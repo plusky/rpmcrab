@@ -49,7 +49,7 @@ pub const SCRIPT_TAGS: &[(Tag, Tag, &str)] = &[
 #[derive(Debug, thiserror::Error)]
 pub enum PkgError {
     #[error("librpm init failed: {0}")]
-    Init(librpm::error::Error),
+    Init(String),
     #[error("failed to open {path}: {source}")]
     Open {
         path: PathBuf,
@@ -57,14 +57,14 @@ pub enum PkgError {
     },
 }
 
-/// Call `librpm::init()` exactly once per process.
+/// Call `librpm::init()` exactly once per process, caching its result so
+/// concurrent opens neither double-init nor lose the failure.
 fn init() -> Result<(), PkgError> {
-    static INIT: OnceLock<()> = OnceLock::new();
-    if INIT.get().is_none() {
-        librpm::init().map_err(PkgError::Init)?;
-        let _ = INIT.set(());
+    static INIT: OnceLock<Result<(), String>> = OnceLock::new();
+    match INIT.get_or_init(|| librpm::init().map_err(|e| e.to_string())) {
+        Ok(()) => Ok(()),
+        Err(e) => Err(PkgError::Init(e.clone())),
     }
-    Ok(())
 }
 
 /// A parsed RPM package (file-backed), mirroring rpmlint's `Pkg`.
@@ -311,9 +311,11 @@ fn gather_deps(
 }
 
 fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        s.push_str(&format!("{b:02x}"));
+        // Writing to a String is infallible.
+        let _ = write!(s, "{b:02x}");
     }
     s
 }
