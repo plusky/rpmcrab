@@ -106,9 +106,8 @@ existing checks:
 - **Description `#VAR#` templating** (`filter.py`,
   `_replace_description_variables`): `#WORD#` tokens in error descriptions are
   recursively expanded. A `#VAR#` with no matching description key raises
-  `KeyError`, and a self-referential variable trips `assert v !=
-  before_replacement` — both **crash the linter**. rpmcrab must reproduce the
-  crash or record an explicit divergence.
+  `KeyError`, and a circular reference raises `ValueError` — both **crash the
+  linter**, and rpmcrab reproduces the crash (no divergence entry).
 - **Extraction stderr always suppressed** (`pkg.py`): the `rpm2archive`/cpio
   extraction stderr is `DEVNULL` even in verbose mode.
 
