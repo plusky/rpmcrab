@@ -150,8 +150,8 @@ fn normalize_toplevel(v: &mut Value) {
     }
     if let Some(files) = o.get_mut("files").and_then(Value::as_array_mut) {
         for f in files {
-            if let Some(fo) = f.as_object_mut() {
-                fo.remove("path");
+            if let Some(obj) = f.as_object_mut() {
+                obj.remove("path");
             }
         }
     }
