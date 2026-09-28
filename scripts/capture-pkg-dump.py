@@ -47,7 +47,8 @@ def provenance():
     import rpm  # noqa: E402  (system binding, present in the reference venv)
 
     try:
-        sha = open(os.path.join(REF, 'REF_SHA')).read().strip()
+        with open(os.path.join(REF, 'REF_SHA')) as fh:
+            sha = fh.read().strip()
     except OSError:
         sha = 'UNKNOWN'
     version = subprocess.run(
@@ -169,6 +170,10 @@ def main(argv):
     failures = 0
     for spec in specs:
         rpm_path, _, outname = spec.partition(':')
+        if not outname:
+            failures += 1
+            print(f'ERROR: bad spec {spec!r}: expected <input-rpm>:<output-case.json>')
+            continue
         if not os.path.exists(rpm_path):
             failures += 1
             print(f'ERROR {os.path.basename(rpm_path)}: no such file: {rpm_path}')
