@@ -81,7 +81,7 @@ fn expand_tabs(text: &str) -> String {
 /// later lines drop theirs, and trailing whitespace is dropped per line.
 pub fn textwrap_fill(text: &str, width: usize) -> String {
     use std::collections::VecDeque;
-    let clen = |s: &str| s.chars().count();
+    let char_len = |s: &str| s.chars().count();
     let char_at = |s: &str, n: usize| s.char_indices().nth(n).map(|(i, _)| i).unwrap_or(s.len());
 
     // expand_tabs runs BEFORE whitespace replacement (CPython _munge_whitespace).
@@ -133,7 +133,7 @@ pub fn textwrap_fill(text: &str, width: usize) -> String {
         let mut cur_line: Vec<String> = Vec::new();
         let mut cur_len = 0usize;
         while let Some(front) = chunks.front() {
-            let l = clen(front);
+            let l = char_len(front);
             if cur_len + l <= width {
                 cur_line.push(chunks.pop_front().expect("front"));
                 cur_len += l;
@@ -142,7 +142,7 @@ pub fn textwrap_fill(text: &str, width: usize) -> String {
             }
         }
         // break_long_words: a chunk too long to fit anywhere.
-        if let Some(front) = chunks.front().filter(|f| clen(f) > width) {
+        if let Some(front) = chunks.front().filter(|f| char_len(f) > width) {
             let space_left = width.saturating_sub(cur_len).max(1);
             let at = char_at(front, space_left);
             cur_line.push(front[..at].to_string());
