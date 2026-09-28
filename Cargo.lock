@@ -591,6 +591,7 @@ dependencies = [
  "clap_mangen",
  "rpmcrab-core",
  "tempfile",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
