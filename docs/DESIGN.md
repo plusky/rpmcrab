@@ -180,7 +180,7 @@ is not part of the key.
 | Badness over `BadnessThreshold` (> 0) | 66 |
 | Internal crash reading a package | 3 (unless `-v`, then re-raise → 1) |
 | Nonexistent positional or `-c` path | 2 |
-| Unparseable TOML config | 4 |
+| Unparsable TOML config | 4 |
 | Bare invocation / `--help` | 0 (prints help) |
 | `-p` / `-e` | 0 |
 | SIGINT | 130 |
