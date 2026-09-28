@@ -8,11 +8,21 @@
 //! testable without a terminal.
 //!
 //! The compatibility contract this crate implements — what is frozen
-//! byte-for-byte against rpmlint 2.10.0 and what is allowed to diverge — is
-//! specified in `docs/DESIGN.md`. Read that before changing the renderer or
-//! the filter engine.
+//! byte-for-byte against openSUSE rpmlint 2.10.0 and what is allowed to diverge
+//! — is specified in `docs/DESIGN.md`. Read that before changing the renderer
+//! or the filter engine.
 
 #![forbid(unsafe_code)]
+
+pub mod check;
+pub mod color;
+pub mod config;
+pub mod filter;
+pub mod finding;
+pub mod level;
+pub mod lint;
+pub mod report;
+pub mod term;
 
 /// The crate version, used for the program's version line.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
