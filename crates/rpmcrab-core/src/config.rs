@@ -1,34 +1,411 @@
-//! The configuration model the filter engine and renderer consume.
+//! The TOML configuration loader and merger, byte-faithful to rpmlint's
+//! `config.py` (`docs/DESIGN.md` §4.7, §4.8).
 //!
-//! This is the parsed shape. The TOML loader + merger (search order, the
-//! 3-way stable sort, union-vs-override list semantics) lands in M1b; for now
-//! tests construct this directly. Field semantics are the frozen contract in
-//! `docs/DESIGN.md` §4.7.
+//! The merged configuration is kept as a generic table because checks read
+//! arbitrary keys (`ValidLicenses`, `ValidGroups`, …). The hot-path fields the
+//! filter engine and renderer need are derived from it by [`Config::finalize`]
+//! after every load step.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
-/// Parsed rpmlint configuration relevant to emission and rendering.
-#[derive(Debug, Default, Clone)]
+use fancy_regex::Regex;
+
+/// The bundled base config (rpmlint's `configdefaults.toml`, same GPL-2.0
+/// licence). It is always the lowest-precedence config (sort key 0).
+const CONFIG_DEFAULTS: &str = include_str!("../data/configdefaults.toml");
+
+/// Parsed rpmlint configuration.
+#[derive(Debug, Clone, Default)]
 pub struct Config {
-    /// `Checks` — the check names to run, in order. The header prints its length.
-    pub checks: Vec<String>,
-    /// The config files that were loaded, in load order (printed in the header).
+    /// The full merged configuration table (arbitrary keys, for checks).
+    pub configuration: toml::Table,
+    /// The config files that were loaded, in final (sorted) load order. The
+    /// bundled base is recorded as the literal `<builtin>`.
     pub conf_files: Vec<String>,
+    /// rpmlintrc filter patterns (only these are audited for unused filters).
+    pub rpmlintrc_filters: Vec<String>,
+    /// `-s/--strict`.
+    pub strict: bool,
+    /// `-v/--verbose`/`--info`.
+    pub info: bool,
+    /// `-P/--permissive`. On openSUSE forced on unless `--strict`.
+    pub permissive: bool,
+
+    // Derived from `configuration` by `finalize` (do not set by hand after load).
+    /// `Checks`.
+    pub checks: Vec<String>,
     /// `[Scoring]` — check name → badness.
     pub scoring: HashMap<String, u64>,
-    /// `Filters` — regex strings matched (unanchored) against the de-coloured line.
+    /// `Filters`.
     pub filters: Vec<String>,
-    /// `FilterErrorTitles` — exact check names that are always suppressed.
+    /// `FilterErrorTitles`.
     pub filter_titles: Vec<String>,
-    /// `BlockedFilters` — exact check names that are never suppressible.
+    /// `BlockedFilters`.
     pub blocked_filters: Vec<String>,
-    /// `BadnessThreshold` (default -1 upstream; 999 on openSUSE).
+    /// `BadnessThreshold` (default -1).
     pub badness_threshold: i64,
-    /// `-s/--strict`: promote every finding to `E`.
-    pub strict: bool,
-    /// `-v/--verbose`/`--info`: inline explanations.
-    pub info: bool,
-    /// `-P/--permissive`: never fail on errors/badness. On openSUSE this is
-    /// forced on unless `--strict` (see `docs/DESIGN.md` §4.6).
-    pub permissive: bool,
+}
+
+impl Config {
+    /// Derive the typed hot-path fields from `configuration`. Called after
+    /// every load step (initial merge, rpmlintrc).
+    pub fn finalize(&mut self) {
+        self.checks = self.get_strings("Checks");
+        self.filters = self.get_strings("Filters");
+        self.filter_titles = self.get_strings("FilterErrorTitles");
+        self.blocked_filters = self.get_strings("BlockedFilters");
+        self.badness_threshold = self
+            .configuration
+            .get("BadnessThreshold")
+            .and_then(toml::Value::as_integer)
+            .unwrap_or(-1);
+        self.scoring = self
+            .configuration
+            .get("Scoring")
+            .and_then(toml::Value::as_table)
+            .map(|t| {
+                t.iter()
+                    .filter_map(|(k, v)| {
+                        // rpmlintrc setBadness stores strings; int() them.
+                        let n = match v {
+                            toml::Value::Integer(i) => u64::try_from(*i).ok(),
+                            toml::Value::String(s) => s.trim().parse::<u64>().ok(),
+                            _ => None,
+                        };
+                        n.map(|n| (k.clone(), n))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+
+    /// Read a top-level key as a list of strings (empty if absent/not a list).
+    fn get_strings(&self, key: &str) -> Vec<String> {
+        self.configuration
+            .get(key)
+            .and_then(toml::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// rpmlint's `_sort_config_files` key: bundled defaults → 0, normal → 1,
+/// `*.override.*` → 2.
+fn sort_key(is_defaults: bool, name: &str) -> u8 {
+    if is_defaults {
+        0
+    } else if name.contains(".override.") {
+        2
+    } else {
+        1
+    }
+}
+
+/// rpmlint's `_merge_dictionaries`: recursive; lists union-append+dedup for
+/// normal configs but are replaced wholesale for `*.override.*`; scalars are
+/// overwritten by the later file.
+fn merge_into(dest: &mut toml::Table, source: &toml::Table, override_: bool) {
+    for (k, v) in source {
+        match (dest.get_mut(k), v) {
+            (Some(toml::Value::Table(d)), toml::Value::Table(s)) => merge_into(d, s, override_),
+            (Some(toml::Value::Array(d)), toml::Value::Array(s)) if !override_ => {
+                for item in s {
+                    if !d.contains(item) {
+                        d.push(item.clone());
+                    }
+                }
+            }
+            _ => {
+                dest.insert(k.clone(), v.clone());
+            }
+        }
+    }
+}
+
+/// The XDG config directories, as pyxdg builds them: `XDG_CONFIG_HOME` (or
+/// `~/.config`) followed by each entry of `XDG_CONFIG_DIRS` (or `/etc/xdg`).
+fn xdg_config_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(h) = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| PathBuf::from(h).join(".config"))
+        })
+    {
+        dirs.push(h);
+    }
+    let sys = std::env::var("XDG_CONFIG_DIRS").unwrap_or_else(|_| "/etc/xdg".to_string());
+    for d in sys.split(':') {
+        let p = PathBuf::from(d);
+        if !d.is_empty() && !dirs.contains(&p) {
+            dirs.push(p);
+        }
+    }
+    dirs
+}
+
+/// `.toml` files in a dir, sorted. `glob_star`: the XDG auto-load glob is
+/// `*toml` (matches any name ending in `toml`, no dot required); a `-c`
+/// directory uses `*.toml`.
+fn glob_toml(dir: &Path, glob_star: bool) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = dir
+        .read_dir()
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.is_file()
+                        && if glob_star {
+                            p.file_name()
+                                .is_some_and(|n| n.to_string_lossy().ends_with("toml"))
+                        } else {
+                            p.extension().is_some_and(|e| e == "toml")
+                        }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    found.sort();
+    found
+}
+
+/// Build the ordered config-file list (`find_configs`), merge them
+/// (`load_config`), and return the resulting [`Config`].
+///
+/// `extra` is the `-c/--config` set (each a file or a directory of `*.toml`).
+/// Autoloading of XDG dirs is skipped when `CONFIG_DISABLE_AUTOLOADING` or
+/// `PYTEST_XDIST_TESTRUNUID` is set. An unparseable TOML file exits 4, as
+/// rpmlint does.
+pub fn load(extra: &[PathBuf]) -> Config {
+    let autoload = std::env::var("PYTEST_XDIST_TESTRUNUID").is_err()
+        && std::env::var("CONFIG_DISABLE_AUTOLOADING").is_err();
+    load_inner(extra, &xdg_config_dirs(), autoload)
+}
+
+/// The env-independent core of [`load`], so tests can drive it without
+/// process-global environment races.
+fn load_inner(extra: &[PathBuf], xdg_dirs: &[PathBuf], autoload: bool) -> Config {
+    // (is_defaults, display_path, Option<read path>); None read path = builtin.
+    let mut entries: Vec<(bool, String, Option<PathBuf>)> =
+        vec![(true, "<builtin>".to_string(), None)];
+
+    if autoload {
+        // reversed(xdg_config_dirs): least-preferred first.
+        for dir in xdg_dirs.iter().rev() {
+            let confdir = dir.join("rpmlint");
+            if confdir.is_dir() {
+                for p in glob_toml(&confdir, true) {
+                    entries.push((false, p.display().to_string(), Some(p)));
+                }
+            }
+        }
+    }
+
+    // -c/--config: file, or directory -> sorted *.toml.
+    for path in extra {
+        if path.is_dir() {
+            for p in glob_toml(path, false) {
+                entries.push((false, p.display().to_string(), Some(p)));
+            }
+        } else if path.exists() {
+            entries.push((false, path.display().to_string(), Some(path.clone())));
+        }
+    }
+
+    // load_config: stable sort by (defaults<normal<override), preserving
+    // insertion order within a key.
+    type Entry = (bool, String, Option<PathBuf>);
+    let mut indexed: Vec<(usize, &Entry)> = entries.iter().enumerate().collect();
+    indexed.sort_by_key(|(i, (is_def, name, _))| (sort_key(*is_def, name), *i));
+
+    let mut cfg = Config::default();
+    for (_, (is_def, display, path)) in indexed {
+        let text = match path {
+            None => CONFIG_DEFAULTS.to_string(),
+            Some(p) => match std::fs::read_to_string(p) {
+                Ok(t) => t,
+                Err(_) => continue,
+            },
+        };
+        let parsed: toml::Table = match toml::from_str(&text) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("(none): E: fatal error while parsing configuration file {display}: {e}");
+                std::process::exit(4);
+            }
+        };
+        let is_override = !*is_def && display.contains(".override.");
+        merge_into(&mut cfg.configuration, &parsed, is_override);
+        cfg.conf_files.push(display.clone());
+    }
+
+    cfg.finalize();
+    cfg
+}
+
+/// The two `rpmlintrc` directives rpmlint recognises (`config.py`).
+/// `setBadness` values land in `Scoring` as strings (int()'d at read time);
+/// `addFilter` appends to `Filters` and is recorded for the unused-filter audit.
+pub fn load_rpmlintrc(config: &mut Config, path: &Path) -> std::io::Result<()> {
+    let re_filter =
+        Regex::new(r#"^\s*addFilter\s*\(\s*r?["\'](.*)["\']\s*\)"#).expect("static regex");
+    let re_badness = Regex::new(r#"\s*setBadness\s*\([\'"](.*)[\'"],\s*[\'"]?(\d+)[\'"]?\)"#)
+        .expect("static regex");
+    let text = std::fs::read_to_string(path)?;
+
+    let mut filters = Vec::new();
+    for line in text.lines() {
+        if let Ok(Some(m)) = re_filter.captures(line) {
+            filters.push(m.get(1).expect("capture group").as_str().to_string());
+        }
+        if let Ok(Some(m)) = re_badness.captures(line) {
+            let name = m.get(1).expect("capture group").as_str().to_string();
+            let val = m.get(2).expect("capture group").as_str().to_string();
+            config
+                .configuration
+                .entry("Scoring")
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+                .as_table_mut()
+                .expect("Scoring is a table")
+                .insert(name, toml::Value::String(val));
+        }
+    }
+
+    // self.configuration['Filters'] += filters
+    let mut all = config.get_strings("Filters");
+    all.extend(filters.iter().cloned());
+    config.configuration.insert(
+        "Filters".to_string(),
+        toml::Value::Array(all.into_iter().map(toml::Value::String).collect()),
+    );
+    config.rpmlintrc_filters = filters;
+    config.finalize();
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table(t: &str) -> toml::Table {
+        toml::from_str(t).unwrap()
+    }
+
+    #[test]
+    fn merge_unions_lists_for_normal_configs() {
+        let mut dest = table("Checks = [\"a\", \"b\"]");
+        let src = table("Checks = [\"b\", \"c\"]");
+        merge_into(&mut dest, &src, false);
+        assert_eq!(
+            dest["Checks"].as_array().unwrap(),
+            &vec!["a", "b", "c"]
+                .into_iter()
+                .map(|s| toml::Value::String(s.to_string()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn merge_replaces_lists_for_override_configs() {
+        let mut dest = table("Checks = [\"a\", \"b\"]");
+        let src = table("Checks = [\"b\", \"c\"]");
+        merge_into(&mut dest, &src, true);
+        assert_eq!(
+            dest["Checks"].as_array().unwrap(),
+            &vec!["b", "c"]
+                .into_iter()
+                .map(|s| toml::Value::String(s.to_string()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn merge_overwrites_scalars_and_recurses_tables() {
+        let mut dest = table("BadnessThreshold = 999\n[Scoring]\na = 1");
+        let src = table("BadnessThreshold = 5\n[Scoring]\nb = 2");
+        merge_into(&mut dest, &src, false);
+        assert_eq!(dest["BadnessThreshold"].as_integer().unwrap(), 5);
+        assert_eq!(dest["Scoring"]["a"].as_integer().unwrap(), 1);
+        assert_eq!(dest["Scoring"]["b"].as_integer().unwrap(), 2);
+    }
+
+    #[test]
+    fn sort_key_orders_defaults_normal_override() {
+        assert!(sort_key(true, "configdefaults.toml") < sort_key(false, "opensuse.toml"));
+        assert!(sort_key(false, "opensuse.toml") < sort_key(false, "scoring-strict.override.toml"));
+    }
+
+    #[test]
+    fn bundled_defaults_load_with_checks() {
+        let cfg = load_inner(&[], &[], false);
+        assert!(!cfg.checks.is_empty());
+        assert_eq!(cfg.badness_threshold, -1);
+        assert_eq!(cfg.conf_files, vec!["<builtin>".to_string()]);
+    }
+
+    #[test]
+    fn xdg_configs_accumulate_checks_and_scoring() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rpmlint_dir = tmp.path().join("xdg").join("rpmlint");
+        std::fs::create_dir_all(&rpmlint_dir).unwrap();
+        std::fs::write(
+            rpmlint_dir.join("opensuse.toml"),
+            "Checks = [\"BrandingPolicyCheck\"]\n[Scoring]\ninvalid-license = 100000",
+        )
+        .unwrap();
+        let cfg = load_inner(&[], &[tmp.path().join("xdg")], true);
+        // Base checks plus the openSUSE append, in load order.
+        assert!(cfg.checks.contains(&"BrandingPolicyCheck".to_string()));
+        assert_eq!(cfg.scoring.get("invalid-license"), Some(&100000));
+        // conf_files: builtin first, then the openSUSE file.
+        assert_eq!(cfg.conf_files[0], "<builtin>");
+        assert!(cfg.conf_files[1].ends_with("opensuse.toml"));
+    }
+
+    #[test]
+    fn override_config_replaces_checks_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rpmlint_dir = tmp.path().join("xdg").join("rpmlint");
+        std::fs::create_dir_all(&rpmlint_dir).unwrap();
+        std::fs::write(rpmlint_dir.join("opensuse.toml"), "Checks = [\"A\", \"B\"]").unwrap();
+        std::fs::write(
+            rpmlint_dir.join("scoring-strict.override.toml"),
+            "Checks = [\"Only\"]",
+        )
+        .unwrap();
+        let cfg = load_inner(&[], &[tmp.path().join("xdg")], true);
+        // The override file merges last and replaces the list wholesale.
+        assert_eq!(cfg.checks, vec!["Only".to_string()]);
+    }
+
+    #[test]
+    fn rpmlintrc_scraper_handles_addfilter_and_setbadness() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rc = tmp.path().join("pkg-rpmlintrc");
+        std::fs::write(
+            &rc,
+            "setBadness('no-return-in-nonvoid-function', 0)\naddFilter('no-return-in-nonvoid-function')\n",
+        )
+        .unwrap();
+        let mut cfg = load_inner(&[], &[], false);
+        load_rpmlintrc(&mut cfg, &rc).unwrap();
+        assert_eq!(cfg.scoring.get("no-return-in-nonvoid-function"), Some(&0));
+        assert!(
+            cfg.filters
+                .contains(&"no-return-in-nonvoid-function".to_string())
+        );
+        assert_eq!(
+            cfg.rpmlintrc_filters,
+            vec!["no-return-in-nonvoid-function".to_string()]
+        );
+    }
 }
