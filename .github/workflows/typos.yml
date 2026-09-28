@@ -22,4 +22,4 @@ jobs:
           persist-credentials: false
       # Config auto-discovered from typos.toml. The parity corpus and generated
       # assets are excluded there; captured rpmlint output is normative data.
-      - uses: crate-ci/typos@512fc24f32f44ab01972217aaaf3dc86ec234d53 # v1.50.2
+      - uses: crate-ci/typos@00f422f3b19c57bc6338715ebfe3316d38768461 # v1.50.3
