@@ -69,6 +69,7 @@ fn init() -> Result<(), PkgError> {
 
 /// A parsed RPM package (file-backed), mirroring rpmlint's `Pkg`.
 pub struct Pkg {
+    /// The path as passed to [`Pkg::open`] (rpmlint stores it verbatim).
     pub filename: String,
     pub name: String,
     pub arch: String,
@@ -108,10 +109,9 @@ impl Pkg {
     }
 
     fn from_header(header: PackageHeader, path: &Path) -> Self {
-        let filename = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        // rpmlint stores the as-passed path verbatim (`self.filename = filename`)
+        // — not the basename. `SignatureCheck` prints it, and M2b resolves it.
+        let filename = path.to_string_lossy().into_owned();
         let name = tags::str_tag(&header, Tag::NAME).unwrap_or_default();
         let is_source = header.get_owned(Tag::SOURCERPM).is_none();
 
@@ -257,13 +257,14 @@ fn gather_requires(header: &PackageHeader) -> (Vec<DepInfo>, Vec<DepInfo>) {
     let versions = tags::str_array(header, Tag::REQUIREVERSION);
     let mut requires = Vec::new();
     let mut prereq = Vec::new();
-    for (i, name) in names.iter().enumerate() {
+    // The `REQUIREVERSION` array drives the iteration (rpmlint `_gather_aux`).
+    for (i, ver) in versions.iter().enumerate() {
+        let name = names.get(i).cloned().unwrap_or_default();
         let flag = flags.get(i).copied().unwrap_or(0) as u32;
-        let (epoch, version, release) =
-            string_to_version(versions.get(i).map(String::as_str).unwrap_or(""));
+        let (epoch, version, release) = string_to_version(ver);
         if flag & PREREQ_FLAG != 0 {
             prereq.push(DepInfo {
-                name: name.clone(),
+                name,
                 flags: flag & !PREREQ_FLAG,
                 epoch,
                 version,
@@ -271,7 +272,7 @@ fn gather_requires(header: &PackageHeader) -> (Vec<DepInfo>, Vec<DepInfo>) {
             });
         } else {
             requires.push(DepInfo {
-                name: name.clone(),
+                name,
                 flags: flag,
                 epoch,
                 version,
@@ -283,24 +284,27 @@ fn gather_requires(header: &PackageHeader) -> (Vec<DepInfo>, Vec<DepInfo>) {
 }
 
 /// Zip a `NAME`/`FLAGS`/`VERSION` tag triple into `DepInfo`s (rpmlint
-/// `_gather_aux`).
+/// `_gather_aux`). Like the reference, the `VERSION` array drives the
+/// iteration and an empty one yields no dependencies (`if versions:`).
 fn gather_deps(
     header: &PackageHeader,
     name_tag: Tag,
     flag_tag: Tag,
     version_tag: Tag,
 ) -> Vec<DepInfo> {
+    let versions = tags::str_array(header, version_tag);
+    if versions.is_empty() {
+        return Vec::new();
+    }
     let names = tags::str_array(header, name_tag);
     let flags = tags::int32_array(header, flag_tag);
-    let versions = tags::str_array(header, version_tag);
-    names
+    versions
         .iter()
         .enumerate()
-        .map(|(i, name)| {
-            let (epoch, version, release) =
-                string_to_version(versions.get(i).map(String::as_str).unwrap_or(""));
+        .map(|(i, ver)| {
+            let (epoch, version, release) = string_to_version(ver);
             DepInfo {
-                name: name.clone(),
+                name: names.get(i).cloned().unwrap_or_default(),
                 flags: flags.get(i).copied().unwrap_or(0) as u32,
                 epoch,
                 version,
@@ -320,6 +324,36 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
+/// The compressed-payload marker rpmlint strips from `magic`
+/// (`Pkg._magic_from_compressed_re`).
+fn compressed_magic_re() -> &'static fancy_regex::Regex {
+    static RE: OnceLock<fancy_regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        fancy_regex::Regex::new(r"\([^)]+\s+compressed\s+data\b").expect("static regex")
+    })
+}
+
+/// rpmlint `AbstractPkg._calc_magic`. The directory / symlink / empty branches
+/// need neither extraction nor libmagic and are done here; the libmagic lookup
+/// for regular files lands in M2b with extraction.
+fn calc_magic(header_magic: &str, mode: u32, size: u64, linkto: &str) -> String {
+    let mut m = header_magic.to_string();
+    if m.is_empty() {
+        if pkgfile::is_dir(mode) {
+            m = "directory".to_string();
+        } else if pkgfile::is_symlink(mode) {
+            m = format!("symbolic link to `{linkto}'");
+        } else if size == 0 {
+            m = "empty".to_string();
+        }
+        // M2b: if still empty, run libmagic on the extracted regular file.
+    }
+    if m.is_empty() || compressed_magic_re().is_match(&m).unwrap_or(false) {
+        m.clear();
+    }
+    m
+}
+
 /// Build the file map (rpmlint `_gather_files_info`). Per-file metadata comes
 /// from librpm's `FileEntry`; `inode`/`rdev`/`lang`/`fileclass` are read from
 /// the parallel header arrays (librpm's `FileEntry` does not expose them).
@@ -336,23 +370,32 @@ fn gather_files(header: &PackageHeader) -> Vec<PkgFile> {
     let mut out = Vec::with_capacity(files.len());
     for (i, entry) in files.iter().enumerate() {
         let name = entry.path();
+        let mode = u32::from(entry.mode());
+        let size = entry.size();
         let linkto_raw = entry.link_target().unwrap_or_default();
         let linkto = if linkto_raw.is_empty() {
             String::new()
         } else {
             normalize_path(linkto_raw)
         };
+        let magic = calc_magic(
+            fileclass.get(i).map(String::as_str).unwrap_or(""),
+            mode,
+            size,
+            &linkto,
+        );
         out.push(PkgFile {
-            // M2a: not extracted, so `dir_name` is `None` and the path is the
-            // package-relative name (rpmlint uses `'/'` as the base).
+            // M2a: not extracted, so `dir_name` is `None` and `path` is the
+            // package-relative name. rpmlint's `path` joins the extraction
+            // tmpdir; `'/'` is only for an installed package (M2c).
             path: normalize_path(&name),
             name,
             flags: entry.flags().bits(),
-            mode: u32::from(entry.mode()),
+            mode,
             user: entry.user().to_string(),
             group: entry.group().to_string(),
             linkto,
-            size: Some(entry.size()),
+            size: Some(size),
             // librpm returns an all-zero digest for entries with no digest
             // (directories, symlinks, ghosts); rpmlint's raw FILEMD5S is empty
             // there, so map an all-zero digest to the empty string.
@@ -367,8 +410,15 @@ fn gather_files(header: &PackageHeader) -> Vec<PkgFile> {
             rdev: rdevs.get(i).map_or(0, |v| *v as u32),
             inode: inodes.get(i).map_or(0, |v| *v as u32),
             lang: langs.get(i).cloned().unwrap_or_default(),
-            magic: fileclass.get(i).cloned().unwrap_or_default(),
-            filecaps: filecaps.get(i).filter(|s| !s.is_empty()).cloned(),
+            magic,
+            // rpmlint sets `filecaps` only when the `FILECAPS` tag is present
+            // (`if filecaps:`): an absent tag yields `None`, a present-but-empty
+            // entry yields `''`.
+            filecaps: if filecaps.is_empty() {
+                None
+            } else {
+                filecaps.get(i).cloned()
+            },
             requires: parse_dep_line(file_requires.get(i).map(String::as_str).unwrap_or("")),
             provides: parse_dep_line(file_provides.get(i).map(String::as_str).unwrap_or("")),
         });
@@ -417,9 +467,9 @@ pub fn normalize_path(p: &str) -> String {
     }
 }
 
-/// Placeholder for per-file dependency parsing (rpmlint `parse_deps`). The
-/// `FILEREQUIRE`/`FILEPROVIDE` strings are space/comma lists of `name [op ver]`
-/// clauses; implemented at M3 where `PostCheck`/`FileDigestCheck` consume them.
+/// Per-file `Requires`/`Provides` (`FILEREQUIRE`/`FILEPROVIDE`) are left
+/// **unparsed until M3**, where `PostCheck`/`FileDigestCheck` consume them
+/// (rpmlint's `parse_deps`). Always empty for now.
 fn parse_dep_line(_line: &str) -> Vec<DepInfo> {
     Vec::new()
 }

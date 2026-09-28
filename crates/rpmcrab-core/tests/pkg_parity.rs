@@ -5,8 +5,13 @@
 //! by `scripts/capture-pkg-dump.py` (recorded on the openSUSE reference). This
 //! test builds the same structure from `rpmcrab_core::pkg::Pkg` and compares.
 //!
-//! `path` and `dir_name` are excluded: they depend on payload extraction,
-//! which is M2b; M2a is the header/file-metadata layer.
+//! Normalizations applied to both sides:
+//! - `dir_name`, `path`: depend on payload extraction (M2b).
+//! - `meta`: oracle provenance, not package data.
+//! - `filename`: reduced to `<DIR>/<basename>` (the reference stores a path).
+//! - `magic` for regular non-empty files: needs libmagic on the extracted file
+//!   (M2b); compared only where rpmcrab can be authoritative (dirs, symlinks,
+//!   empty files).
 
 use std::path::{Path, PathBuf};
 
@@ -20,7 +25,7 @@ fn repo_root() -> PathBuf {
         .unwrap()
 }
 
-/// (case dir name, committed rpm file name)
+/// (case name, committed rpm file name)
 const CASES: &[(&str, &str)] = &[
     ("llvm21-gold", "llvm21-gold-21.1.8-9.2.aarch64.rpm"),
     ("liblto21", "libLTO21-21.1.8-9.2.aarch64.rpm"),
@@ -59,6 +64,7 @@ fn pkg_to_json(pkg: &Pkg) -> Value {
                     "rdev": f.rdev,
                     "inode": f.inode,
                     "lang": f.lang,
+                    "magic": f.magic,
                     "filecaps": f.filecaps,
                     "is_config": f.is_config(),
                     "is_doc": f.is_doc(),
@@ -112,16 +118,37 @@ fn pkg_to_json(pkg: &Pkg) -> Value {
     })
 }
 
-/// Drop the extraction-dependent keys (`path`, `dir_name`) so the oracle and
-/// rpmcrab compare on equal footing.
-fn strip_extraction(v: &mut Value) {
+/// Reduce a dump/rpmcrab JSON to the comparable subset (see the module docs).
+fn normalize(v: &mut Value) {
     if let Some(o) = v.as_object_mut() {
         o.remove("dir_name");
+        o.remove("meta");
+        if let Some(f) = o
+            .get("filename")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            let base = Path::new(&f)
+                .file_name()
+                .map(|n| n.to_string_lossy())
+                .unwrap_or_default();
+            o.insert(
+                "filename".to_string(),
+                Value::String(format!("<DIR>/{base}")),
+            );
+        }
     }
     if let Some(files) = v.get_mut("files").and_then(Value::as_array_mut) {
         for f in files {
             if let Some(o) = f.as_object_mut() {
                 o.remove("path");
+                // A regular non-empty file's magic comes from libmagic on the
+                // extracted file (M2b); drop it from both sides.
+                let reg = o.get("is_reg").and_then(Value::as_bool).unwrap_or(false);
+                let size = o.get("size").and_then(Value::as_u64).unwrap_or(0);
+                if reg && size > 0 {
+                    o.remove("magic");
+                }
             }
         }
     }
@@ -141,12 +168,11 @@ fn pkg_reproduces_rpmlint_for_corpus_rpms() {
 
         let mut expected: Value =
             serde_json::from_str(&std::fs::read_to_string(&dump_path).unwrap()).unwrap();
-        strip_extraction(&mut expected);
+        let mut actual =
+            pkg_to_json(&Pkg::open(&rpm).unwrap_or_else(|e| panic!("open {case}: {e}")));
+        normalize(&mut expected);
+        normalize(&mut actual);
 
-        let pkg = Pkg::open(&rpm).unwrap_or_else(|e| panic!("open {case}: {e}"));
-        let actual = pkg_to_json(&pkg);
-
-        // Compare top-level keys individually for a readable diff.
         for key in expected.as_object().unwrap().keys() {
             assert_eq!(
                 actual.get(key),
