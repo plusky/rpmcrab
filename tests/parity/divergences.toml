@@ -1,0 +1,11 @@
+# The divergence ledger. An empty ledger means rpmcrab is byte-identical to
+# reference rpmlint 2.10.0 on every parity case. Every non-empty entry is a
+# reviewed, deliberate departure — see tests/parity/README.md for the schema.
+#
+# [[divergence]]
+# case = "…"
+# check = "…"
+# kind = "removed"        # removed | added | severity | detail
+# reason = "…"
+# upstream = "https://github.com/rpm-software-management/rpmlint/issues/…"
+# since = "0.2.0"

@@ -1,0 +1,11 @@
+# Index of parity cases. One [[case]] entry per directory under cases/.
+# The parity runner (M1+) iterates this list; keep it in sync with cases/.
+
+[[case]]
+name = "llvm21-gold"
+
+[[case]]
+name = "codequery-spec"
+
+[[case]]
+name = "liblto21"

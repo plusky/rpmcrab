@@ -1,0 +1,13 @@
+kind = "captured"
+rpmlint = "2.10.0"
+flavour = "openSUSE"
+argv = ["codequery.spec"]
+captured = "2026-09-28"
+
+[source]
+description = "codequery spec file (devel:tools). Spec linting with line numbers; exercises openSUSE-only suse-update-desktop-file-deprecated. Exit 0."
+
+[[input]]
+file = "codequery.spec"
+sha256 = "71a4f9c297d8a79c713e32ebe1f988528ad80d9c99f7c20a30f0ad17b6e60092"
+

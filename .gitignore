@@ -16,3 +16,6 @@ fuzz/Cargo.lock
 # Parity-corpus captures that are regenerated locally (never the checked-in
 # goldens themselves).
 tests/parity/**/actual.*
+
+# The local reference rpmlint environment (built by scripts/setup-rpmlint-ref.sh).
+/.parity-ref/

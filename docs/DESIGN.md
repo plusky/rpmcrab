@@ -78,12 +78,41 @@ free and statically linkable.
 becomes genuinely required, `librpm` can be added later behind a non-default
 feature as an additive, non-breaking change. It is not in the default build.
 
+### 3.2 The reference is the openSUSE flavour, not upstream
+
+The contract target is **openSUSE rpmlint 2.10.0** — the `opensuse` branch of
+`rpm-software-management/rpmlint` (checked at `84848c0`), which is what
+openSUSE builds and `rpmlint-mini` ship. It is **not** upstream `main`. The
+openSUSE branch carries behavioural patches on top of upstream; where it
+diverges, the **openSUSE behaviour is the contract**. Catalogued from the
+`main..opensuse` diff:
+
+- **Forced `--permissive`** unless `-s/--strict` (`cli.py`) — see §4.6.
+- **rpmlintrc auto-loading rewrite** (`lint.py`) — OBS `SOURCES` dirs, multiple
+  files, different messages — see §4.8.
+- **`--mini-mode` / `-m` flag + `mini_mode` config** (`cli.py`, `config.py`) —
+  the `rpmlint-mini` wrapper contract. See §4.10.
+- **Skip-rpmlint-on-rpmlint guard** (`lint.py`): any positional matching
+  `/home/abuild/rpmbuild/RPMS/noarch/rpmlint-\d` prints
+  `Skipping rpmlint for rpmlint package!` and exits 0, so the rpmlint package
+  build does not recurse into a modified-config rpmlint-mini.
+- **Description `#VAR#` templating** (`filter.py`,
+  `_replace_description_variables`): `#WORD#` tokens in error descriptions are
+  recursively expanded from other description entries; affects `-v` output.
+- **Extraction stderr always suppressed** (`pkg.py`): the `rpm2archive`/cpio
+  extraction stderr is `DEVNULL` even in verbose mode (upstream shows it under
+  `-v`).
+- **15 extra check modules** plus `filedigestcheck.py` and `permissions.py`
+  helpers (§7.3, §8).
+- Python-version compat shims (`tomllib`→`tomli`, `importlib.metadata`
+  fallbacks) — no behavioural impact for a Rust port.
+
 ---
 
 ## 4. The frozen surface
 
-These are **byte-identical to rpmlint 2.10.0 and permanent.** Changing any of
-them is a breaking change. The `parity` CI job enforces them against the
+These are **byte-identical to openSUSE rpmlint 2.10.0 and permanent.** Changing
+any of them is a breaking change. The `parity` CI job enforces them against the
 corpus (§6).
 
 ### 4.1 The finding line
@@ -149,9 +178,19 @@ order at emit time:
 
 ### 4.4 Sort order
 
-Findings are grouped by check name in **reverse-alphabetical** order, and
-within a check name by severity **reverse** (`W` > `E` > `I`). The package name
-is not part of the key.
+Findings sort on the key `(check_name, level_token)` with `reverse=True`
+(`filter.py` `__diag_sortkey`), so check names group **reverse-alphabetically**.
+The level token is the second whitespace-separated field of the (possibly
+coloured) line, which makes the within-check severity order **tty-dependent**:
+
+- **Piped** (no tty — the case build tooling and this corpus exercise): the
+  tokens are the bare `W:` / `I:` / `E:`, and descending byte order gives
+  **W > I > E**.
+- **On a tty**: the tokens carry ANSI colour codes (`\033[33mW:`, `\033[31mE:`,
+  `\033[1mI:`), and descending byte order gives **W > E > I**.
+
+The sort is **stable** (Python `list.sort`), so within equal `(check, level)`
+keys the package insertion order is preserved.
 
 ### 4.5 Header, footer, banner
 
@@ -171,13 +210,21 @@ is not part of the key.
 
 ### 4.6 Exit codes
 
+**The openSUSE build forces `--permissive` unless `-s/--strict` is passed**
+(`cli.py:171-175`, a SUSE-only patch marked "TODO: remove once OBS integration
+is done"; upstream `main` has no such patch). This is the single most
+load-bearing exit-code fact: on openSUSE, **ordinary errors do not fail the
+run** — only badness over the threshold does. It is why `osc build` can produce
+RPMs and print `E:` findings yet still "succeed", and why consumers grep the
+`exceeds threshold, aborting.` banner rather than trusting the exit code.
+
 | Situation | Code |
 |-----------|-----:|
-| Clean (no errors, badness under threshold) | 0 |
-| Warnings / infos only | 0 |
-| Any error | 64 |
-| Every error was a `--strict` promotion | 65 |
-| Badness over `BadnessThreshold` (> 0) | 66 |
+| Clean, or warnings / infos only | 0 |
+| **Errors, score ≤ threshold (the default — forced permissive)** | **0** |
+| `-s/--strict` passed (no forced permissive): any error | 64 |
+| `-s/--strict` passed, and every error was a strict promotion | 65 |
+| Badness over `BadnessThreshold` (> 0) — fires regardless of permissive | 66 |
 | Internal crash reading a package | 3 (unless `-v`, then re-raise → 1) |
 | Nonexistent positional or `-c` path | 2 |
 | Unparsable TOML config | 4 |
@@ -185,8 +232,10 @@ is not part of the key.
 | `-p` / `-e` | 0 |
 | SIGINT | 130 |
 
-`-P/--permissive` suppresses all of 64/65/66. The `64`-vs-`65` split is keyed
-off by external tools and is preserved.
+The badness branch (`score > threshold` → 66) is evaluated **before** the
+permissive error branch, so 66 fires even in the default permissive mode. The
+`64`-vs-`65` split is reachable only under `-s` and is preserved. On openSUSE,
+passing `-P` explicitly is a no-op (permissive is already forced).
 
 ### 4.7 Configuration semantics
 
@@ -205,19 +254,35 @@ off by external tools and is preserved.
 
 Two directives only, recognised by regex: `addFilter(r"…")` and
 `setBadness('name', N)`. `setBadness` values land in `Scoring` as **strings**
-and are `int()`-ed later (observable via `-p`). Auto-discovery happens only
-when exactly one positional file/dir is given; globs `*.rpmlintrc` then
-`*-rpmlintrc`, `sorted()`; refuse with a stderr warning if more than one
-matches.
+and are `int()`-ed later (observable via `-p`).
+
+**Auto-discovery is an openSUSE rewrite of upstream** (`lint.py`, `+-` diff).
+When no `-r/--rpmlintrc` is given, and unless `PYTEST_XDIST_TESTRUNUID` is set:
+
+1. **SUSE build locations are searched first, always** (not just for a single
+   positional): `/home/abuild/rpmbuild/SOURCES` and `/usr/src/packages/SOURCES/`,
+   each globbed for `*.rpmlintrc` then `*-rpmlintrc`, sorted. This is why OBS
+   builds pick up `$SOURCES/<pkg>-rpmlintrc`.
+2. Only if that found nothing **and** exactly one positional file/dir was given,
+   that argument's directory is globbed (`*.rpmlintrc` then `*-rpmlintrc`,
+   sorted).
+3. **Multiple rpmlintrc files are all loaded**, with a stderr warning
+   `There are multiple items to be loaded: …`. (Upstream instead refuses and
+   prints `…ignoring them…` — a real message-text difference.)
+
+The session header then prints a `rpmlintrc:` line followed by each loaded file
+indented four spaces (upstream prints a single `rpmlintrc: <file>`).
 
 ### 4.9 Badness
 
-There is no severity→badness table. Per-check via `[Scoring]`: if the check is
-in `Scoring`, `badness = int(Scoring[check])` and the level becomes `E` when
-badness > 0. Otherwise `E` → badness 1, `W`/`I` → badness 0. `--strict` changes
-the level letter to `E` and increments the promoted counter but does **not**
-add badness. `BadnessThreshold` default is `-1` (abort branch dead); openSUSE
-sets `999`.
+There is no severity→badness table. Per-check via `[Scoring]`
+(`filter.py:124-131`): if the check is in `Scoring`, `badness =
+int(Scoring[check])`, and the level is **remapped in both directions** — to `E`
+when badness > 0, **and downgraded from `E` to `W` when the configured badness
+is 0**. If the check is not in `Scoring`: `E` → badness 1, `W`/`I` → badness 0.
+`--strict` then forces the level to `E` and increments the promoted counter but
+does **not** add badness. `BadnessThreshold` default is `-1` (abort branch
+dead); openSUSE sets `999`.
 
 ### 4.10 CLI flags
 
@@ -227,9 +292,15 @@ Every flag rpmlint 2.10.0 accepts, with aliases, is accepted: positionals
 `--file` (repeatable), `-v/--verbose` + `--info`, `-p/--print-config`,
 `-i/--installed`, `-t/--time-report`, `-T/--profile`, `--ignore-unused-rpmlintrc`,
 `--checks`, `-s/--strict`, `-P/--permissive` (mutually exclusive with `-s`).
-The SUSE-only **`--mini-mode`** is accepted and ignored (rpmlint-mini execs
-`rpmlint.real --mini-mode`; a port that rejects it breaks `rpmlint-mini`
-outright).
+The SUSE-only **`-m/--mini-mode`** is a real flag (absent upstream; added in
+`46f9d302`, PR #678) that sets `config.mini_mode`. It makes `TagsCheck` skip
+the enchant spellchecker and `SpecCheck` skip `_check_specfile_error` and
+`_check_invalid_url` (`SpecCheck.py:226-228`). The `rpmlint-mini` wrapper
+always passes it (`rpmlint.real --mini-mode --time-report "$@"`), so it is live
+in every bootstrap build root. rpmcrab must accept the flag and port the three
+guards: accepting-and-ignoring would emit `spelling-error` / `specfile-error` /
+`invalid-url` findings that real rpmlint suppresses. A port that rejects the
+flag breaks `rpmlint-mini` outright.
 
 ---
 
@@ -252,6 +323,37 @@ plus, where one exists, a linked upstream issue.
 - **The program-identity banner.** The session-starts banner and version line
   are parameterized by `argv[0]` so the binary can be installed as `rpmlint`.
   Confirmed at M1.
+
+### 5.1 The divergence philosophy (post-parity)
+
+Direction agreed in the RFC (#2). It governs M5 and later; it does **not**
+change the M0–M4 parity work, which is what makes this measurable.
+
+**Why parity first.** Full 1:1 parity at 1.0 is what makes the drop-in claim
+credible, and the parity corpus is what lets us *measure* per-check
+false-positive rates across the whole distro. Strictening — including
+revisiting exit codes toward saner options — is a 2.0 decision, and the corpus
+is the instrument that makes it safe rather than guesswork.
+
+**Error-fast, but run to completion.** Once parity is proven, the goal is cold
+hard facts, not fuzzy warnings. Every check carries a **measured precision
+bar** (its FP rate on the corpus): what measures clean is promoted to error and
+fails the build; what does not is demoted or deleted. There is no permanent
+warning purgatory. But the linter always **runs to completion** — the
+whole-report contract and the footer summary are frozen precisely so batch
+fixing works; aborting at the first error breaks that for no gain.
+
+**Hold W/I to the same bar.** Fuzzy warnings are actively harmful to AI
+consumers — an agent handed a maybe-warning "fixes" things that are not broken
+and generates churn a human must review. The `E`/`W`/`I` taxonomy stays frozen
+(the output contract), but `W`/`I` are held to the same precision bar and the
+noisy ones are cut, not kept.
+
+**Package-level filtering.** Filtering is scoped per-package and driven by
+which checks are enabled, so local and OBS builds stop drifting apart ("always
+follow the strictest of the two"). What fails the build is decided by config
+(`opensuse.toml`), and the FP bar is enforced in CI so regressions cannot sneak
+back in.
 
 ---
 

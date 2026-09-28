@@ -11,7 +11,9 @@ extend-exclude = [
   "crates/rpmcrab/man/**",
   "crates/rpmcrab/completions/**",
   # Captured rpmlint output is normative data; it is never "fixed" for wording.
-  "tests/parity/**",
+  # Only the captured case bytes are excluded — the authored schema doc and
+  # manifests under tests/parity/ stay in scope.
+  "tests/parity/cases/**",
 ]
 
 [default.extend-words]

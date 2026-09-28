@@ -1,0 +1,13 @@
+kind = "captured"
+rpmlint = "2.10.0"
+flavour = "openSUSE"
+argv = ["libLTO21-21.1.8-9.2.aarch64.rpm"]
+captured = "2026-09-28"
+
+[source]
+description = "openSUSE Factory llvm21 build, libLTO21 subpackage. shlib-policy-name-error badness 10000 > 999, abort banner, exit 66. Small (64K) committable exit-66 case."
+
+[[input]]
+file = "libLTO21-21.1.8-9.2.aarch64.rpm"
+sha256 = "58637fae899708314101ddaa4d479f47ffb7b723df8be8c4ba614aadc95f92b6"
+

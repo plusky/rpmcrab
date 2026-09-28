@@ -1,0 +1,31 @@
+============================ rpmlint session starts ============================
+rpmlint: 2.10.0
+configuration:
+    <VENV>/lib64/python3.13/site-packages/rpmlint/configdefaults.toml
+    <XDG>/rpmlint/cron-whitelist.toml
+    <XDG>/rpmlint/dbus-services.toml
+    <XDG>/rpmlint/device-files-whitelist.toml
+    <XDG>/rpmlint/licenses.toml
+    <XDG>/rpmlint/opensuse.toml
+    <XDG>/rpmlint/pam-modules.toml
+    <XDG>/rpmlint/permissions-whitelist.toml
+    <XDG>/rpmlint/pie-executables.toml
+    <XDG>/rpmlint/polkit-rules-whitelist.toml
+    <XDG>/rpmlint/scoring.toml
+    <XDG>/rpmlint/security.toml
+    <XDG>/rpmlint/sudoers-whitelist.toml
+    <XDG>/rpmlint/sysctl-whitelist.toml
+    <XDG>/rpmlint/systemd-tmpfiles.toml
+    <XDG>/rpmlint/users-groups.toml
+    <XDG>/rpmlint/varlink-whitelist.toml
+    <XDG>/rpmlint/world-writable-whitelist.toml
+    <XDG>/rpmlint/zypper-plugins.toml
+checks: 43, packages: 1
+
+codequery.spec:33: W: suse-update-desktop-file-deprecated %suse_update_desktop_file is deprecated
+codequery.spec: E: superfluous-%clean-section
+codequery.spec: W: specfile-warning warning: Macro expanded in comment on line 20: %{version}.tar.gz
+codequery.spec: W: no-%check-section
+codequery.spec:20: W: macro-in-comment %{version}
+codequery.spec: W: invalid-url Source0: codequery-0.08.tar.gz
+ 0 packages and 1 specfiles checked; 1 errors, 5 warnings, 0 filtered, 1 badness; has taken <DURATION> s 

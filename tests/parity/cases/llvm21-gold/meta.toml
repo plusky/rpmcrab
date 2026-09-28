@@ -1,0 +1,13 @@
+kind = "captured"
+rpmlint = "2.10.0"
+flavour = "openSUSE"
+argv = ["llvm21-gold-21.1.8-9.2.aarch64.rpm"]
+captured = "2026-09-28"
+
+[source]
+description = "openSUSE Factory llvm21 build, llvm21-gold subpackage. Binary RPM: E+W findings, 1 filtered, exit 0 (openSUSE forced-permissive default)."
+
+[[input]]
+file = "llvm21-gold-21.1.8-9.2.aarch64.rpm"
+sha256 = "20d1b0654d362df51b2da2eedd09cba3244b1633ff139ec66a0d06293400a7b1"
+
