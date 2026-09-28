@@ -42,7 +42,7 @@ pub fn header(
 
 /// The abort banner, printed (in red) before the time report when the badness
 /// score exceeds the threshold. Grepped verbatim by build tooling.
-pub fn abort_banner(score: u64, threshold: i64, color: &Color, width: usize) -> String {
+pub fn abort_banner(score: i64, threshold: i64, color: &Color, width: usize) -> String {
     let msg = format!("Badness {score} exceeds threshold {threshold}, aborting.");
     format!(
         "{}{}{}\n",
@@ -61,7 +61,7 @@ pub fn footer(
     errors: u64,
     warnings: u64,
     filtered: u64,
-    score: u64,
+    score: i64,
     duration_secs: f64,
     aborted: bool,
     color: &Color,

@@ -12,7 +12,11 @@ use std::path::{Path, PathBuf};
 use fancy_regex::Regex;
 
 /// The bundled base config (rpmlint's `configdefaults.toml`, same GPL-2.0
-/// licence). It is always the lowest-precedence config (sort key 0).
+/// licence). It is always the lowest-precedence config (sort key 0). Recorded
+/// in `conf_files` as `<builtin>`: rpmlint prints its real installed path, but
+/// rpmcrab embeds the base. **Deliberate divergence** — at packaging time the
+/// base becomes a real file (OBS) and this becomes its path; the placeholder is
+/// an M1 convenience. The parity corpus sanitizes the config paths anyway.
 const CONFIG_DEFAULTS: &str = include_str!("../data/configdefaults.toml");
 
 /// Parsed rpmlint configuration.
@@ -25,18 +29,27 @@ pub struct Config {
     pub conf_files: Vec<String>,
     /// rpmlintrc filter patterns (only these are audited for unused filters).
     pub rpmlintrc_filters: Vec<String>,
+    /// The rpmlintrc files loaded (for the header's `rpmlintrc:` block).
+    pub rpmlintrc_display: Vec<String>,
     /// `-s/--strict`.
     pub strict: bool,
     /// `-v/--verbose`/`--info`.
     pub info: bool,
     /// `-P/--permissive`. On openSUSE forced on unless `--strict`.
     pub permissive: bool,
+    /// `-m/--mini-mode` (SUSE-only). Disables `TagsCheck` spellchecking and
+    /// makes `SpecCheck` skip `_check_specfile_error`/`_check_invalid_url`
+    /// (`docs/DESIGN.md` §4.10). Threaded through for the M3 checks.
+    pub mini_mode: bool,
 
     // Derived from `configuration` by `finalize` (do not set by hand after load).
     /// `Checks`.
     pub checks: Vec<String>,
-    /// `[Scoring]` — check name → badness.
-    pub scoring: HashMap<String, u64>,
+    /// `[Scoring]` — check name → raw badness value. Kept raw (not coerced to
+    /// an integer) because Python coerces per finding at emit time
+    /// (`filter.py` `int()`), so negatives/floats/bools/garbage behave
+    /// per-finding. Coerced in `filter.rs`.
+    pub scoring: HashMap<String, toml::Value>,
     /// `Filters`.
     pub filters: Vec<String>,
     /// `FilterErrorTitles`.
@@ -64,19 +77,7 @@ impl Config {
             .configuration
             .get("Scoring")
             .and_then(toml::Value::as_table)
-            .map(|t| {
-                t.iter()
-                    .filter_map(|(k, v)| {
-                        // rpmlintrc setBadness stores strings; int() them.
-                        let n = match v {
-                            toml::Value::Integer(i) => u64::try_from(*i).ok(),
-                            toml::Value::String(s) => s.trim().parse::<u64>().ok(),
-                            _ => None,
-                        };
-                        n.map(|n| (k.clone(), n))
-                    })
-                    .collect()
-            })
+            .map(|t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();
     }
 
@@ -95,14 +96,22 @@ impl Config {
 }
 
 /// rpmlint's `_sort_config_files` key: bundled defaults → 0, normal → 1,
-/// `*.override.*` → 2.
+/// `*.override.*` → 2. The override test is on the file NAME
+/// (`'.override.' in config_file.name`), not the full path, so a parent
+/// directory containing `.override.` does not misclassify the file.
 fn sort_key(is_defaults: bool, name: &str) -> u8 {
     if is_defaults {
         0
-    } else if name.contains(".override.") {
-        2
     } else {
-        1
+        let file_name = Path::new(name)
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default();
+        if file_name.contains(".override.") {
+            2
+        } else {
+            1
+        }
     }
 }
 
@@ -156,7 +165,16 @@ fn xdg_config_dirs() -> Vec<PathBuf> {
 /// `.toml` files in a dir, sorted. `glob_star`: the XDG auto-load glob is
 /// `*toml` (matches any name ending in `toml`, no dot required); a `-c`
 /// directory uses `*.toml`.
-fn glob_toml(dir: &Path, glob_star: bool) -> Vec<PathBuf> {
+/// `.toml` files in a dir. `star_glob`: the XDG auto-load glob is `*toml`
+/// (any name ending in `toml`) and is SORTED (`config.py:87`); a `-c` directory
+/// uses `*.toml` and is left in FILESYSTEM order (`_validate_conf_location`
+/// uses unsorted `path.glob`), which the stable merge sort then preserves
+/// within a key.
+///
+/// The `is_file()` filter is a **deliberate divergence**: Python's glob matches
+/// a directory named `*.toml` and then crashes opening it; skipping
+/// non-regular files is strictly more robust for a build gate.
+fn glob_toml(dir: &Path, star_glob: bool, sort: bool) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = dir
         .read_dir()
         .map(|rd| {
@@ -164,7 +182,7 @@ fn glob_toml(dir: &Path, glob_star: bool) -> Vec<PathBuf> {
                 .map(|e| e.path())
                 .filter(|p| {
                     p.is_file()
-                        && if glob_star {
+                        && if star_glob {
                             p.file_name()
                                 .is_some_and(|n| n.to_string_lossy().ends_with("toml"))
                         } else {
@@ -174,7 +192,9 @@ fn glob_toml(dir: &Path, glob_star: bool) -> Vec<PathBuf> {
                 .collect()
         })
         .unwrap_or_default();
-    found.sort();
+    if sort {
+        found.sort();
+    }
     found
 }
 
@@ -203,17 +223,17 @@ fn load_inner(extra: &[PathBuf], xdg_dirs: &[PathBuf], autoload: bool) -> Config
         for dir in xdg_dirs.iter().rev() {
             let confdir = dir.join("rpmlint");
             if confdir.is_dir() {
-                for p in glob_toml(&confdir, true) {
+                for p in glob_toml(&confdir, true, true) {
                     entries.push((false, p.display().to_string(), Some(p)));
                 }
             }
         }
     }
 
-    // -c/--config: file, or directory -> sorted *.toml.
+    // -c/--config: file, or directory -> *.toml in filesystem order (unsorted).
     for path in extra {
         if path.is_dir() {
-            for p in glob_toml(path, false) {
+            for p in glob_toml(path, false, false) {
                 entries.push((false, p.display().to_string(), Some(p)));
             }
         } else if path.exists() {
@@ -233,7 +253,14 @@ fn load_inner(extra: &[PathBuf], xdg_dirs: &[PathBuf], autoload: bool) -> Config
             None => CONFIG_DEFAULTS.to_string(),
             Some(p) => match std::fs::read_to_string(p) {
                 Ok(t) => t,
-                Err(_) => continue,
+                // Python's `open(cf, 'rb')` raises on an unreadable file
+                // (traceback, exit 1); a build gate must not fail open.
+                Err(e) => {
+                    eprintln!(
+                        "(none): E: fatal error while reading configuration file {display}: {e}"
+                    );
+                    std::process::exit(1);
+                }
             },
         };
         let parsed: toml::Table = match toml::from_str(&text) {
@@ -243,13 +270,39 @@ fn load_inner(extra: &[PathBuf], xdg_dirs: &[PathBuf], autoload: bool) -> Config
                 std::process::exit(4);
             }
         };
-        let is_override = !*is_def && display.contains(".override.");
+        // _is_override_config checks the file NAME, not the full path.
+        let file_name = Path::new(display)
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default();
+        let is_override = !*is_def && file_name.contains(".override.");
         merge_into(&mut cfg.configuration, &parsed, is_override);
         cfg.conf_files.push(display.clone());
     }
 
     cfg.finalize();
     cfg
+}
+
+/// Split like Python `str.splitlines()`: on `\n`, `\r\n`, `\r`, and also
+/// `\x0b`, `\x0c`, `\x1c`-`\x1e`, `\x85`, `\u2028`, `\u2029` (Rust's
+/// `str::lines` only handles `\n` and `\r\n`).
+fn splitlines(text: &str) -> Vec<&str> {
+    text.split(|c| {
+        matches!(
+            c,
+            '\n' | '\r'
+                | '\x0b'
+                | '\x0c'
+                | '\x1c'
+                | '\x1d'
+                | '\x1e'
+                | '\u{85}'
+                | '\u{2028}'
+                | '\u{2029}'
+        )
+    })
+    .collect()
 }
 
 /// The two `rpmlintrc` directives rpmlint recognises (`config.py`).
@@ -263,7 +316,7 @@ pub fn load_rpmlintrc(config: &mut Config, path: &Path) -> std::io::Result<()> {
     let text = std::fs::read_to_string(path)?;
 
     let mut filters = Vec::new();
-    for line in text.lines() {
+    for line in splitlines(&text) {
         if let Ok(Some(m)) = re_filter.captures(line) {
             filters.push(m.get(1).expect("capture group").as_str().to_string());
         }
@@ -288,6 +341,7 @@ pub fn load_rpmlintrc(config: &mut Config, path: &Path) -> std::io::Result<()> {
         toml::Value::Array(all.into_iter().map(toml::Value::String).collect()),
     );
     config.rpmlintrc_filters = filters;
+    config.rpmlintrc_display.push(path.display().to_string());
     config.finalize();
     Ok(())
 }
@@ -365,7 +419,10 @@ mod tests {
         let cfg = load_inner(&[], &[tmp.path().join("xdg")], true);
         // Base checks plus the openSUSE append, in load order.
         assert!(cfg.checks.contains(&"BrandingPolicyCheck".to_string()));
-        assert_eq!(cfg.scoring.get("invalid-license"), Some(&100000));
+        assert_eq!(
+            cfg.scoring.get("invalid-license"),
+            Some(&toml::Value::Integer(100000))
+        );
         // conf_files: builtin first, then the openSUSE file.
         assert_eq!(cfg.conf_files[0], "<builtin>");
         assert!(cfg.conf_files[1].ends_with("opensuse.toml"));
@@ -398,7 +455,10 @@ mod tests {
         .unwrap();
         let mut cfg = load_inner(&[], &[], false);
         load_rpmlintrc(&mut cfg, &rc).unwrap();
-        assert_eq!(cfg.scoring.get("no-return-in-nonvoid-function"), Some(&0));
+        assert_eq!(
+            cfg.scoring.get("no-return-in-nonvoid-function"),
+            Some(&toml::Value::String("0".to_string()))
+        );
         assert!(
             cfg.filters
                 .contains(&"no-return-in-nonvoid-function".to_string())

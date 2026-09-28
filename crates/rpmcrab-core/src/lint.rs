@@ -22,15 +22,28 @@ pub struct Lint {
 }
 
 impl Lint {
-    pub fn new(config: Config, checks: Vec<Box<dyn Check>>, color: Color, width: usize) -> Self {
-        let filter = Filter::new(&config, color);
-        Self {
+    /// Build a `Lint`. rpmlint constructs the config (including any rpmlintrc)
+    /// **before** the `Filter` (`Lint.__init__` calls `_load_rpmlintrc()` then
+    /// `Filter(self.config)`), so `config` must already have rpmlintrc applied.
+    ///
+    /// # Errors
+    /// Returns the `fancy-regex` error if any `Filters` pattern does not
+    /// compile — rpmlint uses a bare `re.compile(f)`, which raises on a bad
+    /// pattern at Filter construction.
+    pub fn new(
+        config: Config,
+        checks: Vec<Box<dyn Check>>,
+        color: Color,
+        width: usize,
+    ) -> Result<Self, fancy_regex::Error> {
+        let filter = Filter::new(&config, color)?;
+        Ok(Self {
             config,
             filter,
             checks,
             color,
             width,
-        }
+        })
     }
 
     /// Run every check, emitting findings into the filter.
@@ -42,8 +55,7 @@ impl Lint {
 
     /// The abort condition: badness score over a positive threshold.
     fn aborted(&self) -> bool {
-        self.config.badness_threshold > 0
-            && self.filter.score > self.config.badness_threshold as u64
+        self.config.badness_threshold > 0 && self.filter.score > self.config.badness_threshold
     }
 
     /// The process exit code (`docs/DESIGN.md` §4.6). Badness-over-threshold
@@ -63,16 +75,25 @@ impl Lint {
     }
 
     /// The full report: header, sorted findings, abort banner (if over
-    /// threshold), footer. `duration_secs` is supplied by the caller (the
-    /// binary measures wall-clock; tests pass a fixed value).
-    pub fn render(&self, version: &str, no_packages: usize, duration_secs: f64) -> String {
+    /// threshold), footer. The header and footer count different things:
+    /// `header_packages` is the CLI *argument* count (`len(installed) +
+    /// len(rpmfile)`, `lint.py:242`), while `footer_packages`/`footer_specfiles`
+    /// count the validated inputs. `duration_secs` is supplied by the caller.
+    pub fn render(
+        &self,
+        version: &str,
+        header_packages: usize,
+        footer_packages: usize,
+        footer_specfiles: usize,
+        duration_secs: f64,
+    ) -> String {
         let mut out = String::new();
         out.push_str(&report::header(
             version,
             &self.config.conf_files,
-            &[], // rpmlintrc block: M1b wires rpmlintrc loading
+            &self.config.rpmlintrc_display,
             self.config.checks.len(),
-            no_packages,
+            header_packages,
             &self.color,
             self.width,
         ));
@@ -86,8 +107,8 @@ impl Lint {
             ));
         }
         out.push_str(&report::footer(
-            no_packages,
-            0, // specfiles: M1b distinguishes spec inputs
+            footer_packages,
+            footer_specfiles,
             self.filter.printed(Level::Error),
             self.filter.printed(Level::Warning),
             self.filter.filtered_out,

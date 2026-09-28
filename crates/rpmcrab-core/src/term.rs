@@ -28,14 +28,20 @@ pub fn string_center(message: &str, filler: char, width: usize) -> String {
     center(&format!(" {message} "), width, filler)
 }
 
-/// The terminal width as rpmlint sees it: `$COLUMNS` if it is a valid
-/// positive integer, else 80. (Piped output — the corpus and build-tooling
-/// case — takes the 80 fallback; rpmlint uses `shutil.get_terminal_size`,
-/// which honours `$COLUMNS` then falls back to 80 when there is no tty.)
+/// The terminal width as rpmlint sees it (`shutil.get_terminal_size`):
+/// `$COLUMNS` if it is a valid positive integer, then the actual tty winsize,
+/// then the 80 fallback. Piped output — the corpus and build-tooling case —
+/// takes the 80 fallback (no tty winsize on a pipe).
 pub fn terminal_width() -> usize {
-    std::env::var("COLUMNS")
+    if let Some(n) = std::env::var("COLUMNS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+    {
+        return n;
+    }
+    terminal_size::terminal_size()
+        .map(|(w, _)| usize::from(w.0))
         .filter(|&n| n > 0)
         .unwrap_or(80)
 }
@@ -82,7 +88,13 @@ pub fn textwrap_fill(text: &str, width: usize) -> String {
     let expanded = expand_tabs(text);
     let normalized: String = expanded
         .chars()
-        .map(|c| if matches!(c, '\n' | '\x0b' | '\x0c' | '\r' | '\t') { ' ' } else { c })
+        .map(|c| {
+            if matches!(c, '\n' | '\x0b' | '\x0c' | '\r' | '\t') {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect();
 
     // Split into alternating word / whitespace-run chunks, preserving the runs.
@@ -130,15 +142,12 @@ pub fn textwrap_fill(text: &str, width: usize) -> String {
             }
         }
         // break_long_words: a chunk too long to fit anywhere.
-        if let Some(front) = chunks.front() {
-            if clen(front) > width {
-                let space_left = width.saturating_sub(cur_len).max(1);
-                let at = char_at(front, space_left);
-                cur_line.push(front[..at].to_string());
-                let rest = front[at..].to_string();
-                *chunks.front_mut().expect("front") = rest;
-                cur_len += space_left;
-            }
+        if let Some(front) = chunks.front().filter(|f| clen(f) > width) {
+            let space_left = width.saturating_sub(cur_len).max(1);
+            let at = char_at(front, space_left);
+            cur_line.push(front[..at].to_string());
+            let rest = front[at..].to_string();
+            *chunks.front_mut().expect("front") = rest;
         }
         // Drop this line's trailing whitespace.
         if cur_line.last().is_some_and(|c| c.trim().is_empty()) {
@@ -197,7 +206,10 @@ mod tests {
         assert_eq!(textwrap_fill(&input, 10), "aaa bbbbbb\nbbbbbbbbb");
         // 'shortword '+'v'*20 at width 12 -> 'shortword vv\nvvvvvvvvvvvv\nvvvvvv'
         let input2 = format!("shortword {}", "v".repeat(20));
-        assert_eq!(textwrap_fill(&input2, 12), "shortword vv\nvvvvvvvvvvvv\nvvvvvv");
+        assert_eq!(
+            textwrap_fill(&input2, 12),
+            "shortword vv\nvvvvvvvvvvvv\nvvvvvv"
+        );
         // A long word with no open line breaks at full width: 'b'*15 at 10.
         assert_eq!(textwrap_fill(&"b".repeat(15), 10), "bbbbbbbbbb\nbbbbb");
     }
@@ -213,7 +225,10 @@ mod tests {
     fn textwrap_preserves_whitespace_runs_and_drop_semantics() {
         // All verified against CPython textwrap.fill(..., break_on_hyphens=False):
         assert_eq!(textwrap_fill("a       b", 20), "a       b"); // runs preserved
-        assert_eq!(textwrap_fill("word    with  spaces", 12), "word    with\nspaces"); // wrap at a run
+        assert_eq!(
+            textwrap_fill("word    with  spaces", 12),
+            "word    with\nspaces"
+        ); // wrap at a run
         assert_eq!(textwrap_fill(" The quick", 78), " The quick"); // first-line leading ws kept
         assert_eq!(textwrap_fill("trail  ", 78), "trail"); // trailing ws dropped
         assert_eq!(textwrap_fill("  a  b  ", 6), "  a  b");

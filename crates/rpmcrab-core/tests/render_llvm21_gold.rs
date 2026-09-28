@@ -1,11 +1,13 @@
 //! Integration test: a full `Lint` run over a synthetic check set must produce
-//! byte-identical output to the captured reference run
-//! `tests/parity/cases/llvm21-gold/expected/stdout`.
+//! byte-identical output to a real openSUSE rpmlint run.
 //!
 //! This is the M1 thesis — the report pipeline (header, sorted findings,
 //! footer, exit code) reproduces the frozen wire format before any real check
-//! or RPM parsing exists. The captured file uses `<DURATION>` for the wall
-//! clock; this test renders with a fixed `0.1` and substitutes.
+//! or RPM parsing exists. The expected block below is a hand-transcribed
+//! rendering of the captured `tests/parity/cases/llvm21-gold/expected/stdout`
+//! (which lives on the corpus branch), with the wall-clock duration rendered as
+//! a fixed `0.1`; it is verified byte-for-byte against that capture. The
+//! parity runner (M1+) will drive the corpus files directly.
 
 use rpmcrab_core::check::{Check, SyntheticCheck};
 use rpmcrab_core::color::Color;
@@ -70,9 +72,10 @@ fn reproduces_llvm21_gold_byte_for_byte() {
         ],
     ))];
 
-    let mut lint = Lint::new(config, checks, Color::for_tty(false), 80);
+    let mut lint = Lint::new(config, checks, Color::for_tty(false), 80).unwrap();
     lint.run_checks();
-    let out = lint.render("2.10.0", 1, 0.1);
+    // version, header arg count, footer packages, footer specfiles, duration.
+    let out = lint.render("2.10.0", 1, 1, 0, 0.1);
 
     let expected = "\
 ============================ rpmlint session starts ============================

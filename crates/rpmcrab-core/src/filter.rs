@@ -18,7 +18,7 @@ use crate::level::Level;
 /// sorted result block.
 pub struct Filter {
     strict: bool,
-    scoring: HashMap<String, u64>,
+    scoring: HashMap<String, toml::Value>,
     filter_titles: HashSet<String>,
     blocked_filters: HashSet<String>,
     filters: Vec<Regex>,
@@ -32,7 +32,7 @@ pub struct Filter {
     /// `check` -> long explanation, for `-v`.
     error_details: HashMap<String, String>,
 
-    pub score: u64,
+    pub score: i64,
     pub filtered_out: u64,
     pub promoted_to_error: u64,
     printed_errors: u64,
@@ -40,19 +40,37 @@ pub struct Filter {
     printed_infos: u64,
 }
 
+/// Coerce a `[Scoring]` value exactly as Python `int()` does at emit time
+/// (`filter.py:101`): integers pass through, strings are parsed (garbage
+/// crashes, as `int('abc')` raises `ValueError`), floats truncate, booleans
+/// become 1/0. rpmlint crashes on a bad value, so this panics to match.
+fn coerce_scoring(v: &toml::Value) -> i64 {
+    match v {
+        toml::Value::Integer(i) => *i,
+        toml::Value::String(s) => s.trim().parse::<i64>().unwrap_or_else(|_| {
+            panic!("invalid Scoring value {s:?} (int() would raise ValueError)")
+        }),
+        toml::Value::Float(f) => *f as i64,
+        toml::Value::Boolean(b) => i64::from(*b),
+        other => panic!("invalid Scoring value {other:?} (int() would raise ValueError)"),
+    }
+}
+
 impl Filter {
     /// Build a filter from the parsed config. The `Filters` strings are compiled
     /// with `fancy-regex` because rpmlint uses Python `re`, which supports
     /// lookahead/lookbehind/backreferences that the `regex` crate rejects.
-    /// A filter that does not compile is reported and skipped (it simply never
-    /// matches), mirroring rpmlint's tolerance of bad patterns at load time.
-    pub fn new(config: &Config, color: Color) -> Self {
-        let filters = config
-            .filters
-            .iter()
-            .filter_map(|f| Regex::new(f).ok())
-            .collect();
-        Self {
+    ///
+    /// rpmlint compiles each pattern with a bare `re.compile(f)` and **no**
+    /// try/except (`filter.py:37`), so a bad `Filters` pattern raises `re.error`
+    /// at Filter construction. This returns `Err` to match — it does not
+    /// silently drop the pattern.
+    pub fn new(config: &Config, color: Color) -> Result<Self, fancy_regex::Error> {
+        let mut filters = Vec::with_capacity(config.filters.len());
+        for f in &config.filters {
+            filters.push(Regex::new(f)?);
+        }
+        Ok(Self {
             strict: config.strict,
             scoring: config.scoring.clone(),
             filter_titles: config.filter_titles.iter().cloned().collect(),
@@ -69,7 +87,7 @@ impl Filter {
             printed_errors: 0,
             printed_warnings: 0,
             printed_infos: 0,
-        }
+        })
     }
 
     /// The exit-code-relevant counters.
@@ -91,9 +109,11 @@ impl Filter {
         );
 
         // Scoring remaps the level in both directions: to E when badness > 0,
-        // and E -> W when the configured badness is 0.
+        // and E -> W when the configured badness is 0. The value is coerced at
+        // emit time with Python `int()` semantics (`filter.py:124-131`).
         let mut badness = None;
-        if let Some(&b) = self.scoring.get(&finding.check) {
+        if let Some(raw) = self.scoring.get(&finding.check) {
+            let b = coerce_scoring(raw);
             badness = Some(b);
             if b > 0 {
                 finding.level = Level::Error;
@@ -218,7 +238,7 @@ pub fn sort_results(results: &mut [(String, String)]) {
 mod tests {
     use super::*;
 
-    fn finding(check: &str, level: Level, badness: u64) -> Finding {
+    fn finding(check: &str, level: Level, badness: i64) -> Finding {
         Finding {
             level,
             check: check.to_string(),
@@ -238,7 +258,7 @@ mod tests {
     fn suppressed_findings_are_invisible_to_counters() {
         let mut c = cfg();
         c.filters = vec!["no-soname".to_string()];
-        let mut f = Filter::new(&c, Color::for_tty(false));
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
         f.add_info(finding("no-soname", Level::Warning, 0));
         assert_eq!(f.printed(Level::Warning), 0);
         assert_eq!(f.filtered_out, 1);
@@ -249,8 +269,9 @@ mod tests {
     #[test]
     fn scoring_downgrades_error_to_warning_at_zero_badness() {
         let mut c = cfg();
-        c.scoring.insert("some-check".to_string(), 0);
-        let mut f = Filter::new(&c, Color::for_tty(false));
+        c.scoring
+            .insert("some-check".to_string(), toml::Value::Integer(0));
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
         f.add_info(finding("some-check", Level::Error, 99));
         // level remapped E -> W, badness 0, counts as a warning, no score.
         assert_eq!(f.printed(Level::Warning), 1);
@@ -261,8 +282,9 @@ mod tests {
     #[test]
     fn scoring_positive_badness_forces_error() {
         let mut c = cfg();
-        c.scoring.insert("some-check".to_string(), 50);
-        let mut f = Filter::new(&c, Color::for_tty(false));
+        c.scoring
+            .insert("some-check".to_string(), toml::Value::Integer(50));
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
         f.add_info(finding("some-check", Level::Warning, 0));
         assert_eq!(f.printed(Level::Error), 1);
         assert_eq!(f.score, 50);
@@ -272,7 +294,7 @@ mod tests {
     fn strict_promotes_without_badness() {
         let mut c = cfg();
         c.strict = true;
-        let mut f = Filter::new(&c, Color::for_tty(false));
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
         f.add_info(finding("a-warning", Level::Warning, 0));
         assert_eq!(f.printed(Level::Error), 1);
         assert_eq!(f.promoted_to_error, 1);
@@ -284,7 +306,7 @@ mod tests {
         let mut c = cfg();
         c.filters = vec!["no-soname".to_string()];
         c.blocked_filters = vec!["no-soname".to_string()];
-        let mut f = Filter::new(&c, Color::for_tty(false));
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
         f.add_info(finding("no-soname", Level::Warning, 0));
         assert_eq!(f.printed(Level::Warning), 1);
         assert_eq!(f.filtered_out, 0);
@@ -296,7 +318,7 @@ mod tests {
         // then that check's description, then a blank line, then no-soname.
         let mut c = cfg();
         c.info = true;
-        let mut f = Filter::new(&c, Color::for_tty(false));
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
         f.set_error_detail(
             "suse-zypp-packageand",
             "The 'packageand(package1:package2)' syntax is obsolete, please use boolean\ndependencies like:\n'Supplements: (package1 and package2)'\n".to_string(),
@@ -318,6 +340,48 @@ mod tests {
         let out = f.render_results();
         let expected = "llvm21-gold.aarch64: E: suse-zypp-packageand packageand(clang21:binutils)\nThe 'packageand(package1:package2)' syntax is obsolete, please use boolean\ndependencies like: 'Supplements: (package1 and package2)'\n\nllvm21-gold.aarch64: W: no-soname /usr/lib64/LLVMgold.so\n";
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn sort_groups_by_check_reverse_then_severity_tty() {
+        // On a tty the level tokens carry ANSI codes, so within a check the
+        // descending order is W > E > I (the F4 quirk, docs/DESIGN.md §4.4).
+        // The findings are rendered with the tty colour table, and the sort
+        // reads the level token off the rendered line.
+        let c = Color::for_tty(true);
+        let render = |level: Level, check: &str| {
+            let f = Finding {
+                level,
+                check: check.to_string(),
+                details: vec![],
+                badness: 0,
+                pkg_name: "pkg".to_string(),
+                arch: Some("src".to_string()),
+                line: None,
+            };
+            (check.to_string(), f.line(&c))
+        };
+        let mut lines = vec![
+            render(Level::Error, "zeta-check"),
+            render(Level::Info, "zeta-check"),
+            render(Level::Warning, "zeta-check"),
+        ];
+        sort_results(&mut lines);
+        // Decode the level letter out of each rendered line's second field.
+        // The level letter is the char before the token's trailing ':'.
+        let letters: Vec<char> = lines
+            .iter()
+            .map(|(_, l)| {
+                l.split_whitespace()
+                    .nth(1)
+                    .unwrap_or("")
+                    .trim_end_matches(':')
+                    .chars()
+                    .last()
+                    .unwrap_or('?')
+            })
+            .collect();
+        assert_eq!(letters, vec!['W', 'E', 'I']);
     }
 
     #[test]

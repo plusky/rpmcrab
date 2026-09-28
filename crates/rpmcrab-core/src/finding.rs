@@ -20,8 +20,10 @@ pub struct Finding {
     /// Free-form details; empty strings are dropped, each kept detail is
     /// prefixed with a single space.
     pub details: Vec<String>,
-    /// Final badness after scoring. The column prints only when `> 1`.
-    pub badness: u64,
+    /// Final badness after scoring (signed: a negative configured badness
+    /// subtracts from the score, per Python `int()`). The column prints only
+    /// when `> 1`.
+    pub badness: i64,
     /// `Path(package.name).name` — the `Name:` tag for binaries, the spec
     /// filename for `.spec`.
     pub pkg_name: String,
@@ -40,7 +42,14 @@ impl Finding {
             .as_deref()
             .map(|a| format!(".{a}"))
             .unwrap_or_default();
-        let line = self.line.map(|n| format!("{n}:")).unwrap_or_default();
+        // A line number of 0 is falsy in Python (`f'{n}:' if n else ''`) and
+        // renders no suffix, matching `SpecCheck` setting `current_linenum = 0`
+        // transiently.
+        let line = self
+            .line
+            .filter(|&n| n != 0)
+            .map(|n| format!("{n}:"))
+            .unwrap_or_default();
         format!("{}{}:{}", self.pkg_name, arch, line)
     }
 

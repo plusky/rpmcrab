@@ -10,6 +10,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -17,6 +18,12 @@ use clap::Parser;
 use rpmcrab_core::config;
 use rpmcrab_core::lint::Lint;
 use rpmcrab_core::{color::Color, term};
+
+/// The rpmlint version rpmcrab emulates in the session banner. The banner is
+/// frozen (`rpmlint: X.Y.Z`); the version shown is the reference version, not
+/// the crate version (`docs/DESIGN.md` §4.5). The crate's own version is
+/// separate (`rpmcrab --version`).
+const RPMLINT_VERSION: &str = "2.10.0";
 
 /// `rpmcrab` — a drop-in replacement for rpmlint 2.10.0.
 #[derive(Parser, Debug)]
@@ -104,11 +111,12 @@ pub fn run() -> ExitCode {
     }
     let cli = Cli::parse();
 
-    // Load configuration. A nonexistent -c path is a usage error (exit 2).
+    // Load configuration. A nonexistent -c path is a usage error (exit 2) with
+    // the reference's exact message (`cli.py:_validate_conf_location`).
     for path in &cli.config {
         if !path.exists() {
             eprintln!(
-                "(none): E: error locating user requested configuration: {}",
+                "File or dir with user specified configuration '{}' does not exist",
                 path.display()
             );
             return ExitCode::from(2);
@@ -120,6 +128,7 @@ pub fn run() -> ExitCode {
     cfg.strict = cli.strict;
     cfg.info = cli.verbose;
     cfg.permissive = cli.permissive || !cli.strict; // openSUSE forces permissive unless -s
+    cfg.mini_mode = cli.mini_mode;
 
     if cli.print_config {
         print!(
@@ -129,7 +138,7 @@ pub fn run() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if !cli.explain.is_empty() {
-        // Explanations come from descriptions (M2 wires the description corpus).
+        // TODO(M2): print the explanation from the description corpus.
         return ExitCode::SUCCESS;
     }
 
@@ -145,6 +154,7 @@ pub fn run() -> ExitCode {
     }
 
     // rpmlintrc: explicit -r files. Auto-discovery is wired at M3.
+    // TODO(M3): rpmlintrc auto-discovery (OBS SOURCES dirs + single-positional).
     for rc in &cli.rpmlintrc {
         if let Err(e) = config::load_rpmlintrc(&mut cfg, rc) {
             eprintln!("(none): E: error loading rpmlintrc {}: {e}", rc.display());
@@ -152,13 +162,25 @@ pub fn run() -> ExitCode {
         }
     }
 
+    // TODO(M2): -i/--installed reads the rpmdb. TODO(M3): -t time-report,
+    // -T profile, --checks filtering. These are parsed and currently no-ops.
+
     // M1: no real checks are registered yet (they arrive at M3). The Lint still
     // renders the full header/footer so the pipeline is exercised end to end.
-    let color = Color::for_tty(false);
+    let color = Color::for_tty(std::io::stdout().is_terminal());
     let width = term::terminal_width();
-    let mut lint = Lint::new(cfg, Vec::new(), color, width);
+    let mut lint = match Lint::new(cfg, Vec::new(), color, width) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("(none): E: fatal error in configuration filters: {e}");
+            return ExitCode::from(1);
+        }
+    };
     lint.run_checks();
-    let out = lint.render(rpmcrab_core::VERSION, cli.files.len(), 0.0);
+    // The header counts CLI args (files + installed); the footer counts
+    // validated inputs. M1 registers no checks, so nothing is validated yet.
+    let arg_count = cli.files.len() + cli.installed.len();
+    let out = lint.render(RPMLINT_VERSION, arg_count, 0, 0, 0.0);
     print!("{out}");
     ExitCode::from(u8::try_from(lint.exit_code()).unwrap_or(1))
 }
