@@ -19,8 +19,9 @@ configuration, same `rpmlintrc` filters, and the same frozen output and
 exit-code contract that external tooling already consumes. It is **not** a
 bug-for-bug port. Upstream false positives and never-firing checks are fixed,
 and every fix is recorded in a machine-enforced ledger
-(`tests/parity/divergences.toml`). Behavioural divergence is deferred to a
-later major version; the output wire format is permanent.
+(`tests/parity/divergences.toml`). Behavioural divergence is permitted whenever
+it makes sense — from the first check port — with every departure recorded in
+the ledger; the output wire format is permanent.
 
 The governing principle: **freeze the output, diverge the findings.** The
 bytes that leave the process are a contract; the set of findings a check
@@ -324,24 +325,29 @@ plus, where one exists, a linked upstream issue.
   are parameterized by `argv[0]` so the binary can be installed as `rpmlint`.
   Confirmed at M1.
 
-### 5.1 The divergence philosophy (post-parity)
+### 5.1 The divergence philosophy
 
-Direction agreed in the RFC (#2). It governs M5 and later; it does **not**
-change the M0–M4 parity work, which is what makes this measurable.
+Direction agreed in the RFC (#2), refined 2026-09-28: **divergence is not
+version-gated.** rpmcrab may diverge from rpmlint's findings whenever it makes
+sense — from the first check port — provided every departure is recorded in the
+ledger (§6) with justification. What does not move is the frozen output
+contract (§4): the wire format, exit codes, sort order and config semantics
+that consumers depend on. A change to *that* is a deliberate major-version
+decision, not a routine divergence.
 
-**Why parity first.** Full 1:1 parity at 1.0 is what makes the drop-in claim
-credible, and the parity corpus is what lets us *measure* per-check
-false-positive rates across the whole distro. Strictening — including
-revisiting exit codes toward saner options — is a 2.0 decision, and the corpus
-is the instrument that makes it safe rather than guesswork.
+**Why the corpus still matters.** Relaxing the parity requirement does not make
+the corpus optional — it is what lets us *measure* per-check false-positive
+rates across the distro, so "when it makes sense" is evidence, not vibes. A
+check lands with its parity case; where rpmcrab deliberately differs, the
+ledger entry records the measured or argued reason.
 
-**Error-fast, but run to completion.** Once parity is proven, the goal is cold
-hard facts, not fuzzy warnings. Every check carries a **measured precision
-bar** (its FP rate on the corpus): what measures clean is promoted to error and
-fails the build; what does not is demoted or deleted. There is no permanent
-warning purgatory. But the linter always **runs to completion** — the
-whole-report contract and the footer summary are frozen precisely so batch
-fixing works; aborting at the first error breaks that for no gain.
+**Error-fast, but run to completion.** The goal is cold hard facts, not fuzzy
+warnings. Every check carries a **measured precision bar** (its FP rate on the
+corpus): what measures clean is promoted to error and fails the build; what
+does not is demoted or deleted. There is no permanent warning purgatory. But
+the linter always **runs to completion** — the whole-report contract and the
+footer summary are frozen precisely so batch fixing works; aborting at the
+first error breaks that for no gain.
 
 **Hold W/I to the same bar.** Fuzzy warnings are actively harmful to AI
 consumers — an agent handed a maybe-warning "fixes" things that are not broken
@@ -457,13 +463,16 @@ tracks tag-name parity per check.
 
 ## 9. Versioning and release
 
-`[workspace.package] version` is the single source of truth. **0.x** until
-parity is proven (M4), **1.0** at drop-in parity, behavioural divergence
-permitted from **2.0**. This avoids `rpmcrab 1.x` masquerading as `rpmlint 2.x`
-for packagers. Bare `X.Y.Z` tags, no `v`. Distribution is primarily the OBS
-package (`rpmcrab`, plus an `rpmcrab-mini` build-root flavour mirroring
-`rpmlint-mini`); crates.io is the secondary channel — `rpmcrab-core` is
-published early (M1) to reserve the name.
+`[workspace.package] version` is the single source of truth. **0.x** until the
+output contract is proven substitutable (M4), **1.0** at that point. Findings
+may diverge at any version (§5.1), so the version tracks the stability of the
+*output contract*, not the set of findings — 1.0 means "substitutable", not
+"bug-for-bug identical". A change to the frozen output contract itself would be
+a deliberate major-version bump. This avoids `rpmcrab 1.x` masquerading as
+`rpmlint 2.x` for packagers. Bare `X.Y.Z` tags, no `v`. Distribution is
+primarily the OBS package (`rpmcrab`, plus an `rpmcrab-mini` build-root flavour
+mirroring `rpmlint-mini`); crates.io is the secondary channel — `rpmcrab-core`
+is published early (M1) to reserve the name.
 
 ---
 
