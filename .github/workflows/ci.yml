@@ -37,6 +37,58 @@ jobs:
       - run: bash scripts/check-rust-layering.sh
       - run: cargo test --workspace --all-targets --locked
 
+  # Platform spread: formatting is platform-independent, so macOS runs only
+  # clippy + test to catch platform-specific compilation issues.
+  rust-macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        with:
+          workspaces: . -> target
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --features gen --locked -- -D warnings
+      - run: cargo test --workspace --all-targets --locked
+
+  # Devel (beta) compiler, non-failing: an early-warning leg for upcoming
+  # toolchain breaks. rust-toolchain.toml outranks the dtolnay default, so the
+  # beta toolchain is selected via RUSTUP_TOOLCHAIN at job level and asserted.
+  rust-beta:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    env:
+      RUSTUP_TOOLCHAIN: beta
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: beta
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        with:
+          workspaces: . -> target
+          # This leg is expected to fail sometimes; with main the only cache
+          # writer, a beta break would otherwise freeze the cache.
+          cache-on-failure: true
+      - name: Assert beta toolchain
+        run: |
+          rustc --version
+          rustc --version | grep -q beta
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --all-targets --locked
+
   rust-msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 20
