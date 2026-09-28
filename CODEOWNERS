@@ -1,0 +1,7 @@
+# Owners for the whole tree. Both maintainers are requested on every merge
+# request; scarabeusiv is the second maintainer alongside the repo owner.
+* @plusky @scarabeusiv
+
+# The compatibility contract and the parity ledger need both eyes.
+/docs/DESIGN.md @plusky @scarabeusiv
+/tests/parity/ @plusky @scarabeusiv

@@ -1,0 +1,33 @@
+# Virtual workspace: no root [package]. Members live under crates/ and restate
+# their own dependency versions deliberately — see crates/README.md. There is
+# no [workspace.dependencies] table: path deps carry explicit `version =` so
+# that cargo-deny's `wildcards = "deny"` accepts them.
+[workspace]
+resolver = "2"
+members = [
+  "crates/rpmcrab",
+  "crates/rpmcrab-core",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-2.0-or-later"
+repository = "https://github.com/plusky/rpmcrab"
+homepage = "https://github.com/plusky/rpmcrab"
+authors = ["Martin Pluskal <martin@pluskal.org>"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# Pedantic is informative locally; CI uses -D warnings on the default set only
+# (do not enable pedantic as warn-as-error — it blocks scaffolding with style
+# nits).
+pedantic = { level = "allow", priority = -1 }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1

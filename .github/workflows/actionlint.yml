@@ -1,0 +1,43 @@
+---
+name: actionlint
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  ACTIONLINT_VERSION: 1.7.12
+  # The tarball is fetched by sha256 digest because upstream ships no action;
+  # this binds the binary, which a pinned download script would not.
+  ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 # linux_amd64
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          curl -sSfL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" -o /tmp/actionlint.tar.gz
+          echo "${ACTIONLINT_SHA256}  /tmp/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          /tmp/actionlint -version
+      - name: Assert shellcheck present
+        # actionlint drops a rule whose external tool is missing and still exits 0.
+        run: shellcheck --version
+      - name: actionlint
+        run: /tmp/actionlint -color
+      - name: shellcheck
+        # Unquoted glob: an emptied scripts/ must fail, not pass vacuously.
+        run: shellcheck scripts/*.sh

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: rpmlint (the reference implementation)
+    url: https://github.com/rpm-software-management/rpmlint
+    about: Bugs in rpmlint itself belong upstream, not here. rpmcrab reports its own bugs and its deliberate divergences.
+  - name: Design contract
+    url: https://github.com/plusky/rpmcrab/blob/main/docs/DESIGN.md
+    about: Read the frozen vs diverging surfaces before filing a parity or divergence issue.

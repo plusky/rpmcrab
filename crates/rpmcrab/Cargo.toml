@@ -1,0 +1,45 @@
+[package]
+name = "rpmcrab"
+description = "A drop-in replacement for rpmlint, rewritten in Rust."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords = ["rpm", "rpmlint", "lint", "packaging", "opensuse"]
+categories = ["command-line-utilities", "os"]
+
+# The shipped binary is the default for a bare `cargo run -p rpmcrab`.
+default-run = "rpmcrab"
+
+[lints]
+workspace = true
+
+# The shipped binary.
+[[bin]]
+name = "rpmcrab"
+path = "src/main.rs"
+
+# Feature-gated generator for man pages and shell completions; never linked
+# into the shipped binary.
+[[bin]]
+name = "rpmcrab-gen"
+path = "src/bin/rpmcrab-gen.rs"
+required-features = ["gen"]
+
+[features]
+gen = ["dep:clap_complete", "dep:clap_mangen"]
+
+[dependencies]
+rpmcrab-core = { version = "0.1.0", path = "../rpmcrab-core" }
+clap = { version = "4", features = ["derive"] }
+clap_complete = { version = "4", optional = true }
+clap_mangen = { version = "0.3", optional = true }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"

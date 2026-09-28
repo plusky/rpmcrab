@@ -1,0 +1,49 @@
+# Cargo-deny policy for rpmcrab (GPL-2.0-or-later project).
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+unmaintained = "workspace"
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+# The project itself is GPL-2.0-or-later, so its own crates and any GPL-2.0+
+# dependency must be allowed; GPL-3.0-only would force the combined work to 3.0
+# and stays denied. Weak-copyleft (MPL, LGPL-2.1) is linkable.
+allow = [
+  "GPL-2.0-or-later",
+  "LGPL-2.1-only",
+  "LGPL-2.1-or-later",
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Zlib",
+  "MPL-2.0",
+  "CC0-1.0",
+  "0BSD",
+]
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+# Record single-backend / single-implementation decisions here as deny entries,
+# with a comment naming the decision, so the policy encodes the architecture.
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

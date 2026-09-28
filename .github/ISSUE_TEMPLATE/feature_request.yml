@@ -1,0 +1,25 @@
+name: Feature request
+description: Propose new rpmcrab behaviour
+title: ""
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        New *findings* and new *flags* are divergence — they land on the
+        diverging surface (`docs/DESIGN.md` §5) and need a ledger entry. Changes
+        to the frozen surface are breaking and need a strong reason.
+  - type: textarea
+    id: what
+    attributes:
+      label: What do you want?
+      description: The behaviour you want and why.
+    validations:
+      required: true
+  - type: textarea
+    id: surface
+    attributes:
+      label: Which surface does it touch?
+      description: Frozen (output/exit-codes/config) or diverging (findings/flags)? See docs/DESIGN.md.
+    validations:
+      required: false

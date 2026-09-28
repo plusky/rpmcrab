@@ -1,0 +1,40 @@
+name: Bug report
+description: Report incorrect rpmcrab behaviour
+title: ""
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. If the behaviour differs from rpmlint 2.10.0 on
+        the **frozen** surface (output format, exit codes, config merge), say so
+        explicitly — that is a parity bug. If it is a wrong *finding*, that is a
+        divergence and needs a ledger entry.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What rpmcrab did, and what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproducer
+      description: The exact rpmcrab invocation, the input package/spec, and the relevant config or rpmlintrc.
+    validations:
+      required: true
+  - type: textarea
+    id: rpmlint
+    attributes:
+      label: rpmlint 2.10.0 output
+      description: If you can, the output of real rpmlint on the same input (for parity comparison).
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: rpmcrab version
+      placeholder: 0.1.0
+    validations:
+      required: true

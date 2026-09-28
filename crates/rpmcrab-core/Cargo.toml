@@ -1,0 +1,38 @@
+[package]
+name = "rpmcrab-core"
+description = "Domain library for rpmcrab: RPM model, config, filters, report renderer, and checks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords = ["rpm", "rpmlint", "lint", "packaging", "opensuse"]
+categories = ["parsing", "os"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# Pure-Rust RPM header/payload parsing (no librpm FFI). Covers the RPMTAG_*
+# constants, header region, and cpio structure. Payload decompression
+# (gzip/zstd/xz) is behind its cargo features, enabled at M2 when extraction
+# lands; keeping them off now keeps the graph C-free.
+rpm = { version = "0.28", default-features = false }
+# EVR/NEVRA ordering, identical to RPM's sort algorithm. Not re-exported by
+# `rpm`, so it is depended on directly for labelled-compare equivalents.
+rpm-version = "0.5"
+# TOML config + description files.
+serde = { version = "1", features = ["derive"] }
+toml = "1.1"
+# Filter matching. rpmlint `Filters` are Python `re`, which supports lookahead,
+# lookbehind and backreferences; the `regex` crate rejects those, so a pure-Rust
+# backtracking engine is required to honour existing filters byte-for-byte.
+# fancy-regex wraps `regex` for the fast path and stays unsafe-free.
+fancy-regex = "0.19"
+# Typed errors on purpose in -core; anyhow stays in the binary crate.
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,5 @@
+[toolchain]
+# Track stable; the MSRV is declared once in the root Cargo.toml
+# (`rust-version`) and enforced by a dedicated CI job.
+channel = "stable"
+components = ["rustfmt", "clippy"]
