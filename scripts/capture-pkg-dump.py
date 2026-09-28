@@ -78,7 +78,20 @@ def dep_to_dict(d):
     }
 
 
-def file_to_dict(f):
+def fileclass_array(pkg):
+    """The raw FILECLASS strings, by file position. `_calc_magic` overwrites
+    `PkgFile.magic` with its own output, so the raw class is read back from the
+    header to tell a populated class from a libmagic lookup."""
+    import rpm  # noqa: E402
+
+    try:
+        arr = pkg.header[rpm.RPMTAG_FILECLASS]
+    except (KeyError, TypeError):
+        return []
+    return [s(x) for x in arr] if arr else []
+
+
+def file_to_dict(f, fileclass):
     mode = int(f.mode)
     return {
         'name': s(f.name),
@@ -96,6 +109,7 @@ def file_to_dict(f):
         'rdev': f.rdev,
         'inode': f.inode,
         'lang': s(f.lang),
+        'fileclass': fileclass,
         'magic': s(f.magic),
         'filecaps': s(f.filecaps),
         'is_config': bool(f.is_config),
@@ -126,7 +140,11 @@ def build_dump(pkg):
     })
     for attr in DEP_ATTRS:
         doc[attr] = [dep_to_dict(d) for d in getattr(pkg, attr)]
-    doc['files'] = [file_to_dict(f) for f in pkg.files.values()]
+    fileclasses = fileclass_array(pkg)
+    doc['files'] = [
+        file_to_dict(f, fileclasses[i] if i < len(fileclasses) else '')
+        for i, f in enumerate(pkg.files.values())
+    ]
     doc['doc_files'] = sorted(s(n) for n in pkg.doc_files)
     doc['config_files'] = sorted(s(n) for n in pkg.config_files)
     doc['ghost_files'] = sorted(s(n) for n in pkg.ghost_files)

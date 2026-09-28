@@ -257,11 +257,12 @@ fn gather_requires(header: &PackageHeader) -> (Vec<DepInfo>, Vec<DepInfo>) {
     let versions = tags::str_array(header, Tag::REQUIREVERSION);
     let mut requires = Vec::new();
     let mut prereq = Vec::new();
-    // The `REQUIREVERSION` array drives the iteration (rpmlint `_gather_aux`).
-    for (i, ver) in versions.iter().enumerate() {
-        let name = names.get(i).cloned().unwrap_or_default();
-        let flag = flags.get(i).copied().unwrap_or(0) as u32;
-        let (epoch, version, release) = string_to_version(ver);
+    // rpmlint zips (versions, names, flags): stop at the shortest array.
+    let n = versions.len().min(names.len()).min(flags.len());
+    for i in 0..n {
+        let name = names[i].clone();
+        let flag = flags[i] as u32;
+        let (epoch, version, release) = string_to_version(&versions[i]);
         if flag & PREREQ_FLAG != 0 {
             prereq.push(DepInfo {
                 name,
@@ -284,8 +285,9 @@ fn gather_requires(header: &PackageHeader) -> (Vec<DepInfo>, Vec<DepInfo>) {
 }
 
 /// Zip a `NAME`/`FLAGS`/`VERSION` tag triple into `DepInfo`s (rpmlint
-/// `_gather_aux`). Like the reference, the `VERSION` array drives the
-/// iteration and an empty one yields no dependencies (`if versions:`).
+/// `_gather_aux`). Like the reference's `zip(versions, names, flags)`, a ragged
+/// header stops at the **shortest** of the three arrays — no phantom
+/// empty-named deps — and an empty `VERSION` yields none (`if versions:`).
 fn gather_deps(
     header: &PackageHeader,
     name_tag: Tag,
@@ -293,19 +295,15 @@ fn gather_deps(
     version_tag: Tag,
 ) -> Vec<DepInfo> {
     let versions = tags::str_array(header, version_tag);
-    if versions.is_empty() {
-        return Vec::new();
-    }
     let names = tags::str_array(header, name_tag);
     let flags = tags::int32_array(header, flag_tag);
-    versions
-        .iter()
-        .enumerate()
-        .map(|(i, ver)| {
-            let (epoch, version, release) = string_to_version(ver);
+    let n = versions.len().min(names.len()).min(flags.len());
+    (0..n)
+        .map(|i| {
+            let (epoch, version, release) = string_to_version(&versions[i]);
             DepInfo {
-                name: names.get(i).cloned().unwrap_or_default(),
-                flags: flags.get(i).copied().unwrap_or(0) as u32,
+                name: names[i].clone(),
+                flags: flags[i] as u32,
                 epoch,
                 version,
                 release,
@@ -378,6 +376,8 @@ fn gather_files(header: &PackageHeader) -> Vec<PkgFile> {
         } else {
             normalize_path(linkto_raw)
         };
+        // M2b: when `magic` is still empty here, run libmagic on the extracted
+        // file and apply the compressed-marker filter to *its* output too.
         let magic = calc_magic(
             fileclass.get(i).map(String::as_str).unwrap_or(""),
             mode,

@@ -19,3 +19,7 @@ tests/parity/**/actual.*
 
 # The local reference rpmlint environment (built by scripts/setup-rpmlint-ref.sh).
 /.parity-ref/
+
+# Python bytecode from the oracle generator.
+__pycache__/
+*.pyc
