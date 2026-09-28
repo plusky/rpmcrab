@@ -183,7 +183,7 @@ fn glob_toml(dir: &Path, glob_star: bool) -> Vec<PathBuf> {
 ///
 /// `extra` is the `-c/--config` set (each a file or a directory of `*.toml`).
 /// Autoloading of XDG dirs is skipped when `CONFIG_DISABLE_AUTOLOADING` or
-/// `PYTEST_XDIST_TESTRUNUID` is set. An unparseable TOML file exits 4, as
+/// `PYTEST_XDIST_TESTRUNUID` is set. An unparsable TOML file exits 4, as
 /// rpmlint does.
 pub fn load(extra: &[PathBuf]) -> Config {
     let autoload = std::env::var("PYTEST_XDIST_TESTRUNUID").is_err()
