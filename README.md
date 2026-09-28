@@ -1,4 +1,16 @@
-# rpmcrab
+<p align="center">
+  <!--
+  Logo slot. The logo MR drops its asset at docs/assets/logo.svg (plus a
+  social-header) and replaces this comment with:
+  <img src="docs/assets/logo.svg" alt="rpmcrab logo" width="360">
+  -->
+</p>
+
+<h1 align="center">rpmcrab</h1>
+
+<p align="center">
+  A drop-in replacement for rpmlint, rewritten in Rust.
+</p>
 
 A drop-in replacement for [`rpmlint`](https://github.com/rpm-software-management/rpmlint)
 (2.10.0, openSUSE flavour, `checks: 43`), rewritten in Rust.
