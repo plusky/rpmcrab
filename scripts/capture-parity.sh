@@ -30,6 +30,11 @@ rpmlint="$venv/bin/rpmlint"
 
 [ $# -ge 2 ] || { echo "usage: $0 <case> <input> [more inputs] [-- extra args]" >&2; exit 2; }
 case_name="$1"; shift
+# The case name becomes a directory under cases/; reject anything that escapes
+# it (path traversal by typo).
+case "$case_name" in
+  */*|*..*|"") { echo "invalid case name: '$case_name'" >&2; exit 2; } ;;
+esac
 
 # Split inputs from any extra rpmlint args after `--`.
 inputs=(); extra=()
@@ -65,19 +70,27 @@ set +e
 set -e
 
 # --- normalize ---------------------------------------------------------------
+# sed-escape a path for use as the LHS (regex) or RHS (replacement) pattern, so
+# a path containing `|`, `&` or a regex metachar cannot break the expression.
+sed_lhs() { printf '%s' "$1" | sed -e 's/[][\.*^$/|]/\\&/g'; }
+sed_rhs() { printf '%s' "$1" | sed -e 's/[&|]/\\&/g'; }
 sanitize() {
   local raw="$1" out="$2"
-  sed -e "s|$venv|<VENV>|g" \
-      -e "s|$xdg|<XDG>|g" \
-      -e "s|$ref_dir|<REF>|g" \
-      -e "s|$HOME|<HOME>|g" \
-      -e "s|$case_dir|<CASE>|g" \
+  sed -e "s|$(sed_lhs "$venv")|$(sed_rhs '<VENV>')|g" \
+      -e "s|$(sed_lhs "$xdg")|$(sed_rhs '<XDG>')|g" \
+      -e "s|$(sed_lhs "$ref_dir")|$(sed_rhs '<REF>')|g" \
+      -e "s|$(sed_lhs "$HOME")|$(sed_rhs '<HOME>')|g" \
+      -e "s|$(sed_lhs "$case_dir")|$(sed_rhs '<CASE>')|g" \
       -e 's/has taken [0-9.]* s/has taken <DURATION> s/' \
       "$raw" > "$out"
 }
 sanitize "$case_dir/expected/stdout.raw" "$case_dir/expected/stdout"
-sanitize "$case_dir/expected/stderr.raw" "$case_dir/expected/stderr"
-rm -f "$case_dir/expected/stdout.raw" "$case_dir/expected/stderr.raw"
+# stderr additionally drops the enchant-availability warning: it depends on
+# whether the optional enchant backend is installed on the capture host, not on
+# rpmcrab. The parity runner drops it from actual output the same way.
+sanitize "$case_dir/expected/stderr.raw" "$case_dir/expected/stderr.tmp"
+grep -v 'unable to init enchant' "$case_dir/expected/stderr.tmp" > "$case_dir/expected/stderr" || true
+rm -f "$case_dir/expected/stdout.raw" "$case_dir/expected/stderr.raw" "$case_dir/expected/stderr.tmp"
 
 # --- leak gate ---------------------------------------------------------------
 # A captured case must be free of host-specific paths and identities. If any
@@ -90,9 +103,19 @@ fi
 
 # --- provenance ---------------------------------------------------------------
 version="$("$rpmlint" --version 2>/dev/null | head -1)"
+# The pinned reference commit this capture came from (set by setup-rpmlint-ref.sh).
+ref_sha="$(cat "$ref_dir/REF_SHA" 2>/dev/null || echo UNKNOWN)"
+# Record which external tools were present, so a degraded capture is detectable
+# after the fact (missing tools change findings — see setup-rpmlint-ref.sh).
+present_tools=()
+for t in checkbashisms dash desktop-file-validate readelf objdump ldd file appstreamcli; do
+  command -v "$t" >/dev/null 2>&1 && present_tools+=("\"$t\"")
+done
+tools_joined="$(IFS=', '; echo "${present_tools[*]}")"
 {
     echo 'kind = "captured"'
     echo "rpmlint = \"$version\""
+    echo "reference_sha = \"$ref_sha\""
     echo 'flavour = "openSUSE"'
     # argv: extra args then input basenames, each quoted, joined by ", ".
     argv_items=()
@@ -104,6 +127,9 @@ version="$("$rpmlint" --version 2>/dev/null | head -1)"
   echo
   echo '[source]'
   echo 'description = ""'
+  echo
+  echo '[tools]'
+  echo "present = [$tools_joined]"
   echo
   for l in "${sha_lines[@]}"; do echo "$l"; echo; done
 } > "$case_dir/meta.toml"

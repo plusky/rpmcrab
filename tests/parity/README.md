@@ -38,6 +38,7 @@ cases/<name>/
 ```toml
 kind = "captured"            # "captured" | "synthetic"
 rpmlint = "2.10.0"           # reference version that produced `expected/`
+reference_sha = "84848c0…"   # the pinned rpmlint commit (see setup-rpmlint-ref.sh)
 flavour = "openSUSE"         # config flavour; the contract is checks: 43
 argv = ["llvm21-gold-….rpm"] # exactly what was passed (basenames)
 captured = "2026-09-28"
@@ -46,10 +47,18 @@ captured = "2026-09-28"
 description = "openSUSE Factory llvm21 build, llvm21-gold subpackage"
 # origin = "…"               # optional: build URL / log path the case came from
 
+[tools]
+present = ["checkbashisms", "dash", …]  # external tools available at capture
+
 [[input]]
 file = "llvm21-gold-21.1.8-9.2.aarch64.rpm"
 sha256 = "…"
 ```
+
+`reference_sha` pins the reference commit that produced `expected/` — a
+floating clone is not a frozen reference. `[tools].present` records the
+external-tool set, so a degraded capture (a missing tool changes findings) is
+detectable after the fact.
 
 ### `captured` vs `synthetic`
 
@@ -81,6 +90,7 @@ applies the identical rules to rpmcrab's actual output before diffing:
 | `has taken 0.1 s` (footer) and `--time-report` durations | `has taken <DURATION> s` |
 | Reference venv path in the `configuration:` header | `<VENV>` |
 | Reference XDG config path in the `configuration:` header | `<XDG>` |
+| `(none): W: unable to init enchant, spellchecking disabled.` (stderr) | **stripped** (enchant is optional; its absence is host-dependent, not rpmcrab) |
 | Any host path, build root, home dir, or username | rejected by the **leak gate** |
 
 The leak gate (`scripts/capture-parity.sh`) fails the capture if any

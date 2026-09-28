@@ -82,11 +82,18 @@ feature as an additive, non-breaking change. It is not in the default build.
 ### 3.2 The reference is the openSUSE flavour, not upstream
 
 The contract target is **openSUSE rpmlint 2.10.0** — the `opensuse` branch of
-`rpm-software-management/rpmlint` (checked at `84848c0`), which is what
-openSUSE builds and `rpmlint-mini` ship. It is **not** upstream `main`. The
-openSUSE branch carries behavioural patches on top of upstream; where it
-diverges, the **openSUSE behaviour is the contract**. Catalogued from the
-`main..opensuse` diff:
+`rpm-software-management/rpmlint`, which is what openSUSE builds and
+`rpmlint-mini` ship. It is **not** upstream `main`. The openSUSE branch carries
+behavioural patches on top of upstream; where it diverges, the **openSUSE
+behaviour is the contract**. The reference is **pinned** to commit `84848c0` by
+`scripts/setup-rpmlint-ref.sh`, and every captured case records that SHA in
+`meta.toml` (`reference_sha`) — a floating clone is not a frozen reference.
+
+Catalogued from the full `main..opensuse` diff, including the patches *inside*
+existing checks:
+
+**Process / plumbing patches** (`cli.py`, `config.py`, `lint.py`, `pkg.py`,
+`filter.py`):
 
 - **Forced `--permissive`** unless `-s/--strict` (`cli.py`) — see §4.6.
 - **rpmlintrc auto-loading rewrite** (`lint.py`) — OBS `SOURCES` dirs, multiple
@@ -95,18 +102,45 @@ diverges, the **openSUSE behaviour is the contract**. Catalogued from the
   the `rpmlint-mini` wrapper contract. See §4.10.
 - **Skip-rpmlint-on-rpmlint guard** (`lint.py`): any positional matching
   `/home/abuild/rpmbuild/RPMS/noarch/rpmlint-\d` prints
-  `Skipping rpmlint for rpmlint package!` and exits 0, so the rpmlint package
-  build does not recurse into a modified-config rpmlint-mini.
+  `Skipping rpmlint for rpmlint package!` and exits 0.
 - **Description `#VAR#` templating** (`filter.py`,
   `_replace_description_variables`): `#WORD#` tokens in error descriptions are
-  recursively expanded from other description entries; affects `-v` output.
+  recursively expanded. A `#VAR#` with no matching description key raises
+  `KeyError`, and a self-referential variable trips `assert v !=
+  before_replacement` — both **crash the linter**. rpmcrab must reproduce the
+  crash or record an explicit divergence.
 - **Extraction stderr always suppressed** (`pkg.py`): the `rpm2archive`/cpio
-  extraction stderr is `DEVNULL` even in verbose mode (upstream shows it under
-  `-v`).
-- **15 extra check modules** plus `filedigestcheck.py` and `permissions.py`
-  helpers (§7.3, §8).
-- Python-version compat shims (`tomllib`→`tomli`, `importlib.metadata`
-  fallbacks) — no behavioural impact for a Rust port.
+  extraction stderr is `DEVNULL` even in verbose mode.
+
+**Check-internal patches** (these change *findings*, so each wants a corpus
+case or an explicit ledger entry):
+
+- `BinariesCheck`: `missing-call-to-setgroups-before-setuid` severity is
+  **flipped** — openSUSE emits `E if is_uid else W`, upstream `W if is_uid
+  else E`. This touches the frozen E/W taxonomy.
+- `BinariesCheck`: `binary-in-etc` also fires under `/usr/etc/`.
+- `DBusPolicyCheck`: new `E: dbus-policy-allow-wildcard` (bsc#1220215) and
+  `W: dbus-policy-allow-receive`.
+- `PAMModulesCheck`: ghost files now emit `E: pam-ghost-module` instead of
+  being skipped.
+- `SpecCheck`: new `E: obsolete-suse-version-check` / `E:
+  invalid-suse-version-check` from `%suse_version` comparisons.
+- `TagsCheck`: the `obs` scheme is now accepted by `invalid-url`.
+- `FilesCheck`: `/var/spool/mail` dropped from `STANDARD_DIRS`.
+- `LogrotateCheck`: `/usr/etc/logrotate.d/` is now also accepted.
+
+**The extra checks** (see §7.3, §8): the flavour enables **11 openSUSE-only
+check modules** (`BrandingPolicyCheck`, `DeviceFilesCheck`, `FileDigestCheck`,
+`FilelistCheck`, `KMPPolicyCheck`, `PolkitCheck`, `SUIDPermissionsCheck`,
+`SystemdInstallCheck`, `SystemdTmpfilesCheck`, `WorldWritableCheck`,
+`AtomicUpdateCheck`) **plus 4 pre-existing checks it merely switches on**
+(`BashismsCheck`, `TmpFilesCheck`, `SysVInitOnSystemdCheck`,
+`SharedLibraryPolicyCheck`). Note `FileMetadataCheck.py` exists in the tree but
+is **not** in `opensuse.toml`'s `Checks` — it is dormant and runs nothing; do
+not port it.
+
+Python-version compat shims (`tomllib`→`tomli`, `importlib.metadata`
+fallbacks) have no behavioural impact for a Rust port.
 
 ---
 

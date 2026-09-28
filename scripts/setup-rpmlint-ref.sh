@@ -31,12 +31,22 @@ done
 [ -n "$py" ] || { echo "no python3 with 'import rpm' (install python3-rpm)" >&2; exit 1; }
 echo "reference python: $py ($("$py" -c 'import rpm; print(rpm.__version__)'))"
 
-# --- 2. rpmlint opensuse branch checkout -------------------------------------
-if [ ! -d "$src/.git" ]; then
+# --- 2. rpmlint opensuse branch checkout, pinned to an exact commit ----------
+# The reference is only "frozen" if it is pinned: a floating `--branch opensuse`
+# clone silently captures different references over time. Pin the blessed
+# commit, verify the checkout matches, and record the SHA for the corpus
+# (capture-parity.sh writes it into each case's meta.toml).
+REF_SHA="84848c05c5571c22274a55ff9afdfe6d88c67dc9"
+if [ -d "$src/.git" ] && [ "$(git -C "$src" rev-parse HEAD 2>/dev/null || true)" = "$REF_SHA" ]; then
+  : # already at the pinned commit
+else
   rm -rf "$src"
-  git clone --quiet --depth 1 --branch opensuse \
-    https://github.com/rpm-software-management/rpmlint "$src"
+  git init -q "$src"
+  git -C "$src" remote add origin https://github.com/rpm-software-management/rpmlint
+  git -C "$src" fetch -q --depth 1 origin "$REF_SHA"
+  git -C "$src" checkout -q FETCH_HEAD
 fi
+echo "$REF_SHA" > "$ref_dir/REF_SHA"
 
 # --- 3. venv with the system rpm binding -------------------------------------
 rm -rf "$venv"
@@ -53,15 +63,22 @@ mkdir -p "$xdg/rpmlint"
 find "$src/configs/openSUSE" -name '*.toml' ! -name '*.override.toml' \
   -exec cp {} "$xdg/rpmlint/" \;
 
-# --- 5. External tool prerequisites ------------------------------------------
-# rpmlint shells out to these; the checks that need a missing tool are skipped
-# or fail at init. checkbashisms and dash are required by BashismsCheck at
-# import time, so their absence is fatal, not graceful.
+# --- 5. External tool prerequisites (fail closed) ----------------------------
+# rpmlint shells out to these; a check that needs a missing tool is skipped or
+# fails at init, so a capture taken with an incomplete tool set silently
+# records DEGRADED output as the expected contract. Fail closed: refuse to set
+# up until the full tool set is present, so a degraded capture can never enter
+# the corpus. checkbashisms and dash are required by BashismsCheck at import
+# time. enchant is optional (its absence only prints a warning, which
+# capture-parity.sh normalizes out of expected stderr).
 missing=0
 for t in checkbashisms dash desktop-file-validate readelf objdump ldd file; do
   command -v "$t" >/dev/null 2>&1 || { echo "MISSING tool: $t" >&2; missing=1; }
 done
-[ "$missing" -eq 0 ] || echo "install the missing tools before capturing" >&2
+if [ "$missing" -ne 0 ]; then
+  echo "refusing to set up a degraded reference: install the missing tools" >&2
+  exit 1
+fi
 
 cat <<EOF
 
