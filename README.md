@@ -1,5 +1,8 @@
 # rpmcrab
 
+<img src="https://raw.githubusercontent.com/plusky/rpmcrab/main/docs/assets/logo.svg"
+     align="right" width="130" alt="rpmcrab logo">
+
 A drop-in replacement for [`rpmlint`](https://github.com/rpm-software-management/rpmlint)
 (2.10.0, openSUSE flavour, `checks: 43`), rewritten in Rust.
 

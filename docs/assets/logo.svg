@@ -1,0 +1,19 @@
+<!-- SPDX-License-Identifier: GPL-2.0-or-later -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 2048 2048" role="img" aria-label="rpmcrab logo">
+<path fill="#FFFFFF" d="M 0 0 L 2048 0 L 2048 2048 L 0 2048 L 0 0 z"/>
+<rect x="272" y="272" width="1504" height="1504" rx="336" fill="#081E26"/>
+<polyline points="730,1150 590,1150 545,1250" fill="none" stroke="#FFFFFF" stroke-width="62" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="1318,1150 1458,1150 1503,1250" fill="none" stroke="#FFFFFF" stroke-width="62" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="745,1260 620,1310 595,1415" fill="none" stroke="#FFFFFF" stroke-width="62" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="1303,1260 1428,1310 1453,1415" fill="none" stroke="#FFFFFF" stroke-width="62" stroke-linecap="round" stroke-linejoin="round"/>
+<ellipse cx="1024" cy="1180" rx="320" ry="220" fill="#FFFFFF"/>
+<polyline points="790,1050 665,860" fill="none" stroke="#88B531" stroke-width="78" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="1258,1050 1383,860" fill="none" stroke="#88B531" stroke-width="78" stroke-linecap="round" stroke-linejoin="round"/>
+<path fill="#88B531" d="M 600.8 734.6 L 491.8 667.7 A 150 150 0 1 0 641.2 613.3 Z"/>
+<path fill="#88B531" d="M 1447.2 734.6 L 1406.8 613.3 A 150 150 0 1 0 1556.2 667.7 Z"/>
+<polyline points="954,975 928,830" fill="none" stroke="#FFFFFF" stroke-width="48" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="928" cy="830" r="62" fill="#FFFFFF"/><circle cx="920" cy="836" r="26" fill="#081E26"/>
+<polyline points="1094,975 1120,830" fill="none" stroke="#FFFFFF" stroke-width="48" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="1120" cy="830" r="62" fill="#FFFFFF"/><circle cx="1128" cy="836" r="26" fill="#081E26"/>
+<path d="M 950 1215 Q 1024 1275 1098 1215" fill="none" stroke="#081E26" stroke-width="30" stroke-linecap="round"/>
+</svg>
