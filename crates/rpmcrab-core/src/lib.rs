@@ -21,6 +21,7 @@ pub mod filter;
 pub mod finding;
 pub mod level;
 pub mod lint;
+pub mod pkg;
 pub mod report;
 pub mod term;
 

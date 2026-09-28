@@ -1,0 +1,338 @@
+{
+  "name": "libLTO21",
+  "arch": "aarch64",
+  "is_source": false,
+  "is_no_source": false,
+  "filename": "libLTO21-21.1.8-9.2.aarch64.rpm",
+  "dir_name": "<DIR>",
+  "requires": [
+    {
+      "name": "ld-linux-aarch64.so.1()(64bit)",
+      "flags": 16384,
+      "epoch": null,
+      "version": null,
+      "release": null
+    },
+    {
+      "name": "ld-linux-aarch64.so.1(GLIBC_2.17)(64bit)",
+      "flags": 16384,
+      "epoch": null,
+      "version": null,
+      "release": null
+    },
+    {
+      "name": "libLLVM.so.21.1()(64bit)",
+      "flags": 16384,
+      "epoch": null,
+      "version": null,
+      "release": null
+    },
+    {
+      "name": "libLLVM.so.21.1(LLVM_21.1)(64bit)",
+      "flags": 16384,
+      "epoch": null,
+      "version": null,
+      "release": null
+    },
+    {
+      "name": "libc.so.6()(64bit)",
+      "flags": 16384,
+      "epoch": null,
+      "version": null,
+      "release": null
+    },
+    {
+      "name": "libc.so.6(GLIBC_2.17)(64bit)",
+      "flags": 16384,
+      "epoch": null,
+      "version": null,
+      "release": null
+    },
+    {
+      "name": "libc.so.6(GLIBC_2.32)(64bit)",
+      "flags": 16384,
+      "epoch": null,
+      "version": null,
+      "release": null
+    },
+    {
+      "name": "libc.so.6(GLIBC_ABI_DT_RELR)(64bit)",
+      "flags": 16384,
+      "epoch": null,
+      "version": null,
+      "release": null
+    },
+    {
+      "name": "libstdc++.so.6()(64bit)",
+      "flags": 16384,
+      "epoch": null,
+      "version": null,
+      "release": null
+    },
+    {
+      "name": "libstdc++.so.6(CXXABI_1.3)(64bit)",
+      "flags": 16384,
+      "epoch": null,
+      "version": null,
+      "release": null
+    },
+    {
+      "name": "libstdc++.so.6(CXXABI_1.3.9)(64bit)",
+      "flags": 16384,
+      "epoch": null,
+      "version": null,
+      "release": null
+    },
+    {
+      "name": "libstdc++.so.6(GLIBCXX_3.4)(64bit)",
+      "flags": 16384,
+      "epoch": null,
+      "version": null,
+      "release": null
+    },
+    {
+      "name": "libstdc++.so.6(GLIBCXX_3.4.21)(64bit)",
+      "flags": 16384,
+      "epoch": null,
+      "version": null,
+      "release": null
+    },
+    {
+      "name": "rpmlib(CompressedFileNames)",
+      "flags": 16777226,
+      "epoch": null,
+      "version": "3.0.4",
+      "release": "1"
+    },
+    {
+      "name": "rpmlib(FileDigests)",
+      "flags": 16777226,
+      "epoch": null,
+      "version": "4.6.0",
+      "release": "1"
+    },
+    {
+      "name": "rpmlib(PayloadFilesHavePrefix)",
+      "flags": 16777226,
+      "epoch": null,
+      "version": "4.0",
+      "release": "1"
+    },
+    {
+      "name": "rpmlib(PayloadIsZstd)",
+      "flags": 16777226,
+      "epoch": null,
+      "version": "5.4.18",
+      "release": "1"
+    }
+  ],
+  "prereq": [
+    {
+      "name": "/sbin/ldconfig",
+      "flags": 256,
+      "epoch": null,
+      "version": null,
+      "release": null
+    },
+    {
+      "name": "/sbin/ldconfig",
+      "flags": 256,
+      "epoch": null,
+      "version": null,
+      "release": null
+    }
+  ],
+  "provides": [
+    {
+      "name": "libLTO.so.21.1()(64bit)",
+      "flags": 32768,
+      "epoch": null,
+      "version": null,
+      "release": null
+    },
+    {
+      "name": "libLTO.so.21.1(LLVM_21.1)(64bit)",
+      "flags": 32768,
+      "epoch": null,
+      "version": null,
+      "release": null
+    },
+    {
+      "name": "libLTO21",
+      "flags": 8,
+      "epoch": null,
+      "version": "21.1.8",
+      "release": "9.2"
+    },
+    {
+      "name": "libLTO21(aarch-64)",
+      "flags": 8,
+      "epoch": null,
+      "version": "21.1.8",
+      "release": "9.2"
+    }
+  ],
+  "conflicts": [],
+  "obsoletes": [],
+  "recommends": [],
+  "suggests": [],
+  "enhances": [],
+  "supplements": [],
+  "files": [
+    {
+      "name": "/usr/lib64/libLTO.so.21.1",
+      "path": "<DIR>/usr/lib64/libLTO.so.21.1",
+      "flags": 0,
+      "mode": 33261,
+      "user": "root",
+      "group": "root",
+      "linkto": "",
+      "size": 67704,
+      "md5": "3de3ca696e04636a6ad4334406844efbf4b8149b0a99f73156d944ec4748a014",
+      "mtime": 1787493124,
+      "rdev": 0,
+      "inode": 1,
+      "lang": "",
+      "filecaps": null,
+      "is_config": false,
+      "is_doc": false,
+      "is_ghost": false,
+      "is_noreplace": false,
+      "is_missingok": false,
+      "is_dir": false,
+      "is_symlink": false,
+      "is_reg": true,
+      "filemode": "-rwxr-xr-x",
+      "suid": false,
+      "sgid": false
+    },
+    {
+      "name": "/usr/share/licenses/libLTO21",
+      "path": "<DIR>/usr/share/licenses/libLTO21",
+      "flags": 0,
+      "mode": 16877,
+      "user": "root",
+      "group": "root",
+      "linkto": "",
+      "size": 0,
+      "md5": "",
+      "mtime": 1787493124,
+      "rdev": 0,
+      "inode": 2,
+      "lang": "",
+      "filecaps": null,
+      "is_config": false,
+      "is_doc": false,
+      "is_ghost": false,
+      "is_noreplace": false,
+      "is_missingok": false,
+      "is_dir": true,
+      "is_symlink": false,
+      "is_reg": false,
+      "filemode": "drwxr-xr-x",
+      "suid": false,
+      "sgid": false
+    },
+    {
+      "name": "/usr/share/licenses/libLTO21/CREDITS.TXT",
+      "path": "<DIR>/usr/share/licenses/libLTO21/CREDITS.TXT",
+      "flags": 128,
+      "mode": 33188,
+      "user": "root",
+      "group": "root",
+      "linkto": "",
+      "size": 13015,
+      "md5": "dcb4d86aaecb65ac3e9dc636b08557c2caeaac1b10f55a418da24a2c762af5be",
+      "mtime": 1765535747,
+      "rdev": 0,
+      "inode": 3,
+      "lang": "",
+      "filecaps": null,
+      "is_config": false,
+      "is_doc": false,
+      "is_ghost": false,
+      "is_noreplace": false,
+      "is_missingok": false,
+      "is_dir": false,
+      "is_symlink": false,
+      "is_reg": true,
+      "filemode": "-rw-r--r--",
+      "suid": false,
+      "sgid": false
+    },
+    {
+      "name": "/usr/share/licenses/libLTO21/LICENSE.TXT",
+      "path": "<DIR>/usr/share/licenses/libLTO21/LICENSE.TXT",
+      "flags": 128,
+      "mode": 33188,
+      "user": "root",
+      "group": "root",
+      "linkto": "",
+      "size": 15141,
+      "md5": "8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee",
+      "mtime": 1765535747,
+      "rdev": 0,
+      "inode": 4,
+      "lang": "",
+      "filecaps": null,
+      "is_config": false,
+      "is_doc": false,
+      "is_ghost": false,
+      "is_noreplace": false,
+      "is_missingok": false,
+      "is_dir": false,
+      "is_symlink": false,
+      "is_reg": true,
+      "filemode": "-rw-r--r--",
+      "suid": false,
+      "sgid": false
+    }
+  ],
+  "doc_files": [],
+  "config_files": [],
+  "ghost_files": [],
+  "noreplace_files": [],
+  "missingok_files": [],
+  "scriptlets": {
+    "%pre": {
+      "exists": false,
+      "prog": ""
+    },
+    "%post": {
+      "exists": false,
+      "prog": "/sbin/ldconfig"
+    },
+    "%preun": {
+      "exists": false,
+      "prog": ""
+    },
+    "%postun": {
+      "exists": false,
+      "prog": "/sbin/ldconfig"
+    },
+    "%trigger": {
+      "exists": false,
+      "prog": ""
+    },
+    "%pretrans": {
+      "exists": false,
+      "prog": ""
+    },
+    "%posttrans": {
+      "exists": false,
+      "prog": ""
+    },
+    "%verifyscript": {
+      "exists": false,
+      "prog": ""
+    },
+    "%filetrigger": {
+      "exists": false,
+      "prog": ""
+    },
+    "%transfiletrigger": {
+      "exists": false,
+      "prog": ""
+    }
+  }
+}

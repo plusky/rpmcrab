@@ -29,33 +29,16 @@ jobs:
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         with:
           workspaces: . -> target
+      # librpm-sys generates bindings with bindgen, so the build needs the RPM
+      # development headers (pkg-config `rpm.pc`).
+      - name: Install RPM development headers
+        run: sudo apt-get update && sudo apt-get install -y librpm-dev
       - run: cargo fmt --all -- --check
       # The second clippy line is not optional: --all-targets skips the
       # feature-gated rpmcrab-gen bin unless gen is enabled.
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo clippy --workspace --all-targets --features gen --locked -- -D warnings
       - run: bash scripts/check-rust-layering.sh
-      - run: cargo test --workspace --all-targets --locked
-
-  # Platform spread: formatting is platform-independent, so macOS runs only
-  # clippy + test to catch platform-specific compilation issues.
-  rust-macos:
-    runs-on: macos-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: stable
-          components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        with:
-          workspaces: . -> target
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo clippy --workspace --all-targets --features gen --locked -- -D warnings
       - run: cargo test --workspace --all-targets --locked
 
   # Devel (beta) compiler, non-failing: an early-warning leg for upcoming
@@ -82,6 +65,8 @@ jobs:
           # This leg is expected to fail sometimes; with main the only cache
           # writer, a beta break would otherwise freeze the cache.
           cache-on-failure: true
+      - name: Install RPM development headers
+        run: sudo apt-get update && sudo apt-get install -y librpm-dev
       - name: Assert beta toolchain
         run: |
           rustc --version
@@ -96,6 +81,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Install RPM development headers
+        run: sudo apt-get update && sudo apt-get install -y librpm-dev
       - name: Read MSRV from Cargo.toml
         id: msrv
         run: |

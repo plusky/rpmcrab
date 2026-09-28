@@ -55,29 +55,38 @@ produces is not.
 
 ### 3.1 RPM backend
 
-**Chosen: pure Rust.** `rpm` 0.28 for the format layer (header region, the 328
-`RPMTAG_*` tag constants in both directions, payload + cpio including RPM's
-stripped `07070X`, all nine scriptlet tags, per-file metadata) and
-`rpm-version` 0.5 for EVR/NEVRA ordering (identical to RPM's sort algorithm).
+**Chosen: `librpm` FFI** — the `rpm-software-management/librpm.rs` binding,
+`librpm` 0.6.0, MPL-2.0. It exposes the whole RPM-reading surface a linter
+needs: the header (`package::PackageHeader`), the file list (`files::Files`,
+wrapping `rpmfiles`), the rpmdb (`db::Db::{find, find_glob, find_regex}`), EVR
+comparison (`version::{vercmp, Version}`), and dependency info
+(`dep::{Dependencies, DepFlags}`). Wrapping librpm 1:1 mirrors rpmlint, which is
+itself a thin wrapper over librpm via rpm-python.
 
-**Rejected alternative: `librpm` FFI.** The `librpm` crate (0.6.0, now under
-`rpm-software-management`, MPL-2.0) advertises rpmdb query and version
-comparison, but its own README states that only the SQLite backend is tested,
-BerkeleyDB is dropped, and "SUSE variants … are not currently tested". The
-primary target's rpmdb is **ndb**, not SQLite, so `-i/--installed` via `librpm`
-is unproven on the platform that matters most. FFI also collides with the
-workspace-wide `unsafe_code = "forbid"`, needs librpm headers at build time and
-`librpm.so` at runtime in every build root, and blocks a static binary.
+**Costs, all accepted.** `librpm-sys` generates bindings with bindgen, so the
+build requires the RPM development headers (`rpm-devel` / `librpm-dev`, plus
+`rpm.pc`) on every host and CI runner; the binary links `librpm`/`librpmio` at
+runtime (present on any RPM distro); and **librpm is Linux-only, so there is no
+macOS build** — the `rust-macos` CI leg and the macOS release asset were
+dropped. `unsafe_code = "forbid"` still holds in `rpmcrab-core`: only the safe
+binding API is used, and `unsafe` stays inside the `librpm`/`librpm-sys`
+crates.
 
-**The one feature that needs the rpmdb** — `-i/--installed` — does not need
-librpm at all. It is served by shelling out to `rpm -q` (guaranteed present
-wherever rpmlint runs, read-only, same header data), exactly as rpmlint already
-shells out to `readelf`/`objdump`/`ldd`. This keeps the whole tree `unsafe`-
-free and statically linkable.
+**Rejected: pure Rust (`rpm` + `rpm-version`).** The `rpm` crate parses the
+format layer but declares the rpmdb a non-goal and implements no RPM
+dependency/rich-dependency semantics, so it would have forced a second, weaker
+RPM model plus `rpm -q`/`rpm2archive` subprocesses for the rest. The earlier
+draft chose it to stay static and `unsafe`-free; that trade is no longer worth
+it now that the binding is known to cover the whole surface.
 
-**Escape hatch.** If rich/boolean dependency *evaluation* (AND/OR/IF/ELSE)
-becomes genuinely required, `librpm` can be added later behind a non-default
-feature as an additive, non-breaking change. It is not in the default build.
+**Extraction caveat.** `librpm`'s safe `archive::PackageReader` returns zero
+entries for the compressed payloads that are all real-world RPMs — it omits the
+`Fdopen(fdi, "r.<compressor>")` step `rpm2archive` performs. Payload extraction
+therefore shells out to `rpm2archive | tar -xz` (§7.4) rather than using that
+API, which also matches rpmlint's own extraction byte for byte.
+
+**Escape hatch.** If the binding proves too incomplete, the header/file layers
+can move to the `rpm` crate behind a feature; not in the default build.
 
 ### 3.2 The reference is the openSUSE flavour, not upstream
 
@@ -469,11 +478,15 @@ checks appears, revisit as an additive feature.
 
 ### 7.4 External tools
 
+Header, file-list and rpmdb reads go through **`librpm`** (§3.1), not a
+subprocess. **Payload extraction** shells out to `rpm2archive | tar -xz`
+(fallback `rpm2cpio | cpio -id`), exactly as rpmlint does — the binding's
+`archive::PackageReader` is unusable for compressed payloads (§3.1).
 `readelf`, `objdump`, `ldd`, `checkbashisms`, `desktop-file-validate`,
-`appstreamcli`, `file`, and `rpm -q` are invoked as subprocesses, matching
-rpmlint's own dependencies (they are already `Requires:` of the openSUSE
-package). All invocations go through shared quoting/path helpers with golden
-tests.
+`appstreamcli` and `file` are invoked as subprocesses on extracted files,
+matching rpmlint's own dependencies (they are already `Requires:` of the
+openSUSE package). All invocations go through shared quoting/path helpers with
+golden tests.
 
 ---
 
@@ -505,7 +518,9 @@ a deliberate major-version bump. This avoids `rpmcrab 1.x` masquerading as
 `rpmlint 2.x` for packagers. Bare `X.Y.Z` tags, no `v`. Distribution is
 primarily the OBS package (`rpmcrab`, plus an `rpmcrab-mini` build-root flavour
 mirroring `rpmlint-mini`); crates.io is the secondary channel — `rpmcrab-core`
-is published early (M1) to reserve the name.
+is published early (M1) to reserve the name. Releases are **Linux-only**
+(`librpm`; §3.1), so the release workflow ships a single
+`x86_64-unknown-linux-gnu` asset.
 
 ---
 

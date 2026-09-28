@@ -20,6 +20,11 @@ The second clippy line is **not optional**: `--all-targets` silently skips the
 feature-gated `rpmcrab-gen` bin, so it must be built explicitly with the `gen`
 feature on.
 
+The build needs the RPM development headers, because `librpm-sys` runs bindgen
+(`pkg-config` must find `rpm.pc`): install `rpm-devel` (openSUSE) or
+`librpm-dev` (Debian/Ubuntu) first, and note that `librpm` is **Linux-only** —
+there is no macOS build.
+
 The toolchain lives in `rust-toolchain.toml`; the MSRV is declared once in the
 root `Cargo.toml` (`rust-version`) and enforced by a dedicated CI job. Use
 `--locked` for verification. Regenerate the man pages and completions with

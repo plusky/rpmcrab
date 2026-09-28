@@ -15,14 +15,14 @@ categories = ["parsing", "os"]
 workspace = true
 
 [dependencies]
-# Pure-Rust RPM header/payload parsing (no librpm FFI). Covers the RPMTAG_*
-# constants, header region, and cpio structure. Payload decompression
-# (gzip/zstd/xz) is behind its cargo features, enabled at M2 when extraction
-# lands; keeping them off now keeps the graph C-free.
-rpm = { version = "0.28", default-features = false }
-# EVR/NEVRA ordering, identical to RPM's sort algorithm. Not re-exported by
-# `rpm`, so it is depended on directly for labelled-compare equivalents.
-rpm-version = "0.5"
+# librpm FFI (the `rpm-software-management` binding). Covers the header, the
+# file list (rpmfiles), payload extraction (PackageReader/ArchiveEntry), the
+# rpmdb (Db), and EVR comparison (version) — the whole RPM-reading surface, so
+# no `rpm2archive`/`rpm -q` subprocesses are needed. Needs `rpm-devel` at build
+# time (bindgen) and `librpm`/`librpmio` at runtime. `sign`/`build` features
+# off. Safe API only; `unsafe` stays inside librpm/librpm-sys, so this crate
+# keeps `unsafe_code = "forbid"`.
+librpm = { version = "0.6", default-features = false }
 # TOML config + description files.
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
@@ -40,3 +40,4 @@ thiserror = "2"
 
 [dev-dependencies]
 tempfile = "3"
+serde_json = "1"
