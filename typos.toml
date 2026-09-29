@@ -25,3 +25,5 @@ extend-exclude = [
 # real occurrence is gone.
 # self-obsoletion is the rpmlint check name (rpmlint#438), not a misspelling.
 obsoletion = "obsoletion" 
+# non-owner-writeable-only-crontab-file is the upstream check name.
+writeable = "writeable"

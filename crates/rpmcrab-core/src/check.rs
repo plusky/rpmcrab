@@ -128,6 +128,7 @@ pub trait Check {
 pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
     match name {
         "TagsCheck" => Some(Box::new(crate::checks::tags::TagsCheck::new(config))),
+        "FilesCheck" => Some(Box::new(crate::checks::files::FilesCheck::new(config))),
         _ => None,
     }
 }
@@ -288,7 +289,7 @@ mod tests {
         let config = cfg_with(&["TagsCheck", "FilesCheck"]);
         let built = load(&config, None);
         let names: Vec<&str> = built.iter().map(|c| c.name()).collect();
-        assert_eq!(names, vec!["TagsCheck"]);
+        assert_eq!(names, vec!["TagsCheck", "FilesCheck"]);
     }
 
     #[test]

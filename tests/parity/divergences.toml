@@ -95,3 +95,290 @@ check = "spelling-error"
 kind = "behaviour"
 reason = "spelling-error is not emitted: no enchant backend is wired up. The design records spelling as free to degrade gracefully (DESIGN.md:368-369)."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "postin-without-ldconfig"
+kind = "behaviour"
+reason = "The reference only searches the scriptlet body for ldconfig, ignoring the -p interpreter. rpmcrab honors -p ldconfig: %post -p /sbin/ldconfig satisfies the check. See rpmlint#1602 which fixes rpmlint#550."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "logrotate-log-dir-not-packaged"
+kind = "missing"
+reason = "LogrotateCheck is not ported yet, so this finding is absent entirely. The /var/log exclusion from rpmlint#551 defers to that port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "dir-or-file-in-%"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "env-script-interpreter"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "executable-sourced-script"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "file-not-utf8"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "gzipped-svg-icon"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "inaccessible-filename"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "incorrect-fsf-address"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "lengthy-symlink"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "module-without-depmod-postin"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "module-without-depmod-postun"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "no-dependency-on"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "noarch-python-in-64bit-path"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "non-devel-file-in-devel-package"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "non-executable-in-bin"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "non-executable-script"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "non-ghost-file"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "non-root-group-log-file"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "non-root-user-log-file"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "non-standard-executable-perm"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "not-listed-as-documentation"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "pem-certificate"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "pem-private-key"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "perl-temp-file"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "postin-with-wrong-depmod"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "postin-without-install-info"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "postun-with-wrong-depmod"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "python-bytecode-without-source"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "read-error"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "rpath-in-buildconfig"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "script-without-shebang"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "spurious-executable-perm"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "standard-dir-owned-by-package"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "symlink-has-too-many-up-segments"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "symlink-should-be-absolute"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "symlink-to-binary-with-shebang"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "tcl-extension-file"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "wrong-file-end-of-line-encoding"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "wrong-script-end-of-line-encoding"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "wrong-script-interpreter"
+kind = "missing"
+reason = "FilesCheck finding not yet ported; see PR #28 (partial port)."
+since = "0.1.0"
