@@ -131,27 +131,24 @@ impl Pkg {
         let filename = path.to_string_lossy().into_owned();
         // rpmlint treats a `'/'` dirname as "installed package, do not extract"
         // (`pkg.py:610-613`); honour that so `ExtractDir = "/"` cannot unpack
-        // into the live root.
-        if extract_dir == Path::new("/") {
-            return Ok(Self::build(
-                header,
-                Some(PathBuf::from("/")),
-                filename,
-                None,
-                None,
-            ));
-        }
-        // Extraction happens in `Pkg.__init__`: a TemporaryDirectory under the
-        // config's `ExtractDir`, prefixed `rpmlint.<rpm-basename>.`.
-        let base = Path::new(&filename)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let tempdir = tempfile::Builder::new()
-            .prefix(&format!("rpmlint.{base}."))
-            .tempdir_in(extract_dir)?;
-        extract::extract(path, tempdir.path())?;
-        let dir_name = tempdir.path().to_path_buf();
+        // into the live root. `extracted` stays false there, as in the
+        // reference.
+        let (dir_name, tempdir, extracted) = if extract_dir == Path::new("/") {
+            (PathBuf::from("/"), None, false)
+        } else {
+            // Extraction happens in `Pkg.__init__`: a TemporaryDirectory under
+            // the config's `ExtractDir`, prefixed `rpmlint.<rpm-basename>.`.
+            let base = Path::new(&filename)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let tempdir = tempfile::Builder::new()
+                .prefix(&format!("rpmlint.{base}."))
+                .tempdir_in(extract_dir)?;
+            extract::extract(path, tempdir.path())?;
+            let dir = tempdir.path().to_path_buf();
+            (dir, Some(tempdir), true)
+        };
 
         let name = tags::str_tag(&header, Tag::NAME).unwrap_or_default();
         let is_source = header.get_owned(Tag::SOURCERPM).is_none();
@@ -252,9 +249,9 @@ impl Pkg {
             noreplace_files,
             missingok_files,
             dir_name: Some(dir_name),
-            extracted: true,
+            extracted,
             header,
-            tempdir: Some(tempdir),
+            tempdir,
         })
     }
 

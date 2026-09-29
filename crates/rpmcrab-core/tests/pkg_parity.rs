@@ -261,3 +261,43 @@ fn filename_is_the_as_passed_path() {
         "the two path spellings must yield different filenames"
     );
 }
+
+/// `cleanup()` removes the payload but keeps `dir_name` pointing at the now-dead
+/// path, so a later read must come back empty — never silently fall back to the
+/// host filesystem via `dir_name or '/'` (rpmlint `pkg.py:647`).
+#[test]
+fn read_file_after_cleanup_is_empty() {
+    let root = repo_root();
+    let scratch = tempfile::tempdir().unwrap();
+    let rpm = case_rpm(
+        &root,
+        "cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm",
+    );
+    let mut pkg = Pkg::open(&rpm, scratch.path()).unwrap();
+
+    // A file that really is in the payload, so the pre-cleanup read is non-empty.
+    // `read_file` is UTF-8 only, so pick a text file rather than any regular one.
+    let victim = pkg
+        .files
+        .iter()
+        .filter(|f| pkgfile::is_reg(f.mode) && f.size.is_some_and(|s| s > 0))
+        .map(|f| f.name.clone())
+        .find(|n| !pkg.read_file(n).is_empty())
+        .expect("corpus rpm has a non-empty UTF-8 regular file");
+    assert!(
+        !pkg.read_file(&victim).is_empty(),
+        "precondition: {victim} should be readable before cleanup"
+    );
+
+    pkg.cleanup();
+
+    assert!(
+        !pkg.dir_name.as_ref().unwrap().exists(),
+        "cleanup must remove the extraction directory"
+    );
+    assert_eq!(
+        pkg.read_file(&victim),
+        "",
+        "read after cleanup must be empty, not a host-filesystem read"
+    );
+}
