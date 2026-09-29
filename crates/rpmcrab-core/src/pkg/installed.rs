@@ -29,17 +29,6 @@ pub fn find_installed(names: &[String]) -> Result<(Vec<Pkg>, Vec<String>), PkgEr
     find_in(&db, names)
 }
 
-/// Like [`find_installed`] but against the rpmdb rooted at `root` (used by the
-/// parity test's isolated database).
-pub fn find_installed_in(
-    root: &std::path::Path,
-    names: &[String],
-) -> Result<(Vec<Pkg>, Vec<String>), PkgError> {
-    init()?;
-    let db = Db::open_with_root(root).map_err(|e| PkgError::Db(e.to_string()))?;
-    find_in(&db, names)
-}
-
 fn find_in(db: &Db, names: &[String]) -> Result<(Vec<Pkg>, Vec<String>), PkgError> {
     let mut pkgs = Vec::new();
     let mut missing = Vec::new();
