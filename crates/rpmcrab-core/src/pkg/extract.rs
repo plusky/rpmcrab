@@ -51,32 +51,19 @@ fn sh_quote(p: &Path) -> String {
 /// stdin. Pure, so the rpm2archive-vs-rpm2cpio branching and its quoting are
 /// golden-testable without the tools installed. `rpm` must already be absolute
 /// (the command runs with `cwd` = the tempdir). `None` when neither tool exists.
-///
-/// The `pipefail` guard: the pipeline must fail when the extractor fails, not
-/// just when the unpacker does. BSD tar exits 0 on empty stdin, so without it
-/// a garbage rpm "extracts" to an empty directory on macOS instead of
-/// erroring. A bare `set -o pipefail` is fatal on dash — `set` is a POSIX
-/// special builtin, so an unsupported option exits the shell before the
-/// pipeline runs — hence the guard on `BASH_VERSION`: effective where `sh` is
-/// bash, byte-identical to the old command where it is dash (where GNU tar
-/// already fails the pipeline correctly).
 fn extract_command(
     rpm: &Path,
     have_rpm2archive: bool,
     have_rpm2cpio: bool,
 ) -> Option<(String, bool)> {
-    const PIPEFAIL: &str = "if [ -n \"${BASH_VERSION:-}\" ]; then set -o pipefail; fi; ";
     if have_rpm2archive {
         Some((
-            format!("{PIPEFAIL}rpm2archive - | tar -xz && chmod -R +rX ."),
+            "rpm2archive - | tar -xz && chmod -R +rX .".to_string(),
             true,
         ))
     } else if have_rpm2cpio {
         Some((
-            format!(
-                "{PIPEFAIL}rpm2cpio {} | cpio -id && chmod -R +rX .",
-                sh_quote(rpm)
-            ),
+            format!("rpm2cpio {} | cpio -id && chmod -R +rX .", sh_quote(rpm)),
             false,
         ))
     } else {
@@ -88,9 +75,8 @@ fn extract_command(
 /// rpmlint's `_extract_rpm`:
 /// `rpm2archive - | tar -xz && chmod -R +rX .` with the rpm on stdin, or
 /// `rpm2cpio <quoted> | cpio -id && chmod -R +rX .` when `rpm2archive` is
-/// absent — both prefixed with the `BASH_VERSION` pipefail guard. stderr is
-/// discarded and `LC_ALL`/`LANGUAGE` are forced to English, as the reference
-/// does.
+/// absent. stderr is discarded and `LC_ALL`/`LANGUAGE` are forced to English,
+/// as the reference does.
 pub fn extract(rpm: &Path, dir: &Path) -> Result<(), ExtractError> {
     if !dir.is_dir() {
         return Err(ExtractError::BadDir(dir.to_path_buf()));
@@ -189,10 +175,7 @@ mod tests {
     #[test]
     fn extract_command_prefers_rpm2archive() {
         let (cmd, stdin) = extract_command(Path::new("/x/y.rpm"), true, true).unwrap();
-        assert_eq!(
-            cmd,
-            "if [ -n \"${BASH_VERSION:-}\" ]; then set -o pipefail; fi; rpm2archive - | tar -xz && chmod -R +rX ."
-        );
+        assert_eq!(cmd, "rpm2archive - | tar -xz && chmod -R +rX .");
         assert!(stdin, "rpm2archive reads the rpm on stdin");
     }
 
@@ -201,7 +184,7 @@ mod tests {
         let (cmd, stdin) = extract_command(Path::new("/x/it's y.rpm"), false, true).unwrap();
         assert_eq!(
             cmd,
-            "if [ -n \"${BASH_VERSION:-}\" ]; then set -o pipefail; fi; rpm2cpio '/x/it'\\''s y.rpm' | cpio -id && chmod -R +rX ."
+            "rpm2cpio '/x/it'\\''s y.rpm' | cpio -id && chmod -R +rX ."
         );
         assert!(!stdin, "rpm2cpio takes the path as an argument");
     }
