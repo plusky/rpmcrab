@@ -1,10 +1,10 @@
 //! Payload extraction and libmagic, mirroring rpmlint's `Pkg._extract_rpm` and
 //! `get_magic`.
 //!
-//! Extraction shells out to `rpm2archive | tar -xz` (fallback
-//! `rpm2cpio | cpio -id`) — the same commands rpmlint runs — because librpm's
-//! safe `archive::PackageReader` yields no entries for compressed payloads
-//! (`docs/DESIGN.md` §3.1).
+//! Extraction shells out to `rpm2archive` staged into a file that `tar -xzf`
+//! unpacks (fallback `rpm2cpio | cpio -id`) — the same tools rpmlint uses —
+//! because librpm's safe `archive::PackageReader` yields no entries for
+//! compressed payloads (`docs/DESIGN.md` §3.1).
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -47,36 +47,47 @@ fn sh_quote(p: &Path) -> String {
     format!("'{}'", p.to_string_lossy().replace('\'', "'\\''"))
 }
 
+/// The staged name for the extractor's output. It lives in the extract dir and
+/// is removed once unpacked; if unpacking fails the tempdir is dropped with it.
+const STAGED: &str = ".rpmcrab-payload.tgz";
+
 /// The shell command for the chosen extractor and whether the rpm is fed on
 /// stdin. Pure, so the rpm2archive-vs-rpm2cpio branching and its quoting are
 /// golden-testable without the tools installed. `rpm` must already be absolute
 /// (the command runs with `cwd` = the tempdir). `None` when neither tool exists.
 ///
-/// The `pipefail` guard: the pipeline must fail when the extractor fails, not
-/// just when the unpacker does. BSD tar exits 0 on empty stdin, so without it
-/// a garbage rpm "extracts" to an empty directory on macOS instead of
-/// erroring. A bare `set -o pipefail` is fatal on dash — `set` is a POSIX
-/// special builtin, so an unsupported option exits the shell before the
-/// pipeline runs — hence the guard on `BASH_VERSION`: effective where `sh` is
-/// bash, byte-identical to the old command where it is dash (where GNU tar
-/// already fails the pipeline correctly).
+/// How extraction decides success.
+///
+/// The extractor's exit status is deliberately discarded, and `tar` arbitrates
+/// alone. `rpm2archive` reports 1 with *empty* stderr for a payload it could
+/// not fully represent — a filename that is not valid UTF-8, say — while still
+/// writing a perfectly good archive, so treating its status as fatal turns a
+/// warning into `fatal error while reading` on a package the reference unpacks
+/// without complaint. `set -o pipefail` does exactly that, and it is not a
+/// portable fix either: `set` is a POSIX special builtin, so on dash the
+/// unsupported option kills the shell before the pipeline runs and extraction
+/// stops working altogether.
+///
+/// Staging to a file is what lets the unpacker reject a broken archive at all,
+/// and it is also what closes the gap `pipefail` was reaching for: BSD tar
+/// exits 0 on empty *stdin*, but errors on an empty *file*, so a garbage rpm
+/// fails on macOS too. The reference has no `pipefail` and therefore already
+/// judges on `tar` alone — this matches it, and matches `cpio` on the fallback.
 fn extract_command(
     rpm: &Path,
     have_rpm2archive: bool,
     have_rpm2cpio: bool,
 ) -> Option<(String, bool)> {
-    const PIPEFAIL: &str = "if [ -n \"${BASH_VERSION:-}\" ]; then set -o pipefail; fi; ";
     if have_rpm2archive {
         Some((
-            format!("{PIPEFAIL}rpm2archive - | tar -xz && chmod -R +rX ."),
+            format!(
+                "rpm2archive - > {STAGED}; tar -xzf {STAGED} && rm -f {STAGED} && chmod -R +rX ."
+            ),
             true,
         ))
     } else if have_rpm2cpio {
         Some((
-            format!(
-                "{PIPEFAIL}rpm2cpio {} | cpio -id && chmod -R +rX .",
-                sh_quote(rpm)
-            ),
+            format!("rpm2cpio {} | cpio -id && chmod -R +rX .", sh_quote(rpm)),
             false,
         ))
     } else {
@@ -85,12 +96,11 @@ fn extract_command(
 }
 
 /// Extract the payload of `rpm` into `dir` (which must already exist), matching
-/// rpmlint's `_extract_rpm`:
-/// `rpm2archive - | tar -xz && chmod -R +rX .` with the rpm on stdin, or
-/// `rpm2cpio <quoted> | cpio -id && chmod -R +rX .` when `rpm2archive` is
-/// absent — both prefixed with the `BASH_VERSION` pipefail guard. stderr is
-/// discarded and `LC_ALL`/`LANGUAGE` are forced to English, as the reference
-/// does.
+/// rpmlint's `_extract_rpm`: `rpm2archive -` into a staged file that `tar -xzf`
+/// unpacks, or `rpm2cpio <quoted> | cpio -id` when `rpm2archive` is absent. In
+/// both cases the unpacker alone decides success, as it does for the reference
+/// (see the `extract_command` comment for why). stderr is discarded and
+/// `LC_ALL`/`LANGUAGE` are forced to English, as the reference does.
 pub fn extract(rpm: &Path, dir: &Path) -> Result<(), ExtractError> {
     if !dir.is_dir() {
         return Err(ExtractError::BadDir(dir.to_path_buf()));
@@ -191,9 +201,86 @@ mod tests {
         let (cmd, stdin) = extract_command(Path::new("/x/y.rpm"), true, true).unwrap();
         assert_eq!(
             cmd,
-            "if [ -n \"${BASH_VERSION:-}\" ]; then set -o pipefail; fi; rpm2archive - | tar -xz && chmod -R +rX ."
+            "rpm2archive - > .rpmcrab-payload.tgz; tar -xzf .rpmcrab-payload.tgz && rm -f .rpmcrab-payload.tgz && chmod -R +rX ."
         );
         assert!(stdin, "rpm2archive reads the rpm on stdin");
+    }
+
+    /// The extractor's status must not reach the `&&` chain. Golden strings
+    /// cannot catch a regression to `&&` or to `pipefail` — only running the
+    /// command can — and getting it wrong turns every warned-about package into
+    /// `fatal error while reading`.
+    #[test]
+    fn a_warning_extractor_still_extracts() {
+        let dir = tempfile::tempdir().unwrap();
+        // A stub standing in for rpm2archive: emits a real archive, then fails
+        // the way a non-UTF-8 payload name makes the real one fail — non-zero,
+        // silently. `tar` is the arbiter, so this must succeed.
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let stub = bin.join("rpm2archive");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\n\
+             printf 'payload' > .rpmcrab-payload.tgz\n\
+             tar -czf .rpmcrab-payload.tgz payload 2>/dev/null\n\
+             exit 1\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("payload"), "hello\n").unwrap();
+        make_executable(&stub);
+
+        let (cmd, needs_stdin) = extract_command(Path::new("/dev/null"), true, true).unwrap();
+        assert!(needs_stdin);
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .current_dir(dir.path())
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .stdin(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "a warned-about archive must still extract"
+        );
+        assert!(
+            !dir.path().join(STAGED).exists(),
+            "the staged archive must be cleaned up"
+        );
+    }
+
+    /// The gap the staging closes: BSD tar exits 0 on empty stdin, so the
+    /// reference "extracts" garbage to an empty dir on macOS. From a *file* it
+    /// errors, so a broken archive fails everywhere.
+    #[test]
+    fn a_broken_archive_fails_extraction() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let stub = bin.join("rpm2archive");
+        std::fs::write(&stub, "#!/bin/sh\n: > .rpmcrab-payload.tgz\nexit 0\n").unwrap();
+        make_executable(&stub);
+
+        let (cmd, _) = extract_command(Path::new("/dev/null"), true, true).unwrap();
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .current_dir(dir.path())
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .stdin(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            !status.success(),
+            "an empty archive must not count as success"
+        );
+    }
+
+    #[cfg(unix)]
+    fn make_executable(p: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]
@@ -201,7 +288,7 @@ mod tests {
         let (cmd, stdin) = extract_command(Path::new("/x/it's y.rpm"), false, true).unwrap();
         assert_eq!(
             cmd,
-            "if [ -n \"${BASH_VERSION:-}\" ]; then set -o pipefail; fi; rpm2cpio '/x/it'\\''s y.rpm' | cpio -id && chmod -R +rX ."
+            "rpm2cpio '/x/it'\\''s y.rpm' | cpio -id && chmod -R +rX ."
         );
         assert!(!stdin, "rpm2cpio takes the path as an argument");
     }
