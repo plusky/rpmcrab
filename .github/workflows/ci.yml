@@ -42,6 +42,36 @@ jobs:
       - run: bash scripts/check-rust-layering.sh
       - run: cargo test --workspace --all-targets --locked
 
+  # Platform spread: Homebrew ships librpm, so the crate builds natively on
+  # macOS too. Formatting is platform-independent, so macOS runs only clippy +
+  # test to catch platform-specific compilation or behavior issues.
+  rust-macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        with:
+          workspaces: . -> target
+      # Homebrew's rpm formula provides librpm, the headers, and rpm2archive.
+      # librpm-sys links bare -lrpm/-lrpmio and bindgen needs the headers, so
+      # export the locations for the cargo steps below.
+      - name: Install RPM via Homebrew
+        run: |
+          brew install rpm
+          echo "LIBRARY_PATH=$(brew --prefix rpm)/lib" >> "$GITHUB_ENV"
+          echo "BINDGEN_EXTRA_CLANG_ARGS=-I$(brew --prefix rpm)/include" >> "$GITHUB_ENV"
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --features gen --locked -- -D warnings
+      - run: cargo test --workspace --all-targets --locked
+
   # Devel (beta) compiler, non-failing: an early-warning leg for upcoming
   # toolchain breaks. rust-toolchain.toml outranks the dtolnay default, so the
   # beta toolchain is selected via RUSTUP_TOOLCHAIN at job level and asserted.
