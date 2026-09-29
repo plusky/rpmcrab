@@ -3,18 +3,21 @@
 //!
 //! The oracle is `tests/parity/pkg/<case>.json` — rpmlint's real `Pkg` dumped
 //! by `scripts/capture-pkg-dump.py` (recorded on the openSUSE reference). This
-//! test builds the same structure from `rpmcrab_core::pkg::Pkg` and compares.
+//! test builds the same structure from `rpmcrab_core::pkg::Pkg`, extracting the
+//! payload into a tempdir the way rpmlint does, and compares.
 //!
 //! Normalizations applied to both sides:
-//! - `dir_name`, `path`: depend on payload extraction (M2b).
 //! - `meta`: oracle provenance, not package data.
 //! - `filename`: reduced to `<DIR>/<basename>` (the reference stores a path;
 //!   `filename_is_the_as_passed_path` pins the path semantics).
+//! - `dir_name`, `path`: the real extraction tempdir is replaced by `<DIR>`
+//!   (the oracle's placeholder) so the location is not compared, only the
+//!   shape.
 //! - `fileclass`: the oracle records the raw `FILECLASS`; rpmcrab does not
 //!   expose it. It is used to decide the one remaining normalization: `magic`
 //!   is dropped where the reference consulted **libmagic** (empty `FILECLASS`,
-//!   not dir/symlink/empty/ghost), which is M2b. Everywhere `FILECLASS` is
-//!   populated, `magic` is authoritative and compared.
+//!   not dir/symlink/empty/ghost). Everywhere `FILECLASS` is populated, `magic`
+//!   is authoritative and compared.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -64,6 +67,7 @@ fn pkg_to_json(pkg: &Pkg) -> Value {
             .map(|f| {
                 json!({
                     "name": f.name,
+                    "path": f.path,
                     "flags": f.flags,
                     "mode": f.mode,
                     "user": f.user,
@@ -110,6 +114,7 @@ fn pkg_to_json(pkg: &Pkg) -> Value {
         "is_source": pkg.is_source,
         "is_no_source": pkg.is_no_source(),
         "filename": pkg.filename,
+        "dir_name": pkg.dir_name.as_ref().map(|p| p.to_string_lossy().into_owned()),
         "requires": deps(&pkg.requires),
         "prereq": deps(&pkg.prereq),
         "provides": deps(&pkg.provides),
@@ -132,7 +137,6 @@ fn pkg_to_json(pkg: &Pkg) -> Value {
 /// Top-level normalization (see the module docs).
 fn normalize_toplevel(v: &mut Value) {
     let o = v.as_object_mut().unwrap();
-    o.remove("dir_name");
     o.remove("meta");
     if let Some(f) = o
         .get("filename")
@@ -148,16 +152,29 @@ fn normalize_toplevel(v: &mut Value) {
             Value::String(format!("<DIR>/{base}")),
         );
     }
-    if let Some(files) = o.get_mut("files").and_then(Value::as_array_mut) {
+}
+
+/// Replace the real extraction tempdir with the oracle's `<DIR>` placeholder.
+fn replace_dir(v: &mut Value, dir: &str) {
+    replace_value_prefix(v, "dir_name", dir);
+    if let Some(files) = v.get_mut("files").and_then(Value::as_array_mut) {
         for f in files {
-            if let Some(obj) = f.as_object_mut() {
-                obj.remove("path");
-            }
+            replace_value_prefix(f, "path", dir);
         }
     }
 }
 
-/// Reconcile the one extraction-dependent field per file, then drop the
+/// In object `v`, replace the leading `dir` in the string `key` with `<DIR>`.
+fn replace_value_prefix(v: &mut Value, key: &str, dir: &str) {
+    let Some(s) = v.get(key).and_then(Value::as_str).map(str::to_string) else {
+        return;
+    };
+    if let Some(o) = v.as_object_mut() {
+        o.insert(key.to_string(), Value::String(s.replacen(dir, "<DIR>", 1)));
+    }
+}
+
+/// Reconcile the one libmagic-dependent field per file, then drop the
 /// oracle-only `fileclass` key.
 fn reconcile_files(expected: &mut Value, actual: &mut Value) {
     let exp = expected
@@ -184,7 +201,7 @@ fn reconcile_files(expected: &mut Value, actual: &mut Value) {
         let is_ghost = eo.get("is_ghost").and_then(Value::as_bool).unwrap_or(false);
         let size = eo.get("size").and_then(Value::as_u64).unwrap_or(0);
         // The reference consults libmagic only when FILECLASS is empty *after*
-        // the dir/symlink/empty branches and the entry is not a ghost (M2b).
+        // the dir/symlink/empty branches and the entry is not a ghost.
         if fileclass_empty && !is_dir && !is_symlink && !is_ghost && size != 0 {
             eo.remove("magic");
             ao.remove("magic");
@@ -196,6 +213,7 @@ fn reconcile_files(expected: &mut Value, actual: &mut Value) {
 #[test]
 fn pkg_reproduces_rpmlint_for_corpus_rpms() {
     let root = repo_root();
+    let scratch = tempfile::tempdir().unwrap();
     for (case, rpm_name) in CASES {
         let rpm = case_rpm(&root, case, rpm_name);
         let dump_path = root.join("tests/parity/pkg").join(format!("{case}.json"));
@@ -203,10 +221,13 @@ fn pkg_reproduces_rpmlint_for_corpus_rpms() {
 
         let mut expected: Value =
             serde_json::from_str(&std::fs::read_to_string(&dump_path).unwrap()).unwrap();
-        let mut actual =
-            pkg_to_json(&Pkg::open(&rpm).unwrap_or_else(|e| panic!("open {case}: {e}")));
+        let pkg = Pkg::open(&rpm, scratch.path()).unwrap_or_else(|e| panic!("open {case}: {e}"));
+        let tmpdir = pkg.dir_name.clone().unwrap().to_string_lossy().into_owned();
+        let mut actual = pkg_to_json(&pkg);
+
         normalize_toplevel(&mut expected);
         normalize_toplevel(&mut actual);
+        replace_dir(&mut actual, &tmpdir);
         reconcile_files(&mut expected, &mut actual);
 
         // The key sets must match, so a renamed/extra Rust field cannot pass.
@@ -229,8 +250,9 @@ fn pkg_reproduces_rpmlint_for_corpus_rpms() {
 #[test]
 fn filename_is_the_as_passed_path() {
     let root = repo_root();
+    let scratch = tempfile::tempdir().unwrap();
     let plain = case_rpm(&root, "llvm21-gold", "llvm21-gold-21.1.8-9.2.aarch64.rpm");
-    let a = Pkg::open(&plain).unwrap().filename;
+    let a = Pkg::open(&plain, scratch.path()).unwrap().filename;
     assert_eq!(
         a,
         plain.to_string_lossy(),
@@ -241,7 +263,7 @@ fn filename_is_the_as_passed_path() {
     let spelled = root
         .join("tests/parity/cases/./llvm21-gold/input/../input/llvm21-gold-21.1.8-9.2.aarch64.rpm");
     assert!(spelled.exists(), "spelled path does not resolve");
-    let b = Pkg::open(&spelled).unwrap().filename;
+    let b = Pkg::open(&spelled, scratch.path()).unwrap().filename;
     assert_eq!(b, spelled.to_string_lossy(), "filename was normalized: {b}");
     assert_ne!(
         a, b,

@@ -81,6 +81,21 @@ impl Config {
             .unwrap_or_default();
     }
 
+    /// `ExtractDir` — where payloads are unpacked. `""` (the default) means the
+    /// system temp dir, resolved as rpmlint does in `lint.py`.
+    pub fn extract_dir(&self) -> PathBuf {
+        let d = self
+            .configuration
+            .get("ExtractDir")
+            .and_then(toml::Value::as_str)
+            .unwrap_or("");
+        if d.is_empty() {
+            std::env::temp_dir()
+        } else {
+            PathBuf::from(d)
+        }
+    }
+
     /// Read a top-level key as a list of strings (empty if absent/not a list).
     fn get_strings(&self, key: &str) -> Vec<String> {
         self.configuration

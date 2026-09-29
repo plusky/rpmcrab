@@ -1,11 +1,13 @@
 //! The `Pkg` abstraction — the Rust equivalent of rpmlint's `pkg.py`.
 //!
-//! M2a covers the **file-backed** layer: the header, the nine dependency
-//! lists, the file map, and the derived `config/doc/ghost/noreplace/missingok`
-//! name lists. Payload extraction (`dir_name`, `PkgFile.path`) is M2b; the
-//! installed DB (`db::Db`) is M2c; the spec `FakePkg` is M3.
+//! The **file-backed** layer: the header, the nine dependency lists, the file
+//! map (with the payload extracted into a tempdir so `PkgFile.path` and
+//! `magic` match the reference), and the derived
+//! `config/doc/ghost/noreplace/missingok` name lists. The installed DB
+//! (`db::Db`) is M2c; the spec `FakePkg` is M3.
 
 pub mod dep;
+pub mod extract;
 pub mod pkgfile;
 pub mod tags;
 
@@ -55,6 +57,10 @@ pub enum PkgError {
         path: PathBuf,
         source: librpm::RpmErrorKind,
     },
+    #[error(transparent)]
+    Extract(#[from] extract::ExtractError),
+    #[error("creating the extraction tempdir: {0}")]
+    Tempdir(#[from] std::io::Error),
 }
 
 /// Call `librpm::init()` exactly once per process, caching its result so
@@ -90,28 +96,51 @@ pub struct Pkg {
     pub ghost_files: Vec<String>,
     pub noreplace_files: Vec<String>,
     pub missingok_files: Vec<String>,
-    /// The extraction directory; `None` until M2b unpacks the payload.
+    /// The extraction directory; `None` only for an installed package (M2c),
+    /// which reads the live filesystem.
     pub dir_name: Option<PathBuf>,
+    /// True once the payload has been unpacked into `dir_name`.
+    pub extracted: bool,
     header: PackageHeader,
+    /// Owns the extraction tempdir; removed on drop.
+    tempdir: Option<tempfile::TempDir>,
 }
 
 impl Pkg {
-    /// Open a `.rpm` file and build the package (signature checks skipped, as
-    /// rpmlint does).
-    pub fn open(path: &Path) -> Result<Self, PkgError> {
+    /// Open a `.rpm` file, unpack its payload into a tempdir under
+    /// `extract_dir`, and build the package. Signature checks are skipped, as
+    /// rpmlint does; `extract_dir` comes from the config's `ExtractDir`.
+    pub fn open(path: &Path, extract_dir: &Path) -> Result<Self, PkgError> {
         init()?;
         let header = PackageHeader::from_file(path, Some(&VerifyOptions::skip_verification()))
             .map_err(|source| PkgError::Open {
                 path: path.to_path_buf(),
                 source,
             })?;
-        Ok(Self::from_header(header, path))
+        Self::from_header(header, path, extract_dir)
     }
 
-    fn from_header(header: PackageHeader, path: &Path) -> Self {
+    fn from_header(
+        header: PackageHeader,
+        path: &Path,
+        extract_dir: &Path,
+    ) -> Result<Self, PkgError> {
         // rpmlint stores the as-passed path verbatim (`self.filename = filename`)
-        // — not the basename. `SignatureCheck` prints it, and M2b resolves it.
+        // — not the basename. `SignatureCheck` prints it, and it is resolved
+        // for extraction.
         let filename = path.to_string_lossy().into_owned();
+        // Extraction happens in `Pkg.__init__`: a TemporaryDirectory under the
+        // config's `ExtractDir`, prefixed `rpmlint.<rpm-basename>.`.
+        let base = Path::new(&filename)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let tempdir = tempfile::Builder::new()
+            .prefix(&format!("rpmlint.{base}."))
+            .tempdir_in(extract_dir)?;
+        extract::extract(path, tempdir.path())?;
+        let dir_name = tempdir.path().to_path_buf();
+
         let name = tags::str_tag(&header, Tag::NAME).unwrap_or_default();
         let is_source = header.get_owned(Tag::SOURCERPM).is_none();
 
@@ -165,7 +194,7 @@ impl Pkg {
             .map(|d| d.name.clone())
             .collect::<Vec<_>>();
 
-        let files = gather_files(&header);
+        let files = gather_files(&header, Some(&dir_name));
         let names = |p: fn(&PkgFile) -> bool| -> Vec<String> {
             files
                 .iter()
@@ -189,7 +218,7 @@ impl Pkg {
             tags::str_tag(&header, Tag::ARCH).unwrap_or_default()
         };
 
-        Self {
+        Ok(Self {
             filename,
             name,
             arch,
@@ -210,9 +239,11 @@ impl Pkg {
             ghost_files,
             noreplace_files,
             missingok_files,
-            dir_name: None,
+            dir_name: Some(dir_name),
+            extracted: true,
             header,
-        }
+            tempdir: Some(tempdir),
+        })
     }
 
     /// The underlying librpm header, for tag access.
@@ -245,6 +276,53 @@ impl Pkg {
     /// bare string, so join handles both).
     pub fn scriptprog(&self, which: Tag) -> String {
         self.tag_str_array(which).join("")
+    }
+
+    /// Read an extracted file as UTF-8 (rpmlint `read_with_mmap`). `''` when it
+    /// cannot be read or is not valid UTF-8, matching the reference's
+    /// `except Exception: return ''`.
+    pub fn read_file(&self, filename: &str) -> String {
+        let base = self.dir_name.clone().unwrap_or_else(|| PathBuf::from("/"));
+        let path = file_path(Some(&base), filename);
+        std::fs::read(path)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+            .unwrap_or_default()
+    }
+
+    /// The first 1-based line number in `filename` matching `regex` (rpmlint
+    /// `grep`), or `None`.
+    pub fn grep(&self, regex: &fancy_regex::Regex, filename: &str) -> Option<usize> {
+        let data = self.read_file(filename);
+        let m = regex.find(&data).ok().flatten()?;
+        Some(data[..m.start()].matches('\n').count() + 1)
+    }
+
+    /// Resolve a symlink chain within this package (rpmlint `readlink`):
+    /// returns the dereferenced [`PkgFile`], or `None` when the chain leaves
+    /// the package. Bounded by the file count, so a symlink cycle cannot loop
+    /// forever (a deliberate robustness divergence; rpmlint would hang).
+    pub fn readlink(&self, pkgfile: &PkgFile) -> Option<&PkgFile> {
+        // Start from this package's own copy of the file, so the returned
+        // reference borrows `self` (the reference resolves within `self.files`
+        // too).
+        let mut result = self.files.iter().find(|f| f.name == pkgfile.name)?;
+        for _ in 0..self.files.len() {
+            if result.linkto.is_empty() {
+                return Some(result);
+            }
+            let linkpath = normalize_path(&join_url(&result.name, &result.linkto));
+            result = self.files.iter().find(|f| f.name == linkpath)?;
+        }
+        None
+    }
+
+    /// Remove the extraction tempdir (rpmlint `cleanup`); it is also removed on
+    /// drop.
+    pub fn cleanup(&mut self) {
+        self.tempdir = None;
+        self.dir_name = None;
+        self.extracted = false;
     }
 }
 
@@ -331,10 +409,17 @@ fn compressed_magic_re() -> &'static fancy_regex::Regex {
     })
 }
 
-/// rpmlint `AbstractPkg._calc_magic`. The directory / symlink / empty branches
-/// need neither extraction nor libmagic and are done here; the libmagic lookup
-/// for regular files lands in M2b with extraction.
-fn calc_magic(header_magic: &str, mode: u32, size: u64, linkto: &str) -> String {
+/// rpmlint `AbstractPkg._calc_magic`: the header's `FILECLASS` if present,
+/// else the directory / symlink / empty branch, else libmagic on the extracted
+/// file (skipped for ghosts); then the compressed-marker filter.
+fn calc_magic(
+    header_magic: &str,
+    mode: u32,
+    size: u64,
+    linkto: &str,
+    path: &Path,
+    is_ghost: bool,
+) -> String {
     let mut m = header_magic.to_string();
     if m.is_empty() {
         if pkgfile::is_dir(mode) {
@@ -344,7 +429,9 @@ fn calc_magic(header_magic: &str, mode: u32, size: u64, linkto: &str) -> String 
         } else if size == 0 {
             m = "empty".to_string();
         }
-        // M2b: if still empty, run libmagic on the extracted regular file.
+    }
+    if m.is_empty() && !is_ghost {
+        m = extract::file_magic(path);
     }
     if m.is_empty() || compressed_magic_re().is_match(&m).unwrap_or(false) {
         m.clear();
@@ -352,10 +439,30 @@ fn calc_magic(header_magic: &str, mode: u32, size: u64, linkto: &str) -> String 
     m
 }
 
+/// rpmlint's `PkgFile.path`: `normpath(join(dir_name or '/', name.lstrip('/')))`.
+fn file_path(dir: Option<&Path>, name: &str) -> String {
+    let base = dir.unwrap_or_else(|| Path::new("/"));
+    let joined = base.join(name.trim_start_matches('/'));
+    normalize_path(&joined.to_string_lossy())
+}
+
+/// rpmlint's `urljoin(name, linkto)` for path-like strings: an absolute
+/// `linkto` wins, otherwise it is resolved against `name`'s directory. The
+/// caller `normpath`s the result.
+fn join_url(name: &str, linkto: &str) -> String {
+    if linkto.starts_with('/') {
+        return linkto.to_string();
+    }
+    match name.rfind('/') {
+        Some(i) => format!("{}/{}", &name[..i], linkto),
+        None => linkto.to_string(),
+    }
+}
+
 /// Build the file map (rpmlint `_gather_files_info`). Per-file metadata comes
 /// from librpm's `FileEntry`; `inode`/`rdev`/`lang`/`fileclass` are read from
 /// the parallel header arrays (librpm's `FileEntry` does not expose them).
-fn gather_files(header: &PackageHeader) -> Vec<PkgFile> {
+fn gather_files(header: &PackageHeader, dir: Option<&Path>) -> Vec<PkgFile> {
     let inodes = tags::int32_array(header, Tag::FILEINODES);
     let rdevs = tags::int16_array(header, Tag::FILERDEVS);
     let langs = tags::str_array(header, Tag::FILELANGS);
@@ -370,27 +477,26 @@ fn gather_files(header: &PackageHeader) -> Vec<PkgFile> {
         let name = entry.path();
         let mode = u32::from(entry.mode());
         let size = entry.size();
+        let flags = entry.flags();
         let linkto_raw = entry.link_target().unwrap_or_default();
         let linkto = if linkto_raw.is_empty() {
             String::new()
         } else {
             normalize_path(linkto_raw)
         };
-        // M2b: when `magic` is still empty here, run libmagic on the extracted
-        // file and apply the compressed-marker filter to *its* output too.
+        let path = file_path(dir, &name);
         let magic = calc_magic(
             fileclass.get(i).map(String::as_str).unwrap_or(""),
             mode,
             size,
             &linkto,
+            Path::new(&path),
+            flags.is_ghost(),
         );
         out.push(PkgFile {
-            // M2a: not extracted, so `dir_name` is `None` and `path` is the
-            // package-relative name. rpmlint's `path` joins the extraction
-            // tmpdir; `'/'` is only for an installed package (M2c).
-            path: normalize_path(&name),
+            path,
             name,
-            flags: entry.flags().bits(),
+            flags: flags.bits(),
             mode,
             user: entry.user().to_string(),
             group: entry.group().to_string(),
@@ -492,5 +598,44 @@ mod tests {
         assert_eq!(normalize_path("."), ".");
         assert_eq!(normalize_path("a//b///c"), "a/b/c");
         assert_eq!(normalize_path("a/./b"), "a/b");
+    }
+
+    #[test]
+    fn calc_magic_branches_need_no_file() {
+        let none = Path::new("/nonexistent");
+        assert_eq!(calc_magic("", 0o040755, 0, "", none, false), "directory");
+        assert_eq!(
+            calc_magic("", 0o120777, 10, "../x", none, false),
+            "symbolic link to `../x'"
+        );
+        assert_eq!(calc_magic("", 0o100644, 0, "", none, false), "empty");
+        // A populated FILECLASS wins and needs no file.
+        assert_eq!(
+            calc_magic("ELF 64-bit LSB", 0o100755, 9, "", none, false),
+            "ELF 64-bit LSB"
+        );
+        // A ghost never falls through to libmagic.
+        assert_eq!(calc_magic("", 0o100644, 9, "", none, true), "");
+        // The compressed-payload marker is stripped.
+        assert_eq!(
+            calc_magic(
+                "a (gzip compressed data, from Unix)",
+                0o100644,
+                9,
+                "",
+                none,
+                false
+            ),
+            ""
+        );
+    }
+
+    #[test]
+    fn calc_magic_falls_back_to_libmagic() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("hello.txt");
+        std::fs::write(&p, "hello\n").unwrap();
+        // Empty FILECLASS, regular non-empty, not a ghost -> libmagic.
+        assert_eq!(calc_magic("", 0o100644, 6, "", &p, false), "ASCII text");
     }
 }

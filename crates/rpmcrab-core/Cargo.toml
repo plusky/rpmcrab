@@ -35,9 +35,11 @@ fancy-regex = "0.19"
 # honours $COLUMNS, then the tty winsize, then 80. terminal_size gives the
 # winsize via a safe API (unsafe_code is forbidden in this crate).
 terminal_size = "0.4"
+# Extraction tempdir, mirroring rpmlint's TemporaryDirectory(prefix=
+# 'rpmlint.<basename>.', dir=ExtractDir).
+tempfile = "3"
 # Typed errors on purpose in -core; anyhow stays in the binary crate.
 thiserror = "2"
 
 [dev-dependencies]
-tempfile = "3"
 serde_json = "1"

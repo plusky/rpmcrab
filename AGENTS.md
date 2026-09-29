@@ -23,7 +23,9 @@ feature on.
 The build needs the RPM development headers, because `librpm-sys` runs bindgen
 (`pkg-config` must find `rpm.pc`): install `rpm-devel` (openSUSE) or
 `librpm-dev` (Debian/Ubuntu) first, and note that `librpm` is **Linux-only** —
-there is no macOS build.
+there is no macOS build. The tests additionally need the RPM runtime tools
+(`rpm2archive`/`rpm2cpio`), `cpio` and `file` (libmagic), which the parity
+harness and the payload-extraction tests invoke.
 
 The toolchain lives in `rust-toolchain.toml`; the MSRV is declared once in the
 root `Cargo.toml` (`rust-version`) and enforced by a dedicated CI job. Use
