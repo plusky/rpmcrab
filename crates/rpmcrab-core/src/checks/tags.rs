@@ -446,7 +446,8 @@ impl TagsCheck {
                 add_info(out, Level::Error, pkg, "invalid-dependency", &[&dep.name]);
             }
             if is_source {
-                if self.lib_devel_number_re
+                if self
+                    .lib_devel_number_re
                     .is_match(&dep.name)
                     .unwrap_or(false)
                 {
