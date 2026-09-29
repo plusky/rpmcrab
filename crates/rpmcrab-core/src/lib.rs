@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 pub mod check;
+pub mod checks;
 pub mod color;
 pub mod config;
 pub mod filter;

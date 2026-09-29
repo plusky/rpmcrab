@@ -125,14 +125,17 @@ pub trait Check {
 
 /// Build a check from its exact Python module name, or `None` when it is not
 /// implemented yet. The waves in `docs/DESIGN.md` §8 add their arms here.
-pub fn build(_name: &str) -> Option<Box<dyn Check>> {
-    None
+pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
+    match name {
+        "TagsCheck" => Some(Box::new(crate::checks::tags::TagsCheck::new(config))),
+        _ => None,
+    }
 }
 
 /// `Lint.load_checks`: the configured `Checks` list in order, deduplicated by
 /// name and narrowed by `--checks` when that is given.
 pub fn load(config: &Config, selected: Option<&str>) -> Vec<Box<dyn Check>> {
-    load_with(config, selected, build)
+    load_with(config, selected, |name| build(name, config))
 }
 
 /// [`load`] with an injectable factory, so the ordering, deduplication and
@@ -275,9 +278,17 @@ mod tests {
     /// an unimplemented module is skipped instead of failing the run.
     #[test]
     fn load_with_nothing_implemented_is_empty() {
-        let config = cfg_with(&["TagsCheck", "FilesCheck"]);
-        assert!(load(&config, None).is_empty());
+        let config = cfg_with(&["FilesCheck", "NotYetPorted"]);
         assert!(load_with(&config, None, always).is_empty());
+    }
+
+    /// `TagsCheck` is implemented: `load` builds it from the config.
+    #[test]
+    fn load_builds_tags_check() {
+        let config = cfg_with(&["TagsCheck", "FilesCheck"]);
+        let built = load(&config, None);
+        let names: Vec<&str> = built.iter().map(|c| c.name()).collect();
+        assert_eq!(names, vec!["TagsCheck"]);
     }
 
     #[test]
