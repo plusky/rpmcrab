@@ -417,8 +417,11 @@ fn has_package_suffix(path: &Path) -> bool {
 /// `Lint.rpmlint_package`: `re.search(r'/home/abuild/rpmbuild/RPMS/noarch/rpmlint-\d')`.
 ///
 /// The search is **unanchored**, so the pattern matches anywhere in the path,
-/// and `\d` is Unicode-aware in Python, so the digit test is too. Both details
-/// matter for a guard whose whole job is to fire in unexpected layouts.
+/// and Python's `\d` is Unicode-aware, so the digit test is too. Python's `\d`
+/// matches only decimal digits while `is_numeric` accepts every Unicode
+/// numeric, so this is a deliberate superset: `rpmlint-².rpm` is guard-skipped
+/// here and linted by the reference. std has no precise decimal-digit
+/// predicate, and the difference cannot occur in a real package path.
 fn is_rpmlint_package(path: &Path) -> bool {
     let s = path.to_string_lossy();
     const PATTERN: &str = "/home/abuild/rpmbuild/RPMS/noarch/rpmlint-";
@@ -471,7 +474,8 @@ mod tests {
 
     /// `re.search(r'/home/abuild/rpmbuild/RPMS/noarch/rpmlint-\d')` — the
     /// search is unanchored, so any path containing the pattern matches, and
-    /// `\d` is Unicode-aware, so a non-ASCII decimal digit counts.
+    /// `\d` is Unicode-aware, so a non-ASCII decimal digit counts. Every case
+    /// here was checked against CPython `re.search`.
     #[test]
     fn rpmlint_package_pattern() {
         for hit in [
