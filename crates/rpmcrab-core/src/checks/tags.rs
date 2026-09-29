@@ -5,9 +5,12 @@
 //! group, buildhost, changelog, license, URL, obsoletes/provides, and the
 //! filename coherence check.
 //!
-//! Two deliberate gaps: `spelling-error` needs an enchant backend (the design
-//! records it as free to degrade gracefully), and the i18n summary/description
-//! loops read only the `C` locale (the corpus has no other locales).
+//! Deliberate gaps: `spelling-error` needs an enchant backend (the design
+//! records it as free to degrade gracefully; see the ledger). The i18n
+//! summary/description loops are fully implemented.
+//!
+//! TODO(mini-mode): when a spellcheck backend lands, the `DESIGN.md:343-351`
+//! guards become load-bearing — accepting-and-ignoring breaks `rpmlint-mini`.
 
 use std::path::Path;
 
@@ -132,6 +135,9 @@ pub struct TagsCheck {
     valid_license_exceptions: Vec<String>,
     macro_re: Regex,
     devel_re: Regex,
+    lib_devel_number_re: Regex,
+    lib_package_re: Regex,
+    invalid_version_re: Regex,
 }
 
 impl TagsCheck {
@@ -192,6 +198,9 @@ impl TagsCheck {
             valid_license_exceptions: get_strings("ValidLicenseExceptions"),
             macro_re: macro_regex(),
             devel_re: devel_regex(),
+            lib_devel_number_re: lib_devel_number_regex(),
+            lib_package_re: lib_package_regex(),
+            invalid_version_re: invalid_version_regex(),
         }
     }
 
@@ -324,7 +333,7 @@ impl TagsCheck {
     fn check_version(&self, pkg: &Pkg, out: &mut Filter, version: &str) {
         if !version.is_empty() {
             self.unexpanded_macro(out, pkg, "Version", version);
-            if invalid_version_regex().is_match(version).unwrap_or(false) {
+            if self.invalid_version_re.is_match(version).unwrap_or(false) {
                 add_info(out, Level::Error, pkg, "invalid-version", &[version]);
             }
         } else {
@@ -437,7 +446,7 @@ impl TagsCheck {
                 add_info(out, Level::Error, pkg, "invalid-dependency", &[&dep.name]);
             }
             if is_source {
-                if lib_devel_number_regex()
+                if self.lib_devel_number_re
                     .is_match(&dep.name)
                     .unwrap_or(false)
                 {
@@ -456,7 +465,7 @@ impl TagsCheck {
                 }
                 // Issue #1091: replicate the fuzzy lib heuristic exactly.
                 if dep.flags == 0
-                    && let Ok(Some(caps)) = lib_package_regex().captures(&dep.name)
+                    && let Ok(Some(caps)) = self.lib_package_re.captures(&dep.name)
                     && caps.get(1).is_none()
                 {
                     add_info(
