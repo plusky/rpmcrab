@@ -324,9 +324,6 @@ fn live_root_reports_the_reference_extracted_flag() {
     assert_eq!(installed.dir_name(), Path::new("/"));
 
     let live = Pkg::open(&rpm, Path::new("/")).unwrap();
-    assert!(
-        !live.extracted(),
-        "ExtractDir = / must not set extracted"
-    );
+    assert!(!live.extracted(), "ExtractDir = / must not set extracted");
     assert_eq!(live.dir_name(), Path::new("/"));
 }
