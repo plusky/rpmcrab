@@ -1,11 +1,34 @@
 # The divergence ledger. An empty ledger means rpmcrab is byte-identical to
 # reference rpmlint 2.10.0 on every parity case. Every non-empty entry is a
 # reviewed, deliberate departure — see tests/parity/README.md for the schema.
-#
-# [[divergence]]
-# case = "…"
-# check = "…"
-# kind = "removed"        # removed | added | severity | detail
-# reason = "…"
-# upstream = "https://github.com/rpm-software-management/rpmlint/issues/…"
-# since = "0.2.0"
+
+# The ledger also records deliberate *behavioural* departures that no corpus
+# case pins (kind = "behaviour"), so they are reviewed rather than accidental.
+
+[[divergence]]
+case = "global"
+check = "pkg-layer"
+kind = "behaviour"
+reason = "Pkg::readlink bounds the symlink chain by the file count and returns None on a cycle; the reference (pkg.py:716-724) loops forever on a malformed package. A linter must not hang."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "pkg-layer"
+kind = "behaviour"
+reason = "Pkg::grep returns None when the regex engine errors on the data; the reference lets the exception propagate."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "pkg-layer"
+kind = "behaviour"
+reason = "Pkg::open returns ExtractError::BadDir when the extract directory is not a directory; the reference warns and continues with an unextracted package (pkg.py:608-613)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "pkg-layer"
+kind = "behaviour"
+reason = "Pkg::readlink starts from the package's own copy of the file (returning None for a foreign PkgFile); the reference starts from the passed PkgFile object."
+since = "0.1.0"

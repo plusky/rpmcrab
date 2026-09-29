@@ -129,6 +129,18 @@ impl Pkg {
         // — not the basename. `SignatureCheck` prints it, and it is resolved
         // for extraction.
         let filename = path.to_string_lossy().into_owned();
+        // rpmlint treats a `'/'` dirname as "installed package, do not extract"
+        // (`pkg.py:610-613`); honour that so `ExtractDir = "/"` cannot unpack
+        // into the live root.
+        if extract_dir == Path::new("/") {
+            return Ok(Self::build(
+                header,
+                Some(PathBuf::from("/")),
+                filename,
+                None,
+                None,
+            ));
+        }
         // Extraction happens in `Pkg.__init__`: a TemporaryDirectory under the
         // config's `ExtractDir`, prefixed `rpmlint.<rpm-basename>.`.
         let base = Path::new(&filename)
@@ -318,11 +330,11 @@ impl Pkg {
     }
 
     /// Remove the extraction tempdir (rpmlint `cleanup`); it is also removed on
-    /// drop.
+    /// drop. `dir_name` deliberately keeps pointing at the removed path, so a
+    /// read after cleanup fails to `''` exactly as the reference does — nulling
+    /// it would make `read_file` fall back to the host filesystem.
     pub fn cleanup(&mut self) {
         self.tempdir = None;
-        self.dir_name = None;
-        self.extracted = false;
     }
 }
 

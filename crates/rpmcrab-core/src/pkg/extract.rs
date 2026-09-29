@@ -47,6 +47,30 @@ fn sh_quote(p: &Path) -> String {
     format!("'{}'", p.to_string_lossy().replace('\'', "'\\''"))
 }
 
+/// The shell command for the chosen extractor and whether the rpm is fed on
+/// stdin. Pure, so the rpm2archive-vs-rpm2cpio branching and its quoting are
+/// golden-testable without the tools installed. `rpm` must already be absolute
+/// (the command runs with `cwd` = the tempdir). `None` when neither tool exists.
+fn extract_command(
+    rpm: &Path,
+    have_rpm2archive: bool,
+    have_rpm2cpio: bool,
+) -> Option<(String, bool)> {
+    if have_rpm2archive {
+        Some((
+            "rpm2archive - | tar -xz && chmod -R +rX .".to_string(),
+            true,
+        ))
+    } else if have_rpm2cpio {
+        Some((
+            format!("rpm2cpio {} | cpio -id && chmod -R +rX .", sh_quote(rpm)),
+            false,
+        ))
+    } else {
+        None
+    }
+}
+
 /// Extract the payload of `rpm` into `dir` (which must already exist), matching
 /// rpmlint's `_extract_rpm`:
 /// `rpm2archive - | tar -xz && chmod -R +rX .` with the rpm on stdin, or
@@ -57,14 +81,11 @@ pub fn extract(rpm: &Path, dir: &Path) -> Result<(), ExtractError> {
     if !dir.is_dir() {
         return Err(ExtractError::BadDir(dir.to_path_buf()));
     }
-    let archive_stdin = which("rpm2archive");
-    let cmd = if archive_stdin {
-        "rpm2archive - | tar -xz && chmod -R +rX .".to_string()
-    } else if which("rpm2cpio") {
-        format!("rpm2cpio {} | cpio -id && chmod -R +rX .", sh_quote(rpm))
-    } else {
-        return Err(ExtractError::NoTool);
-    };
+    // rpmlint resolves the path (`Path(self.filename).resolve()`) before use, so
+    // a relative rpm path still works in the `cwd`=tempdir child.
+    let abs = std::fs::canonicalize(rpm).unwrap_or_else(|_| rpm.to_path_buf());
+    let (cmd, needs_stdin) = extract_command(&abs, which("rpm2archive"), which("rpm2cpio"))
+        .ok_or(ExtractError::NoTool)?;
 
     let mut command = Command::new("sh");
     command
@@ -77,9 +98,9 @@ pub fn extract(rpm: &Path, dir: &Path) -> Result<(), ExtractError> {
         // it; nothing may reach rpmcrab's own stdout.
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if archive_stdin {
-        let f = File::open(rpm).map_err(|source| ExtractError::Open {
-            path: rpm.to_path_buf(),
+    if needs_stdin {
+        let f = File::open(&abs).map_err(|source| ExtractError::Open {
+            path: abs.clone(),
             source,
         })?;
         command.stdin(Stdio::from(f));
@@ -94,8 +115,20 @@ pub fn extract(rpm: &Path, dir: &Path) -> Result<(), ExtractError> {
 /// libmagic's description of `path` — rpmlint's `get_magic` via python-magic's
 /// `from_file`. `file -b` produces the identical string; `''` on failure, as
 /// the reference returns on `ValueError`/`FileNotFoundError`.
+///
+/// This shells out per consulted file rather than calling libmagic in-process
+/// (the reference uses python-magic). Only files with an empty `FILECLASS` reach
+/// it, and `file` is already a dependency (§7.4); a native binding can replace
+/// this later without changing the call site.
 pub fn file_magic(path: &Path) -> String {
-    let stdout = match Command::new("file").arg("-b").arg(path).output() {
+    // `LC_ALL=C` so the `cannot open` message below is stable regardless of the
+    // ambient locale (libmagic output itself is locale-independent).
+    let stdout = match Command::new("file")
+        .arg("-b")
+        .arg(path)
+        .env("LC_ALL", "C")
+        .output()
+    {
         Ok(o) if o.status.success() => o.stdout,
         _ => return String::new(),
     };
@@ -137,5 +170,56 @@ mod tests {
     #[test]
     fn file_magic_missing_is_empty() {
         assert_eq!(file_magic(Path::new("/no/such/file/xyz")), "");
+    }
+
+    #[test]
+    fn extract_command_prefers_rpm2archive() {
+        let (cmd, stdin) = extract_command(Path::new("/x/y.rpm"), true, true).unwrap();
+        assert_eq!(cmd, "rpm2archive - | tar -xz && chmod -R +rX .");
+        assert!(stdin, "rpm2archive reads the rpm on stdin");
+    }
+
+    #[test]
+    fn extract_command_falls_back_to_quoted_rpm2cpio() {
+        let (cmd, stdin) = extract_command(Path::new("/x/it's y.rpm"), false, true).unwrap();
+        assert_eq!(
+            cmd,
+            "rpm2cpio '/x/it'\\''s y.rpm' | cpio -id && chmod -R +rX ."
+        );
+        assert!(!stdin, "rpm2cpio takes the path as an argument");
+    }
+
+    #[test]
+    fn extract_command_none_without_tools() {
+        assert!(extract_command(Path::new("/x.rpm"), false, false).is_none());
+    }
+
+    #[test]
+    fn extract_rejects_a_non_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(matches!(
+            extract(Path::new("/x.rpm"), &file),
+            Err(ExtractError::BadDir(_))
+        ));
+    }
+
+    #[test]
+    fn extract_fails_on_a_garbage_rpm() {
+        // Needs an extractor present to reach a non-zero status rather than
+        // NoTool.
+        if !which("rpm2archive") && !which("rpm2cpio") {
+            eprintln!("skip: no rpm2archive/rpm2cpio");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("not-an.rpm");
+        std::fs::write(&bad, b"definitely not an rpm").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            extract(&bad, out.path()),
+            Err(ExtractError::Status(_))
+        ));
     }
 }

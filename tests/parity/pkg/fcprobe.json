@@ -1,0 +1,226 @@
+{
+  "meta": {
+    "rpmlint": "2.10.0",
+    "reference_sha": "84848c05c5571c22274a55ff9afdfe6d88c67dc9",
+    "librpm": "4.20.1",
+    "libmagic": 546,
+    "captured": "2026-09-29"
+  },
+  "name": "fcprobe",
+  "arch": "noarch",
+  "is_source": false,
+  "is_no_source": false,
+  "filename": "<DIR>/fcprobe-1-1.noarch.rpm",
+  "dir_name": "<DIR>",
+  "requires": [
+    {
+      "name": "rpmlib(CompressedFileNames)",
+      "flags": 16777226,
+      "epoch": null,
+      "version": "3.0.4",
+      "release": "1"
+    },
+    {
+      "name": "rpmlib(FileDigests)",
+      "flags": 16777226,
+      "epoch": null,
+      "version": "4.6.0",
+      "release": "1"
+    },
+    {
+      "name": "rpmlib(PayloadFilesHavePrefix)",
+      "flags": 16777226,
+      "epoch": null,
+      "version": "4.0",
+      "release": "1"
+    },
+    {
+      "name": "rpmlib(PayloadIsZstd)",
+      "flags": 16777226,
+      "epoch": null,
+      "version": "5.4.18",
+      "release": "1"
+    }
+  ],
+  "prereq": [],
+  "provides": [
+    {
+      "name": "fcprobe",
+      "flags": 8,
+      "epoch": null,
+      "version": "1",
+      "release": "1"
+    }
+  ],
+  "conflicts": [],
+  "obsoletes": [],
+  "recommends": [],
+  "suggests": [],
+  "enhances": [],
+  "supplements": [],
+  "files": [
+    {
+      "name": "/usr/share/fcprobe",
+      "path": "<DIR>/usr/share/fcprobe",
+      "flags": 0,
+      "mode": 16877,
+      "user": "root",
+      "group": "root",
+      "linkto": "",
+      "size": 0,
+      "md5": "",
+      "mtime": 1790664872,
+      "rdev": 0,
+      "inode": 1,
+      "lang": "",
+      "fileclass": "directory",
+      "magic": "directory",
+      "filecaps": null,
+      "is_config": false,
+      "is_doc": false,
+      "is_ghost": false,
+      "is_noreplace": false,
+      "is_missingok": false,
+      "is_dir": true,
+      "is_symlink": false,
+      "is_reg": false,
+      "filemode": "drwxr-xr-x",
+      "suid": false,
+      "sgid": false
+    },
+    {
+      "name": "/usr/share/fcprobe/empty",
+      "path": "<DIR>/usr/share/fcprobe/empty",
+      "flags": 0,
+      "mode": 33188,
+      "user": "root",
+      "group": "root",
+      "linkto": "",
+      "size": 0,
+      "md5": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "mtime": 1790664872,
+      "rdev": 0,
+      "inode": 2,
+      "lang": "",
+      "fileclass": "empty",
+      "magic": "empty",
+      "filecaps": null,
+      "is_config": false,
+      "is_doc": false,
+      "is_ghost": false,
+      "is_noreplace": false,
+      "is_missingok": false,
+      "is_dir": false,
+      "is_symlink": false,
+      "is_reg": true,
+      "filemode": "-rw-r--r--",
+      "suid": false,
+      "sgid": false
+    },
+    {
+      "name": "/usr/share/fcprobe/text.txt",
+      "path": "<DIR>/usr/share/fcprobe/text.txt",
+      "flags": 0,
+      "mode": 33188,
+      "user": "root",
+      "group": "root",
+      "linkto": "",
+      "size": 6,
+      "md5": "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+      "mtime": 1790664872,
+      "rdev": 0,
+      "inode": 3,
+      "lang": "",
+      "fileclass": "ASCII text",
+      "magic": "ASCII text",
+      "filecaps": null,
+      "is_config": false,
+      "is_doc": false,
+      "is_ghost": false,
+      "is_noreplace": false,
+      "is_missingok": false,
+      "is_dir": false,
+      "is_symlink": false,
+      "is_reg": true,
+      "filemode": "-rw-r--r--",
+      "suid": false,
+      "sgid": false
+    },
+    {
+      "name": "/usr/share/fcprobe/tiny.bin",
+      "path": "<DIR>/usr/share/fcprobe/tiny.bin",
+      "flags": 0,
+      "mode": 33188,
+      "user": "root",
+      "group": "root",
+      "linkto": "",
+      "size": 5,
+      "md5": "74f81fe167d99b4cb41d6d0ccda82278caee9f3e2f25d5e5a3936ff3dcec60d0",
+      "mtime": 1790664872,
+      "rdev": 0,
+      "inode": 4,
+      "lang": "",
+      "fileclass": "",
+      "magic": "data",
+      "filecaps": null,
+      "is_config": false,
+      "is_doc": false,
+      "is_ghost": false,
+      "is_noreplace": false,
+      "is_missingok": false,
+      "is_dir": false,
+      "is_symlink": false,
+      "is_reg": true,
+      "filemode": "-rw-r--r--",
+      "suid": false,
+      "sgid": false
+    }
+  ],
+  "doc_files": [],
+  "config_files": [],
+  "ghost_files": [],
+  "noreplace_files": [],
+  "missingok_files": [],
+  "scriptlets": {
+    "%pre": {
+      "exists": false,
+      "prog": ""
+    },
+    "%post": {
+      "exists": false,
+      "prog": ""
+    },
+    "%preun": {
+      "exists": false,
+      "prog": ""
+    },
+    "%postun": {
+      "exists": false,
+      "prog": ""
+    },
+    "%trigger": {
+      "exists": false,
+      "prog": ""
+    },
+    "%pretrans": {
+      "exists": false,
+      "prog": ""
+    },
+    "%posttrans": {
+      "exists": false,
+      "prog": ""
+    },
+    "%verifyscript": {
+      "exists": false,
+      "prog": ""
+    },
+    "%filetrigger": {
+      "exists": false,
+      "prog": ""
+    },
+    "%transfiletrigger": {
+      "exists": false,
+      "prog": ""
+    }
+  }
+}

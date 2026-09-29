@@ -14,10 +14,12 @@
 //!   (the oracle's placeholder) so the location is not compared, only the
 //!   shape.
 //! - `fileclass`: the oracle records the raw `FILECLASS`; rpmcrab does not
-//!   expose it. It is used to decide the one remaining normalization: `magic`
-//!   is dropped where the reference consulted **libmagic** (empty `FILECLASS`,
-//!   not dir/symlink/empty/ghost). Everywhere `FILECLASS` is populated, `magic`
-//!   is authoritative and compared.
+//!   expose it, so it is dropped before comparison.
+//!
+//! `magic` is compared as-is. The `fcprobe` case has a file with an empty
+//! `FILECLASS`, so the libmagic branch is exercised — rpmlint's python-magic
+//! against rpmcrab's `file -b` — rather than skipped; both share the libmagic
+//! version recorded in the oracle's `meta.libmagic`.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -32,17 +34,22 @@ fn repo_root() -> PathBuf {
         .unwrap()
 }
 
-/// (case name, committed rpm file name)
+/// (case name, committed rpm path relative to `tests/parity/`)
 const CASES: &[(&str, &str)] = &[
-    ("llvm21-gold", "llvm21-gold-21.1.8-9.2.aarch64.rpm"),
-    ("liblto21", "libLTO21-21.1.8-9.2.aarch64.rpm"),
+    (
+        "llvm21-gold",
+        "cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm",
+    ),
+    (
+        "liblto21",
+        "cases/liblto21/input/libLTO21-21.1.8-9.2.aarch64.rpm",
+    ),
+    // A file with an empty FILECLASS, so the libmagic branch is compared.
+    ("fcprobe", "pkg/inputs/fcprobe-1-1.noarch.rpm"),
 ];
 
-fn case_rpm(root: &Path, case: &str, rpm_name: &str) -> PathBuf {
-    root.join("tests/parity/cases")
-        .join(case)
-        .join("input")
-        .join(rpm_name)
+fn case_rpm(root: &Path, rel: &str) -> PathBuf {
+    root.join("tests/parity").join(rel)
 }
 
 fn pkg_to_json(pkg: &Pkg) -> Value {
@@ -174,39 +181,20 @@ fn replace_value_prefix(v: &mut Value, key: &str, dir: &str) {
     }
 }
 
-/// Reconcile the one libmagic-dependent field per file, then drop the
-/// oracle-only `fileclass` key.
-fn reconcile_files(expected: &mut Value, actual: &mut Value) {
+/// Drop the oracle-only `fileclass` key, after checking the file counts match.
+/// `magic` is compared as-is: the corpus includes an empty-`FILECLASS` file so
+/// the libmagic branch (rpmlint's python-magic vs rpmcrab's `file -b`) is
+/// exercised, not skipped. Their shared libmagic version is recorded in the
+/// oracle's `meta.libmagic`.
+fn reconcile_files(expected: &mut Value, actual: &Value) {
     let exp = expected
         .get_mut("files")
         .and_then(Value::as_array_mut)
         .unwrap();
-    let act = actual
-        .get_mut("files")
-        .and_then(Value::as_array_mut)
-        .unwrap();
+    let act = actual.get("files").and_then(Value::as_array).unwrap();
     assert_eq!(exp.len(), act.len(), "file count differs");
-    for (e, a) in exp.iter_mut().zip(act.iter_mut()) {
-        let eo = e.as_object_mut().unwrap();
-        let ao = a.as_object_mut().unwrap();
-        let fileclass_empty = eo
-            .get("fileclass")
-            .and_then(Value::as_str)
-            .is_none_or(str::is_empty);
-        let is_dir = eo.get("is_dir").and_then(Value::as_bool).unwrap_or(false);
-        let is_symlink = eo
-            .get("is_symlink")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let is_ghost = eo.get("is_ghost").and_then(Value::as_bool).unwrap_or(false);
-        let size = eo.get("size").and_then(Value::as_u64).unwrap_or(0);
-        // The reference consults libmagic only when FILECLASS is empty *after*
-        // the dir/symlink/empty branches and the entry is not a ghost.
-        if fileclass_empty && !is_dir && !is_symlink && !is_ghost && size != 0 {
-            eo.remove("magic");
-            ao.remove("magic");
-        }
-        eo.remove("fileclass");
+    for e in exp.iter_mut() {
+        e.as_object_mut().unwrap().remove("fileclass");
     }
 }
 
@@ -214,8 +202,8 @@ fn reconcile_files(expected: &mut Value, actual: &mut Value) {
 fn pkg_reproduces_rpmlint_for_corpus_rpms() {
     let root = repo_root();
     let scratch = tempfile::tempdir().unwrap();
-    for (case, rpm_name) in CASES {
-        let rpm = case_rpm(&root, case, rpm_name);
+    for (case, rel) in CASES {
+        let rpm = case_rpm(&root, rel);
         let dump_path = root.join("tests/parity/pkg").join(format!("{case}.json"));
         assert!(rpm.exists(), "missing committed RPM: {}", rpm.display());
 
@@ -228,7 +216,7 @@ fn pkg_reproduces_rpmlint_for_corpus_rpms() {
         normalize_toplevel(&mut expected);
         normalize_toplevel(&mut actual);
         replace_dir(&mut actual, &tmpdir);
-        reconcile_files(&mut expected, &mut actual);
+        reconcile_files(&mut expected, &actual);
 
         // The key sets must match, so a renamed/extra Rust field cannot pass.
         let exp_keys: BTreeSet<&String> = expected.as_object().unwrap().keys().collect();
@@ -251,7 +239,10 @@ fn pkg_reproduces_rpmlint_for_corpus_rpms() {
 fn filename_is_the_as_passed_path() {
     let root = repo_root();
     let scratch = tempfile::tempdir().unwrap();
-    let plain = case_rpm(&root, "llvm21-gold", "llvm21-gold-21.1.8-9.2.aarch64.rpm");
+    let plain = case_rpm(
+        &root,
+        "cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm",
+    );
     let a = Pkg::open(&plain, scratch.path()).unwrap().filename;
     assert_eq!(
         a,
