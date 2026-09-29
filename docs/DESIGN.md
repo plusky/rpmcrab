@@ -71,9 +71,9 @@ itself a thin wrapper over librpm via rpm-python.
 **Costs, all accepted.** `librpm-sys` generates bindings with bindgen, so the
 build requires the RPM development headers (`rpm-devel` / `librpm-dev`, plus
 `rpm.pc`) on every host and CI runner; the binary links `librpm`/`librpmio` at
-runtime (present on any RPM distro); and **librpm is Linux-only, so there is no
-macOS build** — the `rust-macos` CI leg and the macOS release asset were
-dropped. `unsafe_code = "forbid"` still holds in `rpmcrab-core`: only the safe
+runtime (present on any RPM distro); and on macOS the Homebrew `rpm` formula
+provides librpm, so the `rust-macos` CI leg builds and tests natively there.
+`unsafe_code = "forbid"` still holds in `rpmcrab-core`: only the safe
 binding API is used, and `unsafe` stays inside the `librpm`/`librpm-sys`
 crates.
 
@@ -588,9 +588,9 @@ a deliberate major-version bump. This avoids `rpmcrab 1.x` masquerading as
 `rpmlint 2.x` for packagers. Bare `X.Y.Z` tags, no `v`. Distribution is
 primarily the OBS package (`rpmcrab`, plus an `rpmcrab-mini` build-root flavour
 mirroring `rpmlint-mini`); crates.io is the secondary channel — `rpmcrab-core`
-is published early (M1) to reserve the name. Releases are **Linux-only**
-(`librpm`; §3.1), so the release workflow ships a single
-`x86_64-unknown-linux-gnu` asset.
+is published early (M1) to reserve the name. The release workflow ships a
+single `x86_64-unknown-linux-gnu` asset; macOS builds work (§3.1) but no macOS
+release asset is planned.
 
 ---
 
