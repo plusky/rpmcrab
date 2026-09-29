@@ -49,9 +49,14 @@ produces is not.
 |---|----------|--------|--------|
 | 1 | Crate name | `rpmcrab` | Free on crates.io; no Rust rpmlint exists. |
 | 2 | Repository | `plusky/rpmcrab` | Personal workspace, scarabeusiv as collaborator. Transfer to an org is a later, non-breaking decision. |
-| 3 | RPM backend | Pure Rust (`rpm` + `rpm-version`) | See §3.1. |
+| 3 | RPM backend | `librpm` FFI | See §3.1. |
 | 4 | Parity rule | Freeze output, diverge findings | External consumers grep the output. |
 | 5 | Licence | GPL-2.0-or-later | Matches rpmlint; config/description data carries over unambiguously. |
+| 6 | Package source | Sum type (`PkgSource`), not flag fields | §7.5 — illegal source states unrepresentable. |
+| 7 | Spec model | Separate `SpecPkg`; `check_spec` arrives with it | §7.5 — the reference dispatches on `FakePkg`, not `is_source`. |
+| 8 | Named durations | One insertion-ordered type | §7.5 — `Pkg.timers` and the lint accumulator share it. |
+| 9 | Check execution | Serial; `&mut self` + `reset()` | §8 — packages are the future unit of parallelism. |
+| 10 | Precision measurement | Distro-scale set; procedure defined before Wave 1's first promotion | §5.1 — hand cases pin the surface, they cannot measure FP rates. |
 
 ### 3.1 RPM backend
 
@@ -403,6 +408,12 @@ follow the strictest of the two"). What fails the build is decided by config
 (`opensuse.toml`), and the FP bar is enforced in CI so regressions cannot sneak
 back in.
 
+**The precision bar needs a distro-scale set.** Hand-written parity cases pin
+the frozen surface; they cannot measure a false-positive rate. Promoting a
+check to error (or demoting/deleting it) requires its FP rate measured on a
+defined distro-scale package set, with the procedure recorded before Wave 1's
+first promotion. Until then, no promotion happens.
+
 ---
 
 ## 6. The parity corpus and the divergence ledger
@@ -462,6 +473,11 @@ Checks are keyed by the **exact Python module name** (`FilesCheck`,
 `TagsCheck`, …) so a `Checks = ["FilesCheck", …]` list in TOML resolves by
 name, unchanged. The default `Checks` list mirrors `configdefaults.toml`.
 
+Shared check helpers — path/mode predicates, tag readers, anything two checks
+would otherwise each write — live in one shared module. A new check reuses
+them; new shared logic goes there, not in the check. The 43 ports must not
+invent 43 variants of the same predicate.
+
 ### 7.3 openSUSE checks and the plugin departure
 
 openSUSE appends 15 checks (`BrandingPolicyCheck`, `FilelistCheck`,
@@ -488,6 +504,36 @@ matching rpmlint's own dependencies (they are already `Requires:` of the
 openSUSE package). All invocations go through shared quoting/path helpers with
 golden tests.
 
+### 7.5 The package model
+
+`Pkg` is the binary-RPM model (file-backed or installed). *Where its bytes
+come from* is a closed set, so it is represented as one: a `PkgSource` sum
+type, not separate `dir_name`/`extracted`/`tempdir` fields whose combinations
+the type system cannot check.
+
+- `Extracted` — payload unpacked into an owned tempdir (removed on drop);
+- `LiveRoot` — no extraction; reads resolve against the live filesystem
+  (installed packages, and file packages with `ExtractDir='/'`);
+- `CleanedUp` — the tempdir was dropped; reads fail to `''`, exactly as the
+  reference's post-cleanup reads do.
+
+The reference's `extracted` flag is a derived method on the source
+(`InstalledPkg` reports `true`; `ExtractDir='/'` reports `false`). Nothing
+outside the `pkg` module distinguishes the states by field inspection, so a
+read can never silently fall back to the host filesystem again.
+
+The `.spec` model is a **separate struct**, not more `Option` fields on `Pkg`.
+A spec is text with line numbers, not an RPM with a payload, and the reference
+keeps them as separate classes (`Pkg` vs `FakePkg`) with a separate dispatch
+hook: `check_spec` is dispatched on holding a `FakePkg`, *not* on `is_source`
+(which is about src.rpms). The lint loop dispatches on
+`enum Package { Rpm(Pkg), Spec(SpecPkg) }`, and the `Check` trait gains
+`check_spec` with that milestone. Decided now so `Pkg` never grows a second
+personality when `SpecCheck` is ported.
+
+There is one named-durations type (insertion-ordered, like the reference's
+dict): `Pkg.timers` and the lint loop's accumulator share it.
+
 ---
 
 ## 8. The 43-check inventory and wave plan
@@ -513,6 +559,12 @@ A check that panics aborts the run rather than being contained per check or
 per package: a linter that swallowed a check bug would present incomplete
 coverage as a clean run. The status differs from the reference's (101 rather
 than 1 with a traceback) and is ledgered.
+
+Checks run serially, one package at a time; the `&mut self` + `reset()` trait
+shape assumes it, and the fail-closed panic contract above does too. If
+throughput ever demands it, the unit of parallelism is the *package*, with
+deterministic reassembly into the frozen finding order — a future decision,
+not a refactor.
 
 ---
 

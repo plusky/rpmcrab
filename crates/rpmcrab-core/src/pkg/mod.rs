@@ -685,7 +685,7 @@ pub fn normalize_path(p: &str) -> String {
 }
 
 /// Per-file `Requires`/`Provides` (`FILEREQUIRE`/`FILEPROVIDE`) are left
-/// **unparsed until M3**, where `PostCheck`/`FileDigestCheck` consume them
+/// unparsed until `PostCheck`/`FileDigestCheck` are ported, which consume them
 /// (rpmlint's `parse_deps`). Always empty for now.
 fn parse_dep_line(_line: &str) -> Vec<DepInfo> {
     Vec::new()
