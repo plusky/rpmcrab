@@ -263,7 +263,18 @@ pub fn run() -> ExitCode {
                 // declares, so a glob like `lib*` would otherwise hold
                 // hundreds of fully-expanded packages at once.
                 for (i, header) in headers.into_iter().enumerate() {
-                    let pkg = rpmcrab_core::pkg::Pkg::installed(header);
+                    // An installed package is read the same way as a file, so a
+                    // header that will not decode fails here too. The
+                    // reference has no guard around installed packages and
+                    // dies with a traceback, so the status is 1 rather than
+                    // the 3 a file gets.
+                    let pkg = match rpmcrab_core::pkg::Pkg::installed(header) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            warn!(color, "(none): E: fatal error reading the rpmdb: {e}");
+                            return ExitCode::from(1);
+                        }
+                    };
                     lint.run_package(
                         &mut rpmcrab_core::pkg::Package::Rpm(Box::new(pkg)),
                         run_post_checks && i == last,

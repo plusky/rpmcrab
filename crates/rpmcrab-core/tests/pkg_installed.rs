@@ -39,7 +39,7 @@ fn installed_facade_matches_file_pkg() {
     let rpm = corpus_rpm();
     let header = PackageHeader::from_file(&rpm, Some(&VerifyOptions::skip_verification()))
         .expect("open header");
-    let inst = Pkg::installed(header);
+    let inst = Pkg::installed(header).expect("build installed package");
     let scratch = tempfile::tempdir().unwrap();
     let file_pkg = Pkg::open(&rpm, scratch.path()).unwrap();
 
@@ -126,7 +126,7 @@ fn host_db_smoke() {
     // The ndb check: librpm must read openSUSE's backend, and the facade must
     // build from a header that came out of the real database.
     for header in &headers {
-        let inst = Pkg::installed(header.clone());
+        let inst = Pkg::installed(header.clone()).expect("build installed package");
         assert_eq!(inst.name, "rpm");
         assert!(!inst.is_source);
         assert_eq!(inst.dir_name(), Path::new("/"));

@@ -70,6 +70,50 @@ pub enum PkgError {
     /// a database it cannot open reads as empty (see `installed`).
     #[error("rpmdb: {0}")]
     Db(#[from] librpm::error::Error),
+    /// A panic inside a librpm safe-API call, contained by [`guarded`].
+    #[error("librpm could not decode the package: {message}")]
+    Decode { message: String },
+}
+
+/// Run `f` with any panic contained, so a librpm panic becomes a typed
+/// [`PkgError::Decode`] instead of unwinding past the report.
+///
+/// librpm 0.6's decoders panic on data the reference tolerates: a non-UTF-8
+/// `STRING_ARRAY` entry aborts `string_array` (`.expect` on `str::from_utf8`),
+/// and `FileEntry::path` does `.to_str().expect("file path is not UTF-8")`.
+/// Both are reachable from any package header, since every header field read
+/// goes through them. Reading the raw bytes instead would mean calling
+/// `librpm-sys` directly, which `unsafe_code = "forbid"` rules out, so the
+/// panic is caught and surfaced as a read error — the same one-line diagnostic
+/// and status the reference produces for a package it cannot read
+/// (`lint.py:293-297`).
+///
+/// The default panic hook is replaced for the duration so the user sees that
+/// one line rather than a backtrace followed by it. The hook is process-global,
+/// which is why this is scoped to the call and restored immediately.
+fn guarded<T>(f: impl FnOnce() -> Result<T, PkgError>) -> Result<T, PkgError> {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    std::panic::set_hook(previous);
+    match outcome {
+        Ok(result) => result,
+        Err(payload) => Err(PkgError::Decode {
+            message: panic_message(payload),
+        }),
+    }
+}
+
+/// The message from a caught panic payload, which is a `String` for every
+/// `panic!` with a format argument (including librpm's own decoders).
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else {
+        "unknown panic payload".to_string()
+    }
 }
 
 /// Call `librpm::init()` exactly once per process, caching its result so
@@ -219,6 +263,11 @@ impl Pkg {
     /// rpmlint does; `extract_dir` comes from the config's `ExtractDir`.
     pub fn open(path: &Path, extract_dir: &Path) -> Result<Self, PkgError> {
         init()?;
+        guarded(|| Self::read(path, extract_dir))
+    }
+
+    /// The body of [`Pkg::open`], run under [`guarded`].
+    fn read(path: &Path, extract_dir: &Path) -> Result<Self, PkgError> {
         let header = PackageHeader::from_file(path, Some(&VerifyOptions::skip_verification()))
             .map_err(|source| PkgError::Open {
                 path: path.to_path_buf(),
@@ -270,22 +319,28 @@ impl Pkg {
     /// Build an installed package from an rpmdb header (rpmlint `InstalledPkg`):
     /// reads resolve against the live filesystem, there is no extraction, the
     /// filename is synthesized, and `is_source` is forced false.
-    pub fn installed(header: PackageHeader) -> Self {
-        let tag = |t| tags::str_tag(&header, t).unwrap_or_default();
-        let filename = format!(
-            "{}-{}-{}.{}.rpm",
-            tag(Tag::NAME),
-            tag(Tag::VERSION),
-            tag(Tag::RELEASE),
-            tag(Tag::ARCH)
-        );
-        Self::build(
-            header,
-            PkgSource::Installed,
-            filename,
-            Some(false),
-            Timers::with_extract(0.0),
-        )
+    /// # Errors
+    /// [`PkgError::Decode`] when a header field cannot be decoded; see
+    /// [`guarded`]. An installed package is read the same way as a file, so it
+    /// fails the same way.
+    pub fn installed(header: PackageHeader) -> Result<Self, PkgError> {
+        guarded(|| {
+            let tag = |t| tags::str_tag(&header, t).unwrap_or_default();
+            let filename = format!(
+                "{}-{}-{}.{}.rpm",
+                tag(Tag::NAME),
+                tag(Tag::VERSION),
+                tag(Tag::RELEASE),
+                tag(Tag::ARCH)
+            );
+            Ok(Self::build(
+                header,
+                PkgSource::Installed,
+                filename,
+                Some(false),
+                Timers::with_extract(0.0),
+            ))
+        })
     }
 
     /// Shared construction from a header. `is_source` defaults to the header's

@@ -319,7 +319,7 @@ fn live_root_reports_the_reference_extracted_flag() {
     let header = PackageHeader::from_file(&rpm, Some(&VerifyOptions::skip_verification()))
         .expect("open header");
 
-    let installed = Pkg::installed(header);
+    let installed = Pkg::installed(header).expect("build installed package");
     assert!(installed.extracted());
     assert_eq!(installed.dir_name(), Path::new("/"));
 

@@ -315,7 +315,7 @@ mod add_info_tests {
             Some(&librpm::verify::VerifyOptions::skip_verification()),
         )
         .expect("open corpus header");
-        Pkg::installed(header)
+        Pkg::installed(header).expect("build installed package")
     }
 
     /// The finding's package context comes from the header, not from a path, so

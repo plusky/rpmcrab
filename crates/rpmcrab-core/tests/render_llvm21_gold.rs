@@ -85,7 +85,9 @@ fn reproduces_llvm21_gold_byte_for_byte() {
         .join("../../tests/parity/cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm");
     let header = PackageHeader::from_file(&rpm, Some(&VerifyOptions::skip_verification()))
         .expect("open corpus header");
-    let mut pkg = Package::Rpm(Box::new(Pkg::installed(header)));
+    let mut pkg = Package::Rpm(Box::new(
+        Pkg::installed(header).expect("build installed package"),
+    ));
 
     let mut lint = Lint::new(config, checks, Color::for_tty(false), 80).unwrap();
     lint.run_package(&mut pkg, true);

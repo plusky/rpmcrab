@@ -57,6 +57,69 @@ fn print_config_exits_zero() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("Checks"));
 }
 
+/// The non-UTF-8-basename fixture. librpm panics on such a header, so this
+/// pins that the panic is contained into the reference's read-error path rather
+/// than unwinding past the report. See
+/// `tests/fixtures/nonutf8-basename/README.md`.
+fn nonutf8_fixture() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/nonutf8-basename/input/rpmcrab-nonutf8-1-1.noarch.rpm")
+        .canonicalize()
+        .expect("non-UTF-8 fixture is committed")
+}
+
+/// A header that will not decode is a fatal read: one stderr line and exit 3,
+/// which is what the reference emits for a package it cannot read. Before the
+/// containment this was a Rust panic and status 101, with no report at all.
+#[test]
+fn an_undecodable_header_is_a_fatal_read_not_a_panic() {
+    let out = rpmcrab(&[nonutf8_fixture().to_str().unwrap()]);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "expected the reference's fatal-read status, not a panic (101)"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "the guarded read must print one diagnostic, not a backtrace: {stderr}"
+    );
+    assert!(
+        lines[0].contains("(none): E: fatal error while reading"),
+        "{stderr}"
+    );
+    assert!(
+        lines[0].contains("could not decode the package"),
+        "the message should name the cause: {stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("panicked"),
+        "no panic may reach the user: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// Under `-v` the reference re-raises, so the status is 1 and the cause chain
+/// is printed in place of a traceback. The decode is still contained: no Rust
+/// panic message may reach the user either way.
+#[test]
+fn verbose_reports_the_decode_cause_without_a_backtrace() {
+    let out = rpmcrab(&["-v", nonutf8_fixture().to_str().unwrap()]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the reference re-raises under -v"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("file path is not UTF-8"),
+        "stderr: {stderr}"
+    );
+    assert!(!stderr.contains("panicked at"), "stderr: {stderr}");
+}
+
 /// The corpus RPM, so the loop has a real package to read.
 fn corpus_rpm() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

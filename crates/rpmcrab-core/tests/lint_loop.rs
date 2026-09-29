@@ -85,7 +85,9 @@ fn packages(n: usize) -> Vec<Package> {
         .map(|_| {
             let header = PackageHeader::from_file(&rpm, Some(&VerifyOptions::skip_verification()))
                 .expect("open corpus header");
-            Package::Rpm(Box::new(Pkg::installed(header)))
+            Package::Rpm(Box::new(
+                Pkg::installed(header).expect("build installed package"),
+            ))
         })
         .collect()
 }
