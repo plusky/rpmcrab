@@ -473,10 +473,11 @@ Checks are keyed by the **exact Python module name** (`FilesCheck`,
 `TagsCheck`, …) so a `Checks = ["FilesCheck", …]` list in TOML resolves by
 name, unchanged. The default `Checks` list mirrors `configdefaults.toml`.
 
-Shared check helpers — path/mode predicates, tag readers, anything two checks
-would otherwise each write — live in one shared module. A new check reuses
-them; new shared logic goes there, not in the check. The 43 ports must not
-invent 43 variants of the same predicate.
+*Convention, decided; applies from the first check port.* Shared check
+helpers — path/mode predicates, tag readers, anything two checks would
+otherwise each write — live in one shared module. A new check reuses them;
+new shared logic goes there, not in the check. The 43 ports must not invent
+43 variants of the same predicate.
 
 ### 7.3 openSUSE checks and the plugin departure
 
@@ -506,21 +507,29 @@ golden tests.
 
 ### 7.5 The package model
 
+*Status: decided here; implemented by the `PkgSource` change. Until it lands,
+the three `pub` fields (`dir_name`, `extracted`, `tempdir`) remain.*
+
 `Pkg` is the binary-RPM model (file-backed or installed). *Where its bytes
 come from* is a closed set, so it is represented as one: a `PkgSource` sum
-type, not separate `dir_name`/`extracted`/`tempdir` fields whose combinations
-the type system cannot check.
+type, not separate fields whose combinations the type system cannot check.
+The variants follow the situations the reference actually distinguishes, so
+the reference's `extracted` flag is a total function of the variant — no flag
+field remains:
 
-- `Extracted` — payload unpacked into an owned tempdir (removed on drop);
-- `LiveRoot` — no extraction; reads resolve against the live filesystem
-  (installed packages, and file packages with `ExtractDir='/'`);
+- `Extracted { dir, tempdir }` — payload unpacked into an owned tempdir
+  (removed on drop);
+- `Installed` — an installed package (`extracted` true);
+- `LiveRoot` — a file package with `ExtractDir='/'` (`extracted` false);
 - `CleanedUp` — the tempdir was dropped; reads fail to `''`, exactly as the
   reference's post-cleanup reads do.
 
-The reference's `extracted` flag is a derived method on the source
-(`InstalledPkg` reports `true`; `ExtractDir='/'` reports `false`). Nothing
-outside the `pkg` module distinguishes the states by field inspection, so a
-read can never silently fall back to the host filesystem again.
+`Installed` and `LiveRoot` both read from the live filesystem, but they stay
+separate variants because the reference reports different `extracted` values
+for them — collapsing them would reintroduce the flag the sum type exists to
+remove. Nothing outside the `pkg` module distinguishes the states by field
+inspection, so a read can never silently fall back to the host filesystem
+again.
 
 The `.spec` model is a **separate struct**, not more `Option` fields on `Pkg`.
 A spec is text with line numbers, not an RPM with a payload, and the reference
@@ -560,11 +569,11 @@ per package: a linter that swallowed a check bug would present incomplete
 coverage as a clean run. The status differs from the reference's (101 rather
 than 1 with a traceback) and is ledgered.
 
-Checks run serially, one package at a time; the `&mut self` + `reset()` trait
-shape assumes it, and the fail-closed panic contract above does too. If
-throughput ever demands it, the unit of parallelism is the *package*, with
-deterministic reassembly into the frozen finding order — a future decision,
-not a refactor.
+*Decided; recorded for when throughput matters.* Checks run serially, one
+package at a time; the `&mut self` + `reset()` trait shape assumes it, and the
+fail-closed panic contract above does too. If throughput ever demands it, the
+unit of parallelism is the *package*, with deterministic reassembly into the
+frozen finding order — a future decision, not a refactor.
 
 ---
 
