@@ -24,6 +24,8 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use librpm::PackageHeader;
+use librpm::verify::VerifyOptions;
 use rpmcrab_core::pkg::{Pkg, SCRIPT_TAGS, pkgfile};
 use serde_json::{Value, json};
 
@@ -300,4 +302,31 @@ fn read_file_after_cleanup_is_empty() {
         "",
         "read after cleanup must be empty, not a host-filesystem read"
     );
+}
+
+/// `ExtractDir = "/"` means "installed package, do not extract"
+/// (`pkg.py:610-613`): the package reads from the live root with `extracted`
+/// false. `Installed` and `LiveRoot` share `dir_name = "/"` and own no
+/// tempdir — only the reference's `extracted` flag tells them apart, which is
+/// why they are separate `PkgSource` variants rather than one.
+#[test]
+fn live_root_reports_the_reference_extracted_flag() {
+    let root = repo_root();
+    let rpm = case_rpm(
+        &root,
+        "cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm",
+    );
+    let header = PackageHeader::from_file(&rpm, Some(&VerifyOptions::skip_verification()))
+        .expect("open header");
+
+    let installed = Pkg::installed(header);
+    assert!(installed.extracted());
+    assert_eq!(installed.dir_name(), Path::new("/"));
+
+    let live = Pkg::open(&rpm, Path::new("/")).unwrap();
+    assert!(
+        !live.extracted(),
+        "ExtractDir = / must not set extracted"
+    );
+    assert_eq!(live.dir_name(), Path::new("/"));
 }

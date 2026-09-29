@@ -87,7 +87,7 @@ pub fn init() -> Result<(), PkgError> {
 /// fields cannot express an impossible combination, and a read can never
 /// silently fall back to the host filesystem again.
 #[derive(Debug)]
-pub enum PkgSource {
+pub(crate) enum PkgSource {
     /// Payload unpacked into an owned tempdir (removed on drop).
     Extracted {
         /// The extraction directory.
@@ -479,15 +479,21 @@ impl Pkg {
     /// the removed path, so a read after cleanup fails to `''` exactly as the
     /// reference does.
     pub fn cleanup(&mut self) {
-        // Only an extracted package owns a tempdir. Replacing the source drops
-        // the old `TempDir`, removing the directory from the filesystem.
-        let dir = match &self.source {
-            PkgSource::Extracted { dir, .. } => Some(dir.clone()),
-            PkgSource::Installed | PkgSource::LiveRoot | PkgSource::CleanedUp { .. } => None,
+        // Only an extracted package owns a tempdir. Taking the source drops
+        // the old `TempDir` below, removing the directory from the filesystem.
+        let old = std::mem::replace(
+            &mut self.source,
+            PkgSource::CleanedUp {
+                dir: PathBuf::new(),
+            },
+        );
+        self.source = match old {
+            PkgSource::Extracted { dir, tempdir } => {
+                drop(tempdir);
+                PkgSource::CleanedUp { dir }
+            }
+            other => other,
         };
-        if let Some(dir) = dir {
-            self.source = PkgSource::CleanedUp { dir };
-        }
     }
 }
 
