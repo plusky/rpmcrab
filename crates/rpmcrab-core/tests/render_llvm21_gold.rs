@@ -22,7 +22,7 @@ use rpmcrab_core::color::Color;
 use rpmcrab_core::config::Config;
 use rpmcrab_core::level::Level;
 use rpmcrab_core::lint::Lint;
-use rpmcrab_core::pkg::Pkg;
+use rpmcrab_core::pkg::{Package, Pkg};
 
 const CONF_FILES: &[&str] = &[
     "<VENV>/lib64/python3.13/site-packages/rpmlint/configdefaults.toml",
@@ -85,7 +85,7 @@ fn reproduces_llvm21_gold_byte_for_byte() {
         .join("../../tests/parity/cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm");
     let header = PackageHeader::from_file(&rpm, Some(&VerifyOptions::skip_verification()))
         .expect("open corpus header");
-    let mut pkg = Pkg::installed(header);
+    let mut pkg = Package::Rpm(Box::new(Pkg::installed(header)));
 
     let mut lint = Lint::new(config, checks, Color::for_tty(false), 80).unwrap();
     lint.run_package(&mut pkg, true);

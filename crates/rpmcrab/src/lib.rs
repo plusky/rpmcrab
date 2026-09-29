@@ -263,8 +263,11 @@ pub fn run() -> ExitCode {
                 // declares, so a glob like `lib*` would otherwise hold
                 // hundreds of fully-expanded packages at once.
                 for (i, header) in headers.into_iter().enumerate() {
-                    let mut pkg = rpmcrab_core::pkg::Pkg::installed(header);
-                    lint.run_package(&mut pkg, run_post_checks && i == last);
+                    let pkg = rpmcrab_core::pkg::Pkg::installed(header);
+                    lint.run_package(
+                        &mut rpmcrab_core::pkg::Package::Rpm(Box::new(pkg)),
+                        run_post_checks && i == last,
+                    );
                 }
             }
             // Deliberate divergence: the reference lets a failed `rpmtsOpenDB`
@@ -279,36 +282,45 @@ pub fn run() -> ExitCode {
 
     let last = inputs.len().saturating_sub(1);
     for (i, path) in inputs.iter().enumerate() {
-        if path.extension().is_some_and(|e| e == "spec") {
-            // FakePkg / SpecCheck are not ported yet, so a .spec input is
-            // reported as unreadable rather than silently ignored. Recorded in
-            // tests/parity/divergences.toml.
-            warn!(
-                color,
-                "(none): E: fatal error while reading {}: .spec support is not implemented yet",
-                path.display()
-            );
-            return ExitCode::from(3);
-        }
-        // `Lint.validate_file`: any failure to read the package is fatal, and
-        // `-v` re-raises, so the user sees the whole cause chain the way a
-        // Python traceback would (`lint.py:293-297`).
-        let mut pkg = match rpmcrab_core::pkg::Pkg::open(path, &extract_dir) {
-            Ok(p) => p,
-            Err(e) => {
-                warn!(
-                    color,
-                    "(none): E: fatal error while reading {}: {e}",
-                    path.display()
-                );
-                if cli.verbose {
-                    print_error_chain(&color, &e);
-                    return ExitCode::from(1);
+        // `Lint.validate_file`: a `.spec` input is read through `FakePkg`
+        // and runs each check's `check_spec` (`lint.py:289-291,300-304`).
+        let mut package = if path.extension().is_some_and(|e| e == "spec") {
+            match rpmcrab_core::pkg::spec::SpecPkg::open(path) {
+                Ok(p) => rpmcrab_core::pkg::Package::Spec(p),
+                Err(e) => {
+                    warn!(
+                        color,
+                        "(none): E: fatal error while reading {}: {e}",
+                        path.display()
+                    );
+                    if cli.verbose {
+                        print_error_chain(&color, &e);
+                        return ExitCode::from(1);
+                    }
+                    return ExitCode::from(3);
                 }
-                return ExitCode::from(3);
+            }
+        } else {
+            // `Lint.validate_file`: any failure to read the package is fatal, and
+            // `-v` re-raises, so the user sees the whole cause chain the way a
+            // Python traceback would (`lint.py:293-297`).
+            match rpmcrab_core::pkg::Pkg::open(path, &extract_dir) {
+                Ok(p) => rpmcrab_core::pkg::Package::Rpm(Box::new(p)),
+                Err(e) => {
+                    warn!(
+                        color,
+                        "(none): E: fatal error while reading {}: {e}",
+                        path.display()
+                    );
+                    if cli.verbose {
+                        print_error_chain(&color, &e);
+                        return ExitCode::from(1);
+                    }
+                    return ExitCode::from(3);
+                }
             }
         };
-        lint.run_package(&mut pkg, i == last);
+        lint.run_package(&mut package, i == last);
     }
 
     // `Lint.validate_files`: with no file arguments and nothing validated from

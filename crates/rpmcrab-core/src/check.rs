@@ -3,15 +3,9 @@
 //! Checks are keyed by the exact Python module name (`FilesCheck`,
 //! `TagsCheck`, …) so a TOML `Checks = [...]` list resolves unchanged
 //! (`docs/DESIGN.md` §7.2). The trait mirrors rpmlint's `AbstractCheck`:
-//! `check` dispatches on `is_source`, and a check may also run
-//! `after_checks` once the last package has been checked, plus `reset`
-//! between packages.
-//!
-//! `AbstractCheck.check_spec` has no counterpart here: it is dispatched on
-//! being handed a `FakePkg` (a parsed `.spec` file), which is not ported yet,
-//! and `is_source` does **not** stand in for it — a `.spec` input reaches no
-//! check at all until the FakePkg milestone. The hook is added with that
-//! milestone rather than shipped unreachable.
+//! `check` dispatches on `is_source`, `check_spec` runs for `.spec` inputs,
+//! and a check may also run `after_checks` once the last package has been
+//! checked, plus `reset` between packages.
 //!
 //! A configured check that is not implemented yet is **skipped**, not an
 //! error: the run still reports the configured check count in the header while
@@ -22,6 +16,7 @@ use crate::filter::Filter;
 use crate::finding::Finding;
 use crate::level::Level;
 use crate::pkg::Pkg;
+use crate::pkg::spec::SpecPkg;
 
 /// `Filter.add_info(level, package, rpmlint_issue, *details)`: the finding a
 /// check emits, with the package context filled in the way `filter.py:121-156`
@@ -58,6 +53,30 @@ pub fn add_info_at(
     });
 }
 
+/// [`add_info`] for `.spec` inputs: the file part is the spec's basename and
+/// there is no arch suffix (the reference's `FakePkg` has `arch = None`,
+/// `filter.py:164-166`).
+pub fn spec_add_info(
+    out: &mut Filter,
+    level: Level,
+    pkg: &SpecPkg,
+    line: Option<u32>,
+    check: &str,
+    details: &[&str],
+) {
+    out.add_info(Finding {
+        level,
+        check: check.to_string(),
+        details: details.iter().map(|d| (*d).to_string()).collect(),
+        // Scoring decides the real badness at emit time (`Filter::add_info`).
+        badness: 0,
+        // `Path(package.name).name`, as for binary findings.
+        pkg_name: basename(&pkg.name).to_string(),
+        arch: None,
+        line,
+    });
+}
+
 /// `PurePath(name).name` — rpmlint prints the basename of the package name.
 fn basename(name: &str) -> &str {
     name.rsplit('/').next().unwrap_or(name)
@@ -83,6 +102,11 @@ pub trait Check {
 
     /// `AbstractCheck.check_binary`.
     fn check_binary(&mut self, _pkg: &Pkg, _config: &Config, _out: &mut Filter) {}
+
+    /// `AbstractCheck.check_spec`, for `.spec` inputs. Dispatched on the lint
+    /// loop holding a `SpecPkg`, not on `is_source` — like the reference,
+    /// which dispatches it on holding a `FakePkg`.
+    fn check_spec(&mut self, _pkg: &SpecPkg, _config: &Config, _out: &mut Filter) {}
 
     /// `AbstractCheck.after_checks`, run once after the last package so a check
     /// can report on the whole run (`PostCheck`).

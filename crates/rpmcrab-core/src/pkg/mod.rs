@@ -10,6 +10,7 @@ pub mod dep;
 pub mod extract;
 pub mod installed;
 pub mod pkgfile;
+pub mod spec;
 pub mod tags;
 
 use std::collections::BTreeMap;
@@ -22,6 +23,7 @@ use librpm::{PackageHeader, Tag};
 
 use dep::{DepInfo, string_to_version};
 use pkgfile::PkgFile;
+use spec::SpecPkg;
 
 /// `PREREQ_FLAG` (rpmlint `pkg.py:37`): `(RPMSENSE_PREREQ or 64) |
 /// SCRIPT_{PRE,POST,PREUN,POSTUN}` — the legacy prereq bit plus the four
@@ -132,6 +134,16 @@ impl PkgSource {
             PkgSource::LiveRoot => false,
         }
     }
+}
+
+/// What the lint loop runs checks over: a binary RPM or a spec file. The
+/// reference dispatches `check` vs `check_spec` on holding a `FakePkg`, not
+/// on `is_source` (docs/DESIGN.md §7.5).
+pub enum Package {
+    /// A binary RPM (`Pkg`), boxed: the payload model dwarfs the spec one.
+    Rpm(Box<Pkg>),
+    /// A `.spec` file (`SpecPkg`).
+    Spec(SpecPkg),
 }
 
 /// A parsed RPM package (file-backed), mirroring rpmlint's `Pkg`.

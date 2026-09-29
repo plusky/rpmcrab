@@ -82,19 +82,19 @@ fn unreadable_package_exits_three() {
     assert!(stderr.contains("not-an-rpm.rpm"), "stderr: {stderr}");
 }
 
-/// A `.spec` input is reported as unreadable until FakePkg/SpecCheck land, and
-/// it is not silently ignored.
+/// A `.spec` input is linted through `check_spec`: no check is ported yet, so
+/// it reports nothing, exits 0, and the footer counts it as a specfile.
 #[test]
-fn spec_input_is_reported_not_ignored() {
+fn spec_input_is_linted_and_counted() {
     let dir = tempfile::tempdir().unwrap();
     let spec = dir.path().join("thing.spec");
     std::fs::write(&spec, b"Name: thing\n").unwrap();
     let out = rpmcrab(&[spec.to_str().unwrap()]);
-    assert_eq!(out.status.code(), Some(3));
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stderr.contains(".spec support is not implemented yet"),
-        "{stderr}"
+        stdout.contains("0 packages and 1 specfiles checked"),
+        "stdout: {stdout}"
     );
 }
 

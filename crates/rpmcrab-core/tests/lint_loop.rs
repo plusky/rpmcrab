@@ -18,7 +18,7 @@ use rpmcrab_core::config::Config;
 use rpmcrab_core::filter::Filter;
 use rpmcrab_core::level::Level;
 use rpmcrab_core::lint::Lint;
-use rpmcrab_core::pkg::Pkg;
+use rpmcrab_core::pkg::{Package, Pkg};
 
 /// What the recording check saw, shared with the test body.
 #[derive(Default)]
@@ -79,13 +79,13 @@ fn corpus_rpm() -> std::path::PathBuf {
 
 /// Two real packages from the same header: the loop only cares about being
 /// called once per package.
-fn packages(n: usize) -> Vec<Pkg> {
+fn packages(n: usize) -> Vec<Package> {
     let rpm = corpus_rpm();
     (0..n)
         .map(|_| {
             let header = PackageHeader::from_file(&rpm, Some(&VerifyOptions::skip_verification()))
                 .expect("open corpus header");
-            Pkg::installed(header)
+            Package::Rpm(Box::new(Pkg::installed(header)))
         })
         .collect()
 }
@@ -346,4 +346,60 @@ fn check_dispatches_on_is_source() {
     lint.run_package(&mut pkgs[0], false);
     lint.run_package(&mut pkgs[1], true);
     assert_eq!(log.borrow().checked, vec!["binary", "binary"]);
+}
+
+/// The `Package` dispatch: a `.spec` input goes to `check_spec` (never
+/// `check_binary`), bumps `specfiles_checked` instead of `packages_checked`,
+/// and its findings carry the spec's basename with the reported line
+/// (`lint.py:300-304,314-318`).
+#[test]
+fn spec_inputs_dispatch_to_check_spec() {
+    use rpmcrab_core::check::spec_add_info;
+    use rpmcrab_core::pkg::spec::SpecPkg;
+
+    struct SpecRecorder {
+        log: Rc<RefCell<Log>>,
+    }
+    impl Check for SpecRecorder {
+        fn name(&self) -> &'static str {
+            "SpecRecorder"
+        }
+        fn check_spec(&mut self, pkg: &SpecPkg, _c: &Config, out: &mut Filter) {
+            self.log.borrow_mut().checked.push("spec");
+            spec_add_info(
+                out,
+                Level::Warning,
+                pkg,
+                Some(12),
+                "spec-recorder",
+                &["detail"],
+            );
+        }
+    }
+
+    let dir = tempfile::tempdir().expect("scratch dir");
+    let spec = dir.path().join("hello.spec");
+    std::fs::write(&spec, "Name: hello\n").expect("write spec");
+    let mut pkg = Package::Spec(SpecPkg::open(&spec).expect("open spec"));
+
+    let log = Rc::new(RefCell::new(Log::default()));
+    let mut lint = lint_with(
+        SpecRecorder {
+            log: Rc::clone(&log),
+        },
+        Config::default(),
+    );
+    lint.run_package(&mut pkg, true);
+
+    assert_eq!(log.borrow().checked, vec!["spec"]);
+    assert_eq!(lint.packages_checked(), 0);
+    let out = lint.render("2.10.0", 1, false, false, 0.1);
+    assert!(
+        out.contains("0 packages and 1 specfiles checked"),
+        "footer: {out}"
+    );
+    assert!(
+        out.contains("hello.spec:12: W: spec-recorder detail"),
+        "finding: {out}"
+    );
 }

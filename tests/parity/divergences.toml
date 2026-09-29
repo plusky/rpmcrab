@@ -42,13 +42,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "specfile-support"
-kind = "behaviour"
-reason = "A .spec input is reported as '(none): E: fatal error while reading <path>: .spec support is not implemented yet' with exit 3, where the reference reads it through FakePkg and runs SpecCheck. The check runtime exists but no check is ported yet, so the input is refused loudly rather than silently ignored; the FakePkg milestone replaces this."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "profile-report"
 kind = "behaviour"
 reason = "-T/--profile prints rpmcrab's own per-check wall-time report; the reference prints a CPython cProfile dump, which a Rust port cannot reproduce without a profiler dependency. -t, whose output is deterministic, is reproduced column for column."

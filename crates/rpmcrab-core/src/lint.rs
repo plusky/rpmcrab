@@ -13,12 +13,12 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use crate::check::{Check, add_info};
+use crate::check::{Check, add_info, spec_add_info};
 use crate::color::Color;
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
-use crate::pkg::Pkg;
+use crate::pkg::Package;
 use crate::report;
 
 /// Per-check accumulated wall time, keyed by the check's registry name. Holds
@@ -66,8 +66,8 @@ pub struct Lint {
     width: usize,
     check_duration: Durations,
     packages_checked: usize,
-    /// Always 0 until the `.spec` (FakePkg) support lands; the footer's
-    /// `specfiles` column is part of the frozen output either way.
+    /// How many `.spec` inputs have been validated. The footer's `specfiles`
+    /// column is part of the frozen output (`lint.py:114`).
     specfiles_checked: usize,
     /// `Filter.validate_filters` is skipped with `--ignore-unused-rpmlintrc`.
     audit_rpmlintrc: bool,
@@ -113,17 +113,36 @@ impl Lint {
     /// timing each, then — for the last package — the `after_checks` hooks and
     /// the unused-rpmlintrc-filter audit.
     ///
+    /// The reference dispatches `check` vs `check_spec` on the package being
+    /// a `FakePkg` (`lint.py:300-304`); here the `Package` enum carries that.
+    /// A spec input bumps `specfiles_checked` instead of `packages_checked`
+    /// (`lint.py:314-318`).
+    ///
     /// The package's own phase timings (`ExtractRpm`, `libmagic`) are folded
     /// into the same duration map, which is what the `-t` report reads.
-    pub fn run_package(&mut self, pkg: &mut Pkg, is_last: bool) {
-        for (phase, secs) in pkg.timers.iter() {
-            self.check_duration.add(phase, secs);
-        }
-        for check in &mut self.checks {
-            let start = Instant::now();
-            check.check(pkg, &self.config, &mut self.filter);
-            let secs = start.elapsed().as_secs_f64();
-            self.check_duration.add(check.name(), secs);
+    pub fn run_package(&mut self, pkg: &mut Package, is_last: bool) {
+        match pkg {
+            Package::Rpm(pkg) => {
+                for (phase, secs) in pkg.timers.iter() {
+                    self.check_duration.add(phase, secs);
+                }
+                for check in &mut self.checks {
+                    let start = Instant::now();
+                    check.check(pkg, &self.config, &mut self.filter);
+                    let secs = start.elapsed().as_secs_f64();
+                    self.check_duration.add(check.name(), secs);
+                }
+                self.packages_checked += 1;
+            }
+            Package::Spec(pkg) => {
+                for check in &mut self.checks {
+                    let start = Instant::now();
+                    check.check_spec(pkg, &self.config, &mut self.filter);
+                    let secs = start.elapsed().as_secs_f64();
+                    self.check_duration.add(check.name(), secs);
+                }
+                self.specfiles_checked += 1;
+            }
         }
 
         if is_last {
@@ -140,7 +159,6 @@ impl Lint {
         for check in &mut self.checks {
             check.reset();
         }
-        self.packages_checked += 1;
     }
 
     /// `Filter.validate_filters(pkg)`: every rpmlintrc `Filters` pattern that
@@ -149,7 +167,7 @@ impl Lint {
     ///
     /// The patterns are collected first because each finding is emitted while
     /// borrowing the filter mutably.
-    fn audit_unused_filters(&mut self, pkg: &Pkg) {
+    fn audit_unused_filters(&mut self, pkg: &Package) {
         let unused: Vec<String> = self
             .filter
             .unused_filters(&self.config.rpmlintrc_filters)
@@ -158,13 +176,23 @@ impl Lint {
             .collect();
         for pattern in unused {
             let detail = format!("\"{pattern}\"");
-            add_info(
-                &mut self.filter,
-                Level::Error,
-                pkg,
-                "unused-rpmlintrc-filter",
-                &[&detail],
-            );
+            match pkg {
+                Package::Rpm(pkg) => add_info(
+                    &mut self.filter,
+                    Level::Error,
+                    pkg,
+                    "unused-rpmlintrc-filter",
+                    &[&detail],
+                ),
+                Package::Spec(pkg) => spec_add_info(
+                    &mut self.filter,
+                    Level::Error,
+                    pkg,
+                    None,
+                    "unused-rpmlintrc-filter",
+                    &[&detail],
+                ),
+            }
         }
     }
 
