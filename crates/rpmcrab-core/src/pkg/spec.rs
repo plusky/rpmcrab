@@ -6,6 +6,7 @@
 //! around the spec path (`name` is the as-passed path, `is_source` is forced
 //! false) and dispatches `check_spec` on holding one.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
 /// A `.spec` file being linted.
@@ -31,11 +32,12 @@ pub enum SpecError {
 }
 
 impl SpecPkg {
-    /// Open a `.spec` file. Readability is validated now, like `Pkg::open`
-    /// validates the rpm: the reference's `validate_file` treats any read
-    /// failure as fatal.
+    /// Open a `.spec` file. Readability is validated now: the reference's
+    /// `validate_file` treats any read failure as fatal, and there it surfaces
+    /// when `SpecCheck` first reads the file. `File::open` proves readability
+    /// without slurping the contents — the bytes are read later, by the check.
     pub fn open(path: &Path) -> Result<Self, SpecError> {
-        std::fs::read(path).map_err(|source| SpecError::Read {
+        File::open(path).map_err(|source| SpecError::Read {
             path: path.to_path_buf(),
             source,
         })?;
