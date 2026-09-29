@@ -62,13 +62,17 @@ pub enum PkgError {
     Extract(#[from] extract::ExtractError),
     #[error("creating the extraction tempdir: {0}")]
     Tempdir(#[from] std::io::Error),
-    #[error("opening the rpmdb: {0}")]
-    Db(String),
+    /// An rpmdb operation failed. Only the failures librpm surfaces reach this;
+    /// a database it cannot open reads as empty (see `installed`).
+    #[error("rpmdb: {0}")]
+    Db(#[from] librpm::error::Error),
 }
 
 /// Call `librpm::init()` exactly once per process, caching its result so
-/// concurrent opens neither double-init nor lose the failure.
-fn init() -> Result<(), PkgError> {
+/// concurrent opens neither double-init nor lose the failure. Idempotent, and
+/// public because a caller that needs its own `Db` must configure librpm before
+/// constructing it.
+pub fn init() -> Result<(), PkgError> {
     static INIT: OnceLock<Result<(), String>> = OnceLock::new();
     match INIT.get_or_init(|| librpm::init().map_err(|e| e.to_string())) {
         Ok(()) => Ok(()),
