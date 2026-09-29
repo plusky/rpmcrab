@@ -192,3 +192,34 @@ fn no_inputs_warns_and_exits_zero() {
         "There are no files to process nor additional arguments.\nNothing to do, aborting."
     );
 }
+
+/// `-v` re-raises, so the cause chain is printed rather than the run ending on
+/// a bare exit code.
+#[test]
+fn verbose_prints_the_cause_chain_and_exits_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let bogus = dir.path().join("not-an-rpm.rpm");
+    std::fs::write(&bogus, b"definitely not an rpm").unwrap();
+    let out = rpmcrab(&["-v", bogus.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("fatal error while reading"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("caused by:"), "no cause chain: {stderr}");
+}
+
+/// Naming the same package twice validates it once, so the footer counts one.
+#[test]
+fn a_repeated_argument_is_counted_once() {
+    let rpm = corpus_rpm();
+    let arg = rpm.to_str().unwrap();
+    let out = rpmcrab(&[arg, arg]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("1 packages and 0 specfiles checked"),
+        "duplicate argument counted twice: {stdout}"
+    );
+}

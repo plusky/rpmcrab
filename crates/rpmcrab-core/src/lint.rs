@@ -21,6 +21,42 @@ use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::report;
 
+/// Per-check accumulated wall time, keyed by the check's registry name. Holds
+/// the `Pkg` phases (`ExtractRpm`, `libmagic`) too, as in the reference's
+/// single `check_duration` map.
+///
+/// Insertion-ordered rather than a `BTreeMap`: the reference reports equal
+/// durations in the order the phases and checks first ran, and a sorted map
+/// would alphabetise them instead. There are at most one entry per check plus
+/// two phases, so the linear lookup costs nothing.
+#[derive(Debug, Clone, Default)]
+pub struct Durations(Vec<(String, f64)>);
+
+impl Durations {
+    /// Add `secs` to `key`, keeping the position `key` first occupied.
+    pub fn add(&mut self, key: &str, secs: f64) {
+        match self.0.iter_mut().find(|(k, _)| k == key) {
+            Some((_, v)) => *v += secs,
+            None => self.0.push((key.to_string(), secs)),
+        }
+    }
+
+    /// The accumulated `(name, seconds)` pairs in insertion order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, f64)> + '_ {
+        self.0.iter().map(|(k, v)| (k.as_str(), *v))
+    }
+
+    /// The seconds across every entry.
+    pub fn total(&self) -> f64 {
+        self.0.iter().map(|(_, v)| *v).sum()
+    }
+
+    /// The `(name, seconds)` pairs, for the report functions.
+    pub fn as_slice(&self) -> &[(String, f64)] {
+        &self.0
+    }
+}
+
 /// Drives a set of checks over the inputs and renders the report.
 pub struct Lint {
     config: Config,
@@ -28,10 +64,7 @@ pub struct Lint {
     checks: Vec<Box<dyn Check>>,
     color: Color,
     width: usize,
-    /// Per-check accumulated wall time, keyed by the check's registry name.
-    /// Holds the `Pkg` phases (`ExtractRpm`, `libmagic`) too, as in the
-    /// reference's single `check_duration` map.
-    check_duration: BTreeMap<String, f64>,
+    check_duration: Durations,
     packages_checked: usize,
     /// Always 0 until the `.spec` (FakePkg) support lands; the footer's
     /// `specfiles` column is part of the frozen output either way.
@@ -63,7 +96,7 @@ impl Lint {
             checks,
             color,
             width,
-            check_duration: BTreeMap::new(),
+            check_duration: Durations::default(),
             packages_checked: 0,
             specfiles_checked: 0,
             audit_rpmlintrc,
@@ -84,16 +117,13 @@ impl Lint {
     /// into the same duration map, which is what the `-t` report reads.
     pub fn run_package(&mut self, pkg: &mut Pkg, is_last: bool) {
         for (phase, secs) in pkg.timers.iter() {
-            *self.check_duration.entry(phase.to_string()).or_insert(0.0) += secs;
+            self.check_duration.add(phase, secs);
         }
         for check in &mut self.checks {
             let start = Instant::now();
             check.check(pkg, &self.config, &mut self.filter);
             let secs = start.elapsed().as_secs_f64();
-            *self
-                .check_duration
-                .entry(check.name().to_string())
-                .or_insert(0.0) += secs;
+            self.check_duration.add(check.name(), secs);
         }
 
         if is_last {
@@ -103,6 +133,12 @@ impl Lint {
             if self.audit_rpmlintrc {
                 self.audit_unused_filters(pkg);
             }
+        }
+        // `Lint.reset_checks()` runs after *every* package, the last one
+        // included (`lint.py:251,271`), so per-run state cannot leak into the
+        // next package.
+        for check in &mut self.checks {
+            check.reset();
         }
         self.packages_checked += 1;
     }
@@ -162,12 +198,12 @@ impl Lint {
             .filter_map(|c| c.checked_files().map(|n| (c.name().to_string(), n)))
             .filter(|(_, n)| *n > 0)
             .collect();
-        report::time_report(&self.check_duration, &files, &self.color)
+        report::time_report(self.check_duration.as_slice(), &files, &self.color)
     }
 
     /// The `-T` profile report: rpmcrab's own per-check wall time.
     pub fn profile_report(&self) -> String {
-        report::profile_report(&self.check_duration, &self.color)
+        report::profile_report(self.check_duration.as_slice(), &self.color)
     }
 
     /// The report: header, sorted findings, abort banner (if over threshold),

@@ -505,7 +505,14 @@ landing with a parity case and a divergence entry if any:
 `add_info` has 475 call sites / 417 distinct tag names upstream; the port
 tracks tag-name parity per check. `SpecCheck` also needs `FakePkg`, the
 `.spec` model, which is deferred to its own milestone; until then a `.spec`
-input is refused with exit 3 rather than silently ignored (ledgered).
+input is refused with exit 3 rather than silently ignored (ledgered). The
+`Check` trait's `check_spec` hook arrives with it, because the reference
+dispatches it on holding a `FakePkg` rather than on `is_source`.
+
+A check that panics aborts the run rather than being contained per check or
+per package: a linter that swallowed a check bug would present incomplete
+coverage as a clean run. The status differs from the reference's (101 rather
+than 1 with a traceback) and is ledgered.
 
 ---
 

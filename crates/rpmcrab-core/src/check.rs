@@ -7,6 +7,12 @@
 //! `after_checks` once the last package has been checked, plus `reset`
 //! between packages.
 //!
+//! `AbstractCheck.check_spec` has no counterpart here: it is dispatched on
+//! being handed a `FakePkg` (a parsed `.spec` file), which is not ported yet,
+//! and `is_source` does **not** stand in for it — a `.spec` input reaches no
+//! check at all until the FakePkg milestone. The hook is added with that
+//! milestone rather than shipped unreachable.
+//!
 //! A configured check that is not implemented yet is **skipped**, not an
 //! error: the run still reports the configured check count in the header while
 //! the checks land wave by wave (§8).

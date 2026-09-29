@@ -60,3 +60,31 @@ check = "session-header"
 kind = "behaviour"
 reason = "The header's 'configuration:' block names the bundled defaults as <builtin>; the reference names the installed file it read (site-packages/rpmlint/configdefaults.toml). rpmcrab embeds its defaults at build time with include_str!, so there is no installed file to name, and reproducing an installation path would be false provenance."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "argument-globbing"
+kind = "behaviour"
+reason = "A positional argument containing * or ? is taken literally, so it is reported as a missing path and exits 2; the reference expands it as a working-directory-relative glob (cli.py:103-120). Repeated arguments are deduplicated as the reference's set does. Path::glob is nightly-only, and glob semantics (**, character classes, escaping) are a parsing surface that needs its own change with golden tests."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "time-report"
+kind = "behaviour"
+reason = "With -t, a duration map whose entries all sum to zero prints cleanly; the reference divides by the total unguarded and raises ZeroDivisionError (lint.py:158), so `rpmcrab -i rpm -t` succeeds where `rpmlint -i rpm -t` dies."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "interrupt-handling"
+kind = "behaviour"
+reason = "On SIGINT the run ends with the shell's default status 130 but without printing the time or profile reports first; the reference catches KeyboardInterrupt, prints them, then re-raises (lint.py:122-127). Printing them needs a signal handler, which is a dependency decision not taken yet."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "check-error-handling"
+kind = "behaviour"
+reason = "A check that panics aborts the run with Rust's panic status 101 and no rendered report; the reference propagates the exception with a traceback and exits 1. A buggy check is not contained per check or per package, deliberately: a linter that swallowed a check bug would report incomplete coverage as a clean run."
+since = "0.1.0"

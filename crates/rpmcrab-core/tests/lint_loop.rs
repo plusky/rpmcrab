@@ -117,6 +117,29 @@ fn after_checks_runs_only_for_the_last_package() {
         log.after_checks, 1,
         "after_checks runs once, on the last package"
     );
+    assert_eq!(
+        log.resets, 3,
+        "reset runs after every package, the last one included"
+    );
+}
+
+/// `reset` also runs after the single, last package.
+#[test]
+fn reset_runs_after_every_package() {
+    let log = Rc::new(RefCell::new(Log::default()));
+    let mut lint = lint_with(
+        Recorder {
+            name: "Recorder",
+            log: Rc::clone(&log),
+            emit: false,
+        },
+        Config::default(),
+    );
+    let mut pkgs = packages(4);
+    for (i, pkg) in pkgs.iter_mut().enumerate() {
+        lint.run_package(pkg, i == 3);
+    }
+    assert_eq!(log.borrow().resets, 4);
 }
 
 #[test]

@@ -90,14 +90,17 @@ pub fn footer(
 /// `-t`: the per-check time report (`lint.py` `_print_time_report`). Reproduces
 /// the column widths and the >1% / >0.1s cut-off exactly, since the layout is
 /// what a user reads.
+/// `durations` must be in insertion order: the reference sorts by duration and
+/// its dict preserves insertion order for equal values, so the sort is stable
+/// over the order the phases and checks first ran.
 pub fn time_report(
-    durations: &BTreeMap<String, f64>,
+    durations: &[(String, f64)],
     checked_files: &BTreeMap<String, usize>,
     color: &Color,
 ) -> String {
     const PERCENT_THRESHOLD: f64 = 1.0;
     const TIME_THRESHOLD: f64 = 0.1;
-    let total: f64 = durations.values().sum();
+    let total: f64 = durations.iter().map(|(_, v)| *v).sum();
     // Only checks that actually walked files contribute to the total count, and
     // the total is the maximum, not the sum: the same file is checked by
     // several checks.
@@ -123,16 +126,17 @@ pub fn time_report(
         reset = color.reset
     ));
 
-    // Sorted by duration, longest first.
-    let mut rows: Vec<(&String, &f64)> = durations.iter().collect();
-    rows.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Sorted by duration, longest first. The sort is stable, so equal durations
+    // keep the order they first ran in, as the reference's dict does.
+    let mut rows: Vec<(&str, f64)> = durations.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+    rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     for (check, duration) in rows {
         let fraction = if total > 0.0 {
             100.0 * duration / total
         } else {
             0.0
         };
-        if fraction < PERCENT_THRESHOLD || *duration < TIME_THRESHOLD {
+        if fraction < PERCENT_THRESHOLD || duration < TIME_THRESHOLD {
             continue;
         }
         let pct_color = if fraction > 25.0 {
@@ -165,16 +169,16 @@ pub fn time_report(
 /// `-T`: rpmcrab's own per-check wall-time report. The reference prints CPython
 /// `cProfile` output there, which a Rust port cannot reproduce; this is a
 /// deliberate, clearly-labelled substitute (see `tests/parity/divergences.toml`).
-pub fn profile_report(durations: &BTreeMap<String, f64>, color: &Color) -> String {
-    let total: f64 = durations.values().sum();
+pub fn profile_report(durations: &[(String, f64)], color: &Color) -> String {
+    let total: f64 = durations.iter().map(|(_, v)| *v).sum();
     let mut out = String::new();
     out.push_str(&format!(
         "{bold}rpmcrab profile report{reset} (per-check wall time; not a CPython cProfile dump)\n",
         bold = color.bold,
         reset = color.reset
     ));
-    let mut rows: Vec<(&String, &f64)> = durations.iter().collect();
-    rows.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut rows: Vec<(&str, f64)> = durations.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+    rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     for (check, duration) in rows {
         out.push_str(&format!("    {check:32} {duration:15.6}\n"));
     }
@@ -216,8 +220,24 @@ mod tests {
         );
     }
 
-    fn durations(pairs: &[(&str, f64)]) -> BTreeMap<String, f64> {
+    /// The durations in the order the given pairs name them, which is the
+    /// insertion order the report preserves for ties.
+    fn durations(pairs: &[(&str, f64)]) -> Vec<(String, f64)> {
         pairs.iter().map(|(k, v)| ((*k).to_string(), *v)).collect()
+    }
+
+    /// Equal durations report in insertion order, not alphabetically: the
+    /// reference's `check_duration` is a dict, and its sort is stable.
+    #[test]
+    fn time_report_breaks_ties_by_insertion_order() {
+        let out = time_report(
+            &durations(&[("ZebraCheck", 1.0), ("AlphaCheck", 1.0)]),
+            &BTreeMap::new(),
+            &Color::for_tty(false),
+        );
+        let zebra = out.find("ZebraCheck").expect("row");
+        let alpha = out.find("AlphaCheck").expect("row");
+        assert!(zebra < alpha, "insertion order lost:\n{out}");
     }
 
     #[test]

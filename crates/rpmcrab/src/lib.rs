@@ -10,6 +10,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -160,15 +161,16 @@ pub fn run() -> ExitCode {
     // Validate positional paths (missing -> exit 2). This is `cli.py`'s job and
     // it runs before `Lint` is built, which is why an rpmlint package on a
     // non-existent path exits 2 rather than taking the skip path below.
-    for f in &cli.files {
-        if !f.exists() {
+    let files = dedup_files(&cli.files);
+    if files.iter().any(|f| !f.exists()) {
+        for f in files.iter().filter(|f| !f.exists()) {
             warn!(
                 color,
                 "The file or directory '{}' does not exist",
                 f.display()
             );
-            return ExitCode::from(2);
         }
+        return ExitCode::from(2);
     }
 
     // rpmlintrc: explicit `-r` files win outright; with none, auto-discovery
@@ -181,8 +183,8 @@ pub fn run() -> ExitCode {
         }
         // A lone positional argument also looks next to itself, so that
         // `rpmlint foo.spec` picks up `foo.rpmlintrc`.
-        if rc_files.is_empty() && cli.files.len() == 1 {
-            let mut arg = cli.files[0].clone();
+        if rc_files.is_empty() && files.len() == 1 {
+            let mut arg = files[0].clone();
             if arg.is_file() {
                 arg.pop();
             }
@@ -216,7 +218,7 @@ pub fn run() -> ExitCode {
 
     // `Lint.rpmlint_package`: never lint an rpmlint package, which uses a
     // modified configuration and crashes the old rpmlint-mini (`lint.py:26,63-66`).
-    if cli.files.iter().any(|f| is_rpmlint_package(f)) {
+    if files.iter().any(|f| is_rpmlint_package(f)) {
         println!("Skipping rpmlint for rpmlint package!");
         return ExitCode::SUCCESS;
     }
@@ -239,7 +241,7 @@ pub fn run() -> ExitCode {
 
     // `Lint.validate_files`: expand the arguments, then sort so the output is
     // stable regardless of the order they were given in.
-    let mut inputs = expand_filelist(&cli.files);
+    let mut inputs = expand_filelist(&files);
     inputs.sort();
 
     // `Lint.validate_installed_packages` runs the installed packages in
@@ -252,7 +254,10 @@ pub fn run() -> ExitCode {
                     warn!(color, "(none): E: there is no installed rpm \"{name}\".");
                 }
                 // The plain-file run owns the `is_last` pass when there is one.
-                let run_post_checks = inputs.is_empty();
+                // `not bool(self.options['rpmfile'])` — the positional
+                // arguments, not the packages they expanded to
+                // (`lint.py:248`).
+                let run_post_checks = files.is_empty();
                 let last = headers.len().saturating_sub(1);
                 // One `Pkg` at a time: building one walks every file it
                 // declares, so a glob like `lib*` would otherwise hold
@@ -286,7 +291,8 @@ pub fn run() -> ExitCode {
             return ExitCode::from(3);
         }
         // `Lint.validate_file`: any failure to read the package is fatal, and
-        // `-v` re-raises instead of reporting (`lint.py:293-297`).
+        // `-v` re-raises, so the user sees the whole cause chain the way a
+        // Python traceback would (`lint.py:293-297`).
         let mut pkg = match rpmcrab_core::pkg::Pkg::open(path, &extract_dir) {
             Ok(p) => p,
             Err(e) => {
@@ -296,6 +302,7 @@ pub fn run() -> ExitCode {
                     path.display()
                 );
                 if cli.verbose {
+                    print_error_chain(&color, &e);
                     return ExitCode::from(1);
                 }
                 return ExitCode::from(3);
@@ -306,7 +313,7 @@ pub fn run() -> ExitCode {
 
     // `Lint.validate_files`: with no file arguments and nothing validated from
     // `-i`, there is nothing to do (`lint.py:257-262`).
-    if cli.files.is_empty() && lint.packages_checked() == 0 {
+    if files.is_empty() && lint.packages_checked() == 0 {
         warn!(
             color,
             "There are no files to process nor additional arguments."
@@ -316,7 +323,7 @@ pub fn run() -> ExitCode {
 
     // The header counts CLI args (files + installed); the footer counts the
     // inputs that were actually validated.
-    let arg_count = cli.files.len() + cli.installed.len();
+    let arg_count = files.len() + cli.installed.len();
     let duration = start.elapsed().as_secs_f64();
     let out = lint.render(
         RPMLINT_VERSION,
@@ -356,6 +363,34 @@ fn find_rpmlintrc_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// The cause chain, deepest last, as a re-raised Python exception would print
+/// it. `-v` uses this instead of a bare exit code, so the underlying error is
+/// visible rather than swallowed.
+fn print_error_chain(color: &Color, err: &dyn std::error::Error) {
+    let mut current = err.source();
+    while let Some(cause) = current {
+        warn!(color, "caused by: {cause}");
+        current = cause.source();
+    }
+}
+
+/// `cli.process_lint_args`: deduplicate the positional arguments, as the
+/// reference's `set` does, so naming the same package twice validates it once.
+///
+/// The reference also expands a `*`/`?` glob in any path component before this
+/// (`cli.py:103-120`); rpmcrab takes such an argument literally, which is
+/// recorded in `tests/parity/divergences.toml`. `Path::glob` is nightly-only
+/// and hand-rolling `**`/`[...]`/escaping is a parsing surface that deserves
+/// its own change with golden tests.
+fn dedup_files(files: &[PathBuf]) -> Vec<PathBuf> {
+    files
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 /// `Lint._expand_filelist`: a directory expands to the packages beneath it, and
 /// only `.rpm`, `.spm` and `.spec` files are kept.
 fn expand_filelist(files: &[PathBuf]) -> Vec<PathBuf> {
@@ -379,13 +414,20 @@ fn has_package_suffix(path: &Path) -> bool {
         .is_some_and(|e| matches!(e.to_string_lossy().as_ref(), "rpm" | "spm" | "spec"))
 }
 
-/// `Lint.rpmlint_package`: `/home/abuild/rpmbuild/RPMS/noarch/rpmlint-\d`.
+/// `Lint.rpmlint_package`: `re.search(r'/home/abuild/rpmbuild/RPMS/noarch/rpmlint-\d')`.
+///
+/// The search is **unanchored**, so the pattern matches anywhere in the path,
+/// and `\d` is Unicode-aware in Python, so the digit test is too. Both details
+/// matter for a guard whose whole job is to fire in unexpected layouts.
 fn is_rpmlint_package(path: &Path) -> bool {
     let s = path.to_string_lossy();
-    let Some(rest) = s.strip_prefix("/home/abuild/rpmbuild/RPMS/noarch/rpmlint-") else {
-        return false;
-    };
-    rest.starts_with(|c: char| c.is_ascii_digit())
+    const PATTERN: &str = "/home/abuild/rpmbuild/RPMS/noarch/rpmlint-";
+    s.match_indices(PATTERN).any(|(i, m)| {
+        s[i + m.len()..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_numeric())
+    })
 }
 
 #[cfg(test)]
@@ -428,10 +470,20 @@ mod tests {
     }
 
     /// `re.search(r'/home/abuild/rpmbuild/RPMS/noarch/rpmlint-\d')` — the
-    /// search is unanchored, so any path containing the pattern matches.
+    /// search is unanchored, so any path containing the pattern matches, and
+    /// `\d` is Unicode-aware, so a non-ASCII decimal digit counts.
     #[test]
     fn rpmlint_package_pattern() {
         for hit in [
+            // Unanchored: the guard exists for unexpected layouts, so a match
+            // anywhere in the path counts, not only at the start.
+            "/mnt/home/abuild/rpmbuild/RPMS/noarch/rpmlint-2.10.0.noarch.rpm",
+            "./home/abuild/rpmbuild/RPMS/noarch/rpmlint-3.noarch.rpm",
+            // The pattern is not anchored at the end either: a suffix after the
+            // digit is fine, because the regex only needs the first digit.
+            "/home/abuild/rpmbuild/RPMS/noarch/rpmlint-2.10.0.noarch.rpm.bak",
+            // `\d` is Unicode-aware in Python; `١` is an Arabic-Indic digit.
+            "/home/abuild/rpmbuild/RPMS/noarch/rpmlint-\u{0661}.noarch.rpm",
             "/home/abuild/rpmbuild/RPMS/noarch/rpmlint-2.10.0.noarch.rpm",
             "/home/abuild/rpmbuild/RPMS/noarch/rpmlint-1.x86_64.rpm",
         ] {
@@ -439,6 +491,8 @@ mod tests {
         }
         for miss in [
             "/home/abuild/rpmbuild/RPMS/noarch/rpmlint-.noarch.rpm",
+            // The pattern must be followed by a digit, not merely present.
+            "/home/abuild/rpmbuild/RPMS/noarch/rpmlint-noarch.rpm",
             "/home/abuild/rpmbuild/RPMS/noarch/rpmlint-x.noarch.rpm",
             "/home/abuild/rpmbuild/RPMS/x86_64/rpmlint-2.rpm",
             "/srv/rpms/rpmlint-2.10.0.noarch.rpm",
@@ -498,5 +552,29 @@ mod rpmlintrc_tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("trap.rpmlintrc")).unwrap();
         assert!(find_rpmlintrc_files(dir.path()).is_empty());
+    }
+
+    /// Naming a package twice validates it once: the reference collects the
+    /// arguments into a `set` (`cli.py:101,117`).
+    #[test]
+    fn repeated_arguments_are_deduplicated() {
+        let files = vec![
+            PathBuf::from("a.rpm"),
+            PathBuf::from("b.rpm"),
+            PathBuf::from("a.rpm"),
+        ];
+        assert_eq!(
+            dedup_files(&files),
+            vec![PathBuf::from("a.rpm"), PathBuf::from("b.rpm")]
+        );
+        assert!(dedup_files(&[]).is_empty());
+    }
+
+    /// A glob is not expanded yet (ledgered), so it is carried through and then
+    /// rejected as a missing path, exactly as a literal would be.
+    #[test]
+    fn a_glob_argument_is_taken_literally_for_now() {
+        let files = vec![PathBuf::from("*.rpm")];
+        assert_eq!(dedup_files(&files), vec![PathBuf::from("*.rpm")]);
     }
 }
