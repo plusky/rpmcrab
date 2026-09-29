@@ -23,3 +23,4 @@ extend-exclude = [
 # Load-bearing upstream spellings captured verbatim in the frozen output
 # contract. Add a one-line reason per entry; retire an entry only when its last
 # real occurrence is gone.
+obsoletion = "check name self-obsoletion (rpmlint#438)" 
