@@ -82,6 +82,58 @@ pub fn init() -> Result<(), PkgError> {
     }
 }
 
+/// Where a [`Pkg`]'s bytes come from. The reference distinguishes exactly these
+/// situations, so they are a closed set: separate `dir_name`/`extracted`
+/// fields cannot express an impossible combination, and a read can never
+/// silently fall back to the host filesystem again.
+#[derive(Debug)]
+pub enum PkgSource {
+    /// Payload unpacked into an owned tempdir (removed on drop).
+    Extracted {
+        /// The extraction directory.
+        dir: PathBuf,
+        /// Owns the tempdir; dropping it removes the directory.
+        tempdir: tempfile::TempDir,
+    },
+    /// An installed package: reads resolve against the live filesystem.
+    /// The reference's `InstalledPkg` reports `extracted == true`.
+    Installed,
+    /// A file package with `ExtractDir='/'`: no extraction, reads resolve
+    /// against the live filesystem, `extracted == false`.
+    LiveRoot,
+    /// [`Pkg::cleanup`] dropped the tempdir; reads fail to `''`, exactly as
+    /// the reference's post-cleanup reads do. Still points at the removed
+    /// path, like the reference's `dirname`.
+    CleanedUp {
+        /// The removed extraction directory.
+        dir: PathBuf,
+    },
+}
+
+impl PkgSource {
+    /// The directory reads resolve against: the extraction directory, or `/`
+    /// for the live-filesystem sources. `CleanedUp` keeps pointing at the
+    /// removed path, so reads fail there instead of falling back to `/`.
+    fn base_dir(&self) -> &Path {
+        match self {
+            PkgSource::Extracted { dir, .. } => dir,
+            PkgSource::Installed | PkgSource::LiveRoot => Path::new("/"),
+            PkgSource::CleanedUp { dir } => dir,
+        }
+    }
+
+    /// The reference's `extracted` flag, as a total function of the variant —
+    /// no flag field remains.
+    fn extracted(&self) -> bool {
+        match self {
+            PkgSource::Extracted { .. } | PkgSource::Installed | PkgSource::CleanedUp { .. } => {
+                true
+            }
+            PkgSource::LiveRoot => false,
+        }
+    }
+}
+
 /// A parsed RPM package (file-backed), mirroring rpmlint's `Pkg`.
 pub struct Pkg {
     /// The path as passed to [`Pkg::open`] (rpmlint stores it verbatim).
@@ -105,17 +157,13 @@ pub struct Pkg {
     pub ghost_files: Vec<String>,
     pub noreplace_files: Vec<String>,
     pub missingok_files: Vec<String>,
-    /// The extraction directory; `None` only for an installed package (M2c),
-    /// which reads the live filesystem.
-    pub dir_name: Option<PathBuf>,
-    /// True once the payload has been unpacked into `dir_name`.
-    pub extracted: bool,
+    /// Where this package's bytes come from (`docs/DESIGN.md` §7.5). Private:
+    /// callers use [`Pkg::dir_name`] and [`Pkg::extracted`], never the states.
+    source: PkgSource,
     /// Per-phase wall-clock timings, accumulated in seconds and reported by
     /// `-t` (`pkg.py:534`).
     pub timers: Timers,
     header: PackageHeader,
-    /// Owns the extraction tempdir; removed on drop.
-    tempdir: Option<tempfile::TempDir>,
 }
 
 /// rpmlint's `Pkg.timers`: seconds spent per named phase (`ExtractRpm`,
@@ -175,10 +223,8 @@ impl Pkg {
         if extract_dir == Path::new("/") {
             return Ok(Self::build(
                 header,
-                Some(PathBuf::from("/")),
+                PkgSource::LiveRoot,
                 filename,
-                None,
-                false,
                 None,
                 Timers::with_extract(0.0),
             ));
@@ -196,20 +242,22 @@ impl Pkg {
         extract::extract(path, tempdir.path())?;
         let extract_secs = start.elapsed().as_secs_f64();
         let dir_name = tempdir.path().to_path_buf();
+        let source = PkgSource::Extracted {
+            dir: dir_name,
+            tempdir,
+        };
         Ok(Self::build(
             header,
-            Some(dir_name),
+            source,
             filename,
             None,
-            true,
-            Some(tempdir),
             Timers::with_extract(extract_secs),
         ))
     }
 
     /// Build an installed package from an rpmdb header (rpmlint `InstalledPkg`):
-    /// `dir_name` is `/`, so paths are the live filesystem, there is no
-    /// extraction, the filename is synthesized, and `is_source` is forced false.
+    /// reads resolve against the live filesystem, there is no extraction, the
+    /// filename is synthesized, and `is_source` is forced false.
     pub fn installed(header: PackageHeader) -> Self {
         let tag = |t| tags::str_tag(&header, t).unwrap_or_default();
         let filename = format!(
@@ -221,29 +269,22 @@ impl Pkg {
         );
         Self::build(
             header,
-            Some(PathBuf::from("/")),
+            PkgSource::Installed,
             filename,
             Some(false),
-            true,
-            None,
             Timers::with_extract(0.0),
         )
     }
 
     /// Shared construction from a header. `is_source` defaults to the header's
     /// `SOURCERPM` presence (the file case); an installed package passes
-    /// `Some(false)` as rpmlint forces it. `extracted` is an explicit parameter
-    /// rather than derived from `tempdir`: the reference sets it true for an
-    /// installed package (no tempdir, but `dir_name` is the live `/`) and false
-    /// for a file with `ExtractDir = "/"`. `timers` carries the `ExtractRpm`
+    /// `Some(false)` as rpmlint forces it. `timers` carries the `ExtractRpm`
     /// measurement and gains `libmagic` while the file list is built.
     fn build(
         header: PackageHeader,
-        dir_name: Option<PathBuf>,
+        source: PkgSource,
         filename: String,
         is_source: Option<bool>,
-        extracted: bool,
-        tempdir: Option<tempfile::TempDir>,
         mut timers: Timers,
     ) -> Self {
         let is_source = is_source.unwrap_or_else(|| header.get_owned(Tag::SOURCERPM).is_none());
@@ -299,7 +340,7 @@ impl Pkg {
             .map(|d| d.name.clone())
             .collect::<Vec<_>>();
 
-        let files = gather_files(&header, dir_name.as_deref(), &mut timers);
+        let files = gather_files(&header, source.base_dir(), &mut timers);
         let names = |p: fn(&PkgFile) -> bool| -> Vec<String> {
             files
                 .iter()
@@ -344,17 +385,28 @@ impl Pkg {
             ghost_files,
             noreplace_files,
             missingok_files,
-            dir_name,
-            extracted,
+            source,
             timers,
             header,
-            tempdir,
         }
     }
 
     /// The underlying librpm header, for tag access.
     pub fn header(&self) -> &PackageHeader {
         &self.header
+    }
+
+    /// The directory reads resolve against: the extraction directory, `/`
+    /// for the live-filesystem sources, or the removed path after
+    /// [`Pkg::cleanup`].
+    pub fn dir_name(&self) -> &Path {
+        self.source.base_dir()
+    }
+
+    /// The reference's `extracted` flag, as a total function of the source
+    /// (`docs/DESIGN.md` §7.5).
+    pub fn extracted(&self) -> bool {
+        self.source.extracted()
     }
 
     /// True for a NoSource package (source whose files are all ghosts).
@@ -388,8 +440,7 @@ impl Pkg {
     /// cannot be read or is not valid UTF-8, matching the reference's
     /// `except Exception: return ''`.
     pub fn read_file(&self, filename: &str) -> String {
-        let base = self.dir_name.as_deref().unwrap_or_else(|| Path::new("/"));
-        let path = file_path(Some(base), filename);
+        let path = file_path(self.source.base_dir(), filename);
         std::fs::read(path)
             .ok()
             .and_then(|b| String::from_utf8(b).ok())
@@ -424,11 +475,19 @@ impl Pkg {
     }
 
     /// Remove the extraction tempdir (rpmlint `cleanup`); it is also removed on
-    /// drop. `dir_name` deliberately keeps pointing at the removed path, so a
-    /// read after cleanup fails to `''` exactly as the reference does — nulling
-    /// it would make `read_file` fall back to the host filesystem.
+    /// drop. The source becomes [`PkgSource::CleanedUp`], still pointing at
+    /// the removed path, so a read after cleanup fails to `''` exactly as the
+    /// reference does.
     pub fn cleanup(&mut self) {
-        self.tempdir = None;
+        // Only an extracted package owns a tempdir. Replacing the source drops
+        // the old `TempDir`, removing the directory from the filesystem.
+        let dir = match &self.source {
+            PkgSource::Extracted { dir, .. } => Some(dir.clone()),
+            PkgSource::Installed | PkgSource::LiveRoot | PkgSource::CleanedUp { .. } => None,
+        };
+        if let Some(dir) = dir {
+            self.source = PkgSource::CleanedUp { dir };
+        }
     }
 }
 
@@ -550,9 +609,8 @@ fn calc_magic(
 }
 
 /// rpmlint's `PkgFile.path`: `normpath(join(dir_name or '/', name.lstrip('/')))`.
-fn file_path(dir: Option<&Path>, name: &str) -> String {
-    let base = dir.unwrap_or_else(|| Path::new("/"));
-    let joined = base.join(name.trim_start_matches('/'));
+fn file_path(dir: &Path, name: &str) -> String {
+    let joined = dir.join(name.trim_start_matches('/'));
     normalize_path(&joined.to_string_lossy())
 }
 
@@ -572,7 +630,7 @@ fn join_url(name: &str, linkto: &str) -> String {
 /// Build the file map (rpmlint `_gather_files_info`). Per-file metadata comes
 /// from librpm's `FileEntry`; `inode`/`rdev`/`lang`/`fileclass` are read from
 /// the parallel header arrays (librpm's `FileEntry` does not expose them).
-fn gather_files(header: &PackageHeader, dir: Option<&Path>, timers: &mut Timers) -> Vec<PkgFile> {
+fn gather_files(header: &PackageHeader, dir: &Path, timers: &mut Timers) -> Vec<PkgFile> {
     let inodes = tags::int32_array(header, Tag::FILEINODES);
     let rdevs = tags::int16_array(header, Tag::FILERDEVS);
     let langs = tags::str_array(header, Tag::FILELANGS);

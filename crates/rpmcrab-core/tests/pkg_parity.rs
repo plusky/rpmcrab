@@ -121,7 +121,7 @@ fn pkg_to_json(pkg: &Pkg) -> Value {
         "is_source": pkg.is_source,
         "is_no_source": pkg.is_no_source(),
         "filename": pkg.filename,
-        "dir_name": pkg.dir_name.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        "dir_name": pkg.dir_name().to_string_lossy().into_owned(),
         "requires": deps(&pkg.requires),
         "prereq": deps(&pkg.prereq),
         "provides": deps(&pkg.provides),
@@ -210,7 +210,7 @@ fn pkg_reproduces_rpmlint_for_corpus_rpms() {
         let mut expected: Value =
             serde_json::from_str(&std::fs::read_to_string(&dump_path).unwrap()).unwrap();
         let pkg = Pkg::open(&rpm, scratch.path()).unwrap_or_else(|e| panic!("open {case}: {e}"));
-        let tmpdir = pkg.dir_name.clone().unwrap().to_string_lossy().into_owned();
+        let tmpdir = pkg.dir_name().to_string_lossy().into_owned();
         let mut actual = pkg_to_json(&pkg);
 
         normalize_toplevel(&mut expected);
@@ -292,7 +292,7 @@ fn read_file_after_cleanup_is_empty() {
     pkg.cleanup();
 
     assert!(
-        !pkg.dir_name.as_ref().unwrap().exists(),
+        !pkg.dir_name().exists(),
         "cleanup must remove the extraction directory"
     );
     assert_eq!(

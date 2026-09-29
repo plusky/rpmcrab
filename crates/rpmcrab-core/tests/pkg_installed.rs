@@ -78,12 +78,12 @@ fn installed_facade_matches_file_pkg() {
     }
 
     // The installed facade: live dir, synthesized filename, forced is_source.
-    assert_eq!(inst.dir_name.as_deref(), Some(Path::new("/")));
+    assert_eq!(inst.dir_name(), Path::new("/"));
     assert_eq!(inst.filename, "llvm21-gold-21.1.8-9.2.aarch64.rpm");
     assert!(!inst.is_source);
     // The reference marks an installed package extracted even though nothing was
     // unpacked: `InstalledPkg` sets `extracted = True` (pkg.py:758).
-    assert!(inst.extracted);
+    assert!(inst.extracted());
     // Paths are rooted at the live filesystem, not a tempdir.
     assert!(inst.files.iter().all(|f| f.path.starts_with('/')));
     assert_ne!(inst.files[0].path, file_pkg.files[0].path);
@@ -129,6 +129,6 @@ fn host_db_smoke() {
         let inst = Pkg::installed(header.clone());
         assert_eq!(inst.name, "rpm");
         assert!(!inst.is_source);
-        assert_eq!(inst.dir_name.as_deref(), Some(Path::new("/")));
+        assert_eq!(inst.dir_name(), Path::new("/"));
     }
 }
