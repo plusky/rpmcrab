@@ -162,8 +162,25 @@ pub fn run() -> ExitCode {
         }
     }
 
-    // TODO(M2): -i/--installed reads the rpmdb. TODO(M3): -t time-report,
-    // -T profile, --checks filtering. These are parsed and currently no-ops.
+    // -i/--installed: resolve the rpmdb names now (rpmlint `_load_installed_rpms`)
+    // and emit the no-such-rpm warning. The packages are consumed by the checks
+    // at M3; the header count uses the raw argument count either way.
+    if !cli.installed.is_empty() {
+        match rpmcrab_core::pkg::installed::find_installed(&cli.installed) {
+            Ok((_pkgs, missing)) => {
+                for name in &missing {
+                    eprintln!("(none): E: there is no installed rpm \"{name}\".");
+                }
+            }
+            Err(e) => {
+                eprintln!("(none): E: fatal error reading the rpmdb: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+
+    // TODO(M3): -t time-report, -T profile, --checks filtering are parsed and
+    // currently no-ops.
 
     // M1: no real checks are registered yet (they arrive at M3). The Lint still
     // renders the full header/footer so the pipeline is exercised end to end.

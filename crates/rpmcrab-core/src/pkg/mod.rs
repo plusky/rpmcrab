@@ -1,13 +1,14 @@
 //! The `Pkg` abstraction — the Rust equivalent of rpmlint's `pkg.py`.
 //!
-//! The **file-backed** layer: the header, the nine dependency lists, the file
-//! map (with the payload extracted into a tempdir so `PkgFile.path` and
-//! `magic` match the reference), and the derived
-//! `config/doc/ghost/noreplace/missingok` name lists. The installed DB
-//! (`db::Db`) is M2c; the spec `FakePkg` is M3.
+//! Two sources: **file-backed** (the payload extracted into a tempdir so
+//! `PkgFile.path` and `magic` match the reference) and **installed** (`db::Db`,
+//! rooted at the live filesystem). Both expose the header, the nine dependency
+//! lists, the file map, and the derived `config/doc/ghost/noreplace/missingok`
+//! name lists. The spec `FakePkg` is M3.
 
 pub mod dep;
 pub mod extract;
+pub mod installed;
 pub mod pkgfile;
 pub mod tags;
 
@@ -61,6 +62,8 @@ pub enum PkgError {
     Extract(#[from] extract::ExtractError),
     #[error("creating the extraction tempdir: {0}")]
     Tempdir(#[from] std::io::Error),
+    #[error("opening the rpmdb: {0}")]
+    Db(String),
 }
 
 /// Call `librpm::init()` exactly once per process, caching its result so
@@ -117,14 +120,6 @@ impl Pkg {
                 path: path.to_path_buf(),
                 source,
             })?;
-        Self::from_header(header, path, extract_dir)
-    }
-
-    fn from_header(
-        header: PackageHeader,
-        path: &Path,
-        extract_dir: &Path,
-    ) -> Result<Self, PkgError> {
         // rpmlint stores the as-passed path verbatim (`self.filename = filename`)
         // — not the basename. `SignatureCheck` prints it, and it is resolved
         // for extraction.
@@ -133,25 +128,75 @@ impl Pkg {
         // (`pkg.py:610-613`); honour that so `ExtractDir = "/"` cannot unpack
         // into the live root. `extracted` stays false there, as in the
         // reference.
-        let (dir_name, tempdir, extracted) = if extract_dir == Path::new("/") {
-            (PathBuf::from("/"), None, false)
-        } else {
-            // Extraction happens in `Pkg.__init__`: a TemporaryDirectory under
-            // the config's `ExtractDir`, prefixed `rpmlint.<rpm-basename>.`.
-            let base = Path::new(&filename)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let tempdir = tempfile::Builder::new()
-                .prefix(&format!("rpmlint.{base}."))
-                .tempdir_in(extract_dir)?;
-            extract::extract(path, tempdir.path())?;
-            let dir = tempdir.path().to_path_buf();
-            (dir, Some(tempdir), true)
-        };
+        if extract_dir == Path::new("/") {
+            return Ok(Self::build(
+                header,
+                Some(PathBuf::from("/")),
+                filename,
+                None,
+                false,
+                None,
+            ));
+        }
+        // Extraction happens in `Pkg.__init__`: a TemporaryDirectory under the
+        // config's `ExtractDir`, prefixed `rpmlint.<rpm-basename>.`.
+        let base = Path::new(&filename)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let tempdir = tempfile::Builder::new()
+            .prefix(&format!("rpmlint.{base}."))
+            .tempdir_in(extract_dir)?;
+        extract::extract(path, tempdir.path())?;
+        let dir_name = tempdir.path().to_path_buf();
+        Ok(Self::build(
+            header,
+            Some(dir_name),
+            filename,
+            None,
+            true,
+            Some(tempdir),
+        ))
+    }
 
+    /// Build an installed package from an rpmdb header (rpmlint `InstalledPkg`):
+    /// `dir_name` is `/`, so paths are the live filesystem, there is no
+    /// extraction, the filename is synthesized, and `is_source` is forced false.
+    pub fn installed(header: PackageHeader) -> Self {
+        let tag = |t| tags::str_tag(&header, t).unwrap_or_default();
+        let filename = format!(
+            "{}-{}-{}.{}.rpm",
+            tag(Tag::NAME),
+            tag(Tag::VERSION),
+            tag(Tag::RELEASE),
+            tag(Tag::ARCH)
+        );
+        Self::build(
+            header,
+            Some(PathBuf::from("/")),
+            filename,
+            Some(false),
+            true,
+            None,
+        )
+    }
+
+    /// Shared construction from a header. `is_source` defaults to the header's
+    /// `SOURCERPM` presence (the file case); an installed package passes
+    /// `Some(false)` as rpmlint forces it. `extracted` is an explicit parameter
+    /// rather than derived from `tempdir`: the reference sets it true for an
+    /// installed package (no tempdir, but `dir_name` is the live `/`) and false
+    /// for a file with `ExtractDir = "/"`.
+    fn build(
+        header: PackageHeader,
+        dir_name: Option<PathBuf>,
+        filename: String,
+        is_source: Option<bool>,
+        extracted: bool,
+        tempdir: Option<tempfile::TempDir>,
+    ) -> Self {
+        let is_source = is_source.unwrap_or_else(|| header.get_owned(Tag::SOURCERPM).is_none());
         let name = tags::str_tag(&header, Tag::NAME).unwrap_or_default();
-        let is_source = header.get_owned(Tag::SOURCERPM).is_none();
 
         let (requires, prereq) = gather_requires(&header);
         let provides = gather_deps(
@@ -203,7 +248,7 @@ impl Pkg {
             .map(|d| d.name.clone())
             .collect::<Vec<_>>();
 
-        let files = gather_files(&header, Some(&dir_name));
+        let files = gather_files(&header, dir_name.as_deref());
         let names = |p: fn(&PkgFile) -> bool| -> Vec<String> {
             files
                 .iter()
@@ -227,7 +272,7 @@ impl Pkg {
             tags::str_tag(&header, Tag::ARCH).unwrap_or_default()
         };
 
-        Ok(Self {
+        Self {
             filename,
             name,
             arch,
@@ -248,11 +293,11 @@ impl Pkg {
             ghost_files,
             noreplace_files,
             missingok_files,
-            dir_name: Some(dir_name),
+            dir_name,
             extracted,
             header,
             tempdir,
-        })
+        }
     }
 
     /// The underlying librpm header, for tag access.
