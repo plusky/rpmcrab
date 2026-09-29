@@ -71,6 +71,143 @@ fn quotes_regex() -> Regex {
     Regex::new(r#"['"]"#).expect("static regex")
 }
 
+fn compr_regex() -> Regex {
+    Regex::new(r"\.(gz|z|Z|zip|bz2|lzma|xz|zst)$").expect("static regex")
+}
+
+fn absolute_regex() -> Regex {
+    Regex::new(r"^/([^/]+)").expect("static regex")
+}
+
+fn absolute2_regex() -> Regex {
+    Regex::new(r"^/?([^/]+)").expect("static regex")
+}
+
+fn points_regex() -> Regex {
+    Regex::new(r"^\.\./(.*)").expect("static regex")
+}
+
+fn doc_regex() -> Regex {
+    Regex::new(r"^/usr(/share|/X11R6)?/(doc|man|info)/|^/usr/share/gnome/help")
+        .expect("static regex")
+}
+
+fn bin_regex() -> Regex {
+    Regex::new(r"^/(?:usr/(?:s?bin|games)|s?bin)/(.*)").expect("static regex")
+}
+
+fn includefile_regex() -> Regex {
+    Regex::new(r"(?i)\.(c|h)(pp|xx)?$").expect("static regex")
+}
+
+fn develfile_regex() -> Regex {
+    Regex::new(r"\.(a|cmxa?|mli?|gir)$").expect("static regex")
+}
+
+fn buildconfigfile_regex() -> Regex {
+    Regex::new(r"(\.pc|/bin/.+-config)$").expect("static regex")
+}
+
+fn buildconfig_rpath_regex() -> Regex {
+    Regex::new(r"(?:-rpath|Wl,-R)\b").expect("static regex")
+}
+
+fn sofile_regex() -> Regex {
+    Regex::new(r"/lib(64)?/(.+/)?lib[^/]+\.so$").expect("static regex")
+}
+
+fn lib_regex() -> Regex {
+    Regex::new(r"/lib(?:64)?/lib[A-Za-z0-9](?:(?:|[\w\-\.]*[A-Za-z0-9])\.so\.[\w+\.]+|\w*-\d(?:|[\w\-\.]*[A-Za-z0-9])\.so)$")
+        .expect("static regex")
+}
+
+fn depmod_regex() -> Regex {
+    Regex::new(r"(?m)^[^#]*depmod").expect("static regex")
+}
+
+fn install_info_regex() -> Regex {
+    Regex::new(r"(?m)^[^#]*install-info").expect("static regex")
+}
+
+fn perl_temp_file_regex() -> Regex {
+    Regex::new(r".*perl.*/(\.packlist|perllocal\.pod)$").expect("static regex")
+}
+
+fn interpreter_regex() -> Regex {
+    Regex::new(r"^/(?:usr/)?(?:s?bin|games|libexec(?:/.+)?|(?:lib(?:64)?|share)/.+)/([^/]+)$")
+        .expect("static regex")
+}
+
+fn script_regex() -> Regex {
+    Regex::new(
+        r"^/((usr/)?s?bin|etc/(rc\.d/init\.d|X11/xinit\.d|cron\.(hourly|daily|monthly|weekly)))/",
+    )
+    .expect("static regex")
+}
+
+fn sourced_script_regex() -> Regex {
+    Regex::new(r"^/etc/(bash_completion\.d|profile\.d)/").expect("static regex")
+}
+
+fn fsf_license_regex() -> Regex {
+    Regex::new(r"(?i)(GNU((\s+(Library|Lesser|Affero))?(\s+General)?\s+Public|\s+Free\s+Documentation)\s+Licen[cs]e|(GP|FD)L)")
+        .expect("static regex")
+}
+
+fn fsf_wrong_address_regex() -> Regex {
+    Regex::new(r"(?i)(675\s+Mass\s+Ave|59\s+Temple\s+Place|02139|51\s+Franklin\s+St)")
+        .expect("static regex")
+}
+
+fn scalable_icon_regex() -> Regex {
+    Regex::new(r"^/usr(?:/local)?/share/icons/.*/scalable/").expect("static regex")
+}
+
+fn tcl_regex() -> Regex {
+    Regex::new(r"^/usr/lib(64)?/([^/]+/)?pkgIndex\.tcl").expect("static regex")
+}
+
+fn perl_regex() -> Regex {
+    Regex::new(r"^/usr/lib/perl5/(?:vendor_perl/)?([0-9]+\.[0-9]+)\.([0-9]+)/")
+        .expect("static regex")
+}
+
+fn python_regex() -> Regex {
+    Regex::new(r"^/usr/lib(?:64)?/python([.0-9]+)/").expect("static regex")
+}
+
+fn python_bytecode_pep3147_regex() -> Regex {
+    Regex::new(r"^(.*)/__pycache__/(.*?)\.([^.]+)(\.opt-[12])?\.py[oc]$").expect("static regex")
+}
+
+fn python_bytecode_regex() -> Regex {
+    Regex::new(r"^(.*)(\.py[oc])$").expect("static regex")
+}
+
+fn depmod_kernel_regex() -> Regex {
+    Regex::new(r"^(?:/usr)/lib/modules/([0-9]+\.[0-9]+\.[0-9]+[^/]*?)/").expect("static regex")
+}
+
+fn log_file_regex() -> Regex {
+    Regex::new(r"^/var/log/[^/]+$").expect("static regex")
+}
+
+fn lib_path_regex() -> Regex {
+    Regex::new(r"^(/usr(/X11R6)?)?/lib(64)?").expect("static regex")
+}
+
+fn start_certificate_regex() -> Regex {
+    Regex::new(r"^-----BEGIN CERTIFICATE-----\n?$").expect("static regex")
+}
+
+fn start_private_key_regex() -> Regex {
+    // NB: the reference spells this with four leading dashes, so it cannot
+    // match a well-formed PEM header; replicated exactly.
+    // Python's `$` matches before a trailing newline, Rust's does not;
+    // the explicit newline keeps the reference behavior.
+    Regex::new(r"^----BEGIN PRIVATE KEY-----\n?$").expect("static regex")
+}
+
 #[allow(dead_code)]
 pub struct FilesCheck {
     man_re: Regex,
@@ -88,15 +225,107 @@ pub struct FilesCheck {
     games_group_re: Regex,
     skipdocs_re: Regex,
     meta_package_re: Regex,
+    compr_re: Regex,
+    absolute_re: Regex,
+    absolute2_re: Regex,
+    points_re: Regex,
+    doc_re: Regex,
+    bin_re: Regex,
+    includefile_re: Regex,
+    develfile_re: Regex,
+    buildconfigfile_re: Regex,
+    buildconfig_rpath_re: Regex,
+    sofile_re: Regex,
+    lib_re: Regex,
+    depmod_re: Regex,
+    install_info_re: Regex,
+    perl_temp_file_re: Regex,
+    interpreter_re: Regex,
+    script_re: Regex,
+    sourced_script_re: Regex,
+    fsf_license_re: Regex,
+    fsf_wrong_address_re: Regex,
+    scalable_icon_re: Regex,
+    tcl_re: Regex,
+    perl_re: Regex,
+    python_re: Regex,
+    python_bytecode_pep3147_re: Regex,
+    python_bytecode_re: Regex,
+    depmod_kernel_re: Regex,
+    log_file_re: Regex,
+    lib_path_re: Regex,
+    start_certificate_re: Regex,
+    start_private_key_re: Regex,
     use_debugsource: bool,
     module_rpms_ok: bool,
     use_relative_symlinks: bool,
+    perl_version_trick: bool,
     compress_ext: String,
     standard_users: Vec<String>,
     standard_groups: Vec<String>,
     disallowed_dirs: Vec<String>,
-    dangling_exceptions: Vec<Regex>,
+    dangling_exceptions: Vec<(String, Regex)>,
     ldconfig_re: Regex,
+}
+
+/// Whether `script` contains a depmod call for `kernel_version`, replicating
+/// the reference's per-kernel regex without compiling one per file.
+fn depmod_call_for_kernel(script: &str, kernel_version: &str) -> bool {
+    fn is_word(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_'
+    }
+    let bytes = script.as_bytes();
+    let mut pos = 0;
+    while let Some(i) = script[pos..].find("depmod") {
+        let d = pos + i;
+        // \bdepmod
+        if d > 0 && is_word(bytes[d - 1]) {
+            pos = d + 1;
+            continue;
+        }
+        // \s+-a
+        let after = script[d + 6..].trim_start_matches(|c: char| c.is_whitespace());
+        if !after.starts_with("-a") {
+            pos = d + 1;
+            continue;
+        }
+        let rest = &after[2..];
+        // .*F\s+/boot/System\.map-<ver>\b
+        let needle = format!("/boot/System.map-{kernel_version}");
+        let mut found = false;
+        let mut fpos = 0;
+        while let Some(fi) = rest[fpos..].find('F') {
+            let f = fpos + fi;
+            let after_f = rest[f + 1..].trim_start_matches(|c: char| c.is_whitespace());
+            if let Some(ni) = after_f.find(&needle) {
+                let after_ver = &after_f[ni + needle.len()..];
+                if after_ver.as_bytes().first().is_none_or(|&b| !is_word(b)) {
+                    // .*\b<ver>\b
+                    let mut vpos = ni + needle.len();
+                    while let Some(vi) = after_f[vpos..].find(kernel_version) {
+                        let v = vpos + vi;
+                        let before_ok = v == 0 || !is_word(after_f.as_bytes()[v - 1]);
+                        let after_v = &after_f[v + kernel_version.len()..];
+                        let after_ok = after_v.as_bytes().first().is_none_or(|&b| !is_word(b));
+                        if before_ok && after_ok {
+                            found = true;
+                            break;
+                        }
+                        vpos = v + 1;
+                    }
+                }
+            }
+            if found {
+                break;
+            }
+            fpos = f + 1;
+        }
+        if found {
+            return true;
+        }
+        pos = d + 1;
+    }
+    false
 }
 
 impl FilesCheck {
@@ -124,8 +353,15 @@ impl FilesCheck {
             .and_then(toml::Value::as_table)
             .map(|t| {
                 t.values()
-                    .filter_map(|v| v.get("path").and_then(toml::Value::as_str))
-                    .filter_map(|p| Regex::new(p).ok())
+                    .filter_map(|v| {
+                        let path = v.get("path").and_then(toml::Value::as_str)?;
+                        let name = v
+                            .get("name")
+                            .and_then(toml::Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        Regex::new(path).ok().map(|re| (name, re))
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -151,9 +387,41 @@ impl FilesCheck {
                 .unwrap_or_else(|_| Regex::new("$^").expect("static")),
             meta_package_re: Regex::new(&meta_pkg)
                 .unwrap_or_else(|_| Regex::new("$^").expect("static")),
+            compr_re: compr_regex(),
+            absolute_re: absolute_regex(),
+            absolute2_re: absolute2_regex(),
+            points_re: points_regex(),
+            doc_re: doc_regex(),
+            bin_re: bin_regex(),
+            includefile_re: includefile_regex(),
+            develfile_re: develfile_regex(),
+            buildconfigfile_re: buildconfigfile_regex(),
+            buildconfig_rpath_re: buildconfig_rpath_regex(),
+            sofile_re: sofile_regex(),
+            lib_re: lib_regex(),
+            depmod_re: depmod_regex(),
+            install_info_re: install_info_regex(),
+            perl_temp_file_re: perl_temp_file_regex(),
+            interpreter_re: interpreter_regex(),
+            script_re: script_regex(),
+            sourced_script_re: sourced_script_regex(),
+            fsf_license_re: fsf_license_regex(),
+            fsf_wrong_address_re: fsf_wrong_address_regex(),
+            scalable_icon_re: scalable_icon_regex(),
+            tcl_re: tcl_regex(),
+            perl_re: perl_regex(),
+            python_re: python_regex(),
+            python_bytecode_pep3147_re: python_bytecode_pep3147_regex(),
+            python_bytecode_re: python_bytecode_regex(),
+            depmod_kernel_re: depmod_kernel_regex(),
+            log_file_re: log_file_regex(),
+            lib_path_re: lib_path_regex(),
+            start_certificate_re: start_certificate_regex(),
+            start_private_key_re: start_private_key_regex(),
             use_debugsource: get_bool("UseDebugSource"),
             module_rpms_ok: get_bool("KernelModuleRPMsOK"),
             use_relative_symlinks: get_bool("UseRelativeSymlinks"),
+            perl_version_trick: get_bool("PerlVersionTrick"),
             compress_ext: get_str("CompressExtension"),
             standard_users: get_strings("StandardUsers"),
             standard_groups: get_strings("StandardGroups"),
@@ -184,6 +452,7 @@ struct PkgState {
     debuginfo_debugs: bool,
     postin: String,
     postun: String,
+    preun: String,
     hardlinks: HashMap<(u32, u32), Vec<String>>,
     bindir_exes: HashMap<String, Vec<String>>,
     man_basenames: std::collections::HashSet<String>,
@@ -221,12 +490,14 @@ impl Check for FilesCheck {
             .unwrap_or(false);
         st.postin = strip_quotes(
             &self.quotes_re,
-            &pkg.tag_str(librpm::Tag::POSTIN).unwrap_or_default(),
+            &script_body_or_prog(pkg, librpm::Tag::POSTIN, librpm::Tag::POSTINPROG),
         );
         st.postun = strip_quotes(
             &self.quotes_re,
-            &pkg.tag_str(librpm::Tag::POSTUN).unwrap_or_default(),
+            &script_body_or_prog(pkg, librpm::Tag::POSTUN, librpm::Tag::POSTUNPROG),
         );
+        // The reference does not strip quotes from preun.
+        st.preun = script_body_or_prog(pkg, librpm::Tag::PREUN, librpm::Tag::PREUNPROG);
 
         self.check_nodoc(pkg, &st, out);
         self.check_meta_package(pkg, &st, out);
@@ -243,6 +514,17 @@ impl Check for FilesCheck {
 
 fn strip_quotes(re: &Regex, s: &str) -> String {
     re.replace_all(s, "").to_string()
+}
+
+/// The reference's `pkg[tag] or pkg.scriptprog(prog)`: an empty scriptlet
+/// body falls back to the `-p` interpreter string.
+fn script_body_or_prog(pkg: &Pkg, tag: librpm::Tag, prog: librpm::Tag) -> String {
+    let body = pkg.tag_str(tag).unwrap_or_default();
+    if body.is_empty() {
+        pkg.scriptprog(prog)
+    } else {
+        body
+    }
 }
 
 impl FilesCheck {
@@ -375,6 +657,288 @@ impl FilesCheck {
 
 fn is_utf8(bytes: &[u8]) -> bool {
     std::str::from_utf8(bytes).is_ok()
+}
+
+/// Kept in sync with the filesystem package, mirroring the reference's
+/// `STANDARD_DIRS`.
+const STANDARD_DIRS: &[&str] = &[
+    "/",
+    "/bin",
+    "/boot",
+    "/etc",
+    "/etc/X11",
+    "/etc/opt",
+    "/etc/profile.d",
+    "/etc/skel",
+    "/etc/xinetd.d",
+    "/home",
+    "/lib",
+    "/lib/modules",
+    "/lib64",
+    "/media",
+    "/mnt",
+    "/mnt/cdrom",
+    "/mnt/disk",
+    "/mnt/floppy",
+    "/opt",
+    "/proc",
+    "/root",
+    "/run",
+    "/sbin",
+    "/selinux",
+    "/srv",
+    "/sys",
+    "/tmp",
+    "/usr",
+    "/usr/X11R6",
+    "/usr/X11R6/bin",
+    "/usr/X11R6/doc",
+    "/usr/X11R6/include",
+    "/usr/X11R6/lib",
+    "/usr/X11R6/lib64",
+    "/usr/X11R6/man",
+    "/usr/X11R6/man/man1",
+    "/usr/X11R6/man/man2",
+    "/usr/X11R6/man/man3",
+    "/usr/X11R6/man/man4",
+    "/usr/X11R6/man/man5",
+    "/usr/X11R6/man/man6",
+    "/usr/X11R6/man/man7",
+    "/usr/X11R6/man/man8",
+    "/usr/X11R6/man/man9",
+    "/usr/X11R6/man/mann",
+    "/usr/bin",
+    "/usr/bin/X11",
+    "/usr/etc",
+    "/usr/games",
+    "/usr/include",
+    "/usr/lib",
+    "/usr/lib/X11",
+    "/usr/lib/games",
+    "/usr/lib/gcc-lib",
+    "/usr/lib/menu",
+    "/usr/lib64",
+    "/usr/lib64/gcc-lib",
+    "/usr/local",
+    "/usr/local/bin",
+    "/usr/local/doc",
+    "/usr/local/etc",
+    "/usr/local/games",
+    "/usr/local/info",
+    "/usr/local/lib",
+    "/usr/local/lib64",
+    "/usr/local/man",
+    "/usr/local/man/man1",
+    "/usr/local/man/man2",
+    "/usr/local/man/man3",
+    "/usr/local/man/man4",
+    "/usr/local/man/man5",
+    "/usr/local/man/man6",
+    "/usr/local/man/man7",
+    "/usr/local/man/man8",
+    "/usr/local/man/man9",
+    "/usr/local/man/mann",
+    "/usr/local/sbin",
+    "/usr/local/share",
+    "/usr/local/share/man",
+    "/usr/local/share/man/man1",
+    "/usr/local/share/man/man2",
+    "/usr/local/share/man/man3",
+    "/usr/local/share/man/man4",
+    "/usr/local/share/man/man5",
+    "/usr/local/share/man/man6",
+    "/usr/local/share/man/man7",
+    "/usr/local/share/man/man8",
+    "/usr/local/share/man/man9",
+    "/usr/local/share/man/mann",
+    "/usr/local/src",
+    "/usr/sbin",
+    "/usr/share",
+    "/usr/share/dict",
+    "/usr/share/doc",
+    "/usr/share/icons",
+    "/usr/share/info",
+    "/usr/share/man",
+    "/usr/share/man/man1",
+    "/usr/share/man/man2",
+    "/usr/share/man/man3",
+    "/usr/share/man/man4",
+    "/usr/share/man/man5",
+    "/usr/share/man/man6",
+    "/usr/share/man/man7",
+    "/usr/share/man/man8",
+    "/usr/share/man/man9",
+    "/usr/share/man/mann",
+    "/usr/share/misc",
+    "/usr/src",
+    "/usr/tmp",
+    "/var",
+    "/var/cache",
+    "/var/db",
+    "/var/lib",
+    "/var/lib/games",
+    "/var/lib/misc",
+    "/var/lib/rpm",
+    "/var/local",
+    "/var/log",
+    "/var/mail",
+    "/var/nis",
+    "/var/opt",
+    "/var/preserve",
+    "/var/spool",
+    "/var/tmp",
+];
+
+/// Packages allowed to own standard directories.
+const FILESYS_PACKAGES: &[&str] = &["filesystem"];
+
+/// Per-normal-file scratch state, mirroring the reference's `_file_*`
+/// attributes.
+#[derive(Default)]
+struct FileData {
+    chunk: Vec<u8>,
+    istext: bool,
+    interpreter: Option<String>,
+    interpreter_args: String,
+    nonexec_file: bool,
+    is_buildconfig: bool,
+}
+
+/// Bytes the reference's `peek` treats as printable when deciding
+/// text-vs-binary.
+fn is_peek_printable(b: u8) -> bool {
+    matches!(b, b'\n' | b'\r' | b'\t' | 0x0c | 0x08) || b >= 32
+}
+
+impl FilesCheck {
+    /// Read up to 2048 bytes and decide text-vs-binary, mirroring the
+    /// reference's `peek` (including its `read-error` on `OSError`).
+    fn peek(&self, pkg: &Pkg, pkgfile: &PkgFile, out: &mut Filter) -> (Vec<u8>, bool) {
+        let bytes = match std::fs::read(&pkgfile.path) {
+            Ok(b) => b,
+            Err(e) => {
+                add_info(out, Level::Warning, pkg, "read-error", &[&e.to_string()]);
+                return (Vec::new(), false);
+            }
+        };
+        let chunk: Vec<u8> = bytes.into_iter().take(2048).collect();
+        if chunk.contains(&0) {
+            return (chunk, false);
+        }
+        if chunk.is_empty() {
+            return (chunk, true);
+        }
+        let lower = pkgfile.path.to_lowercase();
+        if lower.ends_with(".pdf") && chunk.starts_with(b"%PDF-") {
+            return (chunk, false);
+        }
+        if lower.ends_with(".ri") && lower.contains("/ri/") {
+            return (chunk, false);
+        }
+        if lower.ends_with(".inv") && chunk.starts_with(b"# Sphinx inventory") {
+            return (chunk, false);
+        }
+        let control = chunk.iter().filter(|b| !is_peek_printable(**b)).count();
+        let istext = control as f64 / chunk.len() as f64 <= 0.30;
+        (chunk, istext)
+    }
+}
+
+/// The reference's `script_interpreter`: a `#!` line at the very start of
+/// the chunk, decoded lossy like `byte_to_string`.
+fn script_interpreter(chunk: &[u8]) -> (Option<String>, String) {
+    if !chunk.starts_with(b"#!") {
+        return (None, String::new());
+    }
+    let mut rest = &chunk[2..];
+    while let Some((&b, tail)) = rest.split_first() {
+        if matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c | 0x0b) {
+            rest = tail;
+        } else {
+            break;
+        }
+    }
+    let end = rest
+        .iter()
+        .position(|&b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c | 0x0b))
+        .unwrap_or(rest.len());
+    let interpreter = String::from_utf8_lossy(&rest[..end]).into_owned();
+    if interpreter.is_empty() {
+        return (None, String::new());
+    }
+    let line_end = rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
+    let args = String::from_utf8_lossy(&rest[end..line_end])
+        .trim()
+        .to_string();
+    (Some(interpreter), args)
+}
+
+/// rpmlint's `check_versioned_dep`: a `Requires`/`PreReq` on `name` (with an
+/// optional `(arch-bits)` suffix) pinned with `=` to `version`.
+fn check_versioned_dep(pkg: &Pkg, name: &str, version: &str) -> bool {
+    const RPMSENSE_EQUAL: u32 = 8;
+    for d in pkg.requires.iter().chain(&pkg.prereq) {
+        if !dep_name_matches(&d.name, name) {
+            continue;
+        }
+        if d.flags & RPMSENSE_EQUAL != RPMSENSE_EQUAL {
+            return false;
+        }
+        if d.version.as_deref() != Some(version) {
+            return false;
+        }
+        return true;
+    }
+    false
+}
+
+/// The reference's `^name(\(\w+-\d+\))?$` name match (e.g. `perl-base`,
+/// `perl-base(x86-64)`).
+fn dep_name_matches(dep: &str, name: &str) -> bool {
+    if dep == name {
+        return true;
+    }
+    let Some(inner) = dep
+        .strip_prefix(name)
+        .and_then(|s| s.strip_prefix('('))
+        .and_then(|s| s.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let Some((arch, bits)) = inner.split_once('-') else {
+        return false;
+    };
+    !arch.is_empty()
+        && arch.chars().all(|c| c.is_alphanumeric() || c == '_')
+        && !bits.is_empty()
+        && bits.chars().all(|c| c.is_ascii_digit())
+}
+
+/// rpmlint's `is_utf8`: strict UTF-8, transparently decompressing the
+/// compression formats the reference knows. A failed decompression reads as
+/// UTF-8, matching the reference's `except OSError: return True`.
+fn is_utf8_file(fname: &str, path: &str) -> bool {
+    let lower = fname.to_lowercase();
+    let decompressor = if lower.ends_with(".gz") || lower.ends_with(".z") {
+        Some("gzip")
+    } else if lower.ends_with(".bz2") {
+        Some("bzip2")
+    } else if lower.ends_with(".xz") || lower.ends_with(".lzma") {
+        Some("xz")
+    } else if lower.ends_with(".zst") {
+        Some("zstd")
+    } else {
+        None
+    };
+    match decompressor {
+        Some(tool) => std::process::Command::new(tool)
+            .arg("-dc")
+            .arg(path)
+            .output()
+            .map(|o| !o.status.success() || is_utf8(&o.stdout))
+            .unwrap_or(true),
+        None => std::fs::read(path).map(|b| is_utf8(&b)).unwrap_or(true),
+    }
 }
 
 impl FilesCheck {
@@ -846,45 +1410,203 @@ impl FilesCheck {
                 break;
             }
         }
-        // dangling symlink check
-        let is_absolute = link.starts_with('/');
-        if !is_absolute {
-            // relative link: resolve against parent
-            if let Some(parent) = Path::new(fname).parent() {
-                let abslink = parent.join(link);
-                let norm = abslink.to_string_lossy().replace("/./", "/");
-                if !pkg.files.iter().any(|f| f.name == norm) {
+        // dangling symlink checks
+        self.check_link_absolute(pkg, fname, pkgfile, st, out);
+        self.check_link_relative(pkg, fname, pkgfile, st, out);
+        self.check_link_bindir_shebang(pkg, fname, pkgfile, out);
+    }
+
+    /// The reference's exception lookup: the first matching exception's
+    /// package name, or `None` for a plain dangling symlink.
+    fn dangling_exception(&self, link: &str) -> Option<&str> {
+        for (name, re) in &self.dangling_exceptions {
+            if re.is_match(link).unwrap_or(false) {
+                return Some(name);
+            }
+        }
+        None
+    }
+
+    fn report_dangling(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        link: &str,
+        relative: bool,
+        out: &mut Filter,
+    ) {
+        match self.dangling_exception(link) {
+            // An empty exception name behaves like no exception.
+            Some(name) if !name.is_empty() => {
+                if !pkg.req_names.iter().any(|n| n == name) {
+                    add_info(out, Level::Warning, pkg, "no-dependency-on", &[name]);
+                }
+            }
+            _ => {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    if relative {
+                        "dangling-relative-symlink"
+                    } else {
+                        "dangling-symlink"
+                    },
+                    &[fname, link],
+                );
+            }
+        }
+    }
+
+    fn check_link_absolute(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        _st: &PkgState,
+        out: &mut Filter,
+    ) {
+        let link = &pkgfile.linkto;
+        let caps = match self.absolute_re.captures(link) {
+            Ok(Some(c)) => c,
+            _ => return,
+        };
+        let is_so = self.sofile_re.is_match(fname).unwrap_or(false);
+        if !is_so
+            && !pkg.files.iter().any(|f| f.name == *link)
+            && !pkg.req_names.iter().any(|n| n == link)
+        {
+            self.report_dangling(pkg, fname, link, false, out);
+        }
+        let linktop = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        if let Ok(Some(fcaps)) = self.absolute_re.captures(fname) {
+            let filetop = fcaps.get(1).map(|m| m.as_str()).unwrap_or("");
+            if filetop == linktop || self.use_relative_symlinks {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "symlink-should-be-relative",
+                    &[fname, link],
+                );
+            }
+        }
+    }
+
+    fn check_link_relative(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        _st: &PkgState,
+        out: &mut Filter,
+    ) {
+        let link = &pkgfile.linkto;
+        if self.absolute_re.is_match(link).unwrap_or(false) {
+            return;
+        }
+        let is_so = self.sofile_re.is_match(fname).unwrap_or(false);
+        if !is_so {
+            let parent = Path::new(fname)
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let abslink = crate::pkg::normalize_path(&format!("{parent}/{link}"));
+            if !pkg.files.iter().any(|f| f.name == abslink) && !pkg.req_names.contains(&abslink) {
+                self.report_dangling(pkg, fname, link, true, out);
+            }
+        }
+        let parts: Vec<&str> = fname.split('/').skip(1).collect();
+        let mut pathcomponents: &[&str] = &parts;
+        let mut mylink: Option<&str> = None;
+        let mut lastpop: Option<&str> = None;
+        let mut r = self.points_re.captures(link.as_str()).ok().flatten();
+        while let Some(caps) = r {
+            let rest = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            mylink = Some(rest);
+            if pathcomponents.is_empty() {
+                add_info(
+                    out,
+                    Level::Error,
+                    pkg,
+                    "symlink-has-too-many-up-segments",
+                    &[fname, link],
+                );
+                break;
+            }
+            lastpop = Some(pathcomponents[0]);
+            pathcomponents = &pathcomponents[1..];
+            r = self.points_re.captures(rest).ok().flatten();
+        }
+        if let (Some(mylink), Some(lastpop)) = (mylink, lastpop) {
+            if let Ok(Some(caps)) = self.absolute2_re.captures(mylink) {
+                let linktop = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+                // have we reached the root directory?
+                if pathcomponents.is_empty() && linktop != lastpop && !self.use_relative_symlinks {
+                    // relative link into other toplevel directory
                     add_info(
                         out,
                         Level::Warning,
                         pkg,
-                        "dangling-relative-symlink",
+                        "symlink-should-be-absolute",
                         &[fname, link],
                     );
                 }
             }
-        } else if !pkg.files.iter().any(|f| f.name == *link) {
-            let mut is_exception = false;
-            for e in &self.dangling_exceptions {
-                if e.is_match(link).unwrap_or(false) {
-                    is_exception = true;
-                    break;
-                }
-            }
-            if !is_exception {
-                add_info(out, Level::Warning, pkg, "dangling-symlink", &[fname, link]);
-            }
         }
-        // symlink should be relative/absolute
-        if is_absolute && self.use_relative_symlinks {
-            add_info(
-                out,
-                Level::Warning,
-                pkg,
-                "symlink-should-be-relative",
-                &[fname, link],
-            );
+    }
+
+    fn check_link_bindir_shebang(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        out: &mut Filter,
+    ) {
+        let link = &pkgfile.linkto;
+        let linkto = if link.starts_with('/') {
+            crate::pkg::normalize_path(link)
+        } else {
+            let parent = Path::new(fname)
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            crate::pkg::normalize_path(&format!("{parent}/{link}"))
+        };
+        // Link to a file not in the package, so ignore
+        let Some(realbin) = pkg.files.iter().find(|f| f.name == linkto) else {
+            return;
+        };
+        // Link to something in bindir is okay
+        if self.bin_re.is_match(&realbin.name).unwrap_or(false) {
+            return;
         }
+        if !pkgfile::is_reg(realbin.mode) {
+            return;
+        }
+        let (chunk, _istext) = self.peek(pkg, realbin, out);
+        let (interpreter, _) = script_interpreter(&chunk);
+        // Not a script with shebang, so ignore
+        let Some(interpreter) = interpreter else {
+            return;
+        };
+        // If the shebang interpreter is a dependency, it's okay
+        if pkg.requires.iter().any(|d| d.name == interpreter) {
+            return;
+        }
+        add_info(
+            out,
+            Level::Warning,
+            pkg,
+            "symlink-to-binary-with-shebang",
+            &[
+                fname,
+                &format!(
+                    "is a link to a script ({}) but missing requires for {interpreter}",
+                    realbin.name
+                ),
+            ],
+        );
     }
 
     fn check_file_dir(&self, pkg: &Pkg, fname: &str, pkgfile: &PkgFile, out: &mut Filter) {
@@ -911,6 +1633,15 @@ impl FilesCheck {
                 &[fname, &format!("{:o}", perm)],
             );
         }
+        if !FILESYS_PACKAGES.contains(&pkg.name.as_str()) && STANDARD_DIRS.contains(&fname) {
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "standard-dir-owned-by-package",
+                &[fname],
+            );
+        }
     }
 
     fn check_file_normal_file(
@@ -924,9 +1655,45 @@ impl FilesCheck {
         if !pkgfile::is_reg(pkgfile.mode) {
             return;
         }
-        let perm = pkgfile.mode & 0o7777;
+        let mut fd = FileData::default();
+        self.check_normal_setuid_bit(pkg, fname, pkgfile, out);
+        self.check_normal_libfile(pkg, fname, st);
+        self.check_normal_logfile(pkg, fname, pkgfile, &mut fd, out);
+        self.check_normal_getdata(pkg, fname, pkgfile, &mut fd, out);
+        self.check_normal_doc(pkg, fname, &mut fd, out);
+        self.check_normal_non_devel(pkg, fname, st, out);
+        self.check_normal_lib(pkg, fname, pkgfile, st, out);
+        self.check_normal_depmod_call(pkg, fname, st, out);
+        self.check_normal_install_info(pkg, fname, st, out);
+        self.check_normal_perl_temp(pkg, fname, out);
+        self.check_normal_rpaths_in_buildconfig(pkg, fname, &fd, out);
+        self.check_normal_bin(pkg, fname, pkgfile, out);
+        self.check_normal_non_readable(pkg, fname, pkgfile, out);
+        self.check_normal_zero_length(pkg, fname, pkgfile, out);
+        self.check_normal_world_w(pkg, fname, pkgfile, out);
+        self.check_normal_perl_dep(pkg, fname, st, out);
+        self.check_normal_python_dep(pkg, fname, st, out);
+        self.check_normal_python_source(pkg, fname, out);
+        self.check_normal_exec(pkg, fname, pkgfile, &mut fd, out);
+        self.check_normal_non_conf_in_etc(pkg, fname, pkgfile, out);
+        self.check_normal_python_noarch(pkg, fname, out);
+        self.check_normal_gzipped_svg(pkg, fname, out);
+        self.check_normal_pem(pkg, fname, out);
+        self.check_normal_tcl(pkg, fname, out);
+        self.check_normal_text(pkg, fname, pkgfile, &mut fd, out);
+        self.check_normal_not_utf8(pkg, fname, pkgfile, &fd, out);
+        // library without ldconfig (with #1602 fix: check interpreter too)
+        self.check_ldconfig(pkg, fname, pkgfile, st, out);
+    }
+
+    fn check_normal_setuid_bit(&self, pkg: &Pkg, fname: &str, pkgfile: &PkgFile, out: &mut Filter) {
+        let mode = pkgfile.mode;
+        let perm = mode & 0o7777;
+        if mode & 0o6000 == 0 {
+            return;
+        }
         // setuid/setgid
-        if perm & 0o4000 != 0 {
+        if mode & 0o4000 != 0 {
             add_info(
                 out,
                 Level::Error,
@@ -935,7 +1702,7 @@ impl FilesCheck {
                 &[fname, &pkgfile.user, &format!("{:o}", perm)],
             );
         }
-        if perm & 0o2000 != 0 {
+        if mode & 0o2000 != 0 {
             add_info(
                 out,
                 Level::Error,
@@ -944,20 +1711,246 @@ impl FilesCheck {
                 &[fname, &pkgfile.group, &format!("{:o}", perm)],
             );
         }
-        // world-writable
-        if perm & 0o002 != 0 {
+        if mode & 0o777 != 0o755 {
             add_info(
                 out,
                 Level::Error,
                 pkg,
-                "world-writable",
+                "non-standard-executable-perm",
                 &[fname, &format!("{:o}", perm)],
             );
         }
-        // zero-length
-        if pkgfile.size == Some(0) {
-            add_info(out, Level::Error, pkg, "zero-length", &[fname]);
+    }
+
+    fn check_normal_libfile(&self, pkg: &Pkg, fname: &str, st: &mut PkgState) {
+        let is_doc = pkg.doc_files.iter().any(|d| d == fname);
+        if !st.devel_pkg {
+            if self.lib_path_re.is_match(fname).unwrap_or(false) {
+                st.lib_file = true;
+            } else if !is_doc {
+                st.non_lib_file = Some(fname.to_string());
+            }
         }
+    }
+
+    fn check_normal_logfile(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        fd: &mut FileData,
+        out: &mut Filter,
+    ) {
+        if !self.log_file_re.is_match(fname).unwrap_or(false) {
+            return;
+        }
+        fd.nonexec_file = true;
+        if pkgfile.user != "root" {
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "non-root-user-log-file",
+                &[fname, &pkgfile.user],
+            );
+        }
+        if pkgfile.group != "root" {
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "non-root-group-log-file",
+                &[fname, &pkgfile.group],
+            );
+        }
+        if !pkg.ghost_files.iter().any(|g| g == fname) {
+            add_info(out, Level::Error, pkg, "non-ghost-file", &[fname]);
+        }
+    }
+
+    fn check_normal_getdata(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        fd: &mut FileData,
+        out: &mut Filter,
+    ) {
+        // os.access(path, R_OK): unreadable files are skipped silently here;
+        // peek (below and for symlink targets) reports read-error instead.
+        // The reference's UnicodeError branch has no Rust equivalent: paths
+        // are handled as bytes, so it cannot fail that way (divergences.toml).
+        if std::fs::File::open(&pkgfile.path).is_ok() {
+            let (chunk, istext) = self.peek(pkg, pkgfile, out);
+            fd.chunk = chunk;
+            fd.istext = istext;
+        }
+        let (interpreter, args) = script_interpreter(&fd.chunk);
+        fd.interpreter = interpreter;
+        fd.interpreter_args = args;
+        fd.is_buildconfig = fd.istext && self.buildconfigfile_re.is_match(fname).unwrap_or(false);
+    }
+
+    fn check_normal_doc(&self, pkg: &Pkg, fname: &str, fd: &mut FileData, out: &mut Filter) {
+        let is_doc = pkg.doc_files.iter().any(|d| d == fname);
+        if self.doc_re.is_match(fname).unwrap_or(false) {
+            if fd.interpreter.is_none() {
+                fd.nonexec_file = true;
+            }
+            if !is_doc {
+                add_info(
+                    out,
+                    Level::Error,
+                    pkg,
+                    "not-listed-as-documentation",
+                    &[fname],
+                );
+            }
+        }
+    }
+
+    fn check_normal_non_devel(&self, pkg: &Pkg, fname: &str, st: &PkgState, out: &mut Filter) {
+        if st.devel_pkg && fname.ends_with(".typelib") {
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "non-devel-file-in-devel-package",
+                &[fname],
+            );
+        }
+    }
+
+    fn check_normal_lib(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        st: &PkgState,
+        out: &mut Filter,
+    ) {
+        if self.lib_re.is_match(fname).unwrap_or(false)
+            && st.devel_pkg
+            && !(self.sofile_re.is_match(fname).unwrap_or(false)
+                && pkgfile::is_symlink(pkgfile.mode))
+        {
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "non-devel-file-in-devel-package",
+                &[fname],
+            );
+        }
+    }
+
+    fn check_normal_depmod_call(&self, pkg: &Pkg, fname: &str, st: &PkgState, out: &mut Filter) {
+        let caps = match self.depmod_kernel_re.captures(fname) {
+            Ok(Some(c)) if !st.is_kernel_package => c,
+            _ => return,
+        };
+        let kernel_version = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        if st.postin.is_empty() || !self.depmod_re.is_match(&st.postin).unwrap_or(false) {
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "module-without-depmod-postin",
+                &[fname],
+            );
+        } else if !depmod_call_for_kernel(&st.postin, kernel_version) {
+            add_info(out, Level::Error, pkg, "postin-with-wrong-depmod", &[fname]);
+        }
+        if st.postun.is_empty() || !self.depmod_re.is_match(&st.postun).unwrap_or(false) {
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "module-without-depmod-postun",
+                &[fname],
+            );
+        } else if !depmod_call_for_kernel(&st.postun, kernel_version) {
+            add_info(out, Level::Error, pkg, "postun-with-wrong-depmod", &[fname]);
+        }
+    }
+
+    fn check_normal_install_info(&self, pkg: &Pkg, fname: &str, st: &PkgState, out: &mut Filter) {
+        // check install-info call in %post and %postun
+        if !fname.starts_with("/usr/share/info/") {
+            return;
+        }
+        if !st.postin.is_empty() && !self.install_info_re.is_match(&st.postin).unwrap_or(false) {
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "postin-without-install-info",
+                &[fname],
+            );
+        }
+        let postun_ok =
+            !st.postun.is_empty() && self.install_info_re.is_match(&st.postun).unwrap_or(false);
+        let preun_ok =
+            !st.preun.is_empty() && self.install_info_re.is_match(&st.preun).unwrap_or(false);
+        // NB: the reference checks postun/preun here yet still reports
+        // 'postin-without-install-info'.
+        if !postun_ok && !preun_ok && (!st.postun.is_empty() || !st.preun.is_empty()) {
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "postin-without-install-info",
+                &[fname],
+            );
+        }
+    }
+
+    fn check_normal_perl_temp(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
+        if self.perl_temp_file_re.is_match(fname).unwrap_or(false) {
+            add_info(out, Level::Warning, pkg, "perl-temp-file", &[fname]);
+        }
+    }
+
+    fn check_normal_rpaths_in_buildconfig(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        fd: &FileData,
+        out: &mut Filter,
+    ) {
+        if fd.is_buildconfig {
+            if let Some(ln) = pkg.grep(&self.buildconfig_rpath_re, fname) {
+                add_info(
+                    out,
+                    Level::Error,
+                    pkg,
+                    "rpath-in-buildconfig",
+                    &[fname, "lines", &ln.to_string()],
+                );
+            }
+        }
+    }
+
+    fn check_normal_bin(&self, pkg: &Pkg, fname: &str, pkgfile: &PkgFile, out: &mut Filter) {
+        if self.bin_re.is_match(fname).unwrap_or(false) && pkgfile.mode & 0o111 == 0 {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "non-executable-in-bin",
+                &[fname, &format!("{:o}", pkgfile.mode & 0o7777)],
+            );
+        }
+    }
+
+    fn check_normal_non_readable(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        out: &mut Filter,
+    ) {
+        let perm = pkgfile.mode & 0o7777;
         // non-readable (#1291: skip ghost files)
         if perm & 0o444 == 0 && !pkgfile.is_ghost() {
             add_info(
@@ -968,22 +1961,398 @@ impl FilesCheck {
                 &[fname, &format!("{:o}", perm)],
             );
         }
-        // executable marked as config
-        if perm & 0o111 != 0 && pkgfile.is_config() {
+    }
+
+    fn check_normal_zero_length(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        out: &mut Filter,
+    ) {
+        // zero-length
+        if pkgfile.size == Some(0) {
+            add_info(out, Level::Error, pkg, "zero-length", &[fname]);
+        }
+    }
+
+    fn check_normal_world_w(&self, pkg: &Pkg, fname: &str, pkgfile: &PkgFile, out: &mut Filter) {
+        let perm = pkgfile.mode & 0o7777;
+        // world-writable
+        if perm & 0o002 != 0 {
             add_info(
                 out,
                 Level::Error,
                 pkg,
-                "executable-marked-as-config-file",
-                &[fname],
+                "world-writable",
+                &[fname, &format!("{:o}", perm)],
             );
         }
+    }
+
+    fn check_normal_perl_dep(&self, pkg: &Pkg, fname: &str, st: &mut PkgState, out: &mut Filter) {
+        if st.perl_dep_error {
+            return;
+        }
+        let caps = match self.perl_re.captures(fname) {
+            Ok(Some(c)) => c,
+            _ => return,
+        };
+        let vers = if self.perl_version_trick {
+            format!(
+                "{}.{}",
+                caps.get(1).map(|m| m.as_str()).unwrap_or(""),
+                caps.get(2).map(|m| m.as_str()).unwrap_or("")
+            )
+        } else {
+            format!(
+                "{}{}",
+                caps.get(1).map(|m| m.as_str()).unwrap_or(""),
+                caps.get(2).map(|m| m.as_str()).unwrap_or("")
+            )
+        };
+        let compat = format!("perl(:MODULE_COMPAT_{vers})");
+        let has_compat = pkg
+            .requires
+            .iter()
+            .chain(&pkg.recommends)
+            .chain(&pkg.suggests)
+            .any(|d| d.name == compat);
+        if !(check_versioned_dep(pkg, "perl-base", &vers)
+            || check_versioned_dep(pkg, "perl", &vers)
+            || has_compat)
+        {
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "no-dependency-on",
+                &["perl-base", &vers],
+            );
+            st.perl_dep_error = true;
+        }
+    }
+
+    fn check_normal_python_dep(&self, pkg: &Pkg, fname: &str, st: &mut PkgState, out: &mut Filter) {
+        if st.python_dep_error {
+            return;
+        }
+        let caps = match self.python_re.captures(fname) {
+            Ok(Some(c)) => c,
+            _ => return,
+        };
+        let ver = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        if !["python", "python-base", "python(abi)"]
+            .iter()
+            .any(|dep| check_versioned_dep(pkg, dep, ver))
+        {
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "no-dependency-on",
+                &["python-base", ver],
+            );
+            st.python_dep_error = true;
+        }
+    }
+
+    /// The reference's `python_bytecode_to_script`.
+    fn python_bytecode_to_script(&self, path: &str) -> Option<String> {
+        if let Ok(Some(caps)) = self.python_bytecode_pep3147_re.captures(path) {
+            return Some(format!(
+                "{}/{}.py",
+                caps.get(1).map(|m| m.as_str()).unwrap_or(""),
+                caps.get(2).map(|m| m.as_str()).unwrap_or("")
+            ));
+        }
+        if let Ok(Some(caps)) = self.python_bytecode_re.captures(path) {
+            return Some(format!(
+                "{}.py",
+                caps.get(1).map(|m| m.as_str()).unwrap_or("")
+            ));
+        }
+        None
+    }
+
+    fn check_normal_python_source(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
+        let source_file = match self.python_bytecode_to_script(fname) {
+            Some(s) => s,
+            None => return,
+        };
+        match pkg.files.iter().find(|f| f.name == source_file) {
+            None => {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "python-bytecode-without-source",
+                    &[fname],
+                );
+            }
+            Some(src) => {
+                if pkg.readlink(src).is_none() {
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "python-bytecode-without-source",
+                        &[fname],
+                    );
+                }
+            }
+        }
+    }
+
+    fn check_normal_exec(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        fd: &mut FileData,
+        out: &mut Filter,
+    ) {
+        let mode = pkgfile.mode;
+        let perm = mode & 0o7777;
+        let mode_is_exec = mode & 0o111 != 0;
+        if mode & 0o100 != 0 && perm != 0o755 {
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "non-standard-executable-perm",
+                &[fname, &format!("{:o}", perm)],
+            );
+        }
+        if mode_is_exec {
+            if pkg.config_files.iter().any(|c| c == fname) {
+                add_info(
+                    out,
+                    Level::Error,
+                    pkg,
+                    "executable-marked-as-config-file",
+                    &[fname],
+                );
+            }
+            if !fd.nonexec_file {
+                // doc_regex and log_regex checked earlier, no match,
+                // check rest of usual cases here.  Sourced scripts have
+                // their own check, so disregard them here.
+                fd.nonexec_file = fname.ends_with(".pc")
+                    || self.compr_re.is_match(fname).unwrap_or(false)
+                    || self.includefile_re.is_match(fname).unwrap_or(false)
+                    || self.develfile_re.is_match(fname).unwrap_or(false)
+                    || fname.starts_with("/etc/logrotate.d/");
+            }
+            if fd.nonexec_file {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "spurious-executable-perm",
+                    &[fname],
+                );
+            }
+        }
+    }
+
+    fn check_normal_non_conf_in_etc(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        out: &mut Filter,
+    ) {
         // non-conffile in /etc
         if fname.starts_with("/etc/") && !pkgfile.is_config() && !pkgfile.is_ghost() {
             add_info(out, Level::Warning, pkg, "non-conffile-in-etc", &[fname]);
         }
-        // library without ldconfig (with #1602 fix: check interpreter too)
-        self.check_ldconfig(pkg, fname, pkgfile, st, out);
+    }
+
+    fn check_normal_python_noarch(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
+        if pkg.arch == "noarch" && fname.starts_with("/usr/lib64/python") {
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "noarch-python-in-64bit-path",
+                &[fname],
+            );
+        }
+    }
+
+    fn check_normal_gzipped_svg(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
+        if fname.ends_with(".svgz")
+            && !pkg.files.iter().any(|f| f.name == fname[..fname.len() - 1])
+            && self.scalable_icon_re.is_match(fname).unwrap_or(false)
+        {
+            add_info(out, Level::Warning, pkg, "gzipped-svg-icon", &[fname]);
+        }
+    }
+
+    fn check_normal_pem(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
+        if !fname.ends_with(".pem") || pkg.ghost_files.iter().any(|g| g == fname) {
+            return;
+        }
+        // NB: the reference's regexes are anchored without re.M, so they only
+        // match a file whose whole content is the BEGIN line; replicated here.
+        if pkg.grep(&self.start_certificate_re, fname).is_some() {
+            add_info(out, Level::Warning, pkg, "pem-certificate", &[fname]);
+        }
+        if pkg.grep(&self.start_private_key_re, fname).is_some() {
+            add_info(out, Level::Error, pkg, "pem-private-key", &[fname]);
+        }
+    }
+
+    fn check_normal_tcl(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
+        if self.tcl_re.is_match(fname).unwrap_or(false) {
+            add_info(out, Level::Error, pkg, "tcl-extension-file", &[fname]);
+        }
+    }
+
+    fn check_normal_text(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        fd: &mut FileData,
+        out: &mut Filter,
+    ) {
+        if !fd.istext {
+            return;
+        }
+        let mode = pkgfile.mode;
+        let perm = mode & 0o7777;
+        let mode_is_exec = mode & 0o111 != 0;
+        let is_doc = pkg.doc_files.iter().any(|d| d == fname);
+        // ignore perl module shebang -- TODO: disputed...
+        if fname.ends_with(".pm") {
+            fd.interpreter = None;
+        }
+        // sourced scripts should not be executable
+        if self.sourced_script_re.is_match(fname).unwrap_or(false) {
+            if mode_is_exec {
+                add_info(
+                    out,
+                    Level::Error,
+                    pkg,
+                    "executable-sourced-script",
+                    &[fname, &format!("{:o}", perm)],
+                );
+            }
+        // ...but executed ones should
+        } else if fd.interpreter.is_some()
+            || mode_is_exec
+            || self.script_re.is_match(fname).unwrap_or(false)
+        {
+            if let Some(interpreter) = fd.interpreter.clone() {
+                // rpmlint#31: the interpreter check only applies to executable
+                // files or files in script paths.
+                if mode_is_exec || self.script_re.is_match(fname).unwrap_or(false) {
+                    match self.interpreter_re.captures(&interpreter) {
+                        Ok(Some(caps)) if caps.get(1).map(|m| m.as_str()) == Some("env") => {
+                            add_info(
+                                out,
+                                Level::Error,
+                                pkg,
+                                "env-script-interpreter",
+                                &[fname, &interpreter, &fd.interpreter_args],
+                            );
+                        }
+                        Ok(Some(_)) => {}
+                        _ => {
+                            add_info(
+                                out,
+                                Level::Error,
+                                pkg,
+                                "wrong-script-interpreter",
+                                &[fname, &interpreter, &fd.interpreter_args],
+                            );
+                        }
+                    }
+                }
+            } else if !fd.nonexec_file
+                && !(self.lib_path_re.is_match(fname).unwrap_or(false) && fname.ends_with(".la"))
+            {
+                add_info(out, Level::Error, pkg, "script-without-shebang", &[fname]);
+            }
+            if !mode_is_exec && !is_doc {
+                if let Some(interpreter) = &fd.interpreter {
+                    if interpreter.starts_with('/') {
+                        add_info(
+                            out,
+                            Level::Error,
+                            pkg,
+                            "non-executable-script",
+                            &[
+                                fname,
+                                &format!("{:o}", perm),
+                                interpreter,
+                                &fd.interpreter_args,
+                            ],
+                        );
+                    }
+                }
+            }
+            if fd.chunk.contains(&b'\r') {
+                add_info(
+                    out,
+                    Level::Error,
+                    pkg,
+                    "wrong-script-end-of-line-encoding",
+                    &[fname],
+                );
+            }
+        } else if is_doc && !self.skipdocs_re.is_match(fname).unwrap_or(false) {
+            if fd.chunk.contains(&b'\r') {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "wrong-file-end-of-line-encoding",
+                    &[fname],
+                );
+            }
+            // We check only doc text files for UTF-8-ness;
+            // checking everything may be slow and can generate
+            // lots of unwanted noise.
+            if !is_utf8_file(fname, &pkgfile.path) {
+                add_info(out, Level::Warning, pkg, "file-not-utf8", &[fname]);
+            }
+        }
+        let text = String::from_utf8_lossy(&fd.chunk);
+        if self.fsf_license_re.is_match(text.as_ref()).unwrap_or(false)
+            && self
+                .fsf_wrong_address_re
+                .is_match(text.as_ref())
+                .unwrap_or(false)
+        {
+            add_info(out, Level::Error, pkg, "incorrect-fsf-address", &[fname]);
+        }
+    }
+
+    fn check_normal_not_utf8(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        fd: &FileData,
+        out: &mut Filter,
+    ) {
+        let is_doc = pkg.doc_files.iter().any(|d| d == fname);
+        if !fd.istext
+            && is_doc
+            && !fd.chunk.is_empty()
+            && self.compr_re.is_match(fname).unwrap_or(false)
+        {
+            // compressed docs, eg. info and man files etc
+            let base = self.compr_re.replace(fname, "").to_string();
+            if !self.skipdocs_re.is_match(&base).unwrap_or(false)
+                && !is_utf8_file(fname, &pkgfile.path)
+            {
+                add_info(out, Level::Warning, pkg, "file-not-utf8", &[fname]);
+            }
+        }
     }
 
     fn check_ldconfig(
@@ -1046,7 +2415,15 @@ mod tests {
     use crate::color::Color;
 
     fn test_config() -> Config {
-        Config::default()
+        // Load the bundled defaults so the check sees the same configuration
+        // as the real binary (empty Config::default would leave regexes like
+        // MetaPackageRegexp empty, matching everything).
+        let defaults: toml::Table = toml::from_str(include_str!("../../data/configdefaults.toml"))
+            .expect("parse configdefaults");
+        Config {
+            configuration: defaults,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -1106,5 +2483,195 @@ mod tests {
                 .unwrap_or(true)
         );
         assert!(!check.ldconfig_re.is_match("   # ldconfig").unwrap_or(true));
+    }
+
+    fn fixture_path(name: &str) -> String {
+        format!(
+            "{}/../../tests/parity/pkg/inputs/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            name
+        )
+    }
+
+    fn run_files_check(rpm: &str, config: &Config) -> (Vec<String>, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = Pkg::open(std::path::Path::new(rpm), dir.path()).expect("open fixture");
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(config);
+        check.check(&pkg, config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        (names, dir)
+    }
+
+    fn assert_has(names: &[String], finding: &str) {
+        assert!(
+            names.iter().any(|n| n == finding),
+            "expected {finding}, got: {names:?}"
+        );
+    }
+
+    fn assert_lacks(names: &[String], finding: &str) {
+        assert!(
+            !names.iter().any(|n| n == finding),
+            "unexpected {finding} in: {names:?}"
+        );
+    }
+
+    #[test]
+    fn files_check_scripts_kitchen_sink() {
+        let config = test_config();
+        let (names, _dir) = run_files_check(
+            &fixture_path("filescheck-scripts-1.0-1.noarch.rpm"),
+            &config,
+        );
+        // script findings
+        assert_has(&names, "env-script-interpreter");
+        assert_has(&names, "executable-sourced-script");
+        assert_has(&names, "wrong-script-interpreter");
+        assert_has(&names, "script-without-shebang");
+        assert_has(&names, "non-executable-script");
+        assert_has(&names, "wrong-script-end-of-line-encoding");
+        // permission findings
+        assert_has(&names, "non-executable-in-bin");
+        assert_has(&names, "spurious-executable-perm");
+        assert_has(&names, "non-standard-executable-perm");
+        // documentation and encoding
+        assert_has(&names, "wrong-file-end-of-line-encoding");
+        assert_has(&names, "file-not-utf8");
+        assert_has(&names, "incorrect-fsf-address");
+        // symlinks
+        assert_has(&names, "symlink-has-too-many-up-segments");
+        assert_has(&names, "symlink-should-be-relative");
+        assert_has(&names, "symlink-to-binary-with-shebang");
+        assert_has(&names, "dangling-symlink");
+        // logs
+        assert_has(&names, "non-root-user-log-file");
+        assert_has(&names, "non-root-group-log-file");
+        assert_has(&names, "non-ghost-file");
+        // pem
+        assert_has(&names, "pem-certificate");
+        assert_has(&names, "pem-private-key");
+        // misc
+        assert_has(&names, "tcl-extension-file");
+        assert_has(&names, "perl-temp-file");
+        assert_has(&names, "python-bytecode-without-source");
+        assert_has(&names, "rpath-in-buildconfig");
+        assert_has(&names, "gzipped-svg-icon");
+        assert_has(&names, "noarch-python-in-64bit-path");
+        assert_has(&names, "standard-dir-owned-by-package");
+        assert_has(&names, "dir-or-file-in-opt");
+        // no read errors: extraction works
+        assert_lacks(&names, "read-error");
+    }
+
+    #[test]
+    fn files_check_devel_non_devel_file() {
+        let config = test_config();
+        let (names, _dir) =
+            run_files_check(&fixture_path("filescheck-devel-1.0-1.noarch.rpm"), &config);
+        assert_has(&names, "non-devel-file-in-devel-package");
+    }
+
+    #[test]
+    fn files_check_depmod_variants() {
+        let config = test_config();
+        let (ok_names, _d1) = run_files_check(
+            &fixture_path("filescheck-depmod-ok-1.0-1.noarch.rpm"),
+            &config,
+        );
+        assert_lacks(&ok_names, "module-without-depmod-postin");
+        assert_lacks(&ok_names, "module-without-depmod-postun");
+        assert_lacks(&ok_names, "postin-with-wrong-depmod");
+        assert_lacks(&ok_names, "postun-with-wrong-depmod");
+
+        let (wrong_names, _d2) = run_files_check(
+            &fixture_path("filescheck-depmod-wrong-1.0-1.noarch.rpm"),
+            &config,
+        );
+        assert_has(&wrong_names, "postin-with-wrong-depmod");
+        assert_has(&wrong_names, "postun-with-wrong-depmod");
+
+        let (missing_names, _d3) = run_files_check(
+            &fixture_path("filescheck-depmod-missing-1.0-1.noarch.rpm"),
+            &config,
+        );
+        assert_has(&missing_names, "module-without-depmod-postin");
+        assert_has(&missing_names, "module-without-depmod-postun");
+    }
+
+    #[test]
+    fn files_check_install_info_variants() {
+        let config = test_config();
+        let (ok_names, _d1) = run_files_check(
+            &fixture_path("filescheck-installinfo-ok-1.0-1.noarch.rpm"),
+            &config,
+        );
+        assert_lacks(&ok_names, "postin-without-install-info");
+
+        let (postin_names, _d2) = run_files_check(
+            &fixture_path("filescheck-installinfo-postin-1.0-1.noarch.rpm"),
+            &config,
+        );
+        assert_has(&postin_names, "postin-without-install-info");
+
+        let (postun_names, _d3) = run_files_check(
+            &fixture_path("filescheck-installinfo-postun-1.0-1.noarch.rpm"),
+            &config,
+        );
+        // NB: the reference reports postin-without-install-info for the
+        // postun case too.
+        assert_has(&postun_names, "postin-without-install-info");
+    }
+
+    #[test]
+    fn files_check_deps_ok_no_missing_deps() {
+        let config = test_config();
+        let (names, _dir) = run_files_check(
+            &fixture_path("filescheck-deps-ok-1.0-1.noarch.rpm"),
+            &config,
+        );
+        assert_lacks(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn files_check_read_error_on_missing_file() {
+        // Mutating a PkgFile path to a nonexistent file makes peek fail,
+        // emitting read-error.
+        let config = test_config();
+        let rpm = fixture_path("filescheck-scripts-1.0-1.noarch.rpm");
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = Pkg::open(std::path::Path::new(&rpm), dir.path()).expect("open");
+        // Point a symlink target at a missing path so peek fails with
+        // read-error (check_link_bindir_shebang peeks the target).
+        if let Some(f) = pkg
+            .files
+            .iter_mut()
+            .find(|f| f.name == "/usr/share/filescheck-scripts/runme.sh")
+        {
+            f.path = "/nonexistent/missing".to_string();
+        }
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "read-error");
+    }
+
+    #[test]
+    fn files_check_symlink_absolute_with_config() {
+        // With UseRelativeSymlinks=false, a relative symlink into another
+        // toplevel dir emits symlink-should-be-absolute instead of
+        // symlink-should-be-relative.
+        let mut config = test_config();
+        config.configuration.insert(
+            "UseRelativeSymlinks".to_string(),
+            toml::Value::Boolean(false),
+        );
+        let (names, _dir) = run_files_check(
+            &fixture_path("filescheck-scripts-1.0-1.noarch.rpm"),
+            &config,
+        );
+        assert_has(&names, "symlink-should-be-absolute");
+        assert_lacks(&names, "symlink-should-be-relative");
     }
 }

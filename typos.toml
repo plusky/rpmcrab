@@ -27,3 +27,5 @@ extend-exclude = [
 obsoletion = "obsoletion" 
 # non-owner-writeable-only-crontab-file is the upstream check name.
 writeable = "writeable"
+# gir is a GObject introspection file extension, not a typo for git.
+gir = "gir"
