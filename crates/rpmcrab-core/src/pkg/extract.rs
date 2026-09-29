@@ -1,7 +1,7 @@
 //! Payload extraction and libmagic, mirroring rpmlint's `Pkg._extract_rpm` and
 //! `get_magic`.
 //!
-//! Extraction shells out to `rpm2archive | tar -xz` (fallback
+//! Extraction shells out to `set -o pipefail; rpm2archive | tar -xz` (fallback
 //! `rpm2cpio | cpio -id`) — the same commands rpmlint runs — because librpm's
 //! safe `archive::PackageReader` yields no entries for compressed payloads
 //! (`docs/DESIGN.md` §3.1).
@@ -51,19 +51,29 @@ fn sh_quote(p: &Path) -> String {
 /// stdin. Pure, so the rpm2archive-vs-rpm2cpio branching and its quoting are
 /// golden-testable without the tools installed. `rpm` must already be absolute
 /// (the command runs with `cwd` = the tempdir). `None` when neither tool exists.
+///
+/// `set -o pipefail`: the pipeline must fail when the extractor fails, not
+/// just when the unpacker does. BSD tar exits 0 on empty stdin, so without it
+/// a garbage rpm "extracts" to an empty directory on macOS instead of
+/// erroring. On shells without pipefail (dash) it is a silent no-op, where
+/// GNU tar already fails the pipeline on garbage input.
 fn extract_command(
     rpm: &Path,
     have_rpm2archive: bool,
     have_rpm2cpio: bool,
 ) -> Option<(String, bool)> {
+    const PIPEFAIL: &str = "set -o pipefail; ";
     if have_rpm2archive {
         Some((
-            "rpm2archive - | tar -xz && chmod -R +rX .".to_string(),
+            format!("{PIPEFAIL}rpm2archive - | tar -xz && chmod -R +rX ."),
             true,
         ))
     } else if have_rpm2cpio {
         Some((
-            format!("rpm2cpio {} | cpio -id && chmod -R +rX .", sh_quote(rpm)),
+            format!(
+                "{PIPEFAIL}rpm2cpio {} | cpio -id && chmod -R +rX .",
+                sh_quote(rpm)
+            ),
             false,
         ))
     } else {
@@ -73,10 +83,10 @@ fn extract_command(
 
 /// Extract the payload of `rpm` into `dir` (which must already exist), matching
 /// rpmlint's `_extract_rpm`:
-/// `rpm2archive - | tar -xz && chmod -R +rX .` with the rpm on stdin, or
-/// `rpm2cpio <quoted> | cpio -id && chmod -R +rX .` when `rpm2archive` is
-/// absent. stderr is discarded and `LC_ALL`/`LANGUAGE` are forced to English,
-/// as the reference does.
+/// `set -o pipefail; rpm2archive - | tar -xz && chmod -R +rX .` with the rpm
+/// on stdin, or `set -o pipefail; rpm2cpio <quoted> | cpio -id && chmod -R +rX .`
+/// when `rpm2archive` is absent. stderr is discarded and `LC_ALL`/`LANGUAGE`
+/// are forced to English, as the reference does.
 pub fn extract(rpm: &Path, dir: &Path) -> Result<(), ExtractError> {
     if !dir.is_dir() {
         return Err(ExtractError::BadDir(dir.to_path_buf()));
@@ -175,7 +185,10 @@ mod tests {
     #[test]
     fn extract_command_prefers_rpm2archive() {
         let (cmd, stdin) = extract_command(Path::new("/x/y.rpm"), true, true).unwrap();
-        assert_eq!(cmd, "rpm2archive - | tar -xz && chmod -R +rX .");
+        assert_eq!(
+            cmd,
+            "set -o pipefail; rpm2archive - | tar -xz && chmod -R +rX ."
+        );
         assert!(stdin, "rpm2archive reads the rpm on stdin");
     }
 
@@ -184,7 +197,7 @@ mod tests {
         let (cmd, stdin) = extract_command(Path::new("/x/it's y.rpm"), false, true).unwrap();
         assert_eq!(
             cmd,
-            "rpm2cpio '/x/it'\\''s y.rpm' | cpio -id && chmod -R +rX ."
+            "set -o pipefail; rpm2cpio '/x/it'\\''s y.rpm' | cpio -id && chmod -R +rX ."
         );
         assert!(!stdin, "rpm2cpio takes the path as an argument");
     }
