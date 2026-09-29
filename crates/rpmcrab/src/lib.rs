@@ -11,8 +11,9 @@
 #![forbid(unsafe_code)]
 
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Instant;
 
 use clap::Parser;
 use rpmcrab_core::config;
@@ -24,6 +25,15 @@ use rpmcrab_core::{color::Color, term};
 /// the crate version (`docs/DESIGN.md` §4.5). The crate's own version is
 /// separate (`rpmcrab --version`).
 const RPMLINT_VERSION: &str = "2.10.0";
+
+/// `helpers.print_warning`: the message in red, on stderr. The reference's
+/// `Color` table is chosen by **stdout**'s tty-ness even for stderr writes, so
+/// this shares the report's colour table.
+macro_rules! warn {
+    ($color:expr, $($arg:tt)*) => {
+        eprintln!("{}{}{}", $color.red, format_args!($($arg)*), $color.reset)
+    };
+}
 
 /// `rpmcrab` — a drop-in replacement for rpmlint 2.10.0.
 #[derive(Parser, Debug)]
@@ -111,11 +121,16 @@ pub fn run() -> ExitCode {
     }
     let cli = Cli::parse();
 
+    // The reference picks its colour table from stdout's tty-ness and uses it
+    // for stderr diagnostics too, so it is needed before the first warning.
+    let color = Color::for_tty(std::io::stdout().is_terminal());
+
     // Load configuration. A nonexistent -c path is a usage error (exit 2) with
     // the reference's exact message (`cli.py:_validate_conf_location`).
     for path in &cli.config {
         if !path.exists() {
-            eprintln!(
+            warn!(
+                color,
                 "File or dir with user specified configuration '{}' does not exist",
                 path.display()
             );
@@ -142,66 +157,346 @@ pub fn run() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    // Validate positional paths (missing -> exit 2).
+    // Validate positional paths (missing -> exit 2). This is `cli.py`'s job and
+    // it runs before `Lint` is built, which is why an rpmlint package on a
+    // non-existent path exits 2 rather than taking the skip path below.
     for f in &cli.files {
         if !f.exists() {
-            eprintln!(
-                "(none): E: fatal error, no such file or directory: {}",
+            warn!(
+                color,
+                "The file or directory '{}' does not exist",
                 f.display()
             );
             return ExitCode::from(2);
         }
     }
 
-    // rpmlintrc: explicit -r files. Auto-discovery is wired at M3.
-    // TODO(M3): rpmlintrc auto-discovery (OBS SOURCES dirs + single-positional).
-    for rc in &cli.rpmlintrc {
+    // rpmlintrc: explicit `-r` files win outright; with none, auto-discovery
+    // looks in the two OBS SOURCES directories and then beside a single
+    // positional argument (`lint.py:198-224`).
+    let mut rc_files = cli.rpmlintrc.clone();
+    if rc_files.is_empty() {
+        for dir in ["/home/abuild/rpmbuild/SOURCES", "/usr/src/packages/SOURCES"] {
+            rc_files.extend(find_rpmlintrc_files(Path::new(dir)));
+        }
+        // A lone positional argument also looks next to itself, so that
+        // `rpmlint foo.spec` picks up `foo.rpmlintrc`.
+        if rc_files.is_empty() && cli.files.len() == 1 {
+            let mut arg = cli.files[0].clone();
+            if arg.is_file() {
+                arg.pop();
+            }
+            rc_files.extend(find_rpmlintrc_files(&arg));
+        }
+    }
+    if rc_files.len() > 1 {
+        warn!(
+            color,
+            "There are multiple items to be loaded: {}.",
+            rc_files
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+    for rc in &rc_files {
         if let Err(e) = config::load_rpmlintrc(&mut cfg, rc) {
-            eprintln!("(none): E: error loading rpmlintrc {}: {e}", rc.display());
+            warn!(
+                color,
+                "(none): E: error loading rpmlintrc {}: {e}",
+                rc.display()
+            );
             return ExitCode::from(2);
         }
     }
+    // The header's `rpmlintrc:` block lists what was loaded, auto-discovered
+    // files included.
+    cfg.rpmlintrc_display = rc_files.iter().map(|p| p.display().to_string()).collect();
 
-    // -i/--installed: resolve the rpmdb names now (rpmlint `_load_installed_rpms`)
-    // and emit the no-such-rpm warning. Only the headers come back: building a
-    // `Pkg` walks every file of every match, and no check runs until M3, so a
-    // wide glob would stat the whole system for nothing.
+    // `Lint.rpmlint_package`: never lint an rpmlint package, which uses a
+    // modified configuration and crashes the old rpmlint-mini (`lint.py:26,63-66`).
+    if cli.files.iter().any(|f| is_rpmlint_package(f)) {
+        println!("Skipping rpmlint for rpmlint package!");
+        return ExitCode::SUCCESS;
+    }
+
+    let start = Instant::now();
+    let width = term::terminal_width();
+    let checks = rpmcrab_core::check::load(&cfg, cli.checks.as_deref());
+    let mut lint = match Lint::new(cfg, checks, color, width) {
+        Ok(l) => l,
+        Err(e) => {
+            warn!(
+                color,
+                "(none): E: fatal error in configuration filters: {e}"
+            );
+            return ExitCode::from(1);
+        }
+    };
+    lint.set_audit_rpmlintrc(!cli.ignore_unused_rpmlintrc);
+    let extract_dir = lint.config().extract_dir();
+
+    // `Lint.validate_files`: expand the arguments, then sort so the output is
+    // stable regardless of the order they were given in.
+    let mut inputs = expand_filelist(&cli.files);
+    inputs.sort();
+
+    // `Lint.validate_installed_packages` runs the installed packages in
+    // argument order, and only runs the post-checks when there are no plain
+    // rpm/spec arguments (`lint.py:248`).
     if !cli.installed.is_empty() {
         match rpmcrab_core::pkg::installed::find_installed(&cli.installed) {
-            Ok((_headers, missing)) => {
+            Ok((headers, missing)) => {
                 for name in &missing {
-                    eprintln!("(none): E: there is no installed rpm \"{name}\".");
+                    warn!(color, "(none): E: there is no installed rpm \"{name}\".");
+                }
+                // The plain-file run owns the `is_last` pass when there is one.
+                let run_post_checks = inputs.is_empty();
+                let last = headers.len().saturating_sub(1);
+                // One `Pkg` at a time: building one walks every file it
+                // declares, so a glob like `lib*` would otherwise hold
+                // hundreds of fully-expanded packages at once.
+                for (i, header) in headers.into_iter().enumerate() {
+                    let mut pkg = rpmcrab_core::pkg::Pkg::installed(header);
+                    lint.run_package(&mut pkg, run_post_checks && i == last);
                 }
             }
             // Deliberate divergence: the reference lets a failed `rpmtsOpenDB`
             // raise, so it dies with a Python traceback. One line and exit 1
             // carries the same information to a shell user.
             Err(e) => {
-                eprintln!("(none): E: fatal error reading the rpmdb: {e}");
+                warn!(color, "(none): E: fatal error reading the rpmdb: {e}");
                 return ExitCode::from(1);
             }
         }
     }
 
-    // TODO(M3): -t time-report, -T profile, --checks filtering are parsed and
-    // currently no-ops.
-
-    // M1: no real checks are registered yet (they arrive at M3). The Lint still
-    // renders the full header/footer so the pipeline is exercised end to end.
-    let color = Color::for_tty(std::io::stdout().is_terminal());
-    let width = term::terminal_width();
-    let mut lint = match Lint::new(cfg, Vec::new(), color, width) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("(none): E: fatal error in configuration filters: {e}");
-            return ExitCode::from(1);
+    let last = inputs.len().saturating_sub(1);
+    for (i, path) in inputs.iter().enumerate() {
+        if path.extension().is_some_and(|e| e == "spec") {
+            // FakePkg / SpecCheck are not ported yet, so a .spec input is
+            // reported as unreadable rather than silently ignored. Recorded in
+            // tests/parity/divergences.toml.
+            warn!(
+                color,
+                "(none): E: fatal error while reading {}: .spec support is not implemented yet",
+                path.display()
+            );
+            return ExitCode::from(3);
         }
-    };
-    lint.run_checks();
-    // The header counts CLI args (files + installed); the footer counts
-    // validated inputs. M1 registers no checks, so nothing is validated yet.
+        // `Lint.validate_file`: any failure to read the package is fatal, and
+        // `-v` re-raises instead of reporting (`lint.py:293-297`).
+        let mut pkg = match rpmcrab_core::pkg::Pkg::open(path, &extract_dir) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(
+                    color,
+                    "(none): E: fatal error while reading {}: {e}",
+                    path.display()
+                );
+                if cli.verbose {
+                    return ExitCode::from(1);
+                }
+                return ExitCode::from(3);
+            }
+        };
+        lint.run_package(&mut pkg, i == last);
+    }
+
+    // `Lint.validate_files`: with no file arguments and nothing validated from
+    // `-i`, there is nothing to do (`lint.py:257-262`).
+    if cli.files.is_empty() && lint.packages_checked() == 0 {
+        warn!(
+            color,
+            "There are no files to process nor additional arguments."
+        );
+        warn!(color, "Nothing to do, aborting.");
+    }
+
+    // The header counts CLI args (files + installed); the footer counts the
+    // inputs that were actually validated.
     let arg_count = cli.files.len() + cli.installed.len();
-    let out = lint.render(RPMLINT_VERSION, arg_count, 0, 0, 0.0);
+    let duration = start.elapsed().as_secs_f64();
+    let out = lint.render(
+        RPMLINT_VERSION,
+        arg_count,
+        cli.time_report,
+        cli.profile,
+        duration,
+    );
     print!("{out}");
     ExitCode::from(u8::try_from(lint.exit_code()).unwrap_or(1))
+}
+
+/// `Lint._find_rpmlintrc_files`: `*.rpmlintrc` first, then `*-rpmlintrc`, each
+/// group sorted. Both patterns are a bare suffix in a single directory, which
+/// `fnmatch` and `Path.glob` reduce to.
+fn find_rpmlintrc_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let names: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file())
+        .collect();
+    let mut out = Vec::new();
+    for suffix in [".rpmlintrc", "-rpmlintrc"] {
+        let mut group: Vec<PathBuf> = names
+            .iter()
+            .filter(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().ends_with(suffix))
+            })
+            .cloned()
+            .collect();
+        group.sort();
+        out.extend(group);
+    }
+    out
+}
+
+/// `Lint._expand_filelist`: a directory expands to the packages beneath it, and
+/// only `.rpm`, `.spm` and `.spec` files are kept.
+fn expand_filelist(files: &[PathBuf]) -> Vec<PathBuf> {
+    let mut packages = Vec::new();
+    for path in files {
+        if path.is_file() && has_package_suffix(path) {
+            packages.push(path.clone());
+        } else if path.is_dir() {
+            let Ok(entries) = std::fs::read_dir(path) else {
+                continue;
+            };
+            let nested: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+            packages.extend(expand_filelist(&nested));
+        }
+    }
+    packages
+}
+
+fn has_package_suffix(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| matches!(e.to_string_lossy().as_ref(), "rpm" | "spm" | "spec"))
+}
+
+/// `Lint.rpmlint_package`: `/home/abuild/rpmbuild/RPMS/noarch/rpmlint-\d`.
+fn is_rpmlint_package(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    let Some(rest) = s.strip_prefix("/home/abuild/rpmbuild/RPMS/noarch/rpmlint-") else {
+        return false;
+    };
+    rest.starts_with(|c: char| c.is_ascii_digit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Lint._expand_filelist` keeps only the three package suffixes and
+    /// recurses into directories, in `readdir` order.
+    #[test]
+    fn expand_filelist_walks_directories_and_keeps_package_suffixes() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        for name in ["a.rpm", "b.spec", "c.spm", "notes.txt", "Makefile"] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        std::fs::write(nested.join("deep.rpm"), b"x").unwrap();
+
+        let found = expand_filelist(&[dir.path().to_path_buf()]);
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 4, "got {names:?}");
+        for expected in ["a.rpm", "b.spec", "c.spm", "deep.rpm"] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "missing {expected} in {names:?}"
+            );
+        }
+        assert!(!names.iter().any(|n| n == "notes.txt" || n == "Makefile"));
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_package_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let txt = dir.path().join("notes.txt");
+        std::fs::write(&txt, b"x").unwrap();
+        assert!(expand_filelist(&[txt]).is_empty());
+    }
+
+    /// `re.search(r'/home/abuild/rpmbuild/RPMS/noarch/rpmlint-\d')` — the
+    /// search is unanchored, so any path containing the pattern matches.
+    #[test]
+    fn rpmlint_package_pattern() {
+        for hit in [
+            "/home/abuild/rpmbuild/RPMS/noarch/rpmlint-2.10.0.noarch.rpm",
+            "/home/abuild/rpmbuild/RPMS/noarch/rpmlint-1.x86_64.rpm",
+        ] {
+            assert!(is_rpmlint_package(Path::new(hit)), "{hit} should match");
+        }
+        for miss in [
+            "/home/abuild/rpmbuild/RPMS/noarch/rpmlint-.noarch.rpm",
+            "/home/abuild/rpmbuild/RPMS/noarch/rpmlint-x.noarch.rpm",
+            "/home/abuild/rpmbuild/RPMS/x86_64/rpmlint-2.rpm",
+            "/srv/rpms/rpmlint-2.10.0.noarch.rpm",
+            "/home/abuild/rpmbuild/RPMS/noarch/foo-2.rpm",
+        ] {
+            assert!(
+                !is_rpmlint_package(Path::new(miss)),
+                "{miss} should not match"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod rpmlintrc_tests {
+    use super::*;
+
+    /// `*.rpmlintrc` then `*-rpmlintrc`, each group sorted, so the order is
+    /// stable and the two groups do not interleave.
+    #[test]
+    fn rpmlintrc_discovery_orders_the_two_patterns_separately() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "zeta.rpmlintrc",
+            "alpha.rpmlintrc",
+            "b-rpmlintrc",
+            "a-rpmlintrc",
+            "unrelated.toml",
+            "rpmlintrc",
+        ] {
+            std::fs::write(dir.path().join(name), b"addFilter(r\"x\")\n").unwrap();
+        }
+        let found = find_rpmlintrc_files(dir.path());
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "alpha.rpmlintrc",
+                "zeta.rpmlintrc",
+                "a-rpmlintrc",
+                "b-rpmlintrc"
+            ]
+        );
+    }
+
+    #[test]
+    fn rpmlintrc_discovery_of_a_missing_directory_is_empty() {
+        assert!(find_rpmlintrc_files(Path::new("/no/such/dir")).is_empty());
+    }
+
+    /// A directory called `foo.rpmlintrc` is not a file, so it is skipped.
+    #[test]
+    fn rpmlintrc_discovery_skips_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("trap.rpmlintrc")).unwrap();
+        assert!(find_rpmlintrc_files(dir.path()).is_empty());
+    }
 }

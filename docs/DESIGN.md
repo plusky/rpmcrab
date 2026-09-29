@@ -492,18 +492,20 @@ golden tests.
 
 ## 8. The 43-check inventory and wave plan
 
-43 checks run on openSUSE: upstream's 29 plus the 15 openSUSE appends. They are
-ported in waves ordered by blast radius, each landing with a parity case and a
-divergence entry if any:
+43 checks run on openSUSE: 28 in `configdefaults.toml` plus the 15 that
+`opensuse.toml` appends. They are ported in waves ordered by blast radius, each
+landing with a parity case and a divergence entry if any:
 
 1. **Wave 1:** `TagsCheck`, `FilesCheck` (the two largest, the ones openSUSE
    cares most about).
 2. **Wave 2:** `BinariesCheck`, `SpecCheck`.
-3. **Wave 3:** the rest of upstream's 29.
+3. **Wave 3:** the rest of the 28.
 4. **Wave 4:** the openSUSE 15.
 
 `add_info` has 475 call sites / 417 distinct tag names upstream; the port
-tracks tag-name parity per check.
+tracks tag-name parity per check. `SpecCheck` also needs `FakePkg`, the
+`.spec` model, which is deferred to its own milestone; until then a `.spec`
+input is refused with exit 3 rather than silently ignored (ledgered).
 
 ---
 

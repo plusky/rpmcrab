@@ -12,8 +12,10 @@ pub mod installed;
 pub mod pkgfile;
 pub mod tags;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use librpm::verify::VerifyOptions;
 use librpm::{PackageHeader, Tag};
@@ -108,10 +110,48 @@ pub struct Pkg {
     pub dir_name: Option<PathBuf>,
     /// True once the payload has been unpacked into `dir_name`.
     pub extracted: bool,
+    /// Per-phase wall-clock timings, accumulated in seconds and reported by
+    /// `-t` (`pkg.py:534`).
+    pub timers: Timers,
     header: PackageHeader,
     /// Owns the extraction tempdir; removed on drop.
     tempdir: Option<tempfile::TempDir>,
 }
+
+/// rpmlint's `Pkg.timers`: seconds spent per named phase (`ExtractRpm`,
+/// `libmagic`), accumulated across the package and folded into the `-t` time
+/// report.
+#[derive(Debug, Clone, Default)]
+pub struct Timers(BTreeMap<String, f64>);
+
+impl Timers {
+    /// The seconds accumulated under `key`, `0.0` when it never ran.
+    pub fn get(&self, key: &str) -> f64 {
+        self.0.get(key).copied().unwrap_or(0.0)
+    }
+
+    /// The accumulated `(phase, seconds)` pairs, in phase-name order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, f64)> + '_ {
+        self.0.iter().map(|(k, v)| (k.as_str(), *v))
+    }
+
+    fn add(&mut self, key: &str, secs: f64) {
+        *self.0.entry(key.to_string()).or_insert(0.0) += secs;
+    }
+
+    /// The reference always records an `ExtractRpm` entry, even for an
+    /// installed package where extraction is a no-op (`pkg.py:534`).
+    fn with_extract(secs: f64) -> Self {
+        let mut t = Self::default();
+        t.add(EXTRACT_RPM, secs);
+        t
+    }
+}
+
+/// The `ExtractRpm` phase name.
+const EXTRACT_RPM: &str = "ExtractRpm";
+/// The `libmagic` phase name.
+const LIBMAGIC: &str = "libmagic";
 
 impl Pkg {
     /// Open a `.rpm` file, unpack its payload into a tempdir under
@@ -140,6 +180,7 @@ impl Pkg {
                 None,
                 false,
                 None,
+                Timers::with_extract(0.0),
             ));
         }
         // Extraction happens in `Pkg.__init__`: a TemporaryDirectory under the
@@ -148,10 +189,12 @@ impl Pkg {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let start = Instant::now();
         let tempdir = tempfile::Builder::new()
             .prefix(&format!("rpmlint.{base}."))
             .tempdir_in(extract_dir)?;
         extract::extract(path, tempdir.path())?;
+        let extract_secs = start.elapsed().as_secs_f64();
         let dir_name = tempdir.path().to_path_buf();
         Ok(Self::build(
             header,
@@ -160,6 +203,7 @@ impl Pkg {
             None,
             true,
             Some(tempdir),
+            Timers::with_extract(extract_secs),
         ))
     }
 
@@ -182,6 +226,7 @@ impl Pkg {
             Some(false),
             true,
             None,
+            Timers::with_extract(0.0),
         )
     }
 
@@ -190,7 +235,8 @@ impl Pkg {
     /// `Some(false)` as rpmlint forces it. `extracted` is an explicit parameter
     /// rather than derived from `tempdir`: the reference sets it true for an
     /// installed package (no tempdir, but `dir_name` is the live `/`) and false
-    /// for a file with `ExtractDir = "/"`.
+    /// for a file with `ExtractDir = "/"`. `timers` carries the `ExtractRpm`
+    /// measurement and gains `libmagic` while the file list is built.
     fn build(
         header: PackageHeader,
         dir_name: Option<PathBuf>,
@@ -198,6 +244,7 @@ impl Pkg {
         is_source: Option<bool>,
         extracted: bool,
         tempdir: Option<tempfile::TempDir>,
+        mut timers: Timers,
     ) -> Self {
         let is_source = is_source.unwrap_or_else(|| header.get_owned(Tag::SOURCERPM).is_none());
         let name = tags::str_tag(&header, Tag::NAME).unwrap_or_default();
@@ -252,7 +299,7 @@ impl Pkg {
             .map(|d| d.name.clone())
             .collect::<Vec<_>>();
 
-        let files = gather_files(&header, dir_name.as_deref());
+        let files = gather_files(&header, dir_name.as_deref(), &mut timers);
         let names = |p: fn(&PkgFile) -> bool| -> Vec<String> {
             files
                 .iter()
@@ -299,6 +346,7 @@ impl Pkg {
             missingok_files,
             dir_name,
             extracted,
+            timers,
             header,
             tempdir,
         }
@@ -469,7 +517,8 @@ fn compressed_magic_re() -> &'static fancy_regex::Regex {
 
 /// rpmlint `AbstractPkg._calc_magic`: the header's `FILECLASS` if present,
 /// else the directory / symlink / empty branch, else libmagic on the extracted
-/// file (skipped for ghosts); then the compressed-marker filter.
+/// file (skipped for ghosts); then the compressed-marker filter. The libmagic
+/// time lands in `timers` under `libmagic` (`pkg.py:396-399`).
 fn calc_magic(
     header_magic: &str,
     mode: u32,
@@ -477,6 +526,7 @@ fn calc_magic(
     linkto: &str,
     path: &Path,
     is_ghost: bool,
+    timers: &mut Timers,
 ) -> String {
     let mut m = header_magic.to_string();
     if m.is_empty() {
@@ -489,7 +539,9 @@ fn calc_magic(
         }
     }
     if m.is_empty() && !is_ghost {
+        let start = Instant::now();
         m = extract::file_magic(path);
+        timers.add(LIBMAGIC, start.elapsed().as_secs_f64());
     }
     if m.is_empty() || compressed_magic_re().is_match(&m).unwrap_or(false) {
         m.clear();
@@ -520,7 +572,7 @@ fn join_url(name: &str, linkto: &str) -> String {
 /// Build the file map (rpmlint `_gather_files_info`). Per-file metadata comes
 /// from librpm's `FileEntry`; `inode`/`rdev`/`lang`/`fileclass` are read from
 /// the parallel header arrays (librpm's `FileEntry` does not expose them).
-fn gather_files(header: &PackageHeader, dir: Option<&Path>) -> Vec<PkgFile> {
+fn gather_files(header: &PackageHeader, dir: Option<&Path>, timers: &mut Timers) -> Vec<PkgFile> {
     let inodes = tags::int32_array(header, Tag::FILEINODES);
     let rdevs = tags::int16_array(header, Tag::FILERDEVS);
     let langs = tags::str_array(header, Tag::FILELANGS);
@@ -550,6 +602,7 @@ fn gather_files(header: &PackageHeader, dir: Option<&Path>) -> Vec<PkgFile> {
             &linkto,
             Path::new(&path),
             flags.is_ghost(),
+            timers,
         );
         out.push(PkgFile {
             path,
@@ -661,19 +714,26 @@ mod tests {
     #[test]
     fn calc_magic_branches_need_no_file() {
         let none = Path::new("/nonexistent");
-        assert_eq!(calc_magic("", 0o040755, 0, "", none, false), "directory");
+        let mut t = Timers::default();
         assert_eq!(
-            calc_magic("", 0o120777, 10, "../x", none, false),
+            calc_magic("", 0o040755, 0, "", none, false, &mut t),
+            "directory"
+        );
+        assert_eq!(
+            calc_magic("", 0o120777, 10, "../x", none, false, &mut t),
             "symbolic link to `../x'"
         );
-        assert_eq!(calc_magic("", 0o100644, 0, "", none, false), "empty");
+        assert_eq!(
+            calc_magic("", 0o100644, 0, "", none, false, &mut t),
+            "empty"
+        );
         // A populated FILECLASS wins and needs no file.
         assert_eq!(
-            calc_magic("ELF 64-bit LSB", 0o100755, 9, "", none, false),
+            calc_magic("ELF 64-bit LSB", 0o100755, 9, "", none, false, &mut t),
             "ELF 64-bit LSB"
         );
         // A ghost never falls through to libmagic.
-        assert_eq!(calc_magic("", 0o100644, 9, "", none, true), "");
+        assert_eq!(calc_magic("", 0o100644, 9, "", none, true, &mut t), "");
         // The compressed-payload marker is stripped.
         assert_eq!(
             calc_magic(
@@ -682,10 +742,14 @@ mod tests {
                 9,
                 "",
                 none,
-                false
+                false,
+                &mut t
             ),
             ""
         );
+        // None of those touched the filesystem, so nothing is timed.
+        assert_eq!(t.get(LIBMAGIC), 0.0);
+        assert!(t.iter().next().is_none());
     }
 
     #[test]
@@ -694,6 +758,21 @@ mod tests {
         let p = dir.path().join("hello.txt");
         std::fs::write(&p, "hello\n").unwrap();
         // Empty FILECLASS, regular non-empty, not a ghost -> libmagic.
-        assert_eq!(calc_magic("", 0o100644, 6, "", &p, false), "ASCII text");
+        let mut t = Timers::default();
+        assert_eq!(
+            calc_magic("", 0o100644, 6, "", &p, false, &mut t),
+            "ASCII text"
+        );
+        // The `file -b` call is timed, so it shows up in the `-t` report.
+        assert!(t.iter().any(|(k, _)| k == LIBMAGIC));
+    }
+
+    #[test]
+    fn extract_timer_is_always_recorded() {
+        // An installed package records ExtractRpm even though it never extracts.
+        let t = Timers::with_extract(0.0);
+        assert_eq!(t.get(EXTRACT_RPM), 0.0);
+        let t = Timers::with_extract(1.5);
+        assert_eq!(t.get(EXTRACT_RPM), 1.5);
     }
 }

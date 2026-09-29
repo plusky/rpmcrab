@@ -39,3 +39,24 @@ check = "installed-pkg-layer"
 kind = "behaviour"
 reason = "An rpmdb librpm cannot open reads as an empty database, so the requested names are reported as not installed; the reference raises on a failed rpmtsOpenDB (rpmts-py.c:675-683) and exits 1. librpm 0.6 exposes neither the db open result nor the dbpath, and Db::verify is not a substitute: it returns Ok on a missing database and rebuilds the indexes, which a read-only lint must not do. Where librpm does surface a failure, rpmcrab prints '(none): E: fatal error reading the rpmdb: ...' and exits 1 where the reference dies with a Python traceback."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "specfile-support"
+kind = "behaviour"
+reason = "A .spec input is reported as '(none): E: fatal error while reading <path>: .spec support is not implemented yet' with exit 3, where the reference reads it through FakePkg and runs SpecCheck. The check runtime exists but no check is ported yet, so the input is refused loudly rather than silently ignored; the FakePkg milestone replaces this."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "profile-report"
+kind = "behaviour"
+reason = "-T/--profile prints rpmcrab's own per-check wall-time report; the reference prints a CPython cProfile dump, which a Rust port cannot reproduce without a profiler dependency. -t, whose output is deterministic, is reproduced column for column."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "session-header"
+kind = "behaviour"
+reason = "The header's 'configuration:' block names the bundled defaults as <builtin>; the reference names the installed file it read (site-packages/rpmlint/configdefaults.toml). rpmcrab embeds its defaults at build time with include_str!, so there is no installed file to name, and reproducing an installation path would be false provenance."
+since = "0.1.0"

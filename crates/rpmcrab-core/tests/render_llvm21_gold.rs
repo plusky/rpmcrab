@@ -2,18 +2,27 @@
 //! byte-identical output to a real openSUSE rpmlint run.
 //!
 //! This is the M1 thesis — the report pipeline (header, sorted findings,
-//! footer, exit code) reproduces the frozen wire format before any real check
-//! or RPM parsing exists. The expected block below is a hand-transcribed
-//! rendering of the captured `tests/parity/cases/llvm21-gold/expected/stdout`
-//! (which lives on the corpus branch), with the wall-clock duration rendered as
-//! a fixed `0.1`; it is verified byte-for-byte against that capture. The
-//! parity runner (M1+) will drive the corpus files directly.
+//! footer, exit code) reproduces the frozen wire format. The expected block
+//! below is a hand-transcribed rendering of the captured
+//! `tests/parity/cases/llvm21-gold/expected/stdout`, with the wall-clock
+//! duration rendered as a fixed `0.1`; it is verified byte-for-byte against
+//! that capture.
+//!
+//! The package is a real one from the corpus (built as an installed package so
+//! nothing is unpacked) driven through the same `run_package` loop the binary
+//! uses; the checks themselves are synthetic, so the findings are canned and
+//! the output stays a pure test of the report pipeline.
 
+use std::path::Path;
+
+use librpm::PackageHeader;
+use librpm::verify::VerifyOptions;
 use rpmcrab_core::check::{Check, SyntheticCheck};
 use rpmcrab_core::color::Color;
 use rpmcrab_core::config::Config;
 use rpmcrab_core::level::Level;
 use rpmcrab_core::lint::Lint;
+use rpmcrab_core::pkg::Pkg;
 
 const CONF_FILES: &[&str] = &[
     "<VENV>/lib64/python3.13/site-packages/rpmlint/configdefaults.toml",
@@ -72,10 +81,16 @@ fn reproduces_llvm21_gold_byte_for_byte() {
         ],
     ))];
 
+    let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/parity/cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm");
+    let header = PackageHeader::from_file(&rpm, Some(&VerifyOptions::skip_verification()))
+        .expect("open corpus header");
+    let mut pkg = Pkg::installed(header);
+
     let mut lint = Lint::new(config, checks, Color::for_tty(false), 80).unwrap();
-    lint.run_checks();
-    // version, header arg count, footer packages, footer specfiles, duration.
-    let out = lint.render("2.10.0", 1, 1, 0, 0.1);
+    lint.run_package(&mut pkg, true);
+    // version, header arg count, no -t, no -T, duration.
+    let out = lint.render("2.10.0", 1, false, false, 0.1);
 
     let expected = "\
 ============================ rpmlint session starts ============================

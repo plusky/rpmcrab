@@ -1,15 +1,24 @@
-//! The `Lint` orchestrator: run checks through the filter, render the report,
-//! and compute the exit code.
+//! The `Lint` orchestrator: run checks over the inputs, render the report, and
+//! compute the exit code.
 //!
 //! Exit-code *computation* is domain logic (it is the frozen contract in
 //! `docs/DESIGN.md` §4.6); the binary crate maps the returned value to a
 //! process exit. This crate never calls `std::process::exit`.
+//!
+//! The per-package loop mirrors rpmlint's `Lint.run_checks` /
+//! `validate_file` (`lint.py:282-318`): each check is timed, and only after the
+//! **last** package do the `after_checks` hooks and the rpmlintrc filter audit
+//! run.
 
-use crate::check::Check;
+use std::collections::BTreeMap;
+use std::time::Instant;
+
+use crate::check::{Check, add_info};
 use crate::color::Color;
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
+use crate::pkg::Pkg;
 use crate::report;
 
 /// Drives a set of checks over the inputs and renders the report.
@@ -19,6 +28,16 @@ pub struct Lint {
     checks: Vec<Box<dyn Check>>,
     color: Color,
     width: usize,
+    /// Per-check accumulated wall time, keyed by the check's registry name.
+    /// Holds the `Pkg` phases (`ExtractRpm`, `libmagic`) too, as in the
+    /// reference's single `check_duration` map.
+    check_duration: BTreeMap<String, f64>,
+    packages_checked: usize,
+    /// Always 0 until the `.spec` (FakePkg) support lands; the footer's
+    /// `specfiles` column is part of the frozen output either way.
+    specfiles_checked: usize,
+    /// `Filter.validate_filters` is skipped with `--ignore-unused-rpmlintrc`.
+    audit_rpmlintrc: bool,
 }
 
 impl Lint {
@@ -37,19 +56,79 @@ impl Lint {
         width: usize,
     ) -> Result<Self, fancy_regex::Error> {
         let filter = Filter::new(&config, color)?;
+        let audit_rpmlintrc = true;
         Ok(Self {
             config,
             filter,
             checks,
             color,
             width,
+            check_duration: BTreeMap::new(),
+            packages_checked: 0,
+            specfiles_checked: 0,
+            audit_rpmlintrc,
         })
     }
 
-    /// Run every check, emitting findings into the filter.
-    pub fn run_checks(&mut self) {
-        for check in &self.checks {
-            check.run(&mut self.filter);
+    /// `Lint.__init__` honours `--ignore-unused-rpmlintrc` by not auditing the
+    /// rpmlintrc filters at the end of the run.
+    pub fn set_audit_rpmlintrc(&mut self, audit: bool) {
+        self.audit_rpmlintrc = audit;
+    }
+
+    /// `Lint.run_checks(pkg, is_last)`: run every check over one package,
+    /// timing each, then — for the last package — the `after_checks` hooks and
+    /// the unused-rpmlintrc-filter audit.
+    ///
+    /// The package's own phase timings (`ExtractRpm`, `libmagic`) are folded
+    /// into the same duration map, which is what the `-t` report reads.
+    pub fn run_package(&mut self, pkg: &mut Pkg, is_last: bool) {
+        for (phase, secs) in pkg.timers.iter() {
+            *self.check_duration.entry(phase.to_string()).or_insert(0.0) += secs;
+        }
+        for check in &mut self.checks {
+            let start = Instant::now();
+            check.check(pkg, &self.config, &mut self.filter);
+            let secs = start.elapsed().as_secs_f64();
+            *self
+                .check_duration
+                .entry(check.name().to_string())
+                .or_insert(0.0) += secs;
+        }
+
+        if is_last {
+            for check in &mut self.checks {
+                check.after_checks(&self.config, &mut self.filter);
+            }
+            if self.audit_rpmlintrc {
+                self.audit_unused_filters(pkg);
+            }
+        }
+        self.packages_checked += 1;
+    }
+
+    /// `Filter.validate_filters(pkg)`: every rpmlintrc `Filters` pattern that
+    /// never matched becomes an `unused-rpmlintrc-filter` error. The pattern is
+    /// quoted, as the reference does.
+    ///
+    /// The patterns are collected first because each finding is emitted while
+    /// borrowing the filter mutably.
+    fn audit_unused_filters(&mut self, pkg: &Pkg) {
+        let unused: Vec<String> = self
+            .filter
+            .unused_filters(&self.config.rpmlintrc_filters)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        for pattern in unused {
+            let detail = format!("\"{pattern}\"");
+            add_info(
+                &mut self.filter,
+                Level::Error,
+                pkg,
+                "unused-rpmlintrc-filter",
+                &[&detail],
+            );
         }
     }
 
@@ -74,17 +153,38 @@ impl Lint {
         }
     }
 
-    /// The full report: header, sorted findings, abort banner (if over
-    /// threshold), footer. The header and footer count different things:
+    /// The `-t` time report: per-check accumulated seconds and how many files
+    /// each check walked.
+    pub fn time_report(&self) -> String {
+        let files: BTreeMap<String, usize> = self
+            .checks
+            .iter()
+            .filter_map(|c| c.checked_files().map(|n| (c.name().to_string(), n)))
+            .filter(|(_, n)| *n > 0)
+            .collect();
+        report::time_report(&self.check_duration, &files, &self.color)
+    }
+
+    /// The `-T` profile report: rpmcrab's own per-check wall time.
+    pub fn profile_report(&self) -> String {
+        report::profile_report(&self.check_duration, &self.color)
+    }
+
+    /// The report: header, sorted findings, abort banner (if over threshold),
+    /// and — when requested — the time and profile reports, then the footer.
+    ///
+    /// The order is the reference's: results, banner, reports, footer
+    /// (`lint.py:94-118`). The header and footer count different things:
     /// `header_packages` is the CLI *argument* count (`len(installed) +
-    /// len(rpmfile)`, `lint.py:242`), while `footer_packages`/`footer_specfiles`
-    /// count the validated inputs. `duration_secs` is supplied by the caller.
+    /// len(rpmfile)`, `lint.py:242`), while the footer counts the packages
+    /// actually validated.
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
         version: &str,
         header_packages: usize,
-        footer_packages: usize,
-        footer_specfiles: usize,
+        time_report: bool,
+        profile: bool,
         duration_secs: f64,
     ) -> String {
         let mut out = String::new();
@@ -106,9 +206,15 @@ impl Lint {
                 self.width,
             ));
         }
+        if time_report {
+            out.push_str(&self.time_report());
+        }
+        if profile {
+            out.push_str(&self.profile_report());
+        }
         out.push_str(&report::footer(
-            footer_packages,
-            footer_specfiles,
+            self.packages_checked,
+            self.specfiles_checked,
             self.filter.printed(Level::Error),
             self.filter.printed(Level::Warning),
             self.filter.filtered_out,
@@ -124,5 +230,17 @@ impl Lint {
     /// Access the filter (tests inspect counters).
     pub fn filter(&self) -> &Filter {
         &self.filter
+    }
+
+    /// The merged configuration, for the caller's input handling (the
+    /// extraction directory comes from here).
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// How many packages have been validated. `Lint.validate_files` warns about
+    /// having nothing to do only when this is still zero.
+    pub fn packages_checked(&self) -> usize {
+        self.packages_checked
     }
 }
