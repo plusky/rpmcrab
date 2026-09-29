@@ -73,6 +73,9 @@ pub fn extract(rpm: &Path, dir: &Path) -> Result<(), ExtractError> {
         .current_dir(dir)
         .env("LC_ALL", "en_US.UTF-8")
         .env("LANGUAGE", "en_US")
+        // rpmlint captures the extractor's output via `check_output` and drops
+        // it; nothing may reach rpmcrab's own stdout.
+        .stdout(Stdio::null())
         .stderr(Stdio::null());
     if archive_stdin {
         let f = File::open(rpm).map_err(|source| ExtractError::Open {

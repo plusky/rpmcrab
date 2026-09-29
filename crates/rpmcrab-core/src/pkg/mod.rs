@@ -282,8 +282,8 @@ impl Pkg {
     /// cannot be read or is not valid UTF-8, matching the reference's
     /// `except Exception: return ''`.
     pub fn read_file(&self, filename: &str) -> String {
-        let base = self.dir_name.clone().unwrap_or_else(|| PathBuf::from("/"));
-        let path = file_path(Some(&base), filename);
+        let base = self.dir_name.as_deref().unwrap_or_else(|| Path::new("/"));
+        let path = file_path(Some(base), filename);
         std::fs::read(path)
             .ok()
             .and_then(|b| String::from_utf8(b).ok())
