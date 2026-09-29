@@ -32,3 +32,10 @@ check = "pkg-layer"
 kind = "behaviour"
 reason = "Pkg::readlink starts from the package's own copy of the file (returning None for a foreign PkgFile); the reference starts from the passed PkgFile object."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "installed-pkg-layer"
+kind = "behaviour"
+reason = "An rpmdb librpm cannot open reads as an empty database, so the requested names are reported as not installed; the reference raises on a failed rpmtsOpenDB (rpmts-py.c:675-683) and exits 1. librpm 0.6 exposes neither the db open result nor the dbpath, and Db::verify is not a substitute: it returns Ok on a missing database and rebuilds the indexes, which a read-only lint must not do."
+since = "0.1.0"

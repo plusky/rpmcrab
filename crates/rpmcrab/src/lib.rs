@@ -163,15 +163,19 @@ pub fn run() -> ExitCode {
     }
 
     // -i/--installed: resolve the rpmdb names now (rpmlint `_load_installed_rpms`)
-    // and emit the no-such-rpm warning. The packages are consumed by the checks
-    // at M3; the header count uses the raw argument count either way.
+    // and emit the no-such-rpm warning. Only the headers come back: building a
+    // `Pkg` walks every file of every match, and no check runs until M3, so a
+    // wide glob would stat the whole system for nothing.
     if !cli.installed.is_empty() {
         match rpmcrab_core::pkg::installed::find_installed(&cli.installed) {
-            Ok((_pkgs, missing)) => {
+            Ok((_headers, missing)) => {
                 for name in &missing {
                     eprintln!("(none): E: there is no installed rpm \"{name}\".");
                 }
             }
+            // Deliberate divergence: the reference lets a failed `rpmtsOpenDB`
+            // raise, so it dies with a Python traceback. One line and exit 1
+            // carries the same information to a shell user.
             Err(e) => {
                 eprintln!("(none): E: fatal error reading the rpmdb: {e}");
                 return ExitCode::from(1);
