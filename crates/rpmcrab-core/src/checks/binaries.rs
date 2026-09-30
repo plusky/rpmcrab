@@ -125,13 +125,16 @@ struct ReadelfInfo {
 }
 
 impl ReadelfInfo {
-    fn parse(path: &str) -> Self {
+    fn parse(path: &str, name: &str) -> Self {
         let mut info = ReadelfInfo {
             sections: Vec::new(),
             program_headers: Vec::new(),
             symbols: Vec::new(),
-            is_shlib: false,
-            is_debug: false,
+            // The reference derives is_shlib and is_debug from the file name,
+            // not the ELF content (readelfparser.py). A PIE executable or Go
+            // binary is ET_DYN but is not a shared library for these checks.
+            is_shlib: so_regex().is_match(name).unwrap_or(false),
+            is_debug: name.ends_with(".debug"),
             soname: None,
             needed: Vec::new(),
             runpaths: Vec::new(),
@@ -162,9 +165,6 @@ impl ReadelfInfo {
                 name: name.clone(),
                 size: sh.sh_size,
             }]);
-            if name.starts_with(".debug_") {
-                info.is_debug = true;
-            }
         }
 
         // Program headers
@@ -200,9 +200,6 @@ impl ReadelfInfo {
             }
             info.program_headers.push(ElfProgramHeader { name, flags });
         }
-
-        // File type
-        info.is_shlib = elf.header.e_type == goblin::elf::header::ET_DYN;
 
         // Symbols
         for sym in elf.syms.iter() {
@@ -1396,7 +1393,7 @@ impl BinariesCheck {
             self.is_nonstandard_archive = true;
             return;
         }
-        let info = ReadelfInfo::parse(&pkgfile.path);
+        let info = ReadelfInfo::parse(&pkgfile.path, &pkgfile.name);
         if let Some(reason) = &info.failed {
             add_info(
                 out,
@@ -1531,7 +1528,7 @@ impl Check for BinariesCheck {
             }
 
             let info_is_shlib = {
-                let info = ReadelfInfo::parse(&pkgfile.path);
+                let info = ReadelfInfo::parse(&pkgfile.path, &pkgfile.name);
                 info.failed.is_none() && info.is_shlib
             };
             if info_is_shlib {
@@ -1589,5 +1586,43 @@ mod tests {
         let config = Config::default();
         let check = BinariesCheck::new(&config);
         assert_eq!(check.name(), "BinariesCheck");
+    }
+
+    #[test]
+    fn is_shlib_and_is_debug_are_filename_based() {
+        // Minimal ELF64 header with e_type = ET_DYN, as a PIE executable or
+        // Go binary would have. The reference derives is_shlib/is_debug from
+        // the file name (readelfparser.py), not the ELF type.
+        let mut hdr = vec![0u8; 64];
+        hdr[0..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+        hdr[4] = 2; // ELFCLASS64
+        hdr[5] = 1; // ELFDATA2LSB
+        hdr[6] = 1; // EV_CURRENT
+        hdr[16] = 3; // e_type = ET_DYN
+        hdr[18] = 62; // e_machine = EM_X86_64
+        hdr[40] = 64; // e_ehsize
+
+        let path = std::env::temp_dir().join("rpmcrab-is-shlib-test");
+        std::fs::write(&path, &hdr).unwrap();
+        let path_str = path.to_str().unwrap();
+
+        // ET_DYN but not under /lib*/: not a shared library (e.g. PIE in
+        // /usr/bin, or a Go binary). The old ET_DYN-based logic reported
+        // no-soname and other shlib findings for these.
+        let info = ReadelfInfo::parse(path_str, "/usr/bin/foo");
+        assert!(!info.is_shlib);
+        assert!(!info.is_debug);
+
+        // Same bytes, shared-library name: is a shared library.
+        let info = ReadelfInfo::parse(path_str, "/usr/lib64/libfoo.so.1");
+        assert!(info.is_shlib);
+        assert!(!info.is_debug);
+
+        // Debuginfo file: is_debug, regardless of sections.
+        let info = ReadelfInfo::parse(path_str, "/usr/lib/debug/usr/bin/foo.debug");
+        assert!(info.is_debug);
+        assert!(!info.is_shlib);
+
+        std::fs::remove_file(&path).ok();
     }
 }
