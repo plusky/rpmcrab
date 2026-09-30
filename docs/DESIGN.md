@@ -457,7 +457,7 @@ executable form of "records deliberate decisions".
 Virtual workspace, `resolver = "2"`, members under `crates/`, `[lints]
 workspace = true`, `unsafe_code = "forbid"`, no `[workspace.dependencies]`.
 
-- **`rpmcrab-core`** — the domain, no CLI concern. RPM model (via `rpm`),
+- **`rpmcrab-core`** — the domain, no CLI concern. RPM model (via `librpm`),
   config loader+merger, filter/suppress engine, scoring, the report renderer,
   the check registry and all checks, and the external-tool probes.
 - **`rpmcrab`** — lib + bin. The clap CLI replicating every rpmlint flag, the
@@ -507,8 +507,8 @@ golden tests.
 
 ### 7.5 The package model
 
-*Status: decided here; implemented by the `PkgSource` change. Until it lands,
-the three `pub` fields (`dir_name`, `extracted`, `tempdir`) remain.*
+*Status: decided and implemented. `PkgSource` landed with PR #20; the
+`dir_name`/`extracted`/`tempdir` fields are gone.*
 
 `Pkg` is the binary-RPM model (file-backed or installed). *Where its bytes
 come from* is a closed set, so it is represented as one: a `PkgSource` sum
@@ -552,7 +552,7 @@ dict): `Pkg.timers` and the lint loop's accumulator share it.
 landing with a parity case and a divergence entry if any:
 
 1. **Wave 1:** `TagsCheck`, `FilesCheck` (the two largest, the ones openSUSE
-   cares most about).
+   cares most about). **Done** (PRs #27, #28, #29).
 2. **Wave 2:** `BinariesCheck`, `SpecCheck`.
 3. **Wave 3:** the rest of the 28.
 4. **Wave 4:** the openSUSE 15.
@@ -607,8 +607,9 @@ from package contents; both go through helpers with golden tests. `cargo-deny`
 
 1. **Program-identity banner** — the exact parameterization by `argv[0]`
    (confirm at M1).
-2. **Spellcheck backend** — whether `spelling-error` keeps a live backend or
-   degrades gracefully by default (decide by Wave 1).
+2. **Spellcheck backend** — decided at Wave 1: degrades gracefully by
+   default (`spelling-error` is not emitted; ledgered in
+   `tests/parity/divergences.toml`).
 3. **rpmdb read fidelity** — confirm `rpm -q` output gives every tag the
    installed-mode checks need, or whether a small ndb reader is warranted later
    (spike at M2).

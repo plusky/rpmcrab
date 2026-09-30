@@ -15,23 +15,13 @@ use fancy_regex::Regex;
 use librpm::{OwnedTagData, Tag};
 
 use super::is_match;
+use super::shared::{devel_regex, lib_package_regex, macro_regex};
 use crate::check::{Check, add_info};
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::pkg::dep::{DepInfo, version_to_string};
-
-/// `AbstractCheck.macro_regex`: `%+[{(]?[a-zA-Z_]\w{2,}[)}]?`.
-fn macro_regex() -> Regex {
-    Regex::new(r"%+[{(]?[a-zA-Z_]\w{2,}[)}]?").expect("static regex")
-}
-
-/// `FilesCheck.devel_regex`: `(.*)-(debug(info|source)?|devel|headers|source|static|prof)$`.
-fn devel_regex() -> Regex {
-    Regex::new(r"(.*)-(debug(info|source)?|devel|headers|source|static|prof)$")
-        .expect("static regex")
-}
 
 /// `invalid_version_regex`: `([0-9](?:rc|alpha|beta|pre).*)`, case-insensitive.
 fn invalid_version_regex() -> Regex {
@@ -43,9 +33,29 @@ fn lib_devel_number_regex() -> Regex {
     Regex::new(r"^lib(.*?)([0-9.]+)(_[0-9.]+)?-devel").expect("static regex")
 }
 
-/// `lib_package_regex`: `(?:^(?:compat-)?lib.*?(\.so.*)?|libs?[\d-]*)$`, case-insensitive.
-fn lib_package_regex() -> Regex {
-    Regex::new(r"(?i)(?:^(?:compat-)?lib.*?(\.so.*)?|libs?[\d-]*)$").expect("static regex")
+/// `leading_space_regex`: `^\s+`.
+fn leading_space_regex() -> Regex {
+    Regex::new(r"^\s+").expect("static regex")
+}
+
+/// `pkg_config_regex`: `^/usr/(?:lib\d*|share)/pkgconfig/`.
+fn pkg_config_regex() -> Regex {
+    Regex::new(r"^/usr/(?:lib\d*|share)/pkgconfig/").expect("static regex")
+}
+
+/// `license_regex`: `\(([^)]+)\)|\s(?:and|or|AND|OR)\s`.
+fn license_regex() -> Regex {
+    Regex::new(r"\(([^)]+)\)|\s(?:and|or|AND|OR)\s").expect("static regex")
+}
+
+/// `license_exception_regex`: `([^(\s]+)\s(?:WITH|with)\s([^)\s]+)`.
+fn license_exception_regex() -> Regex {
+    Regex::new(r"([^(\s]+)\s(?:WITH|with)\s([^)\s]+)").expect("static regex")
+}
+
+/// `tag_regex`: the spec-tag detector for `tag-in-description`.
+fn tag_regex() -> Regex {
+    Regex::new(r"(?i)^((?:Auto(?:Req|Prov|ReqProv)|Build(?:Arch(?:itectures)?|Root)|(?:Build)?Conflicts|(?:Build)?(?:Pre)?Requires|Copyright|(?:CVS|SVN)Id|Dist(?:ribution|Tag|URL)|DocDir|(?:Build)?Enhances|Epoch|Exclude(?:Arch|OS)|Exclusive(?:Arch|OS)|Group|Icon|License|Name|No(?:Patch|Source)|Obsoletes|Packager|Patch\d*|Prefix(?:es)?|Provides|(?:Build)?Recommends|Release|RHNPlatform|Serial|Source\d*|(?:Build)?Suggests|Summary|(?:Build)?Supplements|(?:Bug)?URL|Vendor|Version)(?:\([^)]+\))?:)\s*\S").expect("static regex")
 }
 
 /// Words that may start a summary in lowercase (`CAPITALIZED_IGNORE_LIST`).

@@ -14,6 +14,7 @@ use std::path::Path;
 use fancy_regex::Regex;
 
 use super::is_match;
+use super::shared::{devel_regex, lib_package_regex, macro_regex};
 use crate::check::{Check, add_info};
 use crate::config::Config;
 use crate::filter::Filter;
@@ -38,15 +39,6 @@ fn log_regex() -> Regex {
     Regex::new(r"/var/log/").expect("static regex")
 }
 
-fn devel_regex() -> Regex {
-    Regex::new(r"(.*)-(debug(info|source)?|devel|headers|source|static|prof)$")
-        .expect("static regex")
-}
-
-fn lib_package_regex() -> Regex {
-    Regex::new(r"(?i)(?:^(?:compat-)?lib.*?(\\.so.*)?|libs?[\\d-]*)$").expect("static regex")
-}
-
 fn kernel_package_regex() -> Regex {
     Regex::new(r"^kernel(-(default|desktop|pae|xen|vanilla|debug|kdump|source|syms))?$")
         .expect("static regex")
@@ -62,10 +54,6 @@ fn debugsource_package_regex() -> Regex {
 
 fn kernel_modules_regex() -> Regex {
     Regex::new(r"^/lib/modules/").expect("static regex")
-}
-
-fn macro_regex() -> Regex {
-    Regex::new(r"%+[{(]?[a-zA-Z_]\\w{2,}[)}]?").expect("static regex")
 }
 
 fn quotes_regex() -> Regex {
