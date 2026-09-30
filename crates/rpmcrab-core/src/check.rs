@@ -128,6 +128,21 @@ pub trait Check {
 pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
     match name {
         "TagsCheck" => Some(Box::new(crate::checks::tags::TagsCheck::new(config))),
+        "IconSizesCheck" => Some(Box::new(crate::checks::icon_sizes::IconSizesCheck::new(
+            config,
+        ))),
+        "MixedOwnershipCheck" => Some(Box::new(
+            crate::checks::mixed_ownership::MixedOwnershipCheck::new(config),
+        )),
+        "PAMModulesCheck" => Some(Box::new(crate::checks::pam_modules::PAMModulesCheck::new(
+            config,
+        ))),
+        "XinetdDepCheck" => Some(Box::new(crate::checks::xinetd_dep::XinetdDepCheck::new(
+            config,
+        ))),
+        "ZyppSyntaxCheck" => Some(Box::new(crate::checks::zypp_syntax::ZyppSyntaxCheck::new(
+            config,
+        ))),
         "FilesCheck" => Some(Box::new(crate::checks::files::FilesCheck::new(config))),
         "SpecCheck" => Some(Box::new(crate::checks::spec::SpecCheck::new(config))),
         "FHSCheck" => Some(Box::new(crate::checks::fhs::FHSCheck::new(config))),

@@ -6,13 +6,17 @@ pub mod duplicates;
 pub mod fhs;
 pub mod files;
 pub mod i18n;
+pub mod icon_sizes;
 pub mod lsb;
+pub mod mixed_ownership;
+pub mod pam_modules;
 pub mod pkg_config;
 pub mod shared;
 pub mod spec;
 pub mod tags;
+pub mod xinetd_dep;
 pub mod zip;
-
+pub mod zypp_syntax;
 /// Match `text` against a `fancy_regex`, logging engine failures.
 ///
 /// `fancy_regex` can fail at match time (e.g. backtracking-limit errors on
