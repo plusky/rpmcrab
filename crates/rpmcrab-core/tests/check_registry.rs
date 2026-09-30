@@ -138,16 +138,17 @@ fn checks_in_default_config() -> Vec<String> {
             if line.starts_with(']') {
                 break;
             }
-            if let Some(rest) = line
-                .strip_prefix('"')
-                .or_else(|| line.strip_prefix('\''))
+            if let Some(rest) = line.strip_prefix('"').or_else(|| line.strip_prefix('\''))
                 && let Some(end) = rest.find(['"', '\''])
             {
                 names.push(rest[..end].to_string());
             }
         }
     }
-    assert!(!names.is_empty(), "no Checks parsed from configdefaults.toml");
+    assert!(
+        !names.is_empty(),
+        "no Checks parsed from configdefaults.toml"
+    );
     names
 }
 

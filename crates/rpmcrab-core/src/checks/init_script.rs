@@ -202,7 +202,13 @@ impl Check for InitScriptCheck {
             let content = match std::fs::read_to_string(&file.path) {
                 Ok(c) => c,
                 Err(e) => {
-                    add_info(out, Level::Warning, pkg, "read-error", &[&os_error_detail(&e)]);
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "read-error",
+                        &[&os_error_detail(&e)],
+                    );
                     continue;
                 }
             };

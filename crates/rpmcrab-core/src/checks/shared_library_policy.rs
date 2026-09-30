@@ -361,9 +361,7 @@ mod tests {
         push_dyn(10, strtab.len() as u64); // DT_STRSZ
         push_dyn(0, 0); // DT_NULL
 
-        let mut elf: Vec<u8> = vec![
-            0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ];
+        let mut elf: Vec<u8> = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         elf.extend_from_slice(&3u16.to_le_bytes()); // ET_DYN
         elf.extend_from_slice(&62u16.to_le_bytes()); // EM_X86_64
         elf.extend_from_slice(&1u32.to_le_bytes()); // version
