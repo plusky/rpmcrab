@@ -229,7 +229,7 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "FilesCheck"
+check = "python-bytecode-inconsistent-mtime"
 kind = "behaviour"
-reason = "python-bytecode-inconsistent-mtime only fires when the .pyc embedded timestamp is older than the .py mtime (stale bytecode). The reference (FilesCheck.py:1274) fires on any mismatch, but upstream PR #1331 fixed this false positive: a newer .pyc is a local-build artifact, not an error. The port implements the fixed behaviour."
+reason = "python-bytecode-inconsistent-mtime only fires when the .pyc embedded timestamp is older than the .py mtime (stale bytecode). The reference (FilesCheck.py:1274) fires on any mismatch, but rpmlint#1331 (open, unmerged) proposes this fix: a newer .pyc is a local-build artifact, not an error. The port implements the proposed behaviour ahead of upstream."
 since = "0.1.0"

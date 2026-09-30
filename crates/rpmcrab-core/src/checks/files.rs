@@ -2039,8 +2039,8 @@ impl FilesCheck {
     /// The reference's `python_bytecode_to_script`.
     /// Python bytecode magic values, mirroring the reference's
     /// `_python_magic_values` dict.
-    fn python_magic_values(version: &str) -> Option<&'static [u32]> {
-        Some(match version {
+    fn python_magic_values(version: &str) -> &'static [u32] {
+        match version {
             "2.2" => &[60717],
             "2.3" => &[62011],
             "2.4" => &[62061],
@@ -2055,8 +2055,8 @@ impl FilesCheck {
             "3.5" => &[3350, 3351],
             "3.6" => &[3379],
             "3.7" => &[3390, 3391, 3392, 3393, 3394],
-            _ => return None,
-        })
+            _ => &[],
+        }
     }
 
     /// Read a little-endian u32 from the first 4 bytes, like the
@@ -2097,26 +2097,88 @@ impl FilesCheck {
             .flatten()
             .and_then(|c| c.get(1))
             .map(|m| m.as_str().to_string());
-        let expected_version = ver_from_path
-            .clone()
-            .or_else(|| {
-                if self.python_default_version.is_empty() {
-                    None
-                } else {
-                    Some(self.python_default_version.clone())
-                }
-            });
+        let expected_version = ver_from_path.clone().or_else(|| {
+            if self.python_default_version.is_empty() {
+                None
+            } else {
+                Some(self.python_default_version.clone())
+            }
+        });
         let magics = expected_version.as_deref().and_then(|v| {
-            Self::python_magic_values(v).map(|m| {
+            let m = Self::python_magic_values(v);
+            if m.is_empty() {
+                None
+            } else if v.starts_with("3.0") || v.starts_with("3.1") {
                 // Python 3.0/3.1 always use the value one higher
-                if v.starts_with("3.0") || v.starts_with("3.1") {
-                    m.iter().map(|x| x + 1).collect()
-                } else {
-                    m.to_vec()
-                }
-            })
+                Some(m.iter().map(|x| x + 1).collect())
+            } else {
+                Some(m.to_vec())
+            }
         });
         (magics, ver_from_path)
+    }
+
+    /// Decide whether a wrong-magic finding should be emitted for a .pyc.
+    /// Returns the level and detail parts, or None when the magic matches.
+    fn pyc_magic_check(&self, fname: &str, found_magic: u32) -> Option<(Level, Vec<String>)> {
+        let (exp_magic, exp_version) = self.expected_pyc_magic(fname);
+        let exp = exp_magic?;
+        if exp.contains(&found_magic) {
+            return None;
+        }
+        // Find the version name for the found magic value.
+        let mut found_version = "unknown";
+        for v in [
+            "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "3.0", "3.1", "3.2", "3.3", "3.4", "3.5",
+            "3.6", "3.7",
+        ] {
+            if Self::python_magic_values(v).contains(&found_magic) {
+                found_version = v;
+                break;
+            }
+        }
+        let exp_str = exp
+            .iter()
+            .map(|m| m.to_string())
+            .collect::<Vec<_>>()
+            .join(" or ");
+        let exp_ver = exp_version
+            .as_deref()
+            .unwrap_or(&self.python_default_version);
+        let detail = format!(
+            "expected {} ({}), found {} ({})",
+            exp_str, exp_ver, found_magic, found_version
+        );
+        // E when the expected version came from the .pyc path, W otherwise.
+        let level = if exp_version.is_some() {
+            Level::Error
+        } else {
+            Level::Warning
+        };
+        Some((level, vec![fname.to_string(), detail]))
+    }
+
+    /// Decide whether an inconsistent-mtime finding should be emitted.
+    /// Returns the detail parts, or None. Per rpmlint#1331 (open, unmerged),
+    /// only a stale .pyc (older than the source) is reported; a newer .pyc
+    /// is a local-build artifact.
+    fn pyc_mtime_check(
+        pyc_timestamp: Option<u32>,
+        src_mtime: u64,
+        fname: &str,
+        src_name: &str,
+    ) -> Option<Vec<String>> {
+        let ts = pyc_timestamp?;
+        if (ts as u64) < src_mtime {
+            Some(vec![
+                fname.to_string(),
+                ts.to_string(),
+                src_name.to_string(),
+                src_mtime.to_string(),
+            ])
+        } else {
+            None
+        }
     }
 
     fn python_bytecode_to_script(&self, path: &str) -> Option<String> {
@@ -2136,13 +2198,7 @@ impl FilesCheck {
         None
     }
 
-    fn check_normal_python_source(
-        &self,
-        pkg: &Pkg,
-        fname: &str,
-        fd: &FileData,
-        out: &mut Filter,
-    ) {
+    fn check_normal_python_source(&self, pkg: &Pkg, fname: &str, fd: &FileData, out: &mut Filter) {
         let source_file = match self.python_bytecode_to_script(fname) {
             Some(s) => s,
             None => return,
@@ -2175,71 +2231,28 @@ impl FilesCheck {
                 // Verify the magic ABI value embedded in the .pyc header.
                 if fd.chunk.len() >= 4 {
                     let found_magic = Self::pyc_magic_from_chunk(&fd.chunk);
-                    let (exp_magic, exp_version) = self.expected_pyc_magic(fname);
-                    if let Some(exp) = exp_magic {
-                        if !exp.contains(&found_magic) {
-                            // Find the version name for the found magic value.
-                            let mut found_version = "unknown";
-                            for v in [
-                                "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "3.0", "3.1", "3.2",
-                                "3.3", "3.4", "3.5", "3.6", "3.7",
-                            ] {
-                                if Self::python_magic_values(v)
-                                    .map(|m| m.contains(&found_magic))
-                                    .unwrap_or(false)
-                                {
-                                    found_version = v;
-                                    break;
-                                }
-                            }
-                            let exp_str = exp
-                                .iter()
-                                .map(|m| m.to_string())
-                                .collect::<Vec<_>>()
-                                .join(" or ");
-                            let exp_ver = exp_version
-                                .as_deref()
-                                .unwrap_or(&self.python_default_version);
-                            let detail = format!(
-                                "expected {} ({}), found {} ({})",
-                                exp_str,
-                                exp_ver,
-                                found_magic, found_version
-                            );
-                            // E when the expected version came from the .pyc
-                            // path, W otherwise.
-                            let level = if exp_version.is_some() {
-                                Level::Error
-                            } else {
-                                Level::Warning
-                            };
-                            add_info(
-                                out,
-                                level,
-                                pkg,
-                                "python-bytecode-wrong-magic-value",
-                                &[fname, &detail],
-                            );
-                        }
+                    if let Some((level, details)) = self.pyc_magic_check(fname, found_magic) {
+                        let refs: Vec<&str> = details.iter().map(|s| s.as_str()).collect();
+                        add_info(out, level, pkg, "python-bytecode-wrong-magic-value", &refs);
                     }
                 }
 
                 // Verify the timestamp embedded in the .pyc header matches
-                // the mtime of the .py file. Per upstream #1331, only warn
-                // when the .pyc is older than the source (stale bytecode);
-                // a newer .pyc is a local-build artifact, not an error.
-                if let Some(pyc_timestamp) = Self::pyc_mtime_from_chunk(&fd.chunk) {
-                    if (pyc_timestamp as u64) < srcfile.mtime {
-                        let cts = pyc_timestamp.to_string();
-                        let sts = srcfile.mtime.to_string();
-                        add_info(
-                            out,
-                            Level::Error,
-                            pkg,
-                            "python-bytecode-inconsistent-mtime",
-                            &[fname, &cts, &srcfile.name, &sts],
-                        );
-                    }
+                // the mtime of the .py file.
+                if let Some(details) = Self::pyc_mtime_check(
+                    Self::pyc_mtime_from_chunk(&fd.chunk),
+                    srcfile.mtime,
+                    fname,
+                    &srcfile.name,
+                ) {
+                    let refs: Vec<&str> = details.iter().map(|s| s.as_str()).collect();
+                    add_info(
+                        out,
+                        Level::Error,
+                        pkg,
+                        "python-bytecode-inconsistent-mtime",
+                        &refs,
+                    );
                 }
             }
         }
@@ -2878,8 +2891,7 @@ mod tests {
     #[test]
     fn expected_pyc_magic_from_path() {
         let check = FilesCheck::new(&test_config());
-        let (magics, ver) =
-            check.expected_pyc_magic("/usr/lib/python3.6/foo.pyc");
+        let (magics, ver) = check.expected_pyc_magic("/usr/lib/python3.6/foo.pyc");
         assert_eq!(ver, Some("3.6".to_string()));
         assert_eq!(magics, Some(vec![3379]));
     }
@@ -2895,11 +2907,124 @@ mod tests {
 
     #[test]
     fn python_magic_values_known_versions() {
-        assert_eq!(FilesCheck::python_magic_values("3.6"), Some(&[3379][..]));
+        assert_eq!(FilesCheck::python_magic_values("3.6"), &[3379][..]);
         assert_eq!(
             FilesCheck::python_magic_values("3.7"),
-            Some(&[3390, 3391, 3392, 3393, 3394][..])
+            &[3390, 3391, 3392, 3393, 3394][..]
         );
-        assert_eq!(FilesCheck::python_magic_values("9.9"), None);
+        assert!(FilesCheck::python_magic_values("9.9").is_empty());
+    }
+
+    #[test]
+    fn pyc_magic_check_wrong_magic_from_path_is_error() {
+        // The expected version came from the .pyc path -> E.
+        let check = FilesCheck::new(&test_config());
+        let (level, details) = check
+            .pyc_magic_check("/usr/lib/python3.6/foo.pyc", 3390)
+            .expect("finding");
+        assert_eq!(level, Level::Error);
+        assert_eq!(details[0], "/usr/lib/python3.6/foo.pyc");
+        assert!(details[1].contains("expected 3379 (3.6)"), "{}", details[1]);
+        assert!(details[1].contains("found 3390 (3.7)"), "{}", details[1]);
+    }
+
+    #[test]
+    fn pyc_magic_check_wrong_magic_from_default_is_warning() {
+        // No version in the path; the default version supplies it -> W.
+        let mut config = test_config();
+        config.configuration.insert(
+            "PythonDefaultVersion".to_string(),
+            toml::Value::String("3.6".to_string()),
+        );
+        let check = FilesCheck::new(&config);
+        let (level, details) = check
+            .pyc_magic_check("/opt/foo.pyc", 3390)
+            .expect("finding");
+        assert_eq!(level, Level::Warning);
+        assert!(details[1].contains("expected 3379 (3.6)"), "{}", details[1]);
+    }
+
+    #[test]
+    fn pyc_magic_check_matching_magic_emits_nothing() {
+        let check = FilesCheck::new(&test_config());
+        assert!(
+            check
+                .pyc_magic_check("/usr/lib/python3.6/foo.pyc", 3379)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn pyc_magic_check_unknown_version_emits_nothing() {
+        // No version in the path and no default configured: no expected
+        // magics, so nothing to compare against.
+        let check = FilesCheck::new(&test_config());
+        assert!(check.pyc_magic_check("/opt/foo.pyc", 12345).is_none());
+    }
+
+    #[test]
+    fn pyc_mtime_check_stale_pyc_emits_finding() {
+        // The .pyc is older than the source: the four detail parts in the
+        // reference's order.
+        let details = FilesCheck::pyc_mtime_check(
+            Some(1000),
+            2000,
+            "/usr/lib/python3.6/foo.pyc",
+            "/usr/lib/python3.6/foo.py",
+        )
+        .expect("finding");
+        assert_eq!(
+            details,
+            vec![
+                "/usr/lib/python3.6/foo.pyc",
+                "1000",
+                "/usr/lib/python3.6/foo.py",
+                "2000",
+            ]
+        );
+    }
+
+    #[test]
+    fn pyc_mtime_check_newer_pyc_is_silent() {
+        // rpmlint#1331 (open, unmerged): a newer .pyc is a local-build
+        // artifact, not an error. This pins the `<` vs `!=` divergence: a
+        // `!=` comparison would emit here.
+        assert!(
+            FilesCheck::pyc_mtime_check(
+                Some(3000),
+                2000,
+                "/usr/lib/python3.6/foo.pyc",
+                "/usr/lib/python3.6/foo.py",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn pyc_mtime_check_equal_timestamps_is_silent() {
+        assert!(
+            FilesCheck::pyc_mtime_check(
+                Some(2000),
+                2000,
+                "/usr/lib/python3.6/foo.pyc",
+                "/usr/lib/python3.6/foo.py",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn pyc_mtime_check_hash_based_pyc_emits_nothing() {
+        // PEP 552 hash-based .pyc carries no mtime (None): neither mtime
+        // finding can fire.
+        assert!(
+            FilesCheck::pyc_mtime_check(
+                None,
+                2000,
+                "/usr/lib/python3.7/foo.pyc",
+                "/usr/lib/python3.7/foo.py",
+            )
+            .is_none()
+        );
     }
 }
