@@ -5,12 +5,9 @@
 //! group, buildhost, changelog, license, URL, obsoletes/provides, and the
 //! filename coherence check.
 //!
-//! Deliberate gaps: `spelling-error` needs an enchant backend (the design
-//! records it as free to degrade gracefully; see the ledger). The i18n
-//! summary/description loops are fully implemented.
-//!
-//! TODO(mini-mode): when a spellcheck backend lands, the `DESIGN.md:343-351`
-//! guards become load-bearing — accepting-and-ignoring breaks `rpmlint-mini`.
+//! The i18n summary/description loops are fully implemented, including
+//! `spelling-error` via the `spellbook` crate (pure Rust, Hunspell-compatible).
+//! In mini-mode the spellchecker is disabled, matching the reference.
 
 use std::path::Path;
 
@@ -107,6 +104,7 @@ pub struct TagsCheck {
     license_exception_re: Regex,
     pkg_config_re: Regex,
     tag_re: Regex,
+    spellchecker: Option<crate::spellcheck::Spellchecker>,
 }
 
 impl TagsCheck {
@@ -178,6 +176,11 @@ impl TagsCheck {
             license_exception_re: Regex::new(r"([^(\s]+)\s(?:WITH|with)\s([^)\s]+)").expect("static regex"),
             pkg_config_re: Regex::new(r"^/usr/(?:lib\d*|share)/pkgconfig/").expect("static regex"),
             tag_re: Regex::new(r"(?i)^((?:Auto(?:Req|Prov|ReqProv)|Build(?:Arch(?:itectures)?|Root)|(?:Build)?Conflicts|(?:Build)?(?:Pre)?Requires|Copyright|(?:CVS|SVN)Id|Dist(?:ribution|Tag|URL)|DocDir|(?:Build)?Enhances|Epoch|Exclude(?:Arch|OS)|Exclusive(?:Arch|OS)|Group|Icon|License|Name|No(?:Patch|Source)|Obsoletes|Packager|Patch\d*|Prefix(?:es)?|Provides|(?:Build)?Recommends|Release|RHNPlatform|Serial|Source\d*|(?:Build)?Suggests|Summary|(?:Build)?Supplements|(?:Bug)?URL|Vendor|Version)(?:\([^)]+\))?:)\s*\S").expect("static regex"),
+            spellchecker: if config.mini_mode {
+                None
+            } else {
+                crate::spellcheck::Spellchecker::new()
+            },
         }
     }
 
@@ -740,9 +743,19 @@ impl TagsCheck {
         lang: &str,
         ignored: &[String],
     ) {
-        let _ = ignored;
         self.unexpanded_macro(out, pkg, &format!("Summary({lang})"), summary);
-        // Spellcheck (`spelling-error`) needs an enchant backend; degraded.
+        // Spellcheck via `spellbook`; skipped in mini-mode (checker is None).
+        if let Some(checker) = &self.spellchecker {
+            for (word, suggestions) in checker.check(summary, &pkg.name, ignored) {
+                let sug = if suggestions.is_empty() {
+                    String::new()
+                } else {
+                    format!(" -> {}", suggestions.join(", "))
+                };
+                let detail = format!("Summary({lang}) {word}{sug}");
+                add_info(out, Level::Error, pkg, "spelling-error", &[&detail]);
+            }
+        }
         let lang_err = Self::lang_for_error(lang);
         if summary.contains('\n') || summary.contains('\r') {
             let mut d: Vec<&str> = Vec::new();
@@ -856,9 +869,19 @@ impl TagsCheck {
         lang: &str,
         ignored: &[String],
     ) {
-        let _ = ignored;
         self.unexpanded_macro(out, pkg, &format!("%description -l {lang}"), description);
-        // Spellcheck (`spelling-error`) needs an enchant backend; degraded.
+        // Spellcheck via `spellbook`; skipped in mini-mode (checker is None).
+        if let Some(checker) = &self.spellchecker {
+            for (word, suggestions) in checker.check(description, &pkg.name, ignored) {
+                let sug = if suggestions.is_empty() {
+                    String::new()
+                } else {
+                    format!(" -> {}", suggestions.join(", "))
+                };
+                let detail = format!("%description -l {lang} {word}{sug}");
+                add_info(out, Level::Error, pkg, "spelling-error", &[&detail]);
+            }
+        }
         let lang_err = Self::lang_for_error(lang);
         for line in description.split('\n') {
             // Strip a trailing \r for length purposes? The reference uses

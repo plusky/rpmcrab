@@ -89,12 +89,6 @@ kind = "behaviour"
 reason = "The reference emits self-obsoletion for the documented package-merge pattern (Provides: X = EVR with Obsoletes: X <= EVR); rpmcrab exempts it. Upstream's behaviour is the bug (rpmlint#1599, fixes rpmlint#438): a merge-pattern Obsoletes is not a self-obsoletion."
 since = "0.1.0"
 
-[[divergence]]
-case = "global"
-check = "spelling-error"
-kind = "behaviour"
-reason = "spelling-error is not emitted: no enchant backend is wired up. The design records spelling as free to degrade gracefully (DESIGN.md:368-369)."
-since = "0.1.0"
 
 [[divergence]]
 case = "global"
