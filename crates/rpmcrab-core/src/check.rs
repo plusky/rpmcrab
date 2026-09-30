@@ -128,6 +128,21 @@ pub trait Check {
 pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
     match name {
         "TagsCheck" => Some(Box::new(crate::checks::tags::TagsCheck::new(config))),
+        "IconSizesCheck" => Some(Box::new(crate::checks::icon_sizes::IconSizesCheck::new(
+            config,
+        ))),
+        "MixedOwnershipCheck" => Some(Box::new(
+            crate::checks::mixed_ownership::MixedOwnershipCheck::new(config),
+        )),
+        "PAMModulesCheck" => Some(Box::new(crate::checks::pam_modules::PAMModulesCheck::new(
+            config,
+        ))),
+        "XinetdDepCheck" => Some(Box::new(crate::checks::xinetd_dep::XinetdDepCheck::new(
+            config,
+        ))),
+        "ZyppSyntaxCheck" => Some(Box::new(crate::checks::zypp_syntax::ZyppSyntaxCheck::new(
+            config,
+        ))),
         "FilesCheck" => Some(Box::new(crate::checks::files::FilesCheck::new(config))),
         "SpecCheck" => Some(Box::new(crate::checks::spec::SpecCheck::new(config))),
         "FHSCheck" => Some(Box::new(crate::checks::fhs::FHSCheck::new(config))),
@@ -144,6 +159,24 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
             config,
         ))),
         "LSBCheck" => Some(Box::new(crate::checks::lsb::LSBCheck::new(config))),
+        "AtomicUpdateCheck" => Some(Box::new(
+            crate::checks::atomic_update::AtomicUpdateCheck::new(config),
+        )),
+        "FileDigestCheck" => Some(Box::new(crate::checks::file_digest::FileDigestCheck::new(
+            config,
+        ))),
+        "FileMetadataCheck" => Some(Box::new(
+            crate::checks::file_metadata::FileMetadataCheck::new(config),
+        )),
+        "LibraryDependencyCheck" => Some(Box::new(
+            crate::checks::library_dependency::LibraryDependencyCheck::new(config),
+        )),
+        "SignatureCheck" => Some(Box::new(crate::checks::signature::SignatureCheck::new(
+            config,
+        ))),
+        "SUIDPermissionsCheck" => Some(Box::new(
+            crate::checks::suid_permissions::SUIDPermissionsCheck::new(config),
+        )),
         _ => None,
     }
 }
@@ -362,7 +395,7 @@ mod add_info_tests {
         let mut out = Filter::new(&config, crate::color::Color::for_tty(false)).unwrap();
         add_info(
             &mut out,
-            Level::Warning,
+            crate::level::Level::Warning,
             &pkg,
             "no-soname",
             &["/usr/lib64/libfoo.so", "", "detail two"],
