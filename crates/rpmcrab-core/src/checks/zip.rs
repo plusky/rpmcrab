@@ -243,8 +243,8 @@ impl Check for ZipCheck {
 mod tests {
     use super::*;
     use std::io::Write;
-    use zip::write::SimpleFileOptions;
     use zip::unstable::write::FileOptionsExt;
+    use zip::write::SimpleFileOptions;
 
     /// Build a zip in memory: `(name, data, method)` entries, optional
     /// `META-INF/MANIFEST.MF` content.
