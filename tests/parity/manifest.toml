@@ -15,3 +15,9 @@ name = "parity"
 
 [[case]]
 name = "dbus-parity"
+
+[[case]]
+name = "device-parity"
+
+[[case]]
+name = "source-parity"

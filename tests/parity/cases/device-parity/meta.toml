@@ -1,0 +1,17 @@
+kind = "captured"
+rpmlint = "2.10.0"
+reference_sha = "84848c05c5571c22274a55ff9afdfe6d88c67dc9"
+flavour = "openSUSE"
+argv = ["--checks", "DeviceFilesCheck,WorldWritableCheck", "device-parity-1.0-1.noarch.rpm"]
+captured = "2026-09-30"
+
+[source]
+description = "Binary RPM exercising DeviceFilesCheck and WorldWritableCheck: block device /dev/parity-blk and char device /dev/parity-char with empty DeviceFilesWhitelist, plus world-writable /var/lib/device-parity/world.txt (0666) and pub/ (0777) with empty WorldWritableWhitelist. Reference emits 4 E findings; extraction ran under fakeroot (sandbox blocks mknod) but findings derive from header metadata only."
+
+[tools]
+present = ["readelf","objdump","ldd","file"]
+
+[[input]]
+file = "device-parity-1.0-1.noarch.rpm"
+sha256 = "1f0ea83b6028cb0c54b4e4c282c6c13ce3c8ad01d50def3891f19e083b6a3def"
+

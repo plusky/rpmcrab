@@ -1,0 +1,17 @@
+kind = "captured"
+rpmlint = "2.10.0"
+reference_sha = "84848c05c5571c22274a55ff9afdfe6d88c67dc9"
+flavour = "openSUSE"
+argv = ["--checks", "SourceCheck", "source-parity-1.0-1.src.rpm"]
+captured = "2026-09-30"
+
+[source]
+description = "Source RPM exercising SourceCheck: bogus.gz is plain text with a .gz extension (inconsistent-file-extension) and secret.txt ships mode 0600 (strange-permission). data.tar.gz is genuinely gzip-compressed and stays quiet."
+
+[tools]
+present = ["readelf","objdump","ldd","file"]
+
+[[input]]
+file = "source-parity-1.0-1.src.rpm"
+sha256 = "af9aa5e3f023ca68371975f0058ae4298c7fc3b712adc24e5f78aa3e48baee7d"
+
