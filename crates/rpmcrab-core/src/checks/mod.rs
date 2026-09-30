@@ -2,19 +2,27 @@
 
 pub mod atomic_update;
 pub mod binaries;
+pub mod branding_policy;
 pub mod config_files;
+pub mod dbus_policy;
 pub mod doc;
 pub mod duplicates;
+pub mod erlang;
 pub mod fhs;
 pub mod files;
 pub mod i18n;
 pub mod icon_sizes;
+pub mod init_script;
+pub mod kmp_policy;
 pub mod library_dependency;
+pub mod logrotate;
 pub mod lsb;
 pub mod mixed_ownership;
 pub mod pam_modules;
 pub mod pkg_config;
+pub mod selinux_independent_module;
 pub mod shared;
+pub mod shared_library_policy;
 pub mod spec;
 pub mod tags;
 pub mod xinetd_dep;

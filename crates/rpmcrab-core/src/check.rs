@@ -168,6 +168,28 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
         "LibraryDependencyCheck" => Some(Box::new(
             crate::checks::library_dependency::LibraryDependencyCheck::new(config),
         )),
+        "BrandingPolicyCheck" => Some(Box::new(
+            crate::checks::branding_policy::BrandingPolicyCheck::new(config),
+        )),
+        "DBusPolicyCheck" => Some(Box::new(crate::checks::dbus_policy::DBusPolicyCheck::new(
+            config,
+        ))),
+        "ErlangCheck" => Some(Box::new(crate::checks::erlang::ErlangCheck::new(config))),
+        "InitScriptCheck" => Some(Box::new(crate::checks::init_script::InitScriptCheck::new(
+            config,
+        ))),
+        "KMPPolicyCheck" => Some(Box::new(crate::checks::kmp_policy::KMPPolicyCheck::new(
+            config,
+        ))),
+        "LogrotateCheck" => Some(Box::new(crate::checks::logrotate::LogrotateCheck::new(
+            config,
+        ))),
+        "SELinuxIndependentModuleCheck" => Some(Box::new(
+            crate::checks::selinux_independent_module::SELinuxIndependentModuleCheck::new(config),
+        )),
+        "SharedLibraryPolicyCheck" => Some(Box::new(
+            crate::checks::shared_library_policy::SharedLibraryPolicyCheck::new(config),
+        )),
         _ => None,
     }
 }
