@@ -158,6 +158,9 @@ fn checks_in_default_config() -> Vec<String> {
 /// shipped config's `Checks` (`InitScriptCheck`, `LSBCheck`, `XinetdDepCheck`),
 /// plus `PAMModulesCheck`, which the reference lists only in the Fedora
 /// flavour config (not yet ported); the port mirrors all of that.
+/// `AtomicUpdateCheck` is registered deliberately: plusky asked that the
+/// `Checks` entry wait for the central issue #66 rather than landing in any
+/// single PR and conflicting with the others touching the same list.
 #[test]
 fn every_constructible_check_is_listed_in_checks() {
     let listed = checks_in_default_config();
@@ -166,6 +169,7 @@ fn every_constructible_check_is_listed_in_checks() {
             || name == "LSBCheck"
             || name == "XinetdDepCheck"
             || name == "PAMModulesCheck"
+            || name == "AtomicUpdateCheck"
         {
             continue;
         }
