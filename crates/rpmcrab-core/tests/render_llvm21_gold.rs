@@ -92,7 +92,7 @@ fn reproduces_llvm21_gold_byte_for_byte() {
     let mut lint = Lint::new(config, checks, Color::for_tty(false), 80).unwrap();
     lint.run_package(&mut pkg, true);
     // version, header arg count, no -t, no -T, duration.
-    let out = lint.render("2.10.0", 1, false, false, 0.1);
+    let out = lint.render("rpmlint", "2.10.0", 1, false, false, 0.1);
 
     let expected = "\
 ============================ rpmlint session starts ============================

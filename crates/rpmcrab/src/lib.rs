@@ -348,7 +348,18 @@ pub fn run() -> ExitCode {
     // inputs that were actually validated.
     let arg_count = files.len() + cli.installed.len();
     let duration = start.elapsed().as_secs_f64();
+    // The session banner is parameterized by argv[0]'s basename so the
+    // binary can be installed as `rpmlint` (docs/DESIGN.md §5).
+    let prog = std::env::args_os()
+        .next()
+        .and_then(|p| {
+            Path::new(&p)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "rpmlint".to_string());
     let out = lint.render(
+        &prog,
         RPMLINT_VERSION,
         arg_count,
         cli.time_report,

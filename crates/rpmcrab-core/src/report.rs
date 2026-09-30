@@ -7,7 +7,9 @@ use crate::color::Color;
 use crate::term::string_center;
 
 /// The session header block (terminated by a blank line).
+#[allow(clippy::too_many_arguments)]
 pub fn header(
+    prog: &str,
     version: &str,
     conf_files: &[String],
     rpmlintrc: &[String],
@@ -20,10 +22,10 @@ pub fn header(
     out.push_str(&format!(
         "{}{}{}\n",
         color.bold,
-        string_center("rpmlint session starts", '=', width),
+        string_center(&format!("{prog} session starts"), '=', width),
         color.reset
     ));
-    out.push_str(&format!("rpmlint: {version}\n"));
+    out.push_str(&format!("{prog}: {version}\n"));
     out.push_str("configuration:\n");
     for cf in conf_files {
         out.push_str(&format!("    {cf}\n"));

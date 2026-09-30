@@ -245,6 +245,7 @@ impl Lint {
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
+        prog: &str,
         version: &str,
         header_packages: usize,
         time_report: bool,
@@ -253,6 +254,7 @@ impl Lint {
     ) -> String {
         let mut out = String::new();
         out.push_str(&report::header(
+            prog,
             version,
             &self.config.conf_files,
             &self.config.rpmlintrc_display,
