@@ -6,6 +6,9 @@
 //! `branding-provides-missing`, `branding-provides-unversioned`,
 //! `branding-excessive-recommends`, `branding-excessive-suggests`,
 //! `branding-excessive-enhances`.
+//!
+//! `new` takes a `Config` only to satisfy the `Check` construction signature;
+//! like the reference's `__init__`, it reads no config keys.
 
 use fancy_regex::Regex;
 
@@ -27,9 +30,10 @@ pub struct BrandingPolicyCheck {
 impl BrandingPolicyCheck {
     pub fn new(_config: &Config) -> Self {
         Self {
-            re_branding: Regex::new(r"(?P<name>\S+)-(?P<type>branding|theme)-(?P<flavor>\S+)")
+            // `\A`-anchored: the reference uses `re.match`.
+            re_branding: Regex::new(r"\A(?P<name>\S+)-(?P<type>branding|theme)-(?P<flavor>\S+)")
                 .expect("static regex"),
-            re_branding_generic: Regex::new(r"(?P<name>\S+)-(?P<type>branding|theme)")
+            re_branding_generic: Regex::new(r"\A(?P<name>\S+)-(?P<type>branding|theme)")
                 .expect("static regex"),
         }
     }
@@ -126,8 +130,9 @@ impl Check for BrandingPolicyCheck {
                 add_info(out, Level::Error, pkg, "branding-provides-missing", &[]);
             }
             Some(provide) => {
-                let has_version = provide.version.is_some() || provide.release.is_some();
-                if !has_version || provide.flags != RPMSENSE_EQUAL {
+                // The reference guards on `len(branding_provide) < 2`, which is
+                // constant-false for the three-field DepInfo namedtuple.
+                if provide.flags != RPMSENSE_EQUAL {
                     add_info(
                         out,
                         Level::Error,
@@ -173,6 +178,54 @@ impl Check for BrandingPolicyCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    use crate::color::Color;
+    use crate::pkg::dep::DepInfo;
+
+    /// `Pkg` is header-backed with no test constructor, so open a tiny fixture
+    /// and rewrite the public fields the check reads.
+    fn fixture_pkg() -> Pkg {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        Pkg::open(&rpm, &std::env::temp_dir()).expect("open fixture pkg")
+    }
+
+    fn dep(name: &str, flags: u32) -> DepInfo {
+        DepInfo {
+            name: name.to_string(),
+            flags,
+            epoch: None,
+            version: None,
+            release: None,
+        }
+    }
+
+    fn dep_ev(name: &str, flags: u32, version: &str) -> DepInfo {
+        DepInfo {
+            name: name.to_string(),
+            flags,
+            epoch: None,
+            version: Some(version.to_string()),
+            release: None,
+        }
+    }
+
+    fn run(pkg: &Pkg) -> Vec<(String, String)> {
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = BrandingPolicyCheck::new(&config);
+        check.check_binary(pkg, &config, &mut out);
+        out.results().to_vec()
+    }
+
+    fn has<'a>(results: &'a [(String, String)], name: &str) -> Vec<&'a str> {
+        results
+            .iter()
+            .filter(|(n, _)| n == name)
+            .map(|(_, line)| line.as_str())
+            .collect()
+    }
 
     #[test]
     fn parse_branding_package() {
@@ -210,5 +263,106 @@ mod tests {
     fn non_branding_name_is_none() {
         let check = BrandingPolicyCheck::new(&Config::default());
         assert!(BrandingPolicyCheck::parse_branding(&check.re_branding, "vim").is_none());
+    }
+
+    // Mirrors the reference's test_branding.py::test_branding_requires.
+    #[test]
+    fn requires_specific_flavor_is_error() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "brandingdep-testpackage".to_string();
+        pkg.requires = vec![
+            dep("testingpackage-branding-openSUSE", 0),
+            dep_ev("testingpackage2-branding", RPMSENSE_EQUAL, "1.0"),
+            dep_ev(
+                "testingpackage4-branding",
+                RPMSENSE_GREATER | RPMSENSE_EQUAL,
+                "1.0",
+            ),
+            dep("testingpackage-branding", 0),
+        ];
+        let results = run(&pkg);
+
+        let specific = has(&results, "branding-requires-specific-flavor");
+        assert_eq!(specific.len(), 1, "{results:?}");
+        assert!(specific[0].contains(": E: "), "level: {}", specific[0]);
+        assert!(specific[0].contains("testingpackage-branding-openSUSE"));
+
+        let unversioned = has(&results, "branding-requires-unversioned");
+        assert_eq!(unversioned.len(), 1, "{results:?}");
+        assert!(
+            unversioned[0].contains(": E: "),
+            "level: {}",
+            unversioned[0]
+        );
+        assert!(unversioned[0].ends_with("testingpackage-branding"));
+    }
+
+    // Mirrors test_branding.py::test_branding_pkg1. The provide carries `=`
+    // flags but no version: the old `!has_version` condition flagged this,
+    // the reference's constant-false guard does not.
+    #[test]
+    fn versioned_provide_with_equal_flags_is_quiet() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "bla-branding-upstream".to_string();
+        pkg.conflicts = vec![dep("bla-branding", 0)];
+        pkg.supplements = vec![dep("(bla and branding-upstream)", 0)];
+        pkg.provides = vec![dep("bla-branding", RPMSENSE_EQUAL)];
+        let results = run(&pkg);
+        assert!(
+            has(&results, "branding-supplements-missing").is_empty(),
+            "{results:?}"
+        );
+        assert!(
+            has(&results, "branding-provides-missing").is_empty(),
+            "{results:?}"
+        );
+        assert!(
+            has(&results, "branding-provides-unversioned").is_empty(),
+            "{results:?}"
+        );
+        assert!(
+            has(&results, "branding-conflicts-missing").is_empty(),
+            "{results:?}"
+        );
+    }
+
+    // Mirrors test_branding.py::test_branding_pkg2.
+    #[test]
+    fn theme_package_reports_all_expected_findings() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "bla-theme-openSUSE".to_string();
+        pkg.provides = vec![dep("bla-theme", 0)];
+        pkg.recommends = vec![dep("recommendie", 0)];
+        pkg.suggests = vec![dep("suggie", 0)];
+        pkg.enhances = vec![dep("enhancie", 0)];
+        let results = run(&pkg);
+
+        let unversioned = has(&results, "branding-provides-unversioned");
+        assert_eq!(unversioned.len(), 1, "{results:?}");
+        assert!(
+            unversioned[0].contains(": E: "),
+            "level: {}",
+            unversioned[0]
+        );
+        assert!(unversioned[0].contains("bla-theme"));
+
+        let missing_suppl = has(&results, "branding-supplements-missing");
+        assert_eq!(missing_suppl.len(), 1, "{results:?}");
+        assert!(missing_suppl[0].contains("(bla and theme-openSUSE)"));
+
+        let missing_conf = has(&results, "branding-conflicts-missing");
+        assert_eq!(missing_conf.len(), 1, "{results:?}");
+        assert!(missing_conf[0].contains("bla-theme"));
+
+        for (finding, detail) in [
+            ("branding-excessive-recommends", "recommendie"),
+            ("branding-excessive-suggests", "suggie"),
+            ("branding-excessive-enhances", "enhancie"),
+        ] {
+            let got = has(&results, finding);
+            assert_eq!(got.len(), 1, "{finding}: {results:?}");
+            assert!(got[0].contains(": W: "), "level: {}", got[0]);
+            assert!(got[0].contains(detail), "detail: {}", got[0]);
+        }
     }
 }

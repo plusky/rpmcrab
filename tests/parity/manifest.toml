@@ -9,3 +9,9 @@ name = "codequery-spec"
 
 [[case]]
 name = "liblto21"
+
+[[case]]
+name = "parity"
+
+[[case]]
+name = "dbus-parity"

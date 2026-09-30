@@ -1,0 +1,21 @@
+kind = "captured"
+rpmlint = "2.10.0"
+reference_sha = "84848c05c5571c22274a55ff9afdfe6d88c67dc9"
+flavour = "openSUSE"
+argv = ["parity-1.0-1.noarch.rpm", "parity.spec"]
+captured = "2026-09-30"
+
+[source]
+description = "Hand-built fixture (audit #58 B2): sysv init script plus %post/%preun scriptlets with BOTH a body and a -p interpreter - the body (chkconfig) wins, so no postin/preun-without-chkconfig fires. E deprecated-init-script (Badness 10000) trips the badness abort: exit 66."
+
+[tools]
+present = ["checkbashisms","dash","desktop-file-validate","readelf","objdump","ldd","file"]
+
+[[input]]
+file = "parity-1.0-1.noarch.rpm"
+sha256 = "c9755b04ab03e61128e17e97344f04100a26276a343f0e0d9d2376707f98d782"
+
+[[input]]
+file = "parity.spec"
+sha256 = "4c0f3f1ba771a551c93516bd39cc56ee523d3a8f6b5718583caa5679811bafd5"
+

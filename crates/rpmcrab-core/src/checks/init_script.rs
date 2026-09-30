@@ -44,6 +44,20 @@ const RECOMMENDED_LSB_KEYWORDS: &[&str] = &[
     "Short-Description",
 ];
 
+/// Python's `str(OSError)` for the `read-error` detail: `[Errno 13] Permission
+/// denied`. Rust's `Display` renders `Permission denied (os error 13)`.
+fn os_error_detail(e: &std::io::Error) -> String {
+    match e.raw_os_error() {
+        Some(code) => {
+            let msg = e.to_string();
+            let suffix = format!(" (os error {code})");
+            let msg = msg.strip_suffix(&suffix).unwrap_or(&msg);
+            format!("[Errno {code}] {msg}")
+        }
+        None => e.to_string(),
+    }
+}
+
 pub struct InitScriptCheck {
     use_deflevels: bool,
     use_subsys: bool,
@@ -188,7 +202,7 @@ impl Check for InitScriptCheck {
             let content = match std::fs::read_to_string(&file.path) {
                 Ok(c) => c,
                 Err(e) => {
-                    add_info(out, Level::Warning, pkg, "read-error", &[&e.to_string()]);
+                    add_info(out, Level::Warning, pkg, "read-error", &[&os_error_detail(&e)]);
                     continue;
                 }
             };
@@ -210,8 +224,12 @@ impl Check for InitScriptCheck {
                 }
                 if line.ends_with("### END INIT INFO") {
                     in_lsb_tag = false;
-                    for (kw, vals) in &lsb_tags {
-                        if vals.len() != 1 {
+                    // Sorted: one finding per keyword, all sharing (check,
+                    // level), so emission order would otherwise be random.
+                    let mut kws: Vec<&String> = lsb_tags.keys().collect();
+                    kws.sort();
+                    for kw in kws {
+                        if lsb_tags[kw].len() != 1 {
                             add_info(out, Level::Error, pkg, "redundant-lsb-keyword", &[kw]);
                         }
                     }
@@ -382,6 +400,10 @@ impl Check for InitScriptCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    use crate::color::Color;
+    use crate::pkg::pkgfile::PkgFile;
 
     fn checker() -> InitScriptCheck {
         InitScriptCheck::new(&Config::default())
@@ -475,5 +497,48 @@ mod tests {
         check.check(&pkg, &config, &mut out);
         let rendered: Vec<String> = out.results().iter().map(|(_, line)| line.clone()).collect();
         assert!(rendered.is_empty(), "{rendered:?}");
+    }
+
+    #[test]
+    fn redundant_lsb_keywords_have_deterministic_order() {
+        // Three duplicate LSB keywords: without sorting, the HashMap iteration
+        // order would randomize the finding sequence across runs.
+        let dir = std::env::temp_dir().join("rpmcrab-init-order");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let script = dir.join("order");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n### BEGIN INIT INFO\n# Provides: order\n# Provides: order2\n# Description: foo\n# Description: bar\n# Required-Start: $remote_fs\n# Required-Start: $syslog\n### END INIT INFO\n",
+        )
+        .expect("write script");
+
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &dir).expect("open fixture pkg");
+        pkg.files = vec![PkgFile {
+            name: "/etc/init.d/order".to_string(),
+            path: script.to_string_lossy().into_owned(),
+            mode: 0o100755,
+            ..Default::default()
+        }];
+
+        let run = || {
+            let config = Config::default();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            let mut check = InitScriptCheck::new(&config);
+            check.check_binary(&pkg, &config, &mut out);
+            out.results().to_vec()
+        };
+        let first = run();
+        let second = run();
+        assert_eq!(first, second, "finding order must be deterministic");
+
+        let keywords: Vec<&str> = first
+            .iter()
+            .filter(|(n, _)| n == "redundant-lsb-keyword")
+            .map(|(_, line)| line.rsplit(' ').next().unwrap_or(""))
+            .collect();
+        assert_eq!(keywords, vec!["Description", "Provides", "Required-Start"]);
     }
 }

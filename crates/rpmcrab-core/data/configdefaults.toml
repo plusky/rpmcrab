@@ -28,6 +28,11 @@ Checks = [
     "TagsCheck",
     "ZipCheck",
     "ZyppSyntaxCheck",
+    # openSUSE flavour checks (reference configs/openSUSE/opensuse.toml),
+    # in reference order.
+    "SharedLibraryPolicyCheck",
+    "BrandingPolicyCheck",
+    "KMPPolicyCheck",
 ]
 # List of error titles that should be filtered
 FilterErrorTitles = []

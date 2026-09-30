@@ -92,3 +92,86 @@ fn registry_only_constructs_declared_modules() {
         );
     }
 }
+
+/// Check names `check::build` can construct, from the match arms' string keys.
+fn names_built_by_registry() -> Vec<String> {
+    let src = std::fs::read_to_string(core_root().join("src/check.rs")).expect("read check.rs");
+    let body = match src.find("pub fn build(") {
+        Some(start) => {
+            let rest = &src[start..];
+            let end = rest.find("\n}\n").map(|i| i + 1).unwrap_or(rest.len());
+            &rest[..end]
+        }
+        None => panic!("check::build not found"),
+    };
+    let mut found: Vec<String> = body
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            let rest = l.strip_prefix('"')?;
+            let end = rest.find('"')?;
+            let name = &rest[..end];
+            rest[end + 1..]
+                .trim_start()
+                .starts_with("=>")
+                .then(|| name.to_string())
+        })
+        .collect();
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// The `Checks = [...]` list from the default config.
+fn checks_in_default_config() -> Vec<String> {
+    let src = std::fs::read_to_string(core_root().join("data/configdefaults.toml"))
+        .expect("read configdefaults.toml");
+    let mut in_list = false;
+    let mut names = Vec::new();
+    for line in src.lines() {
+        let line = line.trim();
+        if line.starts_with("Checks = [") {
+            in_list = true;
+            continue;
+        }
+        if in_list {
+            if line.starts_with(']') {
+                break;
+            }
+            if let Some(rest) = line
+                .strip_prefix('"')
+                .or_else(|| line.strip_prefix('\''))
+                && let Some(end) = rest.find(['"', '\''])
+            {
+                names.push(rest[..end].to_string());
+            }
+        }
+    }
+    assert!(!names.is_empty(), "no Checks parsed from configdefaults.toml");
+    names
+}
+
+/// A check that `check::build` can construct but the default config never
+/// selects can never run — the same class of defect as #49 (issue #66).
+/// The documented exceptions are modules the reference ships but lists in no
+/// shipped config's `Checks` (`InitScriptCheck`, `LSBCheck`, `XinetdDepCheck`),
+/// plus `PAMModulesCheck`, which the reference lists only in the Fedora
+/// flavour config (not yet ported); the port mirrors all of that.
+#[test]
+fn every_constructible_check_is_listed_in_checks() {
+    let listed = checks_in_default_config();
+    for name in names_built_by_registry() {
+        if name == "InitScriptCheck"
+            || name == "LSBCheck"
+            || name == "XinetdDepCheck"
+            || name == "PAMModulesCheck"
+        {
+            continue;
+        }
+        assert!(
+            listed.contains(&name),
+            "`check::build` constructs `{name}` but it is absent from \
+             `Checks = [...]` in configdefaults.toml, so it can never run"
+        );
+    }
+}

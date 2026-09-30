@@ -289,6 +289,12 @@ impl ErlangCheck {
             .get("ErlangBuildDir")
             .and_then(toml::Value::as_str)
             .unwrap_or("/home/abuild/rpmbuild/BUILD");
+        // An empty value would make `\A` match every path and silently disable
+        // the check; the reference cannot produce this (rpm always expands
+        // %_builddir), so fail loudly on the misconfiguration.
+        if build_dir.is_empty() {
+            panic!("ErlangBuildDir must not be empty");
+        }
         Self {
             // `re.match` anchors at the start of the string.
             source_re: Regex::new(&format!("\\A{}", fancy_regex::escape(build_dir)))

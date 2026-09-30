@@ -1,0 +1,32 @@
+============================ rpmlint session starts ============================
+rpmlint: 2.10.0
+configuration:
+    <VENV>/lib64/python3.13/site-packages/rpmlint/configdefaults.toml
+    <XDG>/rpmlint/cron-whitelist.toml
+    <XDG>/rpmlint/dbus-services.toml
+    <XDG>/rpmlint/device-files-whitelist.toml
+    <XDG>/rpmlint/licenses.toml
+    <XDG>/rpmlint/opensuse.toml
+    <XDG>/rpmlint/pam-modules.toml
+    <XDG>/rpmlint/permissions-whitelist.toml
+    <XDG>/rpmlint/pie-executables.toml
+    <XDG>/rpmlint/polkit-rules-whitelist.toml
+    <XDG>/rpmlint/scoring.toml
+    <XDG>/rpmlint/security.toml
+    <XDG>/rpmlint/sudoers-whitelist.toml
+    <XDG>/rpmlint/sysctl-whitelist.toml
+    <XDG>/rpmlint/systemd-tmpfiles.toml
+    <XDG>/rpmlint/users-groups.toml
+    <XDG>/rpmlint/varlink-whitelist.toml
+    <XDG>/rpmlint/world-writable-whitelist.toml
+    <XDG>/rpmlint/zypper-plugins.toml
+checks: 43, packages: 2
+
+dbus-parity.noarch: W: non-conffile-in-etc /etc/dbus-1/system.d/dbus-parity.conf
+dbus-parity.noarch: W: no-url-tag
+dbus-parity.spec: W: no-%prep-section
+dbus-parity.spec: W: no-%check-section
+dbus-parity.spec: W: no-%build-section
+dbus-parity.noarch: E: dbus-policy-allow-without-destination <allow send_interface="org.parity.If"/> /etc/dbus-1/system.d/dbus-parity.conf
+dbus-parity.noarch: E: dbus-file-unauthorized (Badness: 10) /etc/dbus-1/system.d/dbus-parity.conf (sha256 file digest default filter:9ee3c1c562d87a3c49517a83ed76b0b8b393b486f62cf17975daeaa5d462f73c shell filter:9ee3c1c562d87a3c49517a83ed76b0b8b393b486f62cf17975daeaa5d462f73c xml filter:16dae7dc7c5a0911c75faf2b5adf652c019c58c25aee0c6f1df3292369799f88)
+ 1 packages and 1 specfiles checked; 2 errors, 5 warnings, 5 filtered, 11 badness; has taken <DURATION> s 

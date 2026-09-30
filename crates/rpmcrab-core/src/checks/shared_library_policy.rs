@@ -161,8 +161,12 @@ impl Check for SharedLibraryPolicyCheck {
                     }
                 }
             }
-            // Non-versioned libs in a std lib package.
-            for lib in &filtered {
+            // Non-versioned libs in a std lib package. Sorted: the reference
+            // iterates a set, and findings sharing (check, level) keep
+            // emission order through the stable sort.
+            let mut libs_sorted: Vec<&String> = filtered.iter().collect();
+            libs_sorted.sort();
+            for lib in libs_sorted {
                 let versioned = lib.chars().last().is_some_and(|c| c.is_ascii_digit())
                     || is_match(&self.re_soname_strongly_versioned, lib);
                 if !versioned {
@@ -175,24 +179,20 @@ impl Check for SharedLibraryPolicyCheck {
                     continue;
                 }
                 if dep.flags & (RPMSENSE_GREATER | RPMSENSE_EQUAL) == RPMSENSE_EQUAL {
-                    let evr = dep.evr_string();
-                    let detail = if evr.is_empty() {
-                        dep.name.clone()
-                    } else {
-                        // Like the reference's formatRequire: the operator
-                        // reflects the flags, not a hardcoded `=`.
-                        let mut op = String::new();
-                        if dep.flags & RPMSENSE_LESS != 0 {
-                            op.push('<');
-                        }
-                        if dep.flags & RPMSENSE_GREATER != 0 {
-                            op.push('>');
-                        }
-                        if dep.flags & RPMSENSE_EQUAL != 0 {
-                            op.push('=');
-                        }
-                        format!("{} {op} {}", dep.name, evr)
-                    };
+                    // Like the reference's formatRequire: `name`, a space, the
+                    // operator from the flags, a space, then the EVR — which may
+                    // be empty, leaving the trailing space.
+                    let mut op = String::new();
+                    if dep.flags & RPMSENSE_LESS != 0 {
+                        op.push('<');
+                    }
+                    if dep.flags & RPMSENSE_GREATER != 0 {
+                        op.push('>');
+                    }
+                    if dep.flags & RPMSENSE_EQUAL != 0 {
+                        op.push('=');
+                    }
+                    let detail = format!("{} {op} {}", dep.name, dep.evr_string());
                     add_info(
                         out,
                         Level::Warning,
@@ -204,10 +204,13 @@ impl Check for SharedLibraryPolicyCheck {
             }
         }
 
-        // Non-lib stuff must not add dependencies.
+        // Non-lib stuff must not add dependencies. Sorted for the same reason
+        // as above: one finding per dep, all sharing (check, level).
         if !libs.is_empty() {
-            for dep in &pkg_requires {
-                if dep.contains(".so.") && !libs.contains(*dep) && !libs_needed.contains(*dep) {
+            let mut deps_sorted: Vec<&str> = pkg_requires.iter().copied().collect();
+            deps_sorted.sort_unstable();
+            for dep in deps_sorted {
+                if dep.contains(".so.") && !libs.contains(dep) && !libs_needed.contains(dep) {
                     add_info(
                         out,
                         Level::Error,
@@ -224,9 +227,24 @@ impl Check for SharedLibraryPolicyCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    use crate::color::Color;
+    use crate::pkg::dep::DepInfo;
+    use crate::pkg::pkgfile::PkgFile;
 
     fn checker() -> SharedLibraryPolicyCheck {
         SharedLibraryPolicyCheck::new(&Config::default())
+    }
+
+    fn dep(name: &str) -> DepInfo {
+        DepInfo {
+            name: name.to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        }
     }
 
     #[test]
@@ -257,5 +275,127 @@ mod tests {
             &check.re_soname_strongly_versioned,
             "libfoo.so.1"
         ));
+    }
+
+    #[test]
+    fn excessive_dependencies_have_deterministic_order() {
+        // Two minimal ELF64 shared objects with unversioned SONAMEs, plus
+        // synthetic `.so` requires matching no shipped soname. Both sorted
+        // sites emit multiple findings sharing (check, level); without the
+        // sorts, HashSet iteration order would randomize the sequence.
+        let dir = std::env::temp_dir().join("rpmcrab-shlib-order");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let so_a = dir.join("libfoo.so");
+        let so_b = dir.join("libbar.so");
+        std::fs::write(&so_a, minimal_elf("libfoo.so")).expect("write elf");
+        std::fs::write(&so_b, minimal_elf("libbar.so")).expect("write elf");
+
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &dir).expect("open fixture pkg");
+        pkg.name = "libfoo1".to_string();
+        pkg.files = vec![
+            PkgFile {
+                name: "/usr/lib64/libfoo.so".to_string(),
+                path: so_a.to_string_lossy().into_owned(),
+                mode: 0o100644,
+                magic: "ELF 64-bit LSB shared object".to_string(),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/lib64/libbar.so".to_string(),
+                path: so_b.to_string_lossy().into_owned(),
+                mode: 0o100644,
+                magic: "ELF 64-bit LSB shared object".to_string(),
+                ..Default::default()
+            },
+        ];
+        pkg.requires = vec![dep("libzzz.so.1"), dep("libaaa.so.2"), dep("libmmm.so.3")];
+
+        let run = || {
+            let config = Config::default();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            let mut check = SharedLibraryPolicyCheck::new(&config);
+            check.check_binary(&pkg, &config, &mut out);
+            out.results().to_vec()
+        };
+        let first = run();
+        let second = run();
+        assert_eq!(first, second, "finding order must be deterministic");
+
+        let unversioned: Vec<&str> = first
+            .iter()
+            .filter(|(n, _)| n == "shlib-unversioned-lib")
+            .map(|(_, line)| line.rsplit(' ').next().unwrap_or(""))
+            .collect();
+        assert_eq!(unversioned, vec!["libbar.so", "libfoo.so"]);
+
+        let deps: Vec<&str> = first
+            .iter()
+            .filter(|(n, _)| n == "shlib-policy-excessive-dependency")
+            .map(|(_, line)| line.rsplit(' ').next().unwrap_or(""))
+            .collect();
+        assert_eq!(deps, vec!["libaaa.so.2", "libmmm.so.3", "libzzz.so.1"]);
+    }
+
+    /// A minimal ELF64 shared object with a single DT_SONAME, parseable by
+    /// goblin, so tests need no toolchain-produced fixture.
+    fn minimal_elf(soname: &str) -> Vec<u8> {
+        let mut strtab: Vec<u8> = vec![0];
+        let soname_off = strtab.len() as u64;
+        strtab.extend_from_slice(soname.as_bytes());
+        strtab.push(0);
+
+        // Dynamic entries are (i64 tag, u64 val).
+        let mut dynamic: Vec<u8> = Vec::new();
+        let mut push_dyn = |tag: i64, val: u64| {
+            dynamic.extend_from_slice(&tag.to_le_bytes());
+            dynamic.extend_from_slice(&val.to_le_bytes());
+        };
+        let ehsize: u64 = 64;
+        let dyn_off = ehsize + 2 * 56;
+        let strtab_off = dyn_off + 4 * 16;
+        push_dyn(14, soname_off); // DT_SONAME
+        push_dyn(5, strtab_off); // DT_STRTAB: vaddr == file offset (PT_LOAD at 0)
+        push_dyn(10, strtab.len() as u64); // DT_STRSZ
+        push_dyn(0, 0); // DT_NULL
+
+        let mut elf: Vec<u8> = vec![
+            0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        elf.extend_from_slice(&3u16.to_le_bytes()); // ET_DYN
+        elf.extend_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+        elf.extend_from_slice(&1u32.to_le_bytes()); // version
+        elf.extend_from_slice(&0u64.to_le_bytes()); // entry
+        elf.extend_from_slice(&ehsize.to_le_bytes()); // phoff
+        elf.extend_from_slice(&0u64.to_le_bytes()); // shoff
+        elf.extend_from_slice(&0u32.to_le_bytes()); // flags
+        elf.extend_from_slice(&64u16.to_le_bytes()); // ehsize
+        elf.extend_from_slice(&56u16.to_le_bytes()); // phentsize
+        elf.extend_from_slice(&2u16.to_le_bytes()); // phnum
+        elf.extend_from_slice(&0u16.to_le_bytes()); // shentsize
+        elf.extend_from_slice(&0u16.to_le_bytes()); // shnum
+        elf.extend_from_slice(&0u16.to_le_bytes()); // shstrndx
+
+        // PT_LOAD covering the whole file at vaddr 0, then PT_DYNAMIC.
+        let total = strtab_off + strtab.len() as u64;
+        let mut ph = |p_type: u32, flags: u32, offset: u64, filesz: u64| {
+            elf.extend_from_slice(&p_type.to_le_bytes());
+            elf.extend_from_slice(&flags.to_le_bytes());
+            elf.extend_from_slice(&offset.to_le_bytes());
+            elf.extend_from_slice(&offset.to_le_bytes()); // vaddr == offset
+            elf.extend_from_slice(&offset.to_le_bytes()); // paddr
+            elf.extend_from_slice(&filesz.to_le_bytes());
+            elf.extend_from_slice(&filesz.to_le_bytes()); // memsz
+            elf.extend_from_slice(&0x1000u64.to_le_bytes()); // align
+        };
+        ph(1, 5, 0, total); // PT_LOAD
+        ph(2, 6, dyn_off, dynamic.len() as u64); // PT_DYNAMIC
+
+        elf.extend_from_slice(&dynamic);
+        elf.extend_from_slice(&strtab);
+        assert_eq!(elf.len() as u64, total);
+        elf
     }
 }

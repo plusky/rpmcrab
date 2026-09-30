@@ -1,0 +1,21 @@
+kind = "captured"
+rpmlint = "2.10.0"
+reference_sha = "84848c05c5571c22274a55ff9afdfe6d88c67dc9"
+flavour = "openSUSE"
+argv = ["dbus-parity-1.0-1.noarch.rpm", "dbus-parity.spec"]
+captured = "2026-09-30"
+
+[source]
+description = "Hand-built fixture (audit #58 B1/B3): two <policy> elements, one send-allow plus one deny-only - exactly one E dbus-policy-allow-without-destination with the minidom toxml() detail, no dbus-policy-missing-allow false positive. Exit 0."
+
+[tools]
+present = ["checkbashisms","dash","desktop-file-validate","readelf","objdump","ldd","file"]
+
+[[input]]
+file = "dbus-parity-1.0-1.noarch.rpm"
+sha256 = "506c28241d425d770b539b4887849593677592b18fa423315289981954826fb9"
+
+[[input]]
+file = "dbus-parity.spec"
+sha256 = "19906493f6eef57f2943cdc0658676428caf4cb14d59cfa11ba7663e3364efd1"
+

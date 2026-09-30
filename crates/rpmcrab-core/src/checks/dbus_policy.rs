@@ -38,7 +38,10 @@ struct PolicyElement {
 }
 
 /// Escape an attribute value for the rebuilt XML detail, mirroring
-/// minidom's `toxml()`.
+/// minidom's `toxml()`: only `&`, `<`, `>` and `"` are escaped. Control
+/// characters such as tab, newline and CR pass through literally —
+/// CPython's `xml.dom.minidom._write_data` has no `&#9;`/`&#10;`/`&#13;`
+/// mapping.
 fn escape_xml_attr(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -283,6 +286,14 @@ mod tests {
             "/usr/share/dbus-1/system.d/foo.conf"
         ));
         assert!(!DBusPolicyCheck::is_policy_file("/etc/foo.conf"));
+    }
+
+    #[test]
+    fn escape_xml_attr_matches_minidom() {
+        // Verified against CPython 3.9's xml.dom.minidom._write_data: only
+        // & < > " are escaped; \t \n \r are emitted literally.
+        assert_eq!(escape_xml_attr("a&b<c>d\"e"), "a&amp;b&lt;c&gt;d&quot;e");
+        assert_eq!(escape_xml_attr("x\ty\nz\rw"), "x\ty\nz\rw");
     }
 
     #[test]
