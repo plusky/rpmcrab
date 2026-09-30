@@ -98,13 +98,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "logrotate-log-dir-not-packaged"
-kind = "missing"
-reason = "LogrotateCheck is not ported yet, so this finding is absent entirely. The /var/log exclusion from rpmlint#551 defers to that port."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "inaccessible-filename"
 kind = "missing"
 reason = "Intentional: Python os.access can raise UnicodeError on undecodable paths; Rust paths do not have this failure mode."
@@ -268,18 +261,3 @@ check = "AtomicUpdateCheck"
 kind = "behaviour"
 reason = "A non-string element in AtomicAllowedDirs/AtomicDisallowedSubdirs (e.g. AtomicDisallowedSubdirs = [42]) panics at construction; the reference raises TypeError later, at check time. The port deliberately fails fast on a misconfigured type instead of reproducing the reference's deferred failure."
 since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "kmp-excessive-enhances"
-kind = "detail"
-reason = "The detail prints the enhances list with Rust Debug formatting ([\"a\"]) where the reference prints Python repr (['a'])."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "incoherent-init-script-name"
-kind = "detail"
-reason = "The detail prints the candidate names with Rust Debug formatting ([\"a\",\"ad\"]) where the reference prints Python repr of a tuple (('a', 'ad'))."
-since = "0.1.0"
-

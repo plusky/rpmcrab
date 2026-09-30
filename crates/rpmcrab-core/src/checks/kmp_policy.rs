@@ -7,6 +7,7 @@
 use fancy_regex::Regex;
 
 use crate::check::{Check, add_info};
+use crate::checks::shared::python_str_list;
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
@@ -69,7 +70,7 @@ impl Check for KMPPolicyCheck {
                 Level::Error,
                 pkg,
                 "kmp-excessive-enhances",
-                &[&format!("{kernel_enhances:?}")],
+                &[&python_str_list(&kernel_enhances)],
             );
         }
         if !kernel_enhances.contains(&kernel_flavor.as_str()) {

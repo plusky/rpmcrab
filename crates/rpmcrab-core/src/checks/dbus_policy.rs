@@ -76,10 +76,10 @@ fn push_element(
             .unwrap_or_default();
         attrs.push((key, val));
     }
-    // Document order (not HashMap order) with XML-escaped values, like
-    // minidom's `toxml()`.
+    // Document order with XML-escaped values, byte-identical to minidom's
+    // `toxml()` for empty elements (no space before `/>`).
     let xml = format!(
-        "<{tag}{} />",
+        "<{tag}{}/>",
         attrs
             .iter()
             .map(|(k, v)| format!(" {k}=\"{}\"", escape_xml_attr(v)))
@@ -355,8 +355,9 @@ mod tests {
 
     #[test]
     fn attribute_detail_uses_document_order() {
-        // The rebuilt element detail must list attributes in document order
-        // (like minidom's toxml()), not HashMap order.
+        // The rebuilt element detail must be byte-identical to minidom's
+        // `toxml()`: attributes in document order, XML-escaped values, and
+        // no space before `/>`.
         let xml = r#"<busconfig><policy user="root">
 <allow send_path="/org/foo" send_interface="org.foo.Bar"/>
 </policy></busconfig>"#;
@@ -368,8 +369,22 @@ mod tests {
             .expect("finding present");
         assert_eq!(
             detail,
-            r#"<allow send_path="/org/foo" send_interface="org.foo.Bar" />"#
+            r#"<allow send_path="/org/foo" send_interface="org.foo.Bar"/>"#
         );
+    }
+
+    #[test]
+    fn attribute_detail_escapes_like_toxml() {
+        // minidom escapes & < > " in attribute values; the rebuilt detail
+        // must do the same (byte-identical to `toxml()`).
+        let xml = "<busconfig><policy user=\"root\">\n<allow send_interface=\"a&amp;b&lt;c\"/>\n</policy></busconfig>";
+        let findings = check_content(xml).expect("parses");
+        let detail = findings
+            .iter()
+            .find(|(_, f, _)| *f == "dbus-policy-allow-without-destination")
+            .map(|(_, _, d)| d.as_str())
+            .expect("finding present");
+        assert_eq!(detail, "<allow send_interface=\"a&amp;b&lt;c\"/>");
     }
 
     #[test]
@@ -432,5 +447,39 @@ mod tests {
     #[test]
     fn malformed_xml_is_an_error() {
         assert!(check_content("<busconfig><policy>").is_err());
+    }
+
+    #[test]
+    fn parity_fixture_matches_reference() {
+        use crate::color::Color;
+
+        // Pinned against reference rpmlint 2.10.0 (DBusPolicyCheck.py at
+        // 84848c0), verified in an openSUSE container: the fixture's two
+        // <policy> elements (one send-allow, one deny-only) yield exactly
+        // one finding. B1: a per-policy send_policy_seen scope would add a
+        // false-positive E dbus-policy-missing-allow for the deny-only
+        // policy. B3: the detail is byte-identical to minidom's toxml().
+        let rpm = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/parity/pkg/inputs/dbus-parity-1.0-1.noarch.rpm"
+        );
+        let dir = std::env::temp_dir().join("rpmcrab-dbus-parity");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let pkg = crate::pkg::Pkg::open(std::path::Path::new(rpm), &dir).expect("fixture opens");
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = DBusPolicyCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let rendered: Vec<String> = out.results().iter().map(|(_, line)| line.clone()).collect();
+        assert_eq!(rendered.len(), 1, "{rendered:?}");
+        assert!(
+            rendered[0].contains("dbus-policy-allow-without-destination"),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered[0].contains(r#"<allow send_interface="org.parity.If"/>"#),
+            "{rendered:?}"
+        );
     }
 }

@@ -362,12 +362,17 @@ impl Check for InitScriptCheck {
                 .unwrap_or_else(|| pkg.name.to_lowercase());
             let goodnames = [base.clone(), format!("{base}d")];
             if !goodnames.contains(&initscripts[0]) {
+                // The reference prints `str()` of the 2-tuple goodnames.
+                let want = crate::checks::shared::python_str_tuple(&[
+                    goodnames[0].as_str(),
+                    goodnames[1].as_str(),
+                ]);
                 add_info(
                     out,
                     Level::Warning,
                     pkg,
                     "incoherent-init-script-name",
-                    &[&initscripts[0], &format!("{goodnames:?}")],
+                    &[&initscripts[0], &want],
                 );
             }
         }
@@ -443,5 +448,32 @@ mod tests {
         let check = checker();
         let script = "NAME=$NAME\n";
         assert_eq!(check.shell_var_value("NAME", script), None);
+    }
+
+    #[test]
+    fn parity_fixture_matches_reference() {
+        use crate::color::Color;
+
+        // Pinned against reference rpmlint 2.10.0 (InitScriptCheck.py at
+        // 84848c0), verified in an openSUSE container: the fixture ships an
+        // init script plus %post/%preun bodies WITH -p interpreters. The
+        // bodies (which call chkconfig) win over the interpreters, so the
+        // reference emits nothing. B2: preferring the -p interpreter would
+        // false-positive E postin-without-chkconfig and E
+        // preun-without-chkconfig.
+        let rpm = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/parity/pkg/inputs/parity-1.0-1.noarch.rpm"
+        );
+        let dir = std::env::temp_dir().join("rpmcrab-initscript-parity");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let pkg = crate::pkg::Pkg::open(std::path::Path::new(rpm), &dir).expect("fixture opens");
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = InitScriptCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let rendered: Vec<String> = out.results().iter().map(|(_, line)| line.clone()).collect();
+        assert!(rendered.is_empty(), "{rendered:?}");
     }
 }

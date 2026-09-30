@@ -35,6 +35,23 @@ pub fn script_body_or_prog(pkg: &Pkg, tag: librpm::Tag, prog: librpm::Tag) -> St
     }
 }
 
+/// Python `str()` of a list of strings: `['a', 'b']`. The reference
+/// interpolates `str(list)` into finding details; Rust's `{:?}` would print
+/// `["a", "b"]` instead. (Python switches to double quotes for strings
+/// containing a quote; package and file names never do, so single quotes
+/// match for every realistic input.)
+pub fn python_str_list(items: &[&str]) -> String {
+    let inner: Vec<String> = items.iter().map(|s| format!("'{s}'")).collect();
+    format!("[{}]", inner.join(", "))
+}
+
+/// Python `str()` of a tuple of strings: `('a', 'b')`. Same caveat as
+/// [`python_str_list`].
+pub fn python_str_tuple(items: &[&str]) -> String {
+    let inner: Vec<String> = items.iter().map(|s| format!("'{s}'")).collect();
+    format!("({})", inner.join(", "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,6 +95,20 @@ mod tests {
             "body won, not the -p interpreter: {body:?}"
         );
         assert!(!body.is_empty(), "fixture has a %post body");
+    }
+
+    #[test]
+    fn python_str_list_matches_python_repr() {
+        // B9: the reference prints Python repr (['a']), not Rust Debug (["a"]).
+        assert_eq!(python_str_list(&["a"]), "['a']");
+        assert_eq!(python_str_list(&["a", "b"]), "['a', 'b']");
+        assert_eq!(python_str_list(&[]), "[]");
+    }
+
+    #[test]
+    fn python_str_tuple_matches_python_repr() {
+        // B9: the reference prints str of a tuple (('a', 'ad')).
+        assert_eq!(python_str_tuple(&["a", "ad"]), "('a', 'ad')");
     }
 
     #[test]
