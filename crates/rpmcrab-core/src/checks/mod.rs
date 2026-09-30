@@ -1,5 +1,6 @@
 //! The lint checks, keyed by their Python module names (`TagsCheck`, …).
 
+pub mod binaries;
 pub mod config_files;
 pub mod doc;
 pub mod duplicates;

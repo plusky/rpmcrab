@@ -128,6 +128,9 @@ pub trait Check {
 pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
     match name {
         "TagsCheck" => Some(Box::new(crate::checks::tags::TagsCheck::new(config))),
+        "BinariesCheck" => Some(Box::new(crate::checks::binaries::BinariesCheck::new(
+            config,
+        ))),
         "IconSizesCheck" => Some(Box::new(crate::checks::icon_sizes::IconSizesCheck::new(
             config,
         ))),
