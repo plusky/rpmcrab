@@ -137,10 +137,32 @@ fn merge_into(dest: &mut toml::Table, source: &toml::Table, override_: bool) {
     for (k, v) in source {
         match (dest.get_mut(k), v) {
             (Some(toml::Value::Table(d)), toml::Value::Table(s)) => merge_into(d, s, override_),
-            (Some(toml::Value::Array(d)), toml::Value::Array(s)) if !override_ => {
-                for item in s {
-                    if !d.contains(item) {
-                        d.push(item.clone());
+            // The reference gates the append on the destination being a list, not
+            // on the incoming value's type, and then iterates whatever arrived.
+            // An empty table therefore leaves the destination list intact —
+            // `device-files-whitelist.toml` is followed by an empty
+            // `[DeviceFilesWhitelist]` in opensuse.toml, and treating that as a
+            // replace emptied the whitelist.
+            (Some(toml::Value::Array(d)), v) if !override_ => {
+                let items: Vec<toml::Value> = match v {
+                    toml::Value::Array(a) => a.clone(),
+                    toml::Value::Table(t) => t
+                        .keys()
+                        .map(|s| toml::Value::String(s.to_string()))
+                        .collect(),
+                    // `for item in "xyz"` walks the characters; the reference does not raise.
+                    toml::Value::String(s) => s
+                        .chars()
+                        .map(|c| toml::Value::String(c.to_string()))
+                        .collect(),
+                    other => panic!(
+                        "config: array key '{k}' is merged with a {other:?}, which the \
+                         reference cannot iterate either (TypeError)"
+                    ),
+                };
+                for item in items {
+                    if !d.contains(&item) {
+                        d.push(item);
                     }
                 }
             }
@@ -353,7 +375,11 @@ pub fn load_rpmlintrc(config: &mut Config, path: &Path) -> std::io::Result<()> {
     all.extend(filters.iter().cloned());
     config.configuration.insert(
         "Filters".to_string(),
-        toml::Value::Array(all.into_iter().map(toml::Value::String).collect()),
+        toml::Value::Array(
+            all.into_iter()
+                .map(|s| toml::Value::String(s.to_string()))
+                .collect(),
+        ),
     );
     config.rpmlintrc_filters = filters;
     config.rpmlintrc_display.push(path.display().to_string());
@@ -381,6 +407,83 @@ mod tests {
                 .map(|s| toml::Value::String(s.to_string()))
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn merge_keeps_list_when_a_later_table_is_empty() {
+        // `device-files-whitelist.toml` is followed by an empty
+        // `[DeviceFilesWhitelist]` in opensuse.toml. The reference gates the
+        // append on the destination being a list and then iterates the incoming
+        // value, so an empty table is a no-op and the list survives. Replacing
+        // it emptied the whitelist and flagged every device file in every
+        // package. Found while reviewing #47.
+        let mut dest = table("W = [\"a\", \"b\"]");
+        let src = table("[W]\n");
+        merge_into(&mut dest, &src, false);
+        assert_eq!(dest["W"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn merge_appends_keys_of_a_later_table_into_a_list() {
+        // Same arm, non-empty table: Python's `for item in v` walks a dict's
+        // keys, so the keys are appended.
+        let mut dest = table("W = [\"a\"]");
+        let src = table("[W]\nb = 1\n");
+        merge_into(&mut dest, &src, false);
+        assert_eq!(
+            dest["W"].as_array().unwrap(),
+            &["a".to_string(), "b".to_string()]
+                .into_iter()
+                .map(|s| toml::Value::String(s.to_string()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn merge_appends_table_keys_in_document_order() {
+        // The reference walks dict keys in insertion order, not sorted order.
+        // Needs more than one key to discriminate the two.
+        let mut dest = table("W = [\"a\"]");
+        let src = table("[W]\nz = 1\nb = 2\nm = 3\n");
+        merge_into(&mut dest, &src, false);
+        assert_eq!(
+            dest["W"].as_array().unwrap(),
+            &["a", "z", "b", "m"]
+                .into_iter()
+                .map(|s| toml::Value::String(s.to_string()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn merge_appends_characters_of_a_later_string() {
+        // `for item in "xyz"` walks the characters; the reference does not raise.
+        let mut dest = table("W = [\"a\"]");
+        let src = table("W = \"xyz\"");
+        merge_into(&mut dest, &src, false);
+        assert_eq!(
+            dest["W"].as_array().unwrap(),
+            &["a", "x", "y", "z"]
+                .into_iter()
+                .map(|s| toml::Value::String(s.to_string()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "which the reference cannot iterate either")]
+    fn merge_panics_on_a_non_iterable_scalar() {
+        let mut dest = table("W = [\"a\"]");
+        let src = table("W = 42");
+        merge_into(&mut dest, &src, false);
+    }
+
+    #[test]
+    fn merge_still_replaces_a_list_with_a_later_table_for_override_configs() {
+        let mut dest = table("W = [\"a\", \"b\"]");
+        let src = table("[W]\n");
+        merge_into(&mut dest, &src, true);
+        assert!(dest["W"].is_table());
     }
 
     #[test]
