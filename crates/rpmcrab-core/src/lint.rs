@@ -323,3 +323,37 @@ impl Lint {
         self.packages_checked
     }
 }
+
+#[cfg(test)]
+mod panic_tests {
+    use super::*;
+    use crate::pkg::spec::SpecPkg;
+
+    struct Panics;
+    impl Check for Panics {
+        fn name(&self) -> &'static str {
+            "Panics"
+        }
+        fn check(&mut self, _pkg: &crate::pkg::Pkg, _config: &Config, _out: &mut Filter) {
+            panic!("boom");
+        }
+        fn check_spec(&mut self, _pkg: &SpecPkg, _config: &Config, _out: &mut Filter) {
+            panic!("boom");
+        }
+    }
+
+    #[test]
+    fn a_panicking_check_is_a_fatal_read_not_an_abort() {
+        let config = Config::default();
+        let checks: Vec<Box<dyn Check>> = vec![Box::new(Panics)];
+        let mut lint = Lint::new(config, checks, Color::for_tty(false), 80).unwrap();
+        let mut pkg = Package::Spec(SpecPkg {
+            name: "test.spec".to_string(),
+        });
+        let result = lint.run_package(&mut pkg, false);
+        assert!(
+            matches!(result, Err(PkgError::Decode { .. })),
+            "expected Err(PkgError::Decode), got {result:?}"
+        );
+    }
+}
