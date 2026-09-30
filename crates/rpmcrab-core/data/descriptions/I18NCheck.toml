@@ -1,0 +1,7 @@
+"incorrect-locale-subdir"="""
+The package installed locale files into a subdirectory of /usr/share/locale
+whose name is not a valid language code (for example en or en_US). This
+usually means the files ended up in the wrong subdirectory and the locale
+system will never find them there. Double-check the subdirectory name; if it
+is a valid locale code that rpmlint doesn't know, please report a bug.
+"""
