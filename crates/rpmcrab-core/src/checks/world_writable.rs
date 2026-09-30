@@ -50,6 +50,26 @@ impl WorldWritableCheck {
         }
         order
     }
+
+    /// The findings as pure data: always `Level::Error`. A file missing from
+    /// the whitelist (`*-unauthorized-file`) carries just the filename; an
+    /// attribute mismatch (`*-mismatched-attrs`) appends the detail.
+    fn binary_findings(
+        &self,
+        pkg_name: &str,
+        files: &[FileMeta],
+    ) -> Vec<(Level, String, Vec<String>)> {
+        file_metadata::verify_files("world-writable", &self.whitelists, pkg_name, files)
+            .into_iter()
+            .map(|v| {
+                let mut details = vec![v.filename];
+                if let Some(d) = v.detail {
+                    details.push(d);
+                }
+                (Level::Error, v.check, details)
+            })
+            .collect()
+    }
 }
 
 /// The reference's `f.mode[0] not in 'bcl' and f.mode[-2] == 'w'`.
@@ -67,12 +87,9 @@ impl Check for WorldWritableCheck {
 
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
         let files = Self::world_writable(&pkg.files);
-        for v in file_metadata::verify_files("world-writable", &self.whitelists, &pkg.name, &files)
-        {
-            match v.detail {
-                Some(d) => add_info(out, Level::Error, pkg, &v.check, &[&v.filename, &d]),
-                None => add_info(out, Level::Error, pkg, &v.check, &[&v.filename]),
-            }
+        for (level, check, details) in self.binary_findings(&pkg.name, &files) {
+            let refs: Vec<&str> = details.iter().map(String::as_str).collect();
+            add_info(out, level, pkg, &check, &refs);
         }
     }
 }
@@ -124,5 +141,59 @@ mod tests {
         let files = [pkg_file("/var/spool", 0o411755)];
         let selected = WorldWritableCheck::world_writable(&files);
         assert!(selected.is_empty(), "{selected:?}");
+    }
+
+    fn test_config() -> Config {
+        let table: toml::Table = toml::from_str(
+            r#"
+[[WorldWritableWhitelist]]
+package = "dummy"
+[[WorldWritableWhitelist.files]]
+path = '/tempus'
+mode = "drw-rw---t"
+owner = "root"
+group = "tty"
+"#,
+        )
+        .expect("parse test whitelist");
+        Config {
+            configuration: table,
+            ..Default::default()
+        }
+    }
+
+    fn findings(files: &[PkgFile]) -> Vec<(Level, String, Vec<String>)> {
+        let check = WorldWritableCheck::new(&test_config());
+        let metas: Vec<FileMeta> = files.iter().map(FileMeta::new).collect();
+        check.binary_findings("dummy", &metas)
+    }
+
+    #[test]
+    fn unauthorized_file_is_an_error_without_detail() {
+        // The `None` arm: just the filename reaches `add_info`.
+        let files = [pkg_file("/tmp", 0o41777)];
+        let found = findings(&files);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, Level::Error);
+        assert_eq!(found[0].1, "world-writable-unauthorized-file");
+        assert_eq!(found[0].2, vec!["/tmp".to_string()]);
+    }
+
+    #[test]
+    fn mismatched_attrs_is_an_error_with_detail() {
+        // The `Some` arm: the expected-vs-actual detail is appended.
+        // Whitelisted as drw-rw---t; the actual mode is drwxrwxrwt.
+        let files = [pkg_file("/tempus", 0o41777)];
+        let found = findings(&files);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, Level::Error);
+        assert_eq!(found[0].1, "world-writable-mismatched-attrs");
+        assert_eq!(found[0].2.len(), 2);
+        assert_eq!(found[0].2[0], "/tempus");
+        assert!(
+            found[0].2[1].starts_with("expected \"mode\""),
+            "unexpected detail: {}",
+            found[0].2[1]
+        );
     }
 }

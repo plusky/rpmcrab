@@ -203,6 +203,7 @@ case = "global"
 check = "device-files-whitelist-validation"
 kind = "behaviour"
 reason = "Malformed whitelist entries (missing \"package\"/\"packages\", wrong types, missing required keys, unknown attribute keys) are logged and skipped; the reference raises KeyError in verify_whitelists or AttributeError in getattr at check time and crashes the whole run. Applies to DeviceFilesCheck and WorldWritableCheck."
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/439"
 since = "0.1.0"
 
 [[divergence]]
@@ -288,4 +289,5 @@ case = "global"
 check = "world-writable-mismatched-attrs"
 kind = "behaviour"
 reason = "The reference test test_world_writable.py::test_device_files_simple asserts has: drwxr-xr-t for a file created with mode 0o41777, but stat.filemode(0o41777) is drwxrwxrwt, so the reference code itself reports has: drwxrwxrwt and its own test cannot pass. The port follows the code."
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/600"
 since = "0.1.0"

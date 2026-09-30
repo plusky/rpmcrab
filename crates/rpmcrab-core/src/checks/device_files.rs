@@ -58,6 +58,26 @@ impl DeviceFilesCheck {
         }
         order
     }
+
+    /// The findings as pure data: always `Level::Error`. A file missing from
+    /// the whitelist (`*-unauthorized-file`) carries just the filename; an
+    /// attribute mismatch (`*-mismatched-attrs`) appends the detail.
+    fn binary_findings(
+        &self,
+        pkg_name: &str,
+        files: &[FileMeta],
+    ) -> Vec<(Level, String, Vec<String>)> {
+        file_metadata::verify_files("device", &self.whitelists, pkg_name, files)
+            .into_iter()
+            .map(|v| {
+                let mut details = vec![v.filename];
+                if let Some(d) = v.detail {
+                    details.push(d);
+                }
+                (Level::Error, v.check, details)
+            })
+            .collect()
+    }
 }
 
 impl Check for DeviceFilesCheck {
@@ -67,11 +87,9 @@ impl Check for DeviceFilesCheck {
 
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
         let files = Self::device_files(&pkg.files);
-        for v in file_metadata::verify_files("device", &self.whitelists, &pkg.name, &files) {
-            match v.detail {
-                Some(d) => add_info(out, Level::Error, pkg, &v.check, &[&v.filename, &d]),
-                None => add_info(out, Level::Error, pkg, &v.check, &[&v.filename]),
-            }
+        for (level, check, details) in self.binary_findings(&pkg.name, &files) {
+            let refs: Vec<&str> = details.iter().map(String::as_str).collect();
+            add_info(out, level, pkg, &check, &refs);
         }
     }
 }
@@ -114,5 +132,61 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].mode, "crw-rw----");
         assert_eq!(selected[0].group, "tty");
+    }
+
+    fn test_config() -> Config {
+        let table: toml::Table = toml::from_str(
+            r#"
+[[DeviceFilesWhitelist]]
+package = "dummy"
+[[DeviceFilesWhitelist.files]]
+path = '/dev/sdb1'
+mode = "crw-rw----"
+owner = "root"
+group = "tty"
+device_minor = 12
+device_major = 55
+"#,
+        )
+        .expect("parse test whitelist");
+        Config {
+            configuration: table,
+            ..Default::default()
+        }
+    }
+
+    fn findings(files: &[PkgFile]) -> Vec<(Level, String, Vec<String>)> {
+        let check = DeviceFilesCheck::new(&test_config());
+        let metas: Vec<FileMeta> = files.iter().map(FileMeta::new).collect();
+        check.binary_findings("dummy", &metas)
+    }
+
+    #[test]
+    fn unauthorized_file_is_an_error_without_detail() {
+        // The `None` arm: just the filename reaches `add_info`.
+        let files = [pkg_file("/dev/mydevice", 0o60660, "root", "root", 0x801)];
+        let found = findings(&files);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, Level::Error);
+        assert_eq!(found[0].1, "device-unauthorized-file");
+        assert_eq!(found[0].2, vec!["/dev/mydevice".to_string()]);
+    }
+
+    #[test]
+    fn mismatched_attrs_is_an_error_with_detail() {
+        // The `Some` arm: the expected-vs-actual detail is appended.
+        // Whitelisted as crw-rw---- root:tty; this is a block device.
+        let files = [pkg_file("/dev/sdb1", 0o60660, "root", "root", 0x801)];
+        let found = findings(&files);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, Level::Error);
+        assert_eq!(found[0].1, "device-mismatched-attrs");
+        assert_eq!(found[0].2.len(), 2);
+        assert_eq!(found[0].2[0], "/dev/sdb1");
+        assert!(
+            found[0].2[1].starts_with("expected \"mode\""),
+            "unexpected detail: {}",
+            found[0].2[1]
+        );
     }
 }
