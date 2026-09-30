@@ -6,6 +6,15 @@
 
 use std::path::Path;
 
+use fancy_regex::Regex;
+use std::sync::LazyLock;
+
+/// Sentence-break: start-of-text or sentence-ending punctuation followed by
+/// optional whitespace, tested against the up-to-3 chars preceding a word
+/// (mirrors spellcheck.py:21).
+static SENTENCE_BREAK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(^|[.:;!?])\s*$").expect("static regex"));
+
 /// Standard hunspell dictionary locations.
 const DICT_PATHS: &[&str] = &[
     "/usr/share/hunspell",
@@ -68,7 +77,7 @@ impl Spellchecker {
         // Simple word tokenizer with positions for sentence-break detection.
         let words = tokenize(&normalized);
 
-        for (i, word) in words.iter().enumerate() {
+        for (word, byte_offset) in words.iter() {
             if warned.contains(*word) {
                 continue;
             }
@@ -89,7 +98,7 @@ impl Spellchecker {
             warned.insert(word.to_string());
 
             // Skip capitalized words not at sentence start.
-            if starts_uppercase(word) && !at_sentence_start(&normalized, word, i) {
+            if starts_uppercase(word) && !at_sentence_start(&normalized, *byte_offset) {
                 continue;
             }
 
@@ -119,8 +128,9 @@ impl Spellchecker {
     }
 }
 
-/// Split text into words, keeping only alphabetic sequences with apostrophes.
-fn tokenize(text: &str) -> Vec<&str> {
+/// Split text into (word, byte_offset) pairs, keeping only alphabetic
+/// sequences with apostrophes.
+fn tokenize(text: &str) -> Vec<(&str, usize)> {
     let mut words = Vec::new();
     let mut start: Option<usize> = None;
     for (i, c) in text.char_indices() {
@@ -129,12 +139,12 @@ fn tokenize(text: &str) -> Vec<&str> {
                 start = Some(i);
             }
         } else if let Some(s) = start {
-            words.push(&text[s..i]);
+            words.push((&text[s..i], s));
             start = None;
         }
     }
     if let Some(s) = start {
-        words.push(&text[s..]);
+        words.push((&text[s..], s));
     }
     words
 }
@@ -148,21 +158,25 @@ fn is_url(word: &str) -> bool {
 }
 
 fn is_wiki_word(word: &str) -> bool {
-    // CamelCase: contains both upper and lower, starts uppercase.
-    let has_upper = word.chars().any(|c| c.is_uppercase());
-    let has_lower = word.chars().any(|c| c.is_lowercase());
-    word.chars().next().is_some_and(|c| c.is_uppercase()) && has_upper && has_lower
+    // CamelCase: an uppercase letter after the first character
+    // (e.g. "HelloWorld"), not just a leading capital like "Wrld".
+    word.chars().skip(1).any(|c| c.is_uppercase())
 }
 
 fn starts_uppercase(word: &str) -> bool {
     word.chars().next().is_some_and(|c| c.is_uppercase())
 }
 
-fn at_sentence_start(_text: &str, _word: &str, _index: usize) -> bool {
-    // Simplified: check if previous non-space char is sentence-ending.
-    // For now, conservatively return false (skip capitalized words).
-    // TODO: implement proper sentence-break detection.
-    false
+fn at_sentence_start(text: &str, byte_offset: usize) -> bool {
+    // Take the up-to-3 characters preceding the word, mirroring
+    // `checker.leading_context(3)` in spellcheck.py:99, and test against
+    // the sentence-break rule from spellcheck.py:21.
+    let mut start = byte_offset.saturating_sub(3);
+    while start < byte_offset && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let context = &text[start..byte_offset];
+    SENTENCE_BREAK_RE.is_match(context).unwrap_or(false)
 }
 
 fn has_digit_adjacent(_text: &str, word: &str) -> bool {
@@ -236,5 +250,33 @@ mod tests {
     fn invalid_dictionary_returns_none() {
         let result = Spellchecker::from_strings("invalid", "invalid");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn capitalized_misspelling_at_sentence_start_is_reported() {
+        // "Wrld" is capitalized and at the start: must be reported.
+        // Fails against the stub (which always returned false).
+        let checker = test_checker();
+        let result = checker.check("Wrld hello", "testpkg", &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "Wrld");
+    }
+
+    #[test]
+    fn capitalized_misspelling_after_period_is_reported() {
+        // "Wrld" follows ". ": at sentence start, must be reported.
+        let checker = test_checker();
+        let result = checker.check("hello world. Wrld test", "testpkg", &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "Wrld");
+    }
+
+    #[test]
+    fn capitalized_misspelling_mid_sentence_is_skipped() {
+        // "Wrld" is capitalized but mid-sentence: must be skipped
+        // (reference treats it as a proper noun).
+        let checker = test_checker();
+        let result = checker.check("hello Wrld test", "testpkg", &[]);
+        assert!(result.is_empty());
     }
 }
