@@ -1,10 +1,10 @@
 //! `DuplicatesCheck` — find duplicated files in the package.
 //!
-//! Ported from `rpmlint/checks/DuplicatesCheck.py` with the fix from
-//! upstream PR #1603 (fixes #349): hardlink reporting is evaluated per
-//! `(rdev, inode)` group inside each md5 group, so hardlinked files are
-//! reported even in mixed hardlink/duplicate groups. The reference at the
-//! pinned commit misses them (ledgered).
+//! Ported from `rpmlint/checks/DuplicatesCheck.py`, adopting the fix
+//! proposed in upstream PR #1603 (unmerged; fixes #349): hardlink reporting
+//! is evaluated per `(rdev, inode)` group inside each md5 group. The
+//! reference at the pinned commit mis-attributes hardlinks in mixed
+//! hardlink/duplicate groups, reporting the wrong file pair (ledgered).
 //!
 //! Four findings: `hardlink-across-partition` (E),
 //! `hardlink-across-config-files` (E), `files-duplicate` (W),
@@ -301,9 +301,11 @@ mod tests {
 
     #[test]
     fn mixed_group_reports_hardlink_across_partition() {
-        // #1603: a hardlink pair sharing an md5 with a genuine duplicate
-        // must still report hardlink-across-partition. The pinned reference
-        // misses this (its bookkeeping is global per md5).
+        // #1603: a hardlink pair sharing an md5 with a genuine duplicate.
+        // The pinned reference mis-attributes the hardlink: it picks `first`
+        // from the whole md5 group (c, the genuine duplicate) and reports
+        // hardlink-across-partition(c, b). The port groups by (rdev, inode)
+        // and reports the true hardlink pair (a, b).
         let files = [
             pkgfile("/usr/bin/a", "aaa", 100, 1),
             pkgfile("/opt/bin/b", "aaa", 100, 1), // hardlink to a, other prefix
@@ -311,11 +313,16 @@ mod tests {
         ];
         let refs: Vec<&PkgFile> = files.iter().collect();
         let findings = DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost);
-        assert!(
-            findings
-                .iter()
-                .any(|f| matches!(f, DuplicateFinding::HardlinkAcrossPartition(_, _))),
-            "expected hardlink-across-partition in mixed group, got {findings:?}"
+        assert_eq!(
+            findings,
+            vec![
+                DuplicateFinding::HardlinkAcrossPartition("/usr/bin/a".into(), "/opt/bin/b".into(),),
+                DuplicateFinding::FilesDuplicate(
+                    "/usr/bin/c".into(),
+                    "/opt/bin/b:/usr/bin/a".into(),
+                ),
+            ],
+            "must name the true hardlink pair (a, b), not the reference's (c, b)"
         );
     }
 
