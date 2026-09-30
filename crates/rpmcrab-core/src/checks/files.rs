@@ -2533,6 +2533,46 @@ mod tests {
     }
 
     #[test]
+    fn lib_package_without_docs_skips_no_documentation() {
+        // The shared lib_package_regex must match "libnodoc-test": with the
+        // broken double-escaped form it never matched, so no-documentation
+        // fired on every lib package (a false positive the reference does
+        // not emit). Restoring the broken regex makes this fail.
+        let config = test_config();
+        let (names, _dir) =
+            run_files_check(&fixture_path("libnodoc-test-1.0-1.noarch.rpm"), &config);
+        assert_lacks(&names, "no-documentation");
+    }
+
+    #[test]
+    fn lib_package_with_non_lib_file_emits_outside_libdir_files() {
+        // The shared lib_package_regex must match "liboutsidelib-test": with
+        // the broken double-escaped form st.lib_package was always false, so
+        // outside-libdir-files could never fire. Restoring the broken regex
+        // makes this fail.
+        let config = test_config();
+        let (names, _dir) = run_files_check(
+            &fixture_path("liboutsidelib-test-1.0-1.noarch.rpm"),
+            &config,
+        );
+        assert_has(&names, "outside-libdir-files");
+    }
+
+    #[test]
+    fn filename_with_unexpanded_macro_emits_finding() {
+        // The shared macro_regex must match "%{unexpanded}" in a filename:
+        // with the broken double-escaped form it matched a literal
+        // backslash-w, so unexpanded-macro was never emitted from FilesCheck.
+        // Restoring the broken regex makes this fail.
+        let config = test_config();
+        let (names, _dir) = run_files_check(
+            &fixture_path("unexpandedmacro-test-1.0-1.noarch.rpm"),
+            &config,
+        );
+        assert_has(&names, "unexpanded-macro");
+    }
+
+    #[test]
     fn files_check_depmod_variants() {
         let config = test_config();
         let (ok_names, _d1) = run_files_check(

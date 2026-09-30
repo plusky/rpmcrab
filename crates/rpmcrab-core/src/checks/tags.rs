@@ -33,31 +33,6 @@ fn lib_devel_number_regex() -> Regex {
     Regex::new(r"^lib(.*?)([0-9.]+)(_[0-9.]+)?-devel").expect("static regex")
 }
 
-/// `leading_space_regex`: `^\s+`.
-fn leading_space_regex() -> Regex {
-    Regex::new(r"^\s+").expect("static regex")
-}
-
-/// `pkg_config_regex`: `^/usr/(?:lib\d*|share)/pkgconfig/`.
-fn pkg_config_regex() -> Regex {
-    Regex::new(r"^/usr/(?:lib\d*|share)/pkgconfig/").expect("static regex")
-}
-
-/// `license_regex`: `\(([^)]+)\)|\s(?:and|or|AND|OR)\s`.
-fn license_regex() -> Regex {
-    Regex::new(r"\(([^)]+)\)|\s(?:and|or|AND|OR)\s").expect("static regex")
-}
-
-/// `license_exception_regex`: `([^(\s]+)\s(?:WITH|with)\s([^)\s]+)`.
-fn license_exception_regex() -> Regex {
-    Regex::new(r"([^(\s]+)\s(?:WITH|with)\s([^)\s]+)").expect("static regex")
-}
-
-/// `tag_regex`: the spec-tag detector for `tag-in-description`.
-fn tag_regex() -> Regex {
-    Regex::new(r"(?i)^((?:Auto(?:Req|Prov|ReqProv)|Build(?:Arch(?:itectures)?|Root)|(?:Build)?Conflicts|(?:Build)?(?:Pre)?Requires|Copyright|(?:CVS|SVN)Id|Dist(?:ribution|Tag|URL)|DocDir|(?:Build)?Enhances|Epoch|Exclude(?:Arch|OS)|Exclusive(?:Arch|OS)|Group|Icon|License|Name|No(?:Patch|Source)|Obsoletes|Packager|Patch\d*|Prefix(?:es)?|Provides|(?:Build)?Recommends|Release|RHNPlatform|Serial|Source\d*|(?:Build)?Suggests|Summary|(?:Build)?Supplements|(?:Bug)?URL|Vendor|Version)(?:\([^)]+\))?:)\s*\S").expect("static regex")
-}
-
 /// Words that may start a summary in lowercase (`CAPITALIZED_IGNORE_LIST`).
 const CAPITALIZED_IGNORE_LIST: &[&str] = &["jQuery", "openSUSE", "wxWidgets", "a", "an", "uWSGI"];
 
