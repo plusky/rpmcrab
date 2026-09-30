@@ -138,6 +138,12 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
             config,
         ))),
         "DocCheck" => Some(Box::new(crate::checks::doc::DocCheck::new(config))),
+        "I18NCheck" => Some(Box::new(crate::checks::i18n::I18NCheck::new(config))),
+        "ZipCheck" => Some(Box::new(crate::checks::zip::ZipCheck::new(config))),
+        "PkgConfigCheck" => Some(Box::new(crate::checks::pkg_config::PkgConfigCheck::new(
+            config,
+        ))),
+        "LSBCheck" => Some(Box::new(crate::checks::lsb::LSBCheck::new(config))),
         _ => None,
     }
 }

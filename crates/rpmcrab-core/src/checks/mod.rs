@@ -5,9 +5,13 @@ pub mod doc;
 pub mod duplicates;
 pub mod fhs;
 pub mod files;
+pub mod i18n;
+pub mod lsb;
+pub mod pkg_config;
 pub mod shared;
 pub mod spec;
 pub mod tags;
+pub mod zip;
 
 /// Match `text` against a `fancy_regex`, logging engine failures.
 ///

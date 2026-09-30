@@ -13,6 +13,9 @@ extend-exclude = [
   # Bundled upstream data (rpmlint's configdefaults.toml), verbatim — never
   # "fixed" for wording (e.g. the upstream "Treshold" comment).
   "crates/rpmcrab-core/data/**",
+  # Generated ISO 639/3166 code tables (from rpmlint's __isocodes__.py):
+  # three-letter codes read as typos, but every entry is normative data.
+  "crates/rpmcrab-core/src/checks/i18n_codes.rs",
   # Captured rpmlint output is normative data; it is never "fixed" for wording.
   # Only the captured case bytes are excluded — the authored schema doc and
   # manifests under tests/parity/ stay in scope.

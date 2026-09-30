@@ -180,3 +180,10 @@ kind = "behaviour"
 reason = "Adopted ahead of upstream (proposed in unmerged rpmlint#1603, fixes rpmlint#349): hardlink findings are reported per (rdev, inode) group inside each md5 group. The frozen 2.10.0 reference uses global per-md5 bookkeeping and misattributes hardlinks in mixed hardlink/duplicate groups, reporting the wrong file pair."
 upstream = "https://github.com/rpm-software-management/rpmlint/pull/1603"
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "unable-to-read-zip"
+kind = "severity"
+reason = "The reference reports E on BadZipFile and W on RuntimeError (a password-protected archive). The pure-Rust zip crate surfaces a single error type, so rpmcrab reports E for every archive that fails to open; only password-protected entries (zip::ZipError::PASSWORD_REQUIRED, the reference's RuntimeError case) stay W and abort the file instead of naming an entry."
+since = "0.1.0"
