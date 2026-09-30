@@ -190,6 +190,7 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
         "SharedLibraryPolicyCheck" => Some(Box::new(
             crate::checks::shared_library_policy::SharedLibraryPolicyCheck::new(config),
         )),
+        "PostCheck" => Some(Box::new(crate::checks::post::PostCheck::new(config))),
         _ => None,
     }
 }

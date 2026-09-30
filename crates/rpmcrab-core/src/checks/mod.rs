@@ -20,6 +20,7 @@ pub mod lsb;
 pub mod mixed_ownership;
 pub mod pam_modules;
 pub mod pkg_config;
+pub mod post;
 pub mod selinux_independent_module;
 pub mod shared;
 pub mod shared_library_policy;
