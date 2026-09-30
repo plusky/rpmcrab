@@ -500,4 +500,14 @@ mod tests {
         let names: Vec<&str> = findings.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["percent-in-%pre", "percent-in-%postun"]);
     }
+
+    #[test]
+    fn missing_interpreter_skips_syntax_check() {
+        // Ledgered: the reference dies with FileNotFoundError when the
+        // interpreter is absent; the port skips the probe instead.
+        assert_eq!(
+            PostCheck::syntax_ok("/nonexistent-interpreter", &["-n"], "echo hi"),
+            None
+        );
+    }
 }

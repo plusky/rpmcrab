@@ -228,6 +228,13 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "PostCheck"
+kind = "behaviour"
+reason = "When the scriptlet interpreter is absent the reference (PostCheck.check_syntax_script) lets subprocess.run raise FileNotFoundError and the whole run dies; the port's syntax_ok returns None and the sh -n / perl -wc probe is skipped. A missing optional interpreter must not abort the lint."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "AtomicUpdateCheck"
 kind = "behaviour"
 reason = "A present-but-wrong-type AtomicCheckGhosts (e.g. the string \"false\") panics at construction; the reference treats any truthy value as enabled and runs. The port deliberately fails fast on a misconfigured type instead of reproducing the reference's permissiveness."
@@ -260,4 +267,11 @@ case = "global"
 check = "AtomicUpdateCheck"
 kind = "behaviour"
 reason = "A non-string element in AtomicAllowedDirs/AtomicDisallowedSubdirs (e.g. AtomicDisallowedSubdirs = [42]) panics at construction; the reference raises TypeError later, at check time. The port deliberately fails fast on a misconfigured type instead of reproducing the reference's deferred failure."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "pkg-layer"
+kind = "behaviour"
+reason = "librpm panics decoding a non-UTF-8 string header tag (str::from_utf8 in td.rs); the reference (helpers.byte_to_string) decodes with errors='replace' and keeps linting. A malformed header aborts the port where the reference degrades."
 since = "0.1.0"
