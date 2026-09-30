@@ -3,7 +3,7 @@
 //! Ported from `rpmlint/checks/DuplicatesCheck.py`, adopting the fix
 //! proposed in upstream PR #1603 (unmerged; fixes #349): hardlink reporting
 //! is evaluated per `(rdev, inode)` group inside each md5 group. The
-//! reference at the pinned commit mis-attributes hardlinks in mixed
+//! reference at the pinned commit misattributes hardlinks in mixed
 //! hardlink/duplicate groups, reporting the wrong file pair (ledgered).
 //!
 //! Four findings: `hardlink-across-partition` (E),
@@ -302,7 +302,7 @@ mod tests {
     #[test]
     fn mixed_group_reports_hardlink_across_partition() {
         // #1603: a hardlink pair sharing an md5 with a genuine duplicate.
-        // The pinned reference mis-attributes the hardlink: it picks `first`
+        // The pinned reference misattributes the hardlink: it picks `first`
         // from the whole md5 group (c, the genuine duplicate) and reports
         // hardlink-across-partition(c, b). The port groups by (rdev, inode)
         // and reports the true hardlink pair (a, b).
