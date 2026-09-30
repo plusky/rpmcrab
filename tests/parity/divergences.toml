@@ -164,3 +164,17 @@ check = "invalid-suse-version-check"
 kind = "behaviour"
 reason = "Fixed behaviour: the suse_version regex also matches the braced %{suse_version} form, which the frozen 2.10.0 reference's `%({\?)?suse_version}?` misses (it only matches %suse_version and %{?suse_version})."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "unused-direct-shlib-dependency"
+kind = "missing"
+reason = "The reference uses ldd -u for linker-based unused dependency analysis. goblin cannot replicate this; the finding is not emitted."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "missing-mandatory-optflags"
+kind = "behaviour"
+reason = "DWARF producer extraction via gimli is not yet implemented; the mandatory/forbidden optflags check degrades gracefully (no findings) until DWARF parsing lands."
+since = "0.1.0"

@@ -48,6 +48,10 @@ thiserror = "2"
 # the `spelling-error` check in TagsCheck; degrades gracefully when the
 # dictionary is absent.
 spellbook = "0.4.2"
+# ELF parsing for BinariesCheck (replaces readelf/ldd). Pure Rust, MIT.
+goblin = "0.10"
+# DWARF parsing for BinariesCheck (replaces objdump). Pure Rust.
+gimli = "0.31"
 
 [dev-dependencies]
 serde_json = "1"

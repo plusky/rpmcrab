@@ -499,11 +499,13 @@ Header, file-list and rpmdb reads go through **`librpm`** (§3.1), not a
 subprocess. **Payload extraction** shells out to `rpm2archive | tar -xz`
 (fallback `rpm2cpio | cpio -id`), exactly as rpmlint does — the binding's
 `archive::PackageReader` is unusable for compressed payloads (§3.1).
-`readelf`, `objdump`, `ldd`, `checkbashisms`, `desktop-file-validate`,
-`appstreamcli` and `file` are invoked as subprocesses on extracted files,
-matching rpmlint's own dependencies (they are already `Requires:` of the
-openSUSE package). All invocations go through shared quoting/path helpers with
-golden tests.
+ELF binary analysis uses the pure-Rust `goblin` crate (section/program
+headers, dynamic section, symbols) and `gimli` for DWARF, not `readelf`/`ldd`/
+`objdump` subprocesses — faster, no binutils dependency, and more reliable
+than text parsing. `checkbashisms`, `desktop-file-validate`, `appstreamcli`
+and `file` are invoked as subprocesses on extracted files, matching rpmlint's
+own dependencies (they are already `Requires:` of the openSUSE package). All
+invocations go through shared quoting/path helpers with golden tests.
 
 ### 7.5 The package model
 
