@@ -72,9 +72,9 @@ jobs:
       # export the locations for the cargo steps below.
       - name: Install RPM via Homebrew
         run: |
-          brew install rpm
+          brew install rpm popt
           echo "LIBRARY_PATH=$(brew --prefix rpm)/lib" >> "$GITHUB_ENV"
-          echo "BINDGEN_EXTRA_CLANG_ARGS=-I$(brew --prefix rpm)/include" >> "$GITHUB_ENV"
+          echo "BINDGEN_EXTRA_CLANG_ARGS=-I$(brew --prefix rpm)/include -I$(brew --prefix popt)/include" >> "$GITHUB_ENV"
       # Spellcheck tests need real hunspell dictionaries; the spellchecker
       # looks in /opt/homebrew/share/hunspell on Apple Silicon Macs.
       - name: Install hunspell dictionaries
