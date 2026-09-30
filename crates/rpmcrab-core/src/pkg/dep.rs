@@ -105,3 +105,143 @@ mod tests {
         assert_eq!(version_to_string(None, None, None), "");
     }
 }
+
+/// `rpmlint.pkg.parse_deps`: split a dependency line into `(name, version)`
+/// pairs. The version is `Some` exactly when the dep is versioned (the
+/// reference's `flags != 0`); only its presence is ever read (`unversioned`),
+/// never the value.
+pub fn parse_deps(line: &str) -> Vec<(String, Option<String>)> {
+    let mut tokens: Vec<&str> = line
+        .trim()
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|t| !t.is_empty())
+        .collect();
+    // Drop a trailing line-continuation backslash from a multi-line macro
+    // definition (`pkg.py:310-311`).
+    if tokens.last().is_some_and(|t| *t == "\\") {
+        tokens.pop();
+    }
+
+    let mut prcos = Vec::new();
+    // The reference accumulates `prco` as [name], [name, flags],
+    // [name, flags, evr]; only the name and "is versioned" survive here.
+    let mut prco: Vec<String> = Vec::new();
+    for token in tokens {
+        match prco.len() {
+            0 => prco.push(token.to_string()),
+            1 => {
+                if token.starts_with(['=', '<', '>']) {
+                    prco.push(String::new());
+                } else {
+                    prcos.push((prco.pop().unwrap(), None));
+                    prco.push(token.to_string());
+                }
+            }
+            _ => {
+                let name = prco[0].clone();
+                prcos.push((name, Some(token.to_string())));
+                prco.clear();
+            }
+        }
+    }
+    match prco.len() {
+        // A dangling version operator (`Requires: foo >=`): versioned, but
+        // the version token is missing. `Some` marks versioned-ness; the
+        // value is never read.
+        2 => prcos.push((prco[0].clone(), Some(String::new()))),
+        1 => prcos.push((prco.pop().unwrap(), None)),
+        _ => {}
+    }
+    prcos
+}
+
+/// `rpmlint.pkg.has_forbidden_controlchars` on a string: the string itself
+/// when it holds a control character other than tab, LF or CR, else `None`.
+pub fn has_forbidden_controlchars(s: &str) -> Option<String> {
+    if s.bytes().any(|c| c < 32 && c != 9 && c != 10 && c != 13) {
+        Some(s.to_string())
+    } else {
+        None
+    }
+}
+
+/// `has_forbidden_controlchars` on a `parse_deps` list. The reference recurses
+/// into the list but returns after the first item, so only the first dep's
+/// name is ever examined; mirrored here so findings stay identical.
+pub fn has_forbidden_controlchars_deps(deps: &[(String, Option<String>)]) -> Option<String> {
+    deps.first()
+        .and_then(|(name, _)| has_forbidden_controlchars(name))
+}
+
+#[cfg(test)]
+mod parse_deps_tests {
+    use super::*;
+
+    #[test]
+    fn plain_names_are_unversioned() {
+        assert_eq!(
+            parse_deps("foo bar"),
+            vec![("foo".to_string(), None), ("bar".to_string(), None),]
+        );
+    }
+
+    #[test]
+    fn versioned_dep_keeps_its_version() {
+        assert_eq!(
+            parse_deps("foo >= 1.0, bar"),
+            vec![
+                ("foo".to_string(), Some("1.0".to_string())),
+                ("bar".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn trailing_backslash_is_dropped() {
+        assert_eq!(
+            parse_deps("foo bar \\"),
+            vec![("foo".to_string(), None), ("bar".to_string(), None),]
+        );
+    }
+
+    #[test]
+    fn dangling_operator_is_versioned_without_version() {
+        // `Requires: foo >=`: the reference sets flags but no EVR, so
+        // `unversioned` (flags == 0) does not yield it.
+        assert_eq!(
+            parse_deps("foo >="),
+            vec![("foo".to_string(), Some(String::new()))]
+        );
+    }
+
+    #[test]
+    fn empty_line_parses_to_nothing() {
+        assert!(parse_deps("").is_empty());
+        assert!(parse_deps("   ").is_empty());
+    }
+
+    #[test]
+    fn controlchars_found_in_string() {
+        assert_eq!(
+            has_forbidden_controlchars("a\x01b"),
+            Some("a\x01b".to_string())
+        );
+        assert_eq!(has_forbidden_controlchars("a\tb\nc\rd"), None);
+        assert_eq!(has_forbidden_controlchars("plain"), None);
+    }
+
+    #[test]
+    fn controlchars_in_deps_only_look_at_the_first_name() {
+        // Mirrors the reference's return-after-first-item: the bad second
+        // dep is not reported.
+        let deps = vec![("foo".to_string(), None), ("b\x01ar".to_string(), None)];
+        assert_eq!(has_forbidden_controlchars_deps(&deps), None);
+        let deps = vec![("f\x01oo".to_string(), None)];
+        assert_eq!(
+            has_forbidden_controlchars_deps(&deps),
+            Some("f\x01oo".to_string())
+        );
+        let empty: Vec<(String, Option<String>)> = Vec::new();
+        assert_eq!(has_forbidden_controlchars_deps(&empty), None);
+    }
+}

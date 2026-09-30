@@ -18,11 +18,13 @@ workspace = true
 # librpm FFI (the `rpm-software-management` binding). Covers the header, the
 # file list (rpmfiles), the rpmdb (Db), and EVR comparison (version). Needs
 # `rpm-devel` at build time (bindgen) and `librpm`/`librpmio` at runtime;
-# `sign`/`build` features off. Safe API only — `unsafe` stays inside
+# `sign` feature off; `build` on for `Spec::parse` (`SpecCheck`
+# `_check_invalid_url`, the same C parser the reference uses via
+# `TransactionSet().parseSpec`). Safe API only — `unsafe` stays inside
 # librpm/librpm-sys, so this crate keeps `unsafe_code = "forbid"`. Payload
 # extraction does NOT use the binding (its PackageReader returns no entries for
 # compressed payloads); it shells out to rpm2archive (M2b).
-librpm = { version = "0.6", default-features = false }
+librpm = { version = "0.6", default-features = false, features = ["build"] }
 # TOML config + description files.
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"

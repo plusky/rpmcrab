@@ -1,6 +1,8 @@
 //! The lint checks, keyed by their Python module names (`TagsCheck`, …).
 
 pub mod files;
+pub mod shared;
+pub mod spec;
 pub mod tags;
 
 /// Match `text` against a `fancy_regex`, logging engine failures.

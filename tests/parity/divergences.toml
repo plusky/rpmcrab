@@ -128,4 +128,23 @@ case = "global"
 check = "spelling-error"
 kind = "behaviour"
 reason = "Backend is the pure-Rust spellbook crate, not pyenchant; findings may differ from the reference on the same input even with a dictionary present."
+check = "buildarch-instead-of-exclusivearch-tag"
+kind = "behaviour"
+reason = "Fixed behaviour per rpmlint#1600 (fixes rpmlint#698): a trailing line-continuation backslash is stripped before comparing, so 'BuildArch: noarch \\' inside a multi-line macro is not reported as a real architecture. The frozen 2.10.0 reference reports it."
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1600"
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "macro-in-comment"
+kind = "behaviour"
+reason = "Fixed behaviour per rpmlint#1601 (fixes rpmlint#183): '#' inside shell-quoted strings does not start a comment (quote-aware comment_start_pos, tracking single/double-quote state and backslash escapes). The frozen 2.10.0 reference treats such '#' as a comment start and warns."
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1601"
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "specfile-error"
+kind = "detail"
+reason = "When the spec parser fails in _check_invalid_url, rpmcrab reports 'specfile-error' with only the spec path as detail. The reference also includes librpm's error text, which librpm 0.6's Spec::parse does not surface (it returns Option)."
 since = "0.1.0"

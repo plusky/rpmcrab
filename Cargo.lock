@@ -323,6 +323,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5021c82ed380b4c5506e7b40b15176901a485276d7a5f00a70928ec768e4245b"
 dependencies = [
  "librpm-sys",
+ "librpmbuild-sys",
  "log",
  "num-derive",
  "num-traits",
@@ -334,6 +335,15 @@ name = "librpm-sys"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d5149a9198f6c091e44c3fc5fcb4f28f012ffd4132fc8585fdb95f2c54c0890e"
+dependencies = [
+ "bindgen",
+]
+
+[[package]]
+name = "librpmbuild-sys"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7094ef36b2edccede9742059b70a6386f1ca86e20a2b3a22b81c6c6c07c001d1"
 dependencies = [
  "bindgen",
 ]
