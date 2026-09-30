@@ -78,7 +78,7 @@ pub fn spec_add_info(
 }
 
 /// `PurePath(name).name` — rpmlint prints the basename of the package name.
-fn basename(name: &str) -> &str {
+pub(crate) fn basename(name: &str) -> &str {
     name.rsplit('/').next().unwrap_or(name)
 }
 

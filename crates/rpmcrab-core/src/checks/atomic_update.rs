@@ -30,7 +30,11 @@ fn str_list(value: &toml::Value, key: &str) -> Vec<String> {
             panic!("AtomicUpdateCheck: config key '{key}' must be a list of strings")
         })
         .iter()
-        .filter_map(toml::Value::as_str)
+        .map(|element| {
+            element.as_str().unwrap_or_else(|| {
+                panic!("AtomicUpdateCheck: config key '{key}' must be a list of strings")
+            })
+        })
         .map(String::from)
         .collect()
 }
@@ -41,7 +45,9 @@ impl AtomicUpdateCheck {
         Self {
             check_ghosts: required(cfg, "AtomicCheckGhosts")
                 .as_bool()
-                .expect("AtomicUpdateCheck: config key 'AtomicCheckGhosts' must be a boolean"),
+                .unwrap_or_else(|| {
+                    panic!("AtomicUpdateCheck: config key 'AtomicCheckGhosts' must be a boolean")
+                }),
             allowed_dirs: str_list(required(cfg, "AtomicAllowedDirs"), "AtomicAllowedDirs"),
             disallowed_subdirs: str_list(
                 required(cfg, "AtomicDisallowedSubdirs"),
@@ -299,6 +305,63 @@ mod tests {
     fn missing_check_ghosts_panics() {
         let mut table = toml::Table::new();
         table.insert("AtomicAllowedDirs".to_string(), toml::Value::Array(vec![]));
+        table.insert(
+            "AtomicDisallowedSubdirs".to_string(),
+            toml::Value::Array(vec![]),
+        );
+        let config = Config {
+            configuration: table,
+            ..Default::default()
+        };
+        let _ = AtomicUpdateCheck::new(&config);
+    }
+
+    #[test]
+    #[should_panic(expected = "config key 'AtomicDisallowedSubdirs' must be a list of strings")]
+    fn non_string_list_element_panics() {
+        let mut table = toml::Table::new();
+        table.insert("AtomicCheckGhosts".to_string(), toml::Value::Boolean(false));
+        table.insert("AtomicAllowedDirs".to_string(), toml::Value::Array(vec![]));
+        table.insert(
+            "AtomicDisallowedSubdirs".to_string(),
+            toml::Value::Array(vec![toml::Value::Integer(42)]),
+        );
+        let config = Config {
+            configuration: table,
+            ..Default::default()
+        };
+        let _ = AtomicUpdateCheck::new(&config);
+    }
+
+    #[test]
+    #[should_panic(expected = "config key 'AtomicCheckGhosts' must be a boolean")]
+    fn wrong_type_check_ghosts_panics() {
+        let mut table = toml::Table::new();
+        table.insert(
+            "AtomicCheckGhosts".to_string(),
+            toml::Value::String("false".to_string()),
+        );
+        table.insert("AtomicAllowedDirs".to_string(), toml::Value::Array(vec![]));
+        table.insert(
+            "AtomicDisallowedSubdirs".to_string(),
+            toml::Value::Array(vec![]),
+        );
+        let config = Config {
+            configuration: table,
+            ..Default::default()
+        };
+        let _ = AtomicUpdateCheck::new(&config);
+    }
+
+    #[test]
+    #[should_panic(expected = "config key 'AtomicAllowedDirs' must be a list of strings")]
+    fn wrong_type_allowed_dirs_panics() {
+        let mut table = toml::Table::new();
+        table.insert("AtomicCheckGhosts".to_string(), toml::Value::Boolean(false));
+        table.insert(
+            "AtomicAllowedDirs".to_string(),
+            toml::Value::String("/etc/".to_string()),
+        );
         table.insert(
             "AtomicDisallowedSubdirs".to_string(),
             toml::Value::Array(vec![]),

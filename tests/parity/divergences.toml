@@ -233,3 +233,24 @@ check = "python-bytecode-inconsistent-mtime"
 kind = "behaviour"
 reason = "python-bytecode-inconsistent-mtime only fires when the .pyc embedded timestamp is older than the .py mtime (stale bytecode). The reference (FilesCheck.py:1274) fires on any mismatch, but rpmlint#1331 (open, unmerged) proposes this fix: a newer .pyc is a local-build artifact, not an error. The port implements the proposed behaviour ahead of upstream."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "AtomicUpdateCheck"
+kind = "behaviour"
+reason = "A present-but-wrong-type AtomicCheckGhosts (e.g. the string \"false\") panics at construction; the reference treats any truthy value as enabled and runs. The port deliberately fails fast on a misconfigured type instead of reproducing the reference's permissiveness."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "AtomicUpdateCheck"
+kind = "behaviour"
+reason = "A present-but-wrong-type AtomicAllowedDirs (e.g. the string \"/etc/\") panics at construction; the reference iterates tuple('/etc/') as character prefixes and runs. The port deliberately fails fast on a misconfigured type instead of reproducing the reference's permissiveness."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "AtomicUpdateCheck"
+kind = "behaviour"
+reason = "A non-string element in AtomicAllowedDirs/AtomicDisallowedSubdirs (e.g. AtomicDisallowedSubdirs = [42]) panics at construction; the reference raises TypeError later, at check time. The port deliberately fails fast on a misconfigured type instead of reproducing the reference's deferred failure."
+since = "0.1.0"

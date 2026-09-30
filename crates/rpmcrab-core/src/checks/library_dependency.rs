@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::check::Check;
+use crate::check::basename;
 use crate::checks::is_match;
 use crate::checks::shared::devel_regex;
 use crate::config::Config;
@@ -20,24 +21,22 @@ use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::pkg::pkgfile::is_symlink;
 
-/// The reference reads `%{_isa}` from the running rpm's macros (`(x86-64)` on
-/// x86_64, `(aarch64)` on aarch64, …). There is no macro engine here, so map
-/// the host arch the way rpm's platform macros do.
-fn isa_suffix(arch: &str) -> &'static str {
-    match arch {
-        "x86_64" => "(x86-64)",
-        "i386" | "i486" | "i586" | "i686" => "(x86-32)",
-        "aarch64" => "(aarch64)",
-        "ppc64" | "ppc64le" => "(ppc-64)",
-        "s390x" => "(s390-64)",
-        "riscv64" => "(riscv-64)",
-        _ => "",
-    }
+/// The reference reads `%{_isa}` from the running rpm's macros at
+/// construction time (`LibraryDependencyCheck.py:17`); derive it the same
+/// way through librpm instead of a hand-written table.
+fn expand_isa() -> String {
+    let _ = crate::pkg::init();
+    librpm::macro_context::MacroContext::default()
+        .expand("%{_isa}")
+        .unwrap_or_default()
 }
 
 pub struct LibraryDependencyCheck {
     package_requires: HashMap<String, Vec<String>>,
     package_so_symlinks: HashMap<String, Vec<String>>,
+    /// Lint order of the devel packages; the reference iterates a plain
+    /// dict, so findings follow package lint order deterministically.
+    devel_order: Vec<String>,
     package_so_files: HashMap<String, String>,
     package_arch_mapping: HashMap<String, String>,
     isa: String,
@@ -48,9 +47,10 @@ impl LibraryDependencyCheck {
         Self {
             package_requires: HashMap::new(),
             package_so_symlinks: HashMap::new(),
+            devel_order: Vec::new(),
             package_so_files: HashMap::new(),
             package_arch_mapping: HashMap::new(),
-            isa: isa_suffix(std::env::consts::ARCH).to_string(),
+            isa: expand_isa(),
         }
     }
 
@@ -67,14 +67,12 @@ impl LibraryDependencyCheck {
         check: &str,
         details: Vec<String>,
     ) -> Finding {
-        // `Path(package.name).name`: the header NAME, not the path.
-        let pkg_name = pkg_name.rsplit('/').next().unwrap_or(pkg_name).to_string();
         Finding {
             level,
             check: check.to_string(),
             details,
             badness: 0,
-            pkg_name,
+            pkg_name: basename(pkg_name).to_string(),
             arch: (!arch.is_empty()).then(|| arch.to_string()),
             line: None,
         }
@@ -89,9 +87,10 @@ impl Check for LibraryDependencyCheck {
     fn reset(&mut self) {
         self.package_requires.clear();
         self.package_so_symlinks.clear();
+        self.devel_order.clear();
         self.package_so_files.clear();
         self.package_arch_mapping.clear();
-        self.isa = isa_suffix(std::env::consts::ARCH).to_string();
+        self.isa = expand_isa();
     }
 
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, _out: &mut Filter) {
@@ -106,11 +105,21 @@ impl Check for LibraryDependencyCheck {
                 .chain(pkg.prereq.iter())
                 .map(|d| d.name.clone())
                 .collect();
-            self.package_requires.insert(pkg.name.clone(), requires);
+            // Keyed on `pkg.name` alone, like the reference's dicts
+            // (`LibraryDependencyCheck.py:46-52`): linting two arches of the
+            // same package together makes each clobber the other, there as
+            // here. Inherited upstream quirk, kept for parity.
+            let first_seen = self
+                .package_requires
+                .insert(pkg.name.clone(), requires)
+                .is_none();
             self.package_so_symlinks
                 .insert(pkg.name.clone(), Vec::new());
             self.package_arch_mapping
                 .insert(pkg.name.clone(), pkg.arch.clone());
+            if first_seen {
+                self.devel_order.push(pkg.name.clone());
+            }
 
             let symlinks = self.package_so_symlinks.get_mut(&pkg.name).unwrap();
             for pkgfile in &pkg.files {
@@ -131,25 +140,36 @@ impl Check for LibraryDependencyCheck {
     }
 
     fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
-        for (pkgname, so_symlinks) in &self.package_so_symlinks {
+        // Insertion order, not `HashMap` order: the reference iterates a
+        // plain dict (`LibraryDependencyCheck.py:52`), i.e. package lint
+        // order, which is what the frozen sort-order contract pins.
+        for idx in 0..self.devel_order.len() {
+            let pkgname = self.devel_order[idx].clone();
             let arch = self
                 .package_arch_mapping
-                .get(pkgname)
+                .get(&pkgname)
                 .cloned()
                 .unwrap_or_default();
-            for link in so_symlinks {
+            let so_symlinks = self
+                .package_so_symlinks
+                .get(&pkgname)
+                .cloned()
+                .unwrap_or_default();
+            let requires = self
+                .package_requires
+                .get(&pkgname)
+                .cloned()
+                .unwrap_or_default();
+            for link in &so_symlinks {
                 if let Some(definition) = self.package_so_files.get(link) {
-                    let requires = self
-                        .package_requires
-                        .get(pkgname)
-                        .cloned()
-                        .unwrap_or_default();
-                    // The reference accepts the bare name or the ISA-qualified
-                    // one (`libfoo` or `libfoo(x86-64)`).
+                    // `definition` is the *package* name, not a soname
+                    // (`LibraryDependencyCheck.py:49`), so `definition + isa`
+                    // matches nothing rpm generates; dead in the reference
+                    // as well, kept faithful.
                     let with_isa = format!("{definition}{}", self.isa);
                     if !requires.iter().any(|r| r == definition || r == &with_isa) {
                         out.add_info(Self::make_finding(
-                            pkgname,
+                            &pkgname,
                             &arch,
                             Level::Error,
                             "no-library-dependency-on",
@@ -159,7 +179,7 @@ impl Check for LibraryDependencyCheck {
                     }
                 } else {
                     out.add_info(Self::make_finding(
-                        pkgname,
+                        &pkgname,
                         &arch,
                         Level::Error,
                         "no-library-dependency-for",
@@ -216,31 +236,43 @@ mod tests {
         }
     }
 
-    /// A library package shipping `/usr/lib64/libfoo.so.1` and its `-devel`
+    /// A library package shipping `/usr/lib64/<lib>.so.1` and its `-devel`
     /// subpackage carrying the given requires plus the `.so` symlink.
-    fn lib_and_devel(requires: &[String]) -> (Pkg, Pkg) {
+    fn lib_and_devel_as(lib_name: &str, devel_name: &str, requires: &[String]) -> (Pkg, Pkg) {
         let mut lib = fixture_pkg();
-        lib.name = "libfoo".to_string();
+        lib.name = lib_name.to_string();
         lib.arch = "x86_64".to_string();
-        lib.files = vec![regular("/usr/lib64/libfoo.so.1")];
+        lib.files = vec![regular(&format!("/usr/lib64/{lib_name}.so.1"))];
 
         let mut devel = fixture_pkg();
-        devel.name = "foo-devel".to_string();
+        devel.name = devel_name.to_string();
         devel.arch = "x86_64".to_string();
         devel.requires = requires.iter().map(|r| require(r)).collect();
         devel.prereq = vec![];
-        devel.files = vec![symlink("/usr/lib64/libfoo.so", "libfoo.so.1")];
+        devel.files = vec![symlink(
+            &format!("/usr/lib64/{lib_name}.so"),
+            &format!("{lib_name}.so.1"),
+        )];
         (lib, devel)
     }
 
-    fn run(lib: &Pkg, devel: &Pkg) -> Vec<(String, String)> {
+    fn lib_and_devel(requires: &[String]) -> (Pkg, Pkg) {
+        lib_and_devel_as("libfoo", "foo-devel", requires)
+    }
+
+    fn run_pkgs(pkgs: &[&Pkg]) -> Vec<(String, String)> {
         let config = Config::default();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = LibraryDependencyCheck::new(&config);
-        check.check_binary(lib, &config, &mut out);
-        check.check_binary(devel, &config, &mut out);
+        for pkg in pkgs {
+            check.check_binary(pkg, &config, &mut out);
+        }
         check.after_checks(&config, &mut out);
         out.results().to_vec()
+    }
+
+    fn run(lib: &Pkg, devel: &Pkg) -> Vec<(String, String)> {
+        run_pkgs(&[lib, devel])
     }
 
     #[test]
@@ -252,20 +284,25 @@ mod tests {
     }
 
     #[test]
-    fn isa_suffix_matches_rpm_platform_macros() {
-        assert_eq!(isa_suffix("x86_64"), "(x86-64)");
-        assert_eq!(isa_suffix("i586"), "(x86-32)");
-        assert_eq!(isa_suffix("aarch64"), "(aarch64)");
-        assert_eq!(isa_suffix("ppc64le"), "(ppc-64)");
-        assert_eq!(isa_suffix("s390x"), "(s390-64)");
-        assert_eq!(isa_suffix("riscv64"), "(riscv-64)");
+    fn isa_comes_from_rpm_isa_macro() {
+        // Honest integration assertion: the check must use rpm's own
+        // `%{_isa}` expansion, not a hand-written table.
+        let _ = crate::pkg::init();
+        let expected = librpm::macro_context::MacroContext::default()
+            .expand("%{_isa}")
+            .unwrap_or_default();
+        let config = Config::default();
+        let check = LibraryDependencyCheck::new(&config);
+        assert_eq!(check.isa, expected);
     }
 
     #[test]
     fn isa_qualified_require_is_accepted() {
         // Reference `LibraryDependencyCheck.py:61-63`: `definition + self.isa`
-        // in requires counts as depending on the library.
-        let isa = isa_suffix(std::env::consts::ARCH);
+        // in requires counts as depending on the library (dead arm in
+        // practice — `definition` is a package name — but kept faithful).
+        let config = Config::default();
+        let isa = LibraryDependencyCheck::new(&config).isa.clone();
         let (lib, devel) = lib_and_devel(&[format!("libfoo{isa}")]);
         assert!(run(&lib, &devel).is_empty());
     }
@@ -298,5 +335,46 @@ mod tests {
         let line = &results[0].1;
         assert!(line.contains(": E: "), "level: {line}");
         assert!(line.contains("/usr/lib64/libfoo.so.1"), "link: {line}");
+    }
+
+    #[test]
+    fn findings_follow_package_lint_order() {
+        // The reference iterates a plain dict, i.e. package lint order.
+        // With several devel packages tripping the check, the findings must
+        // come out in lint order — deterministically, across runs.
+        let scenario = || {
+            let mut pkgs = Vec::new();
+            for i in 0..5 {
+                let (lib, devel) = lib_and_devel_as(
+                    &format!("libdep{i}"),
+                    &format!("libdep{i}-devel"),
+                    &["unrelated".to_string()],
+                );
+                pkgs.push(lib);
+                pkgs.push(devel);
+            }
+            let refs: Vec<&Pkg> = pkgs.iter().collect();
+            run_pkgs(&refs)
+                .into_iter()
+                .map(|(_, line)| line)
+                .collect::<Vec<_>>()
+        };
+        let first = scenario();
+        assert_eq!(first.len(), 5, "one finding per devel package");
+        for (i, line) in first.iter().enumerate() {
+            let prefix = format!("libdep{i}-devel.x86_64:");
+            assert!(
+                line.starts_with(&prefix),
+                "finding {i} out of lint order: {line}"
+            );
+            assert!(
+                line.contains(": E: no-library-dependency-on"),
+                "check and level: {line}"
+            );
+        }
+        // Fresh maps per run, so a randomised iteration order would diverge.
+        for _ in 0..4 {
+            assert_eq!(scenario(), first, "finding order is not deterministic");
+        }
     }
 }
