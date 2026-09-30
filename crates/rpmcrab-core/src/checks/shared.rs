@@ -6,6 +6,8 @@
 
 use fancy_regex::Regex;
 
+use crate::pkg::Pkg;
+
 /// `AbstractCheck.macro_regex`: `%+[{(]?[a-zA-Z_]\w{2,}[)}]?`.
 pub fn macro_regex() -> Regex {
     Regex::new(r"%+[{(]?[a-zA-Z_]\w{2,}[)}]?").expect("static regex")
@@ -20,6 +22,17 @@ pub fn devel_regex() -> Regex {
 /// `lib_package_regex`: `(?:^(?:compat-)?lib.*?(\.so.*)?|libs?[\d-]*)$`, case-insensitive.
 pub fn lib_package_regex() -> Regex {
     Regex::new(r"(?i)(?:^(?:compat-)?lib.*?(\.so.*)?|libs?[\d-]*)$").expect("static regex")
+}
+
+// The reference's `pkg[tag] or pkg.scriptprog(prog)`: an empty scriptlet
+// body falls back to the `-p` interpreter string.
+pub fn script_body_or_prog(pkg: &Pkg, tag: librpm::Tag, prog: librpm::Tag) -> String {
+    let body = pkg.tag_str(tag).unwrap_or_default();
+    if body.is_empty() {
+        pkg.scriptprog(prog)
+    } else {
+        body
+    }
 }
 
 #[cfg(test)]
@@ -43,6 +56,28 @@ mod tests {
         assert!(re.is_match("libfoo").unwrap_or(false));
         assert!(re.is_match("lib64").unwrap_or(false));
         assert!(!re.is_match("foo").unwrap_or(true));
+    }
+
+    #[test]
+    fn script_body_or_prog_prefers_body_over_interpreter() {
+        // B2: the reference is `pkg[POSTIN] or pkg.scriptprog(POSTINPROG)` --
+        // the body wins. The ldconfig fixture has a %post body plus
+        // `%post -p /sbin/ldconfig`; returning the interpreter here would be
+        // the inverted precedence.
+        let rpm = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/parity/pkg/inputs/ldconfig-test-1.0-1.noarch.rpm"
+        );
+        let dir = std::env::temp_dir().join("rpmcrab-script-body-or-prog");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let pkg = crate::pkg::Pkg::open(std::path::Path::new(rpm), &dir).expect("fixture opens");
+        let body = script_body_or_prog(&pkg, librpm::Tag::POSTIN, librpm::Tag::POSTINPROG);
+        assert!(
+            !body.contains("/sbin/ldconfig"),
+            "body won, not the -p interpreter: {body:?}"
+        );
+        assert!(!body.is_empty(), "fixture has a %post body");
     }
 
     #[test]

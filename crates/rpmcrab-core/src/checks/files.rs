@@ -475,14 +475,26 @@ impl Check for FilesCheck {
         st.debugsource_package = is_match(&self.debugsource_package_re, &pkg.name);
         st.postin = strip_quotes(
             &self.quotes_re,
-            &script_body_or_prog(pkg, librpm::Tag::POSTIN, librpm::Tag::POSTINPROG),
+            &crate::checks::shared::script_body_or_prog(
+                pkg,
+                librpm::Tag::POSTIN,
+                librpm::Tag::POSTINPROG,
+            ),
         );
         st.postun = strip_quotes(
             &self.quotes_re,
-            &script_body_or_prog(pkg, librpm::Tag::POSTUN, librpm::Tag::POSTUNPROG),
+            &crate::checks::shared::script_body_or_prog(
+                pkg,
+                librpm::Tag::POSTUN,
+                librpm::Tag::POSTUNPROG,
+            ),
         );
         // The reference does not strip quotes from preun.
-        st.preun = script_body_or_prog(pkg, librpm::Tag::PREUN, librpm::Tag::PREUNPROG);
+        st.preun = crate::checks::shared::script_body_or_prog(
+            pkg,
+            librpm::Tag::PREUN,
+            librpm::Tag::PREUNPROG,
+        );
 
         self.check_nodoc(pkg, &st, out);
         self.check_meta_package(pkg, &st, out);
@@ -499,17 +511,6 @@ impl Check for FilesCheck {
 
 fn strip_quotes(re: &Regex, s: &str) -> String {
     re.replace_all(s, "").to_string()
-}
-
-/// The reference's `pkg[tag] or pkg.scriptprog(prog)`: an empty scriptlet
-/// body falls back to the `-p` interpreter string.
-fn script_body_or_prog(pkg: &Pkg, tag: librpm::Tag, prog: librpm::Tag) -> String {
-    let body = pkg.tag_str(tag).unwrap_or_default();
-    if body.is_empty() {
-        pkg.scriptprog(prog)
-    } else {
-        body
-    }
 }
 
 impl FilesCheck {

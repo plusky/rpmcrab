@@ -89,7 +89,6 @@ kind = "behaviour"
 reason = "The reference emits self-obsoletion for the documented package-merge pattern (Provides: X = EVR with Obsoletes: X <= EVR); rpmcrab exempts it. Upstream's behaviour is the bug (rpmlint#1599, fixes rpmlint#438): a merge-pattern Obsoletes is not a self-obsoletion."
 since = "0.1.0"
 
-
 [[divergence]]
 case = "global"
 check = "postin-without-ldconfig"
@@ -243,9 +242,24 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "logrotate-log-dir-not-packaged"
+kind = "behaviour"
+reason = "Deliberate improvement over the reference (open rpmlint#551): /var/log itself is never reported by logrotate-log-dir-not-packaged. It is owned by the filesystem package, not by the package shipping the logrotate config, so flagging it is a false positive."
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/551"
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "AtomicUpdateCheck"
 kind = "behaviour"
 reason = "A present-but-wrong-type AtomicAllowedDirs (e.g. the string \"/etc/\") panics at construction; the reference iterates tuple('/etc/') as character prefixes and runs. The port deliberately fails fast on a misconfigured type instead of reproducing the reference's permissiveness."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "beam-was-not-recompiled"
+kind = "behaviour"
+reason = "The reference expands the %_builddir macro at check time; rpmcrab has no macro expansion, so the expected build dir comes from the ErlangBuildDir config key (default /home/abuild/rpmbuild/BUILD, the OBS value). A local ~/rpmbuild/BUILD build reports beam-was-not-recompiled unless the key is set."
 since = "0.1.0"
 
 [[divergence]]
@@ -254,3 +268,18 @@ check = "AtomicUpdateCheck"
 kind = "behaviour"
 reason = "A non-string element in AtomicAllowedDirs/AtomicDisallowedSubdirs (e.g. AtomicDisallowedSubdirs = [42]) panics at construction; the reference raises TypeError later, at check time. The port deliberately fails fast on a misconfigured type instead of reproducing the reference's deferred failure."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "kmp-excessive-enhances"
+kind = "detail"
+reason = "The detail prints the enhances list with Rust Debug formatting ([\"a\"]) where the reference prints Python repr (['a'])."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "incoherent-init-script-name"
+kind = "detail"
+reason = "The detail prints the candidate names with Rust Debug formatting ([\"a\",\"ad\"]) where the reference prints Python repr of a tuple (('a', 'ad'))."
+since = "0.1.0"
+
