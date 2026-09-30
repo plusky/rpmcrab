@@ -1,0 +1,29 @@
+# BinariesCheck test fixture
+
+A tiny RPM containing prebuilt ELF binaries with known properties, used by
+the `binaries_check_fixture` test in `crates/rpmcrab-core/src/checks/binaries.rs`.
+
+## Contents
+
+| File | Properties | Expected findings |
+|------|------------|-------------------|
+| `/usr/lib64/libbad.so.1` | Executable stack (`GNU_STACK RWE`), no SONAME | `executable-stack`, `no-soname` |
+| `/usr/lib64/libgood.so.1` | Non-executable stack, `SONAME=libgood.so.1` | (absence: no `executable-stack`, no `no-soname`) |
+| `/usr/bin/setuidbin` | Mode 4755, calls `setuid()` but not `setgroups()` | `missing-call-to-setgroups-before-setuid` at **Error** |
+| `/usr/bin/rpathbin` | `RUNPATH=/opt/custom/lib` | `binary-or-shlib-defines-rpath` |
+| `/usr/bin/truncated` | 64-byte truncated ELF (header only) | `readelf-failed` |
+
+The `setuidbin` case pins the #1462 severity flip: the reference reports this
+finding at Warning for setuid binaries (backwards); rpmcrab reports Error for
+setuid binaries and Warning otherwise.
+
+## Regeneration
+
+```bash
+bash tests/fixtures/binaries-check/build.sh
+```
+
+Needs `podman` and `rpmbuild`. The binaries are compiled in an openSUSE
+Tumbleweed container so they are genuine Linux ELFs regardless of host OS.
+The container architecture (currently aarch64) does not matter — goblin
+parses all ELF types and the findings are architecture-independent.

@@ -77,7 +77,7 @@ fn elf_regex() -> Regex {
 }
 
 fn default_executable_stack_archs() -> Regex {
-    Regex::new(r"alpha|arm.*|hppa|i.86|m68k|microblaze|mips|ppc|s390|s390x|sh|sparc|x86_64")
+    Regex::new(r"aarch64|alpha|arm.*|hppa|i.86|m68k|microblaze|mips|ppc|s390|s390x|sh|sparc|x86_64")
         .expect("static regex")
 }
 
@@ -853,7 +853,7 @@ impl BinariesCheck {
             // fullmatch semantics via anchored regex
             let arch_re = Regex::new(&format!(
                 "^(?:{})$",
-                r"alpha|arm.*|hppa|i.86|m68k|microblaze|mips|ppc|s390|s390x|sh|sparc|x86_64"
+                r"aarch64|alpha|arm.*|hppa|i.86|m68k|microblaze|mips|ppc|s390|s390x|sh|sparc|x86_64"
             ))
             .expect("static regex");
             if !arch_re.is_match(&pkg.arch).unwrap_or(false) {
@@ -1580,6 +1580,7 @@ impl Check for BinariesCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::Color;
 
     #[test]
     fn binaries_check_registers() {
@@ -1624,5 +1625,110 @@ mod tests {
         assert!(!info.is_shlib);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    fn fixture_path(name: &str) -> String {
+        format!(
+            "{}/../../tests/fixtures/binaries-check/input/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            name
+        )
+    }
+
+    fn test_config() -> Config {
+        let defaults: toml::Table = toml::from_str(include_str!("../../data/configdefaults.toml"))
+            .expect("parse configdefaults");
+        Config {
+            configuration: defaults,
+            ..Default::default()
+        }
+    }
+
+    fn run_binaries_check(rpm: &str) -> (Vec<(String, String)>, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = Pkg::open(std::path::Path::new(rpm), dir.path()).expect("open fixture");
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = BinariesCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        (out.results().to_vec(), dir)
+    }
+
+    fn assert_lacks(results: &[(String, String)], finding: &str) {
+        assert!(
+            !results.iter().any(|(n, _)| n == finding),
+            "unexpected {finding} in: {:?}",
+            results.iter().map(|(n, _)| n).collect::<Vec<_>>()
+        );
+    }
+
+    fn lines_for<'a>(results: &'a [(String, String)], finding: &str) -> Vec<&'a str> {
+        results
+            .iter()
+            .filter(|(n, _)| n == finding)
+            .map(|(_, line)| line.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn binaries_check_fixture() {
+        let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
+        let (results, _dir) = run_binaries_check(&rpm_path);
+
+        // libbad.so.1: executable stack, no SONAME
+        let stack_lines = lines_for(&results, "executable-stack");
+        assert!(
+            stack_lines.iter().any(|l| l.contains("libbad.so.1")),
+            "executable-stack should fire for libbad.so.1: {results:?}"
+        );
+        assert!(
+            !stack_lines.iter().any(|l| l.contains("libgood.so.1")),
+            "executable-stack should not fire for libgood.so.1: {results:?}"
+        );
+
+        let soname_lines = lines_for(&results, "no-soname");
+        assert!(
+            soname_lines.iter().any(|l| l.contains("libbad.so.1")),
+            "no-soname should fire for libbad.so.1: {results:?}"
+        );
+        assert!(
+            !soname_lines.iter().any(|l| l.contains("libgood.so.1")),
+            "no-soname should not fire for libgood.so.1: {results:?}"
+        );
+
+        // rpathbin: RUNPATH set
+        let rpath_lines = lines_for(&results, "binary-or-shlib-defines-rpath");
+        assert!(
+            rpath_lines.iter().any(|l| l.contains("rpathbin")),
+            "binary-or-shlib-defines-rpath should fire for rpathbin: {results:?}"
+        );
+
+        // setuidbin: setuid without setgroups, installed setuid -> Error (#1462 flip)
+        let setgroups_lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
+        assert_eq!(
+            setgroups_lines.len(),
+            1,
+            "expected one setgroups finding: {results:?}"
+        );
+        assert!(
+            setgroups_lines[0].contains("setuidbin"),
+            "setgroups finding should be for setuidbin: {results:?}"
+        );
+        assert!(
+            setgroups_lines[0].contains(" E: "),
+            "setgroups finding should be Error for setuid binary (#1462): {}",
+            setgroups_lines[0]
+        );
+
+        // truncated: goblin cannot parse -> readelf-failed
+        let failed_lines = lines_for(&results, "readelf-failed");
+        assert!(
+            failed_lines.iter().any(|l| l.contains("truncated")),
+            "readelf-failed should fire for truncated: {results:?}"
+        );
+
+        // Ledgered absences: these findings are never emitted
+        assert_lacks(&results, "unused-direct-shlib-dependency");
+        assert_lacks(&results, "missing-mandatory-optflags");
     }
 }
