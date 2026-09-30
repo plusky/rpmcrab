@@ -1339,25 +1339,13 @@ mod tests {
         config
     }
 
-    fn corpus_pkg(name: &str) -> Pkg {
-        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/parity/cases")
-            .join(name)
-            .join("input")
-            .join(format!("{}.rpm", name));
-        // Find the actual rpm file
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/parity/cases")
-            .join(name)
-            .join("input");
-        let rpm_path = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .find(|p| p.extension().map(|x| x == "rpm").unwrap_or(false))
-            .expect("corpus rpm");
-        let _ = rpm;
-        Pkg::open(&rpm_path, &std::env::temp_dir()).expect("open corpus pkg")
+    fn fixture_pkg(name: &str) -> Pkg {
+        // Hand-built fixture RPMs in tests/parity/pkg/inputs/, not distro
+        // packages. The llvm21-gold corpus is reserved for parity tests.
+        let rpm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs")
+            .join(name);
+        Pkg::open(&rpm_path, &std::env::temp_dir()).expect("open fixture pkg")
     }
 
     fn run_check(pkg: &Pkg) -> Vec<(String, String)> {
@@ -1369,16 +1357,15 @@ mod tests {
     }
 
     #[test]
-    fn tags_check_runs_on_corpus() {
-        let pkg = corpus_pkg("llvm21-gold");
+    fn tags_check_runs_on_fixture() {
+        let pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
         let results = run_check(&pkg);
         for (name, line) in &results {
             eprintln!("GOT: {}: {}", name, line);
         }
-        // The reference reports these three on llvm21-gold (openSUSE config):
-        // invalid-license, invalid-license-exception, no-version-in-last-changelog.
-        // The default config has empty ValidLicenses, so license findings differ;
-        // this pins that the check runs and emits well-formed findings.
+        // Smoke test: the check runs and emits well-formed findings.
+        // Uses a hand-built fixture, not the llvm21-gold corpus (reserved
+        // for parity tests).
         for (name, line) in &results {
             assert!(!name.is_empty(), "finding name: {line}");
             assert!(
