@@ -1,0 +1,8 @@
+SUFFIX = "requires a review and whitelisting by the SUSE security team"
+
+device-unauthorized-file="""
+Packaging device files #SUFFIX#. #REVIEW_NEEDED_TEXT#
+"""
+device-mismatched-attrs="""
+Attribute mismatch for device files #SUFFIX#. #REVIEW_NEEDED_TEXT#
+"""

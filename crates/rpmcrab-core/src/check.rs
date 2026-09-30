@@ -165,15 +165,15 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
         "AtomicUpdateCheck" => Some(Box::new(
             crate::checks::atomic_update::AtomicUpdateCheck::new(config),
         )),
-        "LibraryDependencyCheck" => Some(Box::new(
-            crate::checks::library_dependency::LibraryDependencyCheck::new(config),
-        )),
         "BrandingPolicyCheck" => Some(Box::new(
             crate::checks::branding_policy::BrandingPolicyCheck::new(config),
         )),
         "DBusPolicyCheck" => Some(Box::new(crate::checks::dbus_policy::DBusPolicyCheck::new(
             config,
         ))),
+        "DeviceFilesCheck" => Some(Box::new(
+            crate::checks::device_files::DeviceFilesCheck::new(config),
+        )),
         "ErlangCheck" => Some(Box::new(crate::checks::erlang::ErlangCheck::new(config))),
         "InitScriptCheck" => Some(Box::new(crate::checks::init_script::InitScriptCheck::new(
             config,
@@ -181,6 +181,9 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
         "KMPPolicyCheck" => Some(Box::new(crate::checks::kmp_policy::KMPPolicyCheck::new(
             config,
         ))),
+        "LibraryDependencyCheck" => Some(Box::new(
+            crate::checks::library_dependency::LibraryDependencyCheck::new(config),
+        )),
         "LogrotateCheck" => Some(Box::new(crate::checks::logrotate::LogrotateCheck::new(
             config,
         ))),
@@ -191,6 +194,10 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
             crate::checks::shared_library_policy::SharedLibraryPolicyCheck::new(config),
         )),
         "PostCheck" => Some(Box::new(crate::checks::post::PostCheck::new(config))),
+        "SourceCheck" => Some(Box::new(crate::checks::source::SourceCheck::new(config))),
+        "WorldWritableCheck" => Some(Box::new(
+            crate::checks::world_writable::WorldWritableCheck::new(config),
+        )),
         _ => None,
     }
 }

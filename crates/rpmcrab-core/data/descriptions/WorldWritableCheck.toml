@@ -1,0 +1,8 @@
+SUFFIX = "requires a review and whitelisting by the SUSE security team"
+
+world-writable-unauthorized-file="""
+Packaging world writable files #SUFFIX#. #REVIEW_NEEDED_TEXT#
+"""
+world-writable-mismatched-attrs="""
+Attribute mismatch for world writable files #SUFFIX#. #REVIEW_NEEDED_TEXT#
+"""

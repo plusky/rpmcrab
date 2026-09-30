@@ -200,6 +200,13 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "device-files-whitelist-validation"
+kind = "behaviour"
+reason = "Malformed whitelist entries (missing \"package\"/\"packages\", wrong types, missing required keys, unknown attribute keys) are logged and skipped; the reference raises KeyError in verify_whitelists or AttributeError in getattr at check time and crashes the whole run. Applies to DeviceFilesCheck and WorldWritableCheck."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "missing-call-to-setgroups-before-setuid"
 kind = "behaviour"
 reason = "Upstream rpmlint#1462: the reference reports this at Warning for setuid binaries and Error otherwise, which is backwards. rpmcrab reports Error when the binary is installed setuid and Warning otherwise."
@@ -274,4 +281,11 @@ case = "global"
 check = "pkg-layer"
 kind = "behaviour"
 reason = "librpm panics decoding a non-UTF-8 string header tag (str::from_utf8 in td.rs); the reference (helpers.byte_to_string) decodes with errors='replace' and keeps linting. A malformed header aborts the port where the reference degrades."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "world-writable-mismatched-attrs"
+kind = "behaviour"
+reason = "The reference test test_world_writable.py::test_device_files_simple asserts has: drwxr-xr-t for a file created with mode 0o41777, but stat.filemode(0o41777) is drwxrwxrwt, so the reference code itself reports has: drwxrwxrwt and its own test cannot pass. The port follows the code."
 since = "0.1.0"

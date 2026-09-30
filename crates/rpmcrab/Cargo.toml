@@ -35,7 +35,7 @@ gen = ["dep:clap_complete", "dep:clap_mangen"]
 [dependencies]
 rpmcrab-core = { version = "0.1.0", path = "../rpmcrab-core" }
 clap = { version = "4", features = ["derive"] }
-toml = "1.1"
+toml = { version = "1.1", features = ["preserve_order"] }
 clap_complete = { version = "4", optional = true }
 clap_mangen = { version = "0.3", optional = true }
 anyhow = "1"
