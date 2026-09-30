@@ -97,7 +97,7 @@ fn prereq_re() -> Regex {
 }
 
 fn suse_version_re() -> Regex {
-    Regex::new(r"%({\?)?suse_version}?\s*[<>=]+\s*(?P<version>\d+)").expect("static regex")
+    Regex::new(r"%({|{\?)?suse_version}?\s*[<>=]+\s*(?P<version>\d+)").expect("static regex")
 }
 
 fn make_check_re() -> Regex {
@@ -1816,11 +1816,11 @@ mod tests {
     }
 
     #[test]
-    fn suse_version_bare_braces_are_ignored_like_the_reference() {
-        // The reference's `%({\?)?suse_version}?` only matches `%suse_version`
-        // and `%{?suse_version}`, not `%{suse_version}`; mirrored here.
+    fn suse_version_braced_form_is_checked() {
+        // Deliberate improvement over the reference: its `%({\?)?suse_version}?`
+        // misses the common `%{suse_version}` form; we match it too.
         let results = run_mini("Name: foo\n%if %{suse_version} < 1000\n%endif\n");
-        assert!(!has(&results, "obsolete-suse-version-check"), "{results:?}");
+        assert!(has(&results, "obsolete-suse-version-check"), "{results:?}");
     }
 
     #[test]

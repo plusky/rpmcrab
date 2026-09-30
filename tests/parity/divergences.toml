@@ -118,6 +118,8 @@ kind = "missing"
 reason = "Intentional: reference emission is commented out in FilesCheck.py and unreachable."
 since = "0.1.0"
 
+[[divergence]]
+case = "global"
 check = "header-decoding"
 kind = "behaviour"
 reason = "A header field that is not valid UTF-8 makes rpmcrab report a fatal read and exit 3, where the reference decodes it leniently and lints the package. librpm 0.6's decoders panic on such data (string_array and FileEntry::path both expect UTF-8), the safe API exposes no lossy or bytes accessor, and reading the raw bytes would need librpm-sys, which unsafe_code=forbid rules out, so the panic is contained and the cause reported. The reference's filename-not-utf8 finding is therefore not produced. Fixture: tests/fixtures/nonutf8-basename/."
@@ -147,4 +149,18 @@ case = "global"
 check = "specfile-error"
 kind = "detail"
 reason = "When the spec parser fails in _check_invalid_url, rpmcrab reports 'specfile-error' with only the spec path as detail. The reference also includes librpm's error text, which librpm 0.6's Spec::parse does not surface (it returns Option)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "obsolete-suse-version-check"
+kind = "behaviour"
+reason = "Fixed behaviour: the suse_version regex also matches the braced %{suse_version} form, which the frozen 2.10.0 reference's `%({\?)?suse_version}?` misses (it only matches %suse_version and %{?suse_version})."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "invalid-suse-version-check"
+kind = "behaviour"
+reason = "Fixed behaviour: the suse_version regex also matches the braced %{suse_version} form, which the frozen 2.10.0 reference's `%({\?)?suse_version}?` misses (it only matches %suse_version and %{?suse_version})."
 since = "0.1.0"
