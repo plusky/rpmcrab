@@ -15,24 +15,34 @@ use crate::pkg::Pkg;
 
 pub struct SourceCheck {
     compress_ext: String,
-    valid_src_perms: Vec<u32>,
+    not_compressed_detail: String,
+    valid_src_perms: Vec<u128>,
     ext_magic: Vec<(String, String, Regex)>,
     spec_file: Option<String>,
 }
 
 impl SourceCheck {
     pub fn new(config: &Config) -> Self {
+        // The reference reads `config.configuration['CompressExtension']`
+        // and raises `KeyError` when it is absent; defaulting to `""` would
+        // render a mangled description, so this panics just as loudly.
         let compress_ext = config
             .configuration
             .get("CompressExtension")
             .and_then(toml::Value::as_str)
-            .unwrap_or_default()
+            .unwrap_or_else(|| panic!("SourceCheck: CompressExtension must be a string"))
             .to_string();
+        // The reference registers this description with the configured
+        // compression interpolated in (`__init__`, not per package).
+        let not_compressed_detail = format!(
+            "A source archive or file in your package is not compressed using the {}\n            compression method (doesn't have the {} extension).",
+            compress_ext, compress_ext
+        );
         // The reference runs `[int(value, 8) for value in
         // config.configuration['ValidSrcPerms']]` and dies on a missing key
         // or a bad entry. Substituting an empty list instead would emit
         // `strange-permission` for every file, so this panics just as loudly.
-        let valid_src_perms: Vec<u32> = match config.configuration.get("ValidSrcPerms") {
+        let valid_src_perms: Vec<u128> = match config.configuration.get("ValidSrcPerms") {
             Some(toml::Value::Array(entries)) => entries
                 .iter()
                 .map(|v| match v.as_str().and_then(parse_octal) {
@@ -63,6 +73,7 @@ impl SourceCheck {
         .collect();
         Self {
             compress_ext,
+            not_compressed_detail,
             valid_src_perms,
             ext_magic,
             spec_file: None,
@@ -97,15 +108,19 @@ impl SourceCheck {
             }
         }
         let perm = mode & 0o7777;
-        if !self.valid_src_perms.contains(&perm) {
+        if !self.valid_src_perms.contains(&(perm as u128)) {
             out.push((
                 Level::Warning,
                 "strange-permission",
                 vec![fname.to_string(), format!("{perm:o}")],
             ));
         }
-        // `\.(tar|tgz)$`, exactly: ends with `.tar` or `.tgz`.
-        if (fname.ends_with(".tar") || fname.ends_with(".tgz"))
+        // The reference's `source_regex = re.compile(r'\.(tar|tgz)$')`: without
+        // `re.MULTILINE`, `$` also matches before a trailing newline, so
+        // `foo.tar\n` fires there. `fancy_regex` has no such `$`, hence the
+        // one-newline strip, which is exactly equivalent for this pattern.
+        let stem = fname.strip_suffix('\n').unwrap_or(fname);
+        if (stem.ends_with(".tar") || stem.ends_with(".tgz"))
             && !self.compress_ext.is_empty()
             && !fname.ends_with(self.compress_ext.as_str())
         {
@@ -134,20 +149,135 @@ impl SourceCheck {
     }
 }
 
-/// The reference's `int(value, 8)`: surrounding whitespace and a leading
-/// `+`/`-` are accepted, as is the `0o` prefix.
-fn parse_octal(s: &str) -> Option<u32> {
+/// The reference's `int(value, 8)`, faithfully: surrounding whitespace is
+/// stripped, exactly one ASCII sign is allowed (a second sign is a
+/// `ValueError`, not a double negation), the `0o`/`0O` prefix is optional,
+/// PEP 515 underscores are allowed between digits and directly after the
+/// prefix, and any Unicode decimal digit (`Py_UNICODE_TODECIMAL`) below the
+/// base is accepted — so `int('٦٤٤', 8)` is 420.
+///
+/// The value is unbounded like the reference's: magnitudes beyond `u128`
+/// saturate at `u128::MAX` (ledgered as `kind = "detail"` — the saturated
+/// value can never equal a real file mode, which is the only comparison
+/// this value feeds, so the saturation is unobservable).
+fn parse_octal(s: &str) -> Option<u128> {
     let s = s.trim();
-    let (s, neg) = match s.strip_prefix('-') {
-        Some(rest) => (rest, true),
-        None => (s.strip_prefix('+').unwrap_or(s), false),
+    let (s, neg) = match s.as_bytes().first() {
+        Some(b'-') => (&s[1..], true),
+        Some(b'+') => (&s[1..], false),
+        _ => (s, false),
     };
-    let s = s
-        .strip_prefix("0o")
-        .or_else(|| s.strip_prefix("0O"))
-        .unwrap_or(s);
-    let v = u32::from_str_radix(s, 8).ok()?;
-    Some(if neg { v.wrapping_neg() } else { v })
+    if s.as_bytes()
+        .first()
+        .is_some_and(|b| *b == b'+' || *b == b'-')
+    {
+        return None;
+    }
+    let (s, after_prefix) = match s.strip_prefix("0o").or_else(|| s.strip_prefix("0O")) {
+        Some(rest) => (rest, true),
+        None => (s, false),
+    };
+    let mut value: u128 = 0;
+    // An underscore may follow the prefix or a digit, never anything else.
+    let mut underscore_ok = after_prefix;
+    let mut digits = 0u32;
+    for c in s.chars() {
+        if c == '_' {
+            if !underscore_ok {
+                return None;
+            }
+            underscore_ok = false;
+            continue;
+        }
+        let d = unicode_octal_digit(c)?;
+        underscore_ok = true;
+        digits += 1;
+        value = match value.checked_mul(8).and_then(|v| v.checked_add(d as u128)) {
+            Some(v) => v,
+            None => return Some(u128::MAX),
+        };
+    }
+    if digits == 0 || !underscore_ok {
+        return None;
+    }
+    Some(if neg { value.wrapping_neg() } else { value })
+}
+
+/// A Unicode decimal digit's value when below 8, like CPython's
+/// `Py_UNICODE_TODECIMAL` restricted to the base.
+fn unicode_octal_digit(c: char) -> Option<u32> {
+    let v = unicode_decimal_value(c)?;
+    (v < 8).then_some(v)
+}
+
+/// The decimal value of any Unicode decimal-digit character, mirroring
+/// CPython's `Py_UNICODE_TODECIMAL`. Each arm is one digit block laid out
+/// 0-9 in order; characters outside these blocks are not decimal digits.
+fn unicode_decimal_value(c: char) -> Option<u32> {
+    let c = c as u32;
+    let base = match c {
+        0x0030..=0x0039 => 0x0030,    // ASCII
+        0x0660..=0x0669 => 0x0660,    // Arabic-Indic
+        0x06F0..=0x06F9 => 0x06F0,    // Extended Arabic-Indic
+        0x07C0..=0x07C9 => 0x07C0,    // NKo
+        0x0966..=0x096F => 0x0966,    // Devanagari
+        0x09E6..=0x09EF => 0x09E6,    // Bengali
+        0x0A66..=0x0A6F => 0x0A66,    // Gurmukhi
+        0x0AE6..=0x0AEF => 0x0AE6,    // Gujarati
+        0x0B66..=0x0B6F => 0x0B66,    // Oriya
+        0x0BE6..=0x0BEF => 0x0BE6,    // Tamil
+        0x0C66..=0x0C6F => 0x0C66,    // Telugu
+        0x0CE6..=0x0CEF => 0x0CE6,    // Kannada
+        0x0D66..=0x0D6F => 0x0D66,    // Malayalam
+        0x0DE6..=0x0DEF => 0x0DE6,    // Sinhala
+        0x0E50..=0x0E59 => 0x0E50,    // Thai
+        0x0ED0..=0x0ED9 => 0x0ED0,    // Lao
+        0x0F20..=0x0F29 => 0x0F20,    // Tibetan
+        0x1040..=0x1049 => 0x1040,    // Myanmar
+        0x1090..=0x1099 => 0x1090,    // Myanmar Shan
+        0x17E0..=0x17E9 => 0x17E0,    // Khmer
+        0x1810..=0x1819 => 0x1810,    // Mongolian
+        0x1946..=0x194F => 0x1946,    // Limbu
+        0x19D0..=0x19D9 => 0x19D0,    // New Tai Lue
+        0x1A80..=0x1A89 => 0x1A80,    // Tai Tham Hora
+        0x1A90..=0x1A99 => 0x1A90,    // Tai Tham Tham
+        0x1B50..=0x1B59 => 0x1B50,    // Balinese
+        0x1BB0..=0x1BB9 => 0x1BB0,    // Sundanese
+        0x1C50..=0x1C59 => 0x1C50,    // Ol Chiki
+        0xA620..=0xA629 => 0xA620,    // Vai
+        0xA8D0..=0xA8D9 => 0xA8D0,    // Saurashtra
+        0xA900..=0xA909 => 0xA900,    // Kayah Li
+        0xA9D0..=0xA9D9 => 0xA9D0,    // Javanese
+        0xA9F0..=0xA9F9 => 0xA9F0,    // Myanmar Tai Laing
+        0xAA50..=0xAA59 => 0xAA50,    // Cham
+        0xABF0..=0xABF9 => 0xABF0,    // Meetei Mayek
+        0xFF10..=0xFF19 => 0xFF10,    // Fullwidth
+        0x104A0..=0x104A9 => 0x104A0, // Osmanya
+        0x11066..=0x1106F => 0x11066, // Brahmi
+        0x110F0..=0x110F9 => 0x110F0, // Sora Sompeng
+        0x11136..=0x1113F => 0x11136, // Chakma
+        0x111D0..=0x111D9 => 0x111D0, // Mahajani
+        0x112F0..=0x112F9 => 0x112F0, // Khudawadi
+        0x11450..=0x11459 => 0x11450, // Newa
+        0x114D0..=0x114D9 => 0x114D0, // Tirhuta
+        0x11650..=0x11659 => 0x11650, // Modi
+        0x116C0..=0x116C9 => 0x116C0, // Takri
+        0x11730..=0x11739 => 0x11730, // Ahom
+        0x118E0..=0x118E9 => 0x118E0, // Warang Citi
+        0x11C50..=0x11C59 => 0x11C50, // Sharada
+        0x11D50..=0x11D59 => 0x11D50, // Masaram Gondi
+        0x11DA0..=0x11DA9 => 0x11DA0, // Gunjala Gondi
+        0x16A60..=0x16A69 => 0x16A60, // Mro
+        0x16B50..=0x16B59 => 0x16B50, // Pahawh Hmong
+        0x1D7CE..=0x1D7D7 => 0x1D7CE, // Mathematical Bold
+        0x1D7D8..=0x1D7E1 => 0x1D7D8, // Mathematical Double-Struck
+        0x1D7E2..=0x1D7EB => 0x1D7E2, // Mathematical Sans-Serif
+        0x1D7EC..=0x1D7F5 => 0x1D7EC, // Mathematical Sans-Serif Bold
+        0x1D7F6..=0x1D7FF => 0x1D7F6, // Mathematical Monospace
+        0x1E950..=0x1E959 => 0x1E950, // Adlam
+        _ => return None,
+    };
+    Some(c - base)
 }
 
 /// Python's `repr()` for `str`, for the `inconsistent-file-extension` detail
@@ -188,15 +318,7 @@ impl Check for SourceCheck {
     }
 
     fn check_source(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
-        // The reference registers this description with the configured
-        // compression interpolated in.
-        out.set_error_detail(
-            "source-not-compressed",
-            format!(
-                "A source archive or file in your package is not compressed using the {}\n            compression method (doesn't have the {} extension).",
-                self.compress_ext, self.compress_ext
-            ),
-        );
+        out.set_error_detail("source-not-compressed", self.not_compressed_detail.clone());
         for f in &pkg.files {
             for (level, check, details) in self.file_findings(&f.name, f.mode, &f.magic) {
                 let refs: Vec<&str> = details.iter().map(String::as_str).collect();
@@ -324,10 +446,38 @@ ValidSrcPerms = ["0o644", "0o755"]
         assert_eq!(parse_octal("644"), Some(0o644));
         assert_eq!(parse_octal("0o755"), Some(0o755));
         assert_eq!(parse_octal("0O755"), Some(0o755));
-        // `int(v, 8)` strips whitespace and accepts a sign.
+        // `int(v, 8)` strips whitespace and accepts a single sign.
         assert_eq!(parse_octal("  644\t"), Some(0o644));
         assert_eq!(parse_octal("+0o644"), Some(0o644));
-        assert_eq!(parse_octal("-644"), Some(0o644u32.wrapping_neg()));
+        assert_eq!(parse_octal("-644"), Some(0o644u128.wrapping_neg()));
+        // A second sign is a ValueError, not a double negation.
+        assert_eq!(parse_octal("++644"), None);
+        assert_eq!(parse_octal("-+644"), None);
+        assert_eq!(parse_octal("+-644"), None);
+        assert_eq!(parse_octal("+"), None);
+        assert_eq!(parse_octal("-"), None);
+        // PEP 515 underscores: between digits and after the prefix only.
+        assert_eq!(parse_octal("0o6_44"), Some(0o644));
+        assert_eq!(parse_octal("6_4_4"), Some(0o644));
+        assert_eq!(parse_octal("0o_644"), Some(0o644));
+        assert_eq!(parse_octal("_644"), None);
+        assert_eq!(parse_octal("644_"), None);
+        assert_eq!(parse_octal("6__44"), None);
+        assert_eq!(parse_octal("0o_"), None);
+        assert_eq!(parse_octal("+_644"), None);
+        // Non-ASCII decimal digits below the base are accepted.
+        assert_eq!(parse_octal("\u{0666}\u{0664}\u{0664}"), Some(0o644));
+        assert_eq!(parse_octal("\u{FF16}\u{FF14}\u{FF14}"), Some(0o644));
+        // ...but 8 and 9 are not octal digits in any script.
+        assert_eq!(parse_octal("\u{0668}\u{0664}\u{0664}"), None);
+        assert_eq!(parse_octal("0o8"), None);
+        assert_eq!(parse_octal("8"), None);
+        // Unbounded magnitude, like the reference's arbitrary precision.
+        assert_eq!(parse_octal("0o777777777777"), Some(0o777777777777));
+        assert_eq!(
+            parse_octal(&format!("0o{}", "7".repeat(22))),
+            Some(73786976294838206463)
+        );
         assert_eq!(parse_octal("bogus"), None);
         assert_eq!(parse_octal(""), None);
         assert_eq!(parse_octal("0o"), None);
@@ -384,8 +534,24 @@ ValidSrcPerms = ["0o644", "0o755"]
     #[should_panic(expected = "ValidSrcPerms must be an array")]
     fn missing_valid_src_perms_panics() {
         // The reference raises KeyError; an empty list would flag every file.
+        let table: toml::Table =
+            toml::from_str("CompressExtension = \"gz\"").expect("parse test config");
         let config = Config {
-            configuration: toml::Table::new(),
+            configuration: table,
+            ..Default::default()
+        };
+        let _ = SourceCheck::new(&config);
+    }
+
+    #[test]
+    #[should_panic(expected = "CompressExtension must be a string")]
+    fn missing_compress_extension_panics() {
+        // The reference raises KeyError on `config.configuration['CompressExtension']`;
+        // defaulting to "" would render a mangled description.
+        let table: toml::Table =
+            toml::from_str("ValidSrcPerms = [\"0o644\"]").expect("parse test config");
+        let config = Config {
+            configuration: table,
             ..Default::default()
         };
         let _ = SourceCheck::new(&config);
@@ -397,11 +563,55 @@ ValidSrcPerms = ["0o644", "0o755"]
         // The reference raises ValueError; dropping the entry would flag
         // every file with `strange-permission`.
         let table: toml::Table =
-            toml::from_str("ValidSrcPerms = [\"bogus\"]").expect("parse test config");
+            toml::from_str("CompressExtension = \"gz\"\nValidSrcPerms = [\"bogus\"]")
+                .expect("parse test config");
         let config = Config {
             configuration: table,
             ..Default::default()
         };
         let _ = SourceCheck::new(&config);
+    }
+
+    #[test]
+    fn trailing_newline_still_matches_source_regex() {
+        // The reference's `source_regex.search` uses `$`, which matches
+        // before a trailing newline; `ends_with(".tar")` would stay silent.
+        let c = checker();
+        let found = c.file_findings("foo.tar\n", 0o100644, "POSIX tar archive");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].1, "source-not-compressed");
+    }
+
+    #[test]
+    fn check_source_entry_point_emits_per_file_findings() {
+        // Kills M8-prime (zero files iterated) and M15 (per-file findings
+        // dropped): the whole `check_source` body must run for findings
+        // to reach the `Filter`.
+        use std::path::Path;
+
+        use crate::color::Color;
+        use crate::pkg::pkgfile::PkgFile;
+
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir()).expect("open fixture pkg");
+        pkg.files = vec![PkgFile {
+            name: "bogus.gz".to_string(),
+            mode: 0o100644,
+            magic: "ASCII text".to_string(),
+            ..Default::default()
+        }];
+        let table: toml::Table =
+            toml::from_str("CompressExtension = \"gz\"\nValidSrcPerms = [\"0o644\", \"0o755\"]")
+                .expect("parse test config");
+        let config = Config {
+            configuration: table,
+            ..Default::default()
+        };
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SourceCheck::new(&config);
+        check.check_source(&pkg, &config, &mut out);
+        let names: Vec<&str> = out.results().iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["inconsistent-file-extension"]);
     }
 }

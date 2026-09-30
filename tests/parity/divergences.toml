@@ -291,3 +291,10 @@ kind = "behaviour"
 reason = "The reference test test_world_writable.py::test_device_files_simple asserts has: drwxr-xr-t for a file created with mode 0o41777, but stat.filemode(0o41777) is drwxrwxrwt, so the reference code itself reports has: drwxrwxrwt and its own test cannot pass. The port follows the code."
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/600"
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SourceCheck"
+kind = "detail"
+reason = "parse_octal mirrors the reference's int(value, 8) (sign, 0o prefix, PEP 515 underscores, Unicode decimal digits), but magnitudes beyond u128 saturate at u128::MAX where the reference keeps arbitrary precision. The value only feeds equality against file mode bits, which neither a saturated nor an arbitrary-precision huge value can equal, so the saturation is unobservable."
+since = "0.1.0"

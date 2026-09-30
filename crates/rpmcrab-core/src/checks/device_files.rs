@@ -189,4 +189,25 @@ device_major = 55
             found[0].2[1]
         );
     }
+
+    #[test]
+    fn check_binary_entry_point_reports_through_filter() {
+        // Kills M7 (check_binary emitting nothing): the whole entry point
+        // must run for findings to reach the `Filter`.
+        use std::path::Path;
+
+        use crate::color::Color;
+
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir()).expect("open fixture pkg");
+        pkg.name = "dummy".to_string();
+        pkg.files = vec![pkg_file("/dev/mydevice", 0o60660, "root", "root", 0x801)];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = DeviceFilesCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let names: Vec<&str> = out.results().iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["device-unauthorized-file"]);
+    }
 }

@@ -32,3 +32,7 @@ obsoletion = "obsoletion"
 writeable = "writeable"
 # gir is a GObject introspection file extension, not a typo for git.
 gir = "gir"
+# Tham is the Tai Tham script name (Unicode block Tai_Tham), not a typo for Than.
+tham = "tham"
+# Vai is the Vai script name (Unicode block Vai), not a typo for Via/Vie.
+vai = "vai"

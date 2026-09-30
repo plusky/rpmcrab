@@ -151,15 +151,23 @@ pub fn load_whitelists(config: &Config, key: &str, required: &[&str]) -> Vec<Whi
             log::error!("{key}: \"packages\" must be an array, skipping entry");
             continue;
         }
-        let packages = table
-            .get("packages")
-            .and_then(toml::Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut packages = Vec::new();
+        let mut packages_ok = true;
+        if let Some(arr) = table.get("packages").and_then(toml::Value::as_array) {
+            for v in arr {
+                match v.as_str() {
+                    Some(entry) => packages.push(entry.to_string()),
+                    None => {
+                        log::error!("{key}: \"packages\" entries must be strings, skipping entry");
+                        packages_ok = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if !packages_ok {
+            continue;
+        }
         let Some(files) = table.get("files").and_then(toml::Value::as_array) else {
             log::error!("{key}: whitelist entry has no \"files\" list, skipping");
             continue;
@@ -275,7 +283,13 @@ impl WhitelistedFile {
                     meta.device_minor.to_string(),
                     value.as_integer() == Some(meta.device_minor),
                 ),
-                _ => unreachable!("unknown whitelist keys are rejected when parsing"),
+                // Unknown keys are rejected when parsing, so this only fires if
+                // `KNOWN_ATTRS` and this match diverge. Log loudly and treat the
+                // key as matching rather than panicking a production run.
+                key => {
+                    log::error!("unknown whitelist attribute \"{key}\", treating as match");
+                    (value_repr(value), true)
+                }
             };
             if !matches {
                 return Some((key.clone(), value_repr(value), actual));

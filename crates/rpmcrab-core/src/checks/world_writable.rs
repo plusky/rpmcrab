@@ -196,4 +196,25 @@ group = "tty"
             found[0].2[1]
         );
     }
+
+    #[test]
+    fn check_binary_entry_point_reports_through_filter() {
+        // Kills M14 (check_binary emitting nothing): the whole entry point
+        // must run for findings to reach the `Filter`.
+        use std::path::Path;
+
+        use crate::color::Color;
+
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir()).expect("open fixture pkg");
+        pkg.name = "dummy".to_string();
+        pkg.files = vec![pkg_file("/tmp", 0o41777)];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = WorldWritableCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let names: Vec<&str> = out.results().iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["world-writable-unauthorized-file"]);
+    }
 }
