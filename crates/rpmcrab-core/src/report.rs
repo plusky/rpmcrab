@@ -6,18 +6,31 @@ use std::collections::BTreeMap;
 use crate::color::Color;
 use crate::term::string_center;
 
+/// The parameters for the session [`header`], bundled so the call reads
+/// without the eight-argument sprawl.
+pub struct HeaderParams<'a> {
+    pub prog: &'a str,
+    pub version: &'a str,
+    pub conf_files: &'a [String],
+    pub rpmlintrc: &'a [String],
+    pub no_checks: usize,
+    pub no_packages: usize,
+    pub color: &'a Color,
+    pub width: usize,
+}
+
 /// The session header block (terminated by a blank line).
-#[allow(clippy::too_many_arguments)]
-pub fn header(
-    prog: &str,
-    version: &str,
-    conf_files: &[String],
-    rpmlintrc: &[String],
-    no_checks: usize,
-    no_packages: usize,
-    color: &Color,
-    width: usize,
-) -> String {
+pub fn header(params: &HeaderParams) -> String {
+    let &HeaderParams {
+        prog,
+        version,
+        conf_files,
+        rpmlintrc,
+        no_checks,
+        no_packages,
+        color,
+        width,
+    } = params;
     let mut out = String::new();
     out.push_str(&format!(
         "{}{}{}\n",
@@ -56,21 +69,35 @@ pub fn abort_banner(score: i64, threshold: i64, color: &Color, width: usize) -> 
     )
 }
 
+/// The parameters for the session [`footer`].
+pub struct FooterParams<'a> {
+    pub packages: usize,
+    pub specfiles: usize,
+    pub errors: u64,
+    pub warnings: u64,
+    pub filtered: u64,
+    pub score: i64,
+    pub duration_secs: f64,
+    pub aborted: bool,
+    pub color: &'a Color,
+    pub width: usize,
+}
+
 /// The footer rule. Colour is bold by default, yellow if any warning, red on
 /// abort. `I:` findings are counted nowhere.
-#[allow(clippy::too_many_arguments)]
-pub fn footer(
-    packages: usize,
-    specfiles: usize,
-    errors: u64,
-    warnings: u64,
-    filtered: u64,
-    score: i64,
-    duration_secs: f64,
-    aborted: bool,
-    color: &Color,
-    width: usize,
-) -> String {
+pub fn footer(params: &FooterParams) -> String {
+    let &FooterParams {
+        packages,
+        specfiles,
+        errors,
+        warnings,
+        filtered,
+        score,
+        duration_secs,
+        aborted,
+        color,
+        width,
+    } = params;
     let quit_color = if aborted {
         color.red
     } else if warnings > 0 {
@@ -215,7 +242,19 @@ mod tests {
     #[test]
     fn footer_matches_captured() {
         // Captured from a real run (llvm21-gold, exit 0).
-        let f = footer(1, 0, 2, 1, 1, 2, 0.1, false, &Color::for_tty(false), 80);
+        let color = Color::for_tty(false);
+        let f = footer(&FooterParams {
+            packages: 1,
+            specfiles: 0,
+            errors: 2,
+            warnings: 1,
+            filtered: 1,
+            score: 2,
+            duration_secs: 0.1,
+            aborted: false,
+            color: &color,
+            width: 80,
+        });
         assert_eq!(
             f,
             " 1 packages and 0 specfiles checked; 2 errors, 1 warnings, 1 filtered, 2 badness; has taken 0.1 s \n"

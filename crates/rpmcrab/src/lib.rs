@@ -275,10 +275,20 @@ pub fn run() -> ExitCode {
                             return ExitCode::from(1);
                         }
                     };
-                    lint.run_package(
+                    // A librpm decoder panic inside a check is fatal, the
+                    // same one-line diagnostic the reference prints for a
+                    // package it cannot read (`lint.py:293-297`).
+                    if let Err(e) = lint.run_package(
                         &mut rpmcrab_core::pkg::Package::Rpm(Box::new(pkg)),
                         run_post_checks && i == last,
-                    );
+                    ) {
+                        warn!(color, "(none): E: fatal error while checking: {e}");
+                        if cli.verbose {
+                            print_error_chain(&color, &e);
+                            return ExitCode::from(1);
+                        }
+                        return ExitCode::from(3);
+                    }
                 }
             }
             // Deliberate divergence: the reference lets a failed `rpmtsOpenDB`
@@ -331,7 +341,14 @@ pub fn run() -> ExitCode {
                 }
             }
         };
-        lint.run_package(&mut package, i == last);
+        if let Err(e) = lint.run_package(&mut package, i == last) {
+            warn!(color, "(none): E: fatal error while checking: {e}");
+            if cli.verbose {
+                print_error_chain(&color, &e);
+                return ExitCode::from(1);
+            }
+            return ExitCode::from(3);
+        }
     }
 
     // `Lint.validate_files`: with no file arguments and nothing validated from

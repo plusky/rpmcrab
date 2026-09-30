@@ -91,7 +91,7 @@ pub enum PkgError {
 /// The default panic hook is replaced for the duration so the user sees that
 /// one line rather than a backtrace followed by it. The hook is process-global,
 /// which is why this is scoped to the call and restored immediately.
-fn guarded<T>(f: impl FnOnce() -> Result<T, PkgError>) -> Result<T, PkgError> {
+pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T, PkgError>) -> Result<T, PkgError> {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));

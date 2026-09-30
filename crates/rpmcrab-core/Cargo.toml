@@ -31,6 +31,7 @@ toml = "1.1"
 # backtracking engine is required to honour existing filters byte-for-byte.
 # fancy-regex wraps `regex` for the fast path and stays unsafe-free.
 fancy-regex = "0.19"
+log = "0.4"
 # Terminal width for the centered banners/footer: shutil.get_terminal_size
 # honours $COLUMNS, then the tty winsize, then 80. terminal_size gives the
 # winsize via a safe API (unsafe_code is forbidden in this crate).

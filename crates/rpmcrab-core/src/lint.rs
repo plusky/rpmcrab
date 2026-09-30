@@ -18,7 +18,7 @@ use crate::color::Color;
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
-use crate::pkg::Package;
+use crate::pkg::{Package, PkgError};
 use crate::report;
 
 /// Per-check accumulated wall time, keyed by the check's registry name. Holds
@@ -118,29 +118,41 @@ impl Lint {
     /// A spec input bumps `specfiles_checked` instead of `packages_checked`
     /// (`lint.py:314-318`).
     ///
+    /// The check dispatch runs inside `pkg::guarded`, so a librpm decoder
+    /// panic becomes a fatal read error (`Err`) instead of aborting the run.
+    ///
     /// The package's own phase timings (`ExtractRpm`, `libmagic`) are folded
     /// into the same duration map, which is what the `-t` report reads.
-    pub fn run_package(&mut self, pkg: &mut Package, is_last: bool) {
+    pub fn run_package(&mut self, pkg: &mut Package, is_last: bool) -> Result<(), PkgError> {
         match pkg {
             Package::Rpm(pkg) => {
                 for (phase, secs) in pkg.timers.iter() {
                     self.check_duration.add(phase, secs);
                 }
-                for check in &mut self.checks {
-                    let start = Instant::now();
-                    check.check(pkg, &self.config, &mut self.filter);
-                    let secs = start.elapsed().as_secs_f64();
-                    self.check_duration.add(check.name(), secs);
-                }
+                // A check can reach librpm decoders that panic on tolerated
+                // data (`pkg/mod.rs`); contain that as a fatal read error
+                // rather than aborting the run, and stop the dispatch on it.
+                crate::pkg::guarded(|| {
+                    for check in &mut self.checks {
+                        let start = Instant::now();
+                        check.check(pkg, &self.config, &mut self.filter);
+                        let secs = start.elapsed().as_secs_f64();
+                        self.check_duration.add(check.name(), secs);
+                    }
+                    Ok(())
+                })?;
                 self.packages_checked += 1;
             }
             Package::Spec(pkg) => {
-                for check in &mut self.checks {
-                    let start = Instant::now();
-                    check.check_spec(pkg, &self.config, &mut self.filter);
-                    let secs = start.elapsed().as_secs_f64();
-                    self.check_duration.add(check.name(), secs);
-                }
+                crate::pkg::guarded(|| {
+                    for check in &mut self.checks {
+                        let start = Instant::now();
+                        check.check_spec(pkg, &self.config, &mut self.filter);
+                        let secs = start.elapsed().as_secs_f64();
+                        self.check_duration.add(check.name(), secs);
+                    }
+                    Ok(())
+                })?;
                 self.specfiles_checked += 1;
             }
         }
@@ -159,6 +171,7 @@ impl Lint {
         for check in &mut self.checks {
             check.reset();
         }
+        Ok(())
     }
 
     /// `Filter.validate_filters(pkg)`: every rpmlintrc `Filters` pattern that
@@ -253,16 +266,16 @@ impl Lint {
         duration_secs: f64,
     ) -> String {
         let mut out = String::new();
-        out.push_str(&report::header(
+        out.push_str(&report::header(&report::HeaderParams {
             prog,
             version,
-            &self.config.conf_files,
-            &self.config.rpmlintrc_display,
-            self.config.checks.len(),
-            header_packages,
-            &self.color,
-            self.width,
-        ));
+            conf_files: &self.config.conf_files,
+            rpmlintrc: &self.config.rpmlintrc_display,
+            no_checks: self.config.checks.len(),
+            no_packages: header_packages,
+            color: &self.color,
+            width: self.width,
+        }));
         out.push_str(&self.filter.render_results());
         if self.aborted() {
             out.push_str(&report::abort_banner(
@@ -278,18 +291,18 @@ impl Lint {
         if profile {
             out.push_str(&self.profile_report());
         }
-        out.push_str(&report::footer(
-            self.packages_checked,
-            self.specfiles_checked,
-            self.filter.printed(Level::Error),
-            self.filter.printed(Level::Warning),
-            self.filter.filtered_out,
-            self.filter.score,
+        out.push_str(&report::footer(&report::FooterParams {
+            packages: self.packages_checked,
+            specfiles: self.specfiles_checked,
+            errors: self.filter.printed(Level::Error),
+            warnings: self.filter.printed(Level::Warning),
+            filtered: self.filter.filtered_out,
+            score: self.filter.score,
             duration_secs,
-            self.aborted(),
-            &self.color,
-            self.width,
-        ));
+            aborted: self.aborted(),
+            color: &self.color,
+            width: self.width,
+        }));
         out
     }
 

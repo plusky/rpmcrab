@@ -110,7 +110,8 @@ fn after_checks_runs_only_for_the_last_package() {
 
     let mut pkgs = packages(3);
     for (i, pkg) in pkgs.iter_mut().enumerate() {
-        lint.run_package(pkg, i == 2);
+        lint.run_package(pkg, i == 2)
+            .expect("check dispatch must not fail");
     }
 
     let log = log.borrow();
@@ -139,7 +140,8 @@ fn reset_runs_after_every_package() {
     );
     let mut pkgs = packages(4);
     for (i, pkg) in pkgs.iter_mut().enumerate() {
-        lint.run_package(pkg, i == 3);
+        lint.run_package(pkg, i == 3)
+            .expect("check dispatch must not fail");
     }
     assert_eq!(log.borrow().resets, 4);
 }
@@ -156,7 +158,8 @@ fn a_single_package_is_always_the_last_one() {
         Config::default(),
     );
     let mut pkgs = packages(1);
-    lint.run_package(&mut pkgs[0], true);
+    lint.run_package(&mut pkgs[0], true)
+        .expect("check dispatch must not fail");
     assert_eq!(log.borrow().after_checks, 1);
 }
 
@@ -173,7 +176,8 @@ fn the_footer_counts_every_validated_package() {
     );
     let mut pkgs = packages(4);
     for (i, pkg) in pkgs.iter_mut().enumerate() {
-        lint.run_package(pkg, i == 3);
+        lint.run_package(pkg, i == 3)
+            .expect("check dispatch must not fail");
     }
     assert_eq!(lint.packages_checked(), 4);
     // One warning per package.
@@ -201,7 +205,8 @@ fn after_checks_findings_are_reported() {
     );
     let mut pkgs = packages(2);
     for (i, pkg) in pkgs.iter_mut().enumerate() {
-        lint.run_package(pkg, i == 1);
+        lint.run_package(pkg, i == 1)
+            .expect("check dispatch must not fail");
     }
     let out = lint.render("rpmlint", "2.10.0", 2, false, false, 0.1);
     assert!(
@@ -238,7 +243,8 @@ fn unused_rpmlintrc_filters_are_reported_once_on_the_last_package() {
 
     let mut pkgs = packages(2);
     for (i, pkg) in pkgs.iter_mut().enumerate() {
-        lint.run_package(pkg, i == 1);
+        lint.run_package(pkg, i == 1)
+            .expect("check dispatch must not fail");
     }
 
     let out = lint.render("rpmlint", "2.10.0", 2, false, false, 0.1);
@@ -265,7 +271,8 @@ fn ignore_unused_rpmlintrc_suppresses_the_audit() {
     lint.set_audit_rpmlintrc(false);
     let mut pkgs = packages(2);
     for (i, pkg) in pkgs.iter_mut().enumerate() {
-        lint.run_package(pkg, i == 1);
+        lint.run_package(pkg, i == 1)
+            .expect("check dispatch must not fail");
     }
     let out = lint.render("rpmlint", "2.10.0", 2, false, false, 0.1);
     assert!(!out.contains("unused-rpmlintrc-filter"), "stdout: {out}");
@@ -285,7 +292,8 @@ fn a_used_rpmlintrc_filter_is_not_reported() {
         config_with_rpmlintrc_filter("recorder-found-something"),
     );
     let mut pkgs = packages(1);
-    lint.run_package(&mut pkgs[0], true);
+    lint.run_package(&mut pkgs[0], true)
+        .expect("check dispatch must not fail");
     let out = lint.render("rpmlint", "2.10.0", 1, false, false, 0.1);
     // The finding matched the pattern, so it is suppressed ...
     assert!(
@@ -310,7 +318,8 @@ fn package_phase_timers_reach_the_time_report() {
         Config::default(),
     );
     let mut pkgs = packages(1);
-    lint.run_package(&mut pkgs[0], true);
+    lint.run_package(&mut pkgs[0], true)
+        .expect("check dispatch must not fail");
     let report = lint.time_report();
     // An installed package records ExtractRpm; it is below the 0.1s cut-off so
     // it does not print, but the header does.
@@ -345,8 +354,10 @@ fn check_dispatches_on_is_source() {
     );
     let mut pkgs = packages(2);
     // Pkg::installed forces is_source false, so both take the binary hook.
-    lint.run_package(&mut pkgs[0], false);
-    lint.run_package(&mut pkgs[1], true);
+    lint.run_package(&mut pkgs[0], false)
+        .expect("check dispatch must not fail");
+    lint.run_package(&mut pkgs[1], true)
+        .expect("check dispatch must not fail");
     assert_eq!(log.borrow().checked, vec!["binary", "binary"]);
 }
 
@@ -391,7 +402,8 @@ fn spec_inputs_dispatch_to_check_spec() {
         },
         Config::default(),
     );
-    lint.run_package(&mut pkg, true);
+    lint.run_package(&mut pkg, true)
+        .expect("check dispatch must not fail");
 
     assert_eq!(log.borrow().checked, vec!["spec"]);
     assert_eq!(lint.packages_checked(), 0);

@@ -234,4 +234,23 @@ mod tests {
         assert_eq!(textwrap_fill("  a  b  ", 6), "  a  b");
         assert_eq!(textwrap_fill("one two three", 7), "one two\nthree");
     }
+
+    #[test]
+    fn session_banner_names_prog() {
+        // The session banner is parameterized by argv[0]; the header must
+        // greet with the program name it was given.
+        let color = crate::color::Color::for_tty(false);
+        let params = crate::report::HeaderParams {
+            prog: "rpmcrab",
+            version: "0.1.0",
+            conf_files: &[],
+            rpmlintrc: &[],
+            no_checks: 0,
+            no_packages: 0,
+            color: &color,
+            width: 80,
+        };
+        let out = crate::report::header(&params);
+        assert!(out.contains("rpmcrab session starts"));
+    }
 }

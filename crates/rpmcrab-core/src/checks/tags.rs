@@ -17,6 +17,7 @@ use std::path::Path;
 use fancy_regex::Regex;
 use librpm::{OwnedTagData, Tag};
 
+use super::is_match;
 use crate::check::{Check, add_info};
 use crate::config::Config;
 use crate::filter::Filter;
@@ -40,21 +41,6 @@ fn invalid_version_regex() -> Regex {
     Regex::new(r"(?i)([0-9](?:rc|alpha|beta|pre).*)").expect("static regex")
 }
 
-/// `changelog_version_regex`: `[^>]([^ >]+)\s*$`.
-fn changelog_version_regex() -> Regex {
-    Regex::new(r"[^>]([^ >]+)\s*$").expect("static regex")
-}
-
-/// `changelog_text_version_regex`: `^\s*-\s*((\d+:)?[\w\.]+-[\w\.]+)`.
-fn changelog_text_version_regex() -> Regex {
-    Regex::new(r"^\s*-\s*((\d+:)?[\w\.]+-[\w\.]+)").expect("static regex")
-}
-
-/// `devel_number_regex`: `(.*?)([0-9.]+)(_[0-9.]+)?-devel`.
-fn devel_number_regex() -> Regex {
-    Regex::new(r"(.*?)([0-9.]+)(_[0-9.]+)?-devel").expect("static regex")
-}
-
 /// `lib_devel_number_regex`: `^lib(.*?)([0-9.]+)(_[0-9.]+)?-devel`.
 fn lib_devel_number_regex() -> Regex {
     Regex::new(r"^lib(.*?)([0-9.]+)(_[0-9.]+)?-devel").expect("static regex")
@@ -63,31 +49,6 @@ fn lib_devel_number_regex() -> Regex {
 /// `lib_package_regex`: `(?:^(?:compat-)?lib.*?(\.so.*)?|libs?[\d-]*)$`, case-insensitive.
 fn lib_package_regex() -> Regex {
     Regex::new(r"(?i)(?:^(?:compat-)?lib.*?(\.so.*)?|libs?[\d-]*)$").expect("static regex")
-}
-
-/// `leading_space_regex`: `^\s+`.
-fn leading_space_regex() -> Regex {
-    Regex::new(r"^\s+").expect("static regex")
-}
-
-/// `pkg_config_regex`: `^/usr/(?:lib\d*|share)/pkgconfig/`.
-fn pkg_config_regex() -> Regex {
-    Regex::new(r"^/usr/(?:lib\d*|share)/pkgconfig/").expect("static regex")
-}
-
-/// `license_regex`: `\(([^)]+)\)|\s(?:and|or|AND|OR)\s`.
-fn license_regex() -> Regex {
-    Regex::new(r"\(([^)]+)\)|\s(?:and|or|AND|OR)\s").expect("static regex")
-}
-
-/// `license_exception_regex`: `([^(\s]+)\s(?:WITH|with)\s([^)\s]+)`.
-fn license_exception_regex() -> Regex {
-    Regex::new(r"([^(\s]+)\s(?:WITH|with)\s([^)\s]+)").expect("static regex")
-}
-
-/// `tag_regex`: the spec-tag detector for `tag-in-description`.
-fn tag_regex() -> Regex {
-    Regex::new(r"(?i)^((?:Auto(?:Req|Prov|ReqProv)|Build(?:Arch(?:itectures)?|Root)|(?:Build)?Conflicts|(?:Build)?(?:Pre)?Requires|Copyright|(?:CVS|SVN)Id|Dist(?:ribution|Tag|URL)|DocDir|(?:Build)?Enhances|Epoch|Exclude(?:Arch|OS)|Exclusive(?:Arch|OS)|Group|Icon|License|Name|No(?:Patch|Source)|Obsoletes|Packager|Patch\d*|Prefix(?:es)?|Provides|(?:Build)?Recommends|Release|RHNPlatform|Serial|Source\d*|(?:Build)?Suggests|Summary|(?:Build)?Supplements|(?:Bug)?URL|Vendor|Version)(?:\([^)]+\))?:)\s*\S").expect("static regex")
 }
 
 /// Words that may start a summary in lowercase (`CAPITALIZED_IGNORE_LIST`).
@@ -138,6 +99,14 @@ pub struct TagsCheck {
     lib_devel_number_re: Regex,
     lib_package_re: Regex,
     invalid_version_re: Regex,
+    changelog_version_re: Regex,
+    changelog_text_version_re: Regex,
+    devel_number_re: Regex,
+    leading_space_re: Regex,
+    license_re: Regex,
+    license_exception_re: Regex,
+    pkg_config_re: Regex,
+    tag_re: Regex,
 }
 
 impl TagsCheck {
@@ -201,6 +170,14 @@ impl TagsCheck {
             lib_devel_number_re: lib_devel_number_regex(),
             lib_package_re: lib_package_regex(),
             invalid_version_re: invalid_version_regex(),
+            changelog_version_re: Regex::new(r"[^>]([^ >]+)\s*$").expect("static regex"),
+            changelog_text_version_re: Regex::new(r"^\s*-\s*((\d+:)?[\w\.]+-[\w\.]+)").expect("static regex"),
+            devel_number_re: Regex::new(r"(.*?)([0-9.]+)(_[0-9.]+)?-devel").expect("static regex"),
+            leading_space_re: Regex::new(r"^\s+").expect("static regex"),
+            license_re: Regex::new(r"\(([^)]+)\)|\s(?:and|or|AND|OR)\s").expect("static regex"),
+            license_exception_re: Regex::new(r"([^(\s]+)\s(?:WITH|with)\s([^)\s]+)").expect("static regex"),
+            pkg_config_re: Regex::new(r"^/usr/(?:lib\d*|share)/pkgconfig/").expect("static regex"),
+            tag_re: Regex::new(r"(?i)^((?:Auto(?:Req|Prov|ReqProv)|Build(?:Arch(?:itectures)?|Root)|(?:Build)?Conflicts|(?:Build)?(?:Pre)?Requires|Copyright|(?:CVS|SVN)Id|Dist(?:ribution|Tag|URL)|DocDir|(?:Build)?Enhances|Epoch|Exclude(?:Arch|OS)|Exclusive(?:Arch|OS)|Group|Icon|License|Name|No(?:Patch|Source)|Obsoletes|Packager|Patch\d*|Prefix(?:es)?|Provides|(?:Build)?Recommends|Release|RHNPlatform|Serial|Source\d*|(?:Build)?Suggests|Summary|(?:Build)?Supplements|(?:Bug)?URL|Vendor|Version)(?:\([^)]+\))?:)\s*\S").expect("static regex"),
         }
     }
 
@@ -221,12 +198,7 @@ impl TagsCheck {
                 .filter_map(|r| r.ok())
                 .map(|m| m.as_str())
             {
-                if is_url
-                    && Regex::new(r"(?i)^%[0-9A-F][0-9A-F]$")
-                        .expect("static")
-                        .is_match(m)
-                        .unwrap_or(false)
-                {
+                if is_url && is_match(&Regex::new(r"(?i)^%[0-9A-F][0-9A-F]$").expect("static"), m) {
                     continue;
                 }
                 add_info(out, Level::Warning, pkg, "unexpanded-macro", &[tagname, m]);
@@ -257,7 +229,7 @@ impl TagsCheck {
         let rpm_license = tag_str(Tag::LICENSE);
         let name = pkg.name.clone();
         let deps: Vec<DepInfo> = pkg.requires.iter().chain(&pkg.prereq).cloned().collect();
-        let is_devel = self.devel_re.is_match(&name).unwrap_or(false);
+        let is_devel = is_match(&self.devel_re, &name);
         let is_source = pkg.is_source;
 
         // Words ignored by the (unimplemented) spellchecker: file path
@@ -333,7 +305,7 @@ impl TagsCheck {
     fn check_version(&self, pkg: &Pkg, out: &mut Filter, version: &str) {
         if !version.is_empty() {
             self.unexpanded_macro(out, pkg, "Version", version);
-            if self.invalid_version_re.is_match(version).unwrap_or(false) {
+            if is_match(&self.invalid_version_re, version) {
                 add_info(out, Level::Error, pkg, "invalid-version", &[version]);
             }
         } else {
@@ -438,7 +410,7 @@ impl TagsCheck {
             }
             // Issue #1443/#1444: check every requirement, not just the first.
             for req in &self.invalid_requires {
-                if req.is_match(&dep.name).unwrap_or(false) {
+                if is_match(req, &dep.name) {
                     add_info(out, Level::Error, pkg, "invalid-dependency", &[&dep.name]);
                 }
             }
@@ -446,11 +418,7 @@ impl TagsCheck {
                 add_info(out, Level::Error, pkg, "invalid-dependency", &[&dep.name]);
             }
             if is_source {
-                if self
-                    .lib_devel_number_re
-                    .is_match(&dep.name)
-                    .unwrap_or(false)
-                {
+                if is_match(&self.lib_devel_number_re, &dep.name) {
                     add_info(
                         out,
                         Level::Error,
@@ -460,7 +428,7 @@ impl TagsCheck {
                     );
                 }
             } else if !is_devel {
-                if !devel_depend && self.devel_re.is_match(&dep.name).unwrap_or(false) {
+                if !devel_depend && is_match(&self.devel_re, &dep.name) {
                     add_info(out, Level::Error, pkg, "devel-dependency", &[&dep.name]);
                     devel_depend = true;
                 }
@@ -618,7 +586,7 @@ impl TagsCheck {
             add_info(out, Level::Error, pkg, "no-name-tag", &[]);
             return;
         }
-        let is_devel = self.devel_re.is_match(name).unwrap_or(false);
+        let is_devel = is_match(&self.devel_re, name);
         if is_devel && !pkg.is_source {
             let base = match self
                 .devel_re
@@ -636,8 +604,7 @@ impl TagsCheck {
                 if f.name.ends_with(".so") {
                     has_so = true;
                 }
-                if pkg_config_regex().is_match(&f.name).unwrap_or(false) && f.name.ends_with(".pc")
-                {
+                if is_match(&self.pkg_config_re, &f.name) && f.name.ends_with(".pc") {
                     has_pc = true;
                 }
             }
@@ -650,7 +617,7 @@ impl TagsCheck {
                 let base_or_libs_re = Regex::new(&re_str).expect("static regex");
                 let mut dep_match: Option<&DepInfo> = None;
                 for d in pkg.requires.iter().chain(&pkg.prereq) {
-                    if base_or_libs_re.is_match(&d.name).unwrap_or(false) {
+                    if is_match(&base_or_libs_re, &d.name) {
                         dep_match = Some(d);
                         break;
                     }
@@ -683,7 +650,7 @@ impl TagsCheck {
                         );
                     }
                 }
-                match devel_number_regex().captures(name).ok().flatten() {
+                match self.devel_number_re.captures(name).ok().flatten() {
                     None => {
                         add_info(out, Level::Warning, pkg, "no-major-in-name", &[name]);
                     }
@@ -814,7 +781,7 @@ impl TagsCheck {
             d.push(summary);
             add_info(out, Level::Error, pkg, "summary-too-long", &d);
         }
-        if leading_space_regex().is_match(summary).unwrap_or(false) {
+        if is_match(&self.leading_space_re, summary) {
             let mut d: Vec<&str> = Vec::new();
             if let Some(l) = lang_err {
                 d.push(l);
@@ -916,7 +883,7 @@ impl TagsCheck {
                 d.push(m.as_str());
                 add_info(out, Level::Warning, pkg, "description-use-invalid-word", &d);
             }
-            if let Ok(Some(caps)) = tag_regex().captures(line)
+            if let Ok(Some(caps)) = self.tag_re.captures(line)
                 && let Some(m) = caps.get(1)
             {
                 let mut d: Vec<&str> = Vec::new();
@@ -976,10 +943,10 @@ impl TagsCheck {
         let clt: Vec<String> = crate::pkg::tags::str_array(header, Tag::CHANGELOGTEXT);
         if self.use_version_in_changelog {
             let mut found: Option<String> = None;
-            if let Ok(Some(caps)) = changelog_version_regex().captures(&changelog[0]) {
+            if let Ok(Some(caps)) = self.changelog_version_re.captures(&changelog[0]) {
                 found = caps.get(1).map(|m| m.as_str().to_string());
             } else if !clt.is_empty()
-                && let Ok(Some(caps)) = changelog_text_version_regex().captures(&clt[0])
+                && let Ok(Some(caps)) = self.changelog_text_version_re.captures(&clt[0])
             {
                 found = caps.get(1).map(|m| m.as_str().to_string());
             }
@@ -1074,6 +1041,31 @@ impl TagsCheck {
         }
     }
 
+    /// Split a license string on `license_re`, dropping empties.
+    fn split_license(&self, text: &str) -> Vec<String> {
+        self.license_re
+            .split(text)
+            .filter_map(|r| r.ok())
+            .map(|m| m.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    /// Split `"<license> WITH <exception>"`; returns `(license, exception)`.
+    fn split_license_exception(&self, text: &str) -> (String, String) {
+        match self.license_exception_re.captures(text).ok().flatten() {
+            Some(caps) => (
+                caps.get(1)
+                    .map(|m| m.as_str().trim().to_string())
+                    .unwrap_or_default(),
+                caps.get(2)
+                    .map(|m| m.as_str().trim().to_string())
+                    .unwrap_or_default(),
+            ),
+            None => (text.trim().to_string(), String::new()),
+        }
+    }
+
     fn check_license(&self, pkg: &Pkg, out: &mut Filter, rpm_license: &str) {
         if rpm_license.is_empty() {
             add_info(out, Level::Error, pkg, "no-license", &[]);
@@ -1082,7 +1074,7 @@ impl TagsCheck {
         let mut valid_license = true;
         if !self.valid_licenses.contains(&rpm_license.to_string()) {
             let mut license_string = rpm_license.to_string();
-            let (l1, lexception) = split_license_exception(rpm_license);
+            let (l1, lexception) = self.split_license_exception(rpm_license);
             if !lexception.is_empty() {
                 license_string = l1.clone();
                 if !self.valid_license_exceptions.contains(&lexception) {
@@ -1096,11 +1088,11 @@ impl TagsCheck {
                     valid_license = false;
                 }
             }
-            for part in split_license(&license_string) {
+            for part in self.split_license(&license_string) {
                 if self.valid_licenses.contains(&part) {
                     continue;
                 }
-                for sub in split_license(&part) {
+                for sub in self.split_license(&part) {
                     if !self.valid_licenses.contains(&sub) {
                         add_info(out, Level::Warning, pkg, "invalid-license", &[&sub]);
                         valid_license = false;
@@ -1132,7 +1124,7 @@ impl TagsCheck {
                     || self
                         .invalid_url_regex
                         .as_ref()
-                        .is_some_and(|re| re.is_match(&url).unwrap_or(false))
+                        .is_some_and(|re| is_match(re, &url))
                 {
                     add_info(out, Level::Warning, pkg, "invalid-url", &[tagname, &url]);
                 }
@@ -1269,31 +1261,6 @@ fn has_forbidden_controlchars(s: &str) -> Option<&str> {
         Some(s)
     } else {
         None
-    }
-}
-
-/// Split a license string on `license_regex`, dropping empties.
-fn split_license(text: &str) -> Vec<String> {
-    license_regex()
-        .split(text)
-        .filter_map(|r| r.ok())
-        .map(|m| m.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
-/// Split `"<license> WITH <exception>"`; returns `(license, exception)`.
-fn split_license_exception(text: &str) -> (String, String) {
-    match license_exception_regex().captures(text).ok().flatten() {
-        Some(caps) => (
-            caps.get(1)
-                .map(|m| m.as_str().trim().to_string())
-                .unwrap_or_default(),
-            caps.get(2)
-                .map(|m| m.as_str().trim().to_string())
-                .unwrap_or_default(),
-        ),
-        None => (text.trim().to_string(), String::new()),
     }
 }
 
