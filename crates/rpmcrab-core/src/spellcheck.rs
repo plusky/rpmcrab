@@ -25,10 +25,9 @@ impl Spellchecker {
         for dir in DICT_PATHS {
             let aff = Path::new(dir).join("en_US.aff");
             let dic = Path::new(dir).join("en_US.dic");
-            if let (Ok(aff_s), Ok(dic_s)) = (
-                std::fs::read_to_string(&aff),
-                std::fs::read_to_string(&dic),
-            ) {
+            if let (Ok(aff_s), Ok(dic_s)) =
+                (std::fs::read_to_string(&aff), std::fs::read_to_string(&dic))
+            {
                 if let Ok(dict) = spellbook::Dictionary::new(&aff_s, &dic_s) {
                     return Some(Self { dict });
                 }
