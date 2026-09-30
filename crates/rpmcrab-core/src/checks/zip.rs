@@ -244,6 +244,7 @@ mod tests {
     use super::*;
     use std::io::Write;
     use zip::write::SimpleFileOptions;
+    use zip::unstable::write::FileOptionsExt;
 
     /// Build a zip in memory: `(name, data, method)` entries, optional
     /// `META-INF/MANIFEST.MF` content.
@@ -475,7 +476,7 @@ mod tests {
         let mut archive = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
         let options = SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored)
-            .with_aes_encryption(zip::AesMode::Aes256, "secret");
+            .with_deprecated_encryption(b"secret");
         archive.start_file("secret.txt", options).unwrap();
         archive.write_all(b"top secret").unwrap();
         archive.finish().unwrap();
