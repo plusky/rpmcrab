@@ -122,3 +122,10 @@ check = "header-decoding"
 kind = "behaviour"
 reason = "A header field that is not valid UTF-8 makes rpmcrab report a fatal read and exit 3, where the reference decodes it leniently and lints the package. librpm 0.6's decoders panic on such data (string_array and FileEntry::path both expect UTF-8), the safe API exposes no lossy or bytes accessor, and reading the raw bytes would need librpm-sys, which unsafe_code=forbid rules out, so the panic is contained and the cause reported. The reference's filename-not-utf8 finding is therefore not produced. Fixture: tests/fixtures/nonutf8-basename/."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "spelling-error"
+kind = "behaviour"
+reason = "Backend is the pure-Rust spellbook crate, not pyenchant; findings may differ from the reference on the same input even with a dictionary present."
+since = "0.1.0"

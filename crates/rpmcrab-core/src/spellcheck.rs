@@ -25,15 +25,24 @@ impl Spellchecker {
         for dir in DICT_PATHS {
             let aff = Path::new(dir).join("en_US.aff");
             let dic = Path::new(dir).join("en_US.dic");
-            if let (Ok(aff_s), Ok(dic_s)) =
+            let (Ok(aff_s), Ok(dic_s)) =
                 (std::fs::read_to_string(&aff), std::fs::read_to_string(&dic))
-            {
-                if let Ok(dict) = spellbook::Dictionary::new(&aff_s, &dic_s) {
-                    return Some(Self { dict });
-                }
+            else {
+                continue;
+            };
+            if let Ok(dict) = spellbook::Dictionary::new(&aff_s, &dic_s) {
+                return Some(Self { dict });
             }
         }
         None
+    }
+
+    /// Build from inline dictionary strings (for tests).
+    #[cfg(test)]
+    fn from_strings(aff: &str, dic: &str) -> Option<Self> {
+        spellbook::Dictionary::new(aff, dic)
+            .ok()
+            .map(|dict| Self { dict })
     }
 
     /// Check text for misspellings, returning (word, suggestions) pairs.
@@ -159,4 +168,73 @@ fn at_sentence_start(_text: &str, _word: &str, _index: usize) -> bool {
 fn has_digit_adjacent(_text: &str, word: &str) -> bool {
     // Simplified: skip words containing digits.
     word.chars().any(|c| c.is_ascii_digit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_AFF: &str = "SET UTF-8\n";
+    const TEST_DIC: &str = "5\nhello\nworld\ntest\npackage\ncheck\n";
+
+    fn test_checker() -> Spellchecker {
+        Spellchecker::from_strings(TEST_AFF, TEST_DIC).expect("test dictionary")
+    }
+
+    #[test]
+    fn misspelled_word_is_reported() {
+        let checker = test_checker();
+        let result = checker.check("hello wrld", "testpkg", &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "wrld");
+    }
+
+    #[test]
+    fn correct_words_pass() {
+        let checker = test_checker();
+        let result = checker.check("hello world", "testpkg", &[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn wikiword_skipped() {
+        let checker = test_checker();
+        let result = checker.check("HelloWorld", "testpkg", &[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn all_uppercase_skipped() {
+        let checker = test_checker();
+        let result = checker.check("WRLD", "testpkg", &[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn ignored_words_skipped() {
+        let checker = test_checker();
+        let ignored = vec!["wrld".to_string()];
+        let result = checker.check("hello wrld", "testpkg", &ignored);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn package_name_skipped() {
+        let checker = test_checker();
+        let result = checker.check("mypackage", "mypackage", &[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn repeated_word_reported_once() {
+        let checker = test_checker();
+        let result = checker.check("wrld wrld wrld", "testpkg", &[]);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn invalid_dictionary_returns_none() {
+        let result = Spellchecker::from_strings("invalid", "invalid");
+        assert!(result.is_none());
+    }
 }
