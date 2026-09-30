@@ -130,9 +130,14 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
         "TagsCheck" => Some(Box::new(crate::checks::tags::TagsCheck::new(config))),
         "FilesCheck" => Some(Box::new(crate::checks::files::FilesCheck::new(config))),
         "SpecCheck" => Some(Box::new(crate::checks::spec::SpecCheck::new(config))),
-        "BinariesCheck" => Some(Box::new(crate::checks::binaries::BinariesCheck::new(
+        "FHSCheck" => Some(Box::new(crate::checks::fhs::FHSCheck::new(config))),
+        "ConfigFilesCheck" => Some(Box::new(
+            crate::checks::config_files::ConfigFilesCheck::new(config),
+        )),
+        "DuplicatesCheck" => Some(Box::new(crate::checks::duplicates::DuplicatesCheck::new(
             config,
         ))),
+        "DocCheck" => Some(Box::new(crate::checks::doc::DocCheck::new(config))),
         _ => None,
     }
 }

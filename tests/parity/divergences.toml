@@ -167,35 +167,16 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "unused-direct-shlib-dependency"
-kind = "missing"
-reason = "The reference uses ldd -u for linker-based unused dependency analysis. goblin cannot replicate this; the finding is not emitted."
+check = "hardlink-across-partition"
+kind = "behaviour"
+reason = "Fixed behaviour per rpmlint#1603 (fixes rpmlint#349): hardlink findings are reported per (rdev, inode) group inside each md5 group, so hardlinked files are reported even in mixed hardlink/duplicate groups. The frozen 2.10.0 reference uses global per-md5 bookkeeping and misses them."
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1603"
 since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "missing-mandatory-optflags"
+check = "hardlink-across-config-files"
 kind = "behaviour"
-reason = "DWARF producer extraction via gimli is not yet implemented; the mandatory/forbidden optflags check degrades gracefully (no findings) until DWARF parsing lands."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "missing-call-to-setgroups-before-setuid"
-kind = "behaviour"
-reason = "Upstream rpmlint#1462: the reference reports this at Warning for setuid binaries and Error otherwise, which is backwards. rpmcrab reports Error when the binary is installed setuid and Warning otherwise."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "binaries-dependency-scope"
-kind = "behaviour"
-reason = "The reference runs its ldd-based dependency analysis only for installed packages; rpmcrab runs the DT_NEEDED-based analysis for extracted files too. This is also what makes unused-direct-shlib-dependency impossible to replicate (no ldd -u on extracted files)."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "executable-stack"
-kind = "behaviour"
-reason = "Fixed behaviour: the executable-stack arch list also matches aarch64. The reference's `arm.*` does not match the string 'aarch64', so the reference skips the check on ARM64; rpmcrab includes it."
+reason = "Fixed behaviour per rpmlint#1603 (fixes rpmlint#349): hardlink findings are reported per (rdev, inode) group inside each md5 group, so hardlinked files are reported even in mixed hardlink/duplicate groups. The frozen 2.10.0 reference uses global per-md5 bookkeeping and misses them."
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1603"
 since = "0.1.0"

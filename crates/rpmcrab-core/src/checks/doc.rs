@@ -1,0 +1,229 @@
+//! `DocCheck` — package documentation checks.
+//!
+//! Ported from `rpmlint/checks/DocCheck.py`. Four findings:
+//! `executable-docs` (E), `doc-file-dependency` (W), `install-file-in-docs`
+//! (W), `package-with-huge-docs` (W).
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::check::{Check, add_info};
+use crate::config::Config;
+use crate::filter::Filter;
+use crate::level::Level;
+use crate::pkg::Pkg;
+use crate::pkg::pkgfile::{PkgFile, is_reg};
+
+/// Suffixes that must never be executable in documentation.
+const DOC_EXTENSIONS: &[&str] = &[
+    ".txt", ".gif", ".jpg", ".html", ".pdf", ".ps", ".pdf.gz", ".ps.gz",
+];
+/// Basenames that must never be executable in documentation.
+const DOC_BASENAMES: &[&str] = &["README", "NEWS", "COPYING", "AUTHORS", "LICENCE", "LICENSE"];
+
+pub struct DocCheck;
+
+impl DocCheck {
+    pub fn new(_config: &Config) -> Self {
+        Self
+    }
+
+    fn ignore_pkg(name: &str) -> bool {
+        name.starts_with("bundle-") || name.contains("-devel") || name.contains("-doc")
+    }
+
+    /// Filenames in `doc_files` that are executable docs.
+    fn executable_docs<'a>(doc_files: &[&'a str], mode_of: &dyn Fn(&str) -> u32) -> Vec<&'a str> {
+        let mut out = Vec::new();
+        for f in doc_files {
+            let mode = mode_of(f);
+            if !is_reg(mode) || mode & 0o111 == 0 {
+                continue;
+            }
+            let lower = f.to_lowercase();
+            let suffix_hit = DOC_EXTENSIONS.iter().any(|e| lower.ends_with(e));
+            let base = f.rsplit('/').next().unwrap_or(f).to_lowercase();
+            let base_hit = DOC_BASENAMES.iter().any(|b| base == b.to_lowercase());
+            if suffix_hit || base_hit {
+                out.push(*f);
+            }
+        }
+        out
+    }
+
+    /// Doc files that introduce dependencies not needed by non-doc files.
+    /// Returns `(doc_file, dep)` pairs. `requires_of` maps filename to its
+    /// requirement names; `core_provides` are names the package itself
+    /// provides (including all file paths).
+    fn doc_file_dependencies(
+        doc_files: &[&str],
+        all_files: &[&str],
+        requires_of: &dyn Fn(&str) -> Vec<String>,
+        core_provides: &BTreeSet<String>,
+    ) -> Vec<(String, String)> {
+        let mut core_reqs: BTreeSet<String> = core_provides.clone();
+        let mut doc_reqs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+        for f in all_files {
+            let is_doc = doc_files.contains(f);
+            for r in requires_of(f) {
+                if is_doc {
+                    doc_reqs.entry(r).or_default().push(f.to_string());
+                } else {
+                    core_reqs.insert(r);
+                }
+            }
+        }
+
+        let mut out = Vec::new();
+        for (dep, req_files) in &doc_reqs {
+            if !core_reqs.contains(dep) {
+                for f in req_files {
+                    out.push((f.clone(), dep.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    /// Doc files ending in `/INSTALL`.
+    fn install_files<'a>(doc_files: &[&'a str]) -> Vec<&'a str> {
+        doc_files
+            .iter()
+            .filter(|f| f.ends_with("/INSTALL"))
+            .copied()
+            .collect()
+    }
+
+    /// Percentage of the package that is documentation, when huge.
+    fn huge_docs_pct(files: &[PkgFile], doc_files: &[&str]) -> Option<u32> {
+        let by_name: BTreeMap<&str, &PkgFile> =
+            files.iter().map(|f| (f.name.as_str(), f)).collect();
+        let complete_size: u64 = files
+            .iter()
+            .filter(|f| is_reg(f.mode))
+            .map(|f| f.size.unwrap_or(0))
+            .sum();
+        let doc_size: u64 = doc_files
+            .iter()
+            .filter_map(|n| by_name.get(n))
+            .filter(|f| is_reg(f.mode))
+            .map(|f| f.size.unwrap_or(0))
+            .sum();
+        if doc_size * 2 >= complete_size && doc_size > 100 * 1024 && complete_size > 0 {
+            Some((doc_size * 100 / complete_size) as u32)
+        } else {
+            None
+        }
+    }
+}
+
+impl Check for DocCheck {
+    fn name(&self) -> &'static str {
+        "DocCheck"
+    }
+
+    fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
+        if pkg.doc_files.is_empty() {
+            return;
+        }
+        let by_name: BTreeMap<&str, &PkgFile> =
+            pkg.files.iter().map(|f| (f.name.as_str(), f)).collect();
+        let doc_refs: Vec<&str> = pkg.doc_files.iter().map(|s| s.as_str()).collect();
+
+        for f in Self::executable_docs(&doc_refs, &|n| by_name.get(n).map(|p| p.mode).unwrap_or(0))
+        {
+            add_info(out, Level::Error, pkg, "executable-docs", &[f]);
+        }
+
+        let all_refs: Vec<&str> = pkg.files.iter().map(|f| f.name.as_str()).collect();
+        let mut core_provides: BTreeSet<String> =
+            pkg.provides.iter().map(|d| d.name.clone()).collect();
+        for f in &all_refs {
+            core_provides.insert(f.to_string());
+        }
+        for (f, dep) in Self::doc_file_dependencies(
+            &doc_refs,
+            &all_refs,
+            &|n| {
+                by_name
+                    .get(n)
+                    .map(|p| p.requires.iter().map(|d| d.name.clone()).collect())
+                    .unwrap_or_default()
+            },
+            &core_provides,
+        ) {
+            add_info(out, Level::Warning, pkg, "doc-file-dependency", &[&f, &dep]);
+        }
+
+        for f in Self::install_files(&doc_refs) {
+            add_info(out, Level::Warning, pkg, "install-file-in-docs", &[f]);
+        }
+
+        if !Self::ignore_pkg(&pkg.name)
+            && let Some(pct) = Self::huge_docs_pct(&pkg.files, &doc_refs)
+        {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "package-with-huge-docs",
+                &[&format!("{pct}%")],
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mode_of(reg_exec: bool) -> u32 {
+        if reg_exec { 0o100755 } else { 0o100644 }
+    }
+
+    #[test]
+    fn executable_txt_is_flagged() {
+        let docs = vec!["/usr/share/doc/pkg/README.txt"];
+        let found = DocCheck::executable_docs(&docs, &|_| mode_of(true));
+        assert_eq!(found, vec!["/usr/share/doc/pkg/README.txt"]);
+    }
+
+    #[test]
+    fn non_executable_is_quiet() {
+        let docs = vec!["/usr/share/doc/pkg/README.txt"];
+        let found = DocCheck::executable_docs(&docs, &|_| mode_of(false));
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn executable_readme_basename_is_flagged() {
+        let docs = vec!["/usr/share/doc/pkg/README"];
+        let found = DocCheck::executable_docs(&docs, &|_| mode_of(true));
+        assert_eq!(found, vec!["/usr/share/doc/pkg/README"]);
+    }
+
+    #[test]
+    fn executable_binary_suffix_is_quiet() {
+        // `.so` is not in the doc extension list.
+        let docs = vec!["/usr/share/doc/pkg/tool.so"];
+        let found = DocCheck::executable_docs(&docs, &|_| mode_of(true));
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn install_file_is_flagged() {
+        assert_eq!(
+            DocCheck::install_files(&["/usr/share/doc/pkg/INSTALL"]),
+            vec!["/usr/share/doc/pkg/INSTALL"]
+        );
+        assert!(DocCheck::install_files(&["/usr/share/doc/pkg/README"]).is_empty());
+    }
+
+    #[test]
+    fn ignore_pkg_names() {
+        assert!(DocCheck::ignore_pkg("bundle-foo"));
+        assert!(DocCheck::ignore_pkg("foo-devel"));
+        assert!(DocCheck::ignore_pkg("foo-doc"));
+        assert!(!DocCheck::ignore_pkg("foo"));
+    }
+}
