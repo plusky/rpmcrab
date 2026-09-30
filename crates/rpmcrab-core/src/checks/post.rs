@@ -82,11 +82,13 @@ impl PostCheck {
     /// `sh -n` / `perl -wc` syntax check via subprocess. `None` when the
     /// interpreter is unavailable (skipped, not an error).
     fn syntax_ok(prog: &str, args: &[&str], script: &str) -> Option<bool> {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("rpmcrab-postcheck-{}", std::process::id()));
-        std::fs::write(&path, script).ok()?;
-        let result = Command::new(prog).args(args).arg(&path).output().ok();
-        std::fs::remove_file(&path).ok();
+        // One temp file per call: tests run in parallel threads of one
+        // process, so a fixed name races and `sh -n` spuriously fails on a
+        // missing or half-written file.
+        let tmp = tempfile::NamedTempFile::new().ok()?;
+        std::fs::write(tmp.path(), script).ok()?;
+        let result = Command::new(prog).args(args).arg(tmp.path()).output().ok();
+        let _ = tmp.close();
         result.map(|o| o.status.success())
     }
 
