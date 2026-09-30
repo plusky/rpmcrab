@@ -349,6 +349,8 @@ mod panic_tests {
         let mut lint = Lint::new(config, checks, Color::for_tty(false), 80).unwrap();
         let mut pkg = Package::Spec(SpecPkg {
             name: "test.spec".to_string(),
+            lines: Vec::new(),
+            current_linenum: std::cell::Cell::new(None),
         });
         let result = lint.run_package(&mut pkg, false);
         assert!(
