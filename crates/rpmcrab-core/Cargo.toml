@@ -44,7 +44,7 @@ tempfile = "3"
 # Typed errors on purpose in -core; anyhow stays in the binary crate.
 thiserror = "2"
 # Zip/jar archive inspection (`ZipCheck`): pure Rust, no subprocesses.
-zip = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 # Spellchecking via the `spellbook` crate (pure Rust, Hunspell-compatible,
 # no_std, unsafe-free). Reads standard `.aff`/`.dic` dictionaries. Used for
 # the `spelling-error` check in TagsCheck; degrades gracefully when the
