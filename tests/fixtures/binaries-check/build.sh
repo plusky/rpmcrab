@@ -4,7 +4,7 @@
 # Builds a tiny RPM containing prebuilt ELF binaries with known properties:
 # - libbad.so.1: executable stack, no SONAME (triggers executable-stack, no-soname)
 # - libgood.so.1: non-executable stack, proper SONAME (absence assertions)
-# - setuidbin: setuid-root binary calling setuid() without setgroups()
+# - setuidbin: setuid-root binary calling setgid() and setuid() without setgroups()
 #   (triggers missing-call-to-setgroups-before-setuid at Error severity)
 # - rpathbin: binary with RUNPATH (triggers binary-or-shlib-defines-rpath)
 # - truncated: 64-byte truncated ELF (triggers readelf-failed)
@@ -33,7 +33,7 @@ int good_function(void) { return 42; }
 EOF
 cat >"$work/src/setuidbin.c" <<'EOF'
 #include <unistd.h>
-int main(void) { setuid(0); return 0; }
+int main(void) { setgid(0); setuid(0); return 0; }
 EOF
 cat >"$work/src/rpathbin.c" <<'EOF'
 int main(void) { return 0; }

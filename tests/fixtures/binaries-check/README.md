@@ -9,7 +9,7 @@ the `binaries_check_fixture` test in `crates/rpmcrab-core/src/checks/binaries.rs
 |------|------------|-------------------|
 | `/usr/lib64/libbad.so.1` | Executable stack (`GNU_STACK RWE`), no SONAME | `executable-stack`, `no-soname` |
 | `/usr/lib64/libgood.so.1` | Non-executable stack, `SONAME=libgood.so.1` | (absence: no `executable-stack`, no `no-soname`) |
-| `/usr/bin/setuidbin` | Mode 4755, calls `setuid()` but not `setgroups()` | `missing-call-to-setgroups-before-setuid` at **Error** |
+| `/usr/bin/setuidbin` | Mode 4755, calls `setgid()` and `setuid()` but not `setgroups()` | `missing-call-to-setgroups-before-setuid` at **Error** |
 | `/usr/bin/rpathbin` | `RUNPATH=/opt/custom/lib` | `binary-or-shlib-defines-rpath` |
 | `/usr/bin/truncated` | 64-byte truncated ELF (header only) | `readelf-failed` |
 
