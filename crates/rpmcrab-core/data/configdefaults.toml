@@ -32,7 +32,9 @@ Checks = [
     # in reference order.
     "SharedLibraryPolicyCheck",
     "BrandingPolicyCheck",
+    "DeviceFilesCheck",
     "KMPPolicyCheck",
+    "WorldWritableCheck",
 ]
 # List of error titles that should be filtered
 FilterErrorTitles = []
