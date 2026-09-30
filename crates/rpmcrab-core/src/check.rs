@@ -162,6 +162,12 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
             config,
         ))),
         "LSBCheck" => Some(Box::new(crate::checks::lsb::LSBCheck::new(config))),
+        "AtomicUpdateCheck" => Some(Box::new(
+            crate::checks::atomic_update::AtomicUpdateCheck::new(config),
+        )),
+        "LibraryDependencyCheck" => Some(Box::new(
+            crate::checks::library_dependency::LibraryDependencyCheck::new(config),
+        )),
         _ => None,
     }
 }

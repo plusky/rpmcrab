@@ -1,5 +1,6 @@
 //! The lint checks, keyed by their Python module names (`TagsCheck`, …).
 
+pub mod atomic_update;
 pub mod binaries;
 pub mod config_files;
 pub mod doc;
@@ -8,6 +9,7 @@ pub mod fhs;
 pub mod files;
 pub mod i18n;
 pub mod icon_sizes;
+pub mod library_dependency;
 pub mod lsb;
 pub mod mixed_ownership;
 pub mod pam_modules;
