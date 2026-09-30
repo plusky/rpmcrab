@@ -87,7 +87,15 @@ impl PostCheck {
         // missing or half-written file.
         let tmp = tempfile::NamedTempFile::new().ok()?;
         std::fs::write(tmp.path(), script).ok()?;
-        let result = Command::new(prog).args(args).arg(tmp.path()).output().ok();
+        // The reference passes ENGLISH_ENVIRONMENT (PostCheck.py:66):
+        // `sh -n` / `perl -wc` diagnostics are locale-dependent.
+        let result = Command::new(prog)
+            .args(args)
+            .arg(tmp.path())
+            .env("LC_ALL", "en_US.UTF-8")
+            .env("LANGUAGE", "en_US")
+            .output()
+            .ok();
         let _ = tmp.close();
         result.map(|o| o.status.success())
     }
@@ -249,14 +257,92 @@ impl PostCheck {
     }
 }
 
+/// `error_details` for `-v`, mirroring the reference's `post_details_dict`
+/// (`PostCheck.py:78-83`): five families over `Pkg.RPM_SCRIPTLETS` plus
+/// the ghost-file entry. Texts are byte-identical to the reference,
+/// including its duplicated `transfiletriggerun` row (dict insertion
+/// dedupes it there; the loop below simply overwrites it here).
+/// `one-line-command-in-<scriptlet>`:
+const ONE_LINE_COMMAND_DETAIL: &str = "You should use {tag} -p <command> instead of using:\n\n        {tag}\n        <command>\n\n        It will avoid the fork of a shell interpreter to execute your command as\n        well as allows rpm to automatically mark the dependency on your command\n        for the execution of the scriptlet.";
+/// `percent-in-<scriptlet>`:
+const PERCENT_IN_DETAIL: &str = "The {tag} scriptlet contains a '%' in a context which might indicate it being\n        fallout from an rpm macro/variable which was not expanded during build.\n        Investigate whether this is the case and fix if appropriate.";
+/// `spurious-bracket-in-<scriptlet>`:
+const SPURIOUS_BRACKET_DETAIL: &str =
+    "The {tag} scriptlet contains an 'if []' construct without a space before\n        the ']'.";
+/// `forbidden-selinux-command-in-<scriptlet>`:
+const FORBIDDEN_SELINUX_DETAIL: &str = "A command which requires intimate knowledge about a specific SELinux\n        policy type was found in the scriptlet. These types are subject to change\n        on a policy version upgrade. Use the restorecon command which queries the\n        currently loaded policy for the correct type instead.";
+/// `non-empty-<scriptlet>`:
+const NON_EMPTY_DETAIL: &str = "Scriptlets for the interpreter mentioned in the message should be empty.\n        One common case where they are unintentionally not is when the specfile\n        contains comments after the scriptlet and before the next section. Review\n        and clean up the scriptlet contents if appropriate.";
+fn register_error_details(out: &mut Filter) {
+    out.set_error_detail(
+        "postin-without-ghost-file-creation",
+        "A file tagged as ghost is not created during %prein nor during %postin.".to_string(),
+    );
+    // `Pkg.RPM_SCRIPTLETS` in the reference.
+    for name in [
+        "pre",
+        "post",
+        "preun",
+        "postun",
+        "pretrans",
+        "posttrans",
+        "trigger",
+        "triggerin",
+        "triggerprein",
+        "triggerun",
+        "triggerpostun",
+        "verifyscript",
+        "filetriggerin",
+        "filetrigger",
+        "filetriggerun",
+        "filetriggerpostun",
+        "transfiletriggerin",
+        "transfiletrigger",
+        "transfiletriggerun",
+        "transfiletriggerpostun",
+    ] {
+        let tag = format!("%{name}");
+        // `one-line-command-in-<scriptlet>`:
+        out.set_error_detail(
+            &format!("one-line-command-in-{tag}"),
+            ONE_LINE_COMMAND_DETAIL.replace("{tag}", &tag),
+        );
+        // `percent-in-<scriptlet>`:
+        out.set_error_detail(
+            &format!("percent-in-{tag}"),
+            PERCENT_IN_DETAIL.replace("{tag}", &tag),
+        );
+        // `spurious-bracket-in-<scriptlet>`:
+        out.set_error_detail(
+            &format!("spurious-bracket-in-{tag}"),
+            SPURIOUS_BRACKET_DETAIL.replace("{tag}", &tag),
+        );
+        // `forbidden-selinux-command-in-<scriptlet>`:
+        out.set_error_detail(
+            &format!("forbidden-selinux-command-in-{tag}"),
+            FORBIDDEN_SELINUX_DETAIL.replace("{tag}", &tag),
+        );
+        // `non-empty-<scriptlet>`:
+        out.set_error_detail(
+            &format!("non-empty-{tag}"),
+            NON_EMPTY_DETAIL.replace("{tag}", &tag),
+        );
+    }
+}
+
 impl Check for PostCheck {
     fn name(&self) -> &'static str {
         "PostCheck"
     }
 
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
+        // `-v` descriptions, mirroring the reference's `post_details_dict`
+        // which `__init__` installs unconditionally.
+        register_error_details(out);
         // (script tag, prog tag, macro name, is list) mirroring
-        // Pkg.SCRIPT_TAGS. Trigger scriptlets store parallel arrays.
+        // `Pkg.SCRIPT_TAGS` (rpmlint/pkg.py). Trigger scriptlets store
+        // parallel arrays; rpm returns a list for the three trigger tags
+        // even for a single entry, so `is_list` is fixed per tag.
         let scriptlets = [
             (Tag::PREIN, Tag::PREINPROG, "%pre", false),
             (Tag::POSTIN, Tag::POSTINPROG, "%post", false),
@@ -386,24 +472,29 @@ mod tests {
     #[test]
     fn percent_without_brace_is_flagged() {
         let found = check().check_scriptlet("/bin/sh", "echo %foo", "%post", &[], &[]);
-        assert!(found.iter().any(|(_, f, _)| f == "percent-in-%post"));
+        assert!(
+            found
+                .iter()
+                .any(|(l, f, _)| *l == Level::Warning && f == "percent-in-%post")
+        );
     }
 
     #[test]
     fn percent_with_brace_is_flagged() {
         let found = check().check_scriptlet("/bin/sh", "echo %{foo}", "%post", &[], &[]);
-        assert!(found.iter().any(|(_, f, _)| f == "percent-in-%post"));
+        assert!(
+            found
+                .iter()
+                .any(|(l, f, _)| *l == Level::Warning && f == "percent-in-%post")
+        );
     }
 
     #[test]
     fn single_line_command_is_flagged() {
         let found = check().check_scriptlet("/bin/sh", "/usr/bin/update-foo", "%post", &[], &[]);
-        assert!(
-            found
-                .iter()
-                .any(|(_, f, d)| f == "one-line-command-in-%post"
-                    && d == &vec!["/usr/bin/update-foo".to_string()])
-        );
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
+            && f == "one-line-command-in-%post"
+            && d == &vec!["/usr/bin/update-foo".to_string()]));
     }
 
     #[test]
@@ -444,13 +535,21 @@ mod tests {
     #[test]
     fn tmp_use_is_flagged() {
         let found = check().check_scriptlet("/bin/sh", "echo hi > /tmp/foo", "%post", &[], &[]);
-        assert!(found.iter().any(|(_, f, _)| f == "use-tmp-in-%post"));
+        assert!(
+            found
+                .iter()
+                .any(|(l, f, _)| *l == Level::Error && f == "use-tmp-in-%post")
+        );
     }
 
     #[test]
     fn home_use_is_flagged() {
         let found = check().check_scriptlet("/bin/sh", "echo ~/foo", "%post", &[], &[]);
-        assert!(found.iter().any(|(_, f, _)| f == "use-of-home-in-%post"));
+        assert!(
+            found
+                .iter()
+                .any(|(l, f, _)| *l == Level::Error && f == "use-of-home-in-%post")
+        );
     }
 
     #[test]
@@ -459,7 +558,7 @@ mod tests {
         assert!(
             found
                 .iter()
-                .any(|(_, f, _)| f == "bogus-variable-use-in-%post")
+                .any(|(l, f, _)| *l == Level::Warning && f == "bogus-variable-use-in-%post")
         );
     }
 
@@ -477,28 +576,81 @@ mod tests {
         assert!(
             found
                 .iter()
-                .any(|(_, f, _)| f == "update-menus-without-menu-file-in-%post")
+                .any(|(l, f, _)| *l == Level::Error
+                    && f == "update-menus-without-menu-file-in-%post")
         );
     }
 
-    #[test]
-    fn parity_fixture_matches_reference() {
-        // Pinned against reference rpmlint 2.10.0 (PostCheck.py at 84848c0):
-        // the fixture produces exactly these two findings, in this order.
+    fn check_fixture_names(rpm: &str) -> Vec<String> {
         let rpm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/parity/pkg/inputs/postcheck-parity-1.0-1.noarch.rpm");
+            .join("../../tests/parity/pkg/inputs")
+            .join(rpm);
         let pkg = Pkg::open(&rpm_path, &std::env::temp_dir()).expect("open fixture pkg");
         let config = Config::default();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = PostCheck::new(&config);
         check.check(&pkg, &config, &mut out);
-        let findings: Vec<(String, String)> = out
-            .results()
-            .iter()
-            .map(|(name, _)| (name.clone(), String::new()))
-            .collect();
-        let names: Vec<&str> = findings.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, vec!["percent-in-%pre", "percent-in-%postun"]);
+        out.results().iter().map(|(name, _)| name.clone()).collect()
+    }
+
+    #[test]
+    fn parity_fixture_matches_reference() {
+        // Pinned against reference rpmlint 2.10.0 (PostCheck.py at 84848c0),
+        // verified by running the reference in a Tumbleweed container over
+        // the same RPM: name, level and detail all identical.
+        //
+        // The three %triggerin entries form a 3-element trigger array whose
+        // bodies each trip a different finding family; the exact vector pins
+        // the parallel-array walk (a flipped `is_list` or a renamed tag
+        // changes it). The empty %post pins `check_empty` through
+        // `check_binary`.
+        assert_eq!(
+            check_fixture_names("postcheck-parity-1.0-1.noarch.rpm"),
+            vec![
+                "percent-in-%pre",
+                "empty-%post",
+                "percent-in-%postun",
+                "percent-in-%trigger",
+                "dangerous-command-in-%trigger",
+                "use-tmp-in-%trigger",
+                "percent-in-%filetrigger",
+                "dangerous-command-in-%transfiletrigger",
+                "postin-without-ghost-file-creation",
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_ghost_fixture_matches_reference() {
+        // Same reference run: a ghost file with no %pre/%post at all.
+        assert_eq!(
+            check_fixture_names("postcheck-ghost-parity-1.0-1.noarch.rpm"),
+            vec![
+                "ghost-files-without-postin",
+                "postin-without-ghost-file-creation",
+            ]
+        );
+    }
+
+    #[test]
+    fn verbose_output_includes_error_details() {
+        // `-v` is wire format: the reference prints `post_details_dict`
+        // explanations after each finding block.
+        let rpm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/postcheck-parity-1.0-1.noarch.rpm");
+        let pkg = Pkg::open(&rpm_path, &std::env::temp_dir()).expect("open fixture pkg");
+        let config = Config {
+            info: true,
+            ..Default::default()
+        };
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = PostCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let rendered = out.render_results();
+        // Only finding names present in the results get their description;
+        // the fixture trips percent-in-* and the ghost-file finding.
+        assert!(rendered.contains("macro/variable"));
+        assert!(rendered.contains("not created during %prein"));
     }
 
     #[test]
@@ -509,5 +661,96 @@ mod tests {
             PostCheck::syntax_ok("/nonexistent-interpreter", &["-n"], "echo hi"),
             None
         );
+    }
+
+    #[test]
+    fn percent_macro_on_third_line_is_flagged() {
+        // Dropping `(?m)` from `percent_regex` loses the line-3 macro case.
+        let found =
+            check().check_scriptlet("/bin/sh", "echo a\necho b\necho %foo", "%post", &[], &[]);
+        assert!(
+            found
+                .iter()
+                .any(|(l, f, _)| *l == Level::Warning && f == "percent-in-%post")
+        );
+    }
+
+    #[test]
+    fn two_letter_macro_is_not_flagged() {
+        // `\\w{3,}` must not become `\\w{2,}`: `%ab` is not a macro.
+        let found = check().check_scriptlet("/bin/sh", "echo %ab", "%post", &[], &[]);
+        assert!(!found.iter().any(|(_, f, _)| f == "percent-in-%post"));
+    }
+
+    #[test]
+    fn shell_syntax_error_is_flagged() {
+        let found = check().check_scriptlet("/bin/sh", "if [", "%post", &[], &[]);
+        assert!(
+            found
+                .iter()
+                .any(|(l, f, _)| *l == Level::Error && f == "shell-syntax-error-in-%post")
+        );
+    }
+
+    #[test]
+    fn valid_shell_script_has_no_syntax_error() {
+        let found = check().check_scriptlet("/bin/sh", "echo hi", "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "shell-syntax-error-in-%post")
+        );
+    }
+
+    #[test]
+    fn perl_syntax_error_is_flagged() {
+        if PostCheck::syntax_ok("/usr/bin/perl", &["-wc"], "print 1;\n").is_none() {
+            // perl absent: the probe is skipped (ledgered divergence).
+            return;
+        }
+        let found = check().check_scriptlet("/usr/bin/perl", "sub foo {", "%post", &[], &[]);
+        assert!(
+            found
+                .iter()
+                .any(|(l, f, _)| *l == Level::Error && f == "perl-syntax-error-in-%post")
+        );
+    }
+
+    #[test]
+    fn non_empty_ldconfig_is_flagged() {
+        let check = PostCheck {
+            valid_shells: vec!["/sbin/ldconfig".to_string()],
+            empty_shells: vec!["/sbin/ldconfig".to_string()],
+        };
+        let found = check.check_scriptlet("/sbin/ldconfig", "ldconfig", "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "non-empty-%post"
+            && d == &vec!["/sbin/ldconfig".to_string()]));
+    }
+
+    #[test]
+    fn spurious_bracket_is_flagged() {
+        let found = check().check_scriptlet("/bin/sh", "if a]", "%post", &[], &[]);
+        assert!(
+            found
+                .iter()
+                .any(|(l, f, _)| *l == Level::Warning && f == "spurious-bracket-in-%post")
+        );
+    }
+
+    #[test]
+    fn dangerous_command_is_flagged() {
+        let found = check().check_scriptlet("/bin/sh", "rm -rf /foo", "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
+            && f == "dangerous-command-in-%post"
+            && d == &vec!["rm".to_string()]));
+    }
+
+    #[test]
+    fn no_prereq_on_chkfontpath_is_flagged() {
+        let found = check().check_scriptlet("/bin/sh", " chkfontpath --add /x", "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "no-prereq-on"
+            && d == &vec!["chkfontpath".to_string()]));
     }
 }

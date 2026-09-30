@@ -230,7 +230,7 @@ since = "0.1.0"
 case = "global"
 check = "PostCheck"
 kind = "behaviour"
-reason = "When the scriptlet interpreter is absent the reference (PostCheck.check_syntax_script) lets subprocess.run raise FileNotFoundError and the whole run dies; the port's syntax_ok returns None and the sh -n / perl -wc probe is skipped. A missing optional interpreter must not abort the lint."
+reason = "When the scriptlet interpreter is absent the reference (PostCheck.check_syntax_script) lets subprocess.run raise FileNotFoundError and the whole run dies; the port's syntax_ok returns None and the sh -n / perl -wc probe is skipped. A missing optional interpreter must not abort the lint. No upstream issue covers this: the reference merely carries a TODO ('test that prog is available/executable', PostCheck.py:60), so the crash is unhandled rather than specified behavior."
 since = "0.1.0"
 
 [[divergence]]
