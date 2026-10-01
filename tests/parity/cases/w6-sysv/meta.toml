@@ -1,0 +1,16 @@
+kind = "captured"
+rpmlint = "2.10.0"
+reference_sha = "84848c05c5571c22274a55ff9afdfe6d88c67dc9"
+flavour = "openSUSE"
+argv = ["w6-sysv-1.0-1.noarch.rpm"]
+captured = "2026-10-01"
+
+[source]
+description = "Hand-built fixture: /etc/init.d/w6sysv initscript shadowed by /usr/lib/systemd/system/w6sysv.service. Reference emits E systemd-shadowed-initscript, E deprecated-init-script (badness 10000, aborts), and four E systemd-service-without-* findings. Exit 66."
+
+[tools]
+present = ["checkbashisms","dash","desktop-file-validate","readelf","objdump","ldd","file"]
+
+[[input]]
+file = "w6-sysv-1.0-1.noarch.rpm"
+sha256 = "a2aa98e062e44ec45e6c80675effaa7aad9803576d73f62ba70c9cd9da25f8ab"
