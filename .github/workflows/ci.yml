@@ -184,7 +184,7 @@ jobs:
       # Building rpmcrab-gen links the rpmcrab lib, so this needs the same RPM
       # development headers as the main build.
       - name: Install RPM toolchain (headers + tools)
-        run: sudo apt-get update && sudo apt-get install -y librpm-dev rpm cpio file
+        run: sudo apt-get update && sudo apt-get install -y librpm-dev rpm cpio file pkg-config
       - run: cargo run -p rpmcrab --features gen --locked --bin rpmcrab-gen -- /tmp/rpmcrab-gen-assets
       - run: diff -r /tmp/rpmcrab-gen-assets/man crates/rpmcrab/man
       - run: diff -r /tmp/rpmcrab-gen-assets/completions crates/rpmcrab/completions

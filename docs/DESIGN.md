@@ -523,7 +523,10 @@ workspace = true`, `unsafe_code = "forbid"`, no `[workspace.dependencies]`.
   exit-code mapping, signal handling, and the feature-gated `rpmcrab-gen`
   generator, which emits the man page and shell completions checked in under
   `crates/rpmcrab/{man,completions}` (drift enforced by the `assets-drift`
-  CI job).
+  CI job). The assets are generated, committed and drift-checked but not yet
+  installed by any packaging step — `release.yml` ships the binary only;
+  wiring them into the tarball/spec is a pending packaging decision, recorded
+  here so it is not implicit.
 
 Dependency direction is one-way (`rpmcrab → rpmcrab-core`), enforced by
 `scripts/check-rust-layering.sh`.

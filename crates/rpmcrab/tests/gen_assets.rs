@@ -43,3 +43,37 @@ fn completions_are_present_and_name_the_binary() {
         );
     }
 }
+
+#[test]
+fn man_page_documents_exit_status() {
+    let man =
+        std::fs::read_to_string(crate_dir().join("man/rpmcrab.1")).expect("man page is checked in");
+    assert!(
+        man.contains(".SH EXIT STATUS"),
+        "man page has an EXIT STATUS section"
+    );
+    // The frozen exit-code contract (docs/DESIGN.md §4.6).
+    for code in ["0", "2", "3", "4", "64", "65", "66", "130"] {
+        assert!(
+            man.contains(&format!("\\fB{code}\\fR")),
+            "man page is missing exit code {code}"
+        );
+    }
+}
+
+#[test]
+fn man_page_has_no_machine_derived_defaults() {
+    // `-j/--jobs` defaults to the machine's parallelism at runtime; the
+    // rendered default must never be baked into the checked-in asset, or the
+    // drift check fails on every machine with a different core count.
+    let man =
+        std::fs::read_to_string(crate_dir().join("man/rpmcrab.1")).expect("man page is checked in");
+    for line in man.lines() {
+        if line.contains("\\-\\-jobs") {
+            assert!(
+                !line.contains("[default:"),
+                "jobs line bakes in a runtime default: {line}"
+            );
+        }
+    }
+}

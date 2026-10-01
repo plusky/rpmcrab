@@ -141,8 +141,7 @@ pub fn run() -> ExitCode {
     // Bare invocation prints help and exits 0 (rpmlint `cli.py:92-94`). clap's
     // `arg_required_else_help` would exit 2, so handle it before parsing.
     if std::env::args_os().count() == 1 {
-        use clap::CommandFactory;
-        let _ = Cli::command().print_help();
+        let _ = cli_command().print_help();
         println!();
         return ExitCode::SUCCESS;
     }

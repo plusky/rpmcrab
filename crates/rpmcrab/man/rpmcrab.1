@@ -56,5 +56,32 @@ Print help
 .TP
 [\fIrpmfile\fR]
 RPMs / specfiles / directories to check
+.SH EXIT STATUS
+.TP
+\fB0\fR
+Clean run, or warnings and infos only. In the default permissive mode errors
+scored at or under the threshold also exit 0, as do bare invocation,
+\fB\-\-help\fR, \fB\-p\fR and \fB\-e\fR.
+.TP
+\fB2\fR
+Nonexistent positional path or \fB\-c\fR path.
+.TP
+\fB3\fR
+A package could not be read (reported; the run continues with the rest).
+.TP
+\fB4\fR
+Unparsable TOML configuration.
+.TP
+\fB64\fR
+\fB\-s\fR/\fB\-\-strict\fR was passed and an error was found.
+.TP
+\fB65\fR
+\fB\-s\fR/\fB\-\-strict\fR was passed and every error was a strict promotion.
+.TP
+\fB66\fR
+Badness score exceeded the threshold.
+.TP
+\fB130\fR
+Interrupted (SIGINT).
 .SH VERSION
 v0.1.0
