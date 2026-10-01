@@ -11,12 +11,13 @@
 //! Parses the permissions profiles (`/usr/share/permissions/permissions`,
 //! `permissions.secure`, and per-package `permissions.d/` drop-ins) natively.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
 
 use fancy_regex::Regex;
+use indexmap::IndexSet;
 use librpm::Tag;
 
 use crate::check::{Check, add_info};
@@ -445,7 +446,10 @@ impl SUIDPermissionsCheck {
             "/etc/permissions.d/".to_string(),
             format!("{SHARE_DIR}/packages.d/"),
         ];
-        let mut dropin_files: HashSet<String> = HashSet::new();
+        // Insertion-ordered: the reference iterates a nondeterministic
+        // `set` here, which made `permissions-incorrect` hash-seed
+        // dependent (see the parity ledger).
+        let mut dropin_files: IndexSet<String> = IndexSet::new();
 
         for pkgfile in &pkg.files {
             let name = pkgfile.name.as_str();
