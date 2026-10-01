@@ -7,6 +7,7 @@
 //! the same when the tools exist and skips the file (debug-logged) when they
 //! do not, rather than crashing at init like the reference.
 
+use std::path::PathBuf;
 use std::process::Command;
 
 use crate::check::{Check, add_info};
@@ -20,16 +21,37 @@ pub struct BashismsCheck {
     use_early_fail: bool,
     have_tools: bool,
     checked_files: usize,
+    tool_dir: Option<PathBuf>,
 }
 
 impl BashismsCheck {
     pub fn new(_config: &Config) -> Self {
-        let (have_tools, use_early_fail) = Self::detect_tools(None);
+        Self::with_tool_dir(None)
+    }
+
+    /// Probe `bin_dir` for the tools and invoke them from there as well, so
+    /// tests can drive the whole check against fake tools. `None` probes and
+    /// invokes via the real `PATH`.
+    pub fn with_tool_dir(bin_dir: Option<&std::path::Path>) -> Self {
+        let tool_dir = bin_dir.map(|p| p.to_path_buf());
+        let (have_tools, use_early_fail) = Self::detect_tools(tool_dir.as_deref());
         Self {
             use_early_fail,
             have_tools,
             checked_files: 0,
+            tool_dir,
         }
+    }
+
+    fn command(tool_dir: &Option<PathBuf>, name: &str) -> Command {
+        match tool_dir {
+            Some(dir) => Command::new(dir.join(name)),
+            None => Command::new(name),
+        }
+    }
+
+    fn tool(&self, name: &str) -> Command {
+        Self::command(&self.tool_dir, name)
     }
 
     /// Probe for `dash` and `checkbashisms`. The reference crashes here when
@@ -38,12 +60,14 @@ impl BashismsCheck {
     /// `bin_dir` overrides PATH resolution so tests can point the probe at
     /// a scratch directory instead of mutating the process environment.
     pub fn detect_tools(bin_dir: Option<&std::path::Path>) -> (bool, bool) {
-        let tool = |name: &str| match bin_dir {
-            Some(dir) => Command::new(dir.join(name)),
-            None => Command::new(name),
-        };
-        let dash = tool("dash").arg("--version").output().is_ok();
-        let help = tool("checkbashisms").arg("--help").output();
+        let tool_dir = bin_dir.map(|p| p.to_path_buf());
+        let dash = Self::command(&tool_dir, "dash")
+            .arg("--version")
+            .output()
+            .is_ok();
+        let help = Self::command(&tool_dir, "checkbashisms")
+            .arg("--help")
+            .output();
         match help {
             Ok(out) => {
                 let text = String::from_utf8_lossy(&out.stdout).into_owned()
@@ -74,16 +98,17 @@ impl BashismsCheck {
     }
 
     /// Run the tools and classify their exit codes.
-    fn check_bashisms(path: &str, use_early_fail: bool) -> Vec<&'static str> {
-        let dash_code = Command::new("dash")
+    fn check_bashisms(&self, path: &str) -> Vec<&'static str> {
+        let dash_code = self
+            .tool("dash")
             .args(["-n", path])
             .env("LC_ALL", "C")
             .output()
             .ok()
             .and_then(|o| o.status.code());
-        let mut cmd = Command::new("checkbashisms");
+        let mut cmd = self.tool("checkbashisms");
         cmd.arg(path).env("LC_ALL", "C");
-        if use_early_fail {
+        if self.use_early_fail {
             cmd.arg("-e");
         }
         let bashisms_code = cmd.output().ok().and_then(|o| o.status.code());
@@ -119,7 +144,7 @@ impl Check for BashismsCheck {
             let key = pkgfile.md5.clone().unwrap_or_else(|| pkgfile.name.clone());
             let warnings = cache
                 .entry(key)
-                .or_insert_with(|| Self::check_bashisms(&pkgfile.path, self.use_early_fail));
+                .or_insert_with(|| self.check_bashisms(&pkgfile.path));
             for warning in warnings.clone() {
                 add_info(out, Level::Warning, pkg, warning, &[&pkgfile.name]);
             }

@@ -235,22 +235,22 @@ fn appdata_reports_malformed_file() {
     );
 }
 
-/// `BashismsCheck` shells out to real `dash` and `checkbashisms`, which are
-/// packaging-environment tools, not libraries. Gating design: probe the real
-/// PATH up front and skip loudly when either is absent — the check itself
-/// degrades to a no-op without them by design, so a missing tool must never
-/// fail the test. (Unit tests cover the tool probe and exit-code
-/// classification with injected fakes; this pins the entry point.)
+/// `BashismsCheck` shells out to `dash` and `checkbashisms`. The tool dir is
+/// injected, so fakes with verified real-tool semantics drive the whole check
+/// deterministically: `dash -n` exits 0 on `[[ ]]` (it parses as a plain
+/// command) and `checkbashisms` exits 1 when it reports a bashism.
 #[test]
+#[cfg(unix)]
 fn bashisms_reports_bashism_script() {
-    let (have_tools, _) = BashismsCheck::detect_tools(None);
-    if !have_tools {
-        eprintln!("skipping: dash and/or checkbashisms not on PATH");
-        return;
-    }
-    let mut check = BashismsCheck::new(&Config::default());
+    let dir = tempfile::tempdir().unwrap();
+    fake_tool(dir.path(), "dash", "exit 0");
+    fake_tool(
+        dir.path(),
+        "checkbashisms",
+        "if [ \"$1\" = \"--help\" ]; then echo \'usage: checkbashisms [-e] file [...]\'; exit 0; fi\nif grep -q \'\\[\\[\' \"$1\" 2>/dev/null; then echo \"possible bashism in $1\" >&2; exit 1; fi\nexit 0",
+    );
+    let mut check = BashismsCheck::with_tool_dir(Some(dir.path()));
     let results = run_check(&mut check, "w6-bashisms-1.0-1.noarch.rpm");
-    // `[[ ]]` passes `dash -n` but `checkbashisms` exits 1 on it.
     assert_findings(&results, &[("potential-bashisms", "w6bashism")]);
     assert!(
         !results.iter().any(|(_, line)| line.contains("w6clean")),
