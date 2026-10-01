@@ -348,6 +348,36 @@ mod tests {
     }
 
     #[test]
+    fn make_finding_path_renders_exact_line() {
+        // Pins the `check::make_finding` field mapping through this check:
+        // basename, arch suffix, level letter, check name, detail order and
+        // spacing, no badness column. Any field regressing in the refactor
+        // fails here, not just in the shared `check.rs` coverage.
+        let (lib, devel) = lib_and_devel(&["unrelated".to_string()]);
+        let results = run(&lib, &devel);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "no-library-dependency-on");
+        assert_eq!(
+            results[0].1,
+            "foo-devel.x86_64: E: no-library-dependency-on libfoo /usr/lib64/libfoo.so.1"
+        );
+    }
+
+    #[test]
+    fn empty_arch_omits_arch_suffix() {
+        // `make_finding` maps an empty arch to `None`; the rendered line
+        // must not carry a stray `.` before the colon.
+        let (lib, mut devel) = lib_and_devel(&["unrelated".to_string()]);
+        devel.arch = String::new();
+        let results = run(&lib, &devel);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].1,
+            "foo-devel: E: no-library-dependency-on libfoo /usr/lib64/libfoo.so.1"
+        );
+    }
+
+    #[test]
     fn dangling_symlink_reports_no_library_dependency_for() {
         let (mut lib, devel) = lib_and_devel(&["libfoo".to_string()]);
         lib.files = vec![];
