@@ -17,7 +17,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
 use indexmap::IndexMap;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};
 
 use crate::check::{Check, add_info};
 use crate::config::Config;
@@ -227,9 +227,16 @@ impl VarlinkServiceCheck {
 }
 
 /// Create a hasher for the named algorithm.
+///
+/// Only the SHA-2 family is implemented; anything else (md5, sha1, …) fails
+/// the run at configuration load, like the reference's `hashlib.new` raising
+/// on an unknown name. See the parity ledger.
 fn new_hasher(algorithm: &str) -> Result<Box<dyn DynDigest>, String> {
     match algorithm {
+        "sha224" => Ok(Box::new(Sha224::new())),
         "sha256" => Ok(Box::new(Sha256::new())),
+        "sha384" => Ok(Box::new(Sha384::new())),
+        "sha512" => Ok(Box::new(Sha512::new())),
         _ => Err(format!("unsupported digest algorithm: {algorithm}")),
     }
 }
@@ -240,14 +247,23 @@ trait DynDigest {
     fn finalize(self: Box<Self>) -> Vec<u8>;
 }
 
-impl DynDigest for Sha256 {
-    fn update(&mut self, data: &[u8]) {
-        Digest::update(self, data);
-    }
-    fn finalize(self: Box<Self>) -> Vec<u8> {
-        Digest::finalize(*self).to_vec()
-    }
+macro_rules! impl_dyn_digest {
+    ($t:ty) => {
+        impl DynDigest for $t {
+            fn update(&mut self, data: &[u8]) {
+                Digest::update(self, data);
+            }
+            fn finalize(self: Box<Self>) -> Vec<u8> {
+                Digest::finalize(*self).to_vec()
+            }
+        }
+    };
 }
+
+impl_dyn_digest!(Sha224);
+impl_dyn_digest!(Sha256);
+impl_dyn_digest!(Sha384);
+impl_dyn_digest!(Sha512);
 
 /// We need `hex` for encoding. Add a minimal hex encoder here to avoid a
 /// dependency.
@@ -1830,6 +1846,18 @@ hash = "deadbeef"
             "xml entry must not mismatch, got {results:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// sha512 from the SHA-2 family matches the reference runtime:
+    /// `hashlib.sha512(b"abc").hexdigest()`.
+    #[test]
+    fn sha512_digester_matches_reference() {
+        let mut hasher = new_hasher("sha512").expect("sha512 supported");
+        hasher.update(b"abc");
+        assert_eq!(
+            hex::encode(hasher.finalize()),
+            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+        );
     }
 
     fn config_with_locations(locations: &str) -> Config {
