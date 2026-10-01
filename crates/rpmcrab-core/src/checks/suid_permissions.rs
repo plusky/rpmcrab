@@ -138,6 +138,10 @@ fn parse_profile(
 ) -> Result<HashMap<String, Vec<PermissionsEntry>>, String> {
     let mut entries: HashMap<String, Vec<PermissionsEntry>> = HashMap::new();
     let mut active_packages: Vec<String> = Vec::new();
+    // Whether the most recent path line produced entries; a `+capabilities`
+    // line attaches to them. The reference resets `active_entries` on every
+    // path line and never on `:package:` lines (`permissions.py`).
+    let mut has_active_entries = false;
 
     let content = fs::read_to_string(profile_path).map_err(|e| format!("{profile_path}: {e}"))?;
 
@@ -155,9 +159,15 @@ fn parse_profile(
             }
             let path = parts[0].to_string();
             let ownership = parts[1].replace('.', ":");
-            let (owner, group) = ownership
-                .split_once(':')
-                .ok_or_else(|| format!("{profile_path}:{nr}: bad ownership"))?;
+            // The reference unpacks exactly two
+            // (`ownership.replace('.', ':').split(':')`), raising ValueError
+            // on `root` or `root:root:extra`; `split_once` would silently
+            // accept the latter with group `"root:extra"`.
+            let mut fields = ownership.split(':');
+            let (owner, group) = match (fields.next(), fields.next(), fields.next()) {
+                (Some(owner), Some(group), None) => (owner, group),
+                _ => return Err(format!("{profile_path}:{nr}: bad ownership")),
+            };
             let mode = u32::from_str_radix(parts[2], 8)
                 .map_err(|_| format!("{profile_path}:{nr}: bad mode"))?;
 
@@ -177,10 +187,26 @@ fn parse_profile(
                 let key = if key.is_empty() { "/".to_string() } else { key };
                 entries.entry(key).or_default().push(e);
             }
-        } else if line.starts_with("+capabilities") {
-            // Capability lines attach to the preceding entries; we track them
-            // but the check rejects packaged capabilities outright.
-            continue;
+            has_active_entries = true;
+        } else if line.starts_with('+') {
+            // Capability lines attach to the entries from the preceding path
+            // line. The check never reads them — packaged capabilities are
+            // rejected outright — so only the reference's error paths are
+            // replicated (`permissions.py` `_parse_line`): the line must be
+            // exactly `+capabilities <caps>`, and it must follow a path line.
+            let mut parts = line.split_whitespace();
+            let is_capabilities = matches!(
+                (parts.next(), parts.next(), parts.next()),
+                (Some(kind), Some(_), None) if kind.trim_start_matches('+') == "capabilities"
+            );
+            if !is_capabilities {
+                return Err(format!("{profile_path}:{nr}: unexpected +line"));
+            }
+            if !has_active_entries {
+                return Err(format!(
+                    "{profile_path}:{nr}: +capabilities without active entries"
+                ));
+            }
         } else if line.starts_with(":package:") {
             let line = line.split('#').next().unwrap_or("");
             // The reference does `line.split(None, 1)` then `parts[1]`,
@@ -190,8 +216,6 @@ fn parse_profile(
                 .map(|x| x.1)
                 .unwrap_or_else(|| panic!("{profile_path}:{nr}: bare :package: line"));
             active_packages = rest.split(',').map(|s| s.trim().to_string()).collect();
-        } else if line.starts_with('+') {
-            return Err(format!("{profile_path}:{nr}: unexpected +line"));
         } else {
             return Err(format!("{profile_path}:{nr}: unexpected line"));
         }
@@ -228,15 +252,20 @@ impl SUIDPermissionsCheck {
         let var_handler = VariablesHandler::new(variables_conf);
         let mut perms: HashMap<String, Vec<PermissionsEntry>> = HashMap::new();
 
-        for base in profile_bases {
-            for name in ["permissions", "permissions.secure"] {
+        // Parse order mirrors the reference's `_paths_to('permissions',
+        // 'permissions.secure')` — every `permissions` file before every
+        // `permissions.secure` file — and a later profile's entry list
+        // REPLACES the earlier one for the same path
+        // (`self.perms.update(parser.entries)`).
+        for name in ["permissions", "permissions.secure"] {
+            for base in profile_bases {
                 let path = format!("{base}/{name}");
                 if !Path::new(&path).exists() {
                     continue;
                 }
                 let entries = parse_profile(&var_handler, &path).unwrap_or_else(|e| panic!("{e}"));
                 for (k, v) in entries {
-                    perms.entry(k).or_default().extend(v);
+                    perms.insert(k, v);
                 }
             }
         }
@@ -1004,5 +1033,130 @@ mod tests {
         let _ =
             SUIDPermissionsCheck::new_with("/nonexistent/rpmcrab-variables.conf", &[base.as_str()]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Parse `content` as a permissions profile. Scratch dirs are unique per
+    /// call because tests run in parallel.
+    fn parse_profile_str(content: &str) -> Result<HashMap<String, Vec<PermissionsEntry>>, String> {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("rpmcrab-suid-parse-str-{n}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let path = dir.join("permissions");
+        std::fs::write(&path, content).expect("write");
+        let handler = VariablesHandler {
+            variables: HashMap::new(),
+        };
+        let result = parse_profile(&handler, path.to_str().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        result
+    }
+
+    #[test]
+    fn bad_ownership_arity_is_an_error() {
+        // The reference unpacks exactly two
+        // (`ownership.replace('.', ':').split(':')`), raising ValueError on
+        // `root` or `root:root:extra`; `split_once` would silently accept the
+        // latter with group `"root:extra"`.
+        for ownership in ["root", "root:root:extra", "root.root.extra"] {
+            let err = parse_profile_str(&format!("/usr/bin/x {ownership} 4755\n")).unwrap_err();
+            assert!(err.contains("bad ownership"), "{ownership}: {err}");
+        }
+        // Exactly one separator in either spelling still parses.
+        for ownership in ["root:root", "root.root"] {
+            let entries = parse_profile_str(&format!("/usr/bin/x {ownership} 4755\n")).unwrap();
+            let entry = &entries["/usr/bin/x"][0];
+            assert_eq!(entry.owner, "root");
+            assert_eq!(entry.group, "root");
+        }
+    }
+
+    #[test]
+    fn later_profile_replaces_earlier_for_same_path() {
+        // The reference does `self.perms.update(parser.entries)`: a later
+        // profile's entry list REPLACES the earlier one for the same path.
+        let dir = std::env::temp_dir().join("rpmcrab-suid-replace");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        std::fs::write(dir.join("permissions"), "/usr/bin/dup root:root 4755\n").expect("write");
+        std::fs::write(
+            dir.join("permissions.secure"),
+            "/usr/bin/dup root:root 4750\n",
+        )
+        .expect("write");
+        let base = dir.to_str().unwrap().to_string();
+        let check =
+            SUIDPermissionsCheck::new_with("/nonexistent/rpmcrab-variables.conf", &[base.as_str()]);
+        let entries = &check.perms["/usr/bin/dup"];
+        assert_eq!(entries.len(), 1, "replace, not extend: {entries:?}");
+        assert_eq!(entries[0].mode, 0o4750);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_order_matches_reference_paths_to() {
+        // The reference parses via `_paths_to('permissions',
+        // 'permissions.secure')`: every `permissions` file before every
+        // `permissions.secure` file, regardless of base directory.
+        let dir = std::env::temp_dir().join("rpmcrab-suid-merge-order");
+        let _ = std::fs::remove_dir_all(&dir);
+        let base1 = dir.join("share");
+        let base2 = dir.join("etc");
+        std::fs::create_dir_all(&base1).expect("tmpdir");
+        std::fs::create_dir_all(&base2).expect("tmpdir");
+        std::fs::write(
+            base1.join("permissions.secure"),
+            "/usr/bin/dup root:root 4750\n",
+        )
+        .expect("write");
+        std::fs::write(base2.join("permissions"), "/usr/bin/dup root:root 4755\n").expect("write");
+        let b1 = base1.to_str().unwrap().to_string();
+        let b2 = base2.to_str().unwrap().to_string();
+        let check = SUIDPermissionsCheck::new_with(
+            "/nonexistent/rpmcrab-variables.conf",
+            &[b1.as_str(), b2.as_str()],
+        );
+        assert_eq!(
+            check.perms["/usr/bin/dup"][0].mode, 0o4750,
+            "the secure profile wins across bases"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn capabilities_line_errors_match_reference() {
+        // `+capabilities` with no preceding path line raises (`permissions.py`:
+        // "+capabilities line without active entries").
+        let err = parse_profile_str("+capabilities cap_net_raw=p\n").unwrap_err();
+        assert!(err.contains("without active entries"), "{err}");
+        // A bare `+capabilities` is malformed (`_type, rest = line.split()`
+        // unpacks exactly two), as is an unknown `+` type.
+        for content in [
+            "/usr/bin/x root:root 4755\n+capabilities\n",
+            "/usr/bin/x root:root 4755\n+bogus cap_x\n",
+            "/usr/bin/x root:root 4755\n+capabilities a b\n",
+        ] {
+            let err = parse_profile_str(content).unwrap_err();
+            assert!(err.contains("unexpected +line"), "{content}: {err}");
+        }
+    }
+
+    #[test]
+    fn capabilities_line_after_entry_parses() {
+        // A well-formed `+capabilities` line after a path line is accepted;
+        // the caps themselves are never read by the check (packaged
+        // capabilities are rejected outright), so only the error paths are
+        // pinned above.
+        let entries =
+            parse_profile_str("/usr/bin/x root:root 4755\n+capabilities cap_net_raw=p\n").unwrap();
+        assert!(entries.contains_key("/usr/bin/x"));
+        // `:package:` lines do not reset the active entries — the reference
+        // only resets them on path lines.
+        let entries = parse_profile_str(
+            "/usr/bin/x root:root 4755\n:package: foo\n+capabilities cap_net_raw=p\n",
+        )
+        .unwrap();
+        assert!(entries.contains_key("/usr/bin/x"));
     }
 }

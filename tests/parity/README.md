@@ -103,13 +103,34 @@ fixed, not committed.
 
 ```toml
 [[divergence]]
-case = "llvm21-gold"          # the case it applies to (or "global")
-check = "no-soname"           # the finding that differs
-kind = "removed"              # "removed" | "added" | "severity" | "detail"
-reason = "rpmlint #780: fires on /usr/lib/debug/.dwz/* false positive"
-upstream = "https://github.com/rpm-software-management/rpmlint/issues/780"
+case = "global"               # only "global" is defined so far
+check = "no-soname"           # the finding (or area) that differs
+kind = "behaviour"            # one of the kinds below
+reason = "why the port differs, and why the difference is deliberate"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/780"  # optional
 since = "0.2.0"               # rpmcrab version that introduced the divergence
 ```
+
+The schema is enforced by `crates/rpmcrab-core/tests/divergences_ledger.rs`:
+`case`, `check`, `kind`, `reason` and `since` are required (and `case` must be
+`"global"` for now); `upstream` is optional. Whether entries must link an
+upstream issue is still undecided (rpmcrab#56) — do not treat it as settled.
+
+`kind` is one of:
+
+| kind | meaning |
+|---|---|
+| `missing` | the finding or check is absent entirely; the reason must say what is missing and why |
+| `behaviour` | a deliberate behavioural departure (an adopted bug fix, or an intentional difference with justification) |
+| `severity` | the finding fires at a different severity than the reference |
+| `detail` | the finding fires with different detail wording than the reference |
+| `limitation` | a divergence that genuinely cannot be implemented in the Rust port |
+
+`limitation` is the narrowest kind and must not become a bucket for unfinished
+work: the ledger guard exempts it from the "reason must say what is absent"
+discipline that `missing` entries follow, so a real gap filed as `limitation`
+would carry no accounting at all. "Not implemented" is not "cannot be
+implemented" — file those as `behaviour`.
 
 An empty ledger means rpmcrab is byte-identical to the reference on every case.
 Every non-empty entry is a reviewed, deliberate decision.

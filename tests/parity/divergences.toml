@@ -308,6 +308,13 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "FileDigestCheck"
+kind = "behaviour"
+reason = "The `xml` digester is a hand-rolled approximation, not C14N 2.0 like the reference's `ET.canonicalize(strip_text=True)`: it keeps the XML declaration and the DOCTYPE (including internal subsets), does not expand empty elements (`<b/>` stays; the reference emits `<b></b>`), collapses text whitespace instead of per-node handling, and misses the attribute sorting, namespace hoisting/elision, entity/char-ref expansion, and CDATA-as-escaped-text subtleties of canonicalization. A differential against the reference on 30 XML samples showed 14 mismatches. C14N is fully specified and implementable, so this is unfinished work, not a port constraint — recorded as behaviour, never limitation."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "AtomicUpdateCheck"
 kind = "behaviour"
 reason = "A non-string element in AtomicAllowedDirs/AtomicDisallowedSubdirs (e.g. AtomicDisallowedSubdirs = [42]) panics at construction; the reference raises TypeError later, at check time. The port deliberately fails fast on a misconfigured type instead of reproducing the reference's deferred failure."
@@ -371,6 +378,83 @@ case = "global"
 check = "FileMetadataCheck"
 kind = "missing"
 reason = "FileMetadataCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FilelistCheck"
+kind = "missing"
+reason = "FilelistCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "MenuCheck"
+kind = "missing"
+reason = "MenuCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "MenuXDGCheck"
+kind = "missing"
+reason = "MenuXDGCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "PolkitCheck"
+kind = "missing"
+reason = "PolkitCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "PythonCheck"
+kind = "missing"
+reason = "PythonCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SignatureCheck"
+kind = "detail"
+reason = "SignatureCheck captures stdout only while the reference merges stderr into stdout, and runs `rpm -Kv` under `LC_ALL=C` instead of the reference's `en_US.UTF-8`/`LANGUAGE=en_US` environment."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SignatureCheck"
+kind = "behaviour"
+reason = "The any-signature regex is widened to `[Ss]ignature|\\(sha1\\) dsa|\\(sha1\\) rsa` (the reference only matches `[Ss]ignature, key ID`), so `no-signature` fires less often on old-style `rpm -Kv` output lines."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SysVInitOnSystemdCheck"
+kind = "missing"
+reason = "SysVInitOnSystemdCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SystemdInstallCheck"
+kind = "missing"
+reason = "SystemdInstallCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SystemdTmpfilesCheck"
+kind = "missing"
+reason = "SystemdTmpfilesCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "TmpFilesCheck"
+kind = "missing"
+reason = "TmpFilesCheck is not ported yet; its findings are absent from the port."
 since = "0.1.0"
 
 [[divergence]]
@@ -493,20 +577,6 @@ case = "global"
 check = "FileDigestCheck"
 kind = "detail"
 reason = "File digest finding details are byte-identical to the reference except `{type}-file-parse-error`, which renders the Rust `std::io::Error` text where the reference interpolates its own OS-error wording; `whitelisted-file-missing` and `file-digest-mismatch` match the reference exactly."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "SUIDPermissionsCheck"
-kind = "detail"
-reason = "Drop-in `permissions-parse-error` message texts are paraphrased rather than byte-identical to the reference's wordings; central-profile parse errors abort the run like the reference constructor, emitting no finding."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "SignatureCheck"
-kind = "detail"
-reason = "SignatureCheck captures stdout only while the reference merges stderr into stdout, and runs `rpm -Kv` under `LC_ALL=C` instead of the reference's `en_US.UTF-8`/`LANGUAGE=en_US` environment."
 since = "0.1.0"
 
 [[divergence]]

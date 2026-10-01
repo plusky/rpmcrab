@@ -501,11 +501,14 @@ discriminator:
 `tests/parity/divergences.toml` is machine-enforced. The `parity` CI job runs
 rpmcrab on each case and diffs. Any difference is either:
 
-- a recorded entry — `{ case, check, reason, upstream-issue, since }` — or
+- a recorded entry — `{ case, check, kind, reason, since }`, with optional
+  `upstream` — or
 - a **failure**.
 
 You cannot ship a behavioural change without writing down why. This is the
-executable form of "records deliberate decisions".
+executable form of "records deliberate decisions". The `kind` taxonomy and the
+required/optional fields are documented in `tests/parity/README.md`; whether
+entries must carry an upstream link is still undecided (rpmcrab#56).
 
 ---
 

@@ -7,8 +7,8 @@
 //! `{type}-whitelisted-file-missing`.
 //!
 //! Supports four digesters: `default` (raw bytes), `shell` (strip comments/
-//! whitespace), `xml` (approximate canonicalization — a known limitation, see
-//! the parity ledger), `systemd-socket` (socket unit keys).
+//! whitespace), `xml` (approximate canonicalization, see the parity
+//! ledger), `systemd-socket` (socket unit keys).
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -113,10 +113,11 @@ fn normalize_shebang(line: &str) -> String {
 
 /// XML: canonicalized form without comments.
 ///
-/// This is an approximation, not real C14N (`xml.etree.ElementTree.
+/// Hand-rolled approximation, not real C14N (`xml.etree.ElementTree.
 /// canonicalize` in the reference): it strips comments and collapses
-/// whitespace between tags but does not normalize attributes or namespaces.
-/// Recorded as a known limitation in the parity ledger.
+/// whitespace, but keeps the XML declaration and DOCTYPE, does not expand
+/// empty elements, sort attributes, or normalize namespaces.
+/// Recorded in the parity ledger (kind = "behaviour").
 struct XmlDigester;
 
 impl Digester for XmlDigester {
@@ -130,9 +131,10 @@ impl Digester for XmlDigester {
 }
 
 fn normalize_xml(content: &str) -> String {
-    // Simple XML normalization: strip comments, collapse whitespace between
-    // tags, and remove the XML declaration. This is sufficient for digest
-    // stability against comment/whitespace changes.
+    // Simple XML normalization: strip comments and collapse whitespace.
+    // (The declaration/DOCTYPE skip below never fires — the peeked iterator
+    // is already advanced past `<` — so they are kept. Recorded as a
+    // behavioural divergence in the parity ledger.)
     let mut out = String::new();
     let mut in_comment = false;
     let mut chars = content.chars().peekable();
