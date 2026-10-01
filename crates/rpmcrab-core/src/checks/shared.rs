@@ -24,9 +24,12 @@ pub fn lib_package_regex() -> Regex {
     Regex::new(r"(?i)(?:^(?:compat-)?lib.*?(\.so.*)?|libs?[\d-]*)$").expect("static regex")
 }
 
-// The reference's `pkg[tag] or pkg.scriptprog(prog)`: an empty scriptlet
-// body falls back to the `-p` interpreter string.
-pub fn script_body_or_prog(pkg: &Pkg, tag: librpm::Tag, prog: librpm::Tag) -> String {
+/// The reference's `pkg[tag] or pkg.scriptprog(prog)`: the scriptlet body
+/// wins whenever it is non-empty; an empty body falls back to the `-p`
+/// interpreter string. This is the one place that choice is made -- every
+/// check that needs a scriptlet goes through this helper instead of
+/// open-coding the choice (see the `scriptlet_choice` test).
+pub(crate) fn script_body_or_prog(pkg: &Pkg, tag: librpm::Tag, prog: librpm::Tag) -> String {
     let body = pkg.tag_str(tag).unwrap_or_default();
     if body.is_empty() {
         pkg.scriptprog(prog)
@@ -55,6 +58,12 @@ pub fn python_str_tuple(items: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::check::Check;
+    use crate::checks::files::FilesCheck;
+    use crate::color::Color;
+    use crate::config::Config;
+    use crate::filter::Filter;
 
     #[test]
     fn macro_regex_matches_unexpanded_macro() {
@@ -128,5 +137,50 @@ mod tests {
             !lib_dbg.contains("\\\\"),
             "lib_package_regex double-escaped: {lib_dbg}"
         );
+    }
+
+    fn test_config() -> Config {
+        // Load the bundled defaults so the check sees the same configuration
+        // as the real binary (empty Config::default would leave regexes like
+        // MetaPackageRegexp empty, matching everything).
+        let defaults: toml::Table = toml::from_str(include_str!("../../data/configdefaults.toml"))
+            .expect("parse configdefaults");
+        Config {
+            configuration: defaults,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ldconfig_p_interpreter_satisfies_check() {
+        // #1602: %post -p /sbin/ldconfig with a body that does not call
+        // ldconfig must NOT emit postin-without-ldconfig. The fixture RPM has
+        // a .so file and scriptlets whose -p interpreter is /sbin/ldconfig.
+        // Reverting to the stub scriptprog (or the reference body-only search)
+        // makes this fail.
+        let rpm = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/parity/pkg/inputs/ldconfig-test-1.0-1.noarch.rpm"
+        );
+        let dir = std::env::temp_dir().join("rpmcrab-ldconfig-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let pkg = Pkg::open(std::path::Path::new(rpm), &dir).expect("open fixture");
+        assert_eq!(pkg.scriptprog(librpm::Tag::POSTINPROG), "/sbin/ldconfig");
+
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<&str> = out.results().iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            !names.contains(&"postin-without-ldconfig"),
+            "unexpected postin-without-ldconfig: {names:?}"
+        );
+        assert!(
+            !names.contains(&"postun-without-ldconfig"),
+            "unexpected postun-without-ldconfig: {names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

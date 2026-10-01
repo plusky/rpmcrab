@@ -2575,39 +2575,6 @@ mod tests {
     }
 
     #[test]
-    fn ldconfig_p_interpreter_satisfies_check() {
-        // #1602: %post -p /sbin/ldconfig with a body that does not call
-        // ldconfig must NOT emit postin-without-ldconfig. The fixture RPM has
-        // a .so file and scriptlets whose -p interpreter is /sbin/ldconfig.
-        // Reverting to the stub scriptprog (or the reference body-only search)
-        // makes this fail.
-        let rpm = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../tests/parity/pkg/inputs/ldconfig-test-1.0-1.noarch.rpm"
-        );
-        let dir = std::env::temp_dir().join("rpmcrab-ldconfig-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tmpdir");
-        let pkg = Pkg::open(std::path::Path::new(rpm), &dir).expect("open fixture");
-        assert_eq!(pkg.scriptprog(librpm::Tag::POSTINPROG), "/sbin/ldconfig");
-
-        let config = test_config();
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let mut check = FilesCheck::new(&config);
-        check.check(&pkg, &config, &mut out);
-        let names: Vec<&str> = out.results().iter().map(|(n, _)| n.as_str()).collect();
-        assert!(
-            !names.contains(&"postin-without-ldconfig"),
-            "unexpected postin-without-ldconfig: {names:?}"
-        );
-        assert!(
-            !names.contains(&"postun-without-ldconfig"),
-            "unexpected postun-without-ldconfig: {names:?}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn ldconfig_regex_skips_comments() {
         // The reference uses ^[^#]*ldconfig: a %post mentioning ldconfig only
         // in a comment must NOT satisfy the check.
