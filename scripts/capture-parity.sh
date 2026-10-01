@@ -116,6 +116,8 @@ tools_joined="$(IFS=', '; echo "${present_tools[*]}")"
     echo 'kind = "captured"'
     echo "rpmlint = \"$version\""
     echo "reference_sha = \"$ref_sha\""
+    # The reference's own flavour (its config), recorded at capture time.
+    # Distinct from the rpmcrab `Flavor` TOML key (the flavor selector).
     echo 'flavour = "openSUSE"'
     # argv: extra args then input basenames, each quoted, joined by ", ".
     argv_items=()

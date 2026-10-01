@@ -58,6 +58,11 @@ pub struct Config {
     pub blocked_filters: Vec<String>,
     /// `BadnessThreshold` (default -1).
     pub badness_threshold: i64,
+    /// Distribution flavor for flavor-gated check behavior (`docs/DESIGN.md`
+    /// §4.11, `docs/flavor-implementation.md`): `"opensuse"` (default) or
+    /// `"slfo"`. Derived from the `Flavor` TOML key by [`Config::finalize`];
+    /// unknown values warn on stderr and fall back to `"opensuse"`.
+    pub flavor: String,
 }
 
 impl Config {
@@ -79,6 +84,35 @@ impl Config {
             .and_then(toml::Value::as_table)
             .map(|t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();
+        let flavor = self
+            .configuration
+            .get("Flavor")
+            .and_then(toml::Value::as_str)
+            .unwrap_or("opensuse")
+            .to_ascii_lowercase();
+        // Fail closed on config the code does not understand: warn and fall
+        // back to the default flavor rather than guessing.
+        self.flavor = match flavor.as_str() {
+            "opensuse" | "slfo" => flavor,
+            other => {
+                eprintln!("warning: unknown Flavor {other:?}, falling back to \"opensuse\"");
+                "opensuse".to_string()
+            }
+        };
+    }
+
+    /// True when the `slfo` flavor is selected (`docs/flavor-implementation.md`).
+    pub fn is_slfo(&self) -> bool {
+        self.flavor == "slfo"
+    }
+
+    /// Whether a `[[divergence]]` ledger entry applies under this config's
+    /// flavor. An entry without a `flavor` key applies to every flavor; a
+    /// `flavor = "slfo"` entry only excuses a difference on an slfo run. Under
+    /// opensuse such an entry neither fails the comparison nor goes invisible:
+    /// it simply does not apply (`docs/flavor-implementation.md`).
+    pub fn divergence_applies(&self, entry_flavor: Option<&str>) -> bool {
+        entry_flavor.is_none_or(|f| f == self.flavor)
     }
 
     /// `ExtractDir` — where payloads are unpacked. `""` (the default) means the
@@ -585,5 +619,57 @@ mod tests {
             cfg.rpmlintrc_filters,
             vec!["no-return-in-nonvoid-function".to_string()]
         );
+    }
+
+    fn config_with_toml(toml_text: &str) -> Config {
+        let tmp = tempfile::tempdir().unwrap();
+        let rpmlint_dir = tmp.path().join("xdg").join("rpmlint");
+        std::fs::create_dir_all(&rpmlint_dir).unwrap();
+        std::fs::write(rpmlint_dir.join("flavor.toml"), toml_text).unwrap();
+        load_inner(&[], &[tmp.path().join("xdg")], true)
+    }
+
+    #[test]
+    fn flavor_defaults_to_opensuse() {
+        let cfg = load_inner(&[], &[], false);
+        assert_eq!(cfg.flavor, "opensuse");
+        assert!(!cfg.is_slfo());
+    }
+
+    #[test]
+    fn flavor_slfo_is_recognized() {
+        let cfg = config_with_toml("Flavor = \"slfo\"\n");
+        assert_eq!(cfg.flavor, "slfo");
+        assert!(cfg.is_slfo());
+    }
+
+    #[test]
+    fn flavor_value_is_case_insensitive() {
+        let cfg = config_with_toml("Flavor = \"SLFO\"\n");
+        assert_eq!(cfg.flavor, "slfo");
+        assert!(cfg.is_slfo());
+    }
+
+    #[test]
+    fn flavor_unknown_warns_and_falls_back_to_opensuse() {
+        // The warning goes to stderr; fail closed means asserting the fallback.
+        let cfg = config_with_toml("Flavor = \"sled\"\n");
+        assert_eq!(cfg.flavor, "opensuse");
+        assert!(!cfg.is_slfo());
+    }
+
+    #[test]
+    fn divergence_applies_respects_entry_flavor() {
+        // The corpus runner compares in the default flavor: an entry without a
+        // flavor key applies everywhere, a slfo-gated entry only on slfo runs.
+        let opensuse = load_inner(&[], &[], false);
+        assert!(opensuse.divergence_applies(None));
+        assert!(opensuse.divergence_applies(Some("opensuse")));
+        assert!(!opensuse.divergence_applies(Some("slfo")));
+
+        let slfo = config_with_toml("Flavor = \"slfo\"\n");
+        assert!(slfo.divergence_applies(None));
+        assert!(slfo.divergence_applies(Some("slfo")));
+        assert!(!slfo.divergence_applies(Some("opensuse")));
     }
 }

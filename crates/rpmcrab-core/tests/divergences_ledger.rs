@@ -95,3 +95,19 @@ fn missing_findings_declare_their_kind() {
         }
     }
 }
+
+/// The `flavor` key is optional; when present it must be a known flavor.
+/// (Per #56, `upstream` is optional too — link it when the divergence is
+/// tracked upstream, but the ledger is complete without it.)
+#[test]
+fn ledger_flavor_values_are_valid() {
+    for (i, entry) in entries().iter().enumerate() {
+        if let Some(flavor) = entry.get("flavor").and_then(toml::Value::as_str) {
+            assert!(
+                matches!(flavor, "opensuse" | "slfo"),
+                "entry {i} (`{}`) has unknown flavor `{flavor}`: must be `opensuse` or `slfo`",
+                field(entry, "check", i)
+            );
+        }
+    }
+}

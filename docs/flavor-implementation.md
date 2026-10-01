@@ -1,6 +1,8 @@
 # SLFO Flavor: Implementation Sketch
 
-**Status:** Design proposal for Tom's review. No code changes yet.
+**Status:** Config plumbing landed (`Config.flavor`, `is_slfo()`,
+`divergence_applies()`); ledger `flavor` key validated. No flavor-gated
+checks yet.
 
 This document sketches how the `Flavor` config key (§4.11) would be
 implemented when the first flavor-gated check lands. It is not a
