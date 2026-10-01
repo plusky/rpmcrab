@@ -217,13 +217,36 @@ fn filelist_reports_absolute_bad_patterns() {
     );
 }
 
-/// `AppDataCheck` validates `/usr/share/appdata/*.xml` with `appstream-util`
-/// when present, else a native well-formedness check. The malformed fixture
-/// file fails both paths; the valid one passes both, so this is independent
-/// of whether the tool is installed.
+/// `AppDataCheck` falls back to a native well-formedness check when no
+/// `appstream-util` is configured. The malformed fixture file fails it; the
+/// valid one passes.
 #[test]
-fn appdata_reports_malformed_file() {
-    let mut check = AppDataCheck::new(&Config::default());
+fn appdata_native_check_flags_malformed_file() {
+    let mut check = AppDataCheck::with_tool(None);
+    let results = run_check(&mut check, "w6-appdata-1.0-1.noarch.rpm");
+    assert_findings(
+        &results,
+        &[("invalid-appdata-file", "w6broken.appdata.xml")],
+    );
+    assert!(
+        !results.iter().any(|(_, line)| line.contains("w6valid")),
+        "valid appdata file should be quiet: {results:?}"
+    );
+}
+
+/// With an `appstream-util` configured, the check shells out to it and honors
+/// its exit status. The fake validates well-formedness via minidom, the
+/// reference's own fallback parser.
+#[test]
+#[cfg(unix)]
+fn appdata_injected_tool_is_honored() {
+    let dir = tempfile::tempdir().unwrap();
+    fake_tool(
+        dir.path(),
+        "appstream-util",
+        "python3 -c 'import sys, xml.dom.minidom; xml.dom.minidom.parse(sys.argv[1])' \"$3\" 2>/dev/null",
+    );
+    let mut check = AppDataCheck::with_tool(Some(dir.path().join("appstream-util")));
     let results = run_check(&mut check, "w6-appdata-1.0-1.noarch.rpm");
     assert_findings(
         &results,

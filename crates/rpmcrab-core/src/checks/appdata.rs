@@ -8,6 +8,7 @@
 //! does the same: subprocess when available, otherwise a native well-formed
 //! XML check (no new dependency).
 
+use std::path::PathBuf;
 use std::process::Command;
 
 use fancy_regex::Regex;
@@ -22,14 +23,30 @@ use crate::pkg::Pkg;
 pub struct AppDataCheck {
     file_regex: Regex,
     checked_files: usize,
+    tool: Option<PathBuf>,
 }
 
 impl AppDataCheck {
     pub fn new(_config: &Config) -> Self {
+        Self::with_tool(Self::probe_tool())
+    }
+
+    /// Use the given `appstream-util` binary, or `None` for the native
+    /// well-formedness fallback only.
+    pub fn with_tool(tool: Option<PathBuf>) -> Self {
         Self {
             file_regex: Regex::new(r"/usr/share/appdata/.*\.(appdata|metainfo)\.xml$")
                 .expect("static regex"),
             checked_files: 0,
+            tool,
+        }
+    }
+
+    /// Resolve `appstream-util` via `PATH`; `None` when absent.
+    fn probe_tool() -> Option<PathBuf> {
+        match Command::new("appstream-util").arg("--version").output() {
+            Ok(_) => Some(PathBuf::from("appstream-util")),
+            Err(_) => None,
         }
     }
 
@@ -123,22 +140,26 @@ impl AppDataCheck {
         root_seen && stack.is_empty()
     }
 
-    /// Validate one file: `appstream-util` when present, else well-formedness.
-    fn validate(path: &str) -> bool {
-        // The reference builds `self.cmd + f` and calls `cmd.split()`, so a
-        // path containing whitespace is split into several argv elements.
-        let cmd = format!("appstream-util validate-relax --nonet {path}");
-        let argv: Vec<&str> = cmd.split_whitespace().collect();
-        let util = Command::new(argv[0])
-            .args(&argv[1..])
-            .env("LC_ALL", "C")
-            .output();
-        match util {
-            Ok(o) => o.status.success(),
-            Err(_) => std::fs::read_to_string(path)
-                .map(|t| Self::is_well_formed_xml(&t))
-                .unwrap_or(false),
+    /// Validate one file: the configured `appstream-util` when present,
+    /// else well-formedness.
+    fn validate(&self, path: &str) -> bool {
+        if let Some(tool) = &self.tool {
+            // The reference builds `self.cmd + f` and calls `cmd.split()`,
+            // so a path containing whitespace is split into several argv
+            // elements.
+            let cmd = format!("{} validate-relax --nonet {path}", tool.display());
+            let argv: Vec<&str> = cmd.split_whitespace().collect();
+            if let Ok(o) = Command::new(argv[0])
+                .args(&argv[1..])
+                .env("LC_ALL", "C")
+                .output()
+            {
+                return o.status.success();
+            }
         }
+        std::fs::read_to_string(path)
+            .map(|t| Self::is_well_formed_xml(&t))
+            .unwrap_or(false)
     }
 }
 
@@ -155,7 +176,7 @@ impl Check for AppDataCheck {
             if !pkg.ghost_files.iter().any(|g| g == &pkgfile.name) {
                 self.checked_files += 1;
             }
-            if !Self::validate(&pkgfile.path) {
+            if !self.validate(&pkgfile.path) {
                 add_info(
                     out,
                     Level::Error,
