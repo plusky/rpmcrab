@@ -181,6 +181,138 @@ def test_starred_call_resolving_to_nothing_is_unresolved():
     assert len(unresolved) == 1, unresolved
     assert unresolved[0][0] == "StarEmptyCheck", unresolved
 
+
+
+# ---------------------------------------------------------------------------
+# NEW-6: the reference-side emission call shape is a closed list
+# ---------------------------------------------------------------------------
+
+def _real_reference_pkgdir():
+    """The pinned rpmlint tree when available, else None (skip the test).
+
+    CI clones the reference to /tmp/rpmlint-ref before running this file,
+    so the pin is live there; a bare `make auditor-test` skips gracefully.
+    """
+    cands = []
+    env = os.environ.get("RPMLINT_REF")
+    if env:
+        cands += [os.path.join(env, "rpmlint-src", "rpmlint"),
+                  os.path.join(env, "rpmlint-src"),
+                  os.path.join(env, "rpmlint"), env]
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cands += [os.path.join(root, ".parity-ref", "rpmlint-src", "rpmlint"),
+              os.path.join(root, ".parity-ref", "rpmlint-src"),
+              os.path.join(root, ".parity-ref"),
+              "/tmp/rpmlint-ref"]
+    for c in cands:
+        if os.path.isdir(os.path.join(c, "checks")):
+            return c
+        nested = os.path.join(c, "rpmlint")
+        if os.path.isdir(os.path.join(nested, "checks")):
+            return nested
+    return None
+
+
+def test_reference_output_call_shapes_are_closed():
+    # audit_reference visits `self.output.add_info(...)` calls and nothing
+    # else. If rpmlint ever reports findings through another output method,
+    # the resolver would silently miss every such finding; fail loudly.
+    # (`self.output.error_details` reads are data, not emission.)
+    import ast as _ast
+    pkgdir = _real_reference_pkgdir()
+    if pkgdir is None:
+        print("skip test_reference_output_call_shapes_are_closed: "
+              "no reference tree")
+        return
+    checkdir = os.path.join(pkgdir, "checks")
+    bad = []
+    for fn in sorted(os.listdir(checkdir)):
+        if not fn.endswith(".py"):
+            continue
+        tree = _ast.parse(
+            open(os.path.join(checkdir, fn), encoding="utf-8").read())
+        for node in _ast.walk(tree):
+            if (isinstance(node, _ast.Call)
+                    and isinstance(node.func, _ast.Attribute)
+                    and isinstance(node.func.value, _ast.Attribute)
+                    and isinstance(node.func.value.value, _ast.Name)
+                    and node.func.value.value.id == "self"
+                    and node.func.value.attr == "output"
+                    and node.func.attr != "add_info"):
+                bad.append(f"{fn}:{node.lineno}: "
+                           f"self.output.{node.func.attr}(...)")
+    assert not bad, bad
+
+
+# ---------------------------------------------------------------------------
+# NEW-7: GLOBAL_SELF_ATTRS must not silently merge conflicting values
+# ---------------------------------------------------------------------------
+
+SELF_ATTR_MOD_A = """\
+from rpmlint.checks.AbstractCheck import AbstractCheck
+
+
+class AttrACheck(AbstractCheck):
+    def __init__(self, config, output):
+        super().__init__(config, output)
+        self.prefix = "aaa"
+        self.kind = "same"
+"""
+
+SELF_ATTR_MOD_B = """\
+from rpmlint.checks.AbstractCheck import AbstractCheck
+
+
+class AttrBCheck(AbstractCheck):
+    def __init__(self, config, output):
+        super().__init__(config, output)
+        self.prefix = "bbb"
+        self.kind = "same"
+"""
+
+SELF_ATTR_MOD_C = """\
+from rpmlint.checks.AbstractCheck import AbstractCheck
+
+
+class AttrCCheck(AbstractCheck):
+    def __init__(self, config, output):
+        super().__init__(config, output)
+        self.kind = "different"
+"""
+
+
+def _self_attr_collisions(files):
+    mods = []
+    with tempfile.TemporaryDirectory() as d:
+        for name, text in files.items():
+            _write(os.path.join(d, "checks", name), text)
+        for name in sorted(files):
+            path = os.path.join(d, "checks", name)
+            mods.append(audit.RefModule(path, name[:-3], d))
+        return audit.self_attr_collisions(mods)
+
+
+def test_self_attr_union_allows_only_deliberate_prefix():
+    # `prefix` differs per module by design (the base class resolves the
+    # subclasses' prefixes through the union); every other attr agrees.
+    collisions = _self_attr_collisions({"ACheck.py": SELF_ATTR_MOD_A,
+                                       "BCheck.py": SELF_ATTR_MOD_B})
+    assert collisions == [], collisions
+
+
+def test_self_attr_union_rejects_silent_collision():
+    collisions = _self_attr_collisions({"ACheck.py": SELF_ATTR_MOD_A,
+                                       "CCheck.py": SELF_ATTR_MOD_C})
+    assert [a for a, _ in collisions] == ["kind"], collisions
+
+
+def test_self_attr_collision_fails_the_audit():
+    with tempfile.TemporaryDirectory() as d:
+        _write(os.path.join(d, "checks", "ACheck.py"), SELF_ATTR_MOD_A)
+        _write(os.path.join(d, "checks", "CCheck.py"), SELF_ATTR_MOD_C)
+        findings, unresolved, nmods = audit.audit_reference(d)
+    assert any(m == "(self-attrs)" for m, _, _ in unresolved), unresolved
+
 def main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

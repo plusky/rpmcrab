@@ -523,6 +523,38 @@ class RefModule:
 GLOBAL_SELF_ATTRS = {}
 
 
+# Attributes deliberately unioned across check modules: `self.prefix` is
+# set per subclass (device, world-writable, ...) and the base class
+# resolves it through the union. Any other attribute taking different
+# literal values in different modules would merge silently into one set,
+# which is a bug, not a feature.
+DELIBERATE_ATTR_UNIONS = frozenset({"prefix"})
+
+
+def self_attr_collisions(modules):
+    """Non-deliberate `self.<attr>` value conflicts across check modules.
+
+    Returns [(attr, {module: sorted values})] for every attribute outside
+    DELIBERATE_ATTR_UNIONS where two modules resolve to different literal
+    value sets. An empty set means "unknown" (config-driven, parameter) and
+    never collides: only differing literal sets are reported.
+    """
+    by_attr = {}
+    for m in modules:
+        for attr, vals in m.self_attrs.items():
+            by_attr.setdefault(attr, {})[m.modname] = {
+                v.t for v in vals if isinstance(v, S)}
+    out = []
+    for attr in sorted(by_attr):
+        if attr in DELIBERATE_ATTR_UNIONS:
+            continue
+        literal = {m: v for m, v in by_attr[attr].items() if v}
+        if len({frozenset(v) for v in literal.values()}) > 1:
+            out.append((attr, {m: sorted(v)
+                              for m, v in sorted(literal.items())}))
+    return out
+
+
 def resolve_expr(node, mod, func, depth=0, resolving=frozenset()):
     """Resolve an AST expression to a set of values (S/D/Seq/ConfigTable/...).
     `func` is the enclosing FunctionDef or None (module scope)."""
@@ -1010,6 +1042,13 @@ def audit_reference(pkgdir):
             GLOBAL_SELF_ATTRS.setdefault(attr, set()).update(vals)
 
     findings, unresolved = set(), []
+    for attr, mods in self_attr_collisions(modules):
+        detail = ", ".join(f"{m}={v}" for m, v in mods.items())
+        unresolved.append((
+            "(self-attrs)", 0,
+            f"self.{attr} takes different values across modules "
+            f"({detail}): not a deliberate union; resolve by hand",
+        ))
     for mod in modules:
         for node in ast.walk(mod.tree):
             if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
