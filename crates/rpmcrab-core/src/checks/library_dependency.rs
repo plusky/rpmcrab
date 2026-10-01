@@ -11,12 +11,11 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::check::Check;
-use crate::check::basename;
+use crate::check::make_finding;
 use crate::checks::is_match;
 use crate::checks::shared::devel_regex;
 use crate::config::Config;
 use crate::filter::Filter;
-use crate::finding::Finding;
 use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::pkg::pkgfile::is_symlink;
@@ -56,26 +55,6 @@ impl LibraryDependencyCheck {
 
     fn is_devel_pkg(name: &str) -> bool {
         is_match(&devel_regex(), name)
-    }
-
-    /// Build a `Finding` for a package identified by name and arch, mirroring
-    /// the reference's `FakePkg` usage in `after_checks`.
-    fn make_finding(
-        pkg_name: &str,
-        arch: &str,
-        level: Level,
-        check: &str,
-        details: Vec<String>,
-    ) -> Finding {
-        Finding {
-            level,
-            check: check.to_string(),
-            details,
-            badness: 0,
-            pkg_name: basename(pkg_name).to_string(),
-            arch: (!arch.is_empty()).then(|| arch.to_string()),
-            line: None,
-        }
     }
 }
 
@@ -168,22 +147,24 @@ impl Check for LibraryDependencyCheck {
                     // as well, kept faithful.
                     let with_isa = format!("{definition}{}", self.isa);
                     if !requires.iter().any(|r| r == definition || r == &with_isa) {
-                        out.add_info(Self::make_finding(
+                        out.add_info(make_finding(
                             &pkgname,
                             &arch,
                             Level::Error,
                             "no-library-dependency-on",
                             vec![definition.clone(), link.clone()],
+                            None,
                         ));
                         break;
                     }
                 } else {
-                    out.add_info(Self::make_finding(
+                    out.add_info(make_finding(
                         &pkgname,
                         &arch,
                         Level::Error,
                         "no-library-dependency-for",
                         vec![link.clone()],
+                        None,
                     ));
                     break;
                 }

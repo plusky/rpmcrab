@@ -39,18 +39,41 @@ pub fn add_info_at(
     check: &str,
     details: &[&str],
 ) {
-    out.add_info(Finding {
+    out.add_info(make_finding(
+        &pkg.name,
+        &pkg.arch,
+        level,
+        check,
+        details.iter().map(|d| (*d).to_string()).collect(),
+        line,
+    ));
+}
+
+/// One [`Finding`] with the package context filled in the way
+/// `filter.py:121-156` derives it: the basename of the package name, the arch
+/// dropped when empty, and a zero badness that scoring fills in at emit time.
+/// Checks that lint without a `Pkg` at hand (cross-package `after_checks`)
+/// build findings through this instead of repeating the derivation.
+pub(crate) fn make_finding(
+    pkg_name: &str,
+    arch: &str,
+    level: Level,
+    check: &str,
+    details: Vec<String>,
+    line: Option<u32>,
+) -> Finding {
+    Finding {
         level,
         check: check.to_string(),
-        details: details.iter().map(|d| (*d).to_string()).collect(),
+        details,
         // Scoring decides the real badness at emit time (`Filter::add_info`).
         badness: 0,
         // `Path(package.name).name`: the header NAME, not the path we were
         // handed, so a findings block never leaks the working directory.
-        pkg_name: basename(&pkg.name).to_string(),
-        arch: (!pkg.arch.is_empty()).then(|| pkg.arch.clone()),
+        pkg_name: basename(pkg_name).to_string(),
+        arch: (!arch.is_empty()).then(|| arch.to_string()),
         line,
-    });
+    }
 }
 
 /// [`add_info`] for `.spec` inputs: the file part is the spec's basename and
@@ -64,17 +87,14 @@ pub fn spec_add_info(
     check: &str,
     details: &[&str],
 ) {
-    out.add_info(Finding {
+    out.add_info(make_finding(
+        &pkg.name,
+        "",
         level,
-        check: check.to_string(),
-        details: details.iter().map(|d| (*d).to_string()).collect(),
-        // Scoring decides the real badness at emit time (`Filter::add_info`).
-        badness: 0,
-        // `Path(package.name).name`, as for binary findings.
-        pkg_name: basename(&pkg.name).to_string(),
-        arch: None,
+        check,
+        details.iter().map(|d| (*d).to_string()).collect(),
         line,
-    });
+    ));
 }
 
 /// `PurePath(name).name` — rpmlint prints the basename of the package name.
