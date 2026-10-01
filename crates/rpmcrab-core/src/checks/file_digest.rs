@@ -6,10 +6,9 @@
 //! `{type}-file-ghost`, `{type}-file-symlink`, `{type}-file-parse-error`,
 //! `{type}-whitelisted-file-missing`.
 //!
-//! Supports three digesters: `default` (raw bytes), `shell` (strip comments/
-//! whitespace) and `systemd-socket` (socket unit keys). The `xml` digester is
-//! disabled pending a C14N-conformant implementation (see the parity ledger);
-//! entries selecting it are treated as skipped.
+//! Supports four digesters: `default` (raw bytes), `shell` (strip comments/
+//! whitespace), `xml` (C14N 1.0 canonicalization, see `file_digest_xml`) and
+//! `systemd-socket` (socket unit keys).
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -112,6 +111,20 @@ fn normalize_shebang(line: &str) -> String {
         }
     }
     result
+}
+
+/// XML: digest the C14N 1.0 canonical form (comments, XML declaration
+/// and insignificant whitespace removed), mirroring the reference
+/// `XmlDigester` (`ET.canonicalize(strip_text=True)`).
+struct XmlDigester;
+
+impl Digester for XmlDigester {
+    fn digest(&self, path: &str, algorithm: &str) -> Result<String, String> {
+        let canonical = super::file_digest_xml::canonicalize_file(path)?;
+        let mut hasher = new_hasher(algorithm)?;
+        hasher.update(&canonical);
+        Ok(hex::encode(hasher.finalize()))
+    }
 }
 
 /// Systemd socket unit: hash only the relevant `[Socket]` keys.
@@ -688,8 +701,7 @@ impl FileDigestCheck {
                         .get("digester")
                         .and_then(|v| v.as_str())
                         .unwrap_or("default");
-                    // `xml` stays a known name (validated here) but is
-                    // disabled at digest time; see `check_digest`.
+
                     if !matches!(digester, "default" | "shell" | "xml" | "systemd-socket") {
                         panic!("FileDigestCheck: invalid digester \"{digester}\" for path {path}");
                     }
@@ -821,6 +833,7 @@ impl FileDigestCheck {
         let digester: Box<dyn Digester> = match digester_name {
             "default" => Box::new(DefaultDigester),
             "shell" => Box::new(ShellDigester),
+            "xml" => Box::new(XmlDigester),
             "systemd-socket" => Box::new(SocketUnitDigester),
             _ => return Err(format!("unknown digester: {digester_name}")),
         };
@@ -851,10 +864,7 @@ impl FileDigestCheck {
         pkg: &Pkg,
         info: &DigestInfo,
     ) -> Result<(bool, Option<String>), String> {
-        // The `xml` digester is disabled pending a C14N-conformant
-        // implementation (parity ledger): treat its entries as skipped
-        // rather than emitting mismatch false positives.
-        if info.algorithm == "skip" || info.digester == "xml" {
+        if info.algorithm == "skip" {
             return Ok((true, None));
         }
         let Some(pkgfile) = self.resolve_pkgfile(pkg, &info.path) else {
@@ -1817,35 +1827,269 @@ Locations = ["/m"]
         }
     }
 
-    /// Entries selecting the disabled `xml` digester are skipped: no digest
-    /// is computed and no mismatch is reported (plusky/rpmcrab#75).
+    /// XML digests match the reference's `ET.canonicalize(strip_text=True)`
+    /// byte-for-byte across the C14N edge cases (plusky/rpmcrab#75).
     #[test]
-    fn xml_digester_entries_are_skipped() {
-        let dir = std::env::temp_dir().join("rpmcrab-fd-xmlskip");
+    fn xml_digester_matches_reference_parity() {
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "basic.xml",
+                r#"<?xml version="1.0"?>
+<root>
+  <child name="b" id="a">text</child>
+</root>
+"#,
+                "4275d6a6b56026cffb21c77c6cd82caf46fe3a5080a4177bac54fb791ef0787f",
+            ),
+            (
+                "attrs.xml",
+                r#"<root z="1" a="2" m="3"><e b="x" a="y"/></root>"#,
+                "7e560bc59e6ce8240eff4e218c7c1a3b083c9c0185e120f433732121fcc5350a",
+            ),
+            (
+                "ns.xml",
+                r#"<root xmlns="http://default" xmlns:p="http://p"><p:child p:attr="1" plain="2">t</p:child></root>"#,
+                "7000ae21521841243bf4bbe7546073c698a4aba4736c6d0f237af8983ce47dec",
+            ),
+            (
+                "ns-nested.xml",
+                r#"<a xmlns:n="http://n"><b><n:c n:x="1" y="2"/></b></a>"#,
+                "8d5733dc977d17bc11a0c7e2a048e7901cca7f45289a492af64dd004ea679899",
+            ),
+            (
+                "comments.xml",
+                r#"<root><!-- a comment --><child>text</child><!-- another --></root>"#,
+                "652555980f2fadab20e2f4aa955cd1debac5b392fce42968b387c40f4514be0f",
+            ),
+            (
+                "pi.xml",
+                r#"<?xml version="1.0"?><?php echo "hi"; ?><root><?target data?><c/></root>"#,
+                "7de74885c43f6491efd9eb7640f2066e9e8b91cbe50f64180eef929ff46f16c5",
+            ),
+            (
+                "cdata.xml",
+                r#"<root><c><![CDATA[<raw>&stuff]]></c></root>"#,
+                "3b7e314a9e3af8a41a1b320d79815cd51c77ee07f3999ba8a6c754a4a17f13ee",
+            ),
+            (
+                "ws.xml",
+                r#"<root>   <a>  x  </a>   <b>y</b>   </root>"#,
+                "b8e7015e474048a694ce15755c0cd269eb0ce445b41cc9bd2941a7957a83d029",
+            ),
+            (
+                "mixed.xml",
+                r#"<root>before<e/>after</root>"#,
+                "a41436cf65ce830b9d4a109a22403b065b72a06deff80cf63346525119538e02",
+            ),
+            (
+                "entities.xml",
+                r#"<root><e>&lt;&gt;&amp;&quot;&apos;</e></root>"#,
+                "12004dc33491825f575039629a37e0b893e5717177974aabe7a0b111d655b375",
+            ),
+            (
+                "empty.xml",
+                r#"<root><a/><b></b></root>"#,
+                "eed4b1812e316b74d5c8b1a571e8d5f92c9d4d92678f2988df43157bb005ca38",
+            ),
+            (
+                "doctype.xml",
+                r#"<!DOCTYPE root [<!ENTITY foo "bar">]><root>&foo;<e a="1"/></root>"#,
+                "8a009794a7ea24dbc0bf35daf3214b930cd0ce3ada15f9f8d7f7db71fc0e20c1",
+            ),
+            (
+                "attr-ns-sort.xml",
+                r#"<r xmlns:a="http://a" xmlns:b="http://b" xmlns="http://d"><e b:y="1" a:x="2" z="3" a:w="4"/></r>"#,
+                "ac549833aeff54c95e8f35fb04a868107de8f1491be39972be529b47094b568f",
+            ),
+            (
+                "urisort.xml",
+                r#"<r xmlns:z="http://a" xmlns:a="http://z"><e z:x="1" a:y="2"/></r>"#,
+                "d3d0d20dcb638402402d549e737773e1e4d71641fee8811eef68d921cbad18b7",
+            ),
+            (
+                "nested-default-ns.xml",
+                r#"<root xmlns="http://d"><a xmlns=""><b xmlns="http://d2">x</b></a></root>"#,
+                "d0ba2f0c1e5814f92d099a14dd97da8b88767b4393d630d5dd98267efb1bcc19",
+            ),
+            (
+                "dup-prefix.xml",
+                r#"<a xmlns:p="http://p1"><b xmlns:p="http://p2"><p:c/></b></a>"#,
+                "f684a8e2dc85f693ee3b4d5f37c1c910ee6bcae9180a19531714842a18e05b01",
+            ),
+            (
+                "cr.xml",
+                r#"<root><e>line1
+line2
+last</e></root>"#,
+                "ac1a3d2cef349d7d1489af9f1998334ea4dd560251b28c6a1e408a6b029b8f95",
+            ),
+            (
+                "attr-ws.xml",
+                r#"<root><e a="x	y&#10;z"/></root>"#,
+                "ef663126548c61fc033a0f431ad1d84a69c42273a64a89719e3d0fd6357e54ec",
+            ),
+            (
+                "v_attr-tab-charref.xml",
+                r#"<r><e a="&#9;"/></r>"#,
+                "5b6a9bb5f1e646cdffd34e223f03d4fa8362bf3b36c7358189545f3b87576913",
+            ),
+            (
+                "v_attr-cr-charref.xml",
+                r#"<r><e a="&#13;"/></r>"#,
+                "7dc3856e285707dcd8a2b331b1dc81bd27fd429ccc6d6dac951bc0cbb0f1fd7d",
+            ),
+            (
+                "v_nested-entity.xml",
+                r#"<!DOCTYPE r [<!ENTITY a "x"><!ENTITY b "&a;y">]><r>&b;</r>"#,
+                "23b515e2cdd31abb313839cfa7be009d54e61f6d875c511367bdfa02414b051d",
+            ),
+            (
+                "unicode.xml",
+                r#"<root><e>café 中文</e></root>"#,
+                "c197bb6f13d4eddd69c3d9fa5bdb51f1ee6c8151fe2f3e26bd544f7055fbd627",
+            ),
+            (
+                "xmllang.xml",
+                r#"<root xml:lang="en"><e xml:space="preserve">x</e></root>"#,
+                "23b7cae1caadffe701d0abfbdcb0344375adcd8d2e73e0d93c418ffc277ed3f9",
+            ),
+            (
+                "v_sortxml.xml",
+                r#"<r xmlns:a="http://a"><e z="1" xml:lang="en" a:b="2"/></r>"#,
+                "6fdf445fb786d41647f544ccd4d174dc97be2602e367c887e6fc0a5f7213097f",
+            ),
+            (
+                "toppi.xml",
+                r#"<?a 1?>
+<?b 2?>
+<root/>"#,
+                "e2155754846daa07e16f1750ef1489bb3577ad92fc715c37d28c5ddf29e0bb20",
+            ),
+            (
+                "t_pi-ws.xml",
+                r#"<?a?>
+
+<root/>"#,
+                "af6a411435bb3e9fdf1fe5e772bc00ec4cb21e72cb675126601edb0291ffc8d9",
+            ),
+            (
+                "y_pi-split.xml",
+                r#"<a>  x  <?p d?>  y  </a>"#,
+                "6491ff2a30b1d46fcc29220d4f6048221f2e3db213cd8b4dd5f7caa417c59097",
+            ),
+            (
+                "y_comment-split.xml",
+                r#"<a>  x  <!--c-->  y  </a>"#,
+                "79d87be9bd527f8e1ab2af7443e3768535409246b7d9979386adaeca1697af54",
+            ),
+            (
+                "y_cdata-split.xml",
+                r#"<a>  x  <![CDATA[ y ]]>  z  </a>"#,
+                "70890ba60ce3deebce3171ec0ce964e1fc68d4d763e40b89480f0f25065b440d",
+            ),
+            (
+                "s_t1.xml",
+                r#"<a>x <b/> y</a>"#,
+                "4c4c64dbe903ad3273cf5e4a157fdbc261f28867eb46bb45073afb1b2fccccf0",
+            ),
+            (
+                "v_nbsp.xml",
+                r#"<r><e> x </e></r>"#,
+                "ad926dabb729569ba83458b620101122db2a154ebc4a8f1a217e81d95246a9bf",
+            ),
+            (
+                "x_v11.xml",
+                r#"<?xml version="1.1"?><r><e>x</e></r>"#,
+                "ad926dabb729569ba83458b620101122db2a154ebc4a8f1a217e81d95246a9bf",
+            ),
+        ];
+        for (name, xml, expected) in cases {
+            let dir = std::env::temp_dir().join("rpmcrab-fd-xmlparity");
+            std::fs::create_dir_all(&dir).expect("tmpdir");
+            let path = dir.join(name);
+            std::fs::write(&path, xml).expect("write fixture");
+            let canonical =
+                crate::checks::file_digest_xml::canonicalize_file(path.to_str().unwrap())
+                    .unwrap_or_else(|e| panic!("{name}: canonicalize failed: {e}"));
+            let digest = sha256_hex(&canonical);
+            assert_eq!(digest, *expected, "{name}: digest mismatch");
+        }
+    }
+    /// The `xml` digester verifies through `check_digest`: a matching hash
+    /// passes silently, a wrong one reports `{type}-file-digest-mismatch`.
+    #[test]
+    fn xml_digester_verifies_and_mismatches() {
+        let dir = std::env::temp_dir().join("rpmcrab-fd-xmlverify");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("tmpdir");
-        let content = b"<a><b>x</b></a>\n";
-        let ondisk = write_temp(&dir, "login", content);
+        let content = b"<?xml version=\"1.0\"?>\n<busconfig>\n  <!-- comment -->\n  <policy/>\n</busconfig>\n";
+        let ondisk = write_temp(&dir, "test.conf", content);
+        // sha256 of the C14N form `<busconfig><policy></policy></busconfig>`.
+        let good = sha256_hex(b"<busconfig><policy></policy></busconfig>");
+
+        let extra = format!(
+            r#"
+[[FileDigestGroup]]
+type = "pam"
+package = "testpkg"
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/test.conf"
+algorithm = "sha256"
+digester = "xml"
+hash = "{good}"
+"#
+        );
+        let config = test_config(&extra);
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![pkgfile("/etc/pam.d/test.conf", &ondisk, 0o100644)];
+
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        assert!(
+            !results.iter().any(|(n, _)| n == "pam-file-digest-mismatch"),
+            "matching xml digest must not mismatch, got {results:?}"
+        );
+
+        let extra_bad = extra.replace(&good, "deadbeef");
+        let config_bad = test_config(&extra_bad);
+        let mut check_bad = FileDigestCheck::new(&config_bad);
+        let results_bad = run_check(&pkg, &config_bad, &mut check_bad);
+        assert!(
+            results_bad
+                .iter()
+                .any(|(n, _)| n == "pam-file-digest-mismatch"),
+            "wrong xml digest must mismatch, got {results_bad:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Malformed XML surfaces as `{type}-file-parse-error`, like the reference.
+    #[test]
+    fn xml_digester_parse_error() {
+        let dir = std::env::temp_dir().join("rpmcrab-fd-xmlparseerr");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let ondisk = write_temp(&dir, "bad.conf", b"<busconfig><unclosed>");
 
         let extra = r#"
 [[FileDigestGroup]]
 type = "pam"
 package = "testpkg"
 [[FileDigestGroup.digests]]
-path = "/etc/pam.d/login"
+path = "/etc/pam.d/bad.conf"
 algorithm = "sha256"
 digester = "xml"
 hash = "deadbeef"
 "#;
         let config = test_config(extra);
         let mut pkg = fixture_pkg();
-        pkg.files = vec![pkgfile("/etc/pam.d/login", &ondisk, 0o100644)];
+        pkg.files = vec![pkgfile("/etc/pam.d/bad.conf", &ondisk, 0o100644)];
 
         let mut check = FileDigestCheck::new(&config);
         let results = run_check(&pkg, &config, &mut check);
         assert!(
-            !results.iter().any(|(n, _)| n == "pam-file-digest-mismatch"),
-            "xml entry must not mismatch, got {results:?}"
+            results.iter().any(|(n, _)| n == "pam-file-parse-error"),
+            "malformed xml must be a parse error, got {results:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

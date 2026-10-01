@@ -18,8 +18,9 @@ fn core_root() -> PathBuf {
 }
 
 /// Modules declared in `checks/mod.rs`, excluding the helper modules (they hold no
-/// `Check` of their own: `shared` is reached through `super::shared`, and
-/// `file_metadata` only ever backs `DeviceFilesCheck`/`WorldWritableCheck`).
+/// `Check` of their own: `shared` is reached through `super::shared`,
+/// `file_metadata` only ever backs `DeviceFilesCheck`/`WorldWritableCheck`,
+/// and `file_digest_xml` only ever backs `FileDigestCheck`).
 fn declared_modules() -> Vec<String> {
     let src = std::fs::read_to_string(core_root().join("src/checks/mod.rs")).expect("read mod.rs");
     let modules: Vec<String> = src
@@ -27,7 +28,7 @@ fn declared_modules() -> Vec<String> {
         .filter_map(|l| l.trim().strip_prefix("pub mod "))
         .filter_map(|l| l.strip_suffix(';'))
         .map(str::to_string)
-        .filter(|m| m != "shared" && m != "file_metadata")
+        .filter(|m| m != "shared" && m != "file_metadata" && m != "file_digest_xml")
         .collect();
     let mut sorted = modules.clone();
     sorted.sort_unstable();

@@ -14,6 +14,7 @@ pub mod duplicates;
 pub mod erlang;
 pub mod fhs;
 pub mod file_digest;
+pub mod file_digest_xml;
 pub mod file_metadata;
 pub mod filelist;
 pub mod files;
