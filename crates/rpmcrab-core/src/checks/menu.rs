@@ -1,0 +1,521 @@
+//! `MenuCheck` — legacy menu file validation.
+//!
+//! Ported from `rpmlint/checks/MenuCheck.py`. The reference preprocesses
+//! menu files with `/lib/cpp`; this port does the equivalent natively
+//! (strip `#` comment lines, join backslash continuations) so no subprocess
+//! is needed.
+
+use fancy_regex::Regex;
+
+use crate::check::{Check, add_info};
+use crate::checks::is_match;
+use crate::config::Config;
+use crate::filter::Filter;
+use crate::level::Level;
+use crate::pkg::Pkg;
+use crate::pkg::pkgfile::is_reg;
+use librpm::Tag;
+
+pub struct MenuCheck {
+    valid_sections: Vec<String>,
+    standard_needs: Vec<String>,
+    icon_paths: Vec<(String, String, String)>,
+    launchers: Vec<(String, Regex, Vec<String>)>,
+    icon_ext_regex: Regex,
+}
+
+impl MenuCheck {
+    pub fn new(config: &Config) -> Self {
+        let get_str_list = |key: &str| {
+            config
+                .configuration
+                .get(key)
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let icon_paths: Vec<(String, String, String)> = config
+            .configuration
+            .get("IconPath")
+            .and_then(|v| v.as_table())
+            .map(|t| {
+                t.iter()
+                    .map(|(k, v)| {
+                        let path = v
+                            .get("path")
+                            .and_then(|p| p.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let typ = v
+                            .get("type")
+                            .and_then(|p| p.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        (k.clone(), path, typ)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let launchers: Vec<(String, Regex, Vec<String>)> = config
+            .configuration
+            .get("MenuLaunchers")
+            .and_then(|v| v.as_table())
+            .map(|t| {
+                t.iter()
+                    .filter_map(|(k, v)| {
+                        let regexp = v.get("regexp")?.as_str()?;
+                        let binaries = v
+                            .get("binaries")
+                            .and_then(|b| b.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        Some((
+                            k.clone(),
+                            Regex::new(regexp).expect("launcher regex"),
+                            binaries,
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let icon_ext = config
+            .configuration
+            .get("IconFilename")
+            .and_then(|v| v.as_str())
+            .unwrap_or(r".*\.png$");
+        Self {
+            valid_sections: get_str_list("ValidMenuSections"),
+            standard_needs: get_str_list("ExtraMenuNeeds"),
+            icon_paths,
+            launchers,
+            icon_ext_regex: Regex::new(icon_ext).expect("icon regex"),
+        }
+    }
+
+    /// Native equivalent of the reference's `/lib/cpp` preprocessing: drop
+    /// `#` comment lines and join backslash continuations.
+    fn preprocess(content: &str) -> String {
+        let mut out = String::new();
+        let mut pending = String::new();
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') && pending.is_empty() {
+                continue;
+            }
+            if let Some(stripped) = line.strip_suffix('\\') {
+                pending.push_str(stripped);
+            } else {
+                pending.push_str(line);
+                out.push_str(&pending);
+                out.push('\n');
+                pending.clear();
+            }
+        }
+        if !pending.is_empty() {
+            out.push_str(&pending);
+            out.push('\n');
+        }
+        out
+    }
+
+    fn menu_file_regex() -> Regex {
+        Regex::new(r"^/usr/lib/menu/([^/]+)$").expect("static regex")
+    }
+    fn old_menu_file_regex() -> Regex {
+        Regex::new(r"^/usr/share/(gnome/apps|applnk)/([^/]+)$").expect("static regex")
+    }
+    fn xpm_ext_regex() -> Regex {
+        Regex::new(r"/usr/share/icons/(mini/|large/).*\.xpm$").expect("static regex")
+    }
+    fn update_menus_regex() -> Regex {
+        Regex::new(r"(?m)^[^#]*update-menus").expect("static regex")
+    }
+}
+
+impl Check for MenuCheck {
+    fn name(&self) -> &'static str {
+        "MenuCheck"
+    }
+
+    fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
+        let mut menus: Vec<String> = Vec::new();
+        let none_regex = Regex::new("None\",").expect("static regex");
+
+        for pkgfile in &pkg.files {
+            let fname = pkgfile.name.as_str();
+            let mode = pkgfile.mode;
+            if let Some(caps) = Self::menu_file_regex().captures(fname).ok().flatten() {
+                let basename = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+                if !is_reg(mode) {
+                    add_info(out, Level::Error, pkg, "non-file-in-menu-dir", &[fname]);
+                } else {
+                    if basename != pkg.name {
+                        add_info(
+                            out,
+                            Level::Warning,
+                            pkg,
+                            "non-coherent-menu-filename",
+                            &[fname],
+                        );
+                    }
+                    if mode & 0o444 != 0o444 {
+                        add_info(out, Level::Error, pkg, "non-readable-menu-file", &[fname]);
+                    }
+                    if mode & 0o111 != 0 {
+                        add_info(out, Level::Error, pkg, "executable-menu-file", &[fname]);
+                    }
+                    menus.push(fname.to_string());
+                }
+            } else if Self::old_menu_file_regex()
+                .captures(fname)
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                if is_reg(mode) {
+                    add_info(out, Level::Error, pkg, "old-menu-entry", &[fname]);
+                }
+            } else {
+                if is_match(&Self::xpm_ext_regex(), fname)
+                    && is_reg(mode)
+                    && pkg.grep(&none_regex, fname).is_none()
+                {
+                    add_info(out, Level::Warning, pkg, "non-transparent-xpm", &[fname]);
+                }
+            }
+            if fname.starts_with("/usr/lib64/menu") {
+                add_info(out, Level::Error, pkg, "menu-in-wrong-dir", &[fname]);
+            }
+        }
+
+        if menus.is_empty() {
+            return;
+        }
+
+        let postin = pkg
+            .tag_str(Tag::POSTIN)
+            .unwrap_or_else(|| pkg.scriptprog(Tag::POSTINPROG));
+        if postin.is_empty() {
+            add_info(out, Level::Error, pkg, "menu-without-postin", &[]);
+        } else if !is_match(&Self::update_menus_regex(), &postin) {
+            add_info(out, Level::Error, pkg, "postin-without-update-menus", &[]);
+        }
+        let postun = pkg
+            .tag_str(Tag::POSTUN)
+            .unwrap_or_else(|| pkg.scriptprog(Tag::POSTUNPROG));
+        if postun.is_empty() {
+            add_info(out, Level::Error, pkg, "menu-without-postun", &[]);
+        } else if !is_match(&Self::update_menus_regex(), &postun) {
+            add_info(out, Level::Error, pkg, "postun-without-update-menus", &[]);
+        }
+
+        let file_names: Vec<&str> = pkg.files.iter().map(|f| f.name.as_str()).collect();
+        let req_names: Vec<&str> = pkg.req_names.iter().map(String::as_str).collect();
+
+        for f in &menus {
+            let content = pkg.read_file(f);
+            let text = Self::preprocess(&content);
+            for line in text.lines() {
+                if !line.starts_with('?') {
+                    continue;
+                }
+                self.check_menu_line(pkg, out, f, line, &file_names, &req_names);
+            }
+        }
+    }
+}
+
+impl MenuCheck {
+    /// Check a menu title for capitalization, version, and slashes.
+    fn check_title(
+        &self,
+        pkg: &Pkg,
+        out: &mut Filter,
+        version_re: &Regex,
+        title: &str,
+        long: bool,
+    ) {
+        if title.chars().next().map(|c| c.is_uppercase()) == Some(false) {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                if long {
+                    "menu-longtitle-not-capitalized"
+                } else {
+                    "menu-title-not-capitalized"
+                },
+                &[title],
+            );
+        }
+        if is_match(version_re, title) {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                if long {
+                    "version-in-menu-longtitle"
+                } else {
+                    "version-in-menu-title"
+                },
+                &[title],
+            );
+        }
+        if !long && title.contains('/') {
+            add_info(out, Level::Error, pkg, "invalid-title", &[title]);
+        }
+    }
+
+    /// Check one `?package(...)` menu entry line.
+    fn check_menu_line(
+        &self,
+        pkg: &Pkg,
+        out: &mut Filter,
+        fname: &str,
+        line: &str,
+        files: &[&str],
+        req_names: &[&str],
+    ) {
+        let package_re = Regex::new(r"\?package\((.*)\):").expect("static regex");
+        let command_re = Regex::new(r#"command=(?:"([^"]+)"|([^ \t]+))"#).expect("static regex");
+        let longtitle_re =
+            Regex::new(r#"longtitle=(?:"([^"]+)"|([^ \t]+))"#).expect("static regex");
+        let title_re = Regex::new(r#"["\s]title=(?:"([^"]+)"|([^ \t]+))"#).expect("static regex");
+        let needs_re = Regex::new(r#"needs=("[^"]+"|([^ \t"]+))"#).expect("static regex");
+        let section_re = Regex::new(r#"section=("[^"]+"|([^ \t"]+))"#).expect("static regex");
+        let icon_re = Regex::new(r#"icon="?([^" ]+)"#).expect("static regex");
+        let version_re = Regex::new(r"([0-9.][0-9.]+)($|\s)").expect("static regex");
+        let xdg_re = Regex::new(r#"xdg="?([^" ]+)"#).expect("static regex");
+
+        match package_re.captures(line).ok().flatten() {
+            Some(caps) => {
+                let package = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+                if package != pkg.name {
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "incoherent-package-value-in-menu",
+                        &[package, fname],
+                    );
+                }
+            }
+            None => {
+                add_info(out, Level::Info, pkg, "unable-to-parse-menu-entry", &[line]);
+            }
+        }
+
+        let mut command: Option<String> = None;
+        match command_re.captures(line).ok().flatten() {
+            Some(caps) => {
+                let cmd_line = caps
+                    .get(1)
+                    .or_else(|| caps.get(2))
+                    .map(|m| m.as_str())
+                    .unwrap_or("");
+                let mut parts = cmd_line.split_whitespace();
+                let mut cmd = parts.next().unwrap_or("").to_string();
+                for (launcher_name, launcher_re, binaries) in &self.launchers {
+                    let _ = launcher_name;
+                    if !is_match(launcher_re, &cmd) {
+                        continue;
+                    }
+                    if !binaries.is_empty() {
+                        let found = ["/bin/", "/usr/bin/", "/usr/X11R6/bin/"]
+                            .iter()
+                            .any(|d| files.contains(&format!("{d}{cmd}").as_str()))
+                            || binaries.iter().any(|b| req_names.contains(&b.as_str()));
+                        if !found {
+                            add_info(
+                                out,
+                                Level::Error,
+                                pkg,
+                                "use-of-launcher-in-menu-but-no-requires-on",
+                                &[&binaries[0]],
+                            );
+                        }
+                    }
+                    cmd = parts.next().unwrap_or("").to_string();
+                    break;
+                }
+                if cmd.starts_with('/') {
+                    if !files.contains(&cmd.as_str()) {
+                        add_info(
+                            out,
+                            Level::Warning,
+                            pkg,
+                            "menu-command-not-in-package",
+                            &[&cmd],
+                        );
+                    }
+                } else if !["/bin/", "/usr/bin/", "/usr/X11R6/bin/"]
+                    .iter()
+                    .any(|d| files.contains(&format!("{d}{cmd}").as_str()))
+                {
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "menu-command-not-in-package",
+                        &[&cmd],
+                    );
+                }
+                command = Some(cmd);
+            }
+            None => {
+                add_info(out, Level::Warning, pkg, "missing-menu-command", &[]);
+            }
+        }
+
+        match longtitle_re.captures(line).ok().flatten() {
+            Some(caps) => {
+                let title = caps
+                    .get(1)
+                    .or_else(|| caps.get(2))
+                    .map(|m| m.as_str())
+                    .unwrap_or("");
+                self.check_title(pkg, out, &version_re, title, true);
+            }
+            None => {
+                add_info(out, Level::Error, pkg, "no-longtitle-in-menu", &[fname]);
+            }
+        }
+        match title_re.captures(line).ok().flatten() {
+            Some(caps) => {
+                let title = caps
+                    .get(1)
+                    .or_else(|| caps.get(2))
+                    .map(|m| m.as_str())
+                    .unwrap_or("");
+                self.check_title(pkg, out, &version_re, title, false);
+            }
+            None => {
+                add_info(out, Level::Error, pkg, "no-title-in-menu", &[fname]);
+            }
+        }
+
+        let mut needs = String::new();
+        match needs_re.captures(line).ok().flatten() {
+            Some(caps) => {
+                let raw = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+                needs = raw.trim_matches('"').to_lowercase();
+                if ["x11", "text", "wm"].contains(&needs.as_str()) {
+                    match section_re.captures(line).ok().flatten() {
+                        Some(scaps) => {
+                            let section = scaps
+                                .get(1)
+                                .map(|m| m.as_str().trim_matches('"'))
+                                .unwrap_or("");
+                            if command.is_some()
+                                && !self.valid_sections.iter().any(|s| s == section)
+                            {
+                                add_info(
+                                    out,
+                                    Level::Error,
+                                    pkg,
+                                    "invalid-menu-section",
+                                    &[section, fname],
+                                );
+                            }
+                        }
+                        None => {
+                            add_info(
+                                out,
+                                Level::Info,
+                                pkg,
+                                "unable-to-parse-menu-section",
+                                &[line],
+                            );
+                        }
+                    }
+                } else if !self.standard_needs.iter().any(|n| n == &needs) {
+                    add_info(out, Level::Info, pkg, "strange-needs", &[&needs, fname]);
+                }
+            }
+            None => {
+                add_info(out, Level::Info, pkg, "unable-to-parse-menu-needs", &[line]);
+            }
+        }
+
+        match icon_re.captures(line).ok().flatten() {
+            Some(caps) => {
+                let icon = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+                if !is_match(&self.icon_ext_regex, icon) {
+                    add_info(out, Level::Warning, pkg, "invalid-menu-icon-type", &[icon]);
+                }
+                if icon.starts_with('/') && needs == "x11" {
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "hardcoded-path-in-menu-icon",
+                        &[icon],
+                    );
+                } else {
+                    for (_, path, typ) in &self.icon_paths {
+                        if !files.contains(&format!("{path}{icon}").as_str()) {
+                            add_info(
+                                out,
+                                Level::Error,
+                                pkg,
+                                &format!("{typ}-icon-not-in-package"),
+                                &[icon, fname],
+                            );
+                        }
+                    }
+                }
+            }
+            None => {
+                add_info(out, Level::Warning, pkg, "no-icon-in-menu", &[]);
+            }
+        }
+
+        match xdg_re.captures(line).ok().flatten() {
+            Some(caps) => {
+                let val = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+                if val.to_lowercase() != "true" {
+                    add_info(out, Level::Error, pkg, "non-xdg-migrated-menu", &[]);
+                }
+            }
+            None => {
+                add_info(out, Level::Error, pkg, "non-xdg-migrated-menu", &[]);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preprocess_strips_comments() {
+        let content = "# comment\n?package(foo): needs=\"x11\"\n";
+        let out = MenuCheck::preprocess(content);
+        assert!(!out.contains("# comment"));
+        assert!(out.contains("?package(foo)"));
+    }
+
+    #[test]
+    fn preprocess_joins_continuations() {
+        let content = "?package(foo): \\\n  needs=\"x11\"\n";
+        let out = MenuCheck::preprocess(content);
+        assert!(out.contains("?package(foo):   needs=\"x11\""));
+    }
+
+    #[test]
+    fn menu_file_regex_matches() {
+        let re = MenuCheck::menu_file_regex();
+        let caps = re.captures("/usr/lib/menu/foo").ok().flatten().unwrap();
+        assert_eq!(caps.get(1).map(|m| m.as_str()), Some("foo"));
+        assert!(re.captures("/usr/lib/menu/a/b").ok().flatten().is_none());
+    }
+}

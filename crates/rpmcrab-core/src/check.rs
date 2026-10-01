@@ -241,6 +241,32 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
         "WorldWritableCheck" => Some(Box::new(
             crate::checks::world_writable::WorldWritableCheck::new(config),
         )),
+        "AlternativesCheck" => Some(Box::new(
+            crate::checks::alternatives::AlternativesCheck::new(config),
+        )),
+        "AppDataCheck" => Some(Box::new(crate::checks::appdata::AppDataCheck::new(config))),
+        "BashismsCheck" => Some(Box::new(crate::checks::bashisms::BashismsCheck::new(
+            config,
+        ))),
+        "FilelistCheck" => Some(Box::new(crate::checks::filelist::FilelistCheck::new(
+            config,
+        ))),
+        "MenuCheck" => Some(Box::new(crate::checks::menu::MenuCheck::new(config))),
+        "MenuXDGCheck" => Some(Box::new(crate::checks::menu_xdg::MenuXDGCheck::new(config))),
+        "PolkitCheck" => Some(Box::new(crate::checks::polkit::PolkitCheck::new(config))),
+        "PythonCheck" => Some(Box::new(crate::checks::python::PythonCheck::new(config))),
+        "SystemdInstallCheck" => Some(Box::new(
+            crate::checks::systemd_install::SystemdInstallCheck::new(config),
+        )),
+        "SystemdTmpfilesCheck" => Some(Box::new(
+            crate::checks::systemd_tmpfiles::SystemdTmpfilesCheck::new(config),
+        )),
+        "SysVInitOnSystemdCheck" => Some(Box::new(
+            crate::checks::sysv_init_on_systemd::SysVInitOnSystemdCheck::new(config),
+        )),
+        "TmpFilesCheck" => Some(Box::new(crate::checks::tmpfiles::TmpFilesCheck::new(
+            config,
+        ))),
         _ => None,
     }
 }

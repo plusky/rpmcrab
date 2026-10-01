@@ -56,10 +56,5 @@ goblin = "0.10"
 # DWARF parsing for BinariesCheck (replaces objdump). Pure Rust.
 gimli = "0.31"
 # XML parsing for DBusPolicyCheck (D-Bus policy files). Pure Rust, MIT.
-quick-xml = "0.42"
-
-[dev-dependencies]
-serde_json = "1"
-# Tests build a header directly (e.g. `Pkg::installed`); the crate already uses
-# librpm, this makes it nameable from integration tests too.
-librpm = { version = "0.6", default-features = false }
+# XML parsing for PolkitCheck (polkit policy files). Pure Rust, MIT.
+quick-xml = "0.37"
