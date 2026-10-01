@@ -112,6 +112,11 @@ impl PolkitCheck {
         let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         let mut reader = Reader::from_str(&content);
         reader.config_mut().trim_text(true);
+        // The reference parses with minidom, which rejects any not-well-formed
+        // XML. quick-xml is laxer by default: count open elements so unclosed
+        // tags at EOF error, and check end-tag names so mismatches error.
+        reader.config_mut().check_end_names = true;
+        let mut depth = 0u32;
         let mut actions = Vec::new();
         let mut current_id: Option<String> = None;
         let mut current_defaults: HashMap<String, String> = HashMap::new();
@@ -122,28 +127,31 @@ impl PolkitCheck {
 
         loop {
             match reader.read_event() {
-                Ok(Event::Start(e)) => match e.name().as_ref() {
-                    "action" => {
-                        in_action = true;
-                        current_id = None;
-                        current_defaults = HashMap::new();
-                        for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == "id" {
-                                current_id = Some(
-                                    attr.normalized_value(XmlVersion::Implicit1_0)
-                                        .map(|v| v.into_owned())
-                                        .unwrap_or_default(),
-                                );
+                Ok(Event::Start(e)) => {
+                    depth += 1;
+                    match e.name().as_ref() {
+                        "action" => {
+                            in_action = true;
+                            current_id = None;
+                            current_defaults = HashMap::new();
+                            for attr in e.attributes().flatten() {
+                                if attr.key.as_ref() == "id" {
+                                    current_id = Some(
+                                        attr.normalized_value(XmlVersion::Implicit1_0)
+                                            .map(|v| v.into_owned())
+                                            .unwrap_or_default(),
+                                    );
+                                }
                             }
                         }
+                        "defaults" if in_action => in_defaults = true,
+                        "allow_any" | "allow_inactive" | "allow_active" if in_defaults => {
+                            current_setting = Some(e.name().as_ref().to_owned());
+                            current_text.clear();
+                        }
+                        _ => {}
                     }
-                    "defaults" if in_action => in_defaults = true,
-                    "allow_any" | "allow_inactive" | "allow_active" if in_defaults => {
-                        current_setting = Some(e.name().as_ref().to_owned());
-                        current_text.clear();
-                    }
-                    _ => {}
-                },
+                }
                 Ok(Event::Text(e)) => {
                     if current_setting.is_some() {
                         current_text.push_str(&e.into_inner());
@@ -158,28 +166,36 @@ impl PolkitCheck {
                         current_text.push(';');
                     }
                 }
-                Ok(Event::End(e)) => match e.name().as_ref() {
-                    "action" => {
-                        if let Some(id) = current_id.take() {
-                            actions.push((id, std::mem::take(&mut current_defaults)));
+                Ok(Event::End(e)) => {
+                    depth = depth.saturating_sub(1);
+                    match e.name().as_ref() {
+                        "action" => {
+                            if let Some(id) = current_id.take() {
+                                actions.push((id, std::mem::take(&mut current_defaults)));
+                            }
+                            in_action = false;
+                            in_defaults = false;
                         }
-                        in_action = false;
-                        in_defaults = false;
+                        "defaults" => in_defaults = false,
+                        name @ ("allow_any" | "allow_inactive" | "allow_active")
+                            if current_setting.as_deref() == Some(name) =>
+                        {
+                            let setting = current_setting.take().expect("guard checked");
+                            let value = quick_xml::escape::unescape(&current_text)
+                                .map(|v| v.into_owned())
+                                .unwrap_or_default();
+                            current_text.clear();
+                            current_defaults.insert(setting, value);
+                        }
+                        _ => {}
                     }
-                    "defaults" => in_defaults = false,
-                    name @ ("allow_any" | "allow_inactive" | "allow_active")
-                        if current_setting.as_deref() == Some(name) =>
-                    {
-                        let setting = current_setting.take().expect("guard checked");
-                        let value = quick_xml::escape::unescape(&current_text)
-                            .map(|v| v.into_owned())
-                            .unwrap_or_default();
-                        current_text.clear();
-                        current_defaults.insert(setting, value);
+                }
+                Ok(Event::Eof) => {
+                    if depth != 0 {
+                        return Err("unclosed element at end of file".to_string());
                     }
-                    _ => {}
-                },
-                Ok(Event::Eof) => break,
+                    break;
+                }
                 Err(e) => return Err(e.to_string()),
                 _ => {}
             }
@@ -282,6 +298,31 @@ mod tests {
             privs.get("org.foo.bar").map(String::as_str),
             Some("auth_admin")
         );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn unclosed_tags_are_an_error() {
+        // The reference parses with minidom and raises on unclosed tags;
+        // quick-xml yields Eof without error unless we count depth.
+        let dir = std::env::temp_dir();
+        let path = dir.join("rpmcrab-polkit-unclosed.policy");
+        std::fs::write(&path, "<policyconfig><action id=\"org.foo.bar\"><defaults>").unwrap();
+        let err = PolkitCheck::parse_actions(path.to_str().unwrap()).expect_err("must err");
+        assert!(err.contains("unclosed"), "unexpected error: {err}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn mismatched_end_tags_are_an_error() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("rpmcrab-polkit-mismatch.policy");
+        std::fs::write(
+            &path,
+            "<policyconfig><action id=\"org.foo.bar\"></defaults></policyconfig>",
+        )
+        .unwrap();
+        assert!(PolkitCheck::parse_actions(path.to_str().unwrap()).is_err());
         std::fs::remove_file(&path).ok();
     }
 
