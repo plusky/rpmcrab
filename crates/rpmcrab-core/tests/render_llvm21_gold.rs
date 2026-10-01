@@ -93,7 +93,7 @@ fn reproduces_llvm21_gold_byte_for_byte() {
     lint.run_package(&mut pkg, true)
         .expect("check dispatch must not fail");
     // version, header arg count, no -t, no -T, duration.
-    let out = lint.render("rpmlint", "2.10.0", 1, false, false, 0.1);
+    let out = lint.render("rpmlint", "2.10.0", 1, false, 0.1);
 
     let expected = "\
 ============================ rpmlint session starts ============================

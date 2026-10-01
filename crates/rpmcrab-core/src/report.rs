@@ -195,26 +195,6 @@ pub fn time_report(
     out
 }
 
-/// `-T`: rpmcrab's own per-check wall-time report. The reference prints CPython
-/// `cProfile` output there, which a Rust port cannot reproduce; this is a
-/// deliberate, clearly-labelled substitute (see `tests/parity/divergences.toml`).
-pub fn profile_report(durations: &[(String, f64)], color: &Color) -> String {
-    let total: f64 = durations.iter().map(|(_, v)| *v).sum();
-    let mut out = String::new();
-    out.push_str(&format!(
-        "{bold}rpmcrab profile report{reset} (per-check wall time; not a CPython cProfile dump)\n",
-        bold = color.bold,
-        reset = color.reset
-    ));
-    let mut rows: Vec<(&str, f64)> = durations.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-    rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    for (check, duration) in rows {
-        out.push_str(&format!("    {check:32} {duration:15.6}\n"));
-    }
-    out.push_str(&format!("    {:32} {total:15.6}\n", "TOTAL"));
-    out
-}
-
 /// Python's `format(s, '32s')`: pad right to `width`, never truncate.
 fn pad_right(s: &str, width: usize) -> String {
     format!("{s:<width$}")
@@ -345,20 +325,6 @@ mod tests {
             rows[4],
             "    TOTAL                                        2.0             100.0            300"
         );
-    }
-
-    #[test]
-    fn profile_report_is_labelled_and_has_no_thresholds() {
-        let out = profile_report(
-            &durations(&[("FilesCheck", 1.0), ("TinyCheck", 0.000001)]),
-            &Color::for_tty(false),
-        );
-        assert!(out.starts_with(
-            "rpmcrab profile report (per-check wall time; not a CPython cProfile dump)\n"
-        ));
-        // Unlike -t, nothing is filtered out.
-        assert!(out.contains("TinyCheck"));
-        assert!(out.contains("    TOTAL                                   1.000001\n"));
     }
 
     #[test]

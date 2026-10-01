@@ -334,12 +334,16 @@ dead); openSUSE sets `999`.
 
 ### 4.10 CLI flags
 
-Every flag rpmlint 2.10.0 accepts, with aliases, is accepted: positionals
-(with per-arg `*`/`?` globbing, re-expanded and sorted, only `.rpm`/`.spm`/
-`.spec`), `-V/--version`, `-c/--config`, `-e/--explain`, `-r/--rpmlintrc` +
-`--file` (repeatable), `-v/--verbose` + `--info`, `-p/--print-config`,
-`-i/--installed`, `-t/--time-report`, `-T/--profile`, `--ignore-unused-rpmlintrc`,
-`--checks`, `-s/--strict`, `-P/--permissive` (mutually exclusive with `-s`).
+The CLI follows Tom's rpmlint PR #1595, not the `opensuse` branch's
+option design: positionals (with per-arg `*`/`?` globbing, re-expanded and
+sorted, only `.rpm`/`.spm`/`.spec`), `-V/--version`, `-c/--config`,
+`-e/--explain`, `-r/--rpmlintrc` (repeatable), `-v/--verbose`,
+`-p/--print-config`, `-i/--installed`, `-t/--time-report`,
+`-j/--jobs` (default: machine parallelism; `≤ 0` coerces to 1),
+`--ignore-unused-rpmlintrc`, `--checks`, `-s/--strict`, `-P/--permissive`
+(mutually exclusive with `-s`). Deliberately **not** accepted: `-T/--profile`
+(removed upstream by #1595 as misleading) and the illogical `--file`/`--info`
+aliases (straightened to `-r`/`-v`).
 The SUSE-only **`-m/--mini-mode`** is a real flag (absent upstream; added in
 `46f9d302`, PR #678) that sets `config.mini_mode`. It makes `TagsCheck` skip
 the enchant spellchecker and `SpecCheck` skip `_check_specfile_error` and
@@ -406,8 +410,6 @@ plus, where one exists, a linked upstream issue.
   machine-readable output (long-open RFEs), so every consumer greps human text.
   A stable JSON stream is new surface, added without touching the text format.
 - **A real man page.** rpmlint has none (upstream #1077, open since 2023).
-- **`-T/--profile`.** There is no cProfile in Rust. The flag is accepted, a
-  one-line note points at `--time-report`, and the process exits 0.
 - **Spellcheck backend.** `pyenchant` has no direct Rust equivalent; the
   `spelling-error` check's backend is free to differ or to degrade gracefully.
 - **`--time-report` cosmetics** (not consumed by tooling).

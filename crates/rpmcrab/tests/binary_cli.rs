@@ -205,18 +205,40 @@ fn time_report_flag_prints_the_report() {
     assert!(stdout.contains("Checked files"), "{stdout}");
 }
 
-/// `-T` prints rpmcrab's own profile report, clearly labelled as not a CPython
-/// cProfile dump.
+/// `-T/--profile` is gone: the reference removed it (rpmlint#1595) because
+/// cProfile only ever covered the main process and misled; `--time-report`
+/// aggregates per-check timings instead.
 #[test]
-fn profile_flag_prints_the_rust_report() {
+fn profile_flag_is_rejected() {
+    let out = rpmcrab(&["-T"]);
+    assert_eq!(out.status.code(), Some(2));
+    let out2 = rpmcrab(&["--profile"]);
+    assert_eq!(out2.status.code(), Some(2));
+}
+
+/// The straightened aliases are gone: `-r/--rpmlintrc` and `-v/--verbose` keep
+/// their canonical flags, but the illogical `--file`/`--info` synonyms are
+/// rejected.
+#[test]
+fn straightened_aliases_are_rejected() {
+    assert_eq!(rpmcrab(&["--file", "x"]).status.code(), Some(2));
+    assert_eq!(rpmcrab(&["--info"]).status.code(), Some(2));
+}
+
+/// `-j/--jobs` is accepted and defaults to the machine's parallelism.
+#[test]
+fn jobs_flag_is_accepted() {
     let rpm = corpus_rpm();
-    let out = rpmcrab(&["-T", rpm.to_str().unwrap()]);
-    assert_eq!(out.status.code(), Some(0));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("rpmcrab profile report (per-check wall time"),
-        "stdout: {stdout}"
-    );
+    for args in [&["-j1"][..], &["--jobs", "2"][..]] {
+        let mut full: Vec<&str> = args.to_vec();
+        full.push(rpm.to_str().unwrap());
+        let out = rpmcrab(&full);
+        assert_eq!(out.status.code(), Some(0), "args: {args:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("1 packages and 0 specfiles checked"),
+            "args: {args:?}"
+        );
+    }
 }
 
 /// `--checks` narrows the run; naming a check that exists in the config but is

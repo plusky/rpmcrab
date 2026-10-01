@@ -242,27 +242,20 @@ impl Lint {
         report::time_report(self.check_duration.as_slice(), &files, &self.color)
     }
 
-    /// The `-T` profile report: rpmcrab's own per-check wall time.
-    pub fn profile_report(&self) -> String {
-        report::profile_report(self.check_duration.as_slice(), &self.color)
-    }
-
     /// The report: header, sorted findings, abort banner (if over threshold),
-    /// and — when requested — the time and profile reports, then the footer.
+    /// and — when requested — the time report, then the footer.
     ///
     /// The order is the reference's: results, banner, reports, footer
     /// (`lint.py:94-118`). The header and footer count different things:
     /// `header_packages` is the CLI *argument* count (`len(installed) +
     /// len(rpmfile)`, `lint.py:242`), while the footer counts the packages
     /// actually validated.
-    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
         prog: &str,
         version: &str,
         header_packages: usize,
         time_report: bool,
-        profile: bool,
         duration_secs: f64,
     ) -> String {
         let mut out = String::new();
@@ -287,9 +280,6 @@ impl Lint {
         }
         if time_report {
             out.push_str(&self.time_report());
-        }
-        if profile {
-            out.push_str(&self.profile_report());
         }
         out.push_str(&report::footer(&report::FooterParams {
             packages: self.packages_checked,

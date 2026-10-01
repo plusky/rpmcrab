@@ -63,11 +63,11 @@ struct Cli {
     explain: Vec<String>,
 
     /// A rpmlintrc file (repeatable).
-    #[arg(short = 'r', long = "rpmlintrc", alias = "file", value_name = "path")]
+    #[arg(short = 'r', long = "rpmlintrc", value_name = "path")]
     rpmlintrc: Vec<PathBuf>,
 
     /// Inline explanations (and re-raise internal errors).
-    #[arg(short = 'v', long = "verbose", alias = "info", action = clap::ArgAction::SetTrue)]
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::SetTrue)]
     verbose: bool,
 
     /// Dump the merged configuration as TOML and exit.
@@ -82,9 +82,9 @@ struct Cli {
     #[arg(short = 't', long = "time-report", action = clap::ArgAction::SetTrue)]
     time_report: bool,
 
-    /// Profiling report (accepted; rpmlint uses cProfile).
-    #[arg(short = 'T', long = "profile", action = clap::ArgAction::SetTrue)]
-    profile: bool,
+    /// Number of parallel worker threads for checking packages (1 for sequential).
+    #[arg(short = 'j', long = "jobs", value_name = "n", default_value_t = default_jobs())]
+    jobs: i32,
 
     /// Suppress the `unused-rpmlintrc-filter` audit.
     #[arg(long = "ignore-unused-rpmlintrc", action = clap::ArgAction::SetTrue)]
@@ -105,6 +105,14 @@ struct Cli {
     /// Called from the rpmlint-mini wrapper (SUSE-only).
     #[arg(short = 'm', long = "mini-mode", action = clap::ArgAction::SetTrue)]
     mini_mode: bool,
+}
+
+/// `-j/--jobs` default: the reference uses `os.cpu_count() or 1`
+/// (`cli.py`), so this is the machine's parallelism with a fallback of 1.
+fn default_jobs() -> i32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get() as i32)
+        .unwrap_or(1)
 }
 
 /// Parse arguments and run the linter, returning the process exit code.
@@ -380,7 +388,6 @@ pub fn run() -> ExitCode {
         RPMLINT_VERSION,
         arg_count,
         cli.time_report,
-        cli.profile,
         duration,
     );
     print!("{out}");
