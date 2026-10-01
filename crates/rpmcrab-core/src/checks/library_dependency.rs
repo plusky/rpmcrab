@@ -85,9 +85,10 @@ impl Check for LibraryDependencyCheck {
                 .map(|d| d.name.clone())
                 .collect();
             // Keyed on `pkg.name` alone, like the reference's dicts
-            // (`LibraryDependencyCheck.py:46-52`): linting two arches of the
-            // same package together makes each clobber the other, there as
-            // here. Inherited upstream quirk, kept for parity.
+            // (`LibraryDependencyCheck.py:37-39`): linting two arches of the
+            // same package together, the second overwrites the first - one
+            // finding survives, for the last arch seen. Inherited upstream
+            // quirk, kept for parity.
             let first_seen = self
                 .package_requires
                 .insert(pkg.name.clone(), requires)
