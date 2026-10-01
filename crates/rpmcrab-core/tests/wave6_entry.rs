@@ -12,9 +12,12 @@ use std::path::PathBuf;
 
 use rpmcrab_core::check::Check;
 use rpmcrab_core::checks::alternatives::AlternativesCheck;
+use rpmcrab_core::checks::appdata::AppDataCheck;
+use rpmcrab_core::checks::bashisms::BashismsCheck;
 use rpmcrab_core::checks::filelist::FilelistCheck;
 use rpmcrab_core::checks::menu::MenuCheck;
 use rpmcrab_core::checks::menu_xdg::MenuXDGCheck;
+use rpmcrab_core::checks::polkit::PolkitCheck;
 use rpmcrab_core::checks::python::PythonCheck;
 use rpmcrab_core::checks::systemd_install::SystemdInstallCheck;
 use rpmcrab_core::checks::systemd_tmpfiles::SystemdTmpfilesCheck;
@@ -34,6 +37,12 @@ fn fixture(name: &str) -> PathBuf {
 /// Run one check's `check_binary` over the fixture and return the
 /// `(check_name, rendered_line)` pairs in emission order.
 fn run_check(check: &mut impl Check, rpm: &str) -> Vec<(String, String)> {
+    run_check_with(check, rpm, &Config::default())
+}
+
+/// Like `run_check` but with a caller-supplied config (e.g. to point
+/// `PolkitCheck` at a scratch privs profile instead of the live path).
+fn run_check_with(check: &mut impl Check, rpm: &str, config: &Config) -> Vec<(String, String)> {
     let rpm_path = fixture(rpm);
     assert!(
         rpm_path.is_file(),
@@ -42,9 +51,8 @@ fn run_check(check: &mut impl Check, rpm: &str) -> Vec<(String, String)> {
     );
     let scratch = tempfile::tempdir().unwrap();
     let pkg = Pkg::open(&rpm_path, scratch.path()).unwrap();
-    let config = Config::default();
-    let mut filter = Filter::new(&config, Color::for_tty(false)).unwrap();
-    check.check_binary(&pkg, &config, &mut filter);
+    let mut filter = Filter::new(config, Color::for_tty(false)).unwrap();
+    check.check_binary(&pkg, config, &mut filter);
     filter.results().to_vec()
 }
 
@@ -161,8 +169,9 @@ fn menu_flags_old_menu_entry() {
 
 /// The fixture ships `/usr/local/man/man1/w6.1` and `/var/lib/games/w6.scores`,
 /// which match the absolute Bad patterns `/usr/local/man/*/*` and
-/// `/var/lib/games/*` under fnmatch. The fhs23 rule carries no `IgnorePkgIf`
-/// or `IgnoreFileIf`, so noarch and regular files are both in scope.
+/// `/var/lib/games/*` under fnmatch, plus `/opt/w6provider/bin/w6` for the
+/// `-opt` provider-directory rule. The fhs23 rule carries no `IgnorePkgIf`
+/// or `IgnoreFileIf`, so it applies to every file unconditionally.
 ///
 /// The comparison is on the full package-relative path, not a basename:
 /// `PkgFile.__init__` sets `self.name` and `self.path` to the same value and
@@ -177,6 +186,91 @@ fn filelist_reports_absolute_bad_patterns() {
         &[
             ("filelist-forbidden-fhs23", "/usr/local/man/man1/w6.1"),
             ("filelist-forbidden-fhs23", "/var/lib/games/w6.scores"),
+            // The prefix walk-up: /usr/local/man/man1/w6.1 matches no good
+            // prefix, so the reference reports the first bad component.
+            ("filelist-forbidden-fhs23", "/usr/local"),
+            // /opt/<provider> files are collapsed to the provider dir.
+            ("filelist-forbidden-opt", "/opt/w6provider"),
         ],
+    );
+}
+
+/// `AppDataCheck` validates `/usr/share/appdata/*.xml` with `appstream-util`
+/// when present, else a native well-formedness check. The malformed fixture
+/// file fails both paths; the valid one passes both, so this is independent
+/// of whether the tool is installed.
+#[test]
+fn appdata_reports_malformed_file() {
+    let mut check = AppDataCheck::new(&Config::default());
+    let results = run_check(&mut check, "w6-appdata-1.0-1.noarch.rpm");
+    assert_findings(
+        &results,
+        &[("invalid-appdata-file", "w6broken.appdata.xml")],
+    );
+    assert!(
+        !results.iter().any(|(_, line)| line.contains("w6valid")),
+        "valid appdata file should be quiet: {results:?}"
+    );
+}
+
+/// `BashismsCheck` shells out to real `dash` and `checkbashisms`, which are
+/// packaging-environment tools, not libraries. Gating design: probe the real
+/// PATH up front and skip loudly when either is absent — the check itself
+/// degrades to a no-op without them by design, so a missing tool must never
+/// fail the test. (Unit tests cover the tool probe and exit-code
+/// classification with injected fakes; this pins the entry point.)
+#[test]
+fn bashisms_reports_bashism_script() {
+    let (have_tools, _) = BashismsCheck::detect_tools(None);
+    if !have_tools {
+        eprintln!("skipping: dash and/or checkbashisms not on PATH");
+        return;
+    }
+    let mut check = BashismsCheck::new(&Config::default());
+    let results = run_check(&mut check, "w6-bashisms-1.0-1.noarch.rpm");
+    // `[[ ]]` passes `dash -n` but `checkbashisms` exits 1 on it.
+    assert_findings(&results, &[("potential-bashisms", "w6bashism")]);
+    assert!(
+        !results.iter().any(|(_, line)| line.contains("w6clean")),
+        "clean POSIX script should be quiet: {results:?}"
+    );
+}
+
+/// `PolkitCheck` whitelists actions against a privs profile. The live default
+/// (`/usr/etc/polkit-default-privs/profiles/standard`) must not leak into the
+/// test, so the profile is injected via a scratch `PolkitPrivsFiles` config.
+#[test]
+fn polkit_reports_privilege_findings() {
+    let dir = tempfile::tempdir().unwrap();
+    let privs = dir.path().join("standard");
+    std::fs::write(&privs, "# scratch profile\norg.w6.whitelisted auth_admin\n").unwrap();
+    let mut config = Config::default();
+    config.configuration.insert(
+        "PolkitPrivsFiles".to_string(),
+        toml::Value::Array(vec![toml::Value::String(
+            privs.to_str().unwrap().to_string(),
+        )]),
+    );
+    let mut check = PolkitCheck::new(&config);
+    let results = run_check_with(&mut check, "w6-polkit-1.0-1.noarch.rpm", &config);
+    assert_findings(
+        &results,
+        &[
+            // allow_any=yes, not whitelisted.
+            (
+                "polkit-user-privilege",
+                "org.w6.unprivileged (yes:no:auth_admin)",
+            ),
+            // All settings no/absent: polkit defaults to `no`.
+            ("polkit-untracked-privilege", "org.w6.locked (no:no:no)"),
+            ("polkit-xml-exception", "w6broken.policy"),
+            ("polkit-ghost-file", "w6ghost.policy"),
+        ],
+    );
+    assert!(
+        !results
+            .iter()
+            .any(|(_, line)| line.contains("org.w6.whitelisted")),
+        "whitelisted action should be quiet: {results:?}"
     );
 }

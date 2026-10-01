@@ -37,7 +37,7 @@ impl BashismsCheck {
     ///
     /// `bin_dir` overrides PATH resolution so tests can point the probe at
     /// a scratch directory instead of mutating the process environment.
-    fn detect_tools(bin_dir: Option<&std::path::Path>) -> (bool, bool) {
+    pub fn detect_tools(bin_dir: Option<&std::path::Path>) -> (bool, bool) {
         let tool = |name: &str| match bin_dir {
             Some(dir) => Command::new(dir.join(name)),
             None => Command::new(name),
