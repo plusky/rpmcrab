@@ -211,9 +211,11 @@ impl<'a> Worker<'a> {
         });
         if let Err(e) = checked {
             // Drop state accumulated before the failure so a package that
-            // could not be checked never contributes to `after_checks`.
+            // could not be checked never contributes to `after_checks`, and
+            // reset so the next package on this worker starts clean.
             for check in &mut self.checks {
                 let _ = check.export_state();
+                check.reset();
             }
             return TaskResult::fatal(
                 filter,
@@ -290,7 +292,14 @@ pub fn run_tasks(
     make_checks: &dyn Fn() -> Vec<Box<dyn Check>>,
     color: Color,
 ) -> Vec<TaskResult> {
-    let jobs = jobs.max(1);
+    // Never more workers than tasks, and never more than the machine's
+    // parallelism: each worker builds a full check set up front, so excess
+    // workers only burn memory and startup time, and check work is
+    // CPU-bound, so workers beyond the CPU count add nothing.
+    let max_parallel = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(usize::MAX);
+    let jobs = jobs.max(1).min(tasks.len().max(1)).min(max_parallel);
     // Each worker's check set is built up front; the sets are moved into the
     // threads, so the factory itself is never shared between threads.
     let mut check_sets: Vec<Vec<Box<dyn Check>>> = (0..jobs).map(|_| make_checks()).collect();
@@ -312,9 +321,15 @@ pub fn run_tasks(
             let checks = check_sets.pop().expect("one set per worker");
             s.spawn(move || {
                 let mut worker = Worker::new(config, checks, color);
-                while let Ok((i, task)) =
-                    task_rx.lock().unwrap_or_else(|e| e.into_inner()).recv()
-                {
+                // The lock is released before `check_package` runs: a
+                // `while let` scrutinee temporary lives until the end of
+                // the loop body, which would serialize the pool.
+                loop {
+                    let Ok((i, task)) =
+                        task_rx.lock().unwrap_or_else(|e| e.into_inner()).recv()
+                    else {
+                        break;
+                    };
                     let _ = result_tx.send((i, worker.check_package(task)));
                 }
             });
@@ -328,3 +343,4 @@ pub fn run_tasks(
     results.sort_by_key(|(i, _)| *i);
     results.into_iter().map(|(_, r)| r).collect()
 }
+
