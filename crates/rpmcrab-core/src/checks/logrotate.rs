@@ -127,10 +127,13 @@ impl Check for LogrotateCheck {
             }
         }
 
-        // `dirs` is insertion-ordered, so this is the reference's file order.
-        for (dir, owners) in &dirs {
-            let dir: &str = dir;
-            let Some(pkgfile) = pkg.files.iter().find(|f| f.name == dir) else {
+        // The reference iterates `sorted(dirs.keys())` here (LogrotateCheck.py),
+        // so the explicit sort is parity, not a divergence.
+        let mut sorted: Vec<&String> = dirs.keys().collect();
+        sorted.sort();
+        for dir in sorted {
+            let owners = &dirs[dir];
+            let Some(pkgfile) = pkg.files.iter().find(|f| f.name == *dir) else {
                 // rpmlint#551: /var/log is owned by the filesystem package,
                 // so the not-packaged finding is a false positive for it.
                 // The exemption is scoped to that finding only; a packaged
