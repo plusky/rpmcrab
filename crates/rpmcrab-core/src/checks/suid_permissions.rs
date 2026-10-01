@@ -275,11 +275,12 @@ impl SUIDPermissionsCheck {
         let Some(script) = script else {
             return false;
         };
-        // Reference: `re.search(rf"(chkstat|permctl) -n.* {re.escape(path)}", script)`.
-        // Probe-verified 10/10: fancy-regex matches this exactly like Python
-        // `re`, so the pattern stays as the reference wrote it.
+        // Reference: `re.search(fr'(chkstat|permctl) -n .* {escaped}', line)`
+        // (SUIDPermissionsCheck.py:103). The space after `-n` is load-bearing:
+        // the reference only matches when something separates `-n` from the
+        // path, so a bare `permctl -n /path` is NOT a permctl call there.
         let escaped = fancy_regex::escape(path);
-        let pattern = format!(r"(chkstat|permctl) -n.* {escaped}");
+        let pattern = format!(r"(chkstat|permctl) -n .* {escaped}");
         let Ok(re) = Regex::new(&pattern) else {
             return false;
         };
@@ -892,19 +893,30 @@ mod tests {
 
     #[test]
     fn permctl_call_found() {
-        let script = "#!/bin/sh\npermctl -n /usr/bin/foo\n";
+        // `-n .* <path>` needs something between `-n` and the path, so the
+        // reference matches the two-token form and not the bare one.
         assert!(SUIDPermissionsCheck::lookup_permctl_call(
             "/usr/bin/foo",
-            Some(script)
+            Some("#!/bin/sh\npermctl -n update /usr/bin/foo\n")
+        ));
+        // Bare `-n <path>` does not match the reference either.
+        assert!(!SUIDPermissionsCheck::lookup_permctl_call(
+            "/usr/bin/foo",
+            Some("#!/bin/sh\npermctl -n /usr/bin/foo\n")
+        ));
+        // `-nfoo` glued to the flag does not match.
+        assert!(!SUIDPermissionsCheck::lookup_permctl_call(
+            "/usr/bin/foo",
+            Some("permctl -nfoo /usr/bin/foo\n")
         ));
         assert!(!SUIDPermissionsCheck::lookup_permctl_call(
             "/usr/bin/bar",
-            Some(script)
+            Some("#!/bin/sh\npermctl -n update /usr/bin/foo\n")
         ));
         // chkstat variant from the reference regex.
         assert!(SUIDPermissionsCheck::lookup_permctl_call(
             "/usr/bin/foo",
-            Some("chkstat -n /usr/bin/foo --system\n")
+            Some("chkstat -n update /usr/bin/foo --system\n")
         ));
         assert!(!SUIDPermissionsCheck::lookup_permctl_call(
             "/usr/bin/foo",

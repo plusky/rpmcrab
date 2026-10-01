@@ -66,8 +66,10 @@ impl Digester for ShellDigester {
             }
             if nr == 0 && stripped.starts_with("#!") {
                 // Normalize python3.x to python3.
+                // The reference yields `line.rstrip() + '\n'` from one place
+                // after the substitution, so this branch is rstripped too.
                 let normalized = normalize_shebang(&line);
-                hasher.update(normalized.as_bytes());
+                hasher.update(normalized.trim_end().as_bytes());
                 hasher.update(b"\n");
             } else if stripped.starts_with('#') {
                 continue;
