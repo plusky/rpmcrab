@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use fancy_regex::Regex;
+use indexmap::IndexMap;
 
 use super::is_match;
 use super::shared::{devel_regex, lib_package_regex, macro_regex};
@@ -445,7 +446,7 @@ struct PkgState {
     postun: String,
     preun: String,
     hardlinks: HashMap<(u32, u32), Vec<String>>,
-    bindir_exes: HashMap<String, Vec<String>>,
+    bindir_exes: IndexMap<String, Vec<String>>,
     man_basenames: std::collections::HashSet<String>,
 }
 
@@ -2993,6 +2994,62 @@ mod tests {
                 "/usr/lib/python3.7/foo.py",
             )
             .is_none()
+        );
+    }
+    #[test]
+    fn bindir_exes_emit_in_package_file_order() {
+        let render = || {
+            let dir = tempfile::TempDir::new().expect("tmpdir");
+            let pkg = Pkg::open(
+                std::path::Path::new(&fixture_path("filescheck-depmod-ok-1.0-1.noarch.rpm")),
+                dir.path(),
+            )
+            .expect("open fixture");
+            let config = Config::default();
+            let check = FilesCheck::new(&config);
+            let mut st = PkgState::default();
+            for exe in ["link-alt", "link-up", "link-script", "link-abs"] {
+                st.bindir_exes.entry(exe.to_string()).or_default();
+            }
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_bindir_exes(&pkg, &st, &mut out);
+            out.results()
+                .iter()
+                .map(|(_, line)| line.clone())
+                .collect::<Vec<_>>()
+        };
+        // Two maps built independently in one process draw different hash seeds,
+        // so a HashMap here renders a different order and this fails.
+        assert_eq!(render(), render());
+    }
+
+    #[test]
+    fn bindir_exes_emit_in_the_order_files_were_added() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = Pkg::open(
+            std::path::Path::new(&fixture_path("filescheck-depmod-ok-1.0-1.noarch.rpm")),
+            dir.path(),
+        )
+        .expect("open fixture");
+        let config = Config::default();
+        let check = FilesCheck::new(&config);
+        let mut st = PkgState::default();
+        for exe in ["zzz", "aaa", "mmm"] {
+            st.bindir_exes.entry(exe.to_string()).or_default();
+        }
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_bindir_exes(&pkg, &st, &mut out);
+        let lines: Vec<String> = out.results().iter().map(|(_, l)| l.clone()).collect();
+        let tail = |line: &String| line.rsplit(' ').next().unwrap().to_string();
+        assert_eq!(
+            lines.iter().map(tail).collect::<Vec<_>>(),
+            vec!["zzz", "aaa", "mmm"],
+            "insertion order, not sorted order"
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|l| l.contains("no-manual-page-for-binary"))
         );
     }
 }

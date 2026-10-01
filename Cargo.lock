@@ -650,6 +650,7 @@ dependencies = [
  "fancy-regex",
  "gimli",
  "goblin",
+ "indexmap",
  "librpm",
  "log",
  "quick-xml",

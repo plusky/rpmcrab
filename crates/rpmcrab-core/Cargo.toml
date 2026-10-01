@@ -27,6 +27,7 @@ workspace = true
 librpm = { version = "0.6", default-features = false, features = ["build"] }
 # TOML config + description files.
 serde = { version = "1", features = ["derive"] }
+indexmap = "2"
 toml = { version = "1.1", features = ["preserve_order"] }
 # Filter matching. rpmlint `Filters` are Python `re`, which supports lookahead,
 # lookbehind and backreferences; the `regex` crate rejects those, so a pure-Rust
