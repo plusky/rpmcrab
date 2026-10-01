@@ -40,6 +40,12 @@ produces is not.
   binary and the tests can share it, not a public API commitment.
 - **Not bit-identical to upstream bugs.** Where rpmlint is wrong, rpmcrab is
   right, with a ledger entry.
+- **Not a port of the `rpmdiff` companion binary.** `rpmdiff` diffs two RPM
+  files' metadata for humans; it is a separate binary outside the lint
+  pipeline, and nothing in openSUSE automation consumes it — OBS build
+  comparison runs `build-compare`'s `pkg-diff.sh`, which does deeper,
+  build-noise-normalized content comparison and is intentionally
+  dependency-free. Porting `rpmdiff` would serve no consumer.
 
 ---
 
