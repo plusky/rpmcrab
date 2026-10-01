@@ -204,6 +204,22 @@ impl Filter {
         output
     }
 
+    /// Merge a per-package worker filter into the run's filter, in package
+    /// input order (`_replay_result`). Suppression, scoring and strict
+    /// promotion are deterministic per finding, so concatenating the results
+    /// and summing the counters equals the sequential run exactly.
+    pub fn merge_from(&mut self, other: Filter) {
+        self.results.extend(other.results);
+        self.score += other.score;
+        self.filtered_out += other.filtered_out;
+        self.promoted_to_error += other.promoted_to_error;
+        self.printed_errors += other.printed_errors;
+        self.printed_warnings += other.printed_warnings;
+        self.printed_infos += other.printed_infos;
+        self.used_filters.extend(other.used_filters);
+        self.error_details.extend(other.error_details);
+    }
+
     /// The rpmlintrc filter patterns that never matched (for the
     /// `unused-rpmlintrc-filter` audit; TOML `Filters` are never audited).
     pub fn unused_filters<'a>(&self, rpmlintrc_filters: &'a [String]) -> Vec<&'a str> {

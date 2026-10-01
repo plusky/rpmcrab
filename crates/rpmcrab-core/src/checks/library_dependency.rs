@@ -41,6 +41,18 @@ pub struct LibraryDependencyCheck {
     isa: String,
 }
 
+/// Cross-package state, exported per package and merged before
+/// `after_checks` (`rpmlint#1595`). `devel_order` travels too: the reference
+/// iterates a plain dict (insertion order), which the port pins via this
+/// vector.
+struct LibDepState {
+    package_requires: HashMap<String, Vec<String>>,
+    package_so_symlinks: HashMap<String, Vec<String>>,
+    package_so_files: HashMap<String, String>,
+    package_arch_mapping: HashMap<String, String>,
+    devel_order: Vec<String>,
+}
+
 impl LibraryDependencyCheck {
     pub fn new(_config: &Config) -> Self {
         Self {
@@ -70,6 +82,34 @@ impl Check for LibraryDependencyCheck {
         self.package_so_files.clear();
         self.package_arch_mapping.clear();
         self.isa = expand_isa();
+    }
+
+    fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
+        let state = LibDepState {
+            package_requires: std::mem::take(&mut self.package_requires),
+            package_so_symlinks: std::mem::take(&mut self.package_so_symlinks),
+            package_so_files: std::mem::take(&mut self.package_so_files),
+            package_arch_mapping: std::mem::take(&mut self.package_arch_mapping),
+            devel_order: std::mem::take(&mut self.devel_order),
+        };
+        self.isa = expand_isa();
+        Some(Box::new(state))
+    }
+
+    fn import_state(&mut self, state: Box<dyn std::any::Any + Send>) {
+        // Merging in package input order keeps the reference's dict
+        // insertion order: first-seen package wins the position.
+        if let Ok(state) = state.downcast::<LibDepState>() {
+            self.package_requires.extend(state.package_requires);
+            self.package_so_symlinks.extend(state.package_so_symlinks);
+            self.package_so_files.extend(state.package_so_files);
+            self.package_arch_mapping.extend(state.package_arch_mapping);
+            for name in state.devel_order {
+                if !self.devel_order.contains(&name) {
+                    self.devel_order.push(name);
+                }
+            }
+        }
     }
 
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, _out: &mut Filter) {
@@ -359,4 +399,52 @@ mod tests {
             assert_eq!(scenario(), first, "finding order is not deterministic");
         }
     }
+
+    /// Export/import merges worker state in package order: two workers
+    /// checking disjoint package sets, merged in order, must produce the same
+    /// `after_checks` findings as one sequential run.
+    #[test]
+    fn export_import_merges_in_package_order() {
+        let config = Config::default();
+        let (lib0, devel0) = lib_and_devel_as("libdep0", "libdep0-devel", &[]);
+        let (lib1, devel1) = lib_and_devel_as("libdep1", "libdep1-devel", &[]);
+
+        // Sequential baseline.
+        let mut seq = LibraryDependencyCheck::new(&config);
+        let mut seq_out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        for pkg in [&lib0, &devel0, &lib1, &devel1] {
+            seq.check_binary(pkg, &config, &mut seq_out);
+            seq.reset();
+        }
+        seq.after_checks(&config, &mut seq_out);
+
+        // Two workers, one package pair each, merged in package order.
+        let mut w0 = LibraryDependencyCheck::new(&config);
+        let mut w0_out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        for pkg in [&lib0, &devel0] {
+            w0.check_binary(pkg, &config, &mut w0_out);
+            w0.reset();
+        }
+        let s0 = w0.export_state().expect("worker 0 exports");
+        let mut w1 = LibraryDependencyCheck::new(&config);
+        let mut w1_out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        for pkg in [&lib1, &devel1] {
+            w1.check_binary(pkg, &config, &mut w1_out);
+            w1.reset();
+        }
+        let s1 = w1.export_state().expect("worker 1 exports");
+
+        let mut main = LibraryDependencyCheck::new(&config);
+        main.import_state(s0);
+        main.import_state(s1);
+        let mut main_out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        main.after_checks(&config, &mut main_out);
+
+        assert_eq!(
+            main_out.results(),
+            seq_out.results(),
+            "merged after_checks differs from sequential"
+        );
+    }
 }
+

@@ -273,7 +273,7 @@ RPMs and print `E:` findings yet still "succeed", and why consumers grep the
 | `-s/--strict` passed (no forced permissive): any error | 64 |
 | `-s/--strict` passed, and every error was a strict promotion | 65 |
 | Badness over `BadnessThreshold` (> 0) — fires regardless of permissive | 66 |
-| Internal crash reading a package | 3 (unless `-v`, then re-raise → 1) |
+| Internal crash reading a package | 3 (fatal-continue: reported, run continues, `rpmlint#1595`) |
 | Nonexistent positional or `-c` path | 2 |
 | Unparsable TOML config | 4 |
 | Bare invocation / `--help` | 0 (prints help) |

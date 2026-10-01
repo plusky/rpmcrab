@@ -8,21 +8,19 @@
 //! duration rendered as a fixed `0.1`; it is verified byte-for-byte against
 //! that capture.
 //!
-//! The package is a real one from the corpus (built as an installed package so
-//! nothing is unpacked) driven through the same `run_package` loop the binary
-//! uses; the checks themselves are synthetic, so the findings are canned and
-//! the output stays a pure test of the report pipeline.
+//! The package is a real one from the corpus driven through the same
+//! `check_batch` loop the binary uses; the checks themselves are synthetic, so
+//! the findings are canned and the output stays a pure test of the report
+//! pipeline.
 
 use std::path::Path;
 
-use librpm::PackageHeader;
-use librpm::verify::VerifyOptions;
 use rpmcrab_core::check::{Check, SyntheticCheck};
 use rpmcrab_core::color::Color;
 use rpmcrab_core::config::Config;
 use rpmcrab_core::level::Level;
 use rpmcrab_core::lint::Lint;
-use rpmcrab_core::pkg::{Package, Pkg};
+use rpmcrab_core::worker::Task;
 
 const CONF_FILES: &[&str] = &[
     "<VENV>/lib64/python3.13/site-packages/rpmlint/configdefaults.toml",
@@ -56,42 +54,41 @@ fn reproduces_llvm21_gold_byte_for_byte() {
         filters: vec!["no-documentation".to_string()],
         ..Config::default()
     };
-    let checks: Vec<Box<dyn Check>> = vec![Box::new(SyntheticCheck::new(
-        "SyntheticCheck",
-        "llvm21-gold",
-        Some("aarch64"),
+    let canned = vec![
+        (
+            Level::Error,
+            "suse-zypp-packageand",
+            vec!["packageand(clang21:binutils)".to_string()],
+        ),
+        (
+            Level::Error,
+            "suse-zypp-packageand",
+            vec!["packageand(clang21:binutils-gold)".to_string()],
+        ),
+        (
+            Level::Warning,
+            "no-soname",
+            vec!["/usr/lib64/LLVMgold.so".to_string()],
+        ),
+        // Suppressed by the `no-documentation` filter -> "1 filtered".
+        (Level::Warning, "no-documentation", vec![]),
+    ];
+    let make_checks = || {
         vec![
-            (
-                Level::Error,
-                "suse-zypp-packageand",
-                vec!["packageand(clang21:binutils)".to_string()],
-            ),
-            (
-                Level::Error,
-                "suse-zypp-packageand",
-                vec!["packageand(clang21:binutils-gold)".to_string()],
-            ),
-            (
-                Level::Warning,
-                "no-soname",
-                vec!["/usr/lib64/LLVMgold.so".to_string()],
-            ),
-            // Suppressed by the `no-documentation` filter -> "1 filtered".
-            (Level::Warning, "no-documentation", vec![]),
-        ],
-    ))];
+            Box::new(SyntheticCheck::new(
+                "SyntheticCheck",
+                "llvm21-gold",
+                Some("aarch64"),
+                canned.clone(),
+            )) as Box<dyn Check>,
+        ]
+    };
 
     let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/parity/cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm");
-    let header = PackageHeader::from_file(&rpm, Some(&VerifyOptions::skip_verification()))
-        .expect("open corpus header");
-    let mut pkg = Package::Rpm(Box::new(
-        Pkg::installed(header).expect("build installed package"),
-    ));
 
-    let mut lint = Lint::new(config, checks, Color::for_tty(false), 80).unwrap();
-    lint.run_package(&mut pkg, true)
-        .expect("check dispatch must not fail");
+    let mut lint = Lint::new(config, make_checks(), Color::for_tty(false), 80).unwrap();
+    lint.check_batch(vec![Task::File(rpm)], 1, &make_checks, true);
     // version, header arg count, no -t, no -T, duration.
     let out = lint.render("rpmlint", "2.10.0", 1, false, 0.1);
 

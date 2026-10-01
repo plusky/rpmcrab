@@ -5,21 +5,21 @@
 //! `docs/DESIGN.md` §4.6); the binary crate maps the returned value to a
 //! process exit. This crate never calls `std::process::exit`.
 //!
-//! The per-package loop mirrors rpmlint's `Lint.run_checks` /
-//! `validate_file` (`lint.py:282-318`): each check is timed, and only after the
-//! **last** package do the `after_checks` hooks and the rpmlintrc filter audit
-//! run.
+//! Packages are checked in batches (`_check_packages`, `rpmlint#1595`):
+//! worker threads check one package each and the main thread replays the
+//! results in task order. `after_checks` runs once per batch; the
+//! unused-rpmlintrc-filter audit runs once after all batches.
 
 use std::collections::BTreeMap;
-use std::time::Instant;
 
-use crate::check::{Check, add_info, spec_add_info};
+use crate::check::{Check, basename};
 use crate::color::Color;
 use crate::config::Config;
 use crate::filter::Filter;
+use crate::finding::Finding;
 use crate::level::Level;
-use crate::pkg::{Package, PkgError};
 use crate::report;
+use crate::worker::{self, TaskResult};
 
 /// Per-check accumulated wall time, keyed by the check's registry name. Holds
 /// the `Pkg` phases (`ExtractRpm`, `libmagic`) too, as in the reference's
@@ -71,6 +71,15 @@ pub struct Lint {
     specfiles_checked: usize,
     /// `Filter.validate_filters` is skipped with `--ignore-unused-rpmlintrc`.
     audit_rpmlintrc: bool,
+    /// Set when any package hit a fatal error; the run continues but still
+    /// fails with exit code 3 at the end (`rpmlint#1595`).
+    had_fatal_error: bool,
+    /// Formatted `(none): E: fatal error ...` lines, in replay order, for the
+    /// caller to print to stderr.
+    fatals: Vec<String>,
+    /// The last processed package's audit context (`_last_pkg`): name, arch,
+    /// whether it is a spec.
+    last_pkg: Option<(String, Option<String>, bool)>,
 }
 
 impl Lint {
@@ -100,6 +109,9 @@ impl Lint {
             packages_checked: 0,
             specfiles_checked: 0,
             audit_rpmlintrc,
+            had_fatal_error: false,
+            fatals: Vec::new(),
+            last_pkg: None,
         })
     }
 
@@ -109,78 +121,89 @@ impl Lint {
         self.audit_rpmlintrc = audit;
     }
 
-    /// `Lint.run_checks(pkg, is_last)`: run every check over one package,
-    /// timing each, then — for the last package — the `after_checks` hooks and
-    /// the unused-rpmlintrc-filter audit.
+    /// Check a batch of tasks (`_check_packages`, `rpmlint#1595`):
+    /// optionally on `jobs` worker threads, replaying each result through the
+    /// run's filter in task order, then `after_checks` when asked.
     ///
-    /// The reference dispatches `check` vs `check_spec` on the package being
-    /// a `FakePkg` (`lint.py:300-304`); here the `Package` enum carries that.
-    /// A spec input bumps `specfiles_checked` instead of `packages_checked`
-    /// (`lint.py:314-318`).
-    ///
-    /// The check dispatch runs inside `pkg::guarded`, so a librpm decoder
-    /// panic becomes a fatal read error (`Err`) instead of aborting the run.
-    ///
-    /// The package's own phase timings (`ExtractRpm`, `libmagic`) are folded
-    /// into the same duration map, which is what the `-t` report reads.
-    pub fn run_package(&mut self, pkg: &mut Package, is_last: bool) -> Result<(), PkgError> {
-        match pkg {
-            Package::Rpm(pkg) => {
-                for (phase, secs) in pkg.timers.iter() {
-                    self.check_duration.add(phase, secs);
-                }
-                // A check can reach librpm decoders that panic on tolerated
-                // data (`pkg/mod.rs`); contain that as a fatal read error
-                // rather than aborting the run, and stop the dispatch on it.
-                crate::pkg::guarded(|| {
-                    for check in &mut self.checks {
-                        let start = Instant::now();
-                        check.check(pkg, &self.config, &mut self.filter);
-                        let secs = start.elapsed().as_secs_f64();
-                        self.check_duration.add(check.name(), secs);
-                    }
-                    Ok(())
-                })?;
-                self.packages_checked += 1;
-            }
-            Package::Spec(pkg) => {
-                crate::pkg::guarded(|| {
-                    for check in &mut self.checks {
-                        let start = Instant::now();
-                        check.check_spec(pkg, &self.config, &mut self.filter);
-                        let secs = start.elapsed().as_secs_f64();
-                        self.check_duration.add(check.name(), secs);
-                    }
-                    Ok(())
-                })?;
-                self.specfiles_checked += 1;
-            }
+    /// `make_checks` builds each worker's check set; the main thread keeps its
+    /// own instances for `after_checks`. A fatal per-package error is
+    /// recorded and the run continues; [`Lint::take_fatals`] drains the
+    /// diagnostics for stderr.
+    pub fn check_batch(
+        &mut self,
+        tasks: Vec<worker::Task>,
+        jobs: usize,
+        make_checks: &dyn Fn() -> Vec<Box<dyn Check>>,
+        run_after_checks: bool,
+    ) {
+        if tasks.is_empty() {
+            return;
         }
-
-        if is_last {
+        for result in worker::run_tasks(tasks, jobs, &self.config, make_checks, self.color) {
+            self.replay(result);
+        }
+        if run_after_checks {
             for check in &mut self.checks {
                 check.after_checks(&self.config, &mut self.filter);
             }
-            if self.audit_rpmlintrc {
-                self.audit_unused_filters(pkg);
-            }
         }
-        // `Lint.reset_checks()` runs after *every* package, the last one
-        // included (`lint.py:251,271`), so per-run state cannot leak into the
-        // next package.
+        // Drop the merged cross-package state so batches stay independent.
         for check in &mut self.checks {
             check.reset();
         }
-        Ok(())
     }
 
-    /// `Filter.validate_filters(pkg)`: every rpmlintrc `Filters` pattern that
-    /// never matched becomes an `unused-rpmlintrc-filter` error. The pattern is
-    /// quoted, as the reference does.
-    ///
-    /// The patterns are collected first because each finding is emitted while
-    /// borrowing the filter mutably.
-    fn audit_unused_filters(&mut self, pkg: &Package) {
+    /// Feed one worker result through the run's filter, in task order
+    /// (`_replay_result`).
+    fn replay(&mut self, result: TaskResult) {
+        let is_fatal = result.fatal.is_some();
+        if let Some(fatal) = result.fatal {
+            // The message already reads `fatal error while reading <pkg>: ...`.
+            self.fatals.push(format!("(none): E: {fatal}"));
+            self.had_fatal_error = true;
+        }
+        self.filter.merge_from(result.filter);
+        for (name, state) in result.states {
+            if let Some(check) = self.checks.iter_mut().find(|c| c.name() == name) {
+                check.import_state(state);
+            }
+        }
+        for (name, secs) in result.durations.iter() {
+            self.check_duration.add(name, secs);
+        }
+        for (name, n) in result.checked_files {
+            if let Some(check) = self.checks.iter_mut().find(|c| c.name() == name) {
+                check.add_checked_files(n);
+            }
+        }
+        // A fatal package was not checked, so it does not move the footer
+        // counters (`rpmlint#1595`).
+        if !is_fatal {
+            if result.is_spec {
+                self.specfiles_checked += 1;
+            } else {
+                self.packages_checked += 1;
+            }
+        }
+        self.last_pkg = Some((result.pkg_name, result.pkg_arch, result.is_spec));
+    }
+
+    /// Drain the fatal-error diagnostics collected since the last call, in
+    /// replay order, for the caller to print to stderr.
+    pub fn take_fatals(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.fatals)
+    }
+
+    /// `Filter.validate_filters`: every rpmlintrc `Filters` pattern that
+    /// never matched becomes an `unused-rpmlintrc-filter` error. Runs once
+    /// after all batches, on the last processed package (`_run`).
+    pub fn audit_unused_filters(&mut self) {
+        if !self.audit_rpmlintrc {
+            return;
+        }
+        let Some((pkg_name, arch, is_spec)) = self.last_pkg.clone() else {
+            return;
+        };
         let unused: Vec<String> = self
             .filter
             .unused_filters(&self.config.rpmlintrc_filters)
@@ -189,23 +212,22 @@ impl Lint {
             .collect();
         for pattern in unused {
             let detail = format!("\"{pattern}\"");
-            match pkg {
-                Package::Rpm(pkg) => add_info(
-                    &mut self.filter,
-                    Level::Error,
-                    pkg,
-                    "unused-rpmlintrc-filter",
-                    &[&detail],
-                ),
-                Package::Spec(pkg) => spec_add_info(
-                    &mut self.filter,
-                    Level::Error,
-                    pkg,
-                    None,
-                    "unused-rpmlintrc-filter",
-                    &[&detail],
-                ),
-            }
+            self.filter.add_info(Finding {
+                level: Level::Error,
+                check: "unused-rpmlintrc-filter".to_string(),
+                details: vec![detail],
+                // Scoring decides the real badness at emit time.
+                badness: 0,
+                // `Path(package.name).name`, as for binary findings; specs
+                // carry no arch, like the reference's `FakePkg`.
+                pkg_name: basename(&pkg_name).to_string(),
+                arch: if is_spec {
+                    None
+                } else {
+                    arch.clone().filter(|a| !a.is_empty())
+                },
+                line: None,
+            });
         }
     }
 
@@ -215,9 +237,11 @@ impl Lint {
     }
 
     /// The process exit code (`docs/DESIGN.md` §4.6). Badness-over-threshold
-    /// (66) is evaluated before the permissive error branch (64/65).
+    /// (66) is evaluated before the permissive error branch (64/65); a fatal
+    /// per-package error fails the run with 3, but only after everything else
+    /// has been processed and reported (`rpmlint#1595`).
     pub fn exit_code(&self) -> i32 {
-        if self.aborted() {
+        let code = if self.aborted() {
             66
         } else if self.filter.printed(Level::Error) > 0 && !self.config.permissive {
             if self.filter.printed(Level::Error) == self.filter.promoted_to_error {
@@ -227,7 +251,8 @@ impl Lint {
             }
         } else {
             0
-        }
+        };
+        if self.had_fatal_error { 3 } else { code }
     }
 
     /// The `-t` time report: per-check accumulated seconds and how many files
@@ -332,20 +357,29 @@ mod panic_tests {
         }
     }
 
+    /// A panicking check becomes a fatal result, not a dead worker: the run
+    /// continues and fails with exit code 3 at the end.
     #[test]
-    fn a_panicking_check_is_a_fatal_read_not_an_abort() {
+    fn a_panicking_check_is_a_fatal_result_not_a_dead_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = dir.path().join("test.spec");
+        std::fs::write(&spec, b"Name: test\n").unwrap();
         let config = Config::default();
-        let checks: Vec<Box<dyn Check>> = vec![Box::new(Panics)];
-        let mut lint = Lint::new(config, checks, Color::for_tty(false), 80).unwrap();
-        let mut pkg = Package::Spec(SpecPkg {
-            name: "test.spec".to_string(),
-            lines: Vec::new(),
-            current_linenum: std::cell::Cell::new(None),
-        });
-        let result = lint.run_package(&mut pkg, false);
-        assert!(
-            matches!(result, Err(PkgError::Decode { .. })),
-            "expected Err(PkgError::Decode), got {result:?}"
+        let mut lint =
+            Lint::new(config, vec![Box::new(Panics)], Color::for_tty(false), 80).unwrap();
+        lint.check_batch(
+            vec![worker::Task::File(spec)],
+            1,
+            &|| vec![Box::new(Panics) as Box<dyn Check>],
+            true,
         );
+        let fatals = lint.take_fatals();
+        assert_eq!(fatals.len(), 1, "{fatals:?}");
+        assert!(
+            fatals[0].contains("fatal error while reading"),
+            "{}",
+            fatals[0]
+        );
+        assert_eq!(lint.exit_code(), 3);
     }
 }

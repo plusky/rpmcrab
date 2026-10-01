@@ -101,17 +101,13 @@ fn an_undecodable_header_is_a_fatal_read_not_a_panic() {
     );
 }
 
-/// Under `-v` the reference re-raises, so the status is 1 and the cause chain
-/// is printed in place of a traceback. The decode is still contained: no Rust
-/// panic message may reach the user either way.
+/// A package that will not decode is a fatal result: one line on stderr,
+/// exit 3 (`rpmlint#1595`). The `-v` re-raise is gone, so there is no cause
+/// chain and no Rust panic message either way.
 #[test]
 fn verbose_reports_the_decode_cause_without_a_backtrace() {
     let out = rpmcrab(&["-v", nonutf8_fixture().to_str().unwrap()]);
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "the reference re-raises under -v"
-    );
+    assert_eq!(out.status.code(), Some(3), "fatal result exits 3");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("file path is not UTF-8"),
@@ -278,21 +274,24 @@ fn no_inputs_warns_and_exits_zero() {
     );
 }
 
-/// `-v` re-raises, so the cause chain is printed rather than the run ending on
-/// a bare exit code.
+/// A bogus file is a fatal result: one line on stderr, exit 3. The `-v`
+/// re-raise is gone, so the cause chain is not printed.
 #[test]
 fn verbose_prints_the_cause_chain_and_exits_one() {
     let dir = tempfile::tempdir().unwrap();
     let bogus = dir.path().join("not-an-rpm.rpm");
     std::fs::write(&bogus, b"definitely not an rpm").unwrap();
     let out = rpmcrab(&["-v", bogus.to_str().unwrap()]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(3));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("fatal error while reading"),
         "stderr: {stderr}"
     );
-    assert!(stderr.contains("caused by:"), "no cause chain: {stderr}");
+    assert!(
+        !stderr.contains("caused by:"),
+        "no cause chain without the re-raise: {stderr}"
+    );
 }
 
 /// Naming the same package twice validates it once, so the footer counts one.
@@ -306,5 +305,58 @@ fn a_repeated_argument_is_counted_once() {
     assert!(
         stdout.contains("1 packages and 0 specfiles checked"),
         "duplicate argument counted twice: {stdout}"
+    );
+}
+
+/// `-j1` and `-j4` produce identical output: the worker pool is a scheduling
+/// detail, not a behavior change (`rpmlint#1595`
+/// `test_parallel_output_matches_sequential`).
+#[test]
+fn parallel_output_matches_sequential() {
+    let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/parity/cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm");
+    let rpm = rpm.to_str().unwrap();
+    let seq = rpmcrab(&["-j1", rpm]);
+    let par = rpmcrab(&["-j4", rpm]);
+    assert_eq!(seq.status.code(), par.status.code(), "exit codes differ");
+    // The wall-clock duration in the footer is the only scheduling-dependent
+    // text; everything else must be byte-identical.
+    fn normalized(out: &std::process::Output) -> String {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut s = stdout.into_owned();
+        if let Some(i) = s.find("; has taken ") {
+            s.truncate(i);
+        }
+        s
+    }
+    assert_eq!(normalized(&seq), normalized(&par), "stdout differs");
+    assert_eq!(
+        String::from_utf8_lossy(&seq.stderr),
+        String::from_utf8_lossy(&par.stderr),
+        "stderr differs"
+    );
+}
+
+/// A fatal per-package error does not stop the run: the broken package is
+/// reported on stderr, the healthy one is still checked, and the exit code is
+/// 3 (`rpmlint#1595`).
+#[test]
+fn fatal_package_does_not_stop_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let bogus = dir.path().join("not-an-rpm.rpm");
+    std::fs::write(&bogus, b"definitely not an rpm").unwrap();
+    let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/parity/cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm");
+    let out = rpmcrab(&[bogus.to_str().unwrap(), rpm.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(3), "fatal result exits 3");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("fatal error while reading"),
+        "broken package reported: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("1 packages and 0 specfiles checked"),
+        "healthy package still checked: {stdout}"
     );
 }

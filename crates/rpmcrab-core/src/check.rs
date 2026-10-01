@@ -11,6 +11,8 @@
 //! error: the run still reports the configured check count in the header while
 //! the checks land wave by wave (§8).
 
+use std::any::Any;
+
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::finding::Finding;
@@ -103,7 +105,10 @@ pub(crate) fn basename(name: &str) -> &str {
 }
 
 /// A lint check. Ported from the Python module of the same name.
-pub trait Check {
+///
+/// `Send` so a check can live on a `-j` worker thread; check instances are
+/// built once per worker and never shared between threads.
+pub trait Check: Send {
     /// The check's registry name (the Python module name, e.g. `FilesCheck`).
     fn name(&self) -> &'static str;
 
@@ -136,11 +141,29 @@ pub trait Check {
     /// leak into the next one.
     fn reset(&mut self) {}
 
+    /// `AbstractCheck.export_state`: export the cross-package state
+    /// accumulated since the last export, clearing it, so each export only
+    /// carries this package's contribution. The main thread merges every
+    /// export into its own check instance before `after_checks`
+    /// (`rpmlint#1595`). The default is no cross-package state.
+    fn export_state(&mut self) -> Option<Box<dyn Any + Send>> {
+        None
+    }
+
+    /// `AbstractCheck.import_state`: merge state exported by a worker into
+    /// this (main-thread) instance (`rpmlint#1595`).
+    fn import_state(&mut self, _state: Box<dyn Any + Send>) {}
+
     /// `AbstractFilesCheck.checked_files`, reported by the `-t` time report.
     /// `None` for a check that does not walk files.
     fn checked_files(&self) -> Option<usize> {
         None
     }
+
+    /// Add to the run-lifetime `checked_files` counter. The counter is never
+    /// reset between packages; the worker reports per-package deltas instead
+    /// (`rpmlint#1595` dropped the `reset` clearing).
+    fn add_checked_files(&mut self, _n: usize) {}
 }
 
 /// Build a check from its exact Python module name, or `None` when it is not

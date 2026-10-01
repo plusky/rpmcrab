@@ -300,6 +300,13 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "cli"
+kind = "behaviour"
+reason = "A package that fails to open is a fatal result: one '(none): E: fatal error while reading ...' line on stderr, the run continues with the remaining packages, and the exit code is 3 (rpmlint#1595). The pinned reference exits 3 immediately on the first unreadable file; the -v re-raise (exit 1 with a cause chain) is gone."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "SourceCheck"
 kind = "detail"
 reason = "parse_octal mirrors the reference's int(value, 8) (sign, 0o prefix, PEP 515 underscores, Unicode decimal digits), but magnitudes beyond u128 saturate at u128::MAX where the reference keeps arbitrary precision. The value only feeds equality against file mode bits, which neither a saturated nor an arbitrary-precision huge value can equal, so the saturation is unobservable."
@@ -313,6 +320,13 @@ case = "global"
 check = "AlternativesCheck"
 kind = "missing"
 reason = "AlternativesCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "cli"
+kind = "behaviour"
+reason = "-T/--profile is removed entirely (rpmlint#1595): the reference dropped it because the cProfile dump had no consumers. The --file/--info aliases for -r/-v are also dropped; only -r/--rpmlintrc and -v/--verbose remain."
 since = "0.1.0"
 
 [[divergence]]
@@ -456,4 +470,11 @@ case = "global"
 check = "LibraryDependencyCheck"
 kind = "behaviour"
 reason = "The per-package maps (requires, so-symlinks, arch) are keyed on `pkg.name` alone, mirroring the reference's dicts (`LibraryDependencyCheck.py:37-39`); linting two arches of the same devel package together, the second overwrites the first - one finding survives, for the last arch seen. Re-assigning an existing dict key does not move its position, so `foo-devel.x86_64` then `foo-devel.aarch64` yields exactly one finding carrying the last arch and the last requires/symlink list; the x86_64 package is never checked at all. Inherited upstream quirk, kept for parity rather than fixed; the fix-vs-parity question is tracked in plusky/rpmcrab#74. No upstream issue covers this."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "after_checks"
+kind = "behaviour"
+reason = "after_checks sees the merged state of ALL packages in the batch (rpmlint#1595 export/import). The pinned reference reset checks after each package, so after_checks only ever saw the last package's state."
 since = "0.1.0"

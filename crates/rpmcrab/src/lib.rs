@@ -245,119 +245,77 @@ pub fn run() -> ExitCode {
         }
     };
     lint.set_audit_rpmlintrc(!cli.ignore_unused_rpmlintrc);
-    let extract_dir = lint.config().extract_dir();
+
+    // `-j` coerces non-positive values to 1 (`rpmlint#1595`).
+    let jobs = cli.jobs.max(1) as usize;
+    // Each worker builds its own check set from the same selection. The
+    // config is cloned once here so the factory does not borrow `lint`.
+    let worker_config = lint.config().clone();
+    let selected = cli.checks.clone();
+    let make_checks = move || rpmcrab_core::check::load(&worker_config, selected.as_deref());
 
     // `Lint.validate_files`: expand the arguments, then sort so the output is
     // stable regardless of the order they were given in.
     let mut inputs = expand_filelist(&files);
     inputs.sort();
+    let file_tasks: Vec<rpmcrab_core::worker::Task> = inputs
+        .into_iter()
+        .map(rpmcrab_core::worker::Task::File)
+        .collect();
 
-    // `Lint.validate_installed_packages` runs the installed packages in
-    // argument order, and only runs the post-checks when there are no plain
-    // rpm/spec arguments (`lint.py:248`).
+    // Installed packages are enumerated once up front; each becomes a task
+    // holding its opened `Pkg` (`_installed_tasks`, `rpmlint#1595`).
+    let mut installed_tasks = Vec::new();
+    // `Lint.validate_installed_packages` runs the post-checks for the
+    // installed batch only when there are no plain rpm/spec arguments
+    // (`lint.py:248`).
+    let mut installed_post_checks = false;
     if !cli.installed.is_empty() {
-        match rpmcrab_core::pkg::installed::find_installed(&cli.installed) {
-            Ok((headers, missing)) => {
-                for name in &missing {
-                    warn!(color, "(none): E: there is no installed rpm \"{name}\".");
-                }
-                // The plain-file run owns the `is_last` pass when there is one.
-                // `not bool(self.options['rpmfile'])` — the positional
-                // arguments, not the packages they expanded to
-                // (`lint.py:248`).
-                let run_post_checks = files.is_empty();
-                let last = headers.len().saturating_sub(1);
-                // One `Pkg` at a time: building one walks every file it
-                // declares, so a glob like `lib*` would otherwise hold
-                // hundreds of fully-expanded packages at once.
-                for (i, header) in headers.into_iter().enumerate() {
-                    // An installed package is read the same way as a file, so a
-                    // header that will not decode fails here too. The
-                    // reference has no guard around installed packages and
-                    // dies with a traceback, so the status is 1 rather than
-                    // the 3 a file gets.
-                    let pkg = match rpmcrab_core::pkg::Pkg::installed(header) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            warn!(color, "(none): E: fatal error reading the rpmdb: {e}");
-                            return ExitCode::from(1);
-                        }
-                    };
-                    // A librpm decoder panic inside a check is fatal, the
-                    // same one-line diagnostic the reference prints for a
-                    // package it cannot read (`lint.py:293-297`).
-                    if let Err(e) = lint.run_package(
-                        &mut rpmcrab_core::pkg::Package::Rpm(Box::new(pkg)),
-                        run_post_checks && i == last,
-                    ) {
-                        warn!(color, "(none): E: fatal error while checking: {e}");
-                        if cli.verbose {
-                            print_error_chain(&color, &e);
-                            return ExitCode::from(1);
-                        }
-                        return ExitCode::from(3);
+        installed_post_checks = files.is_empty();
+        // Enumerated once up front for the missing-name warnings; each
+        // worker re-queries per name (cached) because the rpmdb handle cannot
+        // cross threads (`_installed_tasks`, `rpmlint#1595`).
+        for name in &cli.installed {
+            match rpmcrab_core::pkg::installed::find_installed(std::slice::from_ref(name)) {
+                Ok((headers, missing)) => {
+                    for missing in &missing {
+                        warn!(color, "(none): E: there is no installed rpm \"{missing}\".");
+                    }
+                    for (index, _) in headers.iter().enumerate() {
+                        installed_tasks.push(rpmcrab_core::worker::Task::Installed {
+                            name: name.clone(),
+                            index,
+                        });
                     }
                 }
-            }
-            // Deliberate divergence: the reference lets a failed `rpmtsOpenDB`
-            // raise, so it dies with a Python traceback. One line and exit 1
-            // carries the same information to a shell user.
-            Err(e) => {
-                warn!(color, "(none): E: fatal error reading the rpmdb: {e}");
-                return ExitCode::from(1);
+                // Deliberate divergence: the reference lets a failed
+                // `rpmtsOpenDB` raise, so it dies with a Python traceback.
+                // One line and exit 1 carries the same information to a shell
+                // user.
+                Err(e) => {
+                    warn!(color, "(none): E: fatal error reading the rpmdb: {e}");
+                    return ExitCode::from(1);
+                }
             }
         }
     }
 
-    let last = inputs.len().saturating_sub(1);
-    for (i, path) in inputs.iter().enumerate() {
-        // `Lint.validate_file`: a `.spec` input is read through `FakePkg`
-        // and runs each check's `check_spec` (`lint.py:289-291,300-304`).
-        let mut package = if path.extension().is_some_and(|e| e == "spec") {
-            match rpmcrab_core::pkg::spec::SpecPkg::open(path) {
-                Ok(p) => rpmcrab_core::pkg::Package::Spec(p),
-                Err(e) => {
-                    warn!(
-                        color,
-                        "(none): E: fatal error while reading {}: {e}",
-                        path.display()
-                    );
-                    if cli.verbose {
-                        print_error_chain(&color, &e);
-                        return ExitCode::from(1);
-                    }
-                    return ExitCode::from(3);
-                }
-            }
-        } else {
-            // `Lint.validate_file`: any failure to read the package is fatal, and
-            // `-v` re-raises, so the user sees the whole cause chain the way a
-            // Python traceback would (`lint.py:293-297`).
-            match rpmcrab_core::pkg::Pkg::open(path, &extract_dir) {
-                Ok(p) => rpmcrab_core::pkg::Package::Rpm(Box::new(p)),
-                Err(e) => {
-                    warn!(
-                        color,
-                        "(none): E: fatal error while reading {}: {e}",
-                        path.display()
-                    );
-                    if cli.verbose {
-                        print_error_chain(&color, &e);
-                        return ExitCode::from(1);
-                    }
-                    return ExitCode::from(3);
-                }
-            }
-        };
-        if let Err(e) = lint.run_package(&mut package, i == last) {
-            warn!(color, "(none): E: fatal error while checking: {e}");
-            if cli.verbose {
-                print_error_chain(&color, &e);
-                return ExitCode::from(1);
-            }
-            return ExitCode::from(3);
-        }
+    // Check installed packages first and then files; `after_checks` runs once
+    // per batch so post checks see a consistent state (`rpmlint#1595`).
+    // A fatal per-package error is reported and the run continues, failing
+    // with exit code 3 only after everything is reported.
+    lint.check_batch(installed_tasks, jobs, &make_checks, installed_post_checks);
+    for fatal in lint.take_fatals() {
+        warn!(color, "{fatal}");
     }
+    lint.check_batch(file_tasks, jobs, &make_checks, true);
+    for fatal in lint.take_fatals() {
+        warn!(color, "{fatal}");
+    }
+
+    // The unused-rpmlintrc-filter audit runs once, after all batches, on the
+    // last processed package.
+    lint.audit_unused_filters();
 
     // `Lint.validate_files`: with no file arguments and nothing validated from
     // `-i`, there is nothing to do (`lint.py:257-262`).
@@ -419,17 +377,6 @@ fn find_rpmlintrc_files(dir: &Path) -> Vec<PathBuf> {
         out.extend(group);
     }
     out
-}
-
-/// The cause chain, deepest last, as a re-raised Python exception would print
-/// it. `-v` uses this instead of a bare exit code, so the underlying error is
-/// visible rather than swallowed.
-fn print_error_chain(color: &Color, err: &dyn std::error::Error) {
-    let mut current = err.source();
-    while let Some(cause) = current {
-        warn!(color, "caused by: {cause}");
-        current = cause.source();
-    }
 }
 
 /// `cli.process_lint_args`: deduplicate the positional arguments, as the
@@ -529,7 +476,6 @@ mod tests {
         std::fs::write(&txt, b"x").unwrap();
         assert!(expand_filelist(&[txt]).is_empty());
     }
-
     /// `re.search(r'/home/abuild/rpmbuild/RPMS/noarch/rpmlint-\d')` — the
     /// search is unanchored, so any path containing the pattern matches, and
     /// `\d` is Unicode-aware, so a non-ASCII decimal digit counts. Every case

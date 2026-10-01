@@ -1568,12 +1568,12 @@ impl Check for BinariesCheck {
         );
     }
 
-    fn reset(&mut self) {
-        self.checked_files = 0;
-    }
-
     fn checked_files(&self) -> Option<usize> {
         Some(self.checked_files)
+    }
+
+    fn add_checked_files(&mut self, n: usize) {
+        self.checked_files += n;
     }
 }
 
