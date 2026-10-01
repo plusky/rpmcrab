@@ -166,6 +166,56 @@ def covers(port_t, ref_t):
     return template_regex(port_t).match(probe) is not None
 
 
+def port_check_map(check_rs):
+    """Reference check name -> owning port module, from check::build()'s arms.
+
+    check.rs is the port's own registration point, so this cannot drift from
+    the code: an arm exists for a check exactly when the check is
+    constructible. Returns None when the file or build() cannot be located,
+    so the caller can tell "no arms" from "could not look" -- an empty map
+    would silently restore the unscoped matching this exists to prevent.
+    """
+    try:
+        with open(check_rs, encoding="utf-8") as f:
+            src = f.read()
+    except OSError:
+        return None
+    start = src.find("pub fn build(")
+    end = src.find("pub fn load(", start) if start >= 0 else -1
+    if start < 0 or end < 0:
+        return None
+    # Slice into arms first, then look for the module path inside each arm. A
+    # single regex over the whole body would let its gap cross a `=>` and
+    # attribute one arm to the next arm's module.
+    headers = list(re.finditer(r'"([A-Za-z0-9_]+)"\s*=>', src[start:end]))
+    out = {}
+    for i, h in enumerate(headers):
+        stop = headers[i + 1].start() if i + 1 < len(headers) else len(src[start:end])
+        mod = re.search(r"crate::checks::([a-z0-9_]+)::", src[start + h.end():start + stop])
+        if mod:
+            out[h.group(1)] = mod.group(1)
+    return out
+
+
+def covers_finding(module, name, by_module, flat, check_map):
+    """Is reference finding `name` of `module` covered by the port?
+
+    A wildcard-free port template is unambiguous -- the name matches
+    literally -- so it counts wherever it lives. A wildcard is not:
+    `PostCheck`'s `empty-*` would otherwise mask a new, genuinely unported
+    `empty-` finding of any other check. A wildcard therefore only counts
+    from the check's own module. Reference checks with no `build()` arm
+    (they ship in branches that have not merged yet) keep the old unscoped
+    behaviour, and are reported so the fallback stays visible.
+    """
+    if any("*" not in p and covers(p, name) for p in flat):
+        return True
+    owner = check_map.get(module)
+    if owner is None:
+        return any(covers(p, name) for p in flat)
+    return any(covers(p, name) for p in by_module.get(owner, ()))
+
+
 # ---------------------------------------------------------------------------
 # printf-style ("%" operator) and format! template handling
 # ---------------------------------------------------------------------------
@@ -1966,14 +2016,19 @@ def is_push_drain(src, expr, call_pos, push_receivers):
 
 
 def audit_port(checks_dir):
-    """Returns (templates, unresolved). templates: set of "*" templates."""
-    templates, unresolved = set(), []
+    """Returns (by_module, unresolved).
+
+    by_module: {port module name: set of "*" templates it emits}. Kept per
+    module so a wildcard can be attributed to the check that owns it.
+    """
+    by_module, unresolved = {}, []
     for fn in sorted(os.listdir(checks_dir)):
         if not fn.endswith(".rs") or fn == "mod.rs":
             continue
         path = os.path.join(checks_dir, fn)
         with open(path, encoding="utf-8") as f:
             src = f.read()
+        templates = set()
         # Tuple-push emission sites (dbus_policy): the finding names live
         # in the pushed tuples; the later add_info drain just forwards them.
         push_t, push_receivers = find_push_templates(src)
@@ -2012,7 +2067,8 @@ def audit_port(checks_dir):
             else:
                 seg = " ".join(args[idx].split())[:120]
                 unresolved.append((fn, lineno, seg))
-    return templates, unresolved
+        by_module[fn[:-3]] = templates
+    return by_module, unresolved
 
 
 # ---------------------------------------------------------------------------
@@ -2057,13 +2113,27 @@ def main(argv):
         return 2
 
     findings, unresolved, nmods = audit_reference(ref)
-    port_templates, port_unresolved = audit_port(port_dir)
+    by_module, port_unresolved = audit_port(port_dir)
+    port_templates = set().union(*by_module.values()) if by_module else set()
+    check_map = port_check_map(os.path.join(os.path.dirname(port_dir), "check.rs"))
+    if not check_map:
+        # An empty map sends every check down the unscoped fallback, which is
+        # the masking hole this scoping closes. Fail loudly instead of
+        # reporting a clean audit that means nothing.
+        sys.stderr.write(
+            f"error: no check::build() arms parsed from "
+            f"{os.path.join(os.path.dirname(port_dir), 'check.rs')}; wildcard "
+            "scoping would be silently disabled\n")
+        return 2
     entries = load_ledger(ledger_path)
 
     gaps, ledgered, stale = [], [], []
+    # A check is unmapped regardless of whether any of its findings happen to be
+    # covered, so derive this before the loop rather than while iterating.
+    unscoped = {module for module, _ in findings} - set(check_map)
     missing_modules = {e.get("check") for e in entries if e.get("kind") == "missing"}
     for module, name in sorted(findings):
-        if any(covers(p, name) for p in port_templates):
+        if covers_finding(module, name, by_module, port_templates, check_map):
             # A kind="missing" entry must not be able to silence a module the
             # port has since implemented: that hides every future regression in
             # it behind an entry written before the port existed.
@@ -2088,6 +2158,13 @@ def main(argv):
     print(f"modules scanned: {nmods}; reference findings: {len(findings)}; "
           f"port patterns: {len(port_templates)}")
     print()
+    if unscoped:
+        print(f"UNSCOPED ({len(unscoped)}): no check::build() arm, so their "
+              "findings are matched against every port pattern -- a wildcard "
+              "can still mask a finding added to one of these")
+        for module in sorted(unscoped):
+            print(f"  {module}")
+        print()
     if gaps:
         print(f"GAPS ({len(gaps)}): reference findings absent from the port "
               "and unledgered -- these need action")

@@ -149,12 +149,11 @@ def test_port_closure_template_format():
     # through it -- 113 false-positive gaps.
     with tempfile.TemporaryDirectory() as d:
         _write(os.path.join(d, "post.rs"), PORT_RS)
-        templates, unresolved = audit.audit_port(d)
+        by_module, unresolved = audit.audit_port(d)
     assert not unresolved, unresolved
+    templates = by_module["post"]
     assert "invalid-shell-in-*" in templates, sorted(templates)
     assert "empty-*" in templates, sorted(templates)
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +179,6 @@ def test_starred_call_resolving_to_nothing_is_unresolved():
     assert not findings, sorted(findings)
     assert len(unresolved) == 1, unresolved
     assert unresolved[0][0] == "StarEmptyCheck", unresolved
-
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +310,82 @@ def test_self_attr_collision_fails_the_audit():
         _write(os.path.join(d, "checks", "CCheck.py"), SELF_ATTR_MOD_C)
         findings, unresolved, nmods = audit.audit_reference(d)
     assert any(m == "(self-attrs)" for m, _, _ in unresolved), unresolved
+
+
+# ---------------------------------------------------------------------------
+# Wildcard covers are scoped to the check that owns them
+# ---------------------------------------------------------------------------
+
+CHECK_RS = """\
+pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
+    match name {
+        "PostCheck" => Some(Box::new(crate::checks::post::PostCheck::new(config))),
+        "FilesCheck" => Some(Box::new(crate::checks::files::FilesCheck::new(
+            config,
+        ))),
+        // The module path is on its own line here, which is what the wrapping
+        // arms in the real check.rs look like.
+        "MixedOwnershipCheck" => Some(Box::new(
+            crate::checks::mixed_ownership::MixedOwnershipCheck::new(config),
+        )),
+        _ => None,
+    }
+}
+
+pub fn load(config: &Config) -> Vec<Box<dyn Check>> {
+    load_with(config, |name| build(name, config))
+}
+"""
+
+
+def test_port_check_map_reads_build_arms_across_line_breaks():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "check.rs")
+        _write(path, CHECK_RS)
+        got = audit.port_check_map(path)
+    # 9 of the 31 real arms put the module path on its own line; a regex that
+    # cannot cross the newline silently leaves those checks unmapped.
+    assert got == {"PostCheck": "post", "FilesCheck": "files",
+                   "MixedOwnershipCheck": "mixed_ownership"}, got
+
+
+def test_wildcard_from_another_module_does_not_cover():
+    # PostCheck's `empty-*` used to cover every `empty-` finding in the tree,
+    # so a new unported FilesCheck finding called `empty-a-thing` was invisible.
+    by_module = {"post": {"empty-*"}, "files": set()}
+    flat = {"empty-*"}
+    cmap = {"PostCheck": "post", "FilesCheck": "files"}
+    assert audit.covers_finding("PostCheck", "empty-sources", by_module, flat, cmap)
+    assert not audit.covers_finding(
+        "FilesCheck", "empty-a-brand-new-filescheck-finding", by_module, flat, cmap)
+
+
+def test_exact_cover_still_counts_from_any_module():
+    # A literal name cannot be ambiguous, so cross-module exact emission stays
+    # legal: binaries.rs emits readelf-failed for SharedLibraryPolicyCheck and
+    # shared_library_policy.rs emits it for BinariesCheck. The owner here
+    # deliberately lacks the template, so this only passes via the exact-global
+    # branch and would fail as a false gap if that branch were removed.
+    # readelf-failed is emitted by binaries.rs, but the owning module of
+    # SharedLibraryPolicyCheck is shared_library_policy, which does not emit it.
+    # Only the exact-global branch can cover it, so this fails if that branch
+    # goes away.
+    by_module = {"binaries": {"readelf-failed"}}
+    flat = {"readelf-failed"}
+    cmap = {"SharedLibraryPolicyCheck": "shared_library_policy"}
+    assert audit.covers_finding(
+        "SharedLibraryPolicyCheck", "readelf-failed", by_module, flat, cmap)
+
+
+def test_unmapped_module_keeps_unscoped_cover():
+    # Checks with no build() arm yet ship in unmerged branches; they must not
+    # start reporting gaps they never reported before.
+    by_module = {"post": {"empty-*"}}
+    flat = {"empty-*"}
+    assert audit.covers_finding("MenuCheck", "empty-sources", by_module, flat, {})
+    assert not audit.covers_finding(
+        "MenuCheck", "menu-recently-used-xbel", by_module, flat, {})
+
 
 def main():
     tests = [v for k, v in sorted(globals().items())
