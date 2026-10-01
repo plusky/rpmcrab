@@ -23,9 +23,13 @@ impl MixedOwnershipCheck {
     /// owner, when the parent is packaged and not owned by root.
     /// `files` yields `(path, user)` pairs.
     fn mismatches<'a>(files: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<String> {
-        let owners: HashMap<&str, &str> = files.collect();
+        let entries: Vec<(&str, &str)> = files.collect();
+        let owners: HashMap<&str, &str> = entries.iter().copied().collect();
         let mut out = Vec::new();
-        for (path, user) in &owners {
+        // Iterate the package's file order, not the map's: the reference walks
+        // `pkg.files.items()` (MixedOwnershipCheck.py:16) and every finding here
+        // shares one sort key, so hash order would become the output order.
+        for (path, user) in &entries {
             // Parent directory, or "" when there is no '/'.
             let parent = match path.rfind('/') {
                 Some(i) => &path[..i],
@@ -111,5 +115,49 @@ mod tests {
     fn unpackaged_parent_is_skipped() {
         let found = MixedOwnershipCheck::mismatches([("/srv/app/data", "other")].into_iter());
         assert!(found.is_empty(), "{found:?}");
+    }
+
+    /// `mismatches` must follow the package's file order. Each call builds its
+    /// own `HashMap`, so a hash-order implementation renders differently
+    /// between calls and this fails.
+    #[test]
+    fn mismatches_follow_file_order() {
+        // Parents must be in the package too: an unpackaged parent is skipped.
+        let files: &[(&str, &str)] = &[
+            ("/srv/a", "tftp"),
+            ("/srv/a/one", "lp"),
+            ("/srv/b", "tftp"),
+            ("/srv/b/two", "lp"),
+            ("/srv/c", "tftp"),
+            ("/srv/c/three", "lp"),
+            ("/srv/d", "tftp"),
+            ("/srv/d/four", "lp"),
+            ("/srv/e", "tftp"),
+            ("/srv/e/five", "lp"),
+            ("/srv/f", "tftp"),
+            ("/srv/f/six", "lp"),
+        ];
+        let render = || {
+            MixedOwnershipCheck::mismatches(files.iter().copied())
+                .into_iter()
+                .map(|m| m.split('"').nth(1).unwrap_or("").to_string())
+                .collect::<Vec<_>>()
+        };
+        let first = render();
+        assert_eq!(
+            first,
+            vec![
+                "/srv/a/one",
+                "/srv/b/two",
+                "/srv/c/three",
+                "/srv/d/four",
+                "/srv/e/five",
+                "/srv/f/six",
+            ]
+        );
+        // Two independently built maps, 12 times: hash order would permute.
+        for _ in 0..12 {
+            assert_eq!(render(), first);
+        }
     }
 }

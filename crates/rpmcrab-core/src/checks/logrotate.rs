@@ -10,7 +10,7 @@
 //! by the `filesystem` package, not by the package shipping the logrotate
 //! config.
 
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 use crate::check::{Check, add_info};
 use crate::config::Config;
@@ -27,8 +27,10 @@ impl LogrotateCheck {
 
     /// Parse a logrotate config into `dir -> (user, group)` (`su` owners).
     /// Mirrors the reference's primitive parser.
-    fn parse_config(content: &str) -> HashMap<String, Option<(String, String)>> {
-        let mut dirs: HashMap<String, Option<(String, String)>> = HashMap::new();
+    /// Insertion-ordered: the reference returns a dict and walks
+    /// `parselogrotateconf(...).items()` (LogrotateCheck.py:20), i.e. file order.
+    fn parse_config(content: &str) -> IndexMap<String, Option<(String, String)>> {
+        let mut dirs: IndexMap<String, Option<(String, String)>> = IndexMap::new();
         let mut current: Vec<String> = Vec::new();
         for raw_line in content.lines() {
             let line = raw_line.trim();
@@ -90,7 +92,7 @@ impl Check for LogrotateCheck {
             return;
         }
 
-        let mut dirs: HashMap<String, Option<(String, String)>> = HashMap::new();
+        let mut dirs: IndexMap<String, Option<(String, String)>> = IndexMap::new();
         for file in &pkg.files {
             let fname = file.name.as_str();
             if pkg.ghost_files.iter().any(|g| g == fname) {
@@ -125,11 +127,10 @@ impl Check for LogrotateCheck {
             }
         }
 
-        let mut sorted: Vec<&String> = dirs.keys().collect();
-        sorted.sort();
-        for dir in sorted {
-            let owners = &dirs[dir];
-            let Some(pkgfile) = pkg.files.iter().find(|f| &f.name == dir) else {
+        // `dirs` is insertion-ordered, so this is the reference's file order.
+        for (dir, owners) in &dirs {
+            let dir: &str = dir;
+            let Some(pkgfile) = pkg.files.iter().find(|f| f.name == dir) else {
                 // rpmlint#551: /var/log is owned by the filesystem package,
                 // so the not-packaged finding is a false positive for it.
                 // The exemption is scoped to that finding only; a packaged
@@ -231,5 +232,20 @@ mod tests {
         let content = "/var/log/x/a.log {\n}\n/var/log/x/b.log {\n}\n";
         let dirs = LogrotateCheck::parse_config(content);
         assert_eq!(dirs.len(), 1);
+    }
+
+    /// `parse_config` must preserve file order: the reference returns a dict and
+    /// iterates `.items()` (LogrotateCheck.py:20), and `logrotate-duplicate`
+    /// findings share one sort key, so hash order would become output order.
+    #[test]
+    fn parse_config_preserves_file_order() {
+        let content = "/srv/zeta/*.log /srv/alpha/*.log {\n  su root root\n}\n\
+                      /srv/mid/*.log {\n  su root root\n}\n";
+        let keys: Vec<String> = LogrotateCheck::parse_config(content).into_keys().collect();
+        assert_eq!(
+            keys,
+            vec!["/srv/zeta", "/srv/alpha", "/srv/mid"],
+            "file order, not sorted"
+        );
     }
 }
