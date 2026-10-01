@@ -193,7 +193,6 @@ jobs:
   reference-coverage-audit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -204,5 +203,7 @@ jobs:
           git clone --depth 1 https://github.com/rpm-software-management/rpmlint.git /tmp/rpmlint-ref
           git -C /tmp/rpmlint-ref fetch --depth 1 origin "$REF_SHA"
           git -C /tmp/rpmlint-ref checkout "$REF_SHA"
+      - name: Test the auditor
+        run: python3 scripts/test_audit_reference_coverage.py
       - name: Run reference coverage audit
         run: python3 scripts/audit-reference-coverage.py /tmp/rpmlint-ref

@@ -1004,6 +1004,32 @@ def audit_reference(pkgdir):
                 seg = ast.get_source_segment(mod.source, node) or "<source unavailable>"
                 unresolved.append((mod.modname, node.lineno,
                                    " ".join(seg.split())[:160]))
+        # `FileMetadataCheck.get_validation_error` builds its finding name as
+    # `f'{prefix}-mismatched-attrs'` from a FUNCTION PARAMETER, not
+    # `self.prefix`, so the resolver cannot reach it and the name arrives as
+    # `*-mismatched-attrs`. The concrete prefixes are the two subclasses'
+    # `self.prefix` values, already unioned above; expand with them so the name
+    # is checkable instead of permanently un-auditable.
+    prefixes = sorted(v.t for v in GLOBAL_SELF_ATTRS.get("prefix", ()))
+    if prefixes:
+        for mod in modules:
+            for node in ast.walk(mod.tree):
+                if (isinstance(node, ast.JoinedStr)
+                        and any(isinstance(v, ast.FormattedValue)
+                                and isinstance(v.value, ast.Name)
+                                and v.value.id == "prefix" for v in node.values)):
+                    tmpl = printf_template(ast.unparse(node))
+                    # ast.unparse keeps the f-prefix and quotes; the template
+                    # helpers all expect a bare string.
+                    for q in ("'", '"'):
+                        if tmpl.startswith("f" + q) and tmpl.endswith(q):
+                            tmpl = tmpl[2:-1]
+                            break
+                    for pre in prefixes:
+                        findings.add((mod.modname, tmpl.replace("{prefix}", pre)))
+                    # The wildcard form is superseded by the concrete names.
+                    findings.discard((mod.modname, tmpl.replace("{prefix}", "*")))
+
     return findings, unresolved, len(modules)
 
 
@@ -1975,9 +2001,20 @@ def main(argv):
     port_templates, port_unresolved = audit_port(port_dir)
     entries = load_ledger(ledger_path)
 
-    gaps, ledgered = [], []
+    gaps, ledgered, stale = [], [], []
+    missing_modules = {e.get("check") for e in entries if e.get("kind") == "missing"}
     for module, name in sorted(findings):
         if any(covers(p, name) for p in port_templates):
+            # A kind="missing" entry must not be able to silence a module the
+            # port has since implemented: that hides every future regression in
+            # it behind an entry written before the port existed.
+            # Only an EXACT port pattern counts here. A wildcard template such
+            # as `empty-*` "covers" every `empty-` name, including ones no port
+            # check emits, so it would report staleness that is not there.
+            if (module in missing_modules or name in missing_modules) and any(
+                "*" not in p and p == name for p in port_templates
+            ):
+                stale.append((module, name))
             continue
         if is_ledgered(module, name, entries):
             ledgered.append((module, name))
@@ -2015,7 +2052,15 @@ def main(argv):
         for module, name in ledgered:
             print(f"  {name}  [{module}.py]")
 
-    if gaps or unresolved or port_unresolved:
+    if stale:
+        print()
+        print(f"STALE LEDGER ({len(stale)}): findings a kind=\"missing\" entry "
+              "claims are unported but the port emits. Delete the entry.")
+        for module, name in stale:
+            print(f"  {name}  [{module}.py]")
+        print()
+
+    if gaps or unresolved or port_unresolved or stale:
         return 1
     return 0
 

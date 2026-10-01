@@ -3,7 +3,7 @@
 # parity corpus. Keep this fast and deterministic; `--locked` everywhere.
 # ==========================================================================
 
-.PHONY: check fmt clippy test deny layer gen doc doctest
+.PHONY: check fmt clippy test deny layer gen doc doctest audit auditor-test
 
 # The local gate: everything a change must pass before review.
 check: fmt clippy test deny layer
@@ -38,3 +38,9 @@ doc:
 
 doctest:
 	cargo test --workspace --doc --locked
+
+audit: ## reference-vs-port coverage audit (needs .parity-ref or a checkout)
+	python3 scripts/audit-reference-coverage.py
+
+auditor-test: ## unit tests for the auditor itself
+	python3 scripts/test_audit_reference_coverage.py

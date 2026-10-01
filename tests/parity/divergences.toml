@@ -171,13 +171,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "unused-direct-shlib-dependency"
-kind = "missing"
-reason = "The reference uses ldd -u for linker-based unused dependency analysis. goblin cannot replicate this; the finding is not emitted."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "missing-mandatory-optflags"
 kind = "behaviour"
 reason = "DWARF producer extraction via gimli is not yet implemented; the mandatory/forbidden optflags check degrades gracefully (no findings) until DWARF parsing lands."
@@ -383,6 +376,55 @@ case = "global"
 check = "FileMetadataCheck"
 kind = "missing"
 reason = "FileMetadataCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FilelistCheck"
+kind = "missing"
+reason = "FilelistCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "MenuCheck"
+kind = "missing"
+reason = "MenuCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "MenuXDGCheck"
+kind = "missing"
+reason = "MenuXDGCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "PolkitCheck"
+kind = "missing"
+reason = "PolkitCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "PythonCheck"
+kind = "missing"
+reason = "PythonCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SUIDPermissionsCheck"
+kind = "missing"
+reason = "SUIDPermissionsCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SignatureCheck"
+kind = "missing"
+reason = "SignatureCheck is not ported yet; its findings are absent from the port."
 since = "0.1.0"
 
 [[divergence]]

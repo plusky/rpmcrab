@@ -21,7 +21,6 @@ DuplicatesCheck
 ErlangCheck
 FHSCheck
 FileDigestCheck
-FileMetadataCheck
 FilelistCheck
 FilesCheck
 I18NCheck
