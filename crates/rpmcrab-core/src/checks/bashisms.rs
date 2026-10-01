@@ -113,9 +113,6 @@ mod tests {
         // The probe only reads the environment, so two consecutive runs
         // must agree. PATH is deliberately not mutated to force a case:
         // that would be unsafe under parallel in-process tests.
-        assert_eq!(
-            BashismsCheck::detect_tools(),
-            BashismsCheck::detect_tools()
-        );
+        assert_eq!(BashismsCheck::detect_tools(), BashismsCheck::detect_tools());
     }
 }
