@@ -1658,8 +1658,8 @@ def find_loop_source(src, name, call_pos):
                         # enclosing for loop of this push
                         ftext = text[:pm.start()]
                         last_iter = None
-                        for _, fiter, _ in _for_loops(ftext):
-                            last_iter = fiter
+                        for _, f_it, _ in _for_loops(ftext):
+                            last_iter = f_it
                         if last_iter:
                             src_iter = last_iter.strip().lstrip("&").strip()
                             src_rhs = find_let_rhs(text, src_iter)
