@@ -960,13 +960,14 @@ def resolve_add_info_name(mod, call, func, resolving=frozenset()):
     args = call.args
     starred = [a for a in args if isinstance(a, ast.Starred)]
     if starred:
-        # add_info('E', *msg): the name is element 1 of the tuple
+        # add_info('E', *msg): the name is element 1 of the tuple. An
+        # empty resolution is UNRESOLVED, never silently dropped.
         out = set()
         for st in starred:
             for v in resolve_expr(st.value, mod, func):
                 if isinstance(v, Seq) and len(v.items) > 1:
                     out.update(s for s in v.items[1] if isinstance(s, S))
-        return {s.t for s in out}, True
+        return {s.t for s in out}, bool(out)
     if len(args) < 3:
         return set(), False
     return resolve_name_arg(mod, args[2], func, resolving)

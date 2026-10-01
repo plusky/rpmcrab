@@ -155,6 +155,32 @@ def test_port_closure_template_format():
     assert "empty-*" in templates, sorted(templates)
 
 
+
+
+# ---------------------------------------------------------------------------
+# NEW-2: a starred call resolving to nothing is UNRESOLVED, not resolved
+# ---------------------------------------------------------------------------
+
+REF_STAR_EMPTY_PY = """\
+from rpmlint.checks.AbstractCheck import AbstractCheck
+
+
+class StarEmptyCheck(AbstractCheck):
+    def check_binary(self, pkg, msg):
+        # *msg is a parameter: unresolvable here, so this call site must be
+        # reported, never silently treated as resolved with zero names.
+        self.output.add_info('E', *msg)
+"""
+
+
+def test_starred_call_resolving_to_nothing_is_unresolved():
+    with tempfile.TemporaryDirectory() as d:
+        _write(os.path.join(d, "checks", "StarEmptyCheck.py"), REF_STAR_EMPTY_PY)
+        findings, unresolved, nmods = audit.audit_reference(d)
+    assert not findings, sorted(findings)
+    assert len(unresolved) == 1, unresolved
+    assert unresolved[0][0] == "StarEmptyCheck", unresolved
+
 def main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]
