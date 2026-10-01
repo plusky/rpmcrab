@@ -504,4 +504,45 @@ mod tests {
             .collect();
         assert_eq!(order, expected, "results not in task order");
     }
+
+    /// `jobs` is clamped to the task count and the machine's parallelism:
+    /// each worker builds a full check set up front, so workers beyond that
+    /// only burn memory and startup time. The factory runs once per worker,
+    /// so counting its calls pins the clamp.
+    #[test]
+    fn jobs_are_clamped_to_tasks_and_machine_parallelism() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Vec<Task> = (0..3)
+            .map(|i| {
+                let spec = dir.path().join(format!("t{i}.spec"));
+                std::fs::write(&spec, b"Name: test\n").unwrap();
+                Task::File(spec)
+            })
+            .collect();
+        let config = Config::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls2 = Arc::clone(&calls);
+        let results = run_tasks(
+            tasks,
+            256,
+            &config,
+            &move || {
+                calls2.fetch_add(1, Ordering::SeqCst);
+                Vec::<Box<dyn Check>>::new()
+            },
+            Color::for_tty(false),
+        );
+        assert_eq!(results.len(), 3);
+        let max_workers = 3.min(
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(usize::MAX),
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            max_workers,
+            "one check set per worker, no more"
+        );
+    }
 }
