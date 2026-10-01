@@ -21,3 +21,6 @@ name = "device-parity"
 
 [[case]]
 name = "source-parity"
+
+[[case]]
+name = "libdep-devel"
