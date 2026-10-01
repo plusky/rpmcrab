@@ -287,6 +287,13 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "SUIDPermissionsCheck"
+kind = "detail"
+reason = "Drop-in `permissions-parse-error` message texts are paraphrased rather than byte-identical to the reference's wordings; central-profile parse errors abort the run like the reference constructor, emitting no finding."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "beam-was-not-recompiled"
 kind = "behaviour"
 reason = "The reference expands the %_builddir macro at check time; rpmcrab has no macro expansion, so the expected build dir comes from the ErlangBuildDir config key (default /home/abuild/rpmbuild/BUILD, the OBS value). A local ~/rpmbuild/BUILD build reports beam-was-not-recompiled unless the key is set."

@@ -13,6 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
 
 use fancy_regex::Regex;
@@ -57,13 +58,18 @@ struct VariablesHandler {
 impl VariablesHandler {
     fn new(path: &str) -> Self {
         let mut variables = HashMap::new();
-        if let Ok(content) = fs::read_to_string(path) {
-            for line in content.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                if let Some((name, values)) = line.split_once('=') {
+        match fs::read_to_string(path) {
+            Ok(content) => {
+                for (nr, line) in content.lines().enumerate() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    // The reference raises on a malformed line
+                    // (`permissions.py` `_parse`).
+                    let (name, values) = line
+                        .split_once('=')
+                        .unwrap_or_else(|| panic!("{path}:{}: parse error", nr + 1));
                     let name = name.trim().to_string();
                     let values: Vec<String> = values
                         .split_whitespace()
@@ -72,6 +78,10 @@ impl VariablesHandler {
                     variables.insert(name, values);
                 }
             }
+            // The reference suppresses only FileNotFoundError
+            // (`permissions.py:57`); every other I/O error propagates.
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => panic!("{path}: {e}"),
         }
         Self { variables }
     }
@@ -82,19 +92,23 @@ impl VariablesHandler {
         for part in path.split('/') {
             if part.starts_with("%{") && part.ends_with('}') {
                 let var = &part[2..part.len() - 1];
-                if let Some(expansions) = self.variables.get(var) {
-                    let mut new_ret = Vec::new();
-                    for p in &ret {
-                        for value in expansions {
-                            if p.is_empty() {
-                                new_ret.push(format!("/{value}"));
-                            } else {
-                                new_ret.push(format!("{p}/{value}"));
-                            }
+                // The reference raises on undeclared variables
+                // (`permissions.py:94-95`); a silently dropped variable
+                // would produce a wrong path and wrong findings.
+                let expansions = self.variables.get(var).unwrap_or_else(|| {
+                    panic!("Undeclared variable '{var}' encountered in profile")
+                });
+                let mut new_ret = Vec::new();
+                for p in &ret {
+                    for value in expansions {
+                        if p.is_empty() {
+                            new_ret.push(format!("/{value}"));
+                        } else {
+                            new_ret.push(format!("{p}/{value}"));
                         }
                     }
-                    ret = new_ret;
                 }
+                ret = new_ret;
             } else if part.is_empty() {
                 continue;
             } else {
@@ -169,9 +183,13 @@ fn parse_profile(
             continue;
         } else if line.starts_with(":package:") {
             let line = line.split('#').next().unwrap_or("");
-            if let Some(rest) = line.strip_prefix(":package:") {
-                active_packages = rest.split(',').map(|s| s.trim().to_string()).collect();
-            }
+            // The reference does `line.split(None, 1)` then `parts[1]`,
+            // raising `IndexError` on a bare `:package:` line.
+            let rest = line
+                .split_once(|c: char| c.is_whitespace())
+                .map(|x| x.1)
+                .unwrap_or_else(|| panic!("{profile_path}:{nr}: bare :package: line"));
+            active_packages = rest.split(',').map(|s| s.trim().to_string()).collect();
         } else if line.starts_with('+') {
             return Err(format!("{profile_path}:{nr}: unexpected +line"));
         } else {
@@ -194,41 +212,36 @@ fn script_body_or_prog(pkg: &Pkg, tag: Tag, prog: Tag) -> String {
 pub struct SUIDPermissionsCheck {
     perms: HashMap<String, Vec<PermissionsEntry>>,
     var_handler: VariablesHandler,
-    /// Profile parse errors from the constructor, reported as
-    /// `permissions-parse-error` on the first `check()` (the reference
-    /// raises in the constructor; this is the non-fatal equivalent).
-    parse_errors: Vec<String>,
 }
 
 impl SUIDPermissionsCheck {
     pub fn new(_config: &Config) -> Self {
-        let var_handler = VariablesHandler::new(&format!("{SHARE_DIR}/variables.conf"));
-        let mut perms: HashMap<String, Vec<PermissionsEntry>> = HashMap::new();
-        let mut parse_errors = Vec::new();
+        Self::new_with(&format!("{SHARE_DIR}/variables.conf"), &[SHARE_DIR, "/etc"])
+    }
 
-        for name in ["permissions", "permissions.secure"] {
-            for path in [format!("{SHARE_DIR}/{name}"), format!("/etc/{name}")] {
+    /// Load the central profiles, split out so tests can point the
+    /// constructor at scratch profiles. A parse error aborts the run,
+    /// matching the reference: `SUIDPermissionsCheck.__init__` calls
+    /// `_parse_profile` with no exception handling, and nothing upstream
+    /// (`lint.py` `load_checks`) catches it.
+    fn new_with(variables_conf: &str, profile_bases: &[&str]) -> Self {
+        let var_handler = VariablesHandler::new(variables_conf);
+        let mut perms: HashMap<String, Vec<PermissionsEntry>> = HashMap::new();
+
+        for base in profile_bases {
+            for name in ["permissions", "permissions.secure"] {
+                let path = format!("{base}/{name}");
                 if !Path::new(&path).exists() {
                     continue;
                 }
-                match parse_profile(&var_handler, &path) {
-                    Ok(entries) => {
-                        for (k, v) in entries {
-                            perms.entry(k).or_default().extend(v);
-                        }
-                    }
-                    // The reference propagates the parse error; record it so
-                    // `check()` can emit `permissions-parse-error`.
-                    Err(e) => parse_errors.push(e),
+                let entries = parse_profile(&var_handler, &path).unwrap_or_else(|e| panic!("{e}"));
+                for (k, v) in entries {
+                    perms.entry(k).or_default().extend(v);
                 }
             }
         }
 
-        Self {
-            perms,
-            var_handler,
-            parse_errors,
-        }
+        Self { perms, var_handler }
     }
 
     fn is_suid(mode: u32) -> bool {
@@ -469,13 +482,6 @@ impl Check for SUIDPermissionsCheck {
 
     fn check(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
         if pkg.is_source {
-            return;
-        }
-
-        if !self.parse_errors.is_empty() {
-            for e in std::mem::take(&mut self.parse_errors) {
-                add_info(out, Level::Error, pkg, "permissions-parse-error", &[&e]);
-            }
             return;
         }
 
@@ -901,5 +907,102 @@ mod tests {
         let expanded = handler.expand_paths("/usr/%{BIN}/foo");
         assert!(expanded.contains(&"/usr/bin/foo".to_string()));
         assert!(expanded.contains(&"/usr/sbin/foo".to_string()));
+    }
+
+    #[test]
+    #[should_panic(expected = "Undeclared variable 'NOPE' encountered in profile")]
+    fn undeclared_variable_panics() {
+        let handler = VariablesHandler {
+            variables: [("BIN".to_string(), vec!["bin".to_string()])]
+                .into_iter()
+                .collect(),
+        };
+        // The reference raises (`permissions.py:94-95`); silently dropping
+        // the variable would produce a wrong path and wrong findings.
+        let _ = handler.expand_paths("/usr/%{NOPE}/foo");
+    }
+
+    #[test]
+    fn variables_conf_missing_is_ignored() {
+        // The reference suppresses only FileNotFoundError
+        // (`permissions.py:57`).
+        let handler = VariablesHandler::new("/nonexistent/rpmcrab-variables.conf");
+        assert!(handler.variables.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "Is a directory")]
+    fn variables_conf_unreadable_panics() {
+        // A directory at the variables.conf path is a non-NotFound I/O
+        // error, which the reference lets propagate.
+        let dir = std::env::temp_dir().join("rpmcrab-suid-vars-dir");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let _ = VariablesHandler::new(dir.to_str().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[should_panic(expected = "parse error")]
+    fn variables_conf_malformed_line_panics() {
+        // The reference raises on a line without `=` (`permissions.py`
+        // `_parse`).
+        let dir = std::env::temp_dir().join("rpmcrab-suid-vars-bad");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let path = dir.join("variables.conf");
+        std::fs::write(&path, "BIN=bin\nthis line has no equals\n").expect("write");
+        let _ = VariablesHandler::new(path.to_str().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[should_panic(expected = "bare :package:")]
+    fn bare_package_line_panics() {
+        // The reference does `line.split(None, 1)` then `parts[1]`, raising
+        // `IndexError` on a bare `:package:` line.
+        let dir = std::env::temp_dir().join("rpmcrab-suid-bare-package");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let path = dir.join("permissions");
+        std::fs::write(&path, ":package:\n").expect("write");
+        let handler = VariablesHandler {
+            variables: HashMap::new(),
+        };
+        let _ = parse_profile(&handler, path.to_str().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_with_loads_profiles_and_variables() {
+        let dir = std::env::temp_dir().join("rpmcrab-suid-new-with");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let vars = dir.join("variables.conf");
+        std::fs::write(&vars, "BIN=bin sbin\n").expect("write vars");
+        let profile = dir.join("permissions");
+        std::fs::write(&profile, "/usr/%{BIN}/runme root:root 4750\n").expect("write profile");
+        let base = dir.to_str().unwrap().to_string();
+        let check = SUIDPermissionsCheck::new_with(vars.to_str().unwrap(), &[base.as_str()]);
+        assert!(check.perms.contains_key("/usr/bin/runme"));
+        assert!(check.perms.contains_key("/usr/sbin/runme"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected line")]
+    fn constructor_parse_error_panics() {
+        // The reference raises from the constructor, aborting the run
+        // (`SUIDPermissionsCheck.__init__` -> `_parse_profile`, uncaught in
+        // `lint.py` `load_checks`).
+        let dir = std::env::temp_dir().join("rpmcrab-suid-new-bad");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let profile = dir.join("permissions");
+        std::fs::write(&profile, "this is not a valid profile line\n").expect("write");
+        let base = dir.to_str().unwrap().to_string();
+        let _ =
+            SUIDPermissionsCheck::new_with("/nonexistent/rpmcrab-variables.conf", &[base.as_str()]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
