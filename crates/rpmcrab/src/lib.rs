@@ -115,6 +115,14 @@ fn default_jobs() -> i32 {
         .unwrap_or(1)
 }
 
+/// The clap `Command` for the `rpmcrab` binary, shared by `main.rs` and the
+/// `rpmcrab-gen` asset generator so the man page and shell completions can
+/// never drift from the shipped CLI.
+pub fn cli_command() -> clap::Command {
+    use clap::CommandFactory;
+    Cli::command()
+}
+
 /// Parse arguments and run the linter, returning the process exit code.
 ///
 /// Exit-code semantics are part of the frozen compatibility contract (see

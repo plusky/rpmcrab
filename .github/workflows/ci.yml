@@ -164,3 +164,27 @@ jobs:
           command: check
           # Do not force --all-features on an empty graph.
           arguments: ""
+
+  # The man page and shell completions are checked in under
+  # crates/rpmcrab/{man,completions}; regenerate them from the clap Command
+  # and fail if the committed assets drifted.
+  assets-drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: . -> target
+      # Building rpmcrab-gen links the rpmcrab lib, so this needs the same RPM
+      # development headers as the main build.
+      - name: Install RPM toolchain (headers + tools)
+        run: sudo apt-get update && sudo apt-get install -y librpm-dev rpm cpio file
+      - run: cargo run -p rpmcrab --features gen --locked --bin rpmcrab-gen -- /tmp/rpmcrab-gen-assets
+      - run: diff -r /tmp/rpmcrab-gen-assets/man crates/rpmcrab/man
+      - run: diff -r /tmp/rpmcrab-gen-assets/completions crates/rpmcrab/completions

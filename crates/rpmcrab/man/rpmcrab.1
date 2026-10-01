@@ -1,0 +1,60 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH rpmcrab 1  "rpmcrab 0.1.0" 
+.SH NAME
+rpmcrab \- Check for common problems in rpm packages
+.SH SYNOPSIS
+\fBrpmcrab\fR [\fB\-V\fR|\fB\-\-version\fR] [\fB\-c\fR|\fB\-\-config\fR] [\fB\-e\fR|\fB\-\-explain\fR] [\fB\-r\fR|\fB\-\-rpmlintrc\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-p\fR|\fB\-\-print\-config\fR] [\fB\-i\fR|\fB\-\-installed\fR] [\fB\-t\fR|\fB\-\-time\-report\fR] [\fB\-j\fR|\fB\-\-jobs\fR] [\fB\-\-ignore\-unused\-rpmlintrc\fR] [\fB\-\-checks\fR] [\fB\-s\fR|\fB\-\-strict\fR] [\fB\-P\fR|\fB\-\-permissive\fR] [\fB\-m\fR|\fB\-\-mini\-mode\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIrpmfile\fR] 
+.SH DESCRIPTION
+Check for common problems in rpm packages
+.SH OPTIONS
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version and exit
+.TP
+\fB\-c\fR, \fB\-\-config\fR \fI<path>\fR
+Config file or directory of `*.toml` (repeatable)
+.TP
+\fB\-e\fR, \fB\-\-explain\fR \fI<id>...\fR
+Print the description for a message id and exit
+.TP
+\fB\-r\fR, \fB\-\-rpmlintrc\fR \fI<path>\fR
+A rpmlintrc file (repeatable)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Inline explanations (and re\-raise internal errors)
+.TP
+\fB\-p\fR, \fB\-\-print\-config\fR
+Dump the merged configuration as TOML and exit
+.TP
+\fB\-i\fR, \fB\-\-installed\fR \fI<name>...\fR
+Check installed RPM DB packages
+.TP
+\fB\-t\fR, \fB\-\-time\-report\fR
+Per\-check timing report
+.TP
+\fB\-j\fR, \fB\-\-jobs\fR \fI<n>\fR [default: 10]
+Number of parallel worker threads for checking packages (1 for sequential)
+.TP
+\fB\-\-ignore\-unused\-rpmlintrc\fR
+Suppress the `unused\-rpmlintrc\-filter` audit
+.TP
+\fB\-\-checks\fR \fI<a,b,c>\fR
+Run only these checks (debug)
+.TP
+\fB\-s\fR, \fB\-\-strict\fR
+Treat all messages as errors
+.TP
+\fB\-P\fR, \fB\-\-permissive\fR
+Treat individual errors as non\-fatal
+.TP
+\fB\-m\fR, \fB\-\-mini\-mode\fR
+Called from the rpmlint\-mini wrapper (SUSE\-only)
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+[\fIrpmfile\fR]
+RPMs / specfiles / directories to check
+.SH VERSION
+v0.1.0
