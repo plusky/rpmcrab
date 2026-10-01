@@ -20,17 +20,30 @@ use crate::pkg::Pkg;
 use super::shared::script_body_or_prog;
 use librpm::Tag;
 
-pub struct SystemdInstallCheck;
+pub struct SystemdInstallCheck {
+    unit_dir: String,
+}
 
 impl SystemdInstallCheck {
-    pub fn new(_config: &Config) -> Self {
-        Self
+    pub fn new(config: &Config) -> Self {
+        // The reference expands `%{_unitdir}` at import time; rpmcrab has no
+        // macro expansion, so the directory comes from configuration.
+        let unit_dir = config
+            .configuration
+            .get("SystemdUnitDir")
+            .and_then(|v| v.as_str())
+            .unwrap_or("/usr/lib/systemd/system")
+            .to_string();
+        Self { unit_dir }
     }
 
     /// The unit types the reference checks.
-    fn unit_regex() -> Regex {
-        Regex::new(r"^/usr/lib/systemd/system/.+[^@]\.(service|socket|target|path)$")
-            .expect("static regex")
+    fn unit_regex(&self) -> Regex {
+        Regex::new(&format!(
+            r"^{}.+[^@]\.(service|socket|target|path)$",
+            fancy_regex::escape(&self.unit_dir)
+        ))
+        .expect("static regex")
     }
 
     /// `(finding, ok)` for one unit file against the four scriptlets.
@@ -93,13 +106,14 @@ impl Check for SystemdInstallCheck {
     }
 
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
-        let unit_re = Self::unit_regex();
+        let unit_re = self.unit_regex();
         let pre = script_body_or_prog(pkg, Tag::PREIN, Tag::PREINPROG);
         let post = script_body_or_prog(pkg, Tag::POSTIN, Tag::POSTINPROG);
         let preun = script_body_or_prog(pkg, Tag::PREUN, Tag::PREUNPROG);
         let postun = script_body_or_prog(pkg, Tag::POSTUN, Tag::POSTUNPROG);
 
-        let mut units: Vec<String> = pkg
+        // The reference walks pkg.files in order without sorting or deduping.
+        let units: Vec<String> = pkg
             .files
             .iter()
             .map(|f| f.name.as_str())
@@ -111,8 +125,6 @@ impl Check for SystemdInstallCheck {
                     .unwrap_or_default()
             })
             .collect();
-        units.sort();
-        units.dedup();
 
         for basename in &units {
             for finding in Self::check_unit(basename, &pre, &post, &preun, &postun) {
@@ -153,8 +165,23 @@ mod tests {
 
     #[test]
     fn socket_unit_is_ignored_by_regex() {
-        let re = SystemdInstallCheck::unit_regex();
+        let check = SystemdInstallCheck::new(&Config::default());
+        let re = check.unit_regex();
         assert!(!is_match(&re, "/usr/lib/systemd/system/foo@.service"));
         assert!(is_match(&re, "/usr/lib/systemd/system/foo.service"));
+    }
+
+    #[test]
+    fn unit_dir_comes_from_config() {
+        let mut table = toml::Table::new();
+        table.insert(
+            "SystemdUnitDir".to_string(),
+            toml::Value::String("/run/systemd/system".to_string()),
+        );
+        let config = Config { configuration: table, ..Default::default() };
+        let check = SystemdInstallCheck::new(&config);
+        let re = check.unit_regex();
+        assert!(is_match(&re, "/run/systemd/system/foo.service"));
+        assert!(!is_match(&re, "/usr/lib/systemd/system/foo.service"));
     }
 }

@@ -40,7 +40,10 @@ impl MenuCheck {
                 })
                 .unwrap_or_default()
         };
-        let icon_paths: Vec<(String, String, String)> = config
+        // Sort explicitly: the toml table order is serialization-dependent,
+        // while the reference walks IconPath in config-file order. The
+        // resulting emission order is ledgered as a deliberate divergence.
+        let mut icon_paths: Vec<(String, String, String)> = config
             .configuration
             .get("IconPath")
             .and_then(|v| v.as_table())
@@ -62,7 +65,8 @@ impl MenuCheck {
                     .collect()
             })
             .unwrap_or_default();
-        let launchers: Vec<(String, Regex, Vec<String>)> = config
+        icon_paths.sort();
+        let mut launchers: Vec<(String, Regex, Vec<String>)> = config
             .configuration
             .get("MenuLaunchers")
             .and_then(|v| v.as_table())
@@ -88,6 +92,7 @@ impl MenuCheck {
                     .collect()
             })
             .unwrap_or_default();
+        launchers.sort_by(|a, b| a.0.cmp(&b.0));
         let icon_ext = config
             .configuration
             .get("IconFilename")
@@ -386,7 +391,10 @@ impl MenuCheck {
                 add_info(out, Level::Error, pkg, "no-longtitle-in-menu", &[fname]);
             }
         }
-        match title_re.captures(line).ok().flatten() {
+        // The reference passes the parsed title (possibly None) as the
+        // `no-icon-in-menu` detail; a missing title is a falsy detail that
+        // the filter drops at print time.
+        let title: Option<String> = match title_re.captures(line).ok().flatten() {
             Some(caps) => {
                 let title = caps
                     .get(1)
@@ -394,11 +402,13 @@ impl MenuCheck {
                     .map(|m| m.as_str())
                     .unwrap_or("");
                 self.check_title(pkg, out, &version_re, title, false);
+                Some(title.to_string())
             }
             None => {
                 add_info(out, Level::Error, pkg, "no-title-in-menu", &[fname]);
+                None
             }
-        }
+        };
 
         let mut needs = String::new();
         match needs_re.captures(line).ok().flatten() {
@@ -472,7 +482,10 @@ impl MenuCheck {
                 }
             }
             None => {
-                add_info(out, Level::Warning, pkg, "no-icon-in-menu", &[]);
+                match &title {
+                    Some(t) => add_info(out, Level::Warning, pkg, "no-icon-in-menu", &[t]),
+                    None => add_info(out, Level::Warning, pkg, "no-icon-in-menu", &[]),
+                }
             }
         }
 
