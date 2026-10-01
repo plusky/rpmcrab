@@ -55,7 +55,7 @@ produces is not.
 | 6 | Package source | Sum type (`PkgSource`), not flag fields | §7.5 — illegal source states unrepresentable. |
 | 7 | Spec model | Separate `SpecPkg`; `check_spec` arrives with it | §7.5 — the reference dispatches on `FakePkg`, not `is_source`. |
 | 8 | Named durations | One insertion-ordered type | §7.5 — `Pkg.timers` and the lint accumulator share it. |
-| 9 | Check execution | Serial; `&mut self` + `reset()` | §8 — packages are the future unit of parallelism. |
+| 9 | Check execution | Parallel by package (`-j`), deterministic reassembly | §8 — the unit of parallelism is the package; findings reassemble into the frozen order. |
 | 10 | Precision measurement | Distro-scale set; procedure defined before Wave 1's first promotion | §5.1 — hand cases pin the surface, they cannot measure FP rates. |
 
 ### 3.1 RPM backend
@@ -283,7 +283,10 @@ RPMs and print `E:` findings yet still "succeed", and why consumers grep the
 The badness branch (`score > threshold` → 66) is evaluated **before** the
 permissive error branch, so 66 fires even in the default permissive mode. The
 `64`-vs-`65` split is reachable only under `-s` and is preserved. On openSUSE,
-passing `-P` explicitly is a no-op (permissive is already forced).
+passing `-P` explicitly is a no-op (permissive is already forced). A fatal
+per-package result dominates: if any package failed to open, the exit code is
+3 even when the badness threshold also fired — the batch ran to completion,
+so the unreadable input is the load-bearing fact.
 
 ### 4.7 Configuration semantics
 
@@ -334,12 +337,15 @@ dead); openSUSE sets `999`.
 
 ### 4.10 CLI flags
 
-The CLI follows Tom's rpmlint PR #1595, not the `opensuse` branch's
-option design: positionals (with per-arg `*`/`?` globbing, re-expanded and
+The CLI is the deliberate exception to §3.2's contract rule: it follows
+Tom's rpmlint PR #1595, not the `opensuse` branch's option design. The pinned
+branch's option surface carries illogical aliases (`--file`, `--info`) and a
+misleading `--profile`; straightening them is a designed divergence, ledgered
+per flag. Positionals (with per-arg `*`/`?` globbing, re-expanded and
 sorted, only `.rpm`/`.spm`/`.spec`), `-V/--version`, `-c/--config`,
 `-e/--explain`, `-r/--rpmlintrc` (repeatable), `-v/--verbose`,
 `-p/--print-config`, `-i/--installed`, `-t/--time-report`,
-`-j/--jobs` (default: machine parallelism; `≤ 0` coerces to 1),
+`-j/--jobs` (default: machine parallelism; `≤ 0` coerces to 1; capped at the task count and machine parallelism),
 `--ignore-unused-rpmlintrc`, `--checks`, `-s/--strict`, `-P/--permissive`
 (mutually exclusive with `-s`). Deliberately **not** accepted: `-T/--profile`
 (removed upstream by #1595 as misleading) and the illogical `--file`/`--info`
@@ -611,16 +617,20 @@ input is refused with exit 3 rather than silently ignored (ledgered). The
 `Check` trait's `check_spec` hook arrives with it, because the reference
 dispatches it on holding a `FakePkg` rather than on `is_source`.
 
-A check that panics aborts the run rather than being contained per check or
-per package: a linter that swallowed a check bug would present incomplete
-coverage as a clean run. The status differs from the reference's (101 rather
-than 1 with a traceback) and is ledgered.
+A check that panics is contained per package: the package becomes a fatal
+result (reported, exit 3 after the batch) and the run continues with the
+remaining packages. Swallowing the panic entirely would present incomplete
+coverage as a clean run, so the fatal line and the exit code keep the bug
+visible; aborting the whole batch on one package's bug would forfeit the
+rest. The status differs from the reference's (3 rather than 1 with a
+traceback) and is ledgered.
 
-*Decided; recorded for when throughput matters.* Checks run serially, one
-package at a time; the `&mut self` + `reset()` trait shape assumes it, and the
-fail-closed panic contract above does too. If throughput ever demands it, the
-unit of parallelism is the *package*, with deterministic reassembly into the
-frozen finding order — a future decision, not a refactor.
+*Decided and implemented.* Throughput matters: checks run in parallel, one
+package per worker thread (`-j`, defaulting to machine parallelism); the
+`&mut self` + `reset()` trait shape is preserved because each worker owns its
+check set and resets it between packages. Findings reassemble deterministically
+into the frozen order (task-index order, then the frozen sort), so the pool is
+a scheduling detail, not a behaviour change.
 
 ---
 
@@ -631,7 +641,10 @@ output contract is proven substitutable (M4), **1.0** at that point. Findings
 may diverge at any version (§5.1), so the version tracks the stability of the
 *output contract*, not the set of findings — 1.0 means "substitutable", not
 "bug-for-bug identical". A change to the frozen output contract itself would be
-a deliberate major-version bump. This avoids `rpmcrab 1.x` masquerading as
+a deliberate major-version bump. The CLI changes in this cycle (threading,
+fatal-continue, flag straightening) stay at **0.1.0**: they are the designed
+pre-1.0 direction, and 1.0 still marks the substitutability milestone, not the
+absence of divergence. This avoids `rpmcrab 1.x` masquerading as
 `rpmlint 2.x` for packagers. Bare `X.Y.Z` tags, no `v`. Distribution is
 primarily the OBS package (`rpmcrab`, plus an `rpmcrab-mini` build-root flavour
 mirroring `rpmlint-mini`); crates.io is the secondary channel — `rpmcrab-core`

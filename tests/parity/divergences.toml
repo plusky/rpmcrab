@@ -48,13 +48,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "profile-report"
-kind = "behaviour"
-reason = "-T/--profile prints rpmcrab's own per-check wall-time report; the reference prints a CPython cProfile dump, which a Rust port cannot reproduce without a profiler dependency. -t, whose output is deterministic, is reproduced column for column."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "session-header"
 kind = "behaviour"
 reason = "The header's 'configuration:' block names the bundled defaults as <builtin>; the reference names the installed file it read (site-packages/rpmlint/configdefaults.toml). rpmcrab embeds its defaults at build time with include_str!, so there is no installed file to name, and reproducing an installation path would be false provenance."
@@ -78,14 +71,15 @@ since = "0.1.0"
 case = "global"
 check = "interrupt-handling"
 kind = "behaviour"
-reason = "On SIGINT the run ends with the shell's default status 130 but without printing the time or profile reports first; the reference catches KeyboardInterrupt, prints them, then re-raises (lint.py:122-127). Printing them needs a signal handler, which is a dependency decision not taken yet."
+reason = "On SIGINT the run ends with the shell's default status 130 but without printing the time report first; the reference catches KeyboardInterrupt, prints it, then re-raises (lint.py:122-127). Printing it needs a signal handler, which is a dependency decision not taken yet."
 since = "0.1.0"
 
 [[divergence]]
 case = "global"
 check = "check-error-handling"
 kind = "behaviour"
-reason = "A check that panics aborts the run with Rust's panic status 101 and no rendered report; the reference propagates the exception with a traceback and exits 1. A buggy check is not contained per check or per package, deliberately: a linter that swallowed a check bug would report incomplete coverage as a clean run."
+reason = "A check that panics is contained per package: the package becomes a fatal result, the run continues, and the exit code is 3. The reference propagates the exception with a traceback and exits 1. Swallowing the panic entirely would report incomplete coverage as a clean run, so the fatal line and the exit code keep the bug visible; aborting the whole batch on one package's bug would forfeit the rest."
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
 since = "0.1.0"
 
 [[divergence]]
@@ -300,9 +294,18 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "time-report"
+kind = "behaviour"
+reason = "With -t, BinariesCheck's \u201cChecked files\u201d column shows the run-lifetime total instead of blank: the check no longer resets per package (the per-worker check set is reset between packages, but the count accumulates for the merged report). The reference sets checked_files to None on every reset (AbstractCheck.py:65) and resets after each package (lint.py:271), so its column is blank."
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "cli"
 kind = "behaviour"
-reason = "A package that fails to open is a fatal result: one '(none): E: fatal error while reading ...' line on stderr, the run continues with the remaining packages, and the exit code is 3 (rpmlint#1595). The pinned reference exits 3 immediately on the first unreadable file; the -v re-raise (exit 1 with a cause chain) is gone."
+reason = "A package that fails to open is a fatal result: one '(none): E: fatal error while reading ...' line on stderr, the run continues with the remaining packages, and the exit code is 3. The pinned reference exits 3 immediately on the first unreadable file; the -v re-raise (exit 1 with a cause chain) is gone."
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
 since = "0.1.0"
 
 [[divergence]]
@@ -326,7 +329,8 @@ since = "0.1.0"
 case = "global"
 check = "cli"
 kind = "behaviour"
-reason = "-T/--profile is removed entirely (rpmlint#1595): the reference dropped it because the cProfile dump had no consumers. The --file/--info aliases for -r/-v are also dropped; only -r/--rpmlintrc and -v/--verbose remain."
+reason = "-T/--profile is removed entirely, and the --file/--info aliases for -r/-v are dropped; only -r/--rpmlintrc and -v/--verbose remain. All three are live in the pinned reference (cli.py:78,79,83): this is deliberate straightening of the option surface per the #1595 design, not something the reference dropped. A wrapper passing --info now gets exit 2."
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
 since = "0.1.0"
 
 [[divergence]]
@@ -476,5 +480,6 @@ since = "0.1.0"
 case = "global"
 check = "after_checks"
 kind = "behaviour"
-reason = "after_checks sees the merged state of ALL packages in the batch (rpmlint#1595 export/import). The pinned reference reset checks after each package, so after_checks only ever saw the last package's state."
+reason = "after_checks sees the merged state of ALL packages in the batch (export/import). The pinned reference reset checks after each package, so after_checks only ever saw the last package's state."
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
 since = "0.1.0"
