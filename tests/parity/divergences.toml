@@ -300,13 +300,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "menu-icon-path-order"
-kind = "behaviour"
-reason = "The reference walks IconPath/MenuLaunchers in config-file order (Python dict order); the port sorts both tables explicitly so emission order is deterministic regardless of config serialization."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "beam-was-not-recompiled"
 kind = "behaviour"
 reason = "The reference expands the %_builddir macro at check time; rpmcrab has no macro expansion, so the expected build dir comes from the ErlangBuildDir config key (default /home/abuild/rpmbuild/BUILD, the OBS value). A local ~/rpmbuild/BUILD build reports beam-was-not-recompiled unless the key is set."
@@ -457,4 +450,32 @@ check = "after_checks"
 kind = "behaviour"
 reason = "after_checks sees the merged state of ALL packages in the batch (export/import). The pinned reference reset checks after each package, so after_checks only ever saw the last package's state."
 upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "filelist-forbidden-fhs23"
+kind = "behaviour"
+reason = "The reference emits filelist-forbidden-fhs23 once per matching Bad pattern, iterating a Python set (FilelistCheck.py:105); the port collects matches into a BTreeSet and emits one finding per FHS directory in sorted order, so one finding per pattern becomes one per directory and the order is sorted rather than set order."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "filelist-forbidden-opt"
+kind = "behaviour"
+reason = "Same shape as filelist-forbidden-fhs23: the reference emits once per matching Bad pattern iterating a Python set (FilelistCheck.py:127); the port emits one finding per directory in sorted order."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SysVInitOnSystemdCheck"
+kind = "behaviour"
+reason = "The reference accumulates basenames in sets (SysVInitOnSystemdCheck.py:11-13), so a basename reachable by two init scripts yields one finding; the port sorts and dedups explicitly, giving the same single finding in sorted order rather than set order."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SystemdUnitDir"
+kind = "behaviour"
+reason = "The unit directory comes from the SystemdUnitDir config key rather than rpm.expandMacro('%{_unitdir}') (SystemdInstallCheck.py). The shipped value matches this host's macro, so behaviour is identical today, but a host whose rpm sets a different _unitdir would not be followed."
 since = "0.1.0"

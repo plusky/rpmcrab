@@ -43,7 +43,7 @@ impl MenuCheck {
         // Sort explicitly: the toml table order is serialization-dependent,
         // while the reference walks IconPath in config-file order. The
         // resulting emission order is ledgered as a deliberate divergence.
-        let mut icon_paths: Vec<(String, String, String)> = config
+        let icon_paths: Vec<(String, String, String)> = config
             .configuration
             .get("IconPath")
             .and_then(|v| v.as_table())
@@ -65,8 +65,7 @@ impl MenuCheck {
                     .collect()
             })
             .unwrap_or_default();
-        icon_paths.sort();
-        let mut launchers: Vec<(String, Regex, Vec<String>)> = config
+        let launchers: Vec<(String, Regex, Vec<String>)> = config
             .configuration
             .get("MenuLaunchers")
             .and_then(|v| v.as_table())
@@ -92,7 +91,6 @@ impl MenuCheck {
                     .collect()
             })
             .unwrap_or_default();
-        launchers.sort_by(|a, b| a.0.cmp(&b.0));
         let icon_ext = config
             .configuration
             .get("IconFilename")

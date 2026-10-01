@@ -24,3 +24,6 @@ name = "source-parity"
 
 [[case]]
 name = "libdep-devel"
+
+[[case]]
+name = "w6-sysv"
