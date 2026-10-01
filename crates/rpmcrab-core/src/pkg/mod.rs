@@ -890,9 +890,13 @@ mod tests {
         std::fs::write(&p, "hello\n").unwrap();
         // Empty FILECLASS, regular non-empty, not a ghost -> libmagic.
         let mut t = Timers::default();
-        assert_eq!(
-            calc_magic("", 0o100644, 6, "", &p, false, &mut t),
-            "ASCII text"
+        // The exact file(1) vocabulary is a libmagic-version detail, so
+        // assert the documented property instead of the string (same idiom
+        // as the file_magic test in extract.rs).
+        let magic = calc_magic("", 0o100644, 6, "", &p, false, &mut t);
+        assert!(
+            magic.to_lowercase().contains("text"),
+            "expected libmagic to describe a text file as text, got {magic:?}"
         );
         // The `file -b` call is timed, so it shows up in the `-t` report.
         assert!(t.iter().any(|(k, _)| k == LIBMAGIC));
