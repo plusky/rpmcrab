@@ -461,4 +461,46 @@ mod tests {
             ]
         );
     }
+
+    /// Results reassemble in task order even when workers finish out of order:
+    /// task `i` sleeps `(n-1-i)*150ms`, so completion order is the reverse of
+    /// task order. Without the index sort in `run_tasks`, the displays come
+    /// back reversed and this fails.
+    #[test]
+    fn results_reassemble_in_task_order() {
+        struct Staggered;
+        impl Check for Staggered {
+            fn name(&self) -> &'static str {
+                "Staggered"
+            }
+            fn check(&mut self, _pkg: &Pkg, _config: &Config, _out: &mut Filter) {}
+            fn check_spec(&mut self, pkg: &SpecPkg, _config: &Config, _out: &mut Filter) {
+                let stem = pkg.name.rsplit('/').next().unwrap_or("");
+                let i: u64 = stem[1..].parse().unwrap_or(0);
+                std::thread::sleep(Duration::from_millis((3 - i) * 150));
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Vec<Task> = (0..4)
+            .map(|i| {
+                let spec = dir.path().join(format!("t{i}.spec"));
+                std::fs::write(&spec, b"Name: test\n").unwrap();
+                Task::File(spec)
+            })
+            .collect();
+        let config = Config::default();
+        let results = run_tasks(
+            tasks,
+            4,
+            &config,
+            &|| vec![Box::new(Staggered) as Box<dyn Check>],
+            Color::for_tty(false),
+        );
+        let order: Vec<String> = results.iter().map(|r| r.display.clone()).collect();
+        let expected: Vec<String> = (0..4)
+            .map(|i| dir.path().join(format!("t{i}.spec")).display().to_string())
+            .collect();
+        assert_eq!(order, expected, "results not in task order");
+    }
 }
