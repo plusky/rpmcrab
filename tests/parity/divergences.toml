@@ -5,6 +5,12 @@
 # The ledger also records deliberate *behavioural* departures that no corpus
 # case pins (kind = "behaviour"), so they are reviewed rather than accidental.
 
+# Checks the reference has but the port does not are recorded one entry per
+# check (kind = "missing", check = the exact Python module name). The set is
+# derived, not hand-maintained: scripts/gen-reference-checks.py regenerates
+# the reference list, and the divergences_missing test fails if the entries
+# drift from reference-minus-registry.
+
 [[divergence]]
 case = "global"
 check = "pkg-layer"
@@ -297,4 +303,150 @@ case = "global"
 check = "SourceCheck"
 kind = "detail"
 reason = "parse_octal mirrors the reference's int(value, 8) (sign, 0o prefix, PEP 515 underscores, Unicode decimal digits), but magnitudes beyond u128 saturate at u128::MAX where the reference keeps arbitrary precision. The value only feeds equality against file mode bits, which neither a saturated nor an arbitrary-precision huge value can equal, so the saturation is unobservable."
+since = "0.1.0"
+
+# Unported reference checks, one kind = "missing" entry per check
+# (derived; see the header comment).
+
+[[divergence]]
+case = "global"
+check = "AlternativesCheck"
+kind = "missing"
+reason = "AlternativesCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "AppDataCheck"
+kind = "missing"
+reason = "AppDataCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "BashismsCheck"
+kind = "missing"
+reason = "BashismsCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "BuildRootAndDateCheck"
+kind = "missing"
+reason = "BuildRootAndDateCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "missing"
+reason = "FileDigestCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FileMetadataCheck"
+kind = "missing"
+reason = "FileMetadataCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FilelistCheck"
+kind = "missing"
+reason = "FilelistCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "MenuCheck"
+kind = "missing"
+reason = "MenuCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "MenuXDGCheck"
+kind = "missing"
+reason = "MenuXDGCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "PolkitCheck"
+kind = "missing"
+reason = "PolkitCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+[[divergence]]
+case = "global"
+check = "PythonCheck"
+kind = "missing"
+reason = "PythonCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SUIDPermissionsCheck"
+kind = "missing"
+reason = "SUIDPermissionsCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SignatureCheck"
+kind = "missing"
+reason = "SignatureCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+[[divergence]]
+case = "global"
+check = "SysVInitOnSystemdCheck"
+kind = "missing"
+reason = "SysVInitOnSystemdCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SystemdInstallCheck"
+kind = "missing"
+reason = "SystemdInstallCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SystemdTmpfilesCheck"
+kind = "missing"
+reason = "SystemdTmpfilesCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "TmpFilesCheck"
+kind = "missing"
+reason = "TmpFilesCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+[[divergence]]
+case = "global"
+check = "info-files-without-install-info-postin"
+kind = "missing"
+reason = "FilesCheck flags /usr/share/info files when the package has no %post scriptlet at all; the install-info scriptlet analysis is not ported yet."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "info-files-without-install-info-postun"
+kind = "missing"
+reason = "FilesCheck flags /usr/share/info files when neither %postun nor %preun exists; the install-info scriptlet analysis is not ported yet."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "sourced-script-with-shebang"
+kind = "missing"
+reason = "FilesCheck flags sourced scripts (profile.d et al.) that carry a shebang; the sourced-script analysis is not ported yet."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "symlink-contains-up-and-down-segments"
+kind = "missing"
+reason = "FilesCheck flags symlinks whose target contains '..' segments; the symlink segment analysis is not ported yet."
 since = "0.1.0"
