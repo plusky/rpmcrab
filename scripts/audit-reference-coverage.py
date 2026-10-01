@@ -37,6 +37,25 @@ Two traps are encoded, both found the hard way:
   (``FileMetadataCheck.py``) is included in the pass *and* ``self.prefix``
   assignments are collected across all check modules.
 
+Three more decisions are encoded deliberately, not by default:
+
+* ``kind = "missing"`` keeps its coarse granularity: "missing" means no
+  check in the port emits any finding of that module. The failure mode a
+  finer grain (``ported_since``, per-name absence) would guard against --
+  an entry going stale after the finding is ported -- is caught harder: a
+  ``kind = "missing"`` entry whose module has a finding the port emits is
+  a STALE LEDGER hard error. A bookkeeping field would only record the
+  claim; the auditor verifies it.
+* The ledger never overrides the port, and the port never overrides the
+  ledger: a finding that is both ledgered-missing and ported is a
+  STALE LEDGER hard error (exit 1), forcing a human to delete or correct
+  the entry. Either side silently winning would reintroduce the exact
+  blind spot this tool exists to close.
+* The resolver's closed assumptions are pinned, not defaulted: the
+  reference-side emission shape (``self.output.add_info``) and the
+  cross-module ``self.<attr>`` union each have a test that fails loudly
+  if the assumption stops holding (NEW-6/NEW-7).
+
 A call site the resolver cannot handle is reported as UNRESOLVED, never
 silently dropped: an audit that hides what it cannot see is worse than
 no audit.
