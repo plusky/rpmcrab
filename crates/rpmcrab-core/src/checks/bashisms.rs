@@ -149,6 +149,19 @@ mod tests {
             .permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&path, perms).expect("chmod fake tool");
+        // A just-written script can still be "text file busy" (ETXTBSY) on
+        // first spawn under parallel load; settle it so probes below see an
+        // exec-ready tool.
+        for _ in 0..100 {
+            match std::process::Command::new(&path).arg("--version").output() {
+                Ok(_) => return,
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(e) => panic!("fake tool {} failed: {e}", path.display()),
+            }
+        }
+        panic!("fake tool {} stayed busy", path.display());
     }
 
     #[test]

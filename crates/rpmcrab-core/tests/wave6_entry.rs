@@ -68,6 +68,28 @@ fn assert_findings(results: &[(String, String)], expected: &[(&str, &str)]) {
     }
 }
 
+/// Write an executable fake tool script, settling it past the ETXTBSY window
+/// so the first real spawn never fails under parallel test load.
+#[cfg(unix)]
+fn fake_tool(dir: &std::path::Path, name: &str, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    for _ in 0..100 {
+        match std::process::Command::new(&path).arg("--version").output() {
+            Ok(_) => return,
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(e) => panic!("fake tool {} failed: {e}", path.display()),
+        }
+    }
+    panic!("fake tool {} stayed busy", path.display());
+}
+
 #[test]
 fn sysv_init_on_systemd_flags_deprecated_and_shadowed() {
     let mut check = SysVInitOnSystemdCheck::new(&Config::default());
