@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 use quick_xml::Reader;
+use quick_xml::XmlVersion;
 use quick_xml::events::Event;
 
 use crate::check::{Check, add_info};
@@ -112,59 +113,76 @@ impl PolkitCheck {
         let mut reader = Reader::from_str(&content);
         reader.config_mut().trim_text(true);
         let mut actions = Vec::new();
-        let mut buf = Vec::new();
         let mut current_id: Option<String> = None;
         let mut current_defaults: HashMap<String, String> = HashMap::new();
         let mut in_action = false;
         let mut in_defaults = false;
         let mut current_setting: Option<String> = None;
+        let mut current_text = String::new();
 
         loop {
-            match reader.read_event_into(&mut buf) {
+            match reader.read_event() {
                 Ok(Event::Start(e)) => match e.name().as_ref() {
-                    b"action" => {
+                    "action" => {
                         in_action = true;
                         current_id = None;
                         current_defaults = HashMap::new();
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"id" {
+                            if attr.key.as_ref() == "id" {
                                 current_id = Some(
-                                    attr.unescape_value()
+                                    attr.normalized_value(XmlVersion::Implicit1_0)
                                         .map(|v| v.into_owned())
                                         .unwrap_or_default(),
                                 );
                             }
                         }
                     }
-                    b"defaults" if in_action => in_defaults = true,
-                    b"allow_any" | b"allow_inactive" | b"allow_active" if in_defaults => {
-                        current_setting =
-                            Some(String::from_utf8_lossy(e.name().as_ref()).into_owned());
+                    "defaults" if in_action => in_defaults = true,
+                    "allow_any" | "allow_inactive" | "allow_active" if in_defaults => {
+                        current_setting = Some(e.name().as_ref().to_owned());
+                        current_text.clear();
                     }
                     _ => {}
                 },
                 Ok(Event::Text(e)) => {
-                    if let Some(setting) = current_setting.take() {
-                        let value = e.unescape().map(|v| v.into_owned()).unwrap_or_default();
-                        current_defaults.insert(setting, value);
+                    if current_setting.is_some() {
+                        current_text.push_str(&e.into_inner());
+                    }
+                }
+                // Since 0.38 entity references are their own events; splice them
+                // back into the raw text so the value unescapes as a whole.
+                Ok(Event::GeneralRef(e)) => {
+                    if current_setting.is_some() {
+                        current_text.push('&');
+                        current_text.push_str(&e.into_inner());
+                        current_text.push(';');
                     }
                 }
                 Ok(Event::End(e)) => match e.name().as_ref() {
-                    b"action" => {
+                    "action" => {
                         if let Some(id) = current_id.take() {
                             actions.push((id, std::mem::take(&mut current_defaults)));
                         }
                         in_action = false;
                         in_defaults = false;
                     }
-                    b"defaults" => in_defaults = false,
+                    "defaults" => in_defaults = false,
+                    name @ ("allow_any" | "allow_inactive" | "allow_active")
+                        if current_setting.as_deref() == Some(name) =>
+                    {
+                        let setting = current_setting.take().expect("guard checked");
+                        let value = quick_xml::escape::unescape(&current_text)
+                            .map(|v| v.into_owned())
+                            .unwrap_or_default();
+                        current_text.clear();
+                        current_defaults.insert(setting, value);
+                    }
                     _ => {}
                 },
                 Ok(Event::Eof) => break,
                 Err(e) => return Err(e.to_string()),
                 _ => {}
             }
-            buf.clear();
         }
         Ok(actions)
     }
@@ -265,5 +283,30 @@ mod tests {
             Some("auth_admin")
         );
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn parse_actions_unescapes_entities() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("rpmcrab-polkit-entities.policy");
+        std::fs::write(
+            &path,
+            "<policyconfig><action id=\"org.foo.a&amp;b\"><defaults>\
+             <allow_any>yes</allow_any><allow_inactive>a&lt;b</allow_inactive>\
+             </defaults></action></policyconfig>",
+        )
+        .unwrap();
+        let actions = PolkitCheck::parse_actions(path.to_str().unwrap()).expect("parse");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].0, "org.foo.a&b");
+        assert_eq!(
+            actions[0].1.get("allow_any").map(String::as_str),
+            Some("yes")
+        );
+        assert_eq!(
+            actions[0].1.get("allow_inactive").map(String::as_str),
+            Some("a<b")
+        );
     }
 }
