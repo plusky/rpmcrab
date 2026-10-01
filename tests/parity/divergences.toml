@@ -516,6 +516,8 @@ case = "global"
 check = "symlink-contains-up-and-down-segments"
 kind = "missing"
 reason = "FilesCheck flags symlinks whose target contains '..' segments; the symlink segment analysis is not ported yet."
+since = "0.1.0"
+
 [[divergence]]
 case = "global"
 check = "tmpfile-not-in-filelist"
