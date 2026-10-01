@@ -1,0 +1,16 @@
+kind = "captured"
+rpmlint = "2.10.0"
+reference_sha = "84848c05c5571c22274a55ff9afdfe6d88c67dc9"
+flavour = "openSUSE"
+argv = ["libdep-devel-1.0-1.aarch64.rpm"]
+captured = "2026-10-01"
+
+[source]
+description = "Hand-built fixture: libdep-devel ships /usr/lib64/libdep.so -> libdep.so.1 with no library package in the run, so the reference emits E no-library-dependency-for. First parity case exercising LibraryDependencyCheck."
+
+[tools]
+present = ["checkbashisms", "dash", "desktop-file-validate", "readelf", "objdump", "ldd", "file"]
+
+[[input]]
+file = "libdep-devel-1.0-1.aarch64.rpm"
+sha256 = "62924c3343b65169de5a368d9e9b93b68fe29260dcf61b8a8ed77156c597c680"
