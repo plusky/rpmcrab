@@ -6,9 +6,10 @@
 //! `{type}-file-ghost`, `{type}-file-symlink`, `{type}-file-parse-error`,
 //! `{type}-whitelisted-file-missing`.
 //!
-//! Supports four digesters: `default` (raw bytes), `shell` (strip comments/
-//! whitespace), `xml` (approximate canonicalization, see the parity
-//! ledger), `systemd-socket` (socket unit keys).
+//! Supports three digesters: `default` (raw bytes), `shell` (strip comments/
+//! whitespace) and `systemd-socket` (socket unit keys). The `xml` digester is
+//! disabled pending a C14N-conformant implementation (see the parity ledger);
+//! entries selecting it are treated as skipped.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -109,91 +110,6 @@ fn normalize_shebang(line: &str) -> String {
         }
     }
     result
-}
-
-/// XML: canonicalized form without comments.
-///
-/// Hand-rolled approximation, not real C14N (`xml.etree.ElementTree.
-/// canonicalize` in the reference): it strips comments and collapses
-/// whitespace, but keeps the XML declaration and DOCTYPE, does not expand
-/// empty elements, sort attributes, or normalize namespaces.
-/// Recorded in the parity ledger (kind = "behaviour").
-struct XmlDigester;
-
-impl Digester for XmlDigester {
-    fn digest(&self, path: &str, algorithm: &str) -> Result<String, String> {
-        let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let normalized = normalize_xml(&content);
-        let mut hasher = new_hasher(algorithm)?;
-        hasher.update(normalized.as_bytes());
-        Ok(hex::encode(hasher.finalize()))
-    }
-}
-
-fn normalize_xml(content: &str) -> String {
-    // Simple XML normalization: strip comments and collapse whitespace.
-    // (The declaration/DOCTYPE skip below never fires — the peeked iterator
-    // is already advanced past `<` — so they are kept. Recorded as a
-    // behavioural divergence in the parity ledger.)
-    let mut out = String::new();
-    let mut in_comment = false;
-    let mut chars = content.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if in_comment {
-            if c == '-' && chars.peek() == Some(&'-') {
-                chars.next();
-                if chars.peek() == Some(&'>') {
-                    chars.next();
-                    in_comment = false;
-                }
-            }
-            continue;
-        }
-        if c == '<' {
-            // Check for comment start
-            let mut peek = chars.clone();
-            if peek.next() == Some('!') && peek.next() == Some('-') && peek.next() == Some('-') {
-                // Skip the '<!--'
-                chars.next();
-                chars.next();
-                chars.next();
-                in_comment = true;
-                continue;
-            }
-            // Check for XML declaration or DOCTYPE - skip them
-            if peek.next() == Some('?') || (peek.next() == Some('!')) {
-                // Skip until '>'
-                for nc in chars.by_ref() {
-                    if nc == '>' {
-                        break;
-                    }
-                }
-                continue;
-            }
-            out.push(c);
-        } else if c.is_whitespace() {
-            // Collapse whitespace: only keep single spaces between non-whitespace,
-            // and skip whitespace between '>' and '<'
-            let mut ws = String::from(c);
-            while let Some(&nc) = chars.peek() {
-                if nc.is_whitespace() {
-                    ws.push(chars.next().unwrap());
-                } else {
-                    break;
-                }
-            }
-            // Only emit whitespace if not between tags
-            let last = out.chars().last();
-            let next = chars.peek().copied();
-            if last != Some('>') && next != Some('<') {
-                out.push(' ');
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 /// Systemd socket unit: hash only the relevant `[Socket]` keys.
@@ -809,7 +725,6 @@ impl FileDigestCheck {
         let digester: Box<dyn Digester> = match digester_name {
             "default" => Box::new(DefaultDigester),
             "shell" => Box::new(ShellDigester),
-            "xml" => Box::new(XmlDigester),
             "systemd-socket" => Box::new(SocketUnitDigester),
             _ => return Err(format!("unknown digester: {digester_name}")),
         };
@@ -840,7 +755,10 @@ impl FileDigestCheck {
         pkg: &Pkg,
         info: &DigestInfo,
     ) -> Result<(bool, Option<String>), String> {
-        if info.algorithm == "skip" {
+        // The `xml` digester is disabled pending a C14N-conformant
+        // implementation (parity ledger): treat its entries as skipped
+        // rather than emitting mismatch false positives.
+        if info.algorithm == "skip" || info.digester == "xml" {
             return Ok((true, None));
         }
         let Some(pkgfile) = self.resolve_pkgfile(pkg, &info.path) else {
@@ -1801,5 +1719,38 @@ Locations = ["/m"]
                 "glob_match({pattern:?}, {text:?})"
             );
         }
+    }
+
+    /// Entries selecting the disabled `xml` digester are skipped: no digest
+    /// is computed and no mismatch is reported (plusky/rpmcrab#75).
+    #[test]
+    fn xml_digester_entries_are_skipped() {
+        let dir = std::env::temp_dir().join("rpmcrab-fd-xmlskip");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let content = b"<a><b>x</b></a>\n";
+        let ondisk = write_temp(&dir, "login", content);
+
+        let extra = r#"
+[[FileDigestGroup]]
+type = "pam"
+package = "testpkg"
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/login"
+algorithm = "sha256"
+digester = "xml"
+hash = "deadbeef"
+"#;
+        let config = test_config(extra);
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![pkgfile("/etc/pam.d/login", &ondisk, 0o100644)];
+
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        assert!(
+            !results.iter().any(|(n, _)| n == "pam-file-digest-mismatch"),
+            "xml entry must not mismatch, got {results:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
