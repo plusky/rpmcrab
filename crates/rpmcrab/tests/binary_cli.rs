@@ -308,28 +308,51 @@ fn a_repeated_argument_is_counted_once() {
     );
 }
 
-/// `-j1` and `-j4` produce identical output: the worker pool is a scheduling
-/// detail, not a behavior change (`rpmlint#1595`
-/// `test_parallel_output_matches_sequential`).
+/// `-j1` and `-j4` produce byte-identical output over several packages,
+/// footer included: the worker pool is a scheduling detail, not a behavior
+/// change (`rpmlint#1595` `test_parallel_output_matches_sequential`). Only
+/// the wall-clock duration in the footer is normalized; the package counts
+/// are compared, so the footer cannot be silently dropped.
 #[test]
 fn parallel_output_matches_sequential() {
-    let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/parity/cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm");
-    let rpm = rpm.to_str().unwrap();
-    let seq = rpmcrab(&["-j1", rpm]);
-    let par = rpmcrab(&["-j4", rpm]);
+    let dir = tempfile::tempdir().unwrap();
+    // Distinct file names defeat duplicate-argument collapsing, so each copy
+    // is its own task; identical content means the findings share sort keys,
+    // which is exactly what a reassembly defect would reorder.
+    let args: Vec<String> = (0..4)
+        .map(|i| {
+            let dst = dir.path().join(format!("pkg{i}.rpm"));
+            std::fs::copy(&src, &dst).unwrap();
+            dst.to_str().unwrap().to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let seq_args: Vec<&str> = std::iter::once("-j1").chain(refs.iter().copied()).collect();
+    let par_args: Vec<&str> = std::iter::once("-j4").chain(refs.iter().copied()).collect();
+    let seq = rpmcrab(&seq_args);
+    let par = rpmcrab(&par_args);
     assert_eq!(seq.status.code(), par.status.code(), "exit codes differ");
-    // The wall-clock duration in the footer is the only scheduling-dependent
-    // text; everything else must be byte-identical.
     fn normalized(out: &std::process::Output) -> String {
         let stdout = String::from_utf8_lossy(&out.stdout);
         let mut s = stdout.into_owned();
-        if let Some(i) = s.find("; has taken ") {
-            s.truncate(i);
+        // Footer: "...; has taken 0.3 s". Normalize the duration only.
+        if let Some(i) = s.rfind("; has taken ") {
+            let num_start = i + "; has taken ".len();
+            if let Some(num_end) = s[num_start..].find(" s") {
+                s.replace_range(num_start..num_start + num_end, "N.N");
+            }
         }
         s
     }
-    assert_eq!(normalized(&seq), normalized(&par), "stdout differs");
+    let seq_out = normalized(&seq);
+    let par_out = normalized(&par);
+    assert!(
+        seq_out.contains("4 packages and 0 specfiles checked"),
+        "footer counts missing from sequential output"
+    );
+    assert_eq!(seq_out, par_out, "stdout differs");
     assert_eq!(
         String::from_utf8_lossy(&seq.stderr),
         String::from_utf8_lossy(&par.stderr),
