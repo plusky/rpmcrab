@@ -102,8 +102,7 @@ impl<'a> Worker<'a> {
             self.installed_db = Some(librpm::db::Db::open()?);
         }
         let db = self.installed_db.as_ref().expect("just opened");
-        let (headers, _) =
-            crate::pkg::installed::find_in(db, &[name.to_string()])?;
+        let (headers, _) = crate::pkg::installed::find_in(db, &[name.to_string()])?;
         let header = headers.into_iter().nth(index).ok_or_else(|| {
             crate::pkg::PkgError::Init(format!("installed package {name} vanished mid-run"))
         })?;
@@ -149,8 +148,7 @@ impl<'a> Worker<'a> {
                     match Pkg::open(&path, &self.extract_dir) {
                         Ok(pkg) => {
                             let name = pkg.name.clone();
-                            let arch =
-                                (!pkg.arch.is_empty()).then(|| pkg.arch.clone());
+                            let arch = (!pkg.arch.is_empty()).then(|| pkg.arch.clone());
                             (Package::Rpm(Box::new(pkg)), name, arch, false)
                         }
                         Err(e) => {
@@ -304,11 +302,7 @@ pub fn run_tasks(
     // threads, so the factory itself is never shared between threads.
     let mut check_sets: Vec<Vec<Box<dyn Check>>> = (0..jobs).map(|_| make_checks()).collect();
     if jobs == 1 {
-        let mut worker = Worker::new(
-            config,
-            check_sets.pop().expect("one set per worker"),
-            color,
-        );
+        let mut worker = Worker::new(config, check_sets.pop().expect("one set per worker"), color);
         return tasks.into_iter().map(|t| worker.check_package(t)).collect();
     }
     let (result_tx, result_rx) = mpsc::channel::<(usize, TaskResult)>();
@@ -325,8 +319,7 @@ pub fn run_tasks(
                 // `while let` scrutinee temporary lives until the end of
                 // the loop body, which would serialize the pool.
                 loop {
-                    let Ok((i, task)) =
-                        task_rx.lock().unwrap_or_else(|e| e.into_inner()).recv()
+                    let Ok((i, task)) = task_rx.lock().unwrap_or_else(|e| e.into_inner()).recv()
                     else {
                         break;
                     };
@@ -343,7 +336,6 @@ pub fn run_tasks(
     results.sort_by_key(|(i, _)| *i);
     results.into_iter().map(|(_, r)| r).collect()
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -434,7 +426,11 @@ mod tests {
             tasks,
             1,
             &config,
-            &move || vec![Box::new(Records { log: Arc::clone(&log2) }) as Box<dyn Check>],
+            &move || {
+                vec![Box::new(Records {
+                    log: Arc::clone(&log2),
+                }) as Box<dyn Check>]
+            },
             Color::for_tty(false),
         );
         assert_eq!(results.len(), 3);
@@ -457,7 +453,12 @@ mod tests {
         assert_eq!(
             seq.as_slice(),
             &[
-                "check:good1", "reset", "check:bad", "reset", "check:good2", "reset",
+                "check:good1",
+                "reset",
+                "check:bad",
+                "reset",
+                "check:good2",
+                "reset",
             ]
         );
     }

@@ -341,13 +341,7 @@ pub fn run() -> ExitCode {
                 .map(|s| s.to_string_lossy().into_owned())
         })
         .unwrap_or_else(|| "rpmlint".to_string());
-    let out = lint.render(
-        &prog,
-        RPMLINT_VERSION,
-        arg_count,
-        cli.time_report,
-        duration,
-    );
+    let out = lint.render(&prog, RPMLINT_VERSION, arg_count, cli.time_report, duration);
     print!("{out}");
     ExitCode::from(u8::try_from(lint.exit_code()).unwrap_or(1))
 }

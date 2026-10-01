@@ -119,7 +119,10 @@ fn after_checks_runs_only_for_the_last_package() {
     );
     // The worker resets after every package (3); the main resets once more
     // after the batch to drop the merged cross-package state.
-    assert_eq!(log.resets, 4, "reset runs after every package, plus batch cleanup");
+    assert_eq!(
+        log.resets, 4,
+        "reset runs after every package, plus batch cleanup"
+    );
 }
 
 /// `reset` also runs after the single, last package.
@@ -346,7 +349,11 @@ fn check_dispatches_on_is_source() {
     let log = Arc::new(Mutex::new(Log::default()));
     let make_checks = {
         let log = Arc::clone(&log);
-        move || vec![Box::new(Dispatch { log: Arc::clone(&log) }) as Box<dyn Check>]
+        move || {
+            vec![Box::new(Dispatch {
+                log: Arc::clone(&log),
+            }) as Box<dyn Check>]
+        }
     };
     let mut lint =
         Lint::new(Config::default(), make_checks(), Color::for_tty(false), 80).expect("build Lint");
@@ -391,7 +398,11 @@ fn spec_inputs_dispatch_to_check_spec() {
     let log = Arc::new(Mutex::new(Log::default()));
     let make_checks = {
         let log = Arc::clone(&log);
-        move || vec![Box::new(SpecRecorder { log: Arc::clone(&log) }) as Box<dyn Check>]
+        move || {
+            vec![Box::new(SpecRecorder {
+                log: Arc::clone(&log),
+            }) as Box<dyn Check>]
+        }
     };
     let mut lint =
         Lint::new(Config::default(), make_checks(), Color::for_tty(false), 80).expect("build Lint");

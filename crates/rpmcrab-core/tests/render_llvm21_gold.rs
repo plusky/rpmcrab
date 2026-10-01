@@ -74,14 +74,12 @@ fn reproduces_llvm21_gold_byte_for_byte() {
         (Level::Warning, "no-documentation", vec![]),
     ];
     let make_checks = || {
-        vec![
-            Box::new(SyntheticCheck::new(
-                "SyntheticCheck",
-                "llvm21-gold",
-                Some("aarch64"),
-                canned.clone(),
-            )) as Box<dyn Check>,
-        ]
+        vec![Box::new(SyntheticCheck::new(
+            "SyntheticCheck",
+            "llvm21-gold",
+            Some("aarch64"),
+            canned.clone(),
+        )) as Box<dyn Check>]
     };
 
     let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
