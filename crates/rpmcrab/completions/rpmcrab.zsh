@@ -23,8 +23,8 @@ _rpmcrab() {
 '*--rpmlintrc=[A rpmlintrc file (repeatable)]:path:_files' \
 '*-i+[Check installed RPM DB packages]:name:_default' \
 '*--installed=[Check installed RPM DB packages]:name:_default' \
-'-j+[Number of parallel worker threads for checking packages (1 for sequential)]:n:_default' \
-'--jobs=[Number of parallel worker threads for checking packages (1 for sequential)]:n:_default' \
+'-j+[Number of parallel worker threads for checking packages; 1 is sequential. Defaults to the machine'\''s parallelism]:n:_default' \
+'--jobs=[Number of parallel worker threads for checking packages; 1 is sequential. Defaults to the machine'\''s parallelism]:n:_default' \
 '--checks=[Run only these checks (debug)]:a,b,c:_default' \
 '-V[Print version and exit]' \
 '--version[Print version and exit]' \

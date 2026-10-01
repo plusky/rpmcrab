@@ -82,8 +82,18 @@ struct Cli {
     #[arg(short = 't', long = "time-report", action = clap::ArgAction::SetTrue)]
     time_report: bool,
 
-    /// Number of parallel worker threads for checking packages (1 for sequential).
-    #[arg(short = 'j', long = "jobs", value_name = "n", default_value_t = default_jobs())]
+    /// Number of parallel worker threads for checking packages; 1 is
+    /// sequential. Defaults to the machine's parallelism.
+    // `hide_default_value` is deliberate: the default is a runtime CPU count,
+    // so rendering it would make --help and the generated man page
+    // machine-dependent, and the committed assets unreproducible.
+    #[arg(
+        short = 'j',
+        long = "jobs",
+        value_name = "n",
+        default_value_t = default_jobs(),
+        hide_default_value = true
+    )]
     jobs: i32,
 
     /// Suppress the `unused-rpmlintrc-filter` audit.

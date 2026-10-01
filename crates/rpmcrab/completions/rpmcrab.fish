@@ -2,7 +2,7 @@ complete -c rpmcrab -s c -l config -d 'Config file or directory of `*.toml` (rep
 complete -c rpmcrab -s e -l explain -d 'Print the description for a message id and exit' -r
 complete -c rpmcrab -s r -l rpmlintrc -d 'A rpmlintrc file (repeatable)' -r -F
 complete -c rpmcrab -s i -l installed -d 'Check installed RPM DB packages' -r
-complete -c rpmcrab -s j -l jobs -d 'Number of parallel worker threads for checking packages (1 for sequential)' -r
+complete -c rpmcrab -s j -l jobs -d 'Number of parallel worker threads for checking packages; 1 is sequential. Defaults to the machine\'s parallelism' -r
 complete -c rpmcrab -l checks -d 'Run only these checks (debug)' -r
 complete -c rpmcrab -s V -l version -d 'Print version and exit'
 complete -c rpmcrab -s v -l verbose -d 'Inline explanations (and re-raise internal errors)'

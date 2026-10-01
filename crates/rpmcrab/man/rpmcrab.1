@@ -33,8 +33,8 @@ Check installed RPM DB packages
 \fB\-t\fR, \fB\-\-time\-report\fR
 Per\-check timing report
 .TP
-\fB\-j\fR, \fB\-\-jobs\fR \fI<n>\fR [default: 10]
-Number of parallel worker threads for checking packages (1 for sequential)
+\fB\-j\fR, \fB\-\-jobs\fR \fI<n>\fR
+Number of parallel worker threads for checking packages; 1 is sequential. Defaults to the machine\*(Aqs parallelism
 .TP
 \fB\-\-ignore\-unused\-rpmlintrc\fR
 Suppress the `unused\-rpmlintrc\-filter` audit
