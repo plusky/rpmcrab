@@ -27,8 +27,13 @@ workspace = true
 librpm = { version = "0.6", default-features = false, features = ["build"] }
 # TOML config + description files.
 serde = { version = "1", features = ["derive"] }
-indexmap = "2"
+# `preserve_order`: the reference reads configs into Python dicts (insertion
+# order) and `lookup_check_for_file` is first-match-wins, so table order is
+# observable. Without it `toml::Table` is a BTreeMap (sorted).
 toml = { version = "1.1", features = ["preserve_order"] }
+# Insertion-ordered maps for file-order iteration (systemd-socket digester,
+# per-check-type findings), mirroring the reference's dicts.
+indexmap = "2"
 # Filter matching. rpmlint `Filters` are Python `re`, which supports lookahead,
 # lookbehind and backreferences; the `regex` crate rejects those, so a pure-Rust
 # backtracking engine is required to honour existing filters byte-for-byte.

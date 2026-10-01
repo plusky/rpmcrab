@@ -15,6 +15,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
+use indexmap::IndexMap;
 use sha2::{Digest, Sha256};
 
 use crate::check::{Check, add_info};
@@ -241,9 +242,13 @@ impl Digester for SocketUnitDigester {
 }
 
 /// Parse a systemd socket unit file (simplified INI).
-fn parse_socket_unit(path: &str) -> Option<HashMap<String, HashMap<String, Vec<String>>>> {
+///
+/// `IndexMap` preserves file order: the reference iterates a Python dict
+/// (insertion order) straight into the hasher, so a `HashMap` here would make
+/// the digest nondeterministic across processes.
+fn parse_socket_unit(path: &str) -> Option<IndexMap<String, IndexMap<String, Vec<String>>>> {
     let content = std::fs::read_to_string(path).ok()?;
-    let mut ret: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
+    let mut ret: IndexMap<String, IndexMap<String, Vec<String>>> = IndexMap::new();
     let mut section: Option<String> = None;
     let mut multiline = String::new();
 
@@ -269,8 +274,10 @@ fn parse_socket_unit(path: &str) -> Option<HashMap<String, HashMap<String, Vec<S
             return None;
         };
         let (key, value) = line.split_once('=')?;
-        let key = key.trim().to_string();
-        let value = value.trim().to_string();
+        // The reference does `key.rstrip()` / `value.lstrip()` (rpmlint
+        // #1534): a key keeps leading whitespace, a value keeps trailing.
+        let key = key.trim_end().to_string();
+        let value = value.trim_start().to_string();
         ret.get_mut(sec)
             .unwrap()
             .entry(key)
@@ -439,37 +446,46 @@ impl FileDigestCheck {
         let mut trie = TrieNode::default();
 
         for (check_type, cfg) in locations {
-            let cfg_table = cfg.as_table().cloned().unwrap_or_default();
+            let cfg_table = cfg.as_table().unwrap_or_else(|| {
+                panic!("FileDigestCheck: FileDigestLocation[{check_type}] must be a table")
+            });
+            // The reference reads `config['Locations']`, raising KeyError
+            // when absent: fail loudly on absent or malformed entries.
             let locations: Vec<String> = cfg_table
                 .get("Locations")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "FileDigestCheck: FileDigestLocation[{check_type}] \
+                         is missing required \"Locations\""
+                    )
                 })
-                .unwrap_or_default();
-            let name_patterns: Vec<String> = cfg_table
-                .get("NamePatterns")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
+                .as_array()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "FileDigestCheck: FileDigestLocation[{check_type}].Locations \
+                         must be an array of strings"
+                    )
                 })
-                .unwrap_or_default();
-            let follow_symlinks = cfg_table
-                .get("FollowSymlinks")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let recursive = cfg_table
-                .get("Recursive")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            let content_check = cfg_table
-                .get("ContentCheck")
-                .and_then(|v| v.as_str())
-                .map(String::from);
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "FileDigestCheck: FileDigestLocation[{check_type}].Locations \
+                                 must be an array of strings"
+                            )
+                        })
+                        .to_string()
+                })
+                .collect();
+            // Optional keys: the reference `setdefault`s them, so absence
+            // keeps the default; a present-but-malformed value is a config
+            // error and fails loudly instead of silently defaulting.
+            let name_patterns: Vec<String> =
+                Self::cfg_string_array(cfg_table, check_type, "NamePatterns");
+            let follow_symlinks = Self::cfg_bool(cfg_table, check_type, "FollowSymlinks", false);
+            let recursive = Self::cfg_bool(cfg_table, check_type, "Recursive", true);
+            let content_check = Self::cfg_opt_string(cfg_table, check_type, "ContentCheck");
 
             for loc in &locations {
                 trie.insert(loc);
@@ -499,6 +515,60 @@ impl FileDigestCheck {
         }
     }
 
+    /// Optional string-array setting (e.g. `NamePatterns`): absent keeps the
+    /// default, present-but-malformed fails loudly.
+    fn cfg_string_array(cfg: &toml::Table, check_type: &str, key: &str) -> Vec<String> {
+        match cfg.get(key) {
+            None => Vec::new(),
+            Some(v) => v
+                .as_array()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "FileDigestCheck: FileDigestLocation[{check_type}].{key} \
+                         must be an array of strings"
+                    )
+                })
+                .iter()
+                .map(|e| {
+                    e.as_str()
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "FileDigestCheck: FileDigestLocation[{check_type}].{key} \
+                                 must be an array of strings"
+                            )
+                        })
+                        .to_string()
+                })
+                .collect(),
+        }
+    }
+
+    /// Optional boolean setting (e.g. `FollowSymlinks`): absent keeps the
+    /// default, present-but-malformed fails loudly.
+    fn cfg_bool(cfg: &toml::Table, check_type: &str, key: &str, default: bool) -> bool {
+        match cfg.get(key) {
+            None => default,
+            Some(v) => v.as_bool().unwrap_or_else(|| {
+                panic!("FileDigestCheck: FileDigestLocation[{check_type}].{key} must be a boolean")
+            }),
+        }
+    }
+
+    /// Optional string setting (e.g. `ContentCheck`): absent is `None`,
+    /// present-but-malformed fails loudly.
+    fn cfg_opt_string(cfg: &toml::Table, check_type: &str, key: &str) -> Option<String> {
+        cfg.get(key).map(|v| {
+            v.as_str()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "FileDigestCheck: FileDigestLocation[{check_type}].{key} \
+                         must be a string"
+                    )
+                })
+                .to_string()
+        })
+    }
+
     fn parse_exception_lists(config: &Config, key: &str) -> Vec<ExceptionList> {
         let mut out = Vec::new();
         let Some(arr) = config.configuration.get(key).and_then(|v| v.as_array()) else {
@@ -525,13 +595,28 @@ impl FileDigestCheck {
             }
             let paths: Vec<String> = table
                 .get("paths")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
+                .unwrap_or_else(|| {
+                    panic!("FileDigestCheck: {key} entry for {packages:?} is missing \"paths\"")
                 })
-                .unwrap_or_default();
+                .as_array()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "FileDigestCheck: {key} entry for {packages:?}: \
+                         \"paths\" must be an array of strings"
+                    )
+                })
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "FileDigestCheck: {key} entry for {packages:?}: \
+                                 \"paths\" must be an array of strings"
+                            )
+                        })
+                        .to_string()
+                })
+                .collect();
             out.push(ExceptionList { packages, paths });
         }
         out
@@ -628,9 +713,9 @@ impl FileDigestCheck {
             for location in &config.locations {
                 let loc_path = Path::new(location);
                 if let Ok(subpath) = path.strip_prefix(loc_path) {
-                    if subpath.as_os_str().is_empty() {
-                        continue;
-                    }
+                    // The reference's `if not subpath` guard is dead code
+                    // (`bool(Path('.'))` is always True), so a file sitting
+                    // exactly at a Location root is matched, not skipped.
                     if !config.recursive && subpath.components().count() > 1 {
                         continue;
                     }
@@ -732,9 +817,18 @@ impl FileDigestCheck {
     }
 
     /// Follow the symlink chain of the named package file, if any.
+    ///
+    /// Mirrors the reference `_resolve_links`: an unresolvable link yields
+    /// `None` (the caller marks the group mismatched with no finding) rather
+    /// than the unresolved entry, which would fail digest calculation with a
+    /// bogus `-file-parse-error`.
     fn resolve_pkgfile<'a>(&self, pkg: &'a Pkg, path: &str) -> Option<&'a PkgFile> {
         let pkgfile = pkg.files.iter().find(|f| f.name == path)?;
-        Some(pkg.readlink(pkgfile).unwrap_or(pkgfile))
+        if is_symlink(pkgfile.mode) {
+            pkg.readlink(pkgfile)
+        } else {
+            Some(pkgfile)
+        }
     }
 
     /// Check one digest entry against the package: `(matches, actual_hash)`.
@@ -940,6 +1034,11 @@ impl FileDigestCheck {
         violations.sort();
 
         for violation in &violations {
+            // A violation with no recorded digest at all (the file failed to
+            // resolve, or a `skip` entry): the reference's
+            // `mismatches.get(violation, [])` is empty here, so there is
+            // nothing to report. This looks like a missing error branch but
+            // pins the reference behaviour — do not "fix" it.
             let Some(mismatch_list) = mismatches.get(violation) else {
                 continue;
             };
@@ -974,7 +1073,8 @@ impl FileDigestCheck {
     }
 }
 
-/// Simple glob matching (`*` and `?`).
+/// Glob matching with Python `fnmatch` semantics: `*`, `?` and `[...]` character
+/// classes (ranges, `[!seq]` negation). Like `fnmatch`, `*` also spans `/`.
 fn glob_match(pattern: &str, text: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let t: Vec<char> = text.chars().collect();
@@ -996,10 +1096,62 @@ fn glob_match_inner(p: &[char], t: &[char]) -> bool {
     if t.is_empty() {
         return false;
     }
+    if p[0] == '[' {
+        return match match_bracket(&p[1..], t[0]) {
+            // No closing bracket: `[` is literal, like fnmatch.
+            None => t[0] == '[' && glob_match_inner(&p[1..], &t[1..]),
+            Some((consumed, matched)) => matched && glob_match_inner(&p[1 + consumed..], &t[1..]),
+        };
+    }
     if p[0] == '?' || p[0] == t[0] {
         return glob_match_inner(&p[1..], &t[1..]);
     }
     false
+}
+
+/// Match one char against a bracket expression. `p` starts just after `[`;
+/// returns the pattern chars consumed (through the closing `]`) and whether
+/// `c` matched, or `None` when there is no closing bracket. Mirrors
+/// `fnmatch.translate`: an optional `!` negates, a `]` in first position is
+/// literal, `x-y` is a range, and `^` is literal (not negation).
+fn match_bracket(p: &[char], c: char) -> Option<(usize, bool)> {
+    let mut i = 0;
+    let mut negate = false;
+    if p.first() == Some(&'!') {
+        negate = true;
+        i += 1;
+    }
+    // Find the closing `]`, honouring a literal `]` in first position.
+    let mut j = i;
+    if p.get(j) == Some(&']') {
+        j += 1;
+    }
+    while p.get(j).is_some_and(|&ch| ch != ']') {
+        j += 1;
+    }
+    if p.get(j) != Some(&']') {
+        return None;
+    }
+    let stuff = &p[i..j];
+    let mut matched = false;
+    let mut k = 0;
+    while k < stuff.len() {
+        // A `-` between two chars forms a range; leading/trailing `-` is literal.
+        if k + 2 < stuff.len() && stuff[k + 1] == '-' {
+            if stuff[k] <= c && c <= stuff[k + 2] {
+                matched = true;
+                break;
+            }
+            k += 3;
+        } else {
+            if stuff[k] == c {
+                matched = true;
+                break;
+            }
+            k += 1;
+        }
+    }
+    Some((j + 1, matched != negate))
 }
 
 impl Check for FileDigestCheck {
@@ -1011,7 +1163,9 @@ impl Check for FileDigestCheck {
         // Find all files in this package that are placed in restricted
         // locations, honouring the ghost/symlink exception lists and the
         // per-type content check.
-        let mut restricted: HashMap<String, Vec<String>> = HashMap::new();
+        // Insertion order, like the reference's dict: findings for a
+        // package are reported check type by check type in first-seen order.
+        let mut restricted: IndexMap<String, Vec<String>> = IndexMap::new();
         for pkgfile in &pkg.files {
             let Some(check) = self.lookup_check_for_file(pkgfile).cloned() else {
                 continue;
@@ -1081,12 +1235,16 @@ mod tests {
     /// A config with one `FileDigestLocation` type (`pam`) plus the
     /// exception lists, mirroring the opensuse flavour's shape.
     fn test_config(extra: &str) -> Config {
+        test_config_with_symlinks(extra, false)
+    }
+
+    fn test_config_with_symlinks(extra: &str, follow_symlinks: bool) -> Config {
         let toml_src = format!(
             r#"
 [FileDigestLocation.pam]
 Locations = ["/etc/pam.d"]
 NamePatterns = []
-FollowSymlinks = false
+FollowSymlinks = {follow_symlinks}
 Recursive = true
 
 [[GhostFilesExceptions]]
@@ -1466,5 +1624,180 @@ ContentCheck = "VarlinkServiceCheck"
             "#!/usr/bin/python3"
         );
         assert_eq!(normalize_shebang("#!/bin/sh"), "#!/bin/sh");
+    }
+
+    #[test]
+    fn socket_digest_uses_file_order() {
+        // B1: the socket section used to be a `HashMap` iterated straight
+        // into the hasher, so the digest changed with every process run.
+        // `IndexMap` preserves file order like the reference's dict: the
+        // digest must equal the file-order hash exactly, for either key
+        // order. (Cross-process determinism is verified by running this
+        // test in a loop; a `HashMap` fails the exact-value assertions.)
+        let dir = std::env::temp_dir().join("rpmcrab-fd-socket-order");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let unit_a = write_temp(
+            &dir,
+            "a.socket",
+            b"[Socket]\nListenStream=/run/a.sock\nSocketUser=root\n",
+        );
+        let unit_b = write_temp(
+            &dir,
+            "b.socket",
+            b"[Socket]\nSocketUser=root\nListenStream=/run/a.sock\n",
+        );
+        let digester = SocketUnitDigester;
+        let digest_a = digester.digest(&unit_a, "sha256").expect("digest a");
+        let digest_b = digester.digest(&unit_b, "sha256").expect("digest b");
+        println!("socket digests: a={digest_a} b={digest_b}");
+        assert_eq!(
+            digest_a,
+            sha256_hex(b"ListenStream=/run/a.sock\nSocketUser=root\n")
+        );
+        assert_eq!(
+            digest_b,
+            sha256_hex(b"SocketUser=root\nListenStream=/run/a.sock\n")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unrelated_sibling_mismatch_still_reported() {
+        // B5: a digest group whose restricted path verifies cleanly must
+        // still report a bad digest for a sibling file outside any
+        // restricted location (the `unrelated_mismatches` merge). Note the
+        // reference also reports the valid login here: once the group is
+        // invalid, every group path with a recorded digest becomes a
+        // violation, even one whose digest matched.
+        let dir = std::env::temp_dir().join("rpmcrab-fd-unrelated");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let login_content = b"auth required pam_unix.so\n";
+        let login_disk = write_temp(&dir, "login", login_content);
+        let sibling_disk = write_temp(&dir, "sibling", b"sibling data\n");
+
+        let extra = format!(
+            r#"
+[[FileDigestGroup]]
+type = "pam"
+package = "testpkg"
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/login"
+algorithm = "sha256"
+digester = "default"
+hash = "{}"
+[[FileDigestGroup.digests]]
+path = "/etc/unrelated/sibling"
+algorithm = "sha256"
+digester = "default"
+hash = "deadbeef"
+"#,
+            sha256_hex(login_content)
+        );
+        let config = test_config(&extra);
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![
+            pkgfile("/etc/pam.d/login", &login_disk, 0o100644),
+            pkgfile("/etc/unrelated/sibling", &sibling_disk, 0o100644),
+        ];
+
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        let mismatches: Vec<&(String, String)> = results
+            .iter()
+            .filter(|(n, _)| *n == "pam-file-digest-mismatch")
+            .collect();
+        // Without the `unrelated_mismatches` merge the sibling's digest is
+        // silently dropped and only the login is reported.
+        assert!(
+            mismatches
+                .iter()
+                .any(|(_, l)| l.contains("/etc/unrelated/sibling")),
+            "sibling mismatch must be reported: {results:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unresolvable_symlink_yields_no_parse_error() {
+        // B5/H5: a whitelisted path that is a symlink unresolvable within
+        // the package marks the group mismatched with NO finding — the
+        // reference's `_resolve_links` returns None and `_check_digest`
+        // returns (False, None). (The old code returned the unresolved
+        // entry and reported `pam-file-parse-error: No such file or
+        // directory`.)
+        let extra = group_toml("/etc/pam.d/login", b"whatever");
+        let config = test_config_with_symlinks(&extra, true);
+        let mut pkg = fixture_pkg();
+        let mut link = pkgfile("/etc/pam.d/login", "/nonexistent-target", 0o120777);
+        link.linkto = "/etc/pam.d/login-real".to_string();
+        pkg.files = vec![link];
+
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        assert!(
+            !results.iter().any(|(n, _)| n == "pam-file-parse-error"),
+            "unresolvable link must not raise parse-error: {results:?}"
+        );
+        assert!(results.is_empty(), "group mismatched silently: {results:?}");
+    }
+
+    #[test]
+    fn check_type_order_follows_config_order() {
+        // H2: without toml `preserve_order`, tables iterate sorted while the
+        // reference uses file order; `lookup_check_for_file` is
+        // first-match-wins, so the order is observable.
+        let extra = r#"
+[FileDigestLocation.zebra]
+Locations = ["/z"]
+[FileDigestLocation.alpha]
+Locations = ["/a"]
+[FileDigestLocation.mid]
+Locations = ["/m"]
+"#;
+        let config = test_config(extra);
+        let check = FileDigestCheck::new(&config);
+        let order: Vec<&str> = check.checks.iter().map(|c| c.check_type.as_str()).collect();
+        assert_eq!(order, ["pam", "zebra", "alpha", "mid"]);
+    }
+
+    #[test]
+    fn glob_brackets_match_fnmatch() {
+        // G2: `[seq]` / `[!seq]` classes with Python fnmatch semantics.
+        // Each case was verified against `fnmatch.fnmatch`.
+        let cases = [
+            ("foo[abc]", "fooa", true),
+            ("foo[abc]", "food", false),
+            ("foo[!abc]", "food", true),
+            ("foo[!abc]", "fooa", false),
+            // `^` is literal in fnmatch, not negation.
+            ("foo[^abc]", "foo^", true),
+            ("foo[^abc]", "food", false),
+            ("foo[a-c]", "foob", true),
+            ("foo[a-c]", "food", false),
+            ("foo[a-]", "foo-", true),
+            ("foo[-a]", "foo-", true),
+            ("foo[]]", "foo]", true),
+            ("foo[!]]", "foox", true),
+            ("foo[!]]", "foo]", false),
+            // `[!]` has no closing bracket: `[` is literal.
+            ("foo[!]", "foo[!]", true),
+            ("foo[", "foo[", true),
+            ("foo[]", "foo[]", true),
+            ("*.[ch]", "foo.c", true),
+            ("*.[ch]", "foo.o", false),
+            ("lib*.so.[0-9]", "libfoo.so.1", true),
+            ("lib*.so.[0-9]", "libfoo.so.1x", false),
+            // `*` spans `/`, like fnmatch.
+            ("*.socket", "a/b.socket", true),
+        ];
+        for (pattern, text, expected) in cases {
+            assert_eq!(
+                glob_match(pattern, text),
+                expected,
+                "glob_match({pattern:?}, {text:?})"
+            );
+        }
     }
 }
