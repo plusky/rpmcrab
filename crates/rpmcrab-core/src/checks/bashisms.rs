@@ -24,7 +24,7 @@ pub struct BashismsCheck {
 
 impl BashismsCheck {
     pub fn new(_config: &Config) -> Self {
-        let (have_tools, use_early_fail) = Self::detect_tools();
+        let (have_tools, use_early_fail) = Self::detect_tools(None);
         Self {
             use_early_fail,
             have_tools,
@@ -34,9 +34,16 @@ impl BashismsCheck {
 
     /// Probe for `dash` and `checkbashisms`. The reference crashes here when
     /// `checkbashisms` is absent; we degrade to a no-op check instead.
-    fn detect_tools() -> (bool, bool) {
-        let dash = Command::new("dash").arg("--version").output().is_ok();
-        let help = Command::new("checkbashisms").arg("--help").output();
+    ///
+    /// `bin_dir` overrides PATH resolution so tests can point the probe at
+    /// a scratch directory instead of mutating the process environment.
+    fn detect_tools(bin_dir: Option<&std::path::Path>) -> (bool, bool) {
+        let tool = |name: &str| match bin_dir {
+            Some(dir) => Command::new(dir.join(name)),
+            None => Command::new(name),
+        };
+        let dash = tool("dash").arg("--version").output().is_ok();
+        let help = tool("checkbashisms").arg("--help").output();
         match help {
             Ok(out) => {
                 let text = String::from_utf8_lossy(&out.stdout).into_owned()
@@ -132,12 +139,53 @@ impl Check for BashismsCheck {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn fake_tool(dir: &std::path::Path, name: &str, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fake tool");
+        let mut perms = std::fs::metadata(&path)
+            .expect("stat fake tool")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod fake tool");
+    }
+
     #[test]
-    fn detect_tools_is_deterministic() {
-        // The probe only reads the environment, so two consecutive runs
-        // must agree. PATH is deliberately not mutated to force a case:
-        // that would be unsafe under parallel in-process tests.
-        assert_eq!(BashismsCheck::detect_tools(), BashismsCheck::detect_tools());
+    #[cfg(unix)]
+    fn detect_tools_finds_probed_tools() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        fake_tool(dir.path(), "dash", "echo 'dash 0.5.12'");
+        fake_tool(
+            dir.path(),
+            "checkbashisms",
+            "echo 'usage: checkbashisms [-e] file'",
+        );
+        assert_eq!(BashismsCheck::detect_tools(Some(dir.path())), (true, true));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn detect_tools_reports_missing_tools() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        fake_tool(dir.path(), "dash", "echo 'dash 0.5.12'");
+        assert_eq!(
+            BashismsCheck::detect_tools(Some(dir.path())),
+            (false, false)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn detect_tools_detects_early_fail_support() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        fake_tool(dir.path(), "dash", "echo 'dash 0.5.12'");
+        fake_tool(
+            dir.path(),
+            "checkbashisms",
+            "echo 'usage: checkbashisms file'",
+        );
+        assert_eq!(BashismsCheck::detect_tools(Some(dir.path())), (true, false));
     }
 
     #[test]
