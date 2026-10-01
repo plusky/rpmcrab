@@ -51,7 +51,7 @@ impl Pattern {
 }
 
 struct FilelistRule {
-    message: &'static str,
+    message: String,
     good: Vec<Pattern>,
     bad: Vec<Pattern>,
     ignore_pkg_if: Option<fn(&Pkg) -> bool>,
@@ -96,9 +96,8 @@ impl FilelistCheck {
                 let message = check
                     .get("Message")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("filelist-forbidden");
-                // Leak to get 'static: the table is parsed once at startup.
-                let message: &'static str = Box::leak(message.to_string().into_boxed_str());
+                    .unwrap_or("filelist-forbidden")
+                    .to_string();
                 let good = check
                     .get("Good")
                     .and_then(|v| v.as_array())
@@ -247,9 +246,9 @@ impl Check for FilelistCheck {
                     {
                         continue;
                     }
+                    // The reference emits once per matching pattern; no break.
                     if b.matches(f) {
-                        add_info(out, Level::Error, pkg, rule.message, &[f]);
-                        break;
+                        add_info(out, Level::Error, pkg, &rule.message, &[f]);
                     }
                 }
             }

@@ -21,6 +21,7 @@ use crate::pkg::Pkg;
 
 pub struct AppDataCheck {
     file_regex: Regex,
+    checked_files: usize,
 }
 
 impl AppDataCheck {
@@ -28,6 +29,7 @@ impl AppDataCheck {
         Self {
             file_regex: Regex::new(r"/usr/share/appdata/.*\.(appdata|metainfo)\.xml$")
                 .expect("static regex"),
+            checked_files: 0,
         }
     }
 
@@ -123,8 +125,12 @@ impl AppDataCheck {
 
     /// Validate one file: `appstream-util` when present, else well-formedness.
     fn validate(path: &str) -> bool {
-        let util = Command::new("appstream-util")
-            .args(["validate-relax", "--nonet", path])
+        // The reference builds `self.cmd + f` and calls `cmd.split()`, so a
+        // path containing whitespace is split into several argv elements.
+        let cmd = format!("appstream-util validate-relax --nonet {path}");
+        let argv: Vec<&str> = cmd.split_whitespace().collect();
+        let util = Command::new(argv[0])
+            .args(&argv[1..])
             .env("LC_ALL", "C")
             .output();
         match util {
@@ -146,6 +152,9 @@ impl Check for AppDataCheck {
             if !is_match(&self.file_regex, &pkgfile.name) {
                 continue;
             }
+            if !pkg.ghost_files.iter().any(|g| g == &pkgfile.name) {
+                self.checked_files += 1;
+            }
             if !Self::validate(&pkgfile.path) {
                 add_info(
                     out,
@@ -156,6 +165,14 @@ impl Check for AppDataCheck {
                 );
             }
         }
+    }
+
+    fn reset(&mut self) {
+        self.checked_files = 0;
+    }
+
+    fn checked_files(&self) -> Option<usize> {
+        Some(self.checked_files)
     }
 }
 

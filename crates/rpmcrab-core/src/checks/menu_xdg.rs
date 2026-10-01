@@ -32,17 +32,22 @@ type ParseError = (Level, &'static str, Vec<String>);
 
 pub struct MenuXDGCheck {
     file_regex: Regex,
+    checked_files: usize,
 }
 
 impl MenuXDGCheck {
     pub fn new(_config: &Config) -> Self {
         Self {
             file_regex: Regex::new(r"/usr/share/applications/.*\.desktop$").expect("static regex"),
+            checked_files: 0,
         }
     }
 
     /// Parse a desktop file like `configparser.RawConfigParser`.
     /// Returns the sections on success, or the finding on parse failure.
+    ///
+    /// Key lookup is case-insensitive: configparser lowercases every key
+    /// (`optionxform`), so `Exec` and `EXEC` are the same option.
     fn parse_desktop(content: &str, filename: &str) -> Result<DesktopSections, ParseError> {
         let mut sections: DesktopSections = HashMap::new();
         let mut current: Option<String> = None;
@@ -53,11 +58,25 @@ impl MenuXDGCheck {
             }
             if line.starts_with('[') {
                 let end = line.find(']').ok_or_else(|| {
-                    (
-                        Level::Error,
-                        "invalid-desktopfile",
-                        vec![filename.to_string(), "missing closing bracket".to_string()],
-                    )
+                    // configparser raises MissingSectionHeaderError for a
+                    // bracket line outside any section, ParsingError inside
+                    // one; the latter renders as invalid-desktopfile.
+                    if current.is_none() {
+                        (
+                            Level::Error,
+                            "desktopfile-missing-header",
+                            vec![filename.to_string()],
+                        )
+                    } else {
+                        (
+                            Level::Error,
+                            "invalid-desktopfile",
+                            vec![
+                                filename.to_string(),
+                                "Source contains parsing errors".to_string(),
+                            ],
+                        )
+                    }
                 })?;
                 let name = line[1..end].to_string();
                 if sections.contains_key(&name) {
@@ -79,9 +98,14 @@ impl MenuXDGCheck {
             let eq = line.find('=').ok_or((
                 Level::Error,
                 "invalid-desktopfile",
-                vec![filename.to_string(), "missing '='".to_string()],
+                // configparser's ParsingError message, first colon-part.
+                vec![
+                    filename.to_string(),
+                    "Source contains parsing errors".to_string(),
+                ],
             ))?;
-            let key = line[..eq].trim().to_string();
+            // configparser lowercases keys.
+            let key = line[..eq].trim().to_lowercase();
             let value = line[eq + 1..].trim().to_string();
             let map = sections.get_mut(&section).expect("current section");
             if map.contains_key(&key) {
@@ -108,6 +132,13 @@ impl MenuXDGCheck {
         }
         let text = String::from_utf8_lossy(&out.stdout).into_owned()
             + &String::from_utf8_lossy(&out.stderr);
+        Self::parse_validate_output(&text)
+    }
+
+    /// Pull `error: ...` messages out of validator output. The reference
+    /// takes `line.split('error: ')[1]`; `split().nth(1)` is the same
+    /// segment (a second `error: ` truncates the message in both).
+    fn parse_validate_output(text: &str) -> Vec<String> {
         let mut errors = Vec::new();
         for line in text.lines() {
             if let Some(msg) = line.split("error: ").nth(1) {
@@ -146,6 +177,9 @@ impl Check for MenuXDGCheck {
             if !is_match(&self.file_regex, filename) {
                 continue;
             }
+            if !pkg.ghost_files.iter().any(|g| g == &pkgfile.name) {
+                self.checked_files += 1;
+            }
             for error in Self::external_validate(&pkgfile.path) {
                 if error.is_empty() {
                     add_info(out, Level::Error, pkg, "invalid-desktopfile", &[filename]);
@@ -182,9 +216,11 @@ impl Check for MenuXDGCheck {
                 }
                 Ok(sections) => {
                     if let Some(entry) = sections.get("Desktop Entry")
-                        && let Some(exec) = entry.get("Exec")
+                        && let Some(exec) = entry.get("exec")
                     {
-                        let binary = exec.split_whitespace().next().unwrap_or("");
+                        // The reference uses `partition(' ')`, which splits
+                        // on the first ASCII space only.
+                        let binary = exec.split(' ').next().unwrap_or("");
                         if !binary.is_empty() && !Self::binary_exists(pkg, binary) {
                             add_info(
                                 out,
@@ -199,6 +235,14 @@ impl Check for MenuXDGCheck {
             }
         }
     }
+
+    fn reset(&mut self) {
+        self.checked_files = 0;
+    }
+
+    fn checked_files(&self) -> Option<usize> {
+        Some(self.checked_files)
+    }
 }
 
 #[cfg(test)]
@@ -209,7 +253,37 @@ mod tests {
     fn valid_desktop_parses() {
         let content = "[Desktop Entry]\nName=Foo\nExec=foo\n";
         let sections = MenuXDGCheck::parse_desktop(content, "foo.desktop").unwrap();
-        assert_eq!(sections["Desktop Entry"]["Exec"], "foo".to_string());
+        // configparser lowercases keys.
+        assert_eq!(sections["Desktop Entry"]["exec"], "foo".to_string());
+    }
+
+    #[test]
+    fn keys_are_case_insensitive() {
+        let content = "[Desktop Entry]\nName=Foo\nEXEC=foo\nExec=bar\n";
+        let err = MenuXDGCheck::parse_desktop(content, "foo.desktop").unwrap_err();
+        assert_eq!(err.1, "desktopfile-duplicate-option");
+    }
+
+    #[test]
+    fn unclosed_bracket_before_section_is_missing_header() {
+        // configparser raises MissingSectionHeaderError here.
+        let err = MenuXDGCheck::parse_desktop("[foo\nName=Bar\n", "foo.desktop").unwrap_err();
+        assert_eq!(err.1, "desktopfile-missing-header");
+    }
+
+    #[test]
+    fn unclosed_bracket_in_section_is_invalid() {
+        // configparser raises ParsingError here.
+        let err = MenuXDGCheck::parse_desktop("[a]\nName=Foo\n[bad\n", "foo.desktop").unwrap_err();
+        assert_eq!(err.1, "invalid-desktopfile");
+        assert_eq!(err.2[1], "Source contains parsing errors");
+    }
+
+    #[test]
+    fn missing_equals_is_invalid() {
+        let err = MenuXDGCheck::parse_desktop("[a]\nName Foo\n", "foo.desktop").unwrap_err();
+        assert_eq!(err.1, "invalid-desktopfile");
+        assert_eq!(err.2[1], "Source contains parsing errors");
     }
 
     #[test]
@@ -238,5 +312,19 @@ mod tests {
         let content = "# comment\n\n[Desktop Entry]\n; another\nName=Foo\n";
         let sections = MenuXDGCheck::parse_desktop(content, "foo.desktop").unwrap();
         assert!(sections.contains_key("Desktop Entry"));
+    }
+
+    #[test]
+    fn validate_output_truncates_at_second_error_marker() {
+        // Matches Python's `line.split('error: ')[1]`.
+        let errors =
+            MenuXDGCheck::parse_validate_output("f.desktop: error: bad value error: tail\n");
+        assert_eq!(errors, vec!["bad value ".to_string()]);
+    }
+
+    #[test]
+    fn validate_output_without_errors_is_empty_detail() {
+        let errors = MenuXDGCheck::parse_validate_output("all good\n");
+        assert_eq!(errors, vec![String::new()]);
     }
 }

@@ -140,9 +140,10 @@ impl AlternativesCheck {
                         &[&dir_name],
                     );
                 } else {
+                    // The reference interpolates dir_name raw into the
+                    // pattern (no escaping).
                     let conf_re =
-                        Regex::new(&format!("^{}/.*\\.conf$", fancy_regex::escape(&dir_name)))
-                            .expect("conf pattern");
+                        Regex::new(&format!("^{}/.*.conf$", dir_name)).expect("conf pattern");
                     if !pkg.files.iter().any(|f| is_match(&conf_re, &f.name)) {
                         add_info(
                             out,
@@ -162,7 +163,9 @@ impl AlternativesCheck {
             if !is_match(&conf_re, &pkgfile.name) {
                 continue;
             }
-            let Ok(content) = std::fs::read_to_string(&pkgfile.path) else {
+            // The reference checks existence, not readability: a read error
+            // on an existing file is not "not found".
+            if !Path::new(&pkgfile.path).exists() {
                 let level = if pkgfile.is_ghost() {
                     Level::Info
                 } else {
@@ -175,6 +178,9 @@ impl AlternativesCheck {
                     "libalternatives-conf-not-found",
                     &[&pkgfile.name],
                 );
+                continue;
+            };
+            let Ok(content) = std::fs::read_to_string(&pkgfile.path) else {
                 continue;
             };
             let mut bin_found = false;
@@ -371,13 +377,13 @@ impl Check for AlternativesCheck {
             }
         }
 
-        // File list validation.
+        // File list validation: the reference walks slaves before installs.
         let (_, slaves) = Self::find_binaries(&post_lines);
         let file_names: Vec<&str> = pkg.files.iter().map(|f| f.name.as_str()).collect();
-        for binary in install
+        for binary in slaves
             .iter()
-            .map(|(l, _)| l.as_str())
-            .chain(slaves.iter().map(String::as_str))
+            .map(String::as_str)
+            .chain(install.iter().map(|(l, _)| l.as_str()))
         {
             let etc_alt = format!(
                 "/etc/alternatives/{}",
