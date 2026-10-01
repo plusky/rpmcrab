@@ -267,6 +267,15 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
         "TmpFilesCheck" => Some(Box::new(crate::checks::tmpfiles::TmpFilesCheck::new(
             config,
         ))),
+        "FileDigestCheck" => Some(Box::new(crate::checks::file_digest::FileDigestCheck::new(
+            config,
+        ))),
+        "SignatureCheck" => Some(Box::new(crate::checks::signature::SignatureCheck::new(
+            config,
+        ))),
+        "SUIDPermissionsCheck" => Some(Box::new(
+            crate::checks::suid_permissions::SUIDPermissionsCheck::new(config),
+        )),
         _ => None,
     }
 }

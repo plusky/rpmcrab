@@ -76,7 +76,10 @@ fn missing_findings_declare_their_kind() {
     for (i, entry) in entries().iter().enumerate() {
         let kind = field(entry, "kind", i);
         assert!(
-            matches!(kind, "missing" | "behaviour" | "severity" | "detail"),
+            matches!(
+                kind,
+                "missing" | "behaviour" | "severity" | "detail" | "limitation"
+            ),
             "entry {i} (`{}`) has unknown kind `{kind}`",
             field(entry, "check", i)
         );

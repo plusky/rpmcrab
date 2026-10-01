@@ -1,16 +1,3 @@
-# The divergence ledger. An empty ledger means rpmcrab is byte-identical to
-# reference rpmlint 2.10.0 on every parity case. Every non-empty entry is a
-# reviewed, deliberate departure — see tests/parity/README.md for the schema.
-
-# The ledger also records deliberate *behavioural* departures that no corpus
-# case pins (kind = "behaviour"), so they are reviewed rather than accidental.
-
-# Checks the reference has but the port does not are recorded one entry per
-# check (kind = "missing", check = the exact Python module name). The set is
-# derived, not hand-maintained: scripts/gen-reference-checks.py regenerates
-# the reference list, and the divergences_missing test fails if the entries
-# drift from reference-minus-registry.
-
 [[divergence]]
 case = "global"
 check = "pkg-layer"
@@ -79,8 +66,8 @@ case = "global"
 check = "check-error-handling"
 kind = "behaviour"
 reason = "A check that panics is contained per package: the package becomes a fatal result, the run continues, and the exit code is 3. The reference propagates the exception with a traceback and exits 1. Swallowing the panic entirely would report incomplete coverage as a clean run, so the fatal line and the exit code keep the bug visible; aborting the whole batch on one package's bug would forfeit the rest."
-upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
 since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
 
 [[divergence]]
 case = "global"
@@ -129,16 +116,16 @@ case = "global"
 check = "buildarch-instead-of-exclusivearch-tag"
 kind = "behaviour"
 reason = "Fixed behaviour per rpmlint#1600 (fixes rpmlint#698): a trailing line-continuation backslash is stripped before comparing, so 'BuildArch: noarch \\' inside a multi-line macro is not reported as a real architecture. The frozen 2.10.0 reference reports it."
-upstream = "https://github.com/rpm-software-management/rpmlint/pull/1600"
 since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1600"
 
 [[divergence]]
 case = "global"
 check = "macro-in-comment"
 kind = "behaviour"
 reason = "Fixed behaviour per rpmlint#1601 (fixes rpmlint#183): '#' inside shell-quoted strings does not start a comment (quote-aware comment_start_pos, tracking single/double-quote state and backslash escapes). The frozen 2.10.0 reference treats such '#' as a comment start and warns."
-upstream = "https://github.com/rpm-software-management/rpmlint/pull/1601"
 since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1601"
 
 [[divergence]]
 case = "global"
@@ -166,16 +153,16 @@ case = "global"
 check = "hardlink-across-partition"
 kind = "behaviour"
 reason = "Adopted ahead of upstream (proposed in unmerged rpmlint#1603, fixes rpmlint#349): hardlink findings are reported per (rdev, inode) group inside each md5 group. The frozen 2.10.0 reference uses global per-md5 bookkeeping and misattributes hardlinks in mixed hardlink/duplicate groups, reporting the wrong file pair."
-upstream = "https://github.com/rpm-software-management/rpmlint/pull/1603"
 since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1603"
 
 [[divergence]]
 case = "global"
 check = "hardlink-across-config-files"
 kind = "behaviour"
 reason = "Adopted ahead of upstream (proposed in unmerged rpmlint#1603, fixes rpmlint#349): hardlink findings are reported per (rdev, inode) group inside each md5 group. The frozen 2.10.0 reference uses global per-md5 bookkeeping and misattributes hardlinks in mixed hardlink/duplicate groups, reporting the wrong file pair."
-upstream = "https://github.com/rpm-software-management/rpmlint/pull/1603"
 since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1603"
 
 [[divergence]]
 case = "global"
@@ -203,8 +190,8 @@ case = "global"
 check = "device-files-whitelist-validation"
 kind = "behaviour"
 reason = "Malformed whitelist entries (missing \"package\"/\"packages\", wrong types, missing required keys, unknown attribute keys) are logged and skipped; the reference raises KeyError in verify_whitelists or AttributeError in getattr at check time and crashes the whole run. Applies to DeviceFilesCheck and WorldWritableCheck."
-upstream = "https://github.com/rpm-software-management/rpmlint/issues/439"
 since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/439"
 
 [[divergence]]
 case = "global"
@@ -267,8 +254,8 @@ case = "global"
 check = "logrotate-log-dir-not-packaged"
 kind = "behaviour"
 reason = "Deliberate improvement over the reference (open rpmlint#551): /var/log itself is never reported by logrotate-log-dir-not-packaged. It is owned by the filesystem package, not by the package shipping the logrotate config, so flagging it is a false positive."
-upstream = "https://github.com/rpm-software-management/rpmlint/issues/551"
 since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/551"
 
 [[divergence]]
 case = "global"
@@ -331,24 +318,24 @@ case = "global"
 check = "world-writable-mismatched-attrs"
 kind = "behaviour"
 reason = "The reference test test_world_writable.py::test_device_files_simple asserts has: drwxr-xr-t for a file created with mode 0o41777, but stat.filemode(0o41777) is drwxrwxrwt, so the reference code itself reports has: drwxrwxrwt and its own test cannot pass. The port follows the code."
-upstream = "https://github.com/rpm-software-management/rpmlint/issues/600"
 since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/600"
 
 [[divergence]]
 case = "global"
 check = "time-report"
 kind = "behaviour"
-reason = "With -t, BinariesCheck's \u201cChecked files\u201d column shows the run-lifetime total instead of blank: the check no longer resets per package (the per-worker check set is reset between packages, but the count accumulates for the merged report). The reference sets checked_files to None on every reset (AbstractCheck.py:65) and resets after each package (lint.py:271), so its column is blank."
-upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
+reason = "With -t, BinariesCheck's “Checked files” column shows the run-lifetime total instead of blank: the check no longer resets per package (the per-worker check set is reset between packages, but the count accumulates for the merged report). The reference sets checked_files to None on every reset (AbstractCheck.py:65) and resets after each package (lint.py:271), so its column is blank."
 since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
 
 [[divergence]]
 case = "global"
 check = "cli"
 kind = "behaviour"
 reason = "A package that fails to open is a fatal result: one '(none): E: fatal error while reading ...' line on stderr, the run continues with the remaining packages, and the exit code is 3. The pinned reference exits 3 immediately on the first unreadable file; the -v re-raise (exit 1 with a cause chain) is gone."
-upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
 since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
 
 [[divergence]]
 case = "global"
@@ -357,16 +344,13 @@ kind = "detail"
 reason = "parse_octal mirrors the reference's int(value, 8) (sign, 0o prefix, PEP 515 underscores, Unicode decimal digits), but magnitudes beyond u128 saturate at u128::MAX where the reference keeps arbitrary precision. The value only feeds equality against file mode bits, which neither a saturated nor an arbitrary-precision huge value can equal, so the saturation is unobservable."
 since = "0.1.0"
 
-# Unported reference checks, one kind = "missing" entry per check
-# (derived; see the header comment).
-
 [[divergence]]
 case = "global"
 check = "cli"
 kind = "behaviour"
 reason = "-T/--profile is removed entirely, and the --file/--info aliases for -r/-v are dropped; only -r/--rpmlintrc and -v/--verbose remain. All three are live in the pinned reference (cli.py:78,79,83): this is deliberate straightening of the option surface per the #1595 design, not something the reference dropped. A wrapper passing --info now gets exit 2."
-upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
 since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
 
 [[divergence]]
 case = "global"
@@ -377,31 +361,11 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "FileDigestCheck"
-kind = "missing"
-reason = "FileDigestCheck is not ported yet; its findings are absent from the port."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "FileMetadataCheck"
 kind = "missing"
 reason = "FileMetadataCheck is not ported yet; its findings are absent from the port."
 since = "0.1.0"
 
-[[divergence]]
-case = "global"
-check = "SUIDPermissionsCheck"
-kind = "missing"
-reason = "SUIDPermissionsCheck is not ported yet; its findings are absent from the port."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "SignatureCheck"
-kind = "missing"
-reason = "SignatureCheck is not ported yet; its findings are absent from the port."
-since = "0.1.0"
 [[divergence]]
 case = "global"
 check = "info-files-without-install-info-postin"
@@ -449,8 +413,8 @@ case = "global"
 check = "after_checks"
 kind = "behaviour"
 reason = "after_checks sees the merged state of ALL packages in the batch (export/import). The pinned reference reset checks after each package, so after_checks only ever saw the last package's state."
-upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
 since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
 
 [[divergence]]
 case = "global"
@@ -487,3 +451,104 @@ kind = "behaviour"
 reason = "AlternativesCheck.py:216 interpolates the package-chosen symlink basename into a regex with no escaping, so a basename carrying an unbalanced bracket makes re.compile raise. rpmcrab skips the empty-libalternatives-directory finding for such a path instead of aborting the run, because a package must not be able to panic the linter. A path whose basename is valid regex -- every path the reference actually exercises -- behaves identically."
 since = "0.1.0"
 
+[[divergence]]
+case = "global"
+check = "buildarch-instead-of-exclusivearch-tag"
+kind = "behaviour"
+reason = "Fixed behaviour per unmerged rpmlint#1600 (fixes rpmlint#698): a trailing line-continuation backslash is stripped before comparing, so 'BuildArch: noarch \\' inside a multi-line macro is not reported as a real architecture. The frozen 2.10.0 reference reports it."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1600"
+
+[[divergence]]
+case = "global"
+check = "macro-in-comment"
+kind = "behaviour"
+reason = "Fixed behaviour per unmerged rpmlint#1601 (fixes rpmlint#183): '#' inside shell-quoted strings does not start a comment (quote-aware comment_start_pos, tracking single/double-quote state and backslash escapes). The frozen 2.10.0 reference treats such '#' as a comment start and warns."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1601"
+
+[[divergence]]
+case = "global"
+check = "python-bytecode-inconsistent-mtime"
+kind = "behaviour"
+reason = "python-bytecode-inconsistent-mtime only fires when the .pyc embedded timestamp is older than the .py mtime (stale bytecode). The reference (FilesCheck.py:1274) fires on any mismatch, but rpmlint#1331 (unmerged; closed 2025-04-24) proposes this fix: a newer .pyc is a local-build artifact, not an error. The port implements the proposed behaviour ahead of upstream."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "detail"
+reason = "FileDigestCheck drops the `({digest_hint})` detail argument on `{type}-file-unauthorized` findings; the reference appends the observed per-digester digests of the offending file."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "detail"
+reason = "File digest finding details are byte-identical to the reference except `{type}-file-parse-error`, which renders the Rust `std::io::Error` text where the reference interpolates its own OS-error wording; `whitelisted-file-missing` and `file-digest-mismatch` match the reference exactly."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SUIDPermissionsCheck"
+kind = "detail"
+reason = "Drop-in `permissions-parse-error` message texts are paraphrased rather than byte-identical to the reference's wordings; central-profile parse errors abort the run like the reference constructor, emitting no finding."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SignatureCheck"
+kind = "detail"
+reason = "SignatureCheck captures stdout only while the reference merges stderr into stdout, and runs `rpm -Kv` under `LC_ALL=C` instead of the reference's `en_US.UTF-8`/`LANGUAGE=en_US` environment."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SignatureCheck"
+kind = "behaviour"
+reason = "The any-signature regex is widened to `[Ss]ignature|\\(sha1\\) dsa|\\(sha1\\) rsa` (the reference only matches `[Ss]ignature, key ID`), so `no-signature` fires less often on old-style `rpm -Kv` output lines. As a consequence the reference's `no-signature` + `invalid-signature` pair is unreachable here: any output matching `invalid OpenPGP signature` also matches the widened regex, so `no-signature` never fires alongside it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "behaviour"
+reason = "The `xml` digester (plusky/rpmcrab#75) only accepts UTF-8, with an optional BOM stripped: a file in another encoding fails with `{type}-file-parse-error`, where the reference's expat-based `ET.canonicalize` would decode and digest it. All 156 `digester = \"xml\"` entries in dbus-services.toml are UTF-8."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/75"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "behaviour"
+reason = "The `xml` digester (plusky/rpmcrab#75) expands internal-subset general entities as text: markup inside an entity value (e.g. `<!ENTITY e \"<b>x</b>\">`) is escaped rather than parsed as elements, where the reference digests the parsed form. Such entities do not occur in the whitelisted XML configs."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/75"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "behaviour"
+reason = "`nodigests` entries are expanded before the explicit `digests` list; the reference appends them after (`_normalize_digest_group`). Latent: none of the 320 shipped digest groups carry both keys."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "behaviour"
+reason = "Malformed configuration aborts via Rust panic (exit 101, panic text on stderr) where the reference raises out of `__init__` (exit 1, traceback on stderr). Both kill the run before any package is linted; the abort itself is the parity point, not the exit code."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "limitation"
+reason = "Only the SHA-2 family (`sha224`, `sha256`, `sha384`, `sha512`) is implemented; the reference's `hashlib.new()` accepts any algorithm hashlib knows. Anything else fails the run at configuration load. Latent: the shipped whitelists use only `sha256` and `skip`."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SUIDPermissionsCheck"
+kind = "behaviour"
+reason = "Deliberate improvement over the reference: drop-in profile application order follows package file order (insertion-ordered set) instead of the reference's nondeterministic Python `set` iteration (measured 7/12 vs 5/12 across 12 runs on a two-drop-in fixture), so `permissions-incorrect` no longer depends on hash seed. No upstream issue covers the ordering."
+since = "0.1.0"
