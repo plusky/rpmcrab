@@ -22,6 +22,7 @@ use librpm::Tag;
 
 use crate::check::{Check, add_info};
 use crate::checks::is_match;
+use crate::checks::shared::script_body_or_prog;
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
@@ -223,15 +224,6 @@ fn parse_profile(
     }
 
     Ok(entries)
-}
-
-/// The scriptlet body, falling back to the `-p` interpreter program
-/// (rpmlint `pkg[tag] or pkg.scriptprog(prog)`).
-fn script_body_or_prog(pkg: &Pkg, tag: Tag, prog: Tag) -> String {
-    match pkg.tag_str(tag) {
-        Some(body) if !body.is_empty() => body,
-        _ => pkg.scriptprog(prog),
-    }
 }
 
 pub struct SUIDPermissionsCheck {
