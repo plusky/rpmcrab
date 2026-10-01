@@ -159,9 +159,11 @@ fn checks_in_default_config() -> Vec<String> {
 /// shipped config's `Checks` (`InitScriptCheck`, `LSBCheck`, `XinetdDepCheck`),
 /// plus `PAMModulesCheck`, which the reference lists only in the Fedora
 /// flavour config (not yet ported); the port mirrors all of that.
-/// `AtomicUpdateCheck` is registered deliberately: plusky asked that the
+/// `AtomicUpdateCheck` is exempt deliberately: plusky asked that the
 /// `Checks` entry wait for the central issue #66 rather than landing in any
-/// single PR and conflicting with the others touching the same list.
+/// single PR and conflicting with the others touching the same list. The
+/// Wave 6 checks below are exempt for the same reason: their `Checks`
+/// entries also wait for the central issue #66.
 #[test]
 fn every_constructible_check_is_listed_in_checks() {
     let listed = checks_in_default_config();
@@ -171,6 +173,14 @@ fn every_constructible_check_is_listed_in_checks() {
             || name == "XinetdDepCheck"
             || name == "PAMModulesCheck"
             || name == "AtomicUpdateCheck"
+            // Wave 6 (PR #48): `Checks` entries wait for the central issue #66.
+            || name == "BashismsCheck"
+            || name == "FilelistCheck"
+            || name == "PolkitCheck"
+            || name == "SystemdInstallCheck"
+            || name == "SystemdTmpfilesCheck"
+            || name == "SysVInitOnSystemdCheck"
+            || name == "TmpFilesCheck"
         {
             continue;
         }
