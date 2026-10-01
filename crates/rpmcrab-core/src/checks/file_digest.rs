@@ -318,6 +318,23 @@ impl TrieNode {
         node.terminal = true;
     }
 
+    /// True when inserting `path` would descend through an existing
+    /// terminal, i.e. an already-restricted location is a prefix of `path`.
+    /// Mirrors the reference's `Conflicting paths in trie` raise.
+    fn conflicts(&self, path: &str) -> bool {
+        let mut node = self;
+        for part in path.split('/').filter(|p| !p.is_empty()) {
+            if node.terminal {
+                return true;
+            }
+            match node.children.get(part) {
+                Some(child) => node = child,
+                None => return false,
+            }
+        }
+        false
+    }
+
     /// True when `path` is within a restricted location.
     fn is_restricted(&self, path: &str) -> bool {
         let mut node = self;
@@ -406,6 +423,15 @@ impl FileDigestCheck {
             let content_check = Self::cfg_opt_string(cfg_table, check_type, "ContentCheck");
 
             for loc in &locations {
+                // The reference rejects relative and overlapping locations
+                // out of `__init__`; a config typo must kill the run, not
+                // silently under-report.
+                if !loc.starts_with('/') {
+                    panic!("FileDigestCheck: absolute path expected: {loc}");
+                }
+                if trie.conflicts(loc) {
+                    panic!("FileDigestCheck: conflicting paths in trie: {loc}");
+                }
                 trie.insert(loc);
             }
 
@@ -419,7 +445,8 @@ impl FileDigestCheck {
             });
         }
 
-        let digest_groups = Self::parse_digest_groups(config);
+        let known_types: Vec<String> = checks.iter().map(|c| c.check_type.clone()).collect();
+        let digest_groups = Self::parse_digest_groups(config, &known_types);
         let ghost_file_exceptions = Self::parse_exception_lists(config, "GhostFilesExceptions");
         let symlink_exceptions = Self::parse_exception_lists(config, "SymlinkExceptions");
 
@@ -496,21 +523,9 @@ impl FileDigestCheck {
             let Some(table) = v.as_table() else {
                 continue;
             };
-            let mut packages = Vec::new();
-            if let Some(p) = table.get("package").and_then(|v| v.as_str()) {
-                packages.push(p.to_string());
-            }
-            if let Some(arr) = table.get("packages").and_then(|v| v.as_array()) {
-                for p in arr {
-                    if let Some(s) = p.as_str() {
-                        packages.push(s.to_string());
-                    }
-                }
-            }
-            // Malformed entries (no package key) cannot match anything.
-            if packages.is_empty() {
-                continue;
-            }
+            // The reference sanity-checks these keys too; a malformed entry
+            // kills the run instead of silently matching nothing.
+            let packages = Self::checked_packages(table, key);
             let paths: Vec<String> = table
                 .get("paths")
                 .unwrap_or_else(|| {
@@ -540,80 +555,143 @@ impl FileDigestCheck {
         out
     }
 
-    fn parse_digest_groups(config: &Config) -> Vec<DigestGroup> {
+    /// Package-key sanity, mirroring the reference's
+    /// `_sanity_check_package_keys`: exactly one of `package`/`packages`,
+    /// with matching value types, or the run dies.
+    fn checked_packages(table: &toml::Table, context: &str) -> Vec<String> {
+        match (table.get("package"), table.get("packages")) {
+            (None, None) => panic!(
+                "FileDigestCheck: missing \"package\" or \"packages\" key in {context}"
+            ),
+            (Some(_), Some(_)) => panic!(
+                "FileDigestCheck: encountered both \"package\" and \"packages\" keys in {context}"
+            ),
+            (Some(p), None) => vec![
+                p.as_str()
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "FileDigestCheck: \"package\" key contains non-string value in {context}"
+                        )
+                    })
+                    .to_string(),
+            ],
+            (None, Some(ps)) => ps
+                .as_array()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "FileDigestCheck: \"packages\" key contains non-list value in {context}"
+                    )
+                })
+                .iter()
+                .map(|p| {
+                    p.as_str()
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "FileDigestCheck: \"packages\" key contains non-string element in {context}"
+                            )
+                        })
+                        .to_string()
+                })
+                .collect(),
+        }
+    }
+
+    /// Normalize then sanity-check the digest groups, mirroring the
+    /// reference's `_normalize_digest_group` + `_sanity_check_digest_group`:
+    /// malformed configuration kills the run out of the constructor.
+    fn parse_digest_groups(config: &Config, known_types: &[String]) -> Vec<DigestGroup> {
         let mut groups = Vec::new();
-        if let Some(arr) = config
+        let Some(arr) = config
             .configuration
             .get("FileDigestGroup")
             .and_then(|v| v.as_array())
-        {
-            for v in arr {
-                if let Some(table) = v.as_table() {
-                    let check_type = table
-                        .get("type")
+        else {
+            return groups;
+        };
+        for v in arr {
+            let Some(table) = v.as_table() else {
+                panic!("FileDigestCheck: FileDigestGroup entry must be a table");
+            };
+            // The reference reads `digest_group['type']`, raising KeyError
+            // when the key is absent.
+            let check_type = table
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| {
+                    panic!("FileDigestCheck: missing \"type\" key in FileDigestGroup entry")
+                })
+                .to_string();
+            if !known_types.contains(&check_type) {
+                panic!(
+                    "FileDigestCheck: FileDigestGroup type \"{check_type}\" is not supported, \
+                     known values: {known_types:?}"
+                );
+            }
+            let packages = Self::checked_packages(table, "FileDigestGroup");
+            let mut digests = Vec::new();
+            // Expand `nodigests` into skip entries. The reference appends
+            // them after the explicit digests; the port prepends them (see
+            // the parity ledger).
+            if let Some(nodigests) = table.get("nodigests").and_then(|v| v.as_array()) {
+                for entry in nodigests {
+                    if let Some(path) = entry.as_str() {
+                        digests.push(DigestInfo {
+                            path: path.to_string(),
+                            algorithm: "skip".to_string(),
+                            hash: String::new(),
+                            digester: "default".to_string(),
+                        });
+                    }
+                }
+            }
+            if let Some(arr) = table.get("digests").and_then(|v| v.as_array()) {
+                for d in arr {
+                    let Some(dt) = d.as_table() else {
+                        panic!("FileDigestCheck: FileDigestGroup digests entry must be a table");
+                    };
+                    // The reference implies sha256 for a missing algorithm,
+                    // then validates it via `hashlib.new`.
+                    let algorithm = dt
+                        .get("algorithm")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("")
+                        .unwrap_or("sha256")
                         .to_string();
-                    let mut packages = Vec::new();
-                    if let Some(p) = table.get("package").and_then(|v| v.as_str()) {
-                        packages.push(p.to_string());
+                    if algorithm != "skip" && new_hasher(&algorithm).is_err() {
+                        panic!("FileDigestCheck: unsupported digest algorithm \"{algorithm}\"");
                     }
-                    if let Some(arr) = table.get("packages").and_then(|v| v.as_array()) {
-                        for p in arr {
-                            if let Some(s) = p.as_str() {
-                                packages.push(s.to_string());
-                            }
-                        }
+                    let path = dt
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_else(|| {
+                            panic!("FileDigestCheck: missing \"path\" key in FileDigestGroup entry")
+                        })
+                        .to_string();
+                    let digester = dt
+                        .get("digester")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("default");
+                    // `xml` stays a known name (validated here) but is
+                    // disabled at digest time; see `check_digest`.
+                    if !matches!(digester, "default" | "shell" | "xml" | "systemd-socket") {
+                        panic!("FileDigestCheck: invalid digester \"{digester}\" for path {path}");
                     }
-                    let mut digests = Vec::new();
-                    // Expand `nodigests` into skip entries.
-                    if let Some(nodigests) = table.get("nodigests").and_then(|v| v.as_array()) {
-                        for entry in nodigests {
-                            if let Some(path) = entry.as_str() {
-                                digests.push(DigestInfo {
-                                    path: path.to_string(),
-                                    algorithm: "skip".to_string(),
-                                    hash: String::new(),
-                                    digester: "default".to_string(),
-                                });
-                            }
-                        }
-                    }
-                    if let Some(arr) = table.get("digests").and_then(|v| v.as_array()) {
-                        for d in arr {
-                            if let Some(dt) = d.as_table() {
-                                digests.push(DigestInfo {
-                                    path: dt
-                                        .get("path")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string(),
-                                    algorithm: dt
-                                        .get("algorithm")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("sha256")
-                                        .to_string(),
-                                    hash: dt
-                                        .get("hash")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string(),
-                                    digester: dt
-                                        .get("digester")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("default")
-                                        .to_string(),
-                                });
-                            }
-                        }
-                    }
-                    groups.push(DigestGroup {
-                        check_type,
-                        packages,
-                        digests,
+                    digests.push(DigestInfo {
+                        path,
+                        algorithm,
+                        hash: dt
+                            .get("hash")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        digester: digester.to_string(),
                     });
                 }
             }
+            groups.push(DigestGroup {
+                check_type,
+                packages,
+                digests,
+            });
         }
         groups
     }
@@ -1752,5 +1830,91 @@ hash = "deadbeef"
             "xml entry must not mismatch, got {results:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn config_with_locations(locations: &str) -> Config {
+        let toml_src = format!("[FileDigestLocation.pam]\nLocations = [{locations}]\n");
+        let table: toml::Table = toml::from_str(&toml_src).expect("parse test config");
+        let mut config = Config {
+            configuration: table,
+            ..Default::default()
+        };
+        config.finalize();
+        config
+    }
+
+    /// Malformed configuration kills the run out of the constructor, like
+    /// the reference's `__init__` raises.
+    #[test]
+    #[should_panic(expected = "not supported")]
+    fn unknown_digest_group_type_panics() {
+        let config = test_config("[[FileDigestGroup]]\ntype = \"nope\"\npackage = \"testpkg\"\n");
+        let _ = FileDigestCheck::new(&config);
+    }
+
+    #[test]
+    #[should_panic(expected = "missing \"type\"")]
+    fn digest_group_without_type_panics() {
+        let config = test_config("[[FileDigestGroup]]\npackage = \"testpkg\"\n");
+        let _ = FileDigestCheck::new(&config);
+    }
+
+    #[test]
+    #[should_panic(expected = "missing \"path\"")]
+    fn digest_entry_without_path_panics() {
+        let config = test_config(
+            "[[FileDigestGroup]]\ntype = \"pam\"\npackage = \"testpkg\"\n[[FileDigestGroup.digests]]\nalgorithm = \"sha256\"\nhash = \"deadbeef\"\n",
+        );
+        let _ = FileDigestCheck::new(&config);
+    }
+
+    #[test]
+    #[should_panic(expected = "both \"package\" and \"packages\"")]
+    fn digest_group_with_both_package_keys_panics() {
+        let config = test_config(
+            "[[FileDigestGroup]]\ntype = \"pam\"\npackage = \"a\"\npackages = [\"b\"]\n",
+        );
+        let _ = FileDigestCheck::new(&config);
+    }
+
+    #[test]
+    #[should_panic(expected = "missing \"package\" or \"packages\"")]
+    fn digest_group_without_package_keys_panics() {
+        let config = test_config("[[FileDigestGroup]]\ntype = \"pam\"\n");
+        let _ = FileDigestCheck::new(&config);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid digester")]
+    fn digest_entry_with_unknown_digester_panics() {
+        let config = test_config(
+            "[[FileDigestGroup]]\ntype = \"pam\"\npackage = \"testpkg\"\n[[FileDigestGroup.digests]]\npath = \"/etc/pam.d/login\"\ndigester = \"bogus\"\nhash = \"deadbeef\"\n",
+        );
+        let _ = FileDigestCheck::new(&config);
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported digest algorithm")]
+    fn digest_entry_with_unknown_algorithm_panics() {
+        // md5 is valid for the reference's `hashlib.new` but unimplemented
+        // here; the run must die at load, not misreport at check time.
+        let config = test_config(
+            "[[FileDigestGroup]]\ntype = \"pam\"\npackage = \"testpkg\"\n[[FileDigestGroup.digests]]\npath = \"/etc/pam.d/login\"\nalgorithm = \"md5\"\nhash = \"deadbeef\"\n",
+        );
+        let _ = FileDigestCheck::new(&config);
+    }
+
+    #[test]
+    #[should_panic(expected = "absolute path expected")]
+    fn relative_location_panics() {
+        let config = config_with_locations("\"etc/pam.d\"");
+        let _ = FileDigestCheck::new(&config);
+    }
+
+    #[test]
+    #[should_panic(expected = "conflicting paths in trie")]
+    fn overlapping_locations_panic() {
+        let config = config_with_locations("\"/etc\", \"/etc/pam.d\"");
+        let _ = FileDigestCheck::new(&config);
     }
 }
