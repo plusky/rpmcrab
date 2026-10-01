@@ -273,10 +273,13 @@ impl Check for PythonCheck {
         for pkgfile in &pkg.files {
             let filename = pkgfile.name.as_str();
 
-            // The reference counts every non-ghost file (files_re is `.*`).
-            if !pkg.ghost_files.iter().any(|g| g == &pkgfile.name) {
-                self.checked_files += 1;
+            // AbstractCheck.py:45 drops ghosts from the dispatch list, and
+            // files_re is `.*` here, so this is the only filter: a ghost
+            // site-packages tests/ or doc/ directory is never inspected.
+            if pkg.ghost_files.iter().any(|g| g == &pkgfile.name) {
+                continue;
             }
+            self.checked_files += 1;
 
             if filename.ends_with("egg-info/requires.txt") {
                 let content = pkg.read_file(filename);

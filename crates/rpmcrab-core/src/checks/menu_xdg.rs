@@ -38,7 +38,9 @@ pub struct MenuXDGCheck {
 impl MenuXDGCheck {
     pub fn new(_config: &Config) -> Self {
         Self {
-            file_regex: Regex::new(r"/usr/share/applications/.*\.desktop$").expect("static regex"),
+            // AbstractCheck.py:45 applies this with `re.match`; is_match
+            // searches, so anchor it explicitly.
+            file_regex: Regex::new(r"^/usr/share/applications/.*\.desktop$").expect("static regex"),
             checked_files: 0,
         }
     }
@@ -177,9 +179,13 @@ impl Check for MenuXDGCheck {
             if !is_match(&self.file_regex, filename) {
                 continue;
             }
-            if !pkg.ghost_files.iter().any(|g| g == &pkgfile.name) {
-                self.checked_files += 1;
+            // AbstractCheck.py:45 drops ghosts from the dispatch list. A ghost
+            // desktop file has no payload, so the validator reports it missing
+            // and the port would raise invalid-desktopfile for it.
+            if pkg.ghost_files.iter().any(|g| g == &pkgfile.name) {
+                continue;
             }
+            self.checked_files += 1;
             for error in Self::external_validate(&pkgfile.path) {
                 if error.is_empty() {
                     add_info(out, Level::Error, pkg, "invalid-desktopfile", &[filename]);
@@ -326,5 +332,21 @@ mod tests {
     fn validate_output_without_errors_is_empty_detail() {
         let errors = MenuXDGCheck::parse_validate_output("all good\n");
         assert_eq!(errors, vec![String::new()]);
+    }
+
+    #[test]
+    fn file_pattern_is_anchored_like_re_match() {
+        // AbstractCheck.py:45 applies the pattern with `re.match`; is_match
+        // searches, so without `^` a vendored copy under /opt would be
+        // validated where the reference never dispatches it.
+        let check = MenuXDGCheck::new(&Config::default());
+        assert!(is_match(
+            &check.file_regex,
+            "/usr/share/applications/w6.desktop"
+        ));
+        assert!(!is_match(
+            &check.file_regex,
+            "/opt/vendor/usr/share/applications/v.desktop"
+        ));
     }
 }

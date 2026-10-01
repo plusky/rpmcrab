@@ -40,6 +40,31 @@ fn run_check(check: &mut impl Check, rpm: &str) -> Vec<(String, String)> {
     run_check_with(check, rpm, &Config::default())
 }
 
+/// Like `run_check_with_ghost`, but also removes the extracted file, so it
+/// models a real `%ghost` entry: the path is in the manifest with no payload.
+/// Merely listing a file as a ghost is not enough for checks that shell out to
+/// a validator, because `Pkg::open` extracts whatever the RPM actually ships.
+fn run_check_with_ghost_no_payload(
+    check: &mut impl Check,
+    rpm: &str,
+    ghost: &str,
+) -> Vec<(String, String)> {
+    let rpm_path = fixture(rpm);
+    let scratch = tempfile::tempdir().unwrap();
+    let mut pkg = Pkg::open(&rpm_path, scratch.path()).unwrap();
+    let entry = pkg
+        .files
+        .iter()
+        .find(|f| f.name == ghost)
+        .unwrap_or_else(|| panic!("{ghost} is not in {rpm}"));
+    std::fs::remove_file(&entry.path).ok();
+    pkg.ghost_files = vec![ghost.to_string()];
+    let config = Config::default();
+    let mut filter = Filter::new(&config, Color::for_tty(false)).unwrap();
+    check.check_binary(&pkg, &config, &mut filter);
+    filter.results().to_vec()
+}
+
 /// Like `run_check_with` but marks `ghost` as a `%ghost` path first.
 ///
 /// The reference filters ghosts out of the `AbstractFilesCheck` dispatch list
@@ -389,5 +414,67 @@ fn bashisms_ghost_script_is_not_checked() {
     assert_findings(
         &run_check(&mut live, "w6-bashisms-1.0-1.noarch.rpm"),
         &[("potential-bashisms", "w6bashism")],
+    );
+}
+
+/// A ghost desktop file draws nothing. `AbstractCheck.py:45` keeps ghosts out
+/// of the dispatch list, and a ghost has no payload, so the validator reports
+/// it missing -- which the port used to turn into `invalid-desktopfile`.
+#[test]
+fn menu_xdg_ghost_desktopfile_is_not_validated() {
+    let mut check = MenuXDGCheck::new(&Config::default());
+    let results = run_check_with_ghost_no_payload(
+        &mut check,
+        "w6-menu-1.0-1.noarch.rpm",
+        "/usr/share/applications/w6.desktop",
+    );
+    assert!(
+        !results.iter().any(|(n, _)| n == "invalid-desktopfile"),
+        "a ghost desktop file was validated: {results:?}"
+    );
+    // Sanity: the same fixture is reported when the file is not a ghost, or the
+    // assertion above proves nothing.
+    let mut live = MenuXDGCheck::new(&Config::default());
+    let live_results = run_check(&mut live, "w6-menu-1.0-1.noarch.rpm");
+    assert!(
+        live_results
+            .iter()
+            .any(|(n, _)| n == "desktopfile-without-binary"),
+        "expected a finding for the non-ghost file: {live_results:?}"
+    );
+}
+
+/// A ghost site-packages `tests/` or `doc/` directory draws nothing.
+/// `AbstractCheck.py:45` keeps ghosts out of the dispatch list, and
+/// `files_re` is `.*` here, so the ghost filter is the only thing standing
+/// between a `%ghost` and a false `python-tests-in-site-packages`.
+#[test]
+fn python_ghost_site_packages_dir_is_not_inspected() {
+    let mut check = PythonCheck::new(&Config::default());
+    for (ghost, finding) in [
+        (
+            "/usr/lib/python3.13/site-packages/tests",
+            "python-tests-in-site-packages",
+        ),
+        (
+            "/usr/lib/python3.13/site-packages/doc",
+            "python-doc-in-site-packages",
+        ),
+    ] {
+        let results =
+            run_check_with_ghost_no_payload(&mut check, "w6-python-1.0-1.noarch.rpm", ghost);
+        assert!(
+            !results.iter().any(|(n, _)| n == finding),
+            "a ghost {ghost} was inspected: {results:?}"
+        );
+    }
+    // Sanity: the same fixture is reported when the directory is not a ghost.
+    let mut live = PythonCheck::new(&Config::default());
+    let live_results = run_check(&mut live, "w6-python-1.0-1.noarch.rpm");
+    assert!(
+        live_results
+            .iter()
+            .any(|(n, _)| n == "python-tests-in-site-packages"),
+        "expected a finding for the non-ghost directory: {live_results:?}"
     );
 }

@@ -170,9 +170,12 @@ impl PolkitCheck {
                     depth = depth.saturating_sub(1);
                     match e.name().as_ref() {
                         "action" => {
-                            if let Some(id) = current_id.take() {
-                                actions.push((id, std::mem::take(&mut current_defaults)));
-                            }
+                            // `action.getAttribute('id')` (PolkitCheck.py:61)
+                            // yields '' for an action with no id, and the action
+                            // is still evaluated. Dropping it instead would
+                            // silently skip a privilege declaration.
+                            let id = current_id.take().unwrap_or_default();
+                            actions.push((id, std::mem::take(&mut current_defaults)));
                             in_action = false;
                             in_defaults = false;
                         }
@@ -349,5 +352,25 @@ mod tests {
             actions[0].1.get("allow_inactive").map(String::as_str),
             Some("a<b")
         );
+    }
+
+    #[test]
+    fn action_without_an_id_attribute_is_still_collected() {
+        // PolkitCheck.py:61 uses getAttribute('id'), which is '' when the
+        // attribute is absent, and the action is still evaluated. Dropping it
+        // would silently skip the privilege declaration.
+        let dir = std::env::temp_dir();
+        let path = dir.join("rpmcrab-polkit-noid.policy");
+        std::fs::write(
+            &path,
+            "<policyconfig><action><defaults>\
+             <allow_any>yes</allow_any><allow_inactive>no</allow_inactive>\
+             <allow_active>no</allow_active></defaults></action></policyconfig>",
+        )
+        .unwrap();
+        let actions = PolkitCheck::parse_actions(path.to_str().unwrap()).expect("parse");
+        std::fs::remove_file(&path).ok();
+        let ids: Vec<&str> = actions.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec![""], "an <action> without id was dropped: {ids:?}");
     }
 }

@@ -82,11 +82,9 @@ impl MenuCheck {
                                     .collect()
                             })
                             .unwrap_or_default();
-                        Some((
-                            k.clone(),
-                            Regex::new(regexp).expect("launcher regex"),
-                            binaries,
-                        ))
+                        // A malformed regexp in rpmlintrc must not panic the
+                        // linter; skip it, as tags.rs does for Filters.
+                        Some((k.clone(), Regex::new(regexp).ok()?, binaries))
                     })
                     .collect()
             })
@@ -101,7 +99,10 @@ impl MenuCheck {
             standard_needs: get_str_list("ExtraMenuNeeds"),
             icon_paths,
             launchers,
-            icon_ext_regex: Regex::new(icon_ext).expect("icon regex"),
+            // Same reasoning as the launcher regexps: an uncompilable value
+            // from rpmlintrc degrades to matching nothing rather than aborting
+            // the run.
+            icon_ext_regex: Regex::new(icon_ext).unwrap_or_else(|_| Regex::new("$^").unwrap()),
         }
     }
 
@@ -234,6 +235,16 @@ impl Check for MenuCheck {
     }
 }
 
+/// MenuCheck.py:158 tests `title[0] != title[0].upper()` -- "is the first
+/// character not already capitalised", which is not `is_lowercase`: a title
+/// starting with a digit, `_` or an uncased symbol has no case and is quiet.
+fn title_is_capitalized(title: &str) -> bool {
+    title
+        .chars()
+        .next()
+        .is_none_or(|c| c.to_uppercase().collect::<String>() == c.to_string())
+}
+
 impl MenuCheck {
     /// Check a menu title for capitalization, version, and slashes.
     fn check_title(
@@ -244,7 +255,11 @@ impl MenuCheck {
         title: &str,
         long: bool,
     ) {
-        if title.chars().next().map(|c| c.is_uppercase()) == Some(false) {
+        // MenuCheck.py:158 tests `title[0] != title[0].upper()`, i.e. "is the
+        // first character not already capitalised". That is not `is_lowercase`:
+        // a title starting with a digit, `_` or an uncased symbol has no case
+        // and is not a finding.
+        if !title_is_capitalized(title) {
             add_info(
                 out,
                 Level::Warning,
@@ -524,5 +539,16 @@ mod tests {
         let caps = re.captures("/usr/lib/menu/foo").ok().flatten().unwrap();
         assert_eq!(caps.get(1).map(|m| m.as_str()), Some("foo"));
         assert!(re.captures("/usr/lib/menu/a/b").ok().flatten().is_none());
+    }
+
+    #[test]
+    fn uncased_first_character_is_not_a_capitalization_finding() {
+        // These all have a first character with no case, so the reference is
+        // quiet; only a genuinely lowercase first letter is a finding.
+        for t in ["3D Tool", "_internal", "9lives", "¿Qué", "Ünicode"] {
+            assert!(title_is_capitalized(t), "{t} should not be a finding");
+        }
+        assert!(!title_is_capitalized("lowercase title"));
+        assert!(!title_is_capitalized("also lowercase"));
     }
 }
