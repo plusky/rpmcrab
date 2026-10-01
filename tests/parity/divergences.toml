@@ -369,13 +369,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "AlternativesCheck"
-kind = "missing"
-reason = "AlternativesCheck is not ported yet; its findings are absent from the port."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "cli"
 kind = "behaviour"
 reason = "-T/--profile is removed entirely, and the --file/--info aliases for -r/-v are dropped; only -r/--rpmlintrc and -v/--verbose remain. All three are live in the pinned reference (cli.py:78,79,83): this is deliberate straightening of the option surface per the #1595 design, not something the reference dropped. A wrapper passing --info now gets exit 2."
@@ -384,24 +377,11 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "AppDataCheck"
-kind = "missing"
-reason = "AppDataCheck is not ported yet; its findings are absent from the port."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "BashismsCheck"
-kind = "missing"
-reason = "BashismsCheck is not ported yet; its findings are absent from the port."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "BuildRootAndDateCheck"
 kind = "missing"
 reason = "BuildRootAndDateCheck is not ported yet; its findings are absent from the port."
 since = "0.1.0"
+
 [[divergence]]
 case = "global"
 check = "FileDigestCheck"
@@ -418,40 +398,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "FilelistCheck"
-kind = "missing"
-reason = "FilelistCheck is not ported yet; its findings are absent from the port."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "MenuCheck"
-kind = "missing"
-reason = "MenuCheck is not ported yet; its findings are absent from the port."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "MenuXDGCheck"
-kind = "missing"
-reason = "MenuXDGCheck is not ported yet; its findings are absent from the port."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "PolkitCheck"
-kind = "missing"
-reason = "PolkitCheck is not ported yet; its findings are absent from the port."
-since = "0.1.0"
-[[divergence]]
-case = "global"
-check = "PythonCheck"
-kind = "missing"
-reason = "PythonCheck is not ported yet; its findings are absent from the port."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "SUIDPermissionsCheck"
 kind = "missing"
 reason = "SUIDPermissionsCheck is not ported yet; its findings are absent from the port."
@@ -462,33 +408,6 @@ case = "global"
 check = "SignatureCheck"
 kind = "missing"
 reason = "SignatureCheck is not ported yet; its findings are absent from the port."
-since = "0.1.0"
-[[divergence]]
-case = "global"
-check = "SysVInitOnSystemdCheck"
-kind = "missing"
-reason = "SysVInitOnSystemdCheck is not ported yet; its findings are absent from the port."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "SystemdInstallCheck"
-kind = "missing"
-reason = "SystemdInstallCheck is not ported yet; its findings are absent from the port."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "SystemdTmpfilesCheck"
-kind = "missing"
-reason = "SystemdTmpfilesCheck is not ported yet; its findings are absent from the port."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "TmpFilesCheck"
-kind = "missing"
-reason = "TmpFilesCheck is not ported yet; its findings are absent from the port."
 since = "0.1.0"
 [[divergence]]
 case = "global"
