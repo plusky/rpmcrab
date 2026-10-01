@@ -40,6 +40,31 @@ fn run_check(check: &mut impl Check, rpm: &str) -> Vec<(String, String)> {
     run_check_with(check, rpm, &Config::default())
 }
 
+/// Like `run_check_with` but marks `ghost` as a `%ghost` path first.
+///
+/// The reference filters ghosts out of the `AbstractFilesCheck` dispatch list
+/// (AbstractCheck.py:45), so a ghost is never handed to the check. No fixture
+/// RPM ships a ghost, so mark one here rather than claim the path is covered.
+fn run_check_with_ghost(check: &mut impl Check, rpm: &str, ghost: &str) -> Vec<(String, String)> {
+    let rpm_path = fixture(rpm);
+    assert!(
+        rpm_path.is_file(),
+        "fixture missing: {}",
+        rpm_path.display()
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let mut pkg = Pkg::open(&rpm_path, scratch.path()).unwrap();
+    assert!(
+        pkg.files.iter().any(|f| f.name == ghost),
+        "{ghost} is not in {rpm}, so this test would pass vacuously"
+    );
+    pkg.ghost_files = vec![ghost.to_string()];
+    let config = Config::default();
+    let mut filter = Filter::new(&config, Color::for_tty(false)).unwrap();
+    check.check_binary(&pkg, &config, &mut filter);
+    filter.results().to_vec()
+}
+
 /// Like `run_check` but with a caller-supplied config (e.g. to point
 /// `PolkitCheck` at a scratch privs profile instead of the live path).
 fn run_check_with(check: &mut impl Check, rpm: &str, config: &Config) -> Vec<(String, String)> {
@@ -317,5 +342,52 @@ fn polkit_reports_privilege_findings() {
             .iter()
             .any(|(_, line)| line.contains("org.w6.whitelisted")),
         "whitelisted action should be quiet: {results:?}"
+    );
+}
+
+/// A ghost appdata file draws nothing: the reference drops ghosts from the
+/// dispatch list, so `check_file` never runs for one.
+#[test]
+fn appdata_ghost_file_is_not_validated() {
+    let mut check = AppDataCheck::with_tool(None);
+    let results = run_check_with_ghost(
+        &mut check,
+        "w6-appdata-1.0-1.noarch.rpm",
+        "/usr/share/appdata/w6broken.appdata.xml",
+    );
+    assert!(
+        !results.iter().any(|(n, _)| n == "invalid-appdata-file"),
+        "a ghost file was validated: {results:?}"
+    );
+}
+
+/// Same for a ghost shell script: `AbstractCheck.py:45` keeps it out of
+/// `check_file`, so no bashism is reported for it.
+#[test]
+fn bashisms_ghost_script_is_not_checked() {
+    // Same fake tools as bashisms_reports_bashism_script, so the check really
+    // runs; a tool dir without them would make this pass vacuously.
+    let dir = tempfile::tempdir().unwrap();
+    fake_tool(dir.path(), "dash", "exit 0");
+    fake_tool(
+        dir.path(),
+        "checkbashisms",
+        "if [ \"$1\" = \"--help\" ]; then echo 'usage'; exit 0; fi\nif grep -q '\\[\\[' \"$1\" 2>/dev/null; then echo \"possible bashism in $1\" >&2; exit 1; fi\nexit 0",
+    );
+    let results = run_check_with_ghost(
+        &mut BashismsCheck::with_tool_dir(Some(dir.path())),
+        "w6-bashisms-1.0-1.noarch.rpm",
+        "/usr/bin/w6bashism",
+    );
+    assert!(
+        !results.iter().any(|(n, _)| n == "potential-bashisms"),
+        "a ghost script was checked: {results:?}"
+    );
+    // Sanity: the same fixture must report the bashism when it is NOT a ghost,
+    // or the assertion above proves nothing.
+    let mut live = BashismsCheck::with_tool_dir(Some(dir.path()));
+    assert_findings(
+        &run_check(&mut live, "w6-bashisms-1.0-1.noarch.rpm"),
+        &[("potential-bashisms", "w6bashism")],
     );
 }

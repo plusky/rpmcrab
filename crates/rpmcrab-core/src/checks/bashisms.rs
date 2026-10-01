@@ -131,10 +131,13 @@ impl Check for BashismsCheck {
         let mut cache: std::collections::HashMap<String, Vec<&'static str>> =
             std::collections::HashMap::new();
         for pkgfile in &pkg.files {
-            // The reference counts every non-ghost file (files_re is `.*`).
-            if !pkg.ghost_files.iter().any(|g| g == &pkgfile.name) {
-                self.checked_files += 1;
+            // The reference counts every non-ghost file (files_re is `.*`) and
+            // drops ghosts from the dispatch list (AbstractCheck.py:45), so a
+            // ghost script is never handed to the tools.
+            if pkg.ghost_files.iter().any(|g| g == &pkgfile.name) {
+                continue;
             }
+            self.checked_files += 1;
             if !is_reg(pkgfile.mode) {
                 continue;
             }

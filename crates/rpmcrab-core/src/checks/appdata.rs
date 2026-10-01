@@ -35,7 +35,13 @@ impl AppDataCheck {
     /// well-formedness fallback only.
     pub fn with_tool(tool: Option<PathBuf>) -> Self {
         Self {
-            file_regex: Regex::new(r"/usr/share/appdata/.*\.(appdata|metainfo)\.xml$")
+            // The reference passes this to AbstractFilesCheck, which applies it
+            // with `re.match` (AbstractCheck.py:45), so it is anchored at the
+            // start; is_match searches, hence the explicit `^`. The dot before
+            // `xml` is unescaped in the reference pattern and stays that way
+            // here: it matches any character, so `foo.appdata_xml` is
+            // validated upstream and must be here too.
+            file_regex: Regex::new(r"^/usr/share/appdata/.*\.(appdata|metainfo).xml$")
                 .expect("static regex"),
             checked_files: 0,
             tool,
@@ -173,9 +179,13 @@ impl Check for AppDataCheck {
             if !is_match(&self.file_regex, &pkgfile.name) {
                 continue;
             }
-            if !pkg.ghost_files.iter().any(|g| g == &pkgfile.name) {
-                self.checked_files += 1;
+            // AbstractCheck.py:45 filters ghosts out of the dispatch list, so
+            // check_file never runs for one and a ghost appdata file draws no
+            // finding.
+            if pkg.ghost_files.iter().any(|g| g == &pkgfile.name) {
+                continue;
             }
+            self.checked_files += 1;
             if !self.validate(&pkgfile.path) {
                 add_info(
                     out,

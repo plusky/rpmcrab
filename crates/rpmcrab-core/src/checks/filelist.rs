@@ -30,15 +30,19 @@ impl Pattern {
         }
     }
 
-    /// The reference uses `fnmatch.translate` for patterns containing wildcards.
+    /// The reference translates a pattern only when it contains `*`
+    /// (FilelistCheck.py:63); anything else stays a str compared with `==`.
     fn compile(pattern: &str) -> Self {
-        if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
-            // fnmatch.translate: `*` -> `.*`, `?` -> `.`, `[seq]` kept, rest escaped.
-            let mut regex = String::from("(?s:");
+        if pattern.contains('*') {
+            // fnmatch.translate, anchored at both ends. The reference applies
+            // the result with `re.match`, so an end-anchor alone is not enough:
+            // `is_match` searches, and `/etc/httpd/*` would then match mid-path
+            // in `/opt/x/etc/httpd/conf/httpd.conf` -- inventing an Error -- and
+            // a Good pattern matching mid-path would suppress one.
+            let mut regex = String::from("(?s:^");
             for c in pattern.chars() {
                 match c {
                     '*' => regex.push_str(".*"),
-                    '?' => regex.push('.'),
                     c => regex.push_str(&fancy_regex::escape(&c.to_string())),
                 }
             }
@@ -284,9 +288,29 @@ mod tests {
     }
 
     #[test]
-    fn question_mark_matches_one_char() {
+    fn only_a_star_triggers_translation() {
+        // FilelistCheck.py:63 translates only when '*' is in the pattern, and
+        // the untranslated branch is `g == f` (FilelistCheck.py:88). So `?` is
+        // NOT a one-character wildcard here: `file?.txt` is a literal and does
+        // not match `file1.txt`.
         let p = Pattern::compile("file?.txt");
-        assert!(p.matches("file1.txt"));
-        assert!(!p.matches("file12.txt"));
+        assert!(p.matches("file?.txt"));
+        assert!(!p.matches("file1.txt"));
+    }
+
+    #[test]
+    fn patterns_are_anchored_at_the_start_like_re_match() {
+        // The reference applies the translated pattern with `re.match`, so a
+        // pattern must not match part-way along a path. `/etc/httpd/*` against
+        // `/opt/x/etc/httpd/conf/httpd.conf` is False there; an end-anchored
+        // search would call it a Bad hit and invent an Error.
+        let bad = Pattern::compile("/etc/httpd/*");
+        assert!(bad.matches("/etc/httpd/conf/httpd.conf"));
+        assert!(!bad.matches("/opt/x/etc/httpd/conf/httpd.conf"));
+        // The mirror image: a Good pattern matching mid-path used to suppress a
+        // finding the reference reports.
+        let good = Pattern::compile("/etc/sysconfig/scripts/*");
+        assert!(good.matches("/etc/sysconfig/scripts/rc.d"));
+        assert!(!good.matches("/opt/x/etc/sysconfig/scripts/rc.d"));
     }
 }
