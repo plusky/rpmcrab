@@ -503,6 +503,9 @@ rpmcrab on each case and diffs. Any difference is either:
 
 - a recorded entry — `{ case, check, kind, reason, since }`, with optional
   `upstream` — or
+- a recorded entry — `{ case, check, kind, reason, since }` (plus optional
+  `upstream`, linking the upstream issue/PR when the divergence is tracked
+  there) — or
 - a **failure**.
 
 You cannot ship a behavioural change without writing down why. This is the
@@ -614,17 +617,78 @@ dict): `Pkg.timers` and the lint loop's accumulator share it.
 
 ---
 
-## 8. The 43-check inventory and wave plan
+## 8. The 43-check inventory and port status
 
-43 checks run on openSUSE: 28 in `configdefaults.toml` plus the 15 that
-`opensuse.toml` appends. They are ported in waves ordered by blast radius, each
-landing with a parity case and a divergence entry if any:
+openSUSE runs **43** checks: 28 from the reference's `configdefaults.toml`
+plus the 15 that `opensuse.toml` appends (`BashismsCheck`,
+`TmpFilesCheck`, `SysVInitOnSystemdCheck`, `SharedLibraryPolicyCheck`, and
+the 11 openSUSE-only modules `BrandingPolicyCheck`, `DeviceFilesCheck`,
+`FileDigestCheck`, `FilelistCheck`, `KMPPolicyCheck`, `PolkitCheck`,
+`SystemdInstallCheck`, `SystemdTmpfilesCheck`, `SUIDPermissionsCheck`,
+`WorldWritableCheck`, `AtomicUpdateCheck`). The distro config ships in the
+openSUSE package, not in the reference repo — the appended list was verified
+against the openSUSE:Factory 2.10.0 tarball. The run header prints
+`checks: 43`.
 
-1. **Wave 1:** `TagsCheck`, `FilesCheck` (the two largest, the ones openSUSE
-   cares most about). **Done** (PRs #27, #28, #29).
-2. **Wave 2:** `BinariesCheck`, `SpecCheck`.
-3. **Wave 3:** the rest of the 28.
-4. **Wave 4:** the openSUSE 15.
+| Check | rpmcrab status |
+|---|---|
+| `AlternativesCheck` | not yet |
+| `AppDataCheck` | not yet |
+| `BinariesCheck` | **ported** |
+| `BuildRootAndDateCheck` | not yet |
+| `ConfigFilesCheck` | **ported** |
+| `DBusPolicyCheck` | not yet |
+| `DuplicatesCheck` | **ported** |
+| `DocCheck` | **ported** |
+| `ErlangCheck` | not yet |
+| `FHSCheck` | **ported** |
+| `FilesCheck` | **ported** |
+| `IconSizesCheck` | **ported** |
+| `I18NCheck` | **ported** |
+| `LibraryDependencyCheck` | not yet |
+| `LogrotateCheck` | not yet |
+| `MenuCheck` | not yet |
+| `MenuXDGCheck` | not yet |
+| `MixedOwnershipCheck` | **ported** |
+| `PkgConfigCheck` | **ported** |
+| `PostCheck` | not yet |
+| `PythonCheck` | not yet |
+| `SELinuxIndependentModuleCheck` | not yet |
+| `SignatureCheck` | not yet |
+| `SourceCheck` | not yet |
+| `SpecCheck` | **ported** |
+| `TagsCheck` | **ported** |
+| `ZipCheck` | **ported** |
+| `ZyppSyntaxCheck` | **ported** |
+| `BashismsCheck` | not yet |
+| `TmpFilesCheck` | not yet |
+| `SysVInitOnSystemdCheck` | not yet |
+| `SharedLibraryPolicyCheck` | not yet |
+| `BrandingPolicyCheck` | not yet |
+| `DeviceFilesCheck` | not yet |
+| `FileDigestCheck` | not yet |
+| `FilelistCheck` | not yet |
+| `KMPPolicyCheck` | not yet |
+| `PolkitCheck` | not yet |
+| `SystemdInstallCheck` | not yet |
+| `SystemdTmpfilesCheck` | not yet |
+| `SUIDPermissionsCheck` | not yet |
+| `WorldWritableCheck` | not yet |
+| `AtomicUpdateCheck` | not yet |
+
+Three more reference modules are **ported** but sit outside the 43: the
+reference ships `LSBCheck`, `PAMModulesCheck` and `XinetdDepCheck` as
+modules enabled by neither `configdefaults.toml` nor `opensuse.toml`;
+rpmcrab ports them anyway (registered in `crates/rpmcrab-core/src/checks/`,
+selectable via `Checks`). **Intentionally out:** `FileMetadataCheck` —
+dormant in the reference (present in the tree, in no `Checks` list); §3.2
+says do not port it. (`AbstractCheck` is a base class and `TmpfilesParser`
+a parser, not checks.)
+
+*Snapshot, not contract.* This table was true at the commit that wrote it
+and is hand-maintained; the mechanical inventory guard landing with this
+audit round (tooling workstream) derives the same rows from the tree on
+every run and is the source of truth going forward.
 
 `add_info` has 475 call sites / 417 distinct tag names upstream; the port
 tracks tag-name parity per check. `SpecCheck` also needs `FakePkg`, the

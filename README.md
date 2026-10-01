@@ -31,7 +31,12 @@ check exists. See the milestones for sequencing.
 
 ## Building
 
-Requires a stable Rust toolchain (see `rust-toolchain.toml`).
+Requires a stable Rust toolchain (see `rust-toolchain.toml`), plus the RPM
+development headers (`rpm-devel` on openSUSE, `librpm-dev` on Debian/Ubuntu
+— `pkg-config` must find `rpm.pc`). The default build enables librpm's
+`build` feature for spec parsing, whose bindgen step also needs `popt.h`:
+add `popt-devel` (openSUSE) / `libpopt-dev` (Debian/Ubuntu); on
+Debian/Ubuntu `librpm-dev` already pulls popt in.
 
 ```sh
 cargo build --workspace --locked

@@ -23,7 +23,14 @@ feature on.
 The build needs the RPM development headers, because `librpm-sys` runs bindgen
 (`pkg-config` must find `rpm.pc`): install `rpm-devel` (openSUSE) or
 `librpm-dev` (Debian/Ubuntu) first, and note that `librpm` is **Linux-only** —
-there is no macOS build. The tests additionally need the RPM runtime tools
+there is no macOS build. The enabled librpm `build` feature (for `Spec::parse`;
+see `crates/rpmcrab-core/Cargo.toml`) additionally pulls in `librpmbuild-sys`,
+whose bindgen step needs `popt.h`: install `popt-devel` (openSUSE) or
+`libpopt-dev` (Debian/Ubuntu) too. On Debian/Ubuntu `librpm-dev` already drags
+popt in; on openSUSE it does not, so a build-root build with the `build`
+feature fails with an opaque `'popt.h' file not found` bindgen error. (On
+macOS: `brew install popt` plus its include dir in `BINDGEN_EXTRA_CLANG_ARGS`.)
+The tests additionally need the RPM runtime tools
 (`rpm2archive`/`rpm2cpio`), `cpio` and `file` (libmagic), which the parity
 harness and the payload-extraction tests invoke.
 
@@ -61,8 +68,8 @@ must be. Do not treat it as an authority on what is *correct*.
   (see `docs/DESIGN.md`). "Python did X" is a justification for a frozen byte
   shape; it is never a justification for a finding, a severity, or a bug.
 - Never preserve an upstream bug or false positive for parity. Fix it, in its
-  own commit, and record it in `tests/parity/divergences.toml` with the linked
-  upstream issue. Retiring a rationale is prose; changing the behaviour is
+  own commit, and record it in `tests/parity/divergences.toml`, linking the upstream
+  issue when the divergence is tracked there. Retiring a rationale is prose; changing the behaviour is
   not, and the two must not ride in the same commit.
 - First check whether an odd upstream shape is a **contract in disguise** — a
   byte sequence an external consumer already greps. The `exceeds threshold,
@@ -116,7 +123,8 @@ per-crate `tests/`. The **parity corpus** under `tests/parity/` is normative:
 `captured` cases get their expected output only from running real rpmlint,
 never hand-edited; `synthetic` cases may hand-write expectations. Every
 behavioural difference from rpmlint must have an entry in
-`tests/parity/divergences.toml` with a reason and a linked upstream issue —
+`tests/parity/divergences.toml` with a reason — and the upstream issue
+linked when the divergence is tracked there —
 the CI `parity` job fails otherwise. Dependency changes must update
 `Cargo.lock`, preserve the MSRV, pass `cargo deny check`, and must not run a
 broad `cargo update` as part of an unrelated change.
