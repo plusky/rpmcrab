@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use rpmcrab_core::check::Check;
 use rpmcrab_core::checks::alternatives::AlternativesCheck;
+use rpmcrab_core::checks::filelist::FilelistCheck;
 use rpmcrab_core::checks::menu::MenuCheck;
 use rpmcrab_core::checks::menu_xdg::MenuXDGCheck;
 use rpmcrab_core::checks::python::PythonCheck;
@@ -155,5 +156,27 @@ fn menu_flags_old_menu_entry() {
     assert_findings(
         &results,
         &[("old-menu-entry", "/usr/share/applnk/w6legacy.desktop")],
+    );
+}
+
+/// The fixture ships `/usr/local/man/man1/w6.1` and `/var/lib/games/w6.scores`,
+/// which match the absolute Bad patterns `/usr/local/man/*/*` and
+/// `/var/lib/games/*` under fnmatch. The fhs23 rule carries no `IgnorePkgIf`
+/// or `IgnoreFileIf`, so noarch and regular files are both in scope.
+///
+/// The comparison is on the full package-relative path, not a basename:
+/// `PkgFile.__init__` sets `self.name` and `self.path` to the same value and
+/// `pkg.py:845` keys `pkg.files` by it. The emit-order divergence entries for
+/// fhs23 and -opt assume the rule fires, so this pins that it does.
+#[test]
+fn filelist_reports_absolute_bad_patterns() {
+    let mut check = FilelistCheck::new(&Config::default());
+    let results = run_check(&mut check, "w6-filelist-1.0-1.noarch.rpm");
+    assert_findings(
+        &results,
+        &[
+            ("filelist-forbidden-fhs23", "/usr/local/man/man1/w6.1"),
+            ("filelist-forbidden-fhs23", "/var/lib/games/w6.scores"),
+        ],
     );
 }
