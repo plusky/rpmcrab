@@ -317,12 +317,32 @@ def filelist_messages(pkgdir):
 
 
 def script_tags(pkgdir):
-    """The '%pre'/'%post'/... tags: third elements of Pkg.SCRIPT_TAGS."""
+    """The '%pre'/'%post'/... tags: third elements of Pkg.SCRIPT_TAGS.
+
+    Parsed with :mod:`ast`: the file-trigger tuples span lines and their
+    first two elements contain commas, so a regex misses them (8 of 10).
+    """
     text = _read(os.path.join(pkgdir, "pkg.py"))
-    m = re.search(r"SCRIPT_TAGS\s*=\s*\[(.*?)\]", text, re.S)
-    if not m:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
         return []
-    return re.findall(r"\(\s*[^,]+,\s*[^,]+,\s*'([^']+)'", m.group(1))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == "SCRIPT_TAGS"
+                   for t in node.targets):
+            continue
+        if not isinstance(node.value, ast.List):
+            continue
+        tags = []
+        for elt in node.value.elts:
+            if (isinstance(elt, ast.Tuple) and len(elt.elts) >= 3
+                    and isinstance(elt.elts[2], ast.Constant)
+                    and isinstance(elt.elts[2].value, str)):
+                tags.append(elt.elts[2].value)
+        return tags
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -688,6 +708,51 @@ def resolve_subscript(node, mod, func, depth, resolving=frozenset()):
             elif isinstance(val, S):
                 out.add(val)
     return out
+
+
+def _for_loops(text):
+    """Yield (target, iterable, header_end) for each `for` loop in `text`.
+
+    The iterable may sit on the line after `in` (rustfmt wraps long
+    headers); `header_end` is the offset just past `in`."""
+    for m in re.finditer(r"\bfor\s+(\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*)\s+in\b", text):
+        rest = text[m.end():]
+        it = re.split(r"[;{]", rest.split("\n", 1)[0], maxsplit=1)[0].strip()
+        if not it and "\n" in rest:
+            nxt = rest.split("\n", 1)[1].split("\n", 1)[0]
+            it = re.split(r"[;{]", nxt, maxsplit=1)[0].strip()
+        if it:
+            yield m.group(1), it, m.end()
+
+
+def _loop_body_span(src, header_end):
+    """(start, end) of the loop body whose `for...in` header ends at
+    `header_end`; end is exclusive. Empty span when no body is found."""
+    i, n = header_end, len(src)
+    depth = 0
+    instr, esc, q = False, False, None
+    while i < n:
+        ch = src[i]
+        if instr:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == q:
+                instr = False
+        elif ch in "\"'":
+            instr, q = True, ch
+        elif ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif ch == "{" and depth == 0:
+            inner = _brace_body(src, i)
+            return (i, i + 2 + len(inner))
+        elif ch == ";" and depth == 0:
+            break
+        i += 1
+    return (header_end, header_end)
 
 
 def loop_var_values(mod, func, target_name, resolving=frozenset()):
@@ -1114,6 +1179,18 @@ def resolve_rs_name(expr, src, seen=None, scope=None, call_pos=None,
             return resolve_rs_name(inner[3].strip(), src, seen, scope,
                                    call_pos, scope_off=scope_off)
         return set(), False
+    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(", e)
+    if m:
+        # `name(args)` through a closure variable: substitute the resolved
+        # actuals for the closure's parameters (PostCheck's
+        # `let finding = |f: &str| format!("{f}-{tag}")`). Anything that is
+        # not a closure call keeps the old (unresolved) behavior.
+        argstr, end = _paren_argstr(e, m.end() - 1)
+        if argstr is not None and end == len(e):
+            t, ok = resolve_closure_call(m.group(1), argstr, src, seen,
+                                         scope, call_pos, scope_off)
+            if ok:
+                return t, True
     if e.startswith("if "):
         # if cond { A } else { B }
         parts = re.findall(r"\{([^{}]*)\}", e)
@@ -1137,23 +1214,45 @@ def resolve_rs_name(expr, src, seen=None, scope=None, call_pos=None,
             if "WarnOnFunction" in rhs:
                 # config-driven finding names; empty under the openSUSE config
                 return set(), True
-            return resolve_rs_name(rhs, src, seen, scope, call_pos,
-                                   scope_off=scope_off)
-        # closure parameter: let clo = |..., name: &str, ...| ...
-        call, call_off = find_closure_call_arg(scope, e)
-        if call is None:
-            call, call_off = find_closure_call_arg(src, e)
-            abs_off = call_off
+            t, ok = resolve_rs_name(rhs, src, seen, scope, call_pos,
+                                    scope_off=scope_off)
+            if ok:
+                return t, True
+            # The binding does not resolve (a closure definition, or a
+            # binding from another function): fall through to the
+            # closure-parameter / loop / if-let paths instead of failing.
+        # closure parameter: let [mut ]clo = |..., name: &str, ...| ...
+        # (only when the use sits inside the closure body; a use outside
+        # binds to something else, e.g. a shadowing loop variable).
+        # Every call site is resolved: different calls may pass different
+        # bindings (emit's for-loop call vs its if-let call).
+        rel_pos = call_pos - scope_off if call_pos is not None else None
+        call_args = [(a, scope_off + c)
+                     for a, c in find_closure_call_args(scope, e, rel_pos)]
+        if not call_args and call_pos is not None:
+            call_args = list(find_closure_call_args(src, e, call_pos))
+        if call_args:
+            out, any_ok = set(), False
+            for arg, aoff in call_args:
+                if arg.strip() == e:
+                    continue
+                # `seen - {e}`: the call-site argument may legitimately
+                # reuse the parameter's name for a different (shadowing)
+                # binding.
+                t, ok = resolve_rs_name(arg, src, seen - {e}, scope,
+                                        call_pos=aoff, scope_off=scope_off)
+                if ok:
+                    any_ok = True
+                    out.update(t)
+            if any_ok:
+                return out, True
+            # All call args failed: the loop search below starts from the
+            # first call site (a closure parameter shadowed by its
+            # call-site variable searches from past the closure body).
+            lpos = call_args[0][1]
         else:
-            abs_off = scope_off + call_off if call_off is not None else None
-        if call is not None and call.strip() != e:
-            return resolve_rs_name(call, src, seen, scope,
-                                   call_pos=abs_off or call_pos,
-                                   scope_off=scope_off)
+            lpos = call_pos
         # loop over a helper's results: for [(]name[,...)] in ...
-        # (a closure parameter shadowed by its call-site variable searches
-        # from the closure's call site, which is past the closure body)
-        lpos = abs_off if call is not None else call_pos
         if lpos is not None:
             tup = find_loop_source(src, e, lpos)
             if tup is not None:
@@ -1179,14 +1278,19 @@ def resolve_rs_name(expr, src, seen=None, scope=None, call_pos=None,
 
 
 def resolve_if_let_some(src, name, call_pos, seen):
-    """`if let Some(name) = <expr>` nearest before call_pos: resolve <expr>.
+    """`if let Some(name) = <expr>` (or `if let Some((a, name)) = <expr>`)
+    nearest before call_pos: resolve <expr>.
 
     Returns a template set, or None when no such binding exists."""
     text = src[:call_pos]
-    best = None
+    best, best_idx = None, None
     for m in re.finditer(r"if\s+let\s+Some\(\s*" + re.escape(name)
                          + r"\s*\)\s*=\s*", text):
-        best = m
+        best, best_idx = m, None
+    for m in re.finditer(r"if\s+let\s+Some\(\s*\(([^)]*)\)\s*\)\s*=\s*", text):
+        parts = [p.strip().lstrip("&") for p in m.group(1).split(",")]
+        if name in parts and (best is None or m.start() >= best.start()):
+            best, best_idx = m, parts.index(name)
     if best is None:
         return None
     em = re.match(r"\s*([^{\n;]+)", text[best.end():])
@@ -1195,8 +1299,44 @@ def resolve_if_let_some(src, name, call_pos, seen):
     expr = em.group(1).strip()
     if not expr or expr == name:
         return None
+    if best_idx is not None:
+        # Tuple destructuring: the name is element best_idx. A
+        # self.method(...) scrutinee resolves through the method's
+        # returned Some((...)) tuples.
+        mm = re.match(r"(?:self\s*\.\s*|Self::)([A-Za-z_][A-Za-z0-9_]*)\s*\(", expr)
+        if mm:
+            return _method_some_tuple_elem(src, mm.group(1), best_idx, seen)
+        return None
     t, ok = resolve_rs_name(expr, src, seen, call_pos=call_pos)
     return t if ok else None
+
+
+def _method_some_tuple_elem(src, method, idx, seen):
+    """Element `idx` of the `Some((...))` tuples returned by `fn method`.
+
+    Returns a template set, or None when nothing resolves."""
+    fm = re.search(r"\bfn\s+" + re.escape(method) + r"\b[^{]*\{", src)
+    if not fm:
+        return None
+    body = _brace_body(src, fm.end() - 1)
+    out = set()
+    for m in re.finditer(r"\bSome\s*\(", body):
+        argstr, end = _paren_argstr(body, m.end() - 1)
+        if argstr is None:
+            continue
+        inner = argstr.strip()
+        if inner.startswith("(") and inner.endswith(")"):
+            inner = inner[1:-1]
+            elems = split_top_level(inner)
+        elif idx == 0:
+            elems = [inner]
+        else:
+            continue
+        if idx < len(elems):
+            t, ok = resolve_rs_name(elems[idx].strip(), body, seen)
+            if ok:
+                out.update(t)
+    return out if out else None
 
 
 def resolve_struct_field(src, base, field, call_pos, seen):
@@ -1258,10 +1398,16 @@ def find_let_rhs(src, name):
     return found
 
 
-def find_closure_call_arg(src, param):
-    """`let clo = |..., param: &str, ...| ...` then `clo(a0, a1, ...)`:
-    return (actual argument, call offset) passed for `param`."""
-    for m in re.finditer(r"\blet\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\|([^|]*)\|", src):
+def find_closure_call_args(src, param, use_pos=None):
+    """`let [mut ]clo = |..., param: &str, ...| ...` then `clo(a0, a1, ...)`:
+    return [(actual argument, call offset)] passed for `param`, one per
+    call site.
+
+    When `use_pos` (an offset into `src`) is given, only a closure whose
+    body contains the use qualifies: a use outside the body refers to a
+    different binding (e.g. a loop variable the parameter shadows)."""
+    out = []
+    for m in re.finditer(r"\blet\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\|([^|]*)\|", src):
         clo, params = m.group(1), [p.strip() for p in m.group(2).split(",")]
         pnames = []
         for p in params:
@@ -1269,14 +1415,145 @@ def find_closure_call_arg(src, param):
             pnames.append(pm.group(1) if pm else None)
         if param not in pnames:
             continue
+        if use_pos is not None:
+            bstart, bend = _closure_body_span(src, m.end())
+            if not (bstart <= use_pos < bend):
+                continue
         idx = pnames.index(param)
         for callname, argstr, _, coff in find_calls(src, [clo]):
             if callname != clo:
                 continue
             args = split_top_level(argstr)
             if idx < len(args):
-                return args[idx], coff
-    return None, None
+                out.append((args[idx], coff))
+    return out
+
+
+def _closure_body_span(src, pos):
+    """(start, end) of the closure body beginning at `pos` (just past the
+    closing `|` of the parameter list); end is exclusive."""
+    i, n = pos, len(src)
+    while i < n and src[i] in " \t\n\r":
+        i += 1
+    if i < n and src[i] == "{":
+        inner = _brace_body(src, i)
+        return (i, i + 2 + len(inner))
+    depth, j = i, i
+    instr, esc, q = False, False, None
+    while j < n:
+        ch = src[j]
+        if instr:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == q:
+                instr = False
+        elif ch in "\"'":
+            instr, q = True, ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == ";" and depth == 0:
+            return (i, j)
+        j += 1
+    return (i, n)
+
+
+def _paren_argstr(e, open_idx):
+    """Inner text of the paren at `open_idx` and the index just past its
+    matching closer; (None, -1) when unbalanced. String-aware."""
+    depth, i, n = 0, open_idx, len(e)
+    instr, esc, q = False, False, None
+    while i < n:
+        ch = e[i]
+        if instr:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == q:
+                instr = False
+        elif ch in "\"'":
+            instr, q = True, ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return e[open_idx + 1:i], i + 1
+        i += 1
+    return None, -1
+
+
+def resolve_closure_call(name, argstr, src, seen, scope, call_pos, scope_off):
+    """`name(args)` where `name` is bound to a closure: resolve the closure
+    body with each parameter substituted by its resolved actual argument.
+
+    Handles the PostCheck shape `let finding = |f: &str|
+    format!("{f}-{tag}")` called as `finding("invalid-shell-in")`:
+    placeholders naming a closure parameter expand to the actual
+    argument's templates; anything else is `*` as usual.
+    Returns (templates, ok)."""
+    rhs = find_let_rhs(scope, name) or find_let_rhs(src, name)
+    if rhs is None:
+        return set(), False
+    cm = re.match(r"^(?:move\s+)?\|([^|]*)\|\s*(.+)$", rhs.strip(), re.S)
+    if not cm:
+        return set(), False
+    pnames = []
+    for p in cm.group(1).split(","):
+        pm = re.match(r"(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?::.*)?$", p.strip())
+        pnames.append(pm.group(1) if pm else None)
+    arg_tpls = []
+    for a in split_top_level(argstr):
+        t, ok = resolve_rs_name(a.strip(), src, seen, scope, call_pos,
+                                scope_off=scope_off)
+        if not ok:
+            return set(), False
+        arg_tpls.append(t)
+    return _substitute_closure_body(cm.group(2).strip(), pnames, arg_tpls)
+
+
+def _substitute_closure_body(body, pnames, arg_tpls):
+    """Resolve a closure body with parameters bound to resolved actuals.
+
+    Only `format!` bodies are handled: a `{placeholder}` naming a closure
+    parameter expands to the actual argument's templates; any other
+    placeholder is `*` (the usual treatment for dynamic parts)."""
+    m = re.match(r'format!\s*\(\s*"((?:[^"\\\\]|\\\\.)*)"', body, re.S)
+    if not m:
+        return set(), False
+    tmpl = rust_unescape(m.group(1))
+    results = {""}
+    i, n = 0, len(tmpl)
+    while i < n:
+        c = tmpl[i]
+        if c == "{" and i + 1 < n and tmpl[i + 1] == "{":
+            results = {r + "{" for r in results}
+            i += 2
+        elif c == "}" and i + 1 < n and tmpl[i + 1] == "}":
+            results = {r + "}" for r in results}
+            i += 2
+        elif c == "{":
+            j = tmpl.find("}", i)
+            if j == -1:
+                results = {r + c for r in results}
+                i += 1
+                continue
+            ident = tmpl[i + 1:j].split(":")[0].strip()
+            if ident in pnames:
+                idx = pnames.index(ident)
+                repl = arg_tpls[idx] if idx < len(arg_tpls) and arg_tpls[idx] else {"*"}
+            else:
+                repl = {"*"}
+            results = {r + s for r in results for s in repl}
+            i = j + 1
+        else:
+            results = {r + c for r in results}
+            i += 1
+    return results, True
 
 
 def _brace_body(src, open_idx):
@@ -1316,8 +1593,7 @@ def find_loop_source(src, name, call_pos):
     """
     text = src[:call_pos]
     best = None
-    for m in re.finditer(r"\bfor\s+(\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*)\s+in\s+([^;{\n]+)", text):
-        target, iterexpr = m.group(1), m.group(2).strip()
+    for target, iterexpr, hend in _for_loops(text):
         if target.startswith("("):
             parts = [p.strip().lstrip("&") for p in target[1:-1].split(",")]
             if name not in parts:
@@ -1327,10 +1603,15 @@ def find_loop_source(src, name, call_pos):
             idx = None
         else:
             continue
-        best = (idx, iterexpr)
+        best = (idx, iterexpr, hend)
     if best is None:
         return None
-    idx, iterexpr = best
+    idx, iterexpr, hend = best
+    # The use must sit inside the loop body: a use past the closing brace
+    # binds to something else (e.g. a later `if let` shadowing the name).
+    bstart, bend = _loop_body_span(src, hend)
+    if not (bstart <= call_pos < bend):
+        return None
 
     method = None
     m = re.match(r"(?:Self|self|[A-Za-z_][A-Za-z0-9_]*)::([A-Za-z_][A-Za-z0-9_]*)", iterexpr)
@@ -1376,13 +1657,11 @@ def find_loop_source(src, name, call_pos):
                                           + r"\.push\s*\(", text):
                         # enclosing for loop of this push
                         ftext = text[:pm.start()]
-                        fm2 = None
-                        for fmm in re.finditer(
-                                r"\bfor\s+(\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*)\s+in\s+([^;{\n]+)",
-                                ftext):
-                            fm2 = fmm
-                        if fm2:
-                            src_iter = fm2.group(2).strip().lstrip("&").strip()
+                        last_iter = None
+                        for _, fiter, _ in _for_loops(ftext):
+                            last_iter = fiter
+                        if last_iter:
+                            src_iter = last_iter.strip().lstrip("&").strip()
                             src_rhs = find_let_rhs(text, src_iter)
                             # follow one level of indirection (forbidden_tbl)
                             if src_rhs and "WarnOnFunction" not in src_rhs:
@@ -1407,11 +1686,6 @@ def find_loop_source(src, name, call_pos):
         return None
     body_off = fm.end()  # _brace_body returns src[open_idx+1:]
     body = _brace_body(src, fm.end() - 1)
-    # If the method just forwards to another Self::method, follow it
-    # (pkg_config's check_bytes -> check_content).
-    fwd = re.search(r"Self::([A-Za-z_][A-Za-z0-9_]*)\s*\(", body)
-    if fwd and fwd.group(1) != method:
-        return find_loop_source_via_method(src, fwd.group(1), idx)
     templates = set()
     for _, argstr, _, coff in find_calls(body, ["push"]):
         args = split_top_level(argstr)
@@ -1434,6 +1708,14 @@ def find_loop_source(src, name, call_pos):
                 t, ok = resolve_rs_name(elems[idx], src, call_pos=cpos)
                 if ok:
                     templates.update(t)
+    if not templates:
+        # The method just forwards to another Self::method (pkg_config's
+        # check_bytes -> check_content): follow it. Only when there are
+        # no pushes of its own -- a method that merely *calls* helpers
+        # (Self::percent_regex()) still owns its findings.
+        fwd = re.search(r"Self::([A-Za-z_][A-Za-z0-9_]*)\s*\(", body)
+        if fwd and fwd.group(1) != method:
+            return find_loop_source_via_method(src, fwd.group(1), idx)
     return templates if templates else None
 
 
@@ -1585,16 +1867,14 @@ def is_push_drain(src, expr, call_pos, push_receivers):
         return False
     text = src[:call_pos]
     iterexpr = None
-    for m in re.finditer(r"\bfor\s+(\([^)]*\)|[A-Za-z_][\w]*)\s+in\s+([^;{\n]+)",
-                         text):
-        target = m.group(1)
+    for target, it, _ in _for_loops(text):
         if target.startswith("("):
             parts = [p.strip().lstrip("&") for p in target[1:-1].split(",")]
             if e not in parts:
                 continue
         elif target != e:
             continue
-        iterexpr = m.group(2).strip()
+        iterexpr = it
     if iterexpr is None:
         return False
     return iterexpr.lstrip("&").strip() in push_receivers
