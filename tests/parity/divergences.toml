@@ -422,6 +422,61 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "SysVInitOnSystemdCheck"
+kind = "missing"
+reason = "SysVInitOnSystemdCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SystemdInstallCheck"
+kind = "missing"
+reason = "SystemdInstallCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SystemdTmpfilesCheck"
+kind = "missing"
+reason = "SystemdTmpfilesCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "TmpFilesCheck"
+kind = "missing"
+reason = "TmpFilesCheck is not ported yet; its findings are absent from the port."
+since = "0.1.0"
+[[divergence]]
+case = "global"
+check = "info-files-without-install-info-postin"
+kind = "missing"
+reason = "FilesCheck flags /usr/share/info files when the package has no %post scriptlet at all; the install-info scriptlet analysis is not ported yet."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "info-files-without-install-info-postun"
+kind = "missing"
+reason = "FilesCheck flags /usr/share/info files when neither %postun nor %preun exists; the install-info scriptlet analysis is not ported yet."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "sourced-script-with-shebang"
+kind = "missing"
+reason = "FilesCheck flags sourced scripts (profile.d et al.) that carry a shebang; the sourced-script analysis is not ported yet."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "symlink-contains-up-and-down-segments"
+kind = "missing"
+reason = "FilesCheck flags symlinks whose target contains '..' segments; the symlink segment analysis is not ported yet."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "SignatureCheck"
 kind = "detail"
 reason = "SignatureCheck captures stdout only while the reference merges stderr into stdout, and runs `rpm -Kv` under `LC_ALL=C` instead of the reference's `en_US.UTF-8`/`LANGUAGE=en_US` environment."
