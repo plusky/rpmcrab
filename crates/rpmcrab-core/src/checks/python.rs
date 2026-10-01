@@ -25,11 +25,26 @@ use crate::pkg::Pkg;
 
 pub struct PythonCheck {
     pyc_version: Option<String>,
+    checked_files: usize,
+}
+
+/// A parsed requirement: distribution name, environment marker, extras.
+struct Requirement {
+    name: String,
+    marker: Option<String>,
+    extras: Vec<String>,
 }
 
 impl PythonCheck {
+    /// Fallback `python_version` marker value (the reference uses the
+    /// interpreter running rpmlint; the port has no interpreter to ask).
+    const DEFAULT_PYTHON: &'static str = "3.12";
+
     pub fn new(_config: &Config) -> Self {
-        Self { pyc_version: None }
+        Self {
+            pyc_version: None,
+            checked_files: 0,
+        }
     }
 
     fn sitelib_pattern() -> &'static str {
@@ -65,18 +80,26 @@ impl PythonCheck {
         ]
     }
 
-    /// Name variants: the name itself plus `-`/`_` swaps.
-    fn module_names(name: &str) -> Vec<String> {
-        vec![
+    /// Name variants: the name itself plus `-`/`_` swaps, plus
+    /// `name-extra` variants for each extra (reference `_module_names`).
+    fn module_names(name: &str, extras: &[String]) -> Vec<String> {
+        let mut out = vec![
             name.to_string(),
             name.replace('-', "_"),
             name.replace('_', "-"),
-        ]
+        ];
+        for extra in extras {
+            out.extend(Self::module_names(&format!("{name}-{extra}"), &[]));
+        }
+        out
     }
 
-    /// Parse requirement names from `requires.txt` or `METADATA`
-    /// (`Requires-Dist` lines). Markers after `;` are kept for evaluation.
-    fn parse_requirements(content: &str, is_metadata: bool) -> Vec<(String, Option<String>)> {
+    /// One parsed requirement: name, environment marker, extras.
+    fn parse_requirements(
+        content: &str,
+        is_metadata: bool,
+        python_version: &str,
+    ) -> Vec<Requirement> {
         let mut out = Vec::new();
         let mut section: Option<String> = None;
         for line in content.lines() {
@@ -104,7 +127,7 @@ impl PythonCheck {
             // Skip section-gated requirements with unmet markers.
             if let Some(sec) = &section
                 && sec.starts_with(':')
-                && !Self::marker_holds(&sec[1..])
+                && !Self::marker_holds(&sec[1..], python_version)
             {
                 continue;
             }
@@ -113,11 +136,23 @@ impl PythonCheck {
         out
     }
 
-    /// Split `name; marker` into `(name-with-extras-stripped, marker)`.
-    fn split_marker(req: &str) -> (String, Option<String>) {
+    /// Split `name[extras]; marker` into its parts, stripping version
+    /// specifiers: `foo[bar]>=1.0` -> name `foo`, extras `["bar"]`.
+    fn split_marker(req: &str) -> Requirement {
         let mut parts = req.splitn(2, ';');
         let name = parts.next().unwrap_or("").trim();
-        // Strip version specifiers and extras: `foo[bar]>=1.0` -> `foo`.
+        let (name, extras) = match name.split_once('[') {
+            Some((n, rest)) => {
+                let extras = rest
+                    .trim_end_matches(']')
+                    .split(',')
+                    .map(|e| e.trim().to_string())
+                    .filter(|e| !e.is_empty())
+                    .collect();
+                (n, extras)
+            }
+            None => (name, Vec::new()),
+        };
         let name = name
             .split(|c| "<>=!~ [(,".contains(c))
             .next()
@@ -125,13 +160,17 @@ impl PythonCheck {
             .trim()
             .to_string();
         let marker = parts.next().map(|m| m.trim().to_string());
-        (name, marker)
+        Requirement {
+            name,
+            marker,
+            extras,
+        }
     }
 
     /// Evaluate the common environment markers. Unknown markers are treated
     /// as holding (the reference evaluates the full PEP 508 environment; we
     /// cover `python_version`, `sys_platform`, and `extra`).
-    fn marker_holds(marker: &str) -> bool {
+    fn marker_holds(marker: &str, python_version: &str) -> bool {
         let marker = marker.trim();
         // `extra == "..."` means an optional dependency: skip it.
         if marker.contains("extra") {
@@ -143,10 +182,7 @@ impl PythonCheck {
         if let Some(caps) = pv_re.captures(marker).ok().flatten() {
             let op = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let want = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-            // Current runtime Python version is unknown; use 3.x comparison
-            // on the major.minor prefix. We approximate with "3.12".
-            const HAVE: &str = "3.12";
-            let cmp = compare_versions(HAVE, want);
+            let cmp = compare_versions(python_version, want);
             return match op {
                 "==" => cmp == 0,
                 "!=" => cmp != 0,
@@ -165,15 +201,34 @@ impl PythonCheck {
         true
     }
 
+    /// The `python_version` marker environment, mirroring the reference:
+    /// the `python(abi)` require's version wins over the default, and the
+    /// version embedded in the dist-info/egg-info path wins over that.
+    fn marker_python_version(requires: &[crate::pkg::dep::DepInfo], filename: &str) -> String {
+        let mut version = Self::DEFAULT_PYTHON.to_string();
+        if let Some(abi) = requires.iter().find(|r| r.name == "python(abi)")
+            && let Some(v) = abi.version.as_deref()
+        {
+            version = v.to_string();
+        }
+        let sitelib_re = Regex::new(Self::sitelib_pattern()).expect("static regex");
+        if let Some(caps) = sitelib_re.captures(filename).ok().flatten()
+            && let Some(v) = caps.get(1)
+        {
+            version = v.as_str().to_string();
+        }
+        version
+    }
+
     /// Whether an RPM require satisfies a Python requirement name.
-    fn require_satisfied(req_names: &[String], module: &str) -> bool {
-        let mut names = Self::module_names(module);
+    fn require_satisfied(req_names: &[String], req: &Requirement) -> bool {
+        let mut names = Self::module_names(&req.name, &req.extras);
         // pythonX-foo variants
-        for n in Self::module_names(module) {
+        for n in Self::module_names(&req.name, &req.extras) {
             names.push(format!("python\\d*-{}", fancy_regex::escape(&n)));
         }
         // python3.12dist(foo) variants
-        for n in Self::module_names(module) {
+        for n in Self::module_names(&req.name, &req.extras) {
             names.push(format!(
                 r"python\d+(\.\d+)?dist\({}\)",
                 fancy_regex::escape(&n)
@@ -218,22 +273,30 @@ impl Check for PythonCheck {
         for pkgfile in &pkg.files {
             let filename = pkgfile.name.as_str();
 
+            // The reference counts every non-ghost file (files_re is `.*`).
+            if !pkg.ghost_files.iter().any(|g| g == &pkgfile.name) {
+                self.checked_files += 1;
+            }
+
             if filename.ends_with("egg-info/requires.txt") {
                 let content = pkg.read_file(filename);
-                let reqs = Self::parse_requirements(&content, false);
-                self.check_requirements(pkg, out, &reqs);
+                let python_version = Self::marker_python_version(&pkg.requires, filename);
+                let reqs = Self::parse_requirements(&content, false, &python_version);
+                self.check_requirements(pkg, out, &reqs, &python_version);
                 continue;
             }
             if filename.ends_with("dist-info/METADATA") {
                 let content = pkg.read_file(filename);
-                let reqs = Self::parse_requirements(&content, true);
-                self.check_requirements(pkg, out, &reqs);
+                let python_version = Self::marker_python_version(&pkg.requires, filename);
+                let reqs = Self::parse_requirements(&content, true, &python_version);
+                self.check_requirements(pkg, out, &reqs, &python_version);
                 continue;
             }
             if is_match(&egg_info_re, filename) {
-                // Distutils-style egg-info is a directory on disk.
+                // The legacy distutils layout is a plain file named
+                // `*.egg-info`; the reference flags it with `is_file()`.
                 let full = Path::new(pkg.dir_name()).join(filename.trim_start_matches('/'));
-                if full.is_dir() {
+                if full.is_file() {
                     add_info(
                         out,
                         Level::Error,
@@ -301,34 +364,60 @@ impl Check for PythonCheck {
             }
         }
     }
+
+    fn reset(&mut self) {
+        self.checked_files = 0;
+    }
+
+    fn checked_files(&self) -> Option<usize> {
+        Some(self.checked_files)
+    }
 }
 
 impl PythonCheck {
     /// Check parsed requirements against the RPM requires.
-    fn check_requirements(&self, pkg: &Pkg, out: &mut Filter, reqs: &[(String, Option<String>)]) {
-        for (name, marker) in reqs {
-            if name.is_empty() {
+    fn check_requirements(
+        &self,
+        pkg: &Pkg,
+        out: &mut Filter,
+        reqs: &[Requirement],
+        python_version: &str,
+    ) {
+        // The reference returns early when the distribution declares no
+        // requirements; without the guard every pythonX-* require would be
+        // reported as leftover.
+        if reqs.is_empty() {
+            return;
+        }
+        for req in reqs {
+            if req.name.is_empty() {
                 continue;
             }
-            if let Some(m) = marker
-                && !Self::marker_holds(m)
+            if let Some(m) = &req.marker
+                && !Self::marker_holds(m, python_version)
             {
                 continue;
             }
-            if !Self::require_satisfied(&pkg.req_names, name) {
-                add_info(out, Level::Warning, pkg, "python-missing-require", &[name]);
+            if !Self::require_satisfied(&pkg.req_names, req) {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "python-missing-require",
+                    &[&req.name],
+                );
             }
         }
 
         // Leftover requirements: python-foo in RPM requires with no match.
         let mut wanted: Vec<String> = Vec::new();
-        for (name, marker) in reqs {
-            if let Some(m) = marker
-                && !Self::marker_holds(m)
+        for req in reqs {
+            if let Some(m) = &req.marker
+                && !Self::marker_holds(m, python_version)
             {
                 continue;
             }
-            wanted.extend(Self::module_names(name));
+            wanted.extend(Self::module_names(&req.name, &req.extras));
         }
         let wanted: Vec<String> = wanted.iter().map(|n| n.to_lowercase()).collect();
         let py_re = Regex::new(r"^python\d*-(?P<name>.+)$").expect("static regex");
@@ -343,7 +432,7 @@ impl PythonCheck {
             if module == "base" || module == "devel" {
                 continue;
             }
-            let variants: Vec<String> = Self::module_names(&module)
+            let variants: Vec<String> = Self::module_names(&module, &[])
                 .iter()
                 .map(|n| n.to_lowercase())
                 .collect();
@@ -361,56 +450,114 @@ mod tests {
     #[test]
     fn requires_txt_parses_names() {
         let content = "backcall\ndecorator\njedi>=0.16\n";
-        let reqs = PythonCheck::parse_requirements(content, false);
+        let reqs = PythonCheck::parse_requirements(content, false, "3.12");
         assert_eq!(reqs.len(), 3);
-        assert_eq!(reqs[0].0, "backcall");
-        assert_eq!(reqs[2].0, "jedi");
+        assert_eq!(reqs[0].name, "backcall");
+        assert_eq!(reqs[2].name, "jedi");
     }
 
     #[test]
     fn requires_txt_section_markers_are_respected() {
         // python_version < "3.10" does not hold for 3.12.
         let content = "backcall\n[:python_version < \"3.10\"]\ntyping_extensions\n";
-        let reqs = PythonCheck::parse_requirements(content, false);
+        let reqs = PythonCheck::parse_requirements(content, false, "3.12");
         assert_eq!(reqs.len(), 1);
-        assert_eq!(reqs[0].0, "backcall");
+        assert_eq!(reqs[0].name, "backcall");
     }
 
     #[test]
     fn extra_markers_are_skipped() {
         let content = "foo; extra == \"test\"\nbar\n";
-        let reqs = PythonCheck::parse_requirements(content, false);
+        let reqs = PythonCheck::parse_requirements(content, false, "3.12");
         // `foo` has an extra marker, which marker_holds rejects.
-        assert!(reqs.iter().any(|(n, _)| n == "foo"));
-        assert!(!PythonCheck::marker_holds("extra == \"test\""));
+        assert!(reqs.iter().any(|r| r.name == "foo"));
+        assert!(!PythonCheck::marker_holds("extra == \"test\"", "3.12"));
     }
 
     #[test]
     fn metadata_requires_dist_parses() {
         let content = "Metadata-Version: 2.1\nRequires-Dist: requests>=2.0\nRequires-Dist: foo; python_version < \"3.10\"\n";
-        let reqs = PythonCheck::parse_requirements(content, true);
+        let reqs = PythonCheck::parse_requirements(content, true, "3.12");
         assert_eq!(reqs.len(), 2);
-        assert_eq!(reqs[0].0, "requests");
+        assert_eq!(reqs[0].name, "requests");
+    }
+
+    #[test]
+    fn extras_produce_name_variants() {
+        let content = "requests[security]\n";
+        let reqs = PythonCheck::parse_requirements(content, false, "3.12");
+        assert_eq!(reqs[0].extras, vec!["security".to_string()]);
+        let names = PythonCheck::module_names(&reqs[0].name, &reqs[0].extras);
+        assert!(names.contains(&"requests-security".to_string()));
+        assert!(names.contains(&"requests_security".to_string()));
     }
 
     #[test]
     fn module_names_include_variants() {
-        let names = PythonCheck::module_names("foo-bar");
+        let names = PythonCheck::module_names("foo-bar", &[]);
         assert!(names.contains(&"foo-bar".to_string()));
         assert!(names.contains(&"foo_bar".to_string()));
+    }
+
+    fn requirement(name: &str) -> Requirement {
+        Requirement {
+            name: name.to_string(),
+            marker: None,
+            extras: Vec::new(),
+        }
     }
 
     #[test]
     fn require_satisfied_matches_python3_foo() {
         let req_names = vec!["python3-requests".to_string()];
-        assert!(PythonCheck::require_satisfied(&req_names, "requests"));
-        assert!(!PythonCheck::require_satisfied(&req_names, "urllib3"));
+        assert!(PythonCheck::require_satisfied(&req_names, &requirement("requests")));
+        assert!(!PythonCheck::require_satisfied(&req_names, &requirement("urllib3")));
     }
 
     #[test]
     fn require_satisfied_matches_dist() {
         let req_names = vec!["python312dist(requests)".to_string()];
-        assert!(PythonCheck::require_satisfied(&req_names, "requests"));
+        assert!(PythonCheck::require_satisfied(&req_names, &requirement("requests")));
+    }
+
+    #[test]
+    fn marker_python_version_prefers_dist_info_path() {
+        use crate::pkg::dep::DepInfo;
+        let abi = DepInfo {
+            name: "python(abi)".to_string(),
+            flags: 0,
+            epoch: None,
+            version: Some("3.11".to_string()),
+            release: None,
+        };
+        // dist-info path beats both the default and a python(abi) require.
+        let version = PythonCheck::marker_python_version(
+            &[abi],
+            "/usr/lib/python3.13/site-packages/foo-1.0.dist-info/METADATA",
+        );
+        assert_eq!(version, "3.13");
+    }
+
+    #[test]
+    fn marker_python_version_falls_back_to_abi_require() {
+        use crate::pkg::dep::DepInfo;
+        let abi = DepInfo {
+            name: "python(abi)".to_string(),
+            flags: 0,
+            epoch: None,
+            version: Some("3.11".to_string()),
+            release: None,
+        };
+        let version =
+            PythonCheck::marker_python_version(&[abi], "/somewhere/foo-1.0.dist-info/METADATA");
+        assert_eq!(version, "3.11");
+    }
+
+    #[test]
+    fn marker_python_version_defaults() {
+        let version =
+            PythonCheck::marker_python_version(&[], "/somewhere/foo-1.0.dist-info/METADATA");
+        assert_eq!(version, PythonCheck::DEFAULT_PYTHON);
     }
 
     #[test]

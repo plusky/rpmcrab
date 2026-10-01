@@ -20,6 +20,10 @@ impl SysVInitOnSystemdCheck {
     }
 
     /// Classify file names into `(initscripts, bootscripts, systemdscripts)`.
+    ///
+    /// All three lists hold basenames, mirroring the reference which stores
+    /// `Path(filename).name` in its sets; the lists are sorted and deduped
+    /// for deterministic output.
     fn find_services_and_scripts<'a>(
         files: impl Iterator<Item = &'a str>,
         ghost_files: &[String],
@@ -49,21 +53,26 @@ impl SysVInitOnSystemdCheck {
                     );
                 }
             }
-            if name.starts_with("/etc/init.d/") || name.starts_with("/etc/rc.d/init.d/") {
+            // The reference matches `/etc/rc.d/init.d` without a trailing
+            // slash; keep the prefix identical.
+            if name.starts_with("/etc/init.d/") || name.starts_with("/etc/rc.d/init.d") {
                 let basename = Path::new(name)
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 if basename.starts_with("boot.") {
-                    bootscripts.push(name.to_string());
+                    bootscripts.push(basename);
                 } else if !basename.starts_with("rc") {
-                    initscripts.push(name.to_string());
+                    initscripts.push(basename);
                 }
             }
         }
         initscripts.sort();
+        initscripts.dedup();
         bootscripts.sort();
+        bootscripts.dedup();
         systemdscripts.sort();
+        systemdscripts.dedup();
         (initscripts, bootscripts, systemdscripts)
     }
 }
@@ -105,11 +114,7 @@ impl Check for SysVInitOnSystemdCheck {
                 "deprecated-init-script",
                 &[filename],
             );
-            let stem = Path::new(filename)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if systemdscripts.iter().any(|s| s == &stem) {
+            if systemdscripts.iter().any(|s| s == filename) {
                 add_info(
                     out,
                     Level::Error,
@@ -131,17 +136,29 @@ mod tests {
     }
 
     #[test]
-    fn initscript_is_found() {
+    fn initscript_reports_basename() {
         let (init, boot, _) = classify(&["/etc/init.d/foo"]);
-        assert_eq!(init, vec!["/etc/init.d/foo".to_string()]);
+        assert_eq!(init, vec!["foo".to_string()]);
         assert!(boot.is_empty());
     }
 
     #[test]
-    fn boot_script_is_found() {
+    fn boot_script_reports_basename() {
         let (init, boot, _) = classify(&["/etc/init.d/boot.foo"]);
         assert!(init.is_empty());
-        assert_eq!(boot, vec!["/etc/init.d/boot.foo".to_string()]);
+        assert_eq!(boot, vec!["boot.foo".to_string()]);
+    }
+
+    #[test]
+    fn rc_d_init_d_matches_without_trailing_slash() {
+        let (init, _, _) = classify(&["/etc/rc.d/init.d/bar"]);
+        assert_eq!(init, vec!["bar".to_string()]);
+    }
+
+    #[test]
+    fn duplicates_are_deduped() {
+        let (init, _, _) = classify(&["/etc/init.d/foo", "/etc/init.d/foo"]);
+        assert_eq!(init, vec!["foo".to_string()]);
     }
 
     #[test]
@@ -160,7 +177,7 @@ mod tests {
     #[test]
     fn service_stem_matches_initscript_basename() {
         let (init, _, sysd) = classify(&["/etc/init.d/foo", "/usr/lib/systemd/system/foo.service"]);
-        assert_eq!(init, vec!["/etc/init.d/foo".to_string()]);
+        assert_eq!(init, vec!["foo".to_string()]);
         assert_eq!(sysd, vec!["foo".to_string()]);
     }
 

@@ -128,10 +128,6 @@ impl TmpfilesEntry {
             return;
         }
         self.entry_type = fields[0].clone();
-        // `F` is a deprecated form of `f+`.
-        if self.entry_type.starts_with('F') {
-            self.entry_type = format!("f+{}", &self.entry_type[1..]);
-        }
         self.target = fields[1].clone();
         let mut idx = 2;
         let mut next = || {
@@ -152,6 +148,11 @@ impl TmpfilesEntry {
             && !self.supports_perms()
         {
             self.warn("Permissions specified for entry type that doesn't support perms");
+        }
+        // `F` is a deprecated form of `f+`; normalize after the permissions
+        // check, which the reference runs against the raw type.
+        if self.entry_type.starts_with('F') {
+            self.entry_type = format!("f+{}", &self.entry_type[1..]);
         }
         self.valid = true;
     }
@@ -230,10 +231,11 @@ impl SystemdTmpfilesCheck {
                     .collect()
             })
             .unwrap_or_else(|| {
+                // The reference raises KeyError when the section is absent;
+                // fall back to its two configured dirs so the check still runs.
                 vec![
                     "/usr/lib/tmpfiles.d".to_string(),
                     "/etc/tmpfiles.d".to_string(),
-                    "/run/tmpfiles.d".to_string(),
                 ]
             });
         let ignore_packages = cfg
@@ -477,6 +479,22 @@ mod tests {
     fn f_normalizes_to_f_plus() {
         let entry = TmpfilesEntry::parse("test.conf", "F /run/foo - - - -");
         assert_eq!(entry.entry_type, "f+");
+    }
+
+    #[test]
+    fn f_with_perms_warns_before_normalization() {
+        // The reference checks permissions against the raw `F` (which is not
+        // in TYPES_WITH_PERMS) and normalizes afterwards.
+        let entry = TmpfilesEntry::parse("test.conf", "F /run/foo 0644 root root -");
+        assert_eq!(entry.entry_type, "f+");
+        assert!(
+            entry
+                .warnings
+                .iter()
+                .any(|w| w.contains("Permissions specified")),
+            "warnings: {:?}",
+            entry.warnings
+        );
     }
 
     #[test]

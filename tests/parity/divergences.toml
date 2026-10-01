@@ -259,7 +259,7 @@ since = "0.1.0"
 case = "global"
 check = "systemd-tmpfile-parse-error"
 kind = "detail"
-reason = "The reference (TmpfilesParser.warn) formats parse warnings as 'source:line: msg'; the port formats 'source: msg' and passes the line as a separate finding detail. Same information, different placement."
+reason = "The reference (TmpfilesParser.warn) formats parse warnings as 'source:line: msg'; the port formats 'source: msg' and passes the line as a separate finding detail. Only the warning string differs ('source: msg' vs 'source:line: msg'); the detail placement is argument-for-argument identical."
 since = "0.1.0"
 
 [[divergence]]
@@ -286,9 +286,23 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "systemd-tmpfiles"
+check = "systemd-tmpfile-device"
 kind = "behaviour"
-reason = "The reference requires the SystemdTmpfiles config section (KeyError when absent); the port falls back to hardcoded DropinDirs (/usr/lib/tmpfiles.d, /etc/tmpfiles.d, /run/tmpfiles.d) and an empty IgnorePackages so the check runs with the bundled defaults."
+reason = "Deliberate fix of a reference bug (SystemdTmpfilesCheck.py:186): `tf_entry.get_target_path.startswith('/dev')` is missing its call parentheses, so the bound method is always truthy and the 'device not in /dev' sensitivity branch never fires. The port calls the equivalent and treats a device entry outside /dev as sensitive."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "tmpfile-not-in-filelist"
+kind = "behaviour"
+reason = "The reference emits one tmpfile-not-in-filelist finding per config line, in file order, including duplicates; the port sorts and dedups the missing paths so the output is deterministic."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "menu-icon-path-order"
+kind = "behaviour"
+reason = "The reference walks IconPath/MenuLaunchers in config-file order (Python dict order); the port sorts both tables explicitly so emission order is deterministic regardless of config serialization."
 since = "0.1.0"
 
 [[divergence]]
