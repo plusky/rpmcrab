@@ -75,7 +75,13 @@ impl AlternativesCheck {
                     .get(2)
                     .map(|m| m.as_str().to_string())
                     .unwrap_or_default();
-                install.push((link, name));
+                // The reference keys install_binaries by link: a repeated
+                // --install for the same link overwrites, it never duplicates.
+                if let Some(entry) = install.iter_mut().find(|(l, _)| *l == link) {
+                    entry.1 = name;
+                } else {
+                    install.push((link, name));
+                }
             }
             for caps in slave_re.captures_iter(line).flatten() {
                 if let Some(m) = caps.get(1) {
@@ -345,7 +351,7 @@ impl Check for AlternativesCheck {
         };
 
         let postun_lines = Self::normalize_script(&postun);
-        if postun_lines.is_empty() && post_lines.is_empty() {
+        if postun_lines.is_empty() {
             add_info(
                 out,
                 Level::Error,

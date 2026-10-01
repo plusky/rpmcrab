@@ -13,6 +13,8 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
+
+use super::shared::script_body_or_prog;
 use crate::pkg::pkgfile::is_reg;
 use librpm::Tag;
 
@@ -200,17 +202,13 @@ impl Check for MenuCheck {
             return;
         }
 
-        let postin = pkg
-            .tag_str(Tag::POSTIN)
-            .unwrap_or_else(|| pkg.scriptprog(Tag::POSTINPROG));
+        let postin = script_body_or_prog(pkg, Tag::POSTIN, Tag::POSTINPROG);
         if postin.is_empty() {
             add_info(out, Level::Error, pkg, "menu-without-postin", &[]);
         } else if !is_match(&Self::update_menus_regex(), &postin) {
             add_info(out, Level::Error, pkg, "postin-without-update-menus", &[]);
         }
-        let postun = pkg
-            .tag_str(Tag::POSTUN)
-            .unwrap_or_else(|| pkg.scriptprog(Tag::POSTUNPROG));
+        let postun = script_body_or_prog(pkg, Tag::POSTUN, Tag::POSTUNPROG);
         if postun.is_empty() {
             add_info(out, Level::Error, pkg, "menu-without-postun", &[]);
         } else if !is_match(&Self::update_menus_regex(), &postun) {

@@ -16,6 +16,8 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
+
+use super::shared::script_body_or_prog;
 use librpm::Tag;
 
 pub struct SystemdInstallCheck;
@@ -92,18 +94,10 @@ impl Check for SystemdInstallCheck {
 
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
         let unit_re = Self::unit_regex();
-        let pre = pkg
-            .tag_str(Tag::PREIN)
-            .unwrap_or_else(|| pkg.scriptprog(Tag::PREINPROG));
-        let post = pkg
-            .tag_str(Tag::POSTIN)
-            .unwrap_or_else(|| pkg.scriptprog(Tag::POSTINPROG));
-        let preun = pkg
-            .tag_str(Tag::PREUN)
-            .unwrap_or_else(|| pkg.scriptprog(Tag::PREUNPROG));
-        let postun = pkg
-            .tag_str(Tag::POSTUN)
-            .unwrap_or_else(|| pkg.scriptprog(Tag::POSTUNPROG));
+        let pre = script_body_or_prog(pkg, Tag::PREIN, Tag::PREINPROG);
+        let post = script_body_or_prog(pkg, Tag::POSTIN, Tag::POSTINPROG);
+        let preun = script_body_or_prog(pkg, Tag::PREUN, Tag::PREUNPROG);
+        let postun = script_body_or_prog(pkg, Tag::POSTUN, Tag::POSTUNPROG);
 
         let mut units: Vec<String> = pkg
             .files

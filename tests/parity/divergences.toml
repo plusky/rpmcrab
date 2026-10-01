@@ -243,9 +243,23 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "bashisms"
+kind = "behaviour"
+reason = "When checkbashisms is absent the reference (BashismsCheck._detect_early_fail_option) runs `checkbashisms --help` via subprocess.check_output at init, which raises and kills the whole run; the port's detect_tools() degrades to a no-op (no findings) instead. A missing optional tool must not abort the lint."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "AtomicUpdateCheck"
 kind = "behaviour"
 reason = "A present-but-wrong-type AtomicCheckGhosts (e.g. the string \"false\") panics at construction; the reference treats any truthy value as enabled and runs. The port deliberately fails fast on a misconfigured type instead of reproducing the reference's permissiveness."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "systemd-tmpfile-parse-error"
+kind = "detail"
+reason = "The reference (TmpfilesParser.warn) formats parse warnings as 'source:line: msg'; the port formats 'source: msg' and passes the line as a separate finding detail. Same information, different placement."
 since = "0.1.0"
 
 [[divergence]]
@@ -258,6 +272,13 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "systemd-tmpfile-entry-unauthorized"
+kind = "behaviour"
+reason = "On a non-octal mode field the reference (TmpfilesParser.get_octal_mode) raises via int(mode, 8); the port's octal_mode() returns None, which is_sensitive_entry treats as sensitive and emits the finding. The port lints where the reference crashes."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "AtomicUpdateCheck"
 kind = "behaviour"
 reason = "A present-but-wrong-type AtomicAllowedDirs (e.g. the string \"/etc/\") panics at construction; the reference iterates tuple('/etc/') as character prefixes and runs. The port deliberately fails fast on a misconfigured type instead of reproducing the reference's permissiveness."
@@ -265,9 +286,23 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "systemd-tmpfiles"
+kind = "behaviour"
+reason = "The reference requires the SystemdTmpfiles config section (KeyError when absent); the port falls back to hardcoded DropinDirs (/usr/lib/tmpfiles.d, /etc/tmpfiles.d, /run/tmpfiles.d) and an empty IgnorePackages so the check runs with the bundled defaults."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "beam-was-not-recompiled"
 kind = "behaviour"
 reason = "The reference expands the %_builddir macro at check time; rpmcrab has no macro expansion, so the expected build dir comes from the ErlangBuildDir config key (default /home/abuild/rpmbuild/BUILD, the OBS value). A local ~/rpmbuild/BUILD build reports beam-was-not-recompiled unless the key is set."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "polkit-xml-exception"
+kind = "detail"
+reason = "The reference formats the caught expat error via str(expat.ExpatError); the port formats quick-xml's Display for the parse error. The finding name and severity match; the detail text differs."
 since = "0.1.0"
 
 [[divergence]]
@@ -467,6 +502,11 @@ case = "global"
 check = "symlink-contains-up-and-down-segments"
 kind = "missing"
 reason = "FilesCheck flags symlinks whose target contains '..' segments; the symlink segment analysis is not ported yet."
+[[divergence]]
+case = "global"
+check = "tmpfile-not-in-filelist"
+kind = "behaviour"
+reason = "The reference (TmpFilesCheck._check_tmpfile_in_filelist) emits one finding per matching tmpfiles.d line; the port deduplicates by path and emits one finding per missing path. Duplicate lines for the same path produce one finding instead of several."
 since = "0.1.0"
 
 [[divergence]]

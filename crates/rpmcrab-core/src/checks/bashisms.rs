@@ -109,8 +109,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detect_tools_does_not_panic() {
-        // Just exercises the probe; the result depends on the environment.
-        let _ = BashismsCheck::detect_tools();
+    fn detect_tools_is_deterministic() {
+        // The probe only reads the environment, so two consecutive runs
+        // must agree. PATH is deliberately not mutated to force a case:
+        // that would be unsafe under parallel in-process tests.
+        assert_eq!(
+            BashismsCheck::detect_tools(),
+            BashismsCheck::detect_tools()
+        );
     }
 }

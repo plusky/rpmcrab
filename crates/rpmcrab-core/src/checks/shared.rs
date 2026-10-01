@@ -66,6 +66,25 @@ mod tests {
     use crate::filter::Filter;
 
     #[test]
+    fn script_body_or_prog_falls_back_on_empty_body() {
+        // Fixture: %post -p /bin/sh with a present-but-empty body,
+        // %preun -p /bin/sh with content.
+        let rpm_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/scriptlet-empty-post-1.0-1.noarch.rpm");
+        let pkg = Pkg::open(&rpm_path, &std::env::temp_dir()).expect("open fixture pkg");
+        // An empty body falls through to the -p interpreter string.
+        assert_eq!(
+            script_body_or_prog(&pkg, librpm::Tag::POSTIN, librpm::Tag::POSTINPROG),
+            "/bin/sh"
+        );
+        // A non-empty body wins over the interpreter.
+        assert!(
+            script_body_or_prog(&pkg, librpm::Tag::PREUN, librpm::Tag::PREUNPROG)
+                .contains("echo preun-body")
+        );
+    }
+
+    #[test]
     fn macro_regex_matches_unexpanded_macro() {
         // Regression: files.rs had \\w (double-escaped) which matched a
         // literal backslash-w instead of word characters. This fails if the
