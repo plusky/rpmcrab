@@ -15,9 +15,9 @@ use rpmcrab_core::checks::alternatives::AlternativesCheck;
 use rpmcrab_core::checks::menu::MenuCheck;
 use rpmcrab_core::checks::menu_xdg::MenuXDGCheck;
 use rpmcrab_core::checks::python::PythonCheck;
+use rpmcrab_core::checks::systemd_install::SystemdInstallCheck;
 use rpmcrab_core::checks::systemd_tmpfiles::SystemdTmpfilesCheck;
 use rpmcrab_core::checks::sysv_init_on_systemd::SysVInitOnSystemdCheck;
-use rpmcrab_core::checks::systemd_install::SystemdInstallCheck;
 use rpmcrab_core::checks::tmpfiles::TmpFilesCheck;
 use rpmcrab_core::color::Color;
 use rpmcrab_core::config::Config;
@@ -34,7 +34,11 @@ fn fixture(name: &str) -> PathBuf {
 /// `(check_name, rendered_line)` pairs in emission order.
 fn run_check(check: &mut impl Check, rpm: &str) -> Vec<(String, String)> {
     let rpm_path = fixture(rpm);
-    assert!(rpm_path.is_file(), "fixture missing: {}", rpm_path.display());
+    assert!(
+        rpm_path.is_file(),
+        "fixture missing: {}",
+        rpm_path.display()
+    );
     let scratch = tempfile::tempdir().unwrap();
     let pkg = Pkg::open(&rpm_path, scratch.path()).unwrap();
     let config = Config::default();
@@ -82,8 +86,14 @@ fn systemd_install_flags_missing_scriptlets() {
     assert_findings(
         &results,
         &[
-            ("systemd-service-without-service_del_preun", "w6sysv.service"),
-            ("systemd-service-without-service_del_postun", "w6sysv.service"),
+            (
+                "systemd-service-without-service_del_preun",
+                "w6sysv.service",
+            ),
+            (
+                "systemd-service-without-service_del_postun",
+                "w6sysv.service",
+            ),
             ("systemd-service-without-service_add_pre", "w6sysv.service"),
             ("systemd-service-without-service_add_post", "w6sysv.service"),
         ],
@@ -134,10 +144,7 @@ fn menu_xdg_flags_desktopfile_without_binary() {
     let results = run_check(&mut check, "w6-menu-1.0-1.noarch.rpm");
     assert_findings(
         &results,
-        &[(
-            "desktopfile-without-binary",
-            "/usr/bin/w6-missing-binary",
-        )],
+        &[("desktopfile-without-binary", "/usr/bin/w6-missing-binary")],
     );
 }
 

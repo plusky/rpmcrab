@@ -178,7 +178,10 @@ mod tests {
             "SystemdUnitDir".to_string(),
             toml::Value::String("/run/systemd/system".to_string()),
         );
-        let config = Config { configuration: table, ..Default::default() };
+        let config = Config {
+            configuration: table,
+            ..Default::default()
+        };
         let check = SystemdInstallCheck::new(&config);
         let re = check.unit_regex();
         assert!(is_match(&re, "/run/systemd/system/foo.service"));

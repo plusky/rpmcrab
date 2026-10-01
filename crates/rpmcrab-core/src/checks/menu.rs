@@ -481,12 +481,10 @@ impl MenuCheck {
                     }
                 }
             }
-            None => {
-                match &title {
-                    Some(t) => add_info(out, Level::Warning, pkg, "no-icon-in-menu", &[t]),
-                    None => add_info(out, Level::Warning, pkg, "no-icon-in-menu", &[]),
-                }
-            }
+            None => match &title {
+                Some(t) => add_info(out, Level::Warning, pkg, "no-icon-in-menu", &[t]),
+                None => add_info(out, Level::Warning, pkg, "no-icon-in-menu", &[]),
+            },
         }
 
         match xdg_re.captures(line).ok().flatten() {

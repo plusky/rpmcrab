@@ -510,14 +510,23 @@ mod tests {
     #[test]
     fn require_satisfied_matches_python3_foo() {
         let req_names = vec!["python3-requests".to_string()];
-        assert!(PythonCheck::require_satisfied(&req_names, &requirement("requests")));
-        assert!(!PythonCheck::require_satisfied(&req_names, &requirement("urllib3")));
+        assert!(PythonCheck::require_satisfied(
+            &req_names,
+            &requirement("requests")
+        ));
+        assert!(!PythonCheck::require_satisfied(
+            &req_names,
+            &requirement("urllib3")
+        ));
     }
 
     #[test]
     fn require_satisfied_matches_dist() {
         let req_names = vec!["python312dist(requests)".to_string()];
-        assert!(PythonCheck::require_satisfied(&req_names, &requirement("requests")));
+        assert!(PythonCheck::require_satisfied(
+            &req_names,
+            &requirement("requests")
+        ));
     }
 
     #[test]
