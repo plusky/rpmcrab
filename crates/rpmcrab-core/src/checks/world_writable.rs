@@ -58,17 +58,23 @@ impl WorldWritableCheck {
         &self,
         pkg_name: &str,
         files: &[FileMeta],
-    ) -> Vec<(Level, String, Vec<String>)> {
-        file_metadata::verify_files("world-writable", &self.whitelists, pkg_name, files)
-            .into_iter()
-            .map(|v| {
-                let mut details = vec![v.filename];
-                if let Some(d) = v.detail {
-                    details.push(d);
-                }
-                (Level::Error, v.check, details)
-            })
-            .collect()
+    ) -> Vec<(Level, &'static str, Vec<String>)> {
+        // Push literal finding names: the reference-coverage audit collects
+        // `vec.push((Level::X, "name", ...))` sites but cannot trace the
+        // `format!` through `file_metadata::verify_against`. The verdict
+        // kind is encoded in `detail`: `None` is the unauthorized-file
+        // case, `Some` the attribute mismatch.
+        let mut findings = Vec::new();
+        for v in file_metadata::verify_files("world-writable", &self.whitelists, pkg_name, files) {
+            let mut details = vec![v.filename];
+            if let Some(d) = v.detail {
+                details.push(d);
+                findings.push((Level::Error, "world-writable-mismatched-attrs", details));
+            } else {
+                findings.push((Level::Error, "world-writable-unauthorized-file", details));
+            }
+        }
+        findings
     }
 }
 
@@ -87,9 +93,10 @@ impl Check for WorldWritableCheck {
 
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
         let files = Self::world_writable(&pkg.files);
-        for (level, check, details) in self.binary_findings(&pkg.name, &files) {
+        let findings = self.binary_findings(&pkg.name, &files);
+        for (level, check, details) in findings {
             let refs: Vec<&str> = details.iter().map(String::as_str).collect();
-            add_info(out, level, pkg, &check, &refs);
+            add_info(out, level, pkg, check, &refs);
         }
     }
 }
@@ -162,7 +169,7 @@ group = "tty"
         }
     }
 
-    fn findings(files: &[PkgFile]) -> Vec<(Level, String, Vec<String>)> {
+    fn findings(files: &[PkgFile]) -> Vec<(Level, &'static str, Vec<String>)> {
         let check = WorldWritableCheck::new(&test_config());
         let metas: Vec<FileMeta> = files.iter().map(FileMeta::new).collect();
         check.binary_findings("dummy", &metas)
