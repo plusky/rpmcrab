@@ -79,10 +79,11 @@ impl Check for SignatureCheck {
     fn check(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
         let (retcode, output) = self.check_signature(pkg);
 
+        // The reference runs all three sub-checks unconditionally
+        // (SignatureCheck.py:36-40); each decides for itself whether to fire.
         // No signature at all.
         if !is_match(&Self::any_sig_regex(), &output) {
             add_info(out, Level::Error, pkg, "no-signature", &[]);
-            return;
         }
 
         // Unknown key (NOKEY) without an invalid signature.
@@ -253,5 +254,18 @@ mod tests {
             &re,
             "foo.rpm: RSA/SHA256 Signature, key ID abc: OK"
         ));
+    }
+
+    #[test]
+    fn no_signature_with_retcode_1_yields_only_no_signature() {
+        // Guards the unconditional sub-check structure: with no signature
+        // mention in the output, the retcode==1 block must not add findings.
+        let dir = tmpdir("rpmcrab-sig-nosig-rc1");
+        let rpm = fake_rpm(&dir, "rpm", "test.rpm: digests OK", 1);
+        let pkg = fixture_pkg();
+        let results = run_check(&pkg, &rpm);
+        assert_eq!(results.len(), 1, "{results:?}");
+        assert_eq!(results[0].0, "no-signature");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
