@@ -165,8 +165,8 @@ fn checks_in_default_config() -> Vec<String> {
 /// Wave 6 checks below are exempt for the same reason: their `Checks`
 /// entries also wait for the central issue #66.
 /// single PR and conflicting with the others touching the same list. The Wave
-/// 7b checks (`FileDigestCheck`, `SUIDPermissionsCheck`, `SignatureCheck`)
-/// are exempt for the same reason.
+/// 7b checks `FileDigestCheck` and `SUIDPermissionsCheck` are exempt for the
+/// same reason (`SignatureCheck` is already listed in `Checks`).
 #[test]
 fn every_constructible_check_is_listed_in_checks() {
     let listed = checks_in_default_config();
@@ -186,7 +186,6 @@ fn every_constructible_check_is_listed_in_checks() {
             || name == "TmpFilesCheck"
             || name == "FileDigestCheck"
             || name == "SUIDPermissionsCheck"
-            || name == "SignatureCheck"
         {
             continue;
         }

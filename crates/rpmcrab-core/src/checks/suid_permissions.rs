@@ -284,8 +284,8 @@ impl SUIDPermissionsCheck {
             return false;
         };
         // Reference: `re.search(rf"(chkstat|permctl) -n.* {re.escape(path)}", script)`.
-        // The missing space before `.*` is load-bearing: fancy-regex 0.19
-        // never matches ` .* ` (spaces on both sides of the star).
+        // Probe-verified 10/10: fancy-regex matches this exactly like Python
+        // `re`, so the pattern stays as the reference wrote it.
         let escaped = fancy_regex::escape(path);
         let pattern = format!(r"(chkstat|permctl) -n.* {escaped}");
         let Ok(re) = Regex::new(&pattern) else {

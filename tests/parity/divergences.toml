@@ -117,7 +117,6 @@ check = "buildarch-instead-of-exclusivearch-tag"
 kind = "behaviour"
 reason = "Fixed behaviour per rpmlint#1600 (fixes rpmlint#698): a trailing line-continuation backslash is stripped before comparing, so 'BuildArch: noarch \\' inside a multi-line macro is not reported as a real architecture. The frozen 2.10.0 reference reports it."
 since = "0.1.0"
-upstream = "https://github.com/rpm-software-management/rpmlint/pull/1600"
 
 [[divergence]]
 case = "global"
@@ -125,7 +124,6 @@ check = "macro-in-comment"
 kind = "behaviour"
 reason = "Fixed behaviour per rpmlint#1601 (fixes rpmlint#183): '#' inside shell-quoted strings does not start a comment (quote-aware comment_start_pos, tracking single/double-quote state and backslash escapes). The frozen 2.10.0 reference treats such '#' as a comment start and warns."
 since = "0.1.0"
-upstream = "https://github.com/rpm-software-management/rpmlint/pull/1601"
 
 [[divergence]]
 case = "global"
@@ -218,7 +216,7 @@ since = "0.1.0"
 case = "global"
 check = "python-bytecode-inconsistent-mtime"
 kind = "behaviour"
-reason = "python-bytecode-inconsistent-mtime only fires when the .pyc embedded timestamp is older than the .py mtime (stale bytecode). The reference (FilesCheck.py:1274) fires on any mismatch, but rpmlint#1331 (open, unmerged) proposes this fix: a newer .pyc is a local-build artifact, not an error. The port implements the proposed behaviour ahead of upstream."
+reason = "python-bytecode-inconsistent-mtime only fires when the .pyc embedded timestamp is older than the .py mtime (stale bytecode). The reference (FilesCheck.py:1274) fires on any mismatch, but rpmlint#1331 (unmerged; closed 2025-04-24) proposes this fix: a newer .pyc is a local-build artifact, not an error. The port implements the proposed behaviour ahead of upstream."
 since = "0.1.0"
 
 [[divergence]]
@@ -262,6 +260,13 @@ case = "global"
 check = "systemd-tmpfile-entry-unauthorized"
 kind = "behaviour"
 reason = "On a non-octal mode field the reference (TmpfilesParser.get_octal_mode) raises via int(mode, 8); the port's octal_mode() returns None, which is_sensitive_entry treats as sensitive and emits the finding. The port lints where the reference crashes."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "detail"
+reason = "File digest finding details are byte-identical to the reference except `{type}-file-parse-error`, which renders the Rust `std::io::Error` text where the reference interpolates its own OS-error wording; `whitelisted-file-missing` and `file-digest-mismatch` match the reference exactly."
 since = "0.1.0"
 
 [[divergence]]
@@ -560,23 +565,9 @@ upstream = "https://github.com/rpm-software-management/rpmlint/pull/1601"
 
 [[divergence]]
 case = "global"
-check = "python-bytecode-inconsistent-mtime"
-kind = "behaviour"
-reason = "python-bytecode-inconsistent-mtime only fires when the .pyc embedded timestamp is older than the .py mtime (stale bytecode). The reference (FilesCheck.py:1274) fires on any mismatch, but rpmlint#1331 (unmerged; closed 2025-04-24) proposes this fix: a newer .pyc is a local-build artifact, not an error. The port implements the proposed behaviour ahead of upstream."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "FileDigestCheck"
 kind = "detail"
 reason = "FileDigestCheck drops the `({digest_hint})` detail argument on `{type}-file-unauthorized` findings; the reference appends the observed per-digester digests of the offending file."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "FileDigestCheck"
-kind = "detail"
-reason = "File digest finding details are byte-identical to the reference except `{type}-file-parse-error`, which renders the Rust `std::io::Error` text where the reference interpolates its own OS-error wording; `whitelisted-file-missing` and `file-digest-mismatch` match the reference exactly."
 since = "0.1.0"
 
 [[divergence]]
