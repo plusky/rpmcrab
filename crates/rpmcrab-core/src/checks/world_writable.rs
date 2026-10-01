@@ -59,19 +59,22 @@ impl WorldWritableCheck {
         pkg_name: &str,
         files: &[FileMeta],
     ) -> Vec<(Level, &'static str, Vec<String>)> {
-        // Push literal finding names: the reference-coverage audit collects
-        // `vec.push((Level::X, "name", ...))` sites but cannot trace the
-        // `format!` through `file_metadata::verify_against`. The verdict
-        // kind is encoded in `detail`: `None` is the unauthorized-file
-        // case, `Some` the attribute mismatch.
         let mut findings = Vec::new();
-        for v in file_metadata::verify_files("world-writable", &self.whitelists, pkg_name, files) {
+        for v in file_metadata::verify_files(&self.whitelists, pkg_name, files) {
             let mut details = vec![v.filename];
             if let Some(d) = v.detail {
                 details.push(d);
-                findings.push((Level::Error, "world-writable-mismatched-attrs", details));
-            } else {
-                findings.push((Level::Error, "world-writable-unauthorized-file", details));
+            }
+            // Literal names in the push tuples: the reference-coverage
+            // audit collects these sites textually, so the name must not
+            // be built through a variable or format!.
+            match v.kind {
+                file_metadata::VerdictKind::UnauthorizedFile => {
+                    findings.push((Level::Error, "world-writable-unauthorized-file", details));
+                }
+                file_metadata::VerdictKind::MismatchedAttrs => {
+                    findings.push((Level::Error, "world-writable-mismatched-attrs", details));
+                }
             }
         }
         findings

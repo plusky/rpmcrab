@@ -207,10 +207,20 @@ pub fn load_whitelists(config: &Config, key: &str, required: &[&str]) -> Vec<Whi
     out
 }
 
-/// One whitelist verdict: the finding name, the file, and the optional detail.
+/// The kind of whitelist violation for one file: one variant per emitted
+/// finding, so the caller maps it to a literal finding name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerdictKind {
+    /// The file is absent from the whitelist (`{prefix}-unauthorized-file`).
+    UnauthorizedFile,
+    /// A whitelisted attribute differs (`{prefix}-mismatched-attrs`).
+    MismatchedAttrs,
+}
+
+/// One whitelist verdict: the violation kind, the file, and the optional detail.
 #[derive(Debug)]
 pub struct Verdict {
-    pub check: String,
+    pub kind: VerdictKind,
     pub filename: String,
     pub detail: Option<String>,
 }
@@ -218,20 +228,15 @@ pub struct Verdict {
 /// Check `files` against the whitelists, mirroring the reference's
 /// `check_files`: every file starts as unauthorized, then the whitelist
 /// matching the package with the fewest errors wins.
-pub fn verify_files(
-    prefix: &str,
-    whitelists: &[Whitelist],
-    pkg_name: &str,
-    files: &[FileMeta],
-) -> Vec<Verdict> {
-    let mut best = verify_against(&[], files, prefix);
+pub fn verify_files(whitelists: &[Whitelist], pkg_name: &str, files: &[FileMeta]) -> Vec<Verdict> {
+    let mut best = verify_against(&[], files);
     for wl in whitelists {
         let applies =
             wl.package.as_deref() == Some(pkg_name) || wl.packages.iter().any(|p| p == pkg_name);
         if !applies {
             continue;
         }
-        let errors = verify_against(&wl.files, files, prefix);
+        let errors = verify_against(&wl.files, files);
         if errors.len() <= best.len() {
             best = errors;
         }
@@ -239,19 +244,19 @@ pub fn verify_files(
     best
 }
 
-fn verify_against(files: &[WhitelistedFile], metas: &[FileMeta], prefix: &str) -> Vec<Verdict> {
+fn verify_against(files: &[WhitelistedFile], metas: &[FileMeta]) -> Vec<Verdict> {
     let mut out = Vec::new();
     for meta in metas {
         match files.iter().find(|f| f.path == meta.path) {
             None => out.push(Verdict {
-                check: format!("{prefix}-unauthorized-file"),
+                kind: VerdictKind::UnauthorizedFile,
                 filename: meta.path.to_string(),
                 detail: None,
             }),
             Some(entry) => {
                 if let Some((key, expected, has)) = entry.first_mismatch(meta) {
                     out.push(Verdict {
-                        check: format!("{prefix}-mismatched-attrs"),
+                        kind: VerdictKind::MismatchedAttrs,
                         filename: meta.path.to_string(),
                         detail: Some(format!("expected \"{key}\": {expected}, has: {has}")),
                     });
@@ -435,9 +440,9 @@ group = "tty"
         // `device_major` also mismatches: `path` matches, `mode` is next.
         let whitelists = test_device_whitelists();
         let files = [meta("/dev/sdb1", "brw-rw----", "root", "tty", 0, 5)];
-        let verdicts = verify_files("device", &whitelists, "dummy", &files);
+        let verdicts = verify_files(&whitelists, "dummy", &files);
         assert_eq!(verdicts.len(), 1);
-        assert_eq!(verdicts[0].check, "device-mismatched-attrs");
+        assert_eq!(verdicts[0].kind, VerdictKind::MismatchedAttrs);
         assert_eq!(verdicts[0].filename, "/dev/sdb1");
         assert_eq!(
             verdicts[0].detail.as_deref(),
@@ -449,9 +454,9 @@ group = "tty"
     fn unknown_file_is_unauthorized() {
         let whitelists = test_device_whitelists();
         let files = [meta("/dev/mydevice", "brw-rw----", "root", "root", 0, 5)];
-        let verdicts = verify_files("device", &whitelists, "dummy", &files);
+        let verdicts = verify_files(&whitelists, "dummy", &files);
         assert_eq!(verdicts.len(), 1);
-        assert_eq!(verdicts[0].check, "device-unauthorized-file");
+        assert_eq!(verdicts[0].kind, VerdictKind::UnauthorizedFile);
         assert_eq!(verdicts[0].filename, "/dev/mydevice");
         assert!(verdicts[0].detail.is_none());
     }
@@ -460,7 +465,7 @@ group = "tty"
     fn fully_matching_file_is_quiet() {
         let whitelists = test_device_whitelists();
         let files = [meta("/dev/sdb1", "crw-rw----", "root", "tty", 55, 12)];
-        let verdicts = verify_files("device", &whitelists, "dummy", &files);
+        let verdicts = verify_files(&whitelists, "dummy", &files);
         assert!(verdicts.is_empty(), "{verdicts:?}");
     }
 
@@ -468,18 +473,18 @@ group = "tty"
     fn whitelist_for_another_package_does_not_apply() {
         let whitelists = test_device_whitelists();
         let files = [meta("/dev/sdb1", "crw-rw----", "root", "tty", 55, 12)];
-        let verdicts = verify_files("device", &whitelists, "other", &files);
+        let verdicts = verify_files(&whitelists, "other", &files);
         assert_eq!(verdicts.len(), 1);
-        assert_eq!(verdicts[0].check, "device-unauthorized-file");
+        assert_eq!(verdicts[0].kind, VerdictKind::UnauthorizedFile);
     }
 
     #[test]
     fn world_writable_mismatch_reports_mode() {
         let whitelists = test_ww_whitelists();
         let files = [meta("/tempus", "drwxr-xr-t", "root", "root", 0, 0)];
-        let verdicts = verify_files("world-writable", &whitelists, "dummy", &files);
+        let verdicts = verify_files(&whitelists, "dummy", &files);
         assert_eq!(verdicts.len(), 1);
-        assert_eq!(verdicts[0].check, "world-writable-mismatched-attrs");
+        assert_eq!(verdicts[0].kind, VerdictKind::MismatchedAttrs);
         assert_eq!(
             verdicts[0].detail.as_deref(),
             Some("expected \"mode\": drw-rw---t, has: drwxr-xr-t")
