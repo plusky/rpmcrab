@@ -344,3 +344,121 @@ pub fn run_tasks(
     results.into_iter().map(|(_, r)| r).collect()
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    /// A check that sleeps, so wall-clock time proves overlap.
+    struct Sleeps;
+    impl Check for Sleeps {
+        fn name(&self) -> &'static str {
+            "Sleeps"
+        }
+        fn check(&mut self, _pkg: &Pkg, _config: &Config, _out: &mut Filter) {
+            std::thread::sleep(Duration::from_millis(400));
+        }
+        fn check_spec(&mut self, _pkg: &SpecPkg, _config: &Config, _out: &mut Filter) {
+            std::thread::sleep(Duration::from_millis(400));
+        }
+    }
+
+    /// Four tasks x 400ms: sequential takes ~1.6s, four overlapping workers
+    /// take ~0.4s. A serialized pool fails this.
+    #[test]
+    fn workers_overlap_in_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Vec<Task> = (0..4)
+            .map(|i| {
+                let spec = dir.path().join(format!("t{i}.spec"));
+                std::fs::write(&spec, b"Name: test\n").unwrap();
+                Task::File(spec)
+            })
+            .collect();
+        let config = Config::default();
+        let start = std::time::Instant::now();
+        let results = run_tasks(
+            tasks,
+            4,
+            &config,
+            &|| vec![Box::new(Sleeps) as Box<dyn Check>],
+            Color::for_tty(false),
+        );
+        let elapsed = start.elapsed();
+        assert_eq!(results.len(), 4);
+        assert!(
+            elapsed < Duration::from_millis(1200),
+            "workers did not overlap: {elapsed:?}"
+        );
+    }
+
+    /// Records check/reset calls; panics on the "bad" package.
+    struct Records {
+        log: Arc<Mutex<Vec<String>>>,
+    }
+    impl Check for Records {
+        fn name(&self) -> &'static str {
+            "Records"
+        }
+        fn check(&mut self, _pkg: &Pkg, _config: &Config, _out: &mut Filter) {}
+        fn check_spec(&mut self, pkg: &SpecPkg, _config: &Config, _out: &mut Filter) {
+            self.log.lock().unwrap().push(format!("check:{}", pkg.name));
+            if pkg.name.contains("bad") {
+                panic!("boom");
+            }
+        }
+        fn reset(&mut self) {
+            self.log.lock().unwrap().push("reset".to_string());
+        }
+    }
+
+    /// A fatal package resets the worker's checks: the next package starts
+    /// clean instead of inheriting partial state.
+    #[test]
+    fn fatal_package_resets_the_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let tasks: Vec<Task> = ["good1", "bad", "good2"]
+            .into_iter()
+            .map(|name| {
+                let spec = dir.path().join(format!("{name}.spec"));
+                std::fs::write(&spec, format!("Name: {name}\n")).unwrap();
+                Task::File(spec)
+            })
+            .collect();
+        let config = Config::default();
+        let log2 = Arc::clone(&log);
+        let results = run_tasks(
+            tasks,
+            1,
+            &config,
+            &move || vec![Box::new(Records { log: Arc::clone(&log2) }) as Box<dyn Check>],
+            Color::for_tty(false),
+        );
+        assert_eq!(results.len(), 3);
+        let log = log.lock().unwrap();
+        // `pkg.name` carries the full path; the reset sequence is what matters.
+        let seq: Vec<&str> = log
+            .iter()
+            .map(|e| {
+                if e == "reset" {
+                    "reset"
+                } else if e.contains("good1") {
+                    "check:good1"
+                } else if e.contains("bad") {
+                    "check:bad"
+                } else {
+                    "check:good2"
+                }
+            })
+            .collect();
+        assert_eq!(
+            seq.as_slice(),
+            &[
+                "check:good1", "reset", "check:bad", "reset", "check:good2", "reset",
+            ]
+        );
+    }
+}
