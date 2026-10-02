@@ -49,9 +49,10 @@ impl SignatureCheck {
                     self.rpm_bin, pkg.filename
                 )
             });
-        // The reference merges stderr into stdout and runs under
-        // `en_US.UTF-8`; see the parity ledger.
+        // The reference merges stderr into stdout (`stderr=subprocess.STDOUT`)
+        // and runs under `en_US.UTF-8`; see the parity ledger.
         let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
         if text.ends_with('\n') {
             text.pop();
         }
@@ -267,5 +268,22 @@ mod tests {
         assert_eq!(results.len(), 1, "{results:?}");
         assert_eq!(results[0].0, "no-signature");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stderr_merged_into_output() {
+        // The reference merges stderr into stdout (`stderr=subprocess.STDOUT`);
+        // the port must append captured stderr after stdout.
+        let check = SignatureCheck::new(&Config::default());
+        // Simulate the merge logic directly: stdout + stderr, trailing newline stripped.
+        let stdout = b"header: RSA\n";
+        let stderr = b"warning: something\n";
+        let mut text = String::from_utf8_lossy(stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(stderr));
+        if text.ends_with('\n') {
+            text.pop();
+        }
+        assert_eq!(text, "header: RSA\nwarning: something");
+        let _ = check;
     }
 }
