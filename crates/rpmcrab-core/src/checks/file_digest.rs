@@ -660,21 +660,6 @@ impl FileDigestCheck {
             }
             let packages = Self::checked_packages(table, "FileDigestGroup");
             let mut digests = Vec::new();
-            // Expand `nodigests` into skip entries. The reference appends
-            // them after the explicit digests; the port prepends them (see
-            // the parity ledger).
-            if let Some(nodigests) = table.get("nodigests").and_then(|v| v.as_array()) {
-                for entry in nodigests {
-                    if let Some(path) = entry.as_str() {
-                        digests.push(DigestInfo {
-                            path: path.to_string(),
-                            algorithm: "skip".to_string(),
-                            hash: String::new(),
-                            digester: "default".to_string(),
-                        });
-                    }
-                }
-            }
             if let Some(arr) = table.get("digests").and_then(|v| v.as_array()) {
                 for d in arr {
                     let Some(dt) = d.as_table() else {
@@ -715,6 +700,20 @@ impl FileDigestCheck {
                             .to_string(),
                         digester: digester.to_string(),
                     });
+                }
+            }
+            // Expand `nodigests` into skip entries, appended after the
+            // explicit digests (FileDigestCheck.py:132).
+            if let Some(nodigests) = table.get("nodigests").and_then(|v| v.as_array()) {
+                for entry in nodigests {
+                    if let Some(path) = entry.as_str() {
+                        digests.push(DigestInfo {
+                            path: path.to_string(),
+                            algorithm: "skip".to_string(),
+                            hash: String::new(),
+                            digester: "default".to_string(),
+                        });
+                    }
                 }
             }
             groups.push(DigestGroup {
@@ -2190,5 +2189,36 @@ hash = "deadbeef"
     fn overlapping_locations_panic() {
         let config = config_with_locations("\"/etc\", \"/etc/pam.d\"");
         let _ = FileDigestCheck::new(&config);
+    }
+
+    #[test]
+    fn nodigests_append_after_explicit_digests() {
+        // The reference appends `nodigests` skip entries after the explicit
+        // `digests` list (FileDigestCheck.py:132).
+        let mut cfg = test_config("");
+        let group: toml::Value = toml::from_str(
+            r#"
+type = "FileDigestLocation"
+package = "testpkg"
+digests = [{path = "/check/me", algorithm = "sha256", hash = "abc"}]
+nodigests = ["/skip/me"]
+"#,
+        )
+        .unwrap();
+        cfg.configuration
+            .entry("FileDigestGroup")
+            .or_insert(toml::Value::Array(Vec::new()))
+            .as_array_mut()
+            .unwrap()
+            .push(group);
+        let known = vec!["FileDigestLocation".to_string()];
+        let parsed = FileDigestCheck::parse_digest_groups(&cfg, &known);
+        assert_eq!(parsed.len(), 1);
+        let digests = &parsed[0].digests;
+        assert_eq!(digests.len(), 2);
+        assert_eq!(digests[0].path, "/check/me");
+        assert_eq!(digests[0].algorithm, "sha256");
+        assert_eq!(digests[1].path, "/skip/me");
+        assert_eq!(digests[1].algorithm, "skip");
     }
 }

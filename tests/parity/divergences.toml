@@ -520,13 +520,6 @@ upstream = "https://github.com/plusky/rpmcrab/issues/75"
 case = "global"
 check = "FileDigestCheck"
 kind = "behaviour"
-reason = "`nodigests` entries are expanded before the explicit `digests` list; the reference appends them after (`_normalize_digest_group`). Latent: none of the 320 shipped digest groups carry both keys."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "FileDigestCheck"
-kind = "behaviour"
 reason = "Malformed configuration aborts via Rust panic (exit 101, panic text on stderr) where the reference raises out of `__init__` (exit 1, traceback on stderr). Both kill the run before any package is linted; the abort itself is the parity point, not the exit code."
 since = "0.1.0"
 
