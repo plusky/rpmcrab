@@ -230,7 +230,7 @@ since = "0.1.0"
 case = "global"
 check = "polkit-untracked-privilege"
 kind = "behaviour"
-reason = "Deliberate fix of a reference bug (PolkitCheck.py: check_action does `action.getElementsByTagName('defaults')[0]`, which raises IndexError -- not the caught KeyError -- when <defaults> is absent, crashing the check). The port treats the missing settings as `no` per the polkit default and reports polkit-untracked-privilege instead of crashing."
+reason = "Deliberate fix of a reference bug, and a bigger one than the check: PolkitCheck.py:70 does `action.getElementsByTagName('defaults')[0]`, which raises IndexError -- not the KeyError caught at :77 -- when <defaults> is absent, and the call at :57 sits outside the try at :52. The exception escapes check() and is caught only by lint.py:293, which prints `fatal error while reading <pkg>` and calls sys.exit(3): the reference emits NO finding, and abandons every remaining package with exit 3. The port treats the missing settings as `no` per the polkit default and reports polkit-untracked-privilege. Note the reference author evidently meant the opposite finding -- had the except caught IndexError, PolkitCheck.py:78 sets found_unauthorized = True and emits polkit-user-privilege. Exit-code divergence is captured by the parity harness (scripts/capture-parity.sh records expected/exit)."
 since = "0.1.0"
 
 [[divergence]]
