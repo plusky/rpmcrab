@@ -115,7 +115,9 @@ impl PythonCheck {
                 }
                 continue;
             }
-            // requires.txt: sections like `[section]` or `[:marker]`
+            // requires.txt: sections like `[section]`, `[section:marker]`,
+            // or `[:marker]`. The reference (`importlib.metadata`) synthesizes
+            // `extra == "<section>"` markers for named sections.
             if line.starts_with('[') && line.ends_with(']') {
                 let inner = &line[1..line.len() - 1];
                 section = Some(inner.to_string());
@@ -131,7 +133,28 @@ impl PythonCheck {
             {
                 continue;
             }
-            out.push(Self::split_marker(line));
+            let mut req = Self::split_marker(line);
+            // Synthesize `extra == "<section>"` for named sections, matching
+            // `importlib.metadata`: `[extra]` → `extra == "extra"`,
+            // `[extra:marker]` → `(marker) and extra == "extra"`.
+            if let Some(sec) = &section
+                && !sec.starts_with(':')
+            {
+                let (name, marker) = match sec.split_once(':') {
+                    Some((n, m)) => (n, Some(m)),
+                    None => (sec.as_str(), None),
+                };
+                let extra_marker = format!("extra == \"{name}\"");
+                req.marker = match (&req.marker, marker) {
+                    (Some(existing), Some(m)) => {
+                        Some(format!("({m}) and ({existing}) and {extra_marker}"))
+                    }
+                    (Some(existing), None) => Some(format!("({existing}) and {extra_marker}")),
+                    (None, Some(m)) => Some(format!("({m}) and {extra_marker}")),
+                    (None, None) => Some(extra_marker),
+                };
+            }
+            out.push(req);
         }
         out
     }
@@ -582,5 +605,65 @@ mod tests {
     fn err_path_tests_matches() {
         let (re, _) = &PythonCheck::err_paths()[0];
         assert!(is_match(re, "/usr/lib64/python3.12/site-packages/tests"));
+    }
+
+    fn fixture_pkg_with_requires(req_names: &[&str]) -> Pkg {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir()).expect("open fixture pkg");
+        pkg.name = "python-test".to_string();
+        pkg.arch = "noarch".to_string();
+        pkg.req_names = req_names.iter().map(|s| s.to_string()).collect();
+        pkg
+    }
+
+    fn check_requirements_findings(
+        reqs: &[Requirement],
+        req_names: &[&str],
+    ) -> Vec<(String, String)> {
+        use crate::color::Color;
+        let pkg = fixture_pkg_with_requires(req_names);
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = PythonCheck {
+            pyc_version: None,
+            checked_files: 0,
+        };
+        check.check_requirements(&pkg, &mut out, reqs, "3.12");
+        out.results().to_vec()
+    }
+
+    #[test]
+    fn extra_section_synthesis_prevents_false_missing_require() {
+        // Emission-path test: `[extra]` sections in requires.txt must
+        // synthesize `extra == "extra"` markers (matching
+        // `importlib.metadata`). Without the marker, `w6extra` is treated
+        // as a required dependency and falsely reported as missing.
+        let content = "[extra]\nw6extra\n";
+        let reqs = PythonCheck::parse_requirements(content, false, "3.12");
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(
+            reqs[0].marker.as_deref(),
+            Some("extra == \"extra\""),
+            "marker: {:?}",
+            reqs[0].marker
+        );
+        // The RPM does NOT require python3-w6extra: no false positive.
+        let findings = check_requirements_findings(&reqs, &[]);
+        assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+    }
+
+    #[test]
+    fn extra_section_with_marker_combines_correctly() {
+        // `[extra:marker]` synthesizes `(marker) and extra == "extra"`.
+        let content = "[extra:python_version > \"3.8\"]\nw6extra\n";
+        let reqs = PythonCheck::parse_requirements(content, false, "3.12");
+        assert_eq!(reqs.len(), 1);
+        let marker = reqs[0].marker.as_deref().unwrap_or("");
+        assert!(marker.contains("extra == \"extra\""), "marker: {marker}");
+        assert!(
+            marker.contains("python_version > \"3.8\""),
+            "marker: {marker}"
+        );
     }
 }
