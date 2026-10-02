@@ -544,3 +544,10 @@ kind = "behaviour"
 reason = "The `xml` digester is disabled pending a C14N-conformant implementation (plusky/rpmcrab#75): entries with `digester = \"xml\"` are treated as skipped, producing no digest and no mismatch finding. The hand-rolled approximation it replaced mismatched the reference's `ET.canonicalize(strip_text=True)` on every real D-Bus service file, so all 156 `digester = \"xml\"` entries in dbus-services.toml would have false-positived `dbus-file-digest-mismatch`."
 since = "0.1.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/75"
+
+[[divergence]]
+case = "global"
+check = "non-utf8-desktopfile"
+kind = "detail"
+reason = "The reference formats the Python UnicodeDecodeError (`'utf-8' codec can't decode byte 0xff in position 0: invalid start byte`); the port formats Rust's FromUtf8Error (`invalid utf-8 sequence of 1 bytes from index 0`). The finding name, severity, and `Unicode error:` prefix match; the error details differ."
+since = "0.1.0"
