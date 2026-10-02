@@ -140,11 +140,16 @@ impl AlternativesCheck {
                         &[&dir_name],
                     );
                 } else {
-                    // The reference interpolates dir_name raw into the
-                    // pattern (no escaping).
-                    let conf_re =
-                        Regex::new(&format!("^{}/.*.conf$", dir_name)).expect("conf pattern");
-                    if !pkg.files.iter().any(|f| is_match(&conf_re, &f.name)) {
+                    // The reference interpolates dir_name raw into the pattern
+                    // (no escaping), so a package-chosen symlink basename can
+                    // make it an invalid regex -- AlternativesCheck.py:216
+                    // raises re.error there. A package must not be able to
+                    // panic the linter, so an uncompilable pattern skips this
+                    // one finding instead of aborting the run (ledgered as
+                    // alternatives-regex-from-package-path).
+                    if let Ok(conf_re) = Regex::new(&format!("^{}/.*.conf$", dir_name))
+                        && !pkg.files.iter().any(|f| is_match(&conf_re, &f.name))
+                    {
                         add_info(
                             out,
                             Level::Error,

@@ -479,3 +479,11 @@ check = "SystemdUnitDir"
 kind = "behaviour"
 reason = "The unit directory comes from the SystemdUnitDir config key rather than rpm.expandMacro('%{_unitdir}') (SystemdInstallCheck.py). The shipped value matches this host's macro, so behaviour is identical today, but a host whose rpm sets a different _unitdir would not be followed."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "alternatives-regex-from-package-path"
+kind = "behaviour"
+reason = "AlternativesCheck.py:216 interpolates the package-chosen symlink basename into a regex with no escaping, so a basename carrying an unbalanced bracket makes re.compile raise. rpmcrab skips the empty-libalternatives-directory finding for such a path instead of aborting the run, because a package must not be able to panic the linter. A path whose basename is valid regex -- every path the reference actually exercises -- behaves identically."
+since = "0.1.0"
+
