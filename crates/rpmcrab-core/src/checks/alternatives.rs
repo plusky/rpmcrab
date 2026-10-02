@@ -617,6 +617,38 @@ mod tests {
         );
     }
 
+    /// A package-chosen symlink basename with an unbalanced bracket makes the
+    /// libalternatives conf pattern uncompilable (the reference raises
+    /// `re.error` at `AlternativesCheck.py:216`); the check must skip the one
+    /// finding instead of panicking (ledgered as
+    /// `alternatives-regex-from-package-path`).
+    #[test]
+    fn invalid_regex_from_package_path_skips_finding() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        // The dummy conf makes has_libalts true so the libalternatives
+        // file-list checks run at all.
+        let mut pkg =
+            libalternatives_pkg(dir.path(), &[("dummy.conf", "binary = /usr/bin/dummy\n")]);
+        pkg.files.push(PkgFile {
+            name: "/usr/bin/w6[cmd".to_string(),
+            mode: 0o120777,
+            linkto: "alts".to_string(),
+            ..Default::default()
+        });
+        // The directory itself must exist for the conf-pattern branch to run.
+        pkg.files.push(PkgFile {
+            name: "/usr/share/libalternatives/w6[cmd".to_string(),
+            mode: 0o040755,
+            ..Default::default()
+        });
+        // Must not panic; the uncompilable pattern skips the finding.
+        let results = findings_for(&pkg);
+        assert!(
+            !has(&results, "empty-libalternatives-directory"),
+            "uncompilable pattern should skip the finding: {results:?}"
+        );
+    }
+
     #[test]
     fn requirement_regex_matches_paths() {
         let re = AlternativesCheck::requirement_regex();
