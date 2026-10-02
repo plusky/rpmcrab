@@ -243,10 +243,16 @@ impl AlternativesCheck {
                         }
                         for man in value.split(',') {
                             let man = man.trim();
-                            let found = pkg.files.iter().any(|f| {
+                            // The reference resets per man entry
+                            // (AlternativesCheck.py:264-271): after the
+                            // line, man_found holds only the last
+                            // entry's result.
+                            man_found = false;
+                            if pkg.files.iter().any(|f| {
                                 f.name.starts_with("/usr/share/man/") && f.name.contains(man)
-                            });
-                            if !found {
+                            }) {
+                                man_found = true;
+                            } else {
                                 add_info(
                                     out,
                                     Level::Warning,
@@ -256,7 +262,6 @@ impl AlternativesCheck {
                                 );
                             }
                         }
-                        man_found = true;
                     }
                     "group" | "options" => {}
                     _ => {
@@ -438,6 +443,8 @@ impl Check for AlternativesCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::Color;
+    use crate::pkg::pkgfile::PkgFile;
 
     #[test]
     fn install_line_is_parsed() {
@@ -492,6 +499,122 @@ mod tests {
         let lines = vec!["update-alternatives --remove foo /usr/bin/foo-1.0".to_string()];
         let missing = AlternativesCheck::check_postun_phase(&lines, &install);
         assert!(missing.is_empty());
+    }
+
+    fn libalternatives_pkg(dir: &std::path::Path, confs: &[(&str, &str)]) -> Pkg {
+        // `confs`: (conf file name, conf content). Writes each conf under
+        // usr/share/libalternatives/<stem>/ and wires up the binary and man
+        // files the entries point at, so only the findings under test fire.
+        let mut pkg = Pkg::open(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm"),
+            &std::env::temp_dir(),
+        )
+        .expect("open fixture pkg");
+        pkg.name = "alternatives-test".to_string();
+        pkg.files.clear();
+        for (conf_name, content) in confs {
+            let stem = conf_name.trim_end_matches(".conf");
+            let rel = format!("usr/share/libalternatives/{stem}/{conf_name}");
+            let path = dir.join(&rel);
+            std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+            std::fs::write(&path, content).expect("write conf");
+            pkg.files.push(PkgFile {
+                name: format!("/{rel}"),
+                path: path.to_string_lossy().into_owned(),
+                mode: 0o100644,
+                ..Default::default()
+            });
+            let bin = format!("/usr/bin/{stem}");
+            pkg.files.push(PkgFile {
+                name: bin,
+                mode: 0o100755,
+                ..Default::default()
+            });
+            let man = format!("/usr/share/man/man1/{stem}.1.gz");
+            pkg.files.push(PkgFile {
+                name: man,
+                mode: 0o100644,
+                ..Default::default()
+            });
+        }
+        pkg
+    }
+
+    fn findings_for(pkg: &Pkg) -> Vec<(String, String)> {
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = AlternativesCheck::new(&config);
+        check.check_binary(pkg, &config, &mut out);
+        out.results().to_vec()
+    }
+
+    fn has(results: &[(String, String)], name: &str) -> bool {
+        results.iter().any(|(n, _)| n == name)
+    }
+
+    /// `man_found` resets for every `.conf` file (like the reference),
+    /// so two files each with one `man` line are not `double-entries`.
+    #[test]
+    fn man_found_resets_per_conf_file() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let conf = |stem: &str| {
+            (
+                format!("{stem}.conf"),
+                format!("binary = /usr/bin/{stem}\nman = {stem}.1\n"),
+            )
+        };
+        let a = conf("foo-a");
+        let b = conf("foo-b");
+        let pkg = libalternatives_pkg(dir.path(), &[(&a.0, &a.1), (&b.0, &b.1)]);
+        let results = findings_for(&pkg);
+        assert!(
+            !has(&results, "double-entries"),
+            "man_found leaked across conf files: {results:?}"
+        );
+    }
+
+    /// The other direction: two `man` lines in one file still fire.
+    #[test]
+    fn double_man_entries_in_one_file_still_fire() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let pkg = libalternatives_pkg(
+            dir.path(),
+            &[(
+                "foo.conf",
+                "binary = /usr/bin/foo\nman = foo.1\nman = foo.1\n",
+            )],
+        );
+        let results = findings_for(&pkg);
+        assert!(
+            has(&results, "double-entries"),
+            "expected double-entries: {results:?}"
+        );
+    }
+
+    /// The reference resets `man_found` per man entry, so after a
+    /// `man=` line it holds only the last entry's result: a second `man=`
+    /// line following a line whose last man was missing is validated, not
+    /// reported as `double-entries`.
+    #[test]
+    fn man_found_holds_only_the_last_entry_result() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let pkg = libalternatives_pkg(
+            dir.path(),
+            &[(
+                "foo.conf",
+                "binary = /usr/bin/foo\nman = missing.1\nman = foo.1\n",
+            )],
+        );
+        let results = findings_for(&pkg);
+        assert!(
+            !has(&results, "double-entries"),
+            "second man= line falsely reported as double-entries: {results:?}"
+        );
+        assert!(
+            has(&results, "man-entry-value-not-found"),
+            "missing man entry was not validated: {results:?}"
+        );
     }
 
     #[test]
