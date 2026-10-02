@@ -35,6 +35,46 @@ struct Requirement {
     extras: Vec<String>,
 }
 
+/// Find the byte index of a top-level `and`/`or` operator, skipping quoted
+/// strings and parenthesized groups.
+fn find_top_level(expr: &str, op: &str) -> Option<usize> {
+    let mut depth = 0;
+    let mut in_quote: Option<char> = None;
+    let bytes = expr.as_bytes();
+    let op_bytes = op.as_bytes();
+    let mut i = 0;
+    while i + op_bytes.len() <= bytes.len() {
+        let c = bytes[i] as char;
+        if let Some(q) = in_quote {
+            if c == q {
+                in_quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' || c == '\'' {
+            in_quote = Some(c);
+            i += 1;
+            continue;
+        }
+        if c == '(' {
+            depth += 1;
+        } else if c == ')' {
+            depth -= 1;
+        }
+        if depth == 0 && &bytes[i..i + op_bytes.len()] == op_bytes {
+            let before = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+            let after = i + op_bytes.len() >= bytes.len()
+                || !bytes[i + op_bytes.len()].is_ascii_alphanumeric();
+            if before && after {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 impl PythonCheck {
     /// Fallback `python_version` marker value (the reference uses the
     /// interpreter running rpmlint; the port has no interpreter to ask).
@@ -170,16 +210,27 @@ impl PythonCheck {
     /// Evaluate the common environment markers. Unknown markers are treated
     /// as holding (the reference evaluates the full PEP 508 environment; we
     /// cover `python_version`, `sys_platform`, and `extra`).
+    ///
+    /// For the missing-requirement check the reference skips any requirement
+    /// whose marker mentions `extra` (`'extra' in str(req.marker)`), so an
+    /// extra marker never holds here.
     fn marker_holds(marker: &str, python_version: &str) -> bool {
         let marker = marker.trim();
         // `extra == "..."` means an optional dependency: skip it.
         if marker.contains("extra") {
             return false;
         }
+        Self::marker_atom_holds(marker, python_version)
+    }
+
+    /// Evaluate a single non-boolean marker comparison (no `and`/`or`/`not`).
+    /// Unknown markers are treated as holding.
+    fn marker_atom_holds(atom: &str, python_version: &str) -> bool {
+        let atom = atom.trim();
         // python_version comparisons, e.g. `python_version < "3.10"`.
         let pv_re = Regex::new(r#"python_version\s*(==|!=|<=|>=|<|>)\s*["']([\d.]+)["']"#)
             .expect("static regex");
-        if let Some(caps) = pv_re.captures(marker).ok().flatten() {
+        if let Some(caps) = pv_re.captures(atom).ok().flatten() {
             let op = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let want = caps.get(2).map(|m| m.as_str()).unwrap_or("");
             let cmp = compare_versions(python_version, want);
@@ -194,11 +245,62 @@ impl PythonCheck {
             };
         }
         // sys_platform, e.g. `sys_platform != "win32"`.
-        if marker.contains("sys_platform") {
+        if atom.contains("sys_platform") {
             // We are always on Linux here.
-            return !marker.contains("win32") || marker.contains("!=");
+            return !atom.contains("win32") || atom.contains("!=");
         }
         true
+    }
+
+    /// Evaluate a marker for the leftover-requirements check.
+    ///
+    /// Unlike [`Self::marker_holds`], the reference does not skip
+    /// extra-marked requirements here: it evaluates the marker with the
+    /// full PEP 508 environment. `extra` is never provided, so
+    /// `extra == "..."` is false and `extra != "..."` is true
+    /// (verified against `packaging.markers`).
+    fn marker_holds_leftover(marker: &str, python_version: &str) -> bool {
+        // Substitute extra comparisons with their truth values, then
+        // evaluate the boolean combination.
+        let extra_eq = Regex::new(r#"extra\s*==\s*["'][^"']*["']"#).expect("static regex");
+        let extra_ne = Regex::new(r#"extra\s*!=\s*["'][^"']*["']"#).expect("static regex");
+        let substituted = extra_eq.replace_all(marker, "false");
+        let substituted = extra_ne.replace_all(&substituted, "true");
+        let substituted = substituted.into_owned();
+        Self::eval_marker_expr(&substituted, python_version)
+    }
+
+    /// Evaluate a boolean marker expression with `and`/`or`/`not` over the
+    /// single comparisons [`Self::marker_atom_holds`] understands, plus the
+    /// `true`/`false` literals substituted for `extra` comparisons.
+    fn eval_marker_expr(expr: &str, python_version: &str) -> bool {
+        let expr = expr.trim();
+        // Strip one layer of outer parentheses.
+        if expr.starts_with('(') && expr.ends_with(')') {
+            return Self::eval_marker_expr(&expr[1..expr.len() - 1], python_version);
+        }
+        // `or` binds loosest.
+        if let Some(idx) = find_top_level(expr, "or") {
+            return Self::eval_marker_expr(&expr[..idx], python_version)
+                || Self::eval_marker_expr(&expr[idx + 2..], python_version);
+        }
+        // Then `and`.
+        if let Some(idx) = find_top_level(expr, "and") {
+            return Self::eval_marker_expr(&expr[..idx], python_version)
+                && Self::eval_marker_expr(&expr[idx + 3..], python_version);
+        }
+        // `not` prefix.
+        if let Some(rest) = expr.strip_prefix("not ") {
+            return !Self::eval_marker_expr(rest, python_version);
+        }
+        let expr = expr.trim();
+        if expr == "true" {
+            return true;
+        }
+        if expr == "false" {
+            return false;
+        }
+        Self::marker_atom_holds(expr, python_version)
     }
 
     /// The `python_version` marker environment, mirroring the reference:
@@ -413,10 +515,12 @@ impl PythonCheck {
         }
 
         // Leftover requirements: python-foo in RPM requires with no match.
+        // Extra markers are evaluated here, not skipped: the reference
+        // runs the full PEP 508 environment over them.
         let mut wanted: Vec<String> = Vec::new();
         for req in reqs {
             if let Some(m) = &req.marker
-                && !Self::marker_holds(m, python_version)
+                && !Self::marker_holds_leftover(m, python_version)
             {
                 continue;
             }
@@ -475,6 +579,36 @@ mod tests {
         // `foo` has an extra marker, which marker_holds rejects.
         assert!(reqs.iter().any(|r| r.name == "foo"));
         assert!(!PythonCheck::marker_holds("extra == \"test\"", "3.12"));
+    }
+
+    #[test]
+    fn leftover_extra_markers_are_evaluated_not_skipped() {
+        // The reference evaluates markers in the leftover-requirements path;
+        // `extra` is never provided, so `==` is false and `!=` is true
+        // (verified against `packaging.markers`).
+        assert!(!PythonCheck::marker_holds_leftover(
+            "extra == \"test\"",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_holds_leftover(
+            "extra != \"test\"",
+            "3.12"
+        ));
+        // Boolean combinations.
+        assert!(!PythonCheck::marker_holds_leftover(
+            "python_version > \"3.8\" and extra == \"test\"",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_holds_leftover(
+            "python_version > \"3.8\" and extra != \"test\"",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_holds_leftover(
+            "python_version < \"3.8\" or extra != \"test\"",
+            "3.12"
+        ));
+        // Missing-require path still skips extra markers entirely.
+        assert!(!PythonCheck::marker_holds("extra != \"test\"", "3.12"));
     }
 
     #[test]
