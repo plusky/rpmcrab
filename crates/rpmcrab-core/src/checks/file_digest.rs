@@ -2199,6 +2199,26 @@ hash = "deadbeef"
     }
 
     #[test]
+    fn md5_and_sha1_hash_correctly() {
+        // Actually hash known content through new_hasher: md5("hello") and
+        // sha1("hello") must match the reference values, proving the
+        // hasher wiring is correct, not just that config loads.
+        use sha2::Digest as _;
+        let mut md5 = new_hasher("md5").expect("md5 hasher");
+        md5.update(b"hello");
+        assert_eq!(
+            hex::encode(md5.finalize()),
+            "5d41402abc4b2a76b9719d911017c592"
+        );
+        let mut sha1 = new_hasher("sha1").expect("sha1 hasher");
+        sha1.update(b"hello");
+        assert_eq!(
+            hex::encode(sha1.finalize()),
+            "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "absolute path expected")]
     fn relative_location_panics() {
         let config = config_with_locations("\"etc/pam.d\"");
