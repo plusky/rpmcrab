@@ -337,8 +337,8 @@ There is no severity→badness table. Per-check via `[Scoring]`
 int(Scoring[check])`, and the level is **remapped in both directions** — to `E`
 when badness > 0, **and downgraded from `E` to `W` when the configured badness
 is 0**. If the check is not in `Scoring`: `E` → badness 1, `W`/`I` → badness 0.
-`--strict` then forces the level to `E` and increments the promoted counter but
-does **not** add badness. `BadnessThreshold` default is `-1` (abort branch
+`--strict` then forces the level to `E` and increments the promoted counter.
+The default badness is computed **after** promotion (`filter.py:139-140`), so a strict-promoted warning scores the default error badness of 1. `BadnessThreshold` default is `-1` (abort branch
 dead); openSUSE sets `999`.
 
 ### 4.10 CLI flags
