@@ -385,6 +385,108 @@ def filelist_messages(pkgdir):
     return re.findall(r'^\s*Message\s*=\s*"([^"]+)"', text, re.M)
 
 
+
+def rust_filelist_messages(port_dir):
+    """All Message values from the port's FilelistCheck.toml.
+
+    The Rust FilelistCheck reads its rules from an embedded TOML
+    (include_str!("../../data/FilelistCheck.toml")); the `rule.message`
+    values are the finding names it emits.
+    """
+    # port_dir is crates/rpmcrab-core/src/checks; the TOML lives at
+    # crates/rpmcrab-core/data/FilelistCheck.toml (include_str!("../../data/..."))
+    import os as _os
+    toml_path = _os.path.join(
+        _os.path.dirname(_os.path.dirname(port_dir)), "data", "FilelistCheck.toml")
+    try:
+        text = _read(toml_path)
+    except OSError:
+        return []
+    return re.findall(r'^\s*Message\s*=\s*"([^"]+)"', text, re.M)
+
+def fn_err_literals(src, fn_name):
+    """String literals in Err("...") within the named Rust function.
+
+    For `match Self::f(...) { Err(x) => add_info(..., x, ...) }` sites where
+    the finding flows through a Result's error value.
+    """
+    # Find fn <name>(
+    m = re.search(r"fn\s+" + re.escape(fn_name) + r"\s*\(", src)
+    if not m:
+        return []
+    # Find the opening brace of the body
+    brace = src.find("{", m.end())
+    if brace == -1:
+        return []
+    depth = 0
+    end = brace
+    for i in range(brace, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    body = src[brace:end + 1]
+    # Find Err("literal") and Err((level, "literal", ...)) tuple forms.
+    found = re.findall(r"Err\(\s*\"([^\"]+)\"", body)
+    # Tuple form: Err((Level::Error, "name", ...)) - second element
+    for m in re.finditer(r"Err\(\s*\(\s*[\w:]+\s*,\s*\"([^\"]+)\"", body):
+        found.append(m.group(1))
+    # Bare tuple return: (Level::Error, "name", ...) - second element
+    for m in re.finditer(r"\(\s*Level::[\w]+\s*,\s*\"([^\"]+)\"", body):
+        if m.group(1) not in found:
+            found.append(m.group(1))
+    return found
+
+
+def fn_push_literals(src, fn_name):
+    """String literals in out.push("...") within the named Rust function.
+
+    For sites where findings accumulate in a Vec via push.
+    """
+    m = re.search(r"fn\s+" + re.escape(fn_name) + r"\s*\(", src)
+    if not m:
+        return []
+    brace = src.find("{", m.end())
+    if brace == -1:
+        return []
+    depth = 0
+    end = brace
+    for i in range(brace, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    body = src[brace:end + 1]
+    found = re.findall(r"\.push\(\s*\"([^\"]+)\"", body)
+    return found
+
+def _fn_body_literals(src, fn_name):
+    """All quoted string literals in the named function body."""
+    m = re.search(r"fn\s+" + re.escape(fn_name) + r"\s*\(", src)
+    if not m:
+        return []
+    brace = src.find("{", m.end())
+    if brace == -1:
+        return []
+    depth = 0
+    end = brace
+    for i in range(brace, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    body = src[brace:end + 1]
+    return re.findall(r"\"([^\"]+)\"", body)
+
 def script_tags(pkgdir):
     """The '%pre'/'%post'/... tags: third elements of Pkg.SCRIPT_TAGS.
 
@@ -1326,6 +1428,55 @@ def resolve_rs_name(expr, src, seen=None, scope=None, call_pos=None,
                                          scope, call_pos, scope_off)
             if ok:
                 return t, True
+    if e.startswith("match "):
+        # match x { pat => EXPR, ... }: resolve each arm's expression.
+        # Find the brace-enclosed body, then split arms on top-level commas.
+        mbody = re.search(r"\{", e)
+        if not mbody:
+            return set(), False
+        depth = 0
+        start = mbody.start()
+        end = start
+        for i in range(start, len(e)):
+            if e[i] == "{":
+                depth += 1
+            elif e[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if depth != 0:
+            return set(), False
+        body = e[start + 1:end]
+        # Split on top-level commas to get arms.
+        arms = []
+        depth = 0
+        cur = ""
+        for ch in body:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            if ch == "," and depth == 0:
+                arms.append(cur)
+                cur = ""
+            else:
+                cur += ch
+        if cur.strip():
+            arms.append(cur)
+        out = set()
+        for arm in arms:
+            if "=>" not in arm:
+                continue
+            rhs = arm.split("=>", 1)[1].strip()
+            t, ok = resolve_rs_name(rhs, src, seen, scope,
+                                    scope_off=scope_off)
+            if not ok:
+                return set(), False
+            out.update(t)
+        if out:
+            return out, True
+        return set(), False
     if e.startswith("if "):
         # if cond { A } else { B }
         parts = re.findall(r"\{([^{}]*)\}", e)
@@ -2056,6 +2207,33 @@ def audit_port(checks_dir):
                 else:
                     unresolved.append((fn, lineno, "(missing name arg)"))
                 continue
+            # filelist.rs emits via rule.message, populated from the
+            # embedded FilelistCheck.toml; resolve statically.
+            arg = args[idx].strip()
+            if fn == "filelist.rs" and arg in ("rule.message", "&rule.message"):
+                msgs = rust_filelist_messages(os.path.dirname(path))
+                if msgs:
+                    templates.update(msgs)
+                    continue
+            # Dynamic emission sites: resolve via the producing function.
+            # (file, variable) -> (function, extractor)
+            dynamic_sites = {
+                ("alternatives.rs", "finding"): ("check_post_phase", fn_err_literals),
+                ("bashisms.rs", "warning"): ("classify_bashisms", fn_push_literals),
+                ("menu_xdg.rs", "finding"): ("parse_desktop", fn_err_literals),
+                ("systemd_install.rs", "finding"): ("check_unit", None),
+            }
+            site_key = (fn, arg)
+            if site_key in dynamic_sites:
+                func_name, extractor = dynamic_sites[site_key]
+                if extractor is not None:
+                    found = extractor(src, func_name)
+                else:
+                    # check_unit: literals in the function body
+                    found = _fn_body_literals(src, func_name)
+                if found:
+                    templates.update(found)
+                    continue
             t, ok = resolve_rs_name(args[idx], src,
                                      scope=scope,
                                      call_pos=coff,
