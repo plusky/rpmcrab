@@ -534,7 +534,7 @@ since = "0.1.0"
 case = "global"
 check = "FileDigestCheck"
 kind = "limitation"
-reason = "Only the SHA-2 family (`sha224`, `sha256`, `sha384`, `sha512`) is implemented; the reference's `hashlib.new()` accepts any algorithm hashlib knows. Anything else fails the run at configuration load. Latent: the shipped whitelists use only `sha256` and `skip`."
+reason = "MD5, SHA-1 and the SHA-2 family are implemented; the reference's `hashlib.new()` accepts any algorithm hashlib knows (e.g. SHA3, BLAKE2). Anything else fails the run at configuration load. Latent: the shipped whitelists use only `sha256` and `skip`."
 since = "0.1.0"
 
 [[divergence]]

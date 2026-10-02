@@ -16,6 +16,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
 use indexmap::IndexMap;
+use md5::Md5;
+use sha1::Sha1;
 use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};
 
 use crate::check::{Check, add_info};
@@ -243,11 +245,13 @@ impl VarlinkServiceCheck {
 
 /// Create a hasher for the named algorithm.
 ///
-/// Only the SHA-2 family is implemented; anything else (md5, sha1, …) fails
+/// MD5, SHA-1 and the SHA-2 family are implemented; anything else fails
 /// the run at configuration load, like the reference's `hashlib.new` raising
 /// on an unknown name. See the parity ledger.
 fn new_hasher(algorithm: &str) -> Result<Box<dyn DynDigest>, String> {
     match algorithm {
+        "md5" => Ok(Box::new(Md5::new())),
+        "sha1" => Ok(Box::new(Sha1::new())),
         "sha224" => Ok(Box::new(Sha224::new())),
         "sha256" => Ok(Box::new(Sha256::new())),
         "sha384" => Ok(Box::new(Sha384::new())),
@@ -275,6 +279,8 @@ macro_rules! impl_dyn_digest {
     };
 }
 
+impl_dyn_digest!(Md5);
+impl_dyn_digest!(Sha1);
 impl_dyn_digest!(Sha224);
 impl_dyn_digest!(Sha256);
 impl_dyn_digest!(Sha384);
@@ -2169,12 +2175,27 @@ hash = "deadbeef"
     #[test]
     #[should_panic(expected = "unsupported digest algorithm")]
     fn digest_entry_with_unknown_algorithm_panics() {
-        // md5 is valid for the reference's `hashlib.new` but unimplemented
+        // sha3-256 is valid for the reference's `hashlib.new` but unimplemented
         // here; the run must die at load, not misreport at check time.
         let config = test_config(
-            "[[FileDigestGroup]]\ntype = \"pam\"\npackage = \"testpkg\"\n[[FileDigestGroup.digests]]\npath = \"/etc/pam.d/login\"\nalgorithm = \"md5\"\nhash = \"deadbeef\"\n",
+            "[[FileDigestGroup]]\ntype = \"pam\"\npackage = \"testpkg\"\n[[FileDigestGroup.digests]]\npath = \"/etc/pam.d/login\"\nalgorithm = \"sha3-256\"\nhash = \"deadbeef\"\n",
         );
         let _ = FileDigestCheck::new(&config);
+    }
+
+    #[test]
+    fn md5_and_sha1_are_supported() {
+        // md5 and sha1 are valid for the reference's `hashlib.new` and now
+        // implemented here; the run must not die at load.
+        for algorithm in ["md5", "sha1"] {
+            let config = test_config(&format!(
+                "[[FileDigestGroup]]\ntype = \"pam\"\npackage = \"testpkg\"\n[[FileDigestGroup.digests]]\npath = \"/etc/pam.d/login\"\nalgorithm = \"{algorithm}\"\nhash = \"deadbeef\"\n",
+            ));
+            let check = FileDigestCheck::new(&config);
+            assert_eq!(check.digest_groups.len(), 1);
+            assert_eq!(check.digest_groups[0].digests.len(), 1);
+            assert_eq!(check.digest_groups[0].digests[0].algorithm, algorithm);
+        }
     }
 
     #[test]
