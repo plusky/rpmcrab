@@ -7,8 +7,7 @@
 //! the same when the tools exist and skips the file (debug-logged) when they
 //! do not, rather than crashing at init like the reference.
 
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::Path;
 
 use crate::check::{Check, add_info};
 use crate::config::Config;
@@ -16,66 +15,58 @@ use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::pkg::pkgfile::is_reg;
+use crate::tools::{Tool, ToolSource, test_source};
 
 pub struct BashismsCheck {
+    dash: Tool,
+    checkbashisms: Tool,
     use_early_fail: bool,
-    have_tools: bool,
     checked_files: usize,
-    tool_dir: Option<PathBuf>,
 }
 
 impl BashismsCheck {
     pub fn new(_config: &Config) -> Self {
-        Self::with_tool_dir(None)
+        Self::with_tool_source(ToolSource::Path)
     }
 
-    /// Probe `bin_dir` for the tools and invoke them from there as well, so
-    /// tests can drive the whole check against fake tools. `None` probes and
-    /// invokes via the real `PATH`.
-    pub fn with_tool_dir(bin_dir: Option<&std::path::Path>) -> Self {
-        let tool_dir = bin_dir.map(|p| p.to_path_buf());
-        let (have_tools, use_early_fail) = Self::detect_tools(tool_dir.as_deref());
+    /// Probe for `dash` and `checkbashisms` under `source`. The reference
+    /// crashes when `checkbashisms` is absent; we degrade to a no-op check
+    /// instead.
+    pub fn with_tool_source(source: ToolSource) -> Self {
+        let (dash, _) = Tool::probe(&source, "dash", &["--version"]);
+        let (checkbashisms, help) = Tool::probe(&source, "checkbashisms", &["--help"]);
+        // The `--early-fail` option speeds the check up; detect it from the
+        // probe output instead of spawning twice.
+        let use_early_fail = help
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout).into_owned()
+                    + &String::from_utf8_lossy(&o.stderr)
+            })
+            .map(|text| text.contains("[-e]"))
+            .unwrap_or(false);
         Self {
+            dash,
+            checkbashisms,
             use_early_fail,
-            have_tools,
             checked_files: 0,
-            tool_dir,
         }
     }
 
-    fn command(tool_dir: &Option<PathBuf>, name: &str) -> Command {
-        match tool_dir {
-            Some(dir) => Command::new(dir.join(name)),
-            None => Command::new(name),
-        }
+    /// Test entry point: `None` probes the live `PATH`, `Some(dir)`
+    /// resolves both tools under `dir`, so tests can drive the whole check
+    /// against fake tools without mutating the process environment.
+    pub fn with_tool_dir(bin_dir: Option<&Path>) -> Self {
+        Self::with_tool_source(test_source(bin_dir))
     }
 
-    fn tool(&self, name: &str) -> Command {
-        Self::command(&self.tool_dir, name)
+    /// `(have_tools, use_early_fail)`, kept for the probe tests.
+    pub fn detect_tools(bin_dir: Option<&Path>) -> (bool, bool) {
+        let check = Self::with_tool_dir(bin_dir);
+        (check.have_tools(), check.use_early_fail)
     }
 
-    /// Probe for `dash` and `checkbashisms`. The reference crashes here when
-    /// `checkbashisms` is absent; we degrade to a no-op check instead.
-    ///
-    /// `bin_dir` overrides PATH resolution so tests can point the probe at
-    /// a scratch directory instead of mutating the process environment.
-    pub fn detect_tools(bin_dir: Option<&std::path::Path>) -> (bool, bool) {
-        let tool_dir = bin_dir.map(|p| p.to_path_buf());
-        let dash = Self::command(&tool_dir, "dash")
-            .arg("--version")
-            .output()
-            .is_ok();
-        let help = Self::command(&tool_dir, "checkbashisms")
-            .arg("--help")
-            .output();
-        match help {
-            Ok(out) => {
-                let text = String::from_utf8_lossy(&out.stdout).into_owned()
-                    + &String::from_utf8_lossy(&out.stderr);
-                (dash, text.contains("[-e]"))
-            }
-            Err(_) => (false, false),
-        }
+    fn have_tools(&self) -> bool {
+        self.dash.is_present() && self.checkbashisms.is_present()
     }
 
     /// The warnings for one script file: `bin-sh-syntax-error` and/or
@@ -99,20 +90,24 @@ impl BashismsCheck {
 
     /// Run the tools and classify their exit codes.
     fn check_bashisms(&self, path: &str) -> Vec<&'static str> {
-        let dash_code = self
-            .tool("dash")
-            .args(["-n", path])
-            .env("LC_ALL", "C")
-            .output()
-            .ok()
-            .and_then(|o| o.status.code());
-        let mut cmd = self.tool("checkbashisms");
+        let dash_code = self.run_dash(path);
+        let bashisms_code = self.run_checkbashisms(path);
+        Self::classify_bashisms(dash_code, bashisms_code)
+    }
+
+    fn run_dash(&self, path: &str) -> Option<i32> {
+        let mut cmd = self.dash.command()?;
+        cmd.args(["-n", path]).env("LC_ALL", "C");
+        cmd.output().ok()?.status.code()
+    }
+
+    fn run_checkbashisms(&self, path: &str) -> Option<i32> {
+        let mut cmd = self.checkbashisms.command()?;
         cmd.arg(path).env("LC_ALL", "C");
         if self.use_early_fail {
             cmd.arg("-e");
         }
-        let bashisms_code = cmd.output().ok().and_then(|o| o.status.code());
-        Self::classify_bashisms(dash_code, bashisms_code)
+        cmd.output().ok()?.status.code()
     }
 }
 
@@ -122,7 +117,7 @@ impl Check for BashismsCheck {
     }
 
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
-        if !self.have_tools {
+        if !self.have_tools() {
             log::debug!("BashismsCheck: dash/checkbashisms not found, skipping");
             return;
         }

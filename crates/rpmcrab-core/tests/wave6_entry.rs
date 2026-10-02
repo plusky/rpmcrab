@@ -272,7 +272,8 @@ fn filelist_reports_absolute_bad_patterns() {
 /// valid one passes.
 #[test]
 fn appdata_native_check_flags_malformed_file() {
-    let mut check = AppDataCheck::with_tool(None);
+    let empty = tempfile::tempdir().unwrap();
+    let mut check = AppDataCheck::with_tool_dir(Some(empty.path()));
     let results = run_check(&mut check, "w6-appdata-1.0-1.noarch.rpm");
     assert_findings(
         &results,
@@ -296,7 +297,7 @@ fn appdata_injected_tool_is_honored() {
         "appstream-util",
         "python3 -c 'import sys, xml.dom.minidom; xml.dom.minidom.parse(sys.argv[1])' \"$3\" 2>/dev/null",
     );
-    let mut check = AppDataCheck::with_tool(Some(dir.path().join("appstream-util")));
+    let mut check = AppDataCheck::with_tool_dir(Some(dir.path()));
     let results = run_check(&mut check, "w6-appdata-1.0-1.noarch.rpm");
     assert_findings(
         &results,
@@ -374,7 +375,8 @@ fn polkit_reports_privilege_findings() {
 /// dispatch list, so `check_file` never runs for one.
 #[test]
 fn appdata_ghost_file_is_not_validated() {
-    let mut check = AppDataCheck::with_tool(None);
+    let empty = tempfile::tempdir().unwrap();
+    let mut check = AppDataCheck::with_tool_dir(Some(empty.path()));
     let results = run_check_with_ghost(
         &mut check,
         "w6-appdata-1.0-1.noarch.rpm",

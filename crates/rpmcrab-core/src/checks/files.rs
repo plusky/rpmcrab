@@ -22,6 +22,7 @@ use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::pkg::pkgfile::{self, PkgFile};
+use crate::tools::{Tool, ToolSource, test_source};
 
 fn man_regex() -> Regex {
     Regex::new(r"/man(?:\d[px]?|n)/").expect("static regex")
@@ -266,6 +267,8 @@ pub struct FilesCheck {
     dangling_exceptions: Vec<(String, Regex)>,
     ldconfig_re: Regex,
     python_default_version: String,
+    /// Probed `gzip`, `bzip2`, `xz`, `zstd`, in that order.
+    decompressors: [Tool; 4],
 }
 
 /// Whether `script` contains a depmod call for `kernel_version`, replicating
@@ -330,6 +333,11 @@ fn depmod_call_for_kernel(script: &str, kernel_version: &str) -> bool {
 
 impl FilesCheck {
     pub fn new(config: &Config) -> Self {
+        Self::with_tool_source(config, ToolSource::Path)
+    }
+
+    /// Probe for the decompressor tools under `source`.
+    pub fn with_tool_source(config: &Config, source: ToolSource) -> Self {
         let tbl = &config.configuration;
         let get_str = |k: &str| {
             tbl.get(k)
@@ -430,7 +438,16 @@ impl FilesCheck {
             dangling_exceptions: dangling,
             ldconfig_re: Regex::new(r"(?m)^[^#]*ldconfig").expect("static regex"),
             python_default_version: get_str("PythonDefaultVersion"),
+            decompressors: ["gzip", "bzip2", "xz", "zstd"]
+                .map(|name| Tool::probe(&source, name, &[]).0),
         }
+    }
+
+    /// Test entry point: `None` probes the live `PATH`, `Some(dir)`
+    /// resolves the tools under `dir` instead of mutating the process
+    /// environment.
+    pub fn with_tool_dir(config: &Config, bin_dir: Option<&std::path::Path>) -> Self {
+        Self::with_tool_source(config, test_source(bin_dir))
     }
 }
 
@@ -911,30 +928,42 @@ fn dep_name_matches(dep: &str, name: &str) -> bool {
         && bits.chars().all(|c| c.is_ascii_digit())
 }
 
-/// rpmlint's `is_utf8`: strict UTF-8, transparently decompressing the
-/// compression formats the reference knows. A failed decompression reads as
-/// UTF-8, matching the reference's `except OSError: return True`.
-fn is_utf8_file(fname: &str, path: &str) -> bool {
-    let lower = fname.to_lowercase();
-    let decompressor = if lower.ends_with(".gz") || lower.ends_with(".z") {
-        Some("gzip")
-    } else if lower.ends_with(".bz2") {
-        Some("bzip2")
-    } else if lower.ends_with(".xz") || lower.ends_with(".lzma") {
-        Some("xz")
-    } else if lower.ends_with(".zst") {
-        Some("zstd")
-    } else {
-        None
-    };
-    match decompressor {
-        Some(tool) => std::process::Command::new(tool)
-            .arg("-dc")
-            .arg(path)
-            .output()
-            .map(|o| !o.status.success() || is_utf8(&o.stdout))
-            .unwrap_or(true),
-        None => std::fs::read(path).map(|b| is_utf8(&b)).unwrap_or(true),
+impl FilesCheck {
+    /// The probed decompressor for `fname`'s extension, if any.
+    fn decompressor_for(&self, fname: &str) -> Option<&Tool> {
+        let lower = fname.to_lowercase();
+        let name = if lower.ends_with(".gz") || lower.ends_with(".z") {
+            "gzip"
+        } else if lower.ends_with(".bz2") {
+            "bzip2"
+        } else if lower.ends_with(".xz") || lower.ends_with(".lzma") {
+            "xz"
+        } else if lower.ends_with(".zst") {
+            "zstd"
+        } else {
+            return None;
+        };
+        self.decompressors.iter().find(|t| t.name() == name)
+    }
+
+    /// rpmlint's `is_utf8`: strict UTF-8, transparently decompressing the
+    /// compression formats the reference knows. A failed decompression reads
+    /// as UTF-8, matching the reference's `except OSError: return True`; an
+    /// absent tool reads the raw bytes the same way.
+    fn is_utf8_file(&self, fname: &str, path: &str) -> bool {
+        match self.decompressor_for(fname) {
+            Some(tool) => {
+                let Some(mut cmd) = tool.command() else {
+                    return std::fs::read(path).map(|b| is_utf8(&b)).unwrap_or(true);
+                };
+                cmd.arg("-dc")
+                    .arg(path)
+                    .output()
+                    .map(|o| !o.status.success() || is_utf8(&o.stdout))
+                    .unwrap_or(true)
+            }
+            None => std::fs::read(path).map(|b| is_utf8(&b)).unwrap_or(true),
+        }
     }
 }
 
@@ -2483,7 +2512,7 @@ impl FilesCheck {
             // We check only doc text files for UTF-8-ness;
             // checking everything may be slow and can generate
             // lots of unwanted noise.
-            if !is_utf8_file(fname, &pkgfile.path) {
+            if !self.is_utf8_file(fname, &pkgfile.path) {
                 add_info(out, Level::Warning, pkg, "file-not-utf8", &[fname]);
             }
         }
@@ -2507,7 +2536,7 @@ impl FilesCheck {
         if !fd.istext && is_doc && !fd.chunk.is_empty() && is_match(&self.compr_re, fname) {
             // compressed docs, eg. info and man files etc
             let base = self.compr_re.replace(fname, "").to_string();
-            if !is_match(&self.skipdocs_re, &base) && !is_utf8_file(fname, &pkgfile.path) {
+            if !is_match(&self.skipdocs_re, &base) && !self.is_utf8_file(fname, &pkgfile.path) {
                 add_info(out, Level::Warning, pkg, "file-not-utf8", &[fname]);
             }
         }

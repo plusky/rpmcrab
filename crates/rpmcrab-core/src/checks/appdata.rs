@@ -8,8 +8,7 @@
 //! does the same: subprocess when available, otherwise a native well-formed
 //! XML check (no new dependency).
 
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::Path;
 
 use fancy_regex::Regex;
 
@@ -19,21 +18,25 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
+use crate::tools::{Tool, ToolSource, test_source};
 
 pub struct AppDataCheck {
     file_regex: Regex,
     checked_files: usize,
-    tool: Option<PathBuf>,
+    tool: Tool,
 }
 
 impl AppDataCheck {
     pub fn new(_config: &Config) -> Self {
-        Self::with_tool(Self::probe_tool())
+        Self::with_tool_source(ToolSource::Path)
     }
 
-    /// Use the given `appstream-util` binary, or `None` for the native
-    /// well-formedness fallback only.
-    pub fn with_tool(tool: Option<PathBuf>) -> Self {
+    /// Resolve `appstream-util` under `source`. Tests pass
+    /// `ToolSource::Dir` pointing at a scratch dir: a fake named
+    /// `appstream-util` there is used, an empty dir forces the native
+    /// well-formedness fallback.
+    pub fn with_tool_source(source: ToolSource) -> Self {
+        let (tool, _) = Tool::probe(&source, "appstream-util", &["--version"]);
         Self {
             // The reference passes this to AbstractFilesCheck, which applies it
             // with `re.match` (AbstractCheck.py:45), so it is anchored at the
@@ -48,12 +51,10 @@ impl AppDataCheck {
         }
     }
 
-    /// Resolve `appstream-util` via `PATH`; `None` when absent.
-    fn probe_tool() -> Option<PathBuf> {
-        match Command::new("appstream-util").arg("--version").output() {
-            Ok(_) => Some(PathBuf::from("appstream-util")),
-            Err(_) => None,
-        }
+    /// Test entry point: `None` probes the live `PATH`, `Some(dir)`
+    /// resolves `appstream-util` under `dir`.
+    pub fn with_tool_dir(dir: Option<&Path>) -> Self {
+        Self::with_tool_source(test_source(dir))
     }
 
     /// Minimal XML well-formedness check: balanced tags, single root.
@@ -149,14 +150,13 @@ impl AppDataCheck {
     /// Validate one file: the configured `appstream-util` when present,
     /// else well-formedness.
     fn validate(&self, path: &str) -> bool {
-        if let Some(tool) = &self.tool {
+        if let Some(mut cmd) = self.tool.command() {
             // The reference builds `self.cmd + f` and calls `cmd.split()`,
             // so a path containing whitespace is split into several argv
             // elements.
-            let cmd = format!("{} validate-relax --nonet {path}", tool.display());
-            let argv: Vec<&str> = cmd.split_whitespace().collect();
-            if let Ok(o) = Command::new(argv[0])
-                .args(&argv[1..])
+            let args = format!("validate-relax --nonet {path}");
+            if let Ok(o) = cmd
+                .args(args.split_whitespace())
                 .env("LC_ALL", "C")
                 .output()
             {

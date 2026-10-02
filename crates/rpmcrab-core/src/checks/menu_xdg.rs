@@ -12,7 +12,6 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Command;
 
 use fancy_regex::Regex;
 
@@ -22,6 +21,7 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
+use crate::tools::{Tool, ToolSource, test_source};
 
 const STANDARD_BIN_DIRS: [&str; 4] = ["/bin", "/sbin", "/usr/bin", "/usr/sbin"];
 
@@ -33,16 +33,31 @@ type ParseError = (Level, &'static str, Vec<String>);
 pub struct MenuXDGCheck {
     file_regex: Regex,
     checked_files: usize,
+    validator: Tool,
 }
 
 impl MenuXDGCheck {
     pub fn new(_config: &Config) -> Self {
+        Self::with_tool_source(ToolSource::Path)
+    }
+
+    /// Probe for `desktop-file-validate` under `source`.
+    pub fn with_tool_source(source: ToolSource) -> Self {
+        let (validator, _) = Tool::probe(&source, "desktop-file-validate", &[]);
         Self {
             // AbstractCheck.py:45 applies this with `re.match`; is_match
             // searches, so anchor it explicitly.
             file_regex: Regex::new(r"^/usr/share/applications/.*\.desktop$").expect("static regex"),
             checked_files: 0,
+            validator,
         }
+    }
+
+    /// Test entry point: `None` probes the live `PATH`, `Some(dir)`
+    /// resolves the tool under `dir` instead of mutating the process
+    /// environment.
+    pub fn with_tool_dir(bin_dir: Option<&Path>) -> Self {
+        Self::with_tool_source(test_source(bin_dir))
     }
 
     /// Parse a desktop file like `configparser.RawConfigParser`.
@@ -123,11 +138,11 @@ impl MenuXDGCheck {
     }
 
     /// `desktop-file-validate` output, when the tool exists.
-    fn external_validate(path: &str) -> Vec<String> {
-        let out = Command::new("desktop-file-validate")
-            .arg(path)
-            .env("LC_ALL", "C")
-            .output();
+    fn external_validate(&self, path: &str) -> Vec<String> {
+        let Some(mut cmd) = self.validator.command() else {
+            return Vec::new();
+        };
+        let out = cmd.arg(path).env("LC_ALL", "C").output();
         let Ok(out) = out else { return Vec::new() };
         if out.status.success() {
             return Vec::new();
@@ -186,7 +201,7 @@ impl Check for MenuXDGCheck {
                 continue;
             }
             self.checked_files += 1;
-            for error in Self::external_validate(&pkgfile.path) {
+            for error in self.external_validate(&pkgfile.path) {
                 if error.is_empty() {
                     add_info(out, Level::Error, pkg, "invalid-desktopfile", &[filename]);
                 } else {

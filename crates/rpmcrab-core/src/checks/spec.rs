@@ -22,7 +22,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use fancy_regex::Regex;
 
@@ -34,6 +34,7 @@ use crate::level::Level;
 use crate::pkg::dep::{has_forbidden_controlchars, has_forbidden_controlchars_deps, parse_deps};
 use crate::pkg::spec::{self, SpecPkg};
 use crate::pkg::{Pkg, init as pkg_init};
+use crate::tools::{Tool, ToolSource, test_source};
 
 /// `re_tag_compile`: `^{tag}\s*:\s*(\S.*?)\s*$`, case-insensitive.
 fn tag_re(tag: &str) -> Regex {
@@ -423,6 +424,8 @@ pub struct SpecCheck {
     section_res: Vec<(String, Regex)>,
     deprecated_grep_re: Regex,
     hardcoded_library_path_re: Regex,
+    /// Required: spec parsing shells out to `rpm`.
+    rpm: Tool,
     depscript_override_re: Regex,
     depgen_disable_re: Regex,
     patch_fuzz_override_re: Regex,
@@ -481,6 +484,13 @@ impl SpecCheck {
     /// Build the check from the config (`ValidGroups`,
     /// `HardcodedLibPathExceptions`, `mini_mode`).
     pub fn new(config: &Config) -> Self {
+        Self::with_tool_source(config, ToolSource::Path)
+    }
+
+    /// Probe for the required `rpm` tool under `source`. `rpm` is
+    /// mandatory for spec parsing, so absence fails here with a clear
+    /// message instead of deep inside the check.
+    pub fn with_tool_source(config: &Config, source: ToolSource) -> Self {
         let valid_groups = config
             .configuration
             .get("ValidGroups")
@@ -581,7 +591,24 @@ impl SpecCheck {
             current_package: None,
             package_noarch: BTreeMap::new(),
             spec_only: false,
+            rpm: Self::probe_rpm(&source),
         }
+    }
+
+    /// Test entry point: `None` probes the live `PATH`, `Some(dir)`
+    /// resolves `rpm` under `dir` instead of mutating the process
+    /// environment.
+    pub fn with_tool_dir(config: &Config, bin_dir: Option<&std::path::Path>) -> Self {
+        Self::with_tool_source(config, test_source(bin_dir))
+    }
+
+    fn probe_rpm(source: &ToolSource) -> Tool {
+        let (rpm, _) = Tool::probe(source, "rpm", &["--version"]);
+        assert!(
+            rpm.is_present(),
+            "SpecCheck requires the 'rpm' tool, but it could not be executed"
+        );
+        rpm
     }
 
     /// `output.add_info` for spec findings: the line is the package's
@@ -805,7 +832,11 @@ impl SpecCheck {
     fn check_specfile_error(&self, pkg: &SpecPkg, out: &mut Filter) {
         let spec_file = self.spec_file.as_deref().unwrap_or("");
         let define = format!("_sourcedir {}", self.spec_file_dir());
-        let output = Command::new("rpm")
+        let mut cmd = self
+            .rpm
+            .command()
+            .expect("rpm was probed present when SpecCheck was constructed");
+        let output = cmd
             .args(["-q", "--qf=", "-D", &define, "--specfile", spec_file])
             .env("LC_ALL", "en_US.UTF-8")
             .env("LANGUAGE", "en_US")
@@ -1954,5 +1985,13 @@ make install
             url_scheme_netloc("obs://build/foo"),
             (Some("obs"), Some("build"))
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "requires the 'rpm' tool")]
+    fn spec_check_fails_fast_without_rpm() {
+        let empty = tempfile::TempDir::new().expect("tmpdir");
+        let config = Config::default();
+        let _ = SpecCheck::with_tool_dir(&config, Some(empty.path()));
     }
 }

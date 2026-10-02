@@ -26,6 +26,7 @@ pub mod pkg;
 pub mod report;
 pub mod spellcheck;
 pub mod term;
+pub mod tools;
 pub mod worker;
 
 /// The crate version, used for the program's version line.

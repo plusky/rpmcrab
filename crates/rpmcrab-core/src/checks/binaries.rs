@@ -9,7 +9,6 @@
 #![allow(clippy::collapsible_if)]
 
 use std::path::Path;
-use std::process::Command;
 
 use fancy_regex::Regex;
 
@@ -19,6 +18,7 @@ use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::pkg::pkgfile::{self, PkgFile};
+use crate::tools::{Tool, ToolSource, test_source};
 
 fn validso_regex() -> Regex {
     Regex::new(r"(\.so\.\d+(\.\d+)*|\d\.so)$").expect("static regex")
@@ -341,15 +341,15 @@ struct StringsInfo {
 }
 
 impl StringsInfo {
-    fn parse(path: &str) -> Self {
+    fn parse(tool: &Tool, path: &str) -> Self {
         let mut info = StringsInfo {
             strings: Vec::new(),
             failed: None,
         };
-        let out = Command::new("strings")
-            .arg(path)
-            .env("LC_ALL", "C")
-            .output();
+        let Some(mut cmd) = tool.command() else {
+            return info;
+        };
+        let out = cmd.arg(path).env("LC_ALL", "C").output();
         match out {
             Ok(o) if o.status.success() => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
@@ -372,15 +372,15 @@ struct ArInfo {
 }
 
 impl ArInfo {
-    fn parse(path: &str) -> Self {
+    fn parse(tool: &Tool, path: &str) -> Self {
         let mut info = ArInfo {
             objects: Vec::new(),
             failed: None,
         };
-        let out = Command::new("ar")
-            .args(["t", path])
-            .env("LC_ALL", "C")
-            .output();
+        let Some(mut cmd) = tool.command() else {
+            return info;
+        };
+        let out = cmd.args(["t", path]).env("LC_ALL", "C").output();
         match out {
             Ok(o) if o.status.success() => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
@@ -399,6 +399,8 @@ impl ArInfo {
 
 pub struct BinariesCheck {
     checked_files: usize,
+    strings: Tool,
+    ar: Tool,
     system_lib_paths: Vec<String>,
     pie_exec_regexes: Vec<Regex>,
     usr_lib_exception_regex: Regex,
@@ -418,6 +420,11 @@ pub struct BinariesCheck {
 
 impl BinariesCheck {
     pub fn new(config: &Config) -> Self {
+        Self::with_tool_source(config, ToolSource::Path)
+    }
+
+    /// Probe for `strings` and `ar` under `source`.
+    pub fn with_tool_source(config: &Config, source: ToolSource) -> Self {
         let tbl = &config.configuration;
         let get_strings = |k: &str| -> Vec<String> {
             tbl.get(k)
@@ -437,8 +444,12 @@ impl BinariesCheck {
             .get("UsrLibBinaryException")
             .and_then(toml::Value::as_str)
             .unwrap_or_default();
+        let (strings, _) = Tool::probe(&source, "strings", &[]);
+        let (ar, _) = Tool::probe(&source, "ar", &["--version"]);
         BinariesCheck {
             checked_files: 0,
+            strings,
+            ar,
             system_lib_paths: get_strings("SystemLibPaths"),
             pie_exec_regexes,
             usr_lib_exception_regex: Regex::new(usr_lib_exception)
@@ -457,6 +468,13 @@ impl BinariesCheck {
             is_pie_exec: false,
             is_nonstandard_archive: false,
         }
+    }
+
+    /// Test entry point: `None` probes the live `PATH`, `Some(dir)`
+    /// resolves both tools under `dir` instead of mutating the process
+    /// environment.
+    pub fn with_tool_dir(config: &Config, bin_dir: Option<&std::path::Path>) -> Self {
+        Self::with_tool_source(config, test_source(bin_dir))
     }
 
     fn detect_attributes(&mut self, magic: &str) {
@@ -680,7 +698,13 @@ impl BinariesCheck {
         if pkgfile.path.ends_with(".bca") {
             return false;
         }
-        let ar = ArInfo::parse(&pkgfile.path);
+        if !self.ar.is_present() {
+            // Without `ar` the standard-ness test cannot run; assume standard
+            // so the remaining archive checks still execute.
+            log::debug!("BinariesCheck: ar not found, skipping standard-archive test");
+            return true;
+        }
+        let ar = ArInfo::parse(&self.ar, &pkgfile.path);
         if let Some(reason) = ar.failed {
             add_info(
                 out,
@@ -1238,7 +1262,11 @@ impl BinariesCheck {
         if forbidden_calls.is_empty() {
             return;
         }
-        let strings = StringsInfo::parse(&pkgfile.path);
+        if !self.strings.is_present() {
+            log::debug!("BinariesCheck: strings not found, skipping forbidden-function check");
+            return;
+        }
+        let strings = StringsInfo::parse(&self.strings, &pkgfile.path);
         if let Some(reason) = strings.failed {
             add_info(
                 out,
@@ -1645,11 +1673,18 @@ mod tests {
     }
 
     fn run_binaries_check(rpm: &str) -> (Vec<(String, String)>, tempfile::TempDir) {
+        run_binaries_check_with_tools(rpm, None)
+    }
+
+    fn run_binaries_check_with_tools(
+        rpm: &str,
+        tool_dir: Option<&std::path::Path>,
+    ) -> (Vec<(String, String)>, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().expect("tmpdir");
         let pkg = Pkg::open(std::path::Path::new(rpm), dir.path(), true).expect("open fixture");
         let config = test_config();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let mut check = BinariesCheck::new(&config);
+        let mut check = BinariesCheck::with_tool_dir(&config, tool_dir);
         check.check_binary(&pkg, &config, &mut out);
         (out.results().to_vec(), dir)
     }
@@ -1730,5 +1765,16 @@ mod tests {
         // Ledgered absences: these findings are never emitted
         assert_lacks(&results, "unused-direct-shlib-dependency");
         assert_lacks(&results, "missing-mandatory-optflags");
+    }
+
+    #[test]
+    fn binaries_check_skips_tool_subchecks_when_tools_absent() {
+        // Empty tool dir: `strings` and `ar` are absent, so their subchecks
+        // are skipped silently instead of emitting one failure per file.
+        let empty = tempfile::TempDir::new().expect("tmpdir");
+        let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
+        let (results, _dir) = run_binaries_check_with_tools(&rpm_path, Some(empty.path()));
+        assert_lacks(&results, "strings-failed");
+        assert_lacks(&results, "ar-failed");
     }
 }
