@@ -399,7 +399,11 @@ mod exit_code_tests {
     /// that unit tests on Filter.score alone do not cover.
     #[test]
     fn strict_warnings_cross_badness_threshold() {
-        let config = Config { strict: true, badness_threshold: 1, ..Default::default() };
+        let config = Config {
+            strict: true,
+            badness_threshold: 1,
+            ..Default::default()
+        };
         let mut lint = Lint::new(config, vec![], Color::for_tty(false), 80).unwrap();
         for check in ["first-warning", "second-warning"] {
             lint.filter.add_info(Finding {
