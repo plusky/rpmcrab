@@ -1,0 +1,16 @@
+kind = "captured"
+rpmlint = "2.10.0"
+reference_sha = "84848c05c5571c22274a55ff9afdfe6d88c67dc9"
+flavour = "openSUSE"
+argv = ["w6-polkit-1.0-1.noarch.rpm"]
+captured = "2026-10-02"
+
+[source]
+description = "Hand-built fixture: /usr/share/polkit-1/actions/org.w6test.policy with no:no:auth_self defaults. Reference emits E polkit-user-privilege. Exit 0."
+
+[tools]
+present = ["checkbashisms","dash","desktop-file-validate","readelf","objdump","ldd","file"]
+
+[[input]]
+file = "w6-polkit-1.0-1.noarch.rpm"
+sha256 = "dea8fd37b46f2b2bacc3e5a713e657a661ec764cfb49ea05e0d4e6922ce4c95e"

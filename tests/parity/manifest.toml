@@ -27,3 +27,30 @@ name = "libdep-devel"
 
 [[case]]
 name = "w6-sysv"
+
+[[case]]
+name = "w6-alternatives"
+
+[[case]]
+name = "w6-appdata"
+
+[[case]]
+name = "w6-bashisms"
+
+[[case]]
+name = "w6-filelist"
+
+[[case]]
+name = "w6-menu"
+
+[[case]]
+name = "w6-menulegacy"
+
+[[case]]
+name = "w6-polkit"
+
+[[case]]
+name = "w6-python"
+
+[[case]]
+name = "w6-systemd-tmpfiles"
