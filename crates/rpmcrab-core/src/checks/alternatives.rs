@@ -611,9 +611,16 @@ mod tests {
             !has(&results, "double-entries"),
             "second man= line falsely reported as double-entries: {results:?}"
         );
+        // Pin the finding detail, not just the name: the missing entry is
+        // on line 2 of foo.conf.
+        let detail = results
+            .iter()
+            .find(|(n, _)| n == "man-entry-value-not-found")
+            .map(|(_, d)| d.clone())
+            .expect("missing man entry was not validated");
         assert!(
-            has(&results, "man-entry-value-not-found"),
-            "missing man entry was not validated: {results:?}"
+            detail.contains("foo.conf"),
+            "detail should pin foo.conf, got: {detail}"
         );
     }
 
