@@ -948,13 +948,18 @@ impl FilesCheck {
 
     /// rpmlint's `is_utf8`: strict UTF-8, transparently decompressing the
     /// compression formats the reference knows. A failed decompression reads
-    /// as UTF-8, matching the reference's `except OSError: return True`; an
-    /// absent tool reads the raw bytes the same way.
+    /// as UTF-8, matching the reference's `except OSError: return True`.
+    ///
+    /// An absent decompressor also reads as UTF-8. The reference decompresses
+    /// IN-PROCESS (pkg.py imports bz2, gzip, lzma, zstandard) so it never needs
+    /// a decompressor binary and always gets to the real bytes; reading the
+    /// still-compressed file instead would report `file-not-utf8` for every
+    /// `.gz` man page on a host without gzip, which the reference never does.
     fn is_utf8_file(&self, fname: &str, path: &str) -> bool {
         match self.decompressor_for(fname) {
             Some(tool) => {
                 let Some(mut cmd) = tool.command() else {
-                    return std::fs::read(path).map(|b| is_utf8(&b)).unwrap_or(true);
+                    return true;
                 };
                 cmd.arg("-dc")
                     .arg(path)
@@ -3211,6 +3216,22 @@ mod tests {
                 .iter()
                 .any(|(n, d)| n == "zero-length" && d.contains("empty-script")),
             "missing zero-length on empty-script: {results:?}"
+    /// An absent decompressor must not turn a compressed file into
+    /// `file-not-utf8`. The reference decompresses in-process (pkg.py imports
+    /// bz2/gzip/lzma/zstandard), so it never needs a binary and always reaches
+    /// the real bytes. Reading the still-compressed file instead flagged every
+    /// `.gz` man page on a host without gzip -- a regression against main, which
+    /// returned true.
+    #[test]
+    fn absent_decompressor_reads_as_utf8() {
+        let empty = tempfile::TempDir::new().expect("tmpdir");
+        let config = Config::default();
+        let check = FilesCheck::with_tool_dir(&config, Some(empty.path()));
+        let doc = empty.path().join("page.gz");
+        std::fs::write(&doc, [0x1f, 0x8b, 0x08, 0x00, 0xff, 0xfe, 0xfd]).expect("write");
+        assert!(
+            check.is_utf8_file(&doc.to_string_lossy(), &doc.to_string_lossy()),
+            "a compressed file with no decompressor must read as UTF-8"
         );
     }
 }

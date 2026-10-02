@@ -602,12 +602,11 @@ impl SpecCheck {
         Self::with_tool_source(config, test_source(bin_dir))
     }
 
+    /// `rpm` is needed only by `check_specfile_error`, which the reference
+    /// likewise gates on there being a spec file (SpecCheck.py:224-227), so
+    /// probing must not be fatal: a binary-only lint never reaches the tool.
     fn probe_rpm(source: &ToolSource) -> Tool {
         let (rpm, _) = Tool::probe(source, "rpm", &["--version"]);
-        assert!(
-            rpm.is_present(),
-            "SpecCheck requires the 'rpm' tool, but it could not be executed"
-        );
         rpm
     }
 
@@ -832,10 +831,14 @@ impl SpecCheck {
     fn check_specfile_error(&self, pkg: &SpecPkg, out: &mut Filter) {
         let spec_file = self.spec_file.as_deref().unwrap_or("");
         let define = format!("_sourcedir {}", self.spec_file_dir());
-        let mut cmd = self
-            .rpm
-            .command()
-            .expect("rpm was probed present when SpecCheck was constructed");
+        // The reference lets a missing `rpm` raise here (no try/except around
+        // the subprocess). Skipping is this project's standing treatment for an
+        // absent tool -- see the PostCheck interpreter and BashismsCheck
+        // checkbashisms entries -- and keeps a missing rpm from aborting the
+        // whole run instead of one check.
+        let Some(mut cmd) = self.rpm.command() else {
+            return;
+        };
         let output = cmd
             .args(["-q", "--qf=", "-D", &define, "--specfile", spec_file])
             .env("LC_ALL", "en_US.UTF-8")
@@ -1987,11 +1990,28 @@ make install
         );
     }
 
+    /// A missing `rpm` must not abort the run. `rpm` is only needed by
+    /// `check_specfile_error`, and the reference gates that on there being a
+    /// spec file (SpecCheck.py:224-227), so a binary-only lint never reaches
+    /// it. Constructing SpecCheck in an empty tool dir used to panic.
     #[test]
-    #[should_panic(expected = "requires the 'rpm' tool")]
-    fn spec_check_fails_fast_without_rpm() {
+    fn spec_check_constructs_without_rpm() {
         let empty = tempfile::TempDir::new().expect("tmpdir");
         let config = Config::default();
-        let _ = SpecCheck::with_tool_dir(&config, Some(empty.path()));
+        let mut check = SpecCheck::with_tool_dir(&config, Some(empty.path()));
+        let spec_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/codequery-0.08.tar.gz");
+        if !spec_path.is_file() {
+            return; // fixture absent; nothing to assert
+        }
+        let pkg = SpecPkg::open(&spec_path).expect("spec opens");
+        let mut filter = Filter::new(&config, Color::for_tty(false)).unwrap();
+        // No panic, and no finding invented from the absent tool.
+        check.check_spec(&pkg, &config, &mut filter);
+        assert!(
+            !filter.results().iter().any(|(n, _)| n == "spec-file-error"),
+            "absent rpm should skip rather than fabricate: {:?}",
+            filter.results()
+        );
     }
 }

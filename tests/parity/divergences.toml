@@ -558,6 +558,7 @@ check = "non-utf8-desktopfile"
 kind = "detail"
 reason = "The reference reports Python's UnicodeDecodeError (`'utf-8' codec can't decode byte 0xff in position 0: invalid start byte`); the port reports Rust's FromUtf8Error (`invalid utf-8 sequence of 1 bytes from index 0`). The finding name, severity and `Unicode error:` prefix match. The position is not reproducible, not merely formatted differently: the reference decodes through codecs.open + cfp.read_file, which pulls one line at a time, so UnicodeDecodeError.start is the offset WITHIN THE CURRENT LINE, whereas the port reads the whole file and reports a file-wide byte index. Verified: a bad byte at file offset 36 (line 3, column 3) is reported by the reference as position 0. The two agree only while the bad byte is on the first line."
 since = "0.1.0"
+<<<<<<< HEAD
 
 [[divergence]]
 case = "global"
@@ -565,10 +566,18 @@ check = "config"
 kind = "behaviour"
 reason = "Fixed behaviour: the SkipPackagePatterns default uses `\\d` (decimal digits, Unicode-aware) exactly like the reference's `re.search(r'/home/abuild/rpmbuild/RPMS/noarch/rpmlint-\\d')`. The port previously used `char::is_numeric`, a deliberate superset that also skip-guarded names like `rpmlint-².rpm`, which the reference lints."
 upstream = "https://github.com/rpm-software-management/rpmlint/pull/1592"
+=======
+[[divergence]]
+case = "global"
+check = "FilesCheck.is-utf8-decompressor"
+kind = "behaviour"
+reason = "The reference decompresses IN-PROCESS for is_utf8 (pkg.py imports bz2, gzip, lzma and zstandard), so it never invokes a decompressor binary and always reaches the real bytes. rpmcrab shells out to gzip/bzip2/xz/zstd, which is a divergence of its own; when the binary is absent rpmcrab reads as UTF-8, matching the reference's `except OSError: return True`. Reading the still-compressed file instead would report file-not-utf8 for every .gz man page on a host without gzip, which the reference never does."
+>>>>>>> d19d38a (fix(tools): an absent tool must not invent findings or abort the run)
 since = "0.1.0"
 
 [[divergence]]
 case = "global"
+<<<<<<< HEAD
 check = "config"
 kind = "behaviour"
 reason = "PermissiveByDefault, SkipPackagePatterns, RpmlintrcSearchPaths and SuppressExtractionStderr are real config keys instead of hardcoded SUSE behaviour. The bundled defaults carry the openSUSE flavour values: permissive forced unless -s/--strict (exit 64/65), the rpmlint-package skip guard, rpmlintrc auto-discovery over the two SOURCES dirs, and extraction stderr discarded even in verbose mode. Non-default values are new surface with no reference counterpart. One pre-existing gap rides along unchanged: the reference gates its SOURCES auto-discovery on PYTEST_XDIST_TESTRUNUID (lint.py:205) and rpmcrab never implemented that gate, on main or here."
@@ -590,3 +599,10 @@ kind = "behaviour"
 reason = "SuppressExtractionStderr=false lets the extractor child inherit stderr, but only in verbose mode: the effective discard is `suppress_extraction_stderr || !info`. The reference always discards (DEVNULL even in verbose mode, pkg.py). The default true preserves the reference behaviour."
 upstream = "https://github.com/rpm-software-management/rpmlint/pull/1592"
 since = "0.1.0"
+=======
+check = "SpecCheck.rpm-tool"
+kind = "behaviour"
+reason = "rpm is needed only by check_specfile_error, which the reference likewise gates on there being a spec file (SpecCheck.py:224-227), so a binary-only lint never reaches it and probing the tool must not be fatal. The reference lets a missing rpm raise from the subprocess; rpmcrab skips the check instead, matching this project's standing treatment for an absent tool (see the PostCheck interpreter and BashismsCheck checkbashisms entries)."
+since = "0.1.0"
+
+>>>>>>> d19d38a (fix(tools): an absent tool must not invent findings or abort the run)
