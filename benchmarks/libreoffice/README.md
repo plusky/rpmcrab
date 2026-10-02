@@ -50,6 +50,15 @@ unless both sides use the same config.
 
 rpmcrab also needs `rpm2archive`/`rpm2cpio` on PATH.
 
+## Methodology caveat (not parity evidence)
+
+The reference checkout used here (`c0c9cf20`, opensuse branch) is NOT the
+corpus pin (`84848c05`), and the reference is invoked with
+`-c <ref>/configs/openSUSE` whereas `capture-parity.sh` uses
+`XDG_CONFIG_HOME=$ref/xdg`. The config surface differs, so benchmark
+numbers are performance evidence only and must not be cited as parity
+evidence.
+
 ## Results 2026-10-02 (fourteen-mbp, M1 Pro, 10 CPUs)
 
 See `results.json`. Headline: 152 RPMs / 424.7 MB.
