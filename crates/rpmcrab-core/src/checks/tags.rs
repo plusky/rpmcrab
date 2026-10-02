@@ -62,6 +62,32 @@ const RPMSENSE_EQUAL: u32 = 8;
 /// 1995-01-01 UTC, the oldest sane changelog timestamp.
 const OLDEST_CHANGELOG_TIMESTAMP: i64 = 788_918_400;
 
+/// 26-hour rollback applied to changelog timestamps before comparison,
+/// covering the largest timezone difference (Howland Islands to Line Islands).
+const CHANGELOG_ROLLBACK_SECS: i64 = 26 * 3600;
+
+/// Outcome of the changelog timestamp check after the 26h rollback.
+#[derive(Debug, PartialEq, Eq)]
+enum ChangelogTimeStatus {
+    Overflow,
+    InFuture,
+    Ok,
+}
+
+/// Classify the first changelog timestamp: apply the 26h rollback, then
+/// compare against the oldest sane timestamp and now.
+/// (TagsCheck.py: `clt -= 26 * 3600`; both branches read the rolled-back `clt`.)
+fn classify_changelog_time(first: i64, oldest: i64, now: i64) -> ChangelogTimeStatus {
+    let clt = first - CHANGELOG_ROLLBACK_SECS;
+    if clt < oldest {
+        ChangelogTimeStatus::Overflow
+    } else if clt > now {
+        ChangelogTimeStatus::InFuture
+    } else {
+        ChangelogTimeStatus::Ok
+    }
+}
+
 /// `TagsCheck`, ported from `rpmlint/checks/TagsCheck.py`.
 pub struct TagsCheck {
     valid_groups: Vec<String>,
@@ -1021,30 +1047,27 @@ impl TagsCheck {
         }
         let times = crate::pkg::tags::int32_array(header, Tag::CHANGELOGTIME);
         if let Some(&first) = times.first() {
-            let mut clt_time = first as i64 - 26 * 3600;
-            if clt_time < OLDEST_CHANGELOG_TIMESTAMP {
-                add_info(
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let clt = first as i64 - CHANGELOG_ROLLBACK_SECS;
+            match classify_changelog_time(first as i64, OLDEST_CHANGELOG_TIMESTAMP, now) {
+                ChangelogTimeStatus::Overflow => add_info(
                     out,
                     Level::Warning,
                     pkg,
                     "changelog-time-overflow",
-                    &[&format_date(clt_time)],
-                );
-            } else {
-                clt_time = first as i64;
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                if clt_time > now {
-                    add_info(
-                        out,
-                        Level::Error,
-                        pkg,
-                        "changelog-time-in-future",
-                        &[&format_date(clt_time)],
-                    );
-                }
+                    &[&format_date(clt)],
+                ),
+                ChangelogTimeStatus::InFuture => add_info(
+                    out,
+                    Level::Error,
+                    pkg,
+                    "changelog-time-in-future",
+                    &[&format_date(clt)],
+                ),
+                ChangelogTimeStatus::Ok => {}
             }
         }
     }
@@ -1506,5 +1529,67 @@ mod tests {
         assert_eq!(TagsCheck::lang_for_error("C"), None);
         assert_eq!(TagsCheck::lang_for_error("C.UTF-8"), None);
         assert_eq!(TagsCheck::lang_for_error("de"), Some("de"));
+    }
+
+    #[test]
+    fn changelog_rollback_is_26_hours() {
+        assert_eq!(CHANGELOG_ROLLBACK_SECS, 26 * 3600);
+    }
+
+    #[test]
+    fn changelog_time_overflow_region() {
+        let oldest = OLDEST_CHANGELOG_TIMESTAMP;
+        let now = oldest + 10_000_000;
+        // Rolled back below the oldest sane timestamp.
+        assert_eq!(
+            classify_changelog_time(oldest, oldest, now),
+            ChangelogTimeStatus::Overflow
+        );
+        // Boundary: exactly at oldest after rollback is not overflow.
+        assert_eq!(
+            classify_changelog_time(oldest + CHANGELOG_ROLLBACK_SECS, oldest, now),
+            ChangelogTimeStatus::Ok
+        );
+        assert_eq!(
+            classify_changelog_time(oldest + CHANGELOG_ROLLBACK_SECS - 1, oldest, now),
+            ChangelogTimeStatus::Overflow
+        );
+    }
+
+    #[test]
+    fn changelog_time_future_region() {
+        let oldest = OLDEST_CHANGELOG_TIMESTAMP;
+        let now = 1_700_000_000;
+        // Discriminating case: ~1h ahead of now is quiet once rolled back;
+        // the pre-fix code compared the raw value and emitted
+        // changelog-time-in-future here.
+        assert_eq!(
+            classify_changelog_time(now + 3600, oldest, now),
+            ChangelogTimeStatus::Ok
+        );
+        // Beyond the 26h rollback the future finding still fires.
+        assert_eq!(
+            classify_changelog_time(now + CHANGELOG_ROLLBACK_SECS + 1, oldest, now),
+            ChangelogTimeStatus::InFuture
+        );
+        // Boundary: exactly at now after rollback is not in the future.
+        assert_eq!(
+            classify_changelog_time(now + CHANGELOG_ROLLBACK_SECS, oldest, now),
+            ChangelogTimeStatus::Ok
+        );
+    }
+
+    #[test]
+    fn changelog_time_quiet_region() {
+        let oldest = OLDEST_CHANGELOG_TIMESTAMP;
+        let now = 1_700_000_000;
+        assert_eq!(
+            classify_changelog_time(now, oldest, now),
+            ChangelogTimeStatus::Ok
+        );
+        assert_eq!(
+            classify_changelog_time(oldest + CHANGELOG_ROLLBACK_SECS, oldest, now),
+            ChangelogTimeStatus::Ok
+        );
     }
 }
