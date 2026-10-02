@@ -111,6 +111,14 @@ fn lib_regex() -> Regex {
         .expect("static regex")
 }
 
+/// Files exempt from the zero-length check (FilesCheck.py:180).
+fn normal_zero_length_regex() -> Regex {
+    Regex::new(
+        r"^/etc/security/console\.apps/|/\.nosearch$|/__init__\.py$|/py\.typed$|\.dist-info/REQUESTED$|/gem\.build_complete$",
+    )
+    .expect("static regex")
+}
+
 fn depmod_regex() -> Regex {
     Regex::new(r"(?m)^[^#]*depmod").expect("static regex")
 }
@@ -227,6 +235,7 @@ pub struct FilesCheck {
     buildconfig_rpath_re: Regex,
     sofile_re: Regex,
     lib_re: Regex,
+    normal_zero_length_re: Regex,
     depmod_re: Regex,
     install_info_re: Regex,
     perl_temp_file_re: Regex,
@@ -390,6 +399,7 @@ impl FilesCheck {
             buildconfig_rpath_re: buildconfig_rpath_regex(),
             sofile_re: sofile_regex(),
             lib_re: lib_regex(),
+            normal_zero_length_re: normal_zero_length_regex(),
             depmod_re: depmod_regex(),
             install_info_re: install_info_regex(),
             perl_temp_file_re: perl_temp_file_regex(),
@@ -1951,8 +1961,12 @@ impl FilesCheck {
         pkgfile: &PkgFile,
         out: &mut Filter,
     ) {
-        // zero-length
-        if pkgfile.size == Some(0) {
+        // zero-length: the reference exempts __init__.py, py.typed, etc.
+        // via normal_zero_length_regex, and skips ghost files.
+        if pkgfile.size == Some(0)
+            && !is_match(&self.normal_zero_length_re, fname)
+            && !pkg.ghost_files.iter().any(|g| g == fname)
+        {
             add_info(out, Level::Error, pkg, "zero-length", &[fname]);
         }
     }
@@ -2519,7 +2533,9 @@ impl FilesCheck {
                     .map(|p| p.rsplit('/').next().unwrap_or("") == "ldconfig")
                     .unwrap_or(false)
         };
-        if fname.contains(".so") {
+        // The reference gates on lib_regex (anchored /lib(?:64)?/lib...),
+        // not a `.so` substring: `.../libbasegfxlo.so-gdb.py` is not a library.
+        if is_match(&self.lib_re, fname) {
             let postin_prog = pkg.scriptprog(librpm::Tag::POSTINPROG);
             let postun_prog = pkg.scriptprog(librpm::Tag::POSTUNPROG);
             if !is_ldconfig(&st.postin, &postin_prog) {
@@ -3051,5 +3067,38 @@ mod tests {
                 .iter()
                 .all(|l| l.contains("no-manual-page-for-binary"))
         );
+    }
+
+    #[test]
+    fn ldconfig_uses_anchored_lib_regex() {
+        // Benchmark found: `.../libbasegfxlo.so-gdb.py` triggered
+        // library-without-ldconfig because files.rs used
+        // `fname.contains(".so")`. The reference gates on the anchored
+        // lib_regex.
+        let check = FilesCheck::new(&Config::default());
+        assert!(!is_match(
+            &check.lib_re,
+            "/usr/lib64/libreoffice/program/libbasegfxlo.so-gdb.py"
+        ));
+        assert!(is_match(&check.lib_re, "/usr/lib64/libfoo.so.1.2.3"));
+    }
+
+    #[test]
+    fn zero_length_exempts_init_py() {
+        // Benchmark found: zero-length __init__.py files were flagged.
+        // The reference exempts them via normal_zero_length_regex.
+        let check = FilesCheck::new(&Config::default());
+        assert!(is_match(
+            &check.normal_zero_length_re,
+            "/usr/lib64/libreoffice/program/wizards/__init__.py"
+        ));
+        assert!(is_match(
+            &check.normal_zero_length_re,
+            "/usr/lib/python3.12/site-packages/foo/py.typed"
+        ));
+        assert!(!is_match(
+            &check.normal_zero_length_re,
+            "/usr/bin/empty-script"
+        ));
     }
 }
