@@ -27,6 +27,7 @@ use crate::pkg::Pkg;
 pub struct PythonCheck {
     pyc_version: Option<String>,
     checked_files: usize,
+    default_python: String,
 }
 
 /// A parsed requirement: distribution name, environment marker, extras.
@@ -77,14 +78,23 @@ fn find_top_level(expr: &str, op: &str) -> Option<usize> {
 }
 
 impl PythonCheck {
-    /// Fallback `python_version` marker value (the reference uses the
-    /// interpreter running rpmlint; the port has no interpreter to ask).
+    /// Fallback `python_version` marker value when `PythonDefaultVersion`
+    /// is not configured (the reference uses the interpreter running
+    /// rpmlint; the port has no interpreter to ask).
     const DEFAULT_PYTHON: &'static str = "3.12";
 
-    pub fn new(_config: &Config) -> Self {
+    pub fn new(config: &Config) -> Self {
+        let default_python = config
+            .configuration
+            .get("PythonDefaultVersion")
+            .and_then(toml::Value::as_str)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(Self::DEFAULT_PYTHON)
+            .to_string();
         Self {
             pyc_version: None,
             checked_files: 0,
+            default_python,
         }
     }
 
@@ -464,8 +474,12 @@ impl PythonCheck {
     /// The `python_version` marker environment, mirroring the reference:
     /// the `python(abi)` require's version wins over the default, and the
     /// version embedded in the dist-info/egg-info path wins over that.
-    fn marker_python_version(requires: &[crate::pkg::dep::DepInfo], filename: &str) -> String {
-        let mut version = Self::DEFAULT_PYTHON.to_string();
+    fn marker_python_version(
+        &self,
+        requires: &[crate::pkg::dep::DepInfo],
+        filename: &str,
+    ) -> String {
+        let mut version = self.default_python.clone();
         if let Some(abi) = requires.iter().find(|r| r.name == "python(abi)")
             && let Some(v) = abi.version.as_deref()
         {
@@ -548,14 +562,14 @@ impl Check for PythonCheck {
 
             if filename.ends_with("egg-info/requires.txt") {
                 let content = pkg.read_file(filename);
-                let python_version = Self::marker_python_version(&pkg.requires, filename);
+                let python_version = self.marker_python_version(&pkg.requires, filename);
                 let reqs = Self::parse_requirements(&content, false, &python_version);
                 self.check_requirements(pkg, out, &reqs, &python_version);
                 continue;
             }
             if filename.ends_with("dist-info/METADATA") {
                 let content = pkg.read_file(filename);
-                let python_version = Self::marker_python_version(&pkg.requires, filename);
+                let python_version = self.marker_python_version(&pkg.requires, filename);
                 let reqs = Self::parse_requirements(&content, true, &python_version);
                 self.check_requirements(pkg, out, &reqs, &python_version);
                 continue;
@@ -965,8 +979,9 @@ mod tests {
             version: Some("3.11".to_string()),
             release: None,
         };
+        let check = PythonCheck::new(&Config::default());
         // dist-info path beats both the default and a python(abi) require.
-        let version = PythonCheck::marker_python_version(
+        let version = check.marker_python_version(
             &[abi],
             "/usr/lib/python3.13/site-packages/foo-1.0.dist-info/METADATA",
         );
@@ -983,16 +998,28 @@ mod tests {
             version: Some("3.11".to_string()),
             release: None,
         };
-        let version =
-            PythonCheck::marker_python_version(&[abi], "/somewhere/foo-1.0.dist-info/METADATA");
+        let check = PythonCheck::new(&Config::default());
+        let version = check.marker_python_version(&[abi], "/somewhere/foo-1.0.dist-info/METADATA");
         assert_eq!(version, "3.11");
     }
 
     #[test]
     fn marker_python_version_defaults() {
-        let version =
-            PythonCheck::marker_python_version(&[], "/somewhere/foo-1.0.dist-info/METADATA");
+        let check = PythonCheck::new(&Config::default());
+        let version = check.marker_python_version(&[], "/somewhere/foo-1.0.dist-info/METADATA");
         assert_eq!(version, PythonCheck::DEFAULT_PYTHON);
+    }
+
+    #[test]
+    fn marker_python_version_honors_configured_default() {
+        let mut config = Config::default();
+        config.configuration.insert(
+            "PythonDefaultVersion".to_string(),
+            toml::Value::String("3.9".to_string()),
+        );
+        let check = PythonCheck::new(&config);
+        let version = check.marker_python_version(&[], "/somewhere/foo-1.0.dist-info/METADATA");
+        assert_eq!(version, "3.9");
     }
 
     #[test]
@@ -1025,10 +1052,7 @@ mod tests {
         let pkg = fixture_pkg_with_requires(req_names);
         let config = Config::default();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let check = PythonCheck {
-            pyc_version: None,
-            checked_files: 0,
-        };
+        let check = PythonCheck::new(&config);
         check.check_requirements(&pkg, &mut out, reqs, "3.12");
         let levels = out.result_levels().to_vec();
         out.results()
