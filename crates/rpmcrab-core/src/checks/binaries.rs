@@ -699,10 +699,11 @@ impl BinariesCheck {
             return false;
         }
         if !self.ar.is_present() {
-            // Without `ar` the standard-ness test cannot run; assume standard
-            // so the remaining archive checks still execute.
-            log::debug!("BinariesCheck: ar not found, skipping standard-archive test");
-            return true;
+            // Without `ar` the standard-ness test cannot run; treat the
+            // archive as non-standard so no ELF checks run on unverifiable
+            // input. An absent tool must not invent findings.
+            log::debug!("BinariesCheck: ar not found, treating archive as non-standard");
+            return false;
         }
         let ar = ArInfo::parse(&self.ar, &pkgfile.path);
         if let Some(reason) = ar.failed {
@@ -1776,5 +1777,40 @@ mod tests {
         let (results, _dir) = run_binaries_check_with_tools(&rpm_path, Some(empty.path()));
         assert_lacks(&results, "strings-failed");
         assert_lacks(&results, "ar-failed");
+    }
+
+    #[test]
+    fn absent_ar_treats_archive_as_nonstandard() {
+        // With `ar` absent the standard-ness test cannot run: the archive is
+        // treated as non-standard (ELF checks skipped) rather than assumed
+        // standard, which would invent findings on Rust/Go archives.
+        let empty = tempfile::TempDir::new().expect("tmpdir");
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, Some(empty.path()));
+        assert!(!check.ar.is_present());
+
+        // A real `ar` archive; its content is never inspected without the tool.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let archive = dir.path().join("librustfoo.a");
+        std::fs::write(&archive, b"!<arch>\n").expect("write archive");
+
+        let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
+        let extract_dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg =
+            Pkg::open(std::path::Path::new(&rpm_path), extract_dir.path()).expect("open fixture");
+        let pkgfile = PkgFile {
+            path: archive.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        assert!(
+            !check.is_standard_archive(&pkg, &pkgfile, &mut out),
+            "absent ar must not assume a standard archive"
+        );
+        assert!(
+            out.results().is_empty(),
+            "no findings invented: {:?}",
+            out.results()
+        );
     }
 }
