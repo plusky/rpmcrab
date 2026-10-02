@@ -355,6 +355,30 @@ mod tests {
     }
 
     #[test]
+    fn action_without_defaults_does_not_crash() {
+        // The reference does `action.getElementsByTagName('defaults')[0]`,
+        // which raises IndexError (not the caught KeyError) when <defaults>
+        // is absent, crashing the check. The port treats the missing
+        // settings as `no` per the polkit default and reports
+        // polkit-untracked-privilege instead.
+        let dir = std::env::temp_dir();
+        let path = dir.join("rpmcrab-polkit-nodefaults.policy");
+        std::fs::write(
+            &path,
+            "<policyconfig><action id=\"org.foo.nodefaults\"></action></policyconfig>",
+        )
+        .unwrap();
+        let actions = PolkitCheck::parse_actions(path.to_str().unwrap()).expect("parse");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(actions.len(), 1);
+        let (_, finding, detail) = check()
+            .check_action("org.foo.nodefaults", &actions[0].1)
+            .expect("finding");
+        assert_eq!(finding, "polkit-untracked-privilege");
+        assert!(detail.contains("no:no:no"), "unexpected detail: {detail}");
+    }
+
+    #[test]
     fn action_without_an_id_attribute_is_still_collected() {
         // PolkitCheck.py:61 uses getAttribute('id'), which is '' when the
         // attribute is absent, and the action is still evaluated. Dropping it
