@@ -77,7 +77,7 @@ fn extract_command(
 /// `rpm2cpio <quoted> | cpio -id && chmod -R +rX .` when `rpm2archive` is
 /// absent. stderr is discarded and `LC_ALL`/`LANGUAGE` are forced to English,
 /// as the reference does.
-pub fn extract(rpm: &Path, dir: &Path) -> Result<(), ExtractError> {
+pub fn extract(rpm: &Path, dir: &Path, suppress_stderr: bool) -> Result<(), ExtractError> {
     if !dir.is_dir() {
         return Err(ExtractError::BadDir(dir.to_path_buf()));
     }
@@ -95,9 +95,14 @@ pub fn extract(rpm: &Path, dir: &Path) -> Result<(), ExtractError> {
         .env("LC_ALL", "en_US.UTF-8")
         .env("LANGUAGE", "en_US")
         // rpmlint captures the extractor's output via `check_output` and drops
-        // it; nothing may reach rpmcrab's own stdout.
+        // it; nothing may reach rpmcrab's own stdout. stderr follows
+        // `SuppressExtractionStderr` (rpmlint#1592).
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(if suppress_stderr {
+            Stdio::null()
+        } else {
+            Stdio::inherit()
+        });
     if needs_stdin {
         let f = File::open(&abs).map_err(|source| ExtractError::Open {
             path: abs.clone(),
@@ -200,7 +205,7 @@ mod tests {
         let file = dir.path().join("not-a-dir");
         std::fs::write(&file, b"x").unwrap();
         assert!(matches!(
-            extract(Path::new("/x.rpm"), &file),
+            extract(Path::new("/x.rpm"), &file, true),
             Err(ExtractError::BadDir(_))
         ));
     }
@@ -225,7 +230,7 @@ mod tests {
         std::fs::write(&bad, b"definitely not an rpm").unwrap();
         let out = tempfile::tempdir().unwrap();
         assert!(matches!(
-            extract(&bad, out.path()),
+            extract(&bad, out.path(), true),
             Err(ExtractError::Status(_))
         ));
     }

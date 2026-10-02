@@ -1335,7 +1335,7 @@ mod tests {
             toml::Value::Array(vec![]),
         );
         tbl.insert("InvalidRequires".to_string(), toml::Value::Array(vec![]));
-        config.finalize();
+        config.finalize().expect("fixture config");
         config
     }
 
@@ -1345,7 +1345,7 @@ mod tests {
         let rpm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs")
             .join(name);
-        Pkg::open(&rpm_path, &std::env::temp_dir()).expect("open fixture pkg")
+        Pkg::open(&rpm_path, &std::env::temp_dir(), true).expect("open fixture pkg")
     }
 
     fn run_check(pkg: &Pkg) -> Vec<(String, String)> {

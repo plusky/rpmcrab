@@ -211,7 +211,8 @@ fn pkg_reproduces_rpmlint_for_corpus_rpms() {
 
         let mut expected: Value =
             serde_json::from_str(&std::fs::read_to_string(&dump_path).unwrap()).unwrap();
-        let pkg = Pkg::open(&rpm, scratch.path()).unwrap_or_else(|e| panic!("open {case}: {e}"));
+        let pkg =
+            Pkg::open(&rpm, scratch.path(), true).unwrap_or_else(|e| panic!("open {case}: {e}"));
         let tmpdir = pkg.dir_name().to_string_lossy().into_owned();
         let mut actual = pkg_to_json(&pkg);
 
@@ -245,7 +246,7 @@ fn filename_is_the_as_passed_path() {
         &root,
         "cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm",
     );
-    let a = Pkg::open(&plain, scratch.path()).unwrap().filename;
+    let a = Pkg::open(&plain, scratch.path(), true).unwrap().filename;
     assert_eq!(
         a,
         plain.to_string_lossy(),
@@ -256,7 +257,7 @@ fn filename_is_the_as_passed_path() {
     let spelled = root
         .join("tests/parity/cases/./llvm21-gold/input/../input/llvm21-gold-21.1.8-9.2.aarch64.rpm");
     assert!(spelled.exists(), "spelled path does not resolve");
-    let b = Pkg::open(&spelled, scratch.path()).unwrap().filename;
+    let b = Pkg::open(&spelled, scratch.path(), true).unwrap().filename;
     assert_eq!(b, spelled.to_string_lossy(), "filename was normalized: {b}");
     assert_ne!(
         a, b,
@@ -275,7 +276,7 @@ fn read_file_after_cleanup_is_empty() {
         &root,
         "cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm",
     );
-    let mut pkg = Pkg::open(&rpm, scratch.path()).unwrap();
+    let mut pkg = Pkg::open(&rpm, scratch.path(), true).unwrap();
 
     // A file that really is in the payload, so the pre-cleanup read is non-empty.
     // `read_file` is UTF-8 only, so pick a text file rather than any regular one.
@@ -323,7 +324,7 @@ fn live_root_reports_the_reference_extracted_flag() {
     assert!(installed.extracted());
     assert_eq!(installed.dir_name(), Path::new("/"));
 
-    let live = Pkg::open(&rpm, Path::new("/")).unwrap();
+    let live = Pkg::open(&rpm, Path::new("/"), true).unwrap();
     assert!(!live.extracted(), "ExtractDir = / must not set extracted");
     assert_eq!(live.dir_name(), Path::new("/"));
 }

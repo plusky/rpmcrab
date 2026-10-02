@@ -1287,7 +1287,7 @@ paths = ["/etc/pam.d/link-allowed"]
             configuration: table,
             ..Default::default()
         };
-        config.finalize();
+        config.finalize().unwrap();
         config
     }
 
@@ -1612,7 +1612,7 @@ ContentCheck = "VarlinkServiceCheck"
     #[test]
     fn missing_file_digest_location_panics() {
         let mut config = Config::default();
-        config.finalize();
+        config.finalize().unwrap();
         let result = std::panic::catch_unwind(|| FileDigestCheck::new(&config));
         assert!(
             result.is_err(),
@@ -2112,7 +2112,7 @@ hash = "deadbeef"
             configuration: table,
             ..Default::default()
         };
-        config.finalize();
+        config.finalize().unwrap();
         config
     }
 

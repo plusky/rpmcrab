@@ -145,7 +145,13 @@ impl<'a> Worker<'a> {
                         }
                     }
                 } else {
-                    match Pkg::open(&path, &self.extract_dir) {
+                    match Pkg::open(
+                        &path,
+                        &self.extract_dir,
+                        // rpmlint#1592: the extractor child's stderr is discarded when the
+                        // config says so, or whenever not verbose.
+                        self.config.suppress_extraction_stderr || !self.config.info,
+                    ) {
                         Ok(pkg) => {
                             let name = pkg.name.clone();
                             let arch = (!pkg.arch.is_empty()).then(|| pkg.arch.clone());

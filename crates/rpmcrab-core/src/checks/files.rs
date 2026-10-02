@@ -2618,7 +2618,7 @@ mod tests {
 
     fn run_files_check(rpm: &str, config: &Config) -> (Vec<String>, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().expect("tmpdir");
-        let pkg = Pkg::open(std::path::Path::new(rpm), dir.path()).expect("open fixture");
+        let pkg = Pkg::open(std::path::Path::new(rpm), dir.path(), true).expect("open fixture");
         let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
         let mut check = FilesCheck::new(config);
         check.check(&pkg, config, &mut out);
@@ -2803,7 +2803,7 @@ mod tests {
         let config = test_config();
         let rpm = fixture_path("filescheck-scripts-1.0-1.noarch.rpm");
         let dir = tempfile::TempDir::new().expect("tmpdir");
-        let mut pkg = Pkg::open(std::path::Path::new(&rpm), dir.path()).expect("open");
+        let mut pkg = Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open");
         // Point a symlink target at a missing path so peek fails with
         // read-error (check_link_bindir_shebang peeks the target).
         if let Some(f) = pkg
@@ -3020,6 +3020,7 @@ mod tests {
             let pkg = Pkg::open(
                 std::path::Path::new(&fixture_path("filescheck-depmod-ok-1.0-1.noarch.rpm")),
                 dir.path(),
+                true,
             )
             .expect("open fixture");
             let config = Config::default();
@@ -3046,6 +3047,7 @@ mod tests {
         let pkg = Pkg::open(
             std::path::Path::new(&fixture_path("filescheck-depmod-ok-1.0-1.noarch.rpm")),
             dir.path(),
+            true,
         )
         .expect("open fixture");
         let config = Config::default();
@@ -3080,7 +3082,8 @@ mod tests {
         let config = test_config();
         let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
         let dir = tempfile::TempDir::new().expect("tmpdir");
-        let mut pkg = Pkg::open(std::path::Path::new(&rpm), dir.path()).expect("open fixture");
+        let mut pkg =
+            Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
         pkg.files = vec![
             PkgFile {
                 name: "/usr/lib64/libfoo.so-gdb.py".to_string(),
@@ -3127,7 +3130,8 @@ mod tests {
         let config = test_config();
         let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
         let dir = tempfile::TempDir::new().expect("tmpdir");
-        let mut pkg = Pkg::open(std::path::Path::new(&rpm), dir.path()).expect("open fixture");
+        let mut pkg =
+            Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
         pkg.files = vec![
             PkgFile {
                 name: "/usr/lib/python3.12/site-packages/foo/__init__.py".to_string(),

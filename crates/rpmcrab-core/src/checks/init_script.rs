@@ -496,7 +496,8 @@ mod tests {
         let dir = std::env::temp_dir().join("rpmcrab-initscript-parity");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("tmpdir");
-        let pkg = crate::pkg::Pkg::open(std::path::Path::new(rpm), &dir).expect("fixture opens");
+        let pkg =
+            crate::pkg::Pkg::open(std::path::Path::new(rpm), &dir, true).expect("fixture opens");
         let config = Config::default();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = InitScriptCheck::new(&config);
@@ -521,7 +522,7 @@ mod tests {
 
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
-        let mut pkg = Pkg::open(&rpm, &dir).expect("open fixture pkg");
+        let mut pkg = Pkg::open(&rpm, &dir, true).expect("open fixture pkg");
         pkg.files = vec![PkgFile {
             name: "/etc/init.d/order".to_string(),
             path: script.to_string_lossy().into_owned(),

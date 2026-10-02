@@ -585,7 +585,7 @@ mod tests {
         let rpm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs")
             .join(rpm);
-        let pkg = Pkg::open(&rpm_path, &std::env::temp_dir()).expect("open fixture pkg");
+        let pkg = Pkg::open(&rpm_path, &std::env::temp_dir(), true).expect("open fixture pkg");
         let config = Config::default();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = PostCheck::new(&config);
@@ -638,7 +638,7 @@ mod tests {
         // explanations after each finding block.
         let rpm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/postcheck-parity-1.0-1.noarch.rpm");
-        let pkg = Pkg::open(&rpm_path, &std::env::temp_dir()).expect("open fixture pkg");
+        let pkg = Pkg::open(&rpm_path, &std::env::temp_dir(), true).expect("open fixture pkg");
         let config = Config {
             info: true,
             ..Default::default()

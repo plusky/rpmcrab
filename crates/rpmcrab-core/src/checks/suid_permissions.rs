@@ -593,7 +593,7 @@ mod tests {
 
     fn test_config() -> Config {
         let mut config = Config::default();
-        config.finalize();
+        config.finalize().unwrap();
         config
     }
 

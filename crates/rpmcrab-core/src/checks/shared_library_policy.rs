@@ -293,7 +293,7 @@ mod tests {
 
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
-        let mut pkg = Pkg::open(&rpm, &dir).expect("open fixture pkg");
+        let mut pkg = Pkg::open(&rpm, &dir, true).expect("open fixture pkg");
         pkg.name = "libfoo1".to_string();
         pkg.files = vec![
             PkgFile {

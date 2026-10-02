@@ -17,7 +17,7 @@ use std::path::Path;
 
 use rpmcrab_core::check::{Check, SyntheticCheck};
 use rpmcrab_core::color::Color;
-use rpmcrab_core::config::Config;
+use rpmcrab_core::config;
 use rpmcrab_core::level::Level;
 use rpmcrab_core::lint::Lint;
 use rpmcrab_core::worker::Task;
@@ -46,14 +46,15 @@ const CONF_FILES: &[&str] = &[
 
 #[test]
 fn reproduces_llvm21_gold_byte_for_byte() {
-    let config = Config {
-        conf_files: CONF_FILES.iter().map(|s| (*s).to_string()).collect(),
-        checks: (0..43).map(|i| format!("Check{i}")).collect(),
-        badness_threshold: 999,
-        permissive: true, // openSUSE forces --permissive unless -s
-        filters: vec!["no-documentation".to_string()],
-        ..Config::default()
-    };
+    // The bundled defaults, not a struct literal: flipping
+    // `PermissiveByDefault` must break the exit-code assertion below.
+    let mut config = config::load_bundled();
+    config.conf_files = CONF_FILES.iter().map(|s| (*s).to_string()).collect();
+    config.checks = (0..43).map(|i| format!("Check{i}")).collect();
+    config.badness_threshold = 999;
+    // The CLI flag logic with no flags: permissive follows the default.
+    config.permissive = config.permissive_by_default;
+    config.filters = vec!["no-documentation".to_string()];
     let canned = vec![
         (
             Level::Error,

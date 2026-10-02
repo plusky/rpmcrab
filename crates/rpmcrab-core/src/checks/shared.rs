@@ -71,7 +71,7 @@ mod tests {
         // %preun -p /bin/sh with content.
         let rpm_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/scriptlet-empty-post-1.0-1.noarch.rpm");
-        let pkg = Pkg::open(&rpm_path, &std::env::temp_dir()).expect("open fixture pkg");
+        let pkg = Pkg::open(&rpm_path, &std::env::temp_dir(), true).expect("open fixture pkg");
         // An empty body falls through to the -p interpreter string.
         assert_eq!(
             script_body_or_prog(&pkg, librpm::Tag::POSTIN, librpm::Tag::POSTINPROG),
@@ -116,7 +116,8 @@ mod tests {
         let dir = std::env::temp_dir().join("rpmcrab-script-body-or-prog");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("tmpdir");
-        let pkg = crate::pkg::Pkg::open(std::path::Path::new(rpm), &dir).expect("fixture opens");
+        let pkg =
+            crate::pkg::Pkg::open(std::path::Path::new(rpm), &dir, true).expect("fixture opens");
         let body = script_body_or_prog(&pkg, librpm::Tag::POSTIN, librpm::Tag::POSTINPROG);
         assert!(
             !body.contains("/sbin/ldconfig"),
@@ -184,7 +185,7 @@ mod tests {
         let dir = std::env::temp_dir().join("rpmcrab-ldconfig-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("tmpdir");
-        let pkg = Pkg::open(std::path::Path::new(rpm), &dir).expect("open fixture");
+        let pkg = Pkg::open(std::path::Path::new(rpm), &dir, true).expect("open fixture");
         assert_eq!(pkg.scriptprog(librpm::Tag::POSTINPROG), "/sbin/ldconfig");
 
         let config = test_config();

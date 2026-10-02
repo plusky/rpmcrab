@@ -1646,7 +1646,7 @@ mod tests {
 
     fn run_binaries_check(rpm: &str) -> (Vec<(String, String)>, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().expect("tmpdir");
-        let pkg = Pkg::open(std::path::Path::new(rpm), dir.path()).expect("open fixture");
+        let pkg = Pkg::open(std::path::Path::new(rpm), dir.path(), true).expect("open fixture");
         let config = test_config();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = BinariesCheck::new(&config);

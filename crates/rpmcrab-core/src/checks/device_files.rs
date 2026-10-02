@@ -210,7 +210,7 @@ device_major = 55
 
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
-        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir()).expect("open fixture pkg");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
         pkg.name = "dummy".to_string();
         pkg.files = vec![pkg_file("/dev/mydevice", 0o60660, "root", "root", 0x801)];
         let config = test_config();

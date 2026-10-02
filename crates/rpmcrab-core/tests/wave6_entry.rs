@@ -51,7 +51,7 @@ fn run_check_with_ghost_no_payload(
 ) -> Vec<(String, String)> {
     let rpm_path = fixture(rpm);
     let scratch = tempfile::tempdir().unwrap();
-    let mut pkg = Pkg::open(&rpm_path, scratch.path()).unwrap();
+    let mut pkg = Pkg::open(&rpm_path, scratch.path(), true).unwrap();
     let entry = pkg
         .files
         .iter()
@@ -78,7 +78,7 @@ fn run_check_with_ghost(check: &mut impl Check, rpm: &str, ghost: &str) -> Vec<(
         rpm_path.display()
     );
     let scratch = tempfile::tempdir().unwrap();
-    let mut pkg = Pkg::open(&rpm_path, scratch.path()).unwrap();
+    let mut pkg = Pkg::open(&rpm_path, scratch.path(), true).unwrap();
     assert!(
         pkg.files.iter().any(|f| f.name == ghost),
         "{ghost} is not in {rpm}, so this test would pass vacuously"
@@ -100,7 +100,7 @@ fn run_check_with(check: &mut impl Check, rpm: &str, config: &Config) -> Vec<(St
         rpm_path.display()
     );
     let scratch = tempfile::tempdir().unwrap();
-    let pkg = Pkg::open(&rpm_path, scratch.path()).unwrap();
+    let pkg = Pkg::open(&rpm_path, scratch.path(), true).unwrap();
     let mut filter = Filter::new(config, Color::for_tty(false)).unwrap();
     check.check_binary(&pkg, config, &mut filter);
     filter.results().to_vec()

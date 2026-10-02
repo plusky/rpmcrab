@@ -261,13 +261,18 @@ impl Pkg {
     /// Open a `.rpm` file, unpack its payload into a tempdir under
     /// `extract_dir`, and build the package. Signature checks are skipped, as
     /// rpmlint does; `extract_dir` comes from the config's `ExtractDir`.
-    pub fn open(path: &Path, extract_dir: &Path) -> Result<Self, PkgError> {
+    /// `suppress_stderr` discards the extractor child's stderr outright;
+    /// when false, stderr is inherited in verbose mode and discarded
+    /// otherwise. (The reference always discards, DEVNULL even in verbose
+    /// mode: pkg.py's `None if verbose else DEVNULL` is dead, overwritten
+    /// unconditionally two lines later.)
+    pub fn open(path: &Path, extract_dir: &Path, suppress_stderr: bool) -> Result<Self, PkgError> {
         init()?;
-        guarded(|| Self::read(path, extract_dir))
+        guarded(|| Self::read(path, extract_dir, suppress_stderr))
     }
 
     /// The body of [`Pkg::open`], run under [`guarded`].
-    fn read(path: &Path, extract_dir: &Path) -> Result<Self, PkgError> {
+    fn read(path: &Path, extract_dir: &Path, suppress_stderr: bool) -> Result<Self, PkgError> {
         let header = PackageHeader::from_file(path, Some(&VerifyOptions::skip_verification()))
             .map_err(|source| PkgError::Open {
                 path: path.to_path_buf(),
@@ -300,7 +305,7 @@ impl Pkg {
         let tempdir = tempfile::Builder::new()
             .prefix(&format!("rpmlint.{base}."))
             .tempdir_in(extract_dir)?;
-        extract::extract(path, tempdir.path())?;
+        extract::extract(path, tempdir.path(), suppress_stderr)?;
         let extract_secs = start.elapsed().as_secs_f64();
         let dir_name = tempdir.path().to_path_buf();
         let source = PkgSource::Extracted {

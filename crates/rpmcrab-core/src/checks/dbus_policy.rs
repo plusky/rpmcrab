@@ -477,7 +477,8 @@ mod tests {
         let dir = std::env::temp_dir().join("rpmcrab-dbus-parity");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("tmpdir");
-        let pkg = crate::pkg::Pkg::open(std::path::Path::new(rpm), &dir).expect("fixture opens");
+        let pkg =
+            crate::pkg::Pkg::open(std::path::Path::new(rpm), &dir, true).expect("fixture opens");
         let config = Config::default();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = DBusPolicyCheck::new(&config);

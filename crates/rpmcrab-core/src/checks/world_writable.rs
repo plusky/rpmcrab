@@ -217,7 +217,7 @@ group = "tty"
 
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
-        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir()).expect("open fixture pkg");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
         pkg.name = "dummy".to_string();
         pkg.files = vec![pkg_file("/tmp", 0o41777)];
         let config = test_config();

@@ -44,6 +44,21 @@ Filters = []
 BlockedFilters = []
 # Treshold where we should error out, by default single error is enough
 BadnessThreshold = -1
+# Treat individual errors as non-fatal unless --strict is passed on the
+# command line. rpmcrab's defaults are the openSUSE flavour, which runs
+# permissive by default (rpmlint#1592); this moves to the openSUSE flavour
+# layer once the Flavor key lands.
+PermissiveByDefault = true
+# List of regexp patterns for package paths that rpmcrab should refuse to
+# check and exit cleanly instead (e.g. the rpmlint package itself when the
+# checking wrapper uses a modified configuration).
+SkipPackagePatterns = ['/home/abuild/rpmbuild/RPMS/noarch/rpmlint-\d']
+# Distribution-specific build root locations that are searched for
+# rpmlintrc files before falling back to the package folder.
+RpmlintrcSearchPaths = ['/home/abuild/rpmbuild/SOURCES', '/usr/src/packages/SOURCES/']
+# Never print package extraction stderr, even in verbose mode (e.g. to
+# keep build logs clean).
+SuppressExtractionStderr = true
 # Set to true to issue a warning for ghost entries outside snapshots
 # when checking for atomic update compatibility
 AtomicCheckGhosts = false

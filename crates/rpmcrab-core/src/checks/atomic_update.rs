@@ -117,7 +117,7 @@ mod tests {
     fn fixture_pkg() -> Pkg {
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
-        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir()).expect("open fixture pkg");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
         pkg.name = "atomic-test".to_string();
         pkg.arch = "x86_64".to_string();
         pkg

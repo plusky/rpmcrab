@@ -41,7 +41,7 @@ fn installed_facade_matches_file_pkg() {
         .expect("open header");
     let inst = Pkg::installed(header).expect("build installed package");
     let scratch = tempfile::tempdir().unwrap();
-    let file_pkg = Pkg::open(&rpm, scratch.path()).unwrap();
+    let file_pkg = Pkg::open(&rpm, scratch.path(), true).unwrap();
 
     // Identity.
     assert_eq!(inst.name, file_pkg.name);

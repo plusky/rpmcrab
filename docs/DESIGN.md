@@ -115,21 +115,26 @@ existing checks:
 **Process / plumbing patches** (`cli.py`, `config.py`, `lint.py`, `pkg.py`,
 `filter.py`):
 
-- **Forced `--permissive`** unless `-s/--strict` (`cli.py`) — see §4.6.
-- **rpmlintrc auto-loading rewrite** (`lint.py`) — OBS `SOURCES` dirs, multiple
-  files, different messages — see §4.8.
+- **Forced `--permissive`** unless `-s/--strict` (`cli.py`) — now the
+  `PermissiveByDefault` config key (default `true`, the openSUSE behaviour) —
+  see §4.6.
+- **rpmlintrc auto-loading rewrite** (`lint.py`) — the OBS `SOURCES` dirs now
+  come from the `RpmlintrcSearchPaths` config key; multiple files, different
+  messages — see §4.8.
 - **`--mini-mode` / `-m` flag + `mini_mode` config** (`cli.py`, `config.py`) —
   the `rpmlint-mini` wrapper contract. See §4.10.
-- **Skip-rpmlint-on-rpmlint guard** (`lint.py`): any positional matching
-  `/home/abuild/rpmbuild/RPMS/noarch/rpmlint-\d` prints
-  `Skipping rpmlint for rpmlint package!` and exits 0.
+- **Skip-rpmlint-on-rpmlint guard** (`lint.py`) — now the
+  `SkipPackagePatterns` config key (default
+  `/home/abuild/rpmbuild/RPMS/noarch/rpmlint-\d`): any positional matching
+  prints `Skipping rpmlint for rpmlint package!` and exits 0.
 - **Description `#VAR#` templating** (`filter.py`,
   `_replace_description_variables`): `#WORD#` tokens in error descriptions are
   recursively expanded. A `#VAR#` with no matching description key raises
   `KeyError`, and a circular reference raises `ValueError` — both **crash the
   linter**, and rpmcrab reproduces the crash (no divergence entry).
-- **Extraction stderr always suppressed** (`pkg.py`): the `rpm2archive`/cpio
-  extraction stderr is `DEVNULL` even in verbose mode.
+- **Extraction stderr always suppressed** (`pkg.py`) — now the
+  `SuppressExtractionStderr` config key (default `true`): the
+  `rpm2archive`/cpio extraction stderr is `DEVNULL` even in verbose mode.
 
 **Check-internal patches** (these change *findings*, so each wants a corpus
 case or an explicit ledger entry):
@@ -264,11 +269,12 @@ keys the package insertion order is preserved.
 
 ### 4.6 Exit codes
 
-**The openSUSE build forces `--permissive` unless `-s/--strict` is passed**
-(`cli.py:171-175`, a SUSE-only patch marked "TODO: remove once OBS integration
-is done"; upstream `main` has no such patch). This is the single most
-load-bearing exit-code fact: on openSUSE, **ordinary errors do not fail the
-run** — only badness over the threshold does. It is why `osc build` can produce
+**The `PermissiveByDefault` config key (default `true`) forces `--permissive`
+unless `-s/--strict` is passed** — the openSUSE build's SUSE-only `cli.py`
+patch ("TODO: remove once OBS integration is done"; upstream `main` has no
+such patch), now a real key. This is the single most load-bearing exit-code
+fact: with the default, **ordinary errors do not fail the run** — only
+badness over the threshold does. It is why `osc build` can produce
 RPMs and print `E:` findings yet still "succeed", and why consumers grep the
 `exceeds threshold, aborting.` banner rather than trusting the exit code.
 
@@ -303,7 +309,8 @@ so the unreadable input is the load-bearing fact.
   other → 1, name containing `.override.` → 2.
 - Merge is recursive. **Lists union-append + dedup** for normal files but are
   **replaced wholesale** for `*.override.*` files; scalars are overwritten by
-  later files. This is why `Checks` accumulates to 43.
+  later files. This is why `Checks` accumulates to 43. A scalar where a list
+  key is expected is a fatal configuration error, not a silent empty list.
 - Autoloading disabled by `CONFIG_DISABLE_AUTOLOADING` and
   `PYTEST_XDIST_TESTRUNUID`.
 
@@ -316,10 +323,11 @@ and are `int()`-ed later (observable via `-p`).
 **Auto-discovery is an openSUSE rewrite of upstream** (`lint.py`, `+-` diff).
 When no `-r/--rpmlintrc` is given, and unless `PYTEST_XDIST_TESTRUNUID` is set:
 
-1. **SUSE build locations are searched first, always** (not just for a single
-   positional): `/home/abuild/rpmbuild/SOURCES` and `/usr/src/packages/SOURCES/`,
-   each globbed for `*.rpmlintrc` then `*-rpmlintrc`, sorted. This is why OBS
-   builds pick up `$SOURCES/<pkg>-rpmlintrc`.
+1. **The `RpmlintrcSearchPaths` locations are searched first, always** (not
+   just for a single positional): by default `/home/abuild/rpmbuild/SOURCES`
+   and `/usr/src/packages/SOURCES/`, each globbed for `*.rpmlintrc` then
+   `*-rpmlintrc`, sorted. This is why OBS builds pick up
+   `$SOURCES/<pkg>-rpmlintrc`.
 2. Only if that found nothing **and** exactly one positional file/dir was given,
    that argument's directory is globbed (`*.rpmlintrc` then `*-rpmlintrc`,
    sorted).

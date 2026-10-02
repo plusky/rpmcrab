@@ -128,7 +128,7 @@ mod tests {
     fn fixture_pkg() -> Pkg {
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
-        Pkg::open(&rpm, &std::env::temp_dir()).expect("open fixture pkg")
+        Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg")
     }
 
     fn dep(name: &str) -> DepInfo {
