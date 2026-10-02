@@ -270,20 +270,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A fake `rpm` that writes to stderr only, so the finding can only come
+    /// from stderr reaching the output the matchers read.
+    fn fake_rpm_stderr(dir: &std::path::Path, name: &str, stderr: &str, code: i32) -> String {
+        let path = dir.join(name);
+        let mut f = std::fs::File::create(&path).expect("create fake rpm");
+        writeln!(f, "#!/bin/sh").unwrap();
+        writeln!(f, "printf '%s' '{stderr}' >&2").unwrap();
+        writeln!(f, "exit {code}").unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
     #[test]
-    fn stderr_merged_into_output() {
-        // The reference merges stderr into stdout (`stderr=subprocess.STDOUT`);
-        // the port must append captured stderr after stdout.
-        let check = SignatureCheck::new(&Config::default());
-        // Simulate the merge logic directly: stdout + stderr, trailing newline stripped.
-        let stdout = b"header: RSA\n";
-        let stderr = b"warning: something\n";
-        let mut text = String::from_utf8_lossy(stdout).into_owned();
-        text.push_str(&String::from_utf8_lossy(stderr));
-        if text.ends_with('\n') {
-            text.pop();
-        }
-        assert_eq!(text, "header: RSA\nwarning: something");
-        let _ = check;
+    fn stderr_reaches_the_matchers() {
+        // The reference runs rpm -Kv with stderr=subprocess.STDOUT
+        // (pkg.py:637-644), so a key id reported on stderr still produces
+        // unknown-key. With stdout-only capture this finding disappears, so
+        // this fails if the merge is reverted.
+        let dir = tmpdir("rpmcrab-signature-stderr");
+        let rpm = fake_rpm_stderr(
+            &dir,
+            "rpm-stderr",
+            "V6-RSA-CBC, signature, key ID 1234abcd: NOKEY\n",
+            // _check_unknown_key requires retcode == 1 (SignatureCheck.py:50).
+            1,
+        );
+        let results = run_check(&fixture_pkg(), &rpm);
+        assert!(
+            results
+                .iter()
+                .any(|(name, line)| name == "unknown-key" && line.contains("1234abcd")),
+            "stderr did not reach the matchers: {results:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
