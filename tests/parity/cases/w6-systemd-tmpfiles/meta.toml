@@ -1,0 +1,16 @@
+kind = "captured"
+rpmlint = "2.10.0"
+reference_sha = "84848c05c5571c22274a55ff9afdfe6d88c67dc9"
+flavour = "openSUSE"
+argv = ["w6-systemd-tmpfiles-1.0-1.noarch.rpm"]
+captured = "2026-10-02"
+
+[source]
+description = "Hand-built fixture: /usr/lib/tmpfiles.d/w6test.conf. Reference emits W tmpfile-not-in-filelist. Exit 0."
+
+[tools]
+present = ["checkbashisms","dash","desktop-file-validate","readelf","objdump","ldd","file"]
+
+[[input]]
+file = "w6-systemd-tmpfiles-1.0-1.noarch.rpm"
+sha256 = "725009ee91c88e8ec5b861f243cca082c0ab6e84a585f84d0743e0e1a54ffe5e"

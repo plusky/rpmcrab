@@ -245,6 +245,10 @@ impl Check for PolkitCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    use crate::color::Color;
+    use crate::pkg::pkgfile::PkgFile;
 
     fn check() -> PolkitCheck {
         PolkitCheck {
@@ -371,9 +375,10 @@ mod tests {
         let actions = PolkitCheck::parse_actions(path.to_str().unwrap()).expect("parse");
         std::fs::remove_file(&path).ok();
         assert_eq!(actions.len(), 1);
-        let (_, finding, detail) = check()
+        let (level, finding, detail) = check()
             .check_action("org.foo.nodefaults", &actions[0].1)
             .expect("finding");
+        assert_eq!(level, Level::Error);
         assert_eq!(finding, "polkit-untracked-privilege");
         assert!(detail.contains("no:no:no"), "unexpected detail: {detail}");
     }
@@ -396,5 +401,32 @@ mod tests {
         std::fs::remove_file(&path).ok();
         let ids: Vec<&str> = actions.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(ids, vec![""], "an <action> without id was dropped: {ids:?}");
+    }
+
+    #[test]
+    fn ghost_policy_file_is_flagged_not_parsed() {
+        // check_binary routes ghost files to polkit-ghost-file without
+        // parsing them: a ghost has no payload on disk, so parse_actions
+        // would fail on a missing file. This covers the ghost filter that
+        // unit tests stopping at check_action never reach.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir()).expect("open fixture pkg");
+        let name = "/usr/share/polkit-1/actions/org.foo.ghost.policy";
+        pkg.files = vec![PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            ..Default::default()
+        }];
+        pkg.ghost_files = vec![name.to_string()];
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = check();
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(results.len(), 1, "unexpected results: {results:?}");
+        assert_eq!(results[0].0, "polkit-ghost-file");
+        assert!(results[0].1.contains(": E: "), "level: {}", results[0].1);
+        assert!(results[0].1.contains(name), "detail: {}", results[0].1);
     }
 }
