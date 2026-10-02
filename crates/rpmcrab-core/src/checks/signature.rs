@@ -51,6 +51,11 @@ impl SignatureCheck {
             });
         // The reference merges stderr into stdout (`stderr=subprocess.STDOUT`)
         // and runs under `en_US.UTF-8`; see the parity ledger.
+        // Appending whole stderr after whole stdout (rather than true
+        // interleaving) is safe because all three SignatureCheck matchers
+        // are unanchored searches, so relative stream order cannot change
+        // what matches. A future anchored matcher would need real
+        // interleaving instead.
         let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
         text.push_str(&String::from_utf8_lossy(&output.stderr));
         if text.ends_with('\n') {
