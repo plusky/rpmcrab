@@ -2573,6 +2573,7 @@ impl FilesCheck {
 mod tests {
     use super::*;
     use crate::color::Color;
+    use crate::pkg::pkgfile::RPMFILE_GHOST;
 
     fn test_config() -> Config {
         // Load the bundled defaults so the check sees the same configuration
@@ -3074,31 +3075,109 @@ mod tests {
         // Benchmark found: `.../libbasegfxlo.so-gdb.py` triggered
         // library-without-ldconfig because files.rs used
         // `fname.contains(".so")`. The reference gates on the anchored
-        // lib_regex.
-        let check = FilesCheck::new(&Config::default());
-        assert!(!is_match(
-            &check.lib_re,
-            "/usr/lib64/libreoffice/program/libbasegfxlo.so-gdb.py"
-        ));
-        assert!(is_match(&check.lib_re, "/usr/lib64/libfoo.so.1.2.3"));
+        // lib_regex. Drive through check_binary: a .so-gdb.py file must NOT
+        // emit the finding, while a real .so file without ldconfig MUST.
+        let config = test_config();
+        let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = Pkg::open(std::path::Path::new(&rpm), dir.path()).expect("open fixture");
+        pkg.files = vec![
+            PkgFile {
+                name: "/usr/lib64/libfoo.so-gdb.py".to_string(),
+                path: "/usr/lib64/libfoo.so-gdb.py".to_string(),
+                mode: 0o100644,
+                size: Some(100),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/lib64/libfoo.so.1.2.3".to_string(),
+                path: "/usr/lib64/libfoo.so.1.2.3".to_string(),
+                mode: 0o100755,
+                size: Some(100),
+                ..Default::default()
+            },
+        ];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let results: Vec<(String, String)> = out
+            .results()
+            .iter()
+            .map(|(n, d)| (n.clone(), d.clone()))
+            .collect();
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "library-without-ldconfig-postin" && d.contains("so-gdb.py")),
+            "false positive on .so-gdb.py: {results:?}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|(n, d)| n == "library-without-ldconfig-postin"
+                    && d.contains("libfoo.so.1.2.3")),
+            "missing finding on real .so: {results:?}"
+        );
     }
 
     #[test]
-    fn zero_length_exempts_init_py() {
-        // Benchmark found: zero-length __init__.py files were flagged.
-        // The reference exempts them via normal_zero_length_regex.
-        let check = FilesCheck::new(&Config::default());
-        assert!(is_match(
-            &check.normal_zero_length_re,
-            "/usr/lib64/libreoffice/program/wizards/__init__.py"
-        ));
-        assert!(is_match(
-            &check.normal_zero_length_re,
-            "/usr/lib/python3.12/site-packages/foo/py.typed"
-        ));
-        assert!(!is_match(
-            &check.normal_zero_length_re,
-            "/usr/bin/empty-script"
-        ));
+    fn zero_length_exempts_init_py_and_ghosts() {
+        // Benchmark found: zero-length __init__.py files were flagged, and
+        // ghost files were not skipped. The reference exempts both.
+        let config = test_config();
+        let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = Pkg::open(std::path::Path::new(&rpm), dir.path()).expect("open fixture");
+        pkg.files = vec![
+            PkgFile {
+                name: "/usr/lib/python3.12/site-packages/foo/__init__.py".to_string(),
+                path: "/usr/lib/python3.12/site-packages/foo/__init__.py".to_string(),
+                mode: 0o100644,
+                size: Some(0),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/bin/empty-script".to_string(),
+                path: "/usr/bin/empty-script".to_string(),
+                mode: 0o100755,
+                size: Some(0),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/var/log/ghost.log".to_string(),
+                path: "/var/log/ghost.log".to_string(),
+                mode: 0o100644,
+                size: Some(0),
+                flags: RPMFILE_GHOST,
+                ..Default::default()
+            },
+        ];
+        pkg.ghost_files = vec!["/var/log/ghost.log".to_string()];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let results: Vec<(String, String)> = out
+            .results()
+            .iter()
+            .map(|(n, d)| (n.clone(), d.clone()))
+            .collect();
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "zero-length" && d.contains("__init__.py")),
+            "false positive on __init__.py: {results:?}"
+        );
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "zero-length" && d.contains("ghost.log")),
+            "false positive on ghost: {results:?}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|(n, d)| n == "zero-length" && d.contains("empty-script")),
+            "missing zero-length on empty-script: {results:?}"
+        );
     }
 }
