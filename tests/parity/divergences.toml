@@ -431,7 +431,7 @@ since = "0.1.0"
 case = "global"
 check = "LibraryDependencyCheck"
 kind = "behaviour"
-reason = "The per-package maps (requires, so-symlinks, arch) are keyed on `pkg.name` alone, mirroring the reference's dicts (`LibraryDependencyCheck.py:37-39`); linting two arches of the same devel package together, the second overwrites the first - one finding survives, for the last arch seen. Re-assigning an existing dict key does not move its position, so `foo-devel.x86_64` then `foo-devel.aarch64` yields exactly one finding carrying the last arch and the last requires/symlink list; the x86_64 package is never checked at all. Inherited upstream quirk, kept for parity rather than fixed; the fix-vs-parity question is tracked in plusky/rpmcrab#74. No upstream issue covers this."
+reason = "Deliberate fix (plusky/rpmcrab#74): the per-package maps are keyed on `(name, arch)` instead of `pkg.name` alone. The reference keys on name alone (`LibraryDependencyCheck.py:37-39`), so linting `foo-devel.x86_64` then `foo-devel.aarch64` together silently drops the first arch — only the last arch is ever checked, and no user would want that. The port checks each arch. Pinned by `cross_arch_packages_are_each_checked`."
 since = "0.1.0"
 
 [[divergence]]

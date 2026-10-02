@@ -6,6 +6,11 @@
 //! This is a cross-package check: it collects `.so` symlinks from devel
 //! packages and `.so` files from non-devel packages during `check_binary`,
 //! then verifies the dependencies in `after_checks`.
+//!
+//! Deliberate divergence (plusky/rpmcrab#74): the per-package maps are keyed
+//! on `(name, arch)` rather than `pkg.name` alone. The reference keys on
+//! name alone, so linting two arches of one package together silently drops
+//! all but the last arch. The port checks each arch.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -31,13 +36,16 @@ fn expand_isa() -> String {
 }
 
 pub struct LibraryDependencyCheck {
-    package_requires: HashMap<String, Vec<String>>,
-    package_so_symlinks: HashMap<String, Vec<String>>,
+    package_requires: HashMap<(String, String), Vec<String>>,
+    package_so_symlinks: HashMap<(String, String), Vec<String>>,
     /// Lint order of the devel packages; the reference iterates a plain
     /// dict, so findings follow package lint order deterministically.
-    devel_order: Vec<String>,
+    /// Keyed on `(name, arch)`: the reference keys on `pkg.name` alone
+    /// (`LibraryDependencyCheck.py:37-39`), so linting two arches of the
+    /// same package together silently drops all but the last arch. The port
+    /// deliberately checks each arch (plusky/rpmcrab#74).
+    devel_order: Vec<(String, String)>,
     package_so_files: HashMap<String, String>,
-    package_arch_mapping: HashMap<String, String>,
     isa: String,
 }
 
@@ -46,11 +54,10 @@ pub struct LibraryDependencyCheck {
 /// iterates a plain dict (insertion order), which the port pins via this
 /// vector.
 struct LibDepState {
-    package_requires: HashMap<String, Vec<String>>,
-    package_so_symlinks: HashMap<String, Vec<String>>,
+    package_requires: HashMap<(String, String), Vec<String>>,
+    package_so_symlinks: HashMap<(String, String), Vec<String>>,
     package_so_files: HashMap<String, String>,
-    package_arch_mapping: HashMap<String, String>,
-    devel_order: Vec<String>,
+    devel_order: Vec<(String, String)>,
 }
 
 impl LibraryDependencyCheck {
@@ -60,7 +67,6 @@ impl LibraryDependencyCheck {
             package_so_symlinks: HashMap::new(),
             devel_order: Vec::new(),
             package_so_files: HashMap::new(),
-            package_arch_mapping: HashMap::new(),
             isa: expand_isa(),
         }
     }
@@ -80,7 +86,6 @@ impl Check for LibraryDependencyCheck {
         self.package_so_symlinks.clear();
         self.devel_order.clear();
         self.package_so_files.clear();
-        self.package_arch_mapping.clear();
         self.isa = expand_isa();
     }
 
@@ -89,7 +94,6 @@ impl Check for LibraryDependencyCheck {
             package_requires: std::mem::take(&mut self.package_requires),
             package_so_symlinks: std::mem::take(&mut self.package_so_symlinks),
             package_so_files: std::mem::take(&mut self.package_so_files),
-            package_arch_mapping: std::mem::take(&mut self.package_arch_mapping),
             devel_order: std::mem::take(&mut self.devel_order),
         };
         self.isa = expand_isa();
@@ -103,7 +107,6 @@ impl Check for LibraryDependencyCheck {
             self.package_requires.extend(state.package_requires);
             self.package_so_symlinks.extend(state.package_so_symlinks);
             self.package_so_files.extend(state.package_so_files);
-            self.package_arch_mapping.extend(state.package_arch_mapping);
             for name in state.devel_order {
                 if !self.devel_order.contains(&name) {
                     self.devel_order.push(name);
@@ -124,24 +127,22 @@ impl Check for LibraryDependencyCheck {
                 .chain(pkg.prereq.iter())
                 .map(|d| d.name.clone())
                 .collect();
-            // Keyed on `pkg.name` alone, like the reference's dicts
-            // (`LibraryDependencyCheck.py:37-39`): linting two arches of the
-            // same package together, the second overwrites the first - one
-            // finding survives, for the last arch seen. Inherited upstream
-            // quirk, kept for parity.
+            // Keyed on `(name, arch)`: the reference keys on `pkg.name`
+            // alone (`LibraryDependencyCheck.py:37-39`), so the second arch
+            // of a package overwrites the first and only the last arch is
+            // ever checked. Deliberate fix (plusky/rpmcrab#74): each arch
+            // gets its own entry.
+            let key = (pkg.name.clone(), pkg.arch.clone());
             let first_seen = self
                 .package_requires
-                .insert(pkg.name.clone(), requires)
+                .insert(key.clone(), requires)
                 .is_none();
-            self.package_so_symlinks
-                .insert(pkg.name.clone(), Vec::new());
-            self.package_arch_mapping
-                .insert(pkg.name.clone(), pkg.arch.clone());
+            self.package_so_symlinks.insert(key.clone(), Vec::new());
             if first_seen {
-                self.devel_order.push(pkg.name.clone());
+                self.devel_order.push(key.clone());
             }
 
-            let symlinks = self.package_so_symlinks.get_mut(&pkg.name).unwrap();
+            let symlinks = self.package_so_symlinks.get_mut(&key).unwrap();
             for pkgfile in &pkg.files {
                 if is_symlink(pkgfile.mode) && pkgfile.name.ends_with(".so") {
                     let parent = Path::new(&pkgfile.name).parent().unwrap_or(Path::new("/"));
@@ -164,22 +165,14 @@ impl Check for LibraryDependencyCheck {
         // plain dict (`LibraryDependencyCheck.py:52`), i.e. package lint
         // order, which is what the frozen sort-order contract pins.
         for idx in 0..self.devel_order.len() {
-            let pkgname = self.devel_order[idx].clone();
-            let arch = self
-                .package_arch_mapping
-                .get(&pkgname)
-                .cloned()
-                .unwrap_or_default();
+            let (pkgname, arch) = self.devel_order[idx].clone();
+            let key = (pkgname.clone(), arch.clone());
             let so_symlinks = self
                 .package_so_symlinks
-                .get(&pkgname)
+                .get(&key)
                 .cloned()
                 .unwrap_or_default();
-            let requires = self
-                .package_requires
-                .get(&pkgname)
-                .cloned()
-                .unwrap_or_default();
+            let requires = self.package_requires.get(&key).cloned().unwrap_or_default();
             for link in &so_symlinks {
                 if let Some(definition) = self.package_so_files.get(link) {
                     // `definition` is the *package* name, not a soname
@@ -428,6 +421,32 @@ mod tests {
         for _ in 0..4 {
             assert_eq!(scenario(), first, "finding order is not deterministic");
         }
+    }
+
+    #[test]
+    fn cross_arch_packages_are_each_checked() {
+        // plusky/rpmcrab#74: the reference keys its per-package maps on
+        // `pkg.name` alone, so linting `foo-devel.x86_64` then
+        // `foo-devel.aarch64` together overwrites the first entry — only
+        // the last arch is ever checked. The port keys on `(name, arch)`,
+        // so both arches must produce findings.
+        let (lib, mut devel_x86) = lib_and_devel(&["unrelated".to_string()]);
+        devel_x86.arch = "x86_64".to_string();
+        let (_, mut devel_aarch64) = lib_and_devel(&["unrelated".to_string()]);
+        devel_aarch64.arch = "aarch64".to_string();
+
+        let results = run_pkgs(&[&lib, &devel_x86, &devel_aarch64]);
+        assert_eq!(results.len(), 2, "both arches must be checked: {results:?}");
+        assert_eq!(results[0].0, "no-library-dependency-on");
+        assert_eq!(
+            results[0].1,
+            "foo-devel.x86_64: E: no-library-dependency-on libfoo /usr/lib64/libfoo.so.1"
+        );
+        assert_eq!(results[1].0, "no-library-dependency-on");
+        assert_eq!(
+            results[1].1,
+            "foo-devel.aarch64: E: no-library-dependency-on libfoo /usr/lib64/libfoo.so.1"
+        );
     }
 
     /// Export/import merges worker state in package order: two workers
