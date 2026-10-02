@@ -197,6 +197,21 @@ def port_check_map(check_rs):
     return out
 
 
+# Reference checks that structurally cannot own a `check::build()` arm, so
+# `port_check_map` can never report them, mapped to the port modules that
+# actually emit their findings. FileMetadataCheck is an abstract base in the
+# reference: checks/file_metadata.py holds the shared verdict engine and is
+# registered as two concrete checks, DeviceFilesCheck and WorldWritableCheck.
+# Without an entry it fell into the unscoped fallback forever, where
+# post.rs's `empty-*` masked a new FileMetadataCheck finding (VERIFIED).
+# This is the same explicit mapping the exact-match branch already gives
+# readelf-failed, not a general exemption: anything absent here still falls
+# back and is still reported as UNSCOPED.
+PORT_MODULE_ALIASES = {
+    "FileMetadataCheck": ("device_files", "world_writable"),
+}
+
+
 def covers_finding(module, name, by_module, flat, check_map):
     """Is reference finding `name` of `module` covered by the port?
 
@@ -204,16 +219,33 @@ def covers_finding(module, name, by_module, flat, check_map):
     literally -- so it counts wherever it lives. A wildcard is not:
     `PostCheck`'s `empty-*` would otherwise mask a new, genuinely unported
     `empty-` finding of any other check. A wildcard therefore only counts
-    from the check's own module. Reference checks with no `build()` arm
-    (they ship in branches that have not merged yet) keep the old unscoped
-    behaviour, and are reported so the fallback stays visible.
+    from the check's own module, which comes from `check::build()`'s arms
+    or, for the few checks that cannot have one, from
+    PORT_MODULE_ALIASES. Remaining arm-less checks (they ship in branches
+    that have not merged yet) keep the old unscoped behaviour, and are
+    reported so the fallback stays visible.
     """
     if any("*" not in p and covers(p, name) for p in flat):
         return True
     owner = check_map.get(module)
     if owner is None:
+        owners = PORT_MODULE_ALIASES.get(module)
+        if owners is not None:
+            return any(covers(p, name) for m in owners
+                       for p in by_module.get(m, ()))
         return any(covers(p, name) for p in flat)
     return any(covers(p, name) for p in by_module.get(owner, ()))
+
+
+def unscoped_modules(finding_modules, check_map):
+    """Checks whose findings fall back to matching every port pattern.
+
+    Arm-less and not aliased is the exposure: a wildcard from anywhere can
+    still mask a finding added to one of these. A check is listed whether or
+    not any of its findings happen to be covered, so a check that never
+    reports a gap stays visible.
+    """
+    return (set(finding_modules) - set(check_map)) - set(PORT_MODULE_ALIASES)
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +518,26 @@ def _fn_body_literals(src, fn_name):
                 break
     body = src[brace:end + 1]
     return re.findall(r"\"([^\"]+)\"", body)
+
+
+_FINDING_NAME_RE = re.compile(r"^[A-Za-z0-9_.%*-]+$")
+
+
+def fn_finding_literals(src, fn_name):
+    """`_fn_body_literals` minus the literals that are not finding names.
+
+    check_unit keeps its four findings in the same body as its regex
+    templates ("systemd-update-helper install-system-units .*{}") and its
+    expect message ("unit pattern"). An exact template counts for every
+    module, so each stray one is a global masking hole for a reference
+    finding that happens to share the name. rpmlint finding names are drawn
+    from a narrow alphabet (letters, digits, '-', '%', '*', '_', '.'); all
+    648 distinct reference names fit it and none of the strays do. It fails
+    safe: a literal that ever stops fitting can only add a GAPS entry, never
+    hide one.
+    """
+    return [l for l in _fn_body_literals(src, fn_name)
+            if _FINDING_NAME_RE.match(l)]
 
 def script_tags(pkgdir):
     """The '%pre'/'%post'/... tags: third elements of Pkg.SCRIPT_TAGS.
@@ -2221,7 +2273,7 @@ def audit_port(checks_dir):
                 ("alternatives.rs", "finding"): ("check_post_phase", fn_err_literals),
                 ("bashisms.rs", "warning"): ("classify_bashisms", fn_push_literals),
                 ("menu_xdg.rs", "finding"): ("parse_desktop", fn_err_literals),
-                ("systemd_install.rs", "finding"): ("check_unit", None),
+                ("systemd_install.rs", "finding"): ("check_unit", fn_finding_literals),
             }
             site_key = (fn, arg)
             if site_key in dynamic_sites:
@@ -2229,7 +2281,6 @@ def audit_port(checks_dir):
                 if extractor is not None:
                     found = extractor(src, func_name)
                 else:
-                    # check_unit: literals in the function body
                     found = _fn_body_literals(src, func_name)
                 if found:
                     templates.update(found)
@@ -2308,7 +2359,7 @@ def main(argv):
     gaps, ledgered, stale = [], [], []
     # A check is unmapped regardless of whether any of its findings happen to be
     # covered, so derive this before the loop rather than while iterating.
-    unscoped = {module for module, _ in findings} - set(check_map)
+    unscoped = unscoped_modules({module for module, _ in findings}, check_map)
     missing_modules = {e.get("check") for e in entries if e.get("kind") == "missing"}
     for module, name in sorted(findings):
         if covers_finding(module, name, by_module, port_templates, check_map):

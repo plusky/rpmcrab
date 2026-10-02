@@ -32,6 +32,10 @@ def _write(path, text):
         f.write(text)
 
 
+def _raise_oserror(path):
+    raise OSError(path)
+
+
 # ---------------------------------------------------------------------------
 # script_tags: all ten reference script tags
 # ---------------------------------------------------------------------------
@@ -385,6 +389,481 @@ def test_unmapped_module_keeps_unscoped_cover():
     assert audit.covers_finding("MenuCheck", "empty-sources", by_module, flat, {})
     assert not audit.covers_finding(
         "MenuCheck", "menu-recently-used-xbel", by_module, flat, {})
+
+
+# ---------------------------------------------------------------------------
+# PORT_MODULE_ALIASES: arm-less checks that still get scoped
+# ---------------------------------------------------------------------------
+
+ALIASED = {"post": {"empty-*"}, "device_files": {"device-unauthorized-file"},
+           "world_writable": set()}
+ALIASED_FLAT = {"empty-*", "device-unauthorized-file"}
+
+
+def test_abstract_base_is_scoped_to_its_concrete_modules():
+    # FileMetadataCheck has no build() arm and never will: it is an abstract
+    # base whose verdict engine (checks/file_metadata.rs) is registered as
+    # DeviceFilesCheck and WorldWritableCheck. Unscoped, post.rs's `empty-*`
+    # masked `empty-mutant-filemeta` added to FileMetadataCheck.py -- the
+    # exact hole the aliases close.
+    assert audit.PORT_MODULE_ALIASES.get("FileMetadataCheck") == (
+        "device_files", "world_writable")
+    assert not audit.covers_finding(
+        "FileMetadataCheck", "empty-mutant-filemeta", ALIASED,
+        ALIASED_FLAT, {})
+    assert audit.covers_finding(
+        "FileMetadataCheck", "device-unauthorized-file", ALIASED,
+        ALIASED_FLAT, {})
+
+
+def test_alias_does_not_leak_another_modules_wildcard():
+    # A mapped check still may not borrow a wildcard from a module that has
+    # nothing to do with it -- scoping must not become a licence.
+    assert not audit.covers_finding(
+        "FileMetadataCheck", "empty-sources", ALIASED, ALIASED_FLAT, {})
+
+
+def test_alias_is_not_a_general_exemption():
+    # Every other arm-less check keeps the unscoped fallback, which is what
+    # UNSCOPED discloses. BuildRootAndDateCheck is genuinely unported, so a
+    # new `empty-` finding there is still masked -- disclosed, not fixed.
+    assert "BuildRootAndDateCheck" not in audit.PORT_MODULE_ALIASES
+    assert audit.covers_finding(
+        "BuildRootAndDateCheck", "empty-mutant-bradc",
+        {"post": {"empty-*"}}, {"empty-*"}, {})
+
+
+def test_exact_match_still_wins_for_an_aliased_check():
+    # The exact-match branch runs before scoping, so an aliased check keeps
+    # the readelf-failed style cross-module exact emission.
+    assert audit.covers_finding(
+        "FileMetadataCheck", "device-mismatched-attrs",
+        {"binaries": {"device-mismatched-attrs"}},
+        {"device-mismatched-attrs"}, {})
+
+
+def test_aliased_check_is_no_longer_reported_as_unscoped():
+    # UNSCOPED is the disclosure; the alias has to clear it or the report
+    # keeps advertising an exposure that no longer exists.
+    mods = {"FileMetadataCheck", "BuildRootAndDateCheck", "PostCheck"}
+    cmap = {"PostCheck": "post"}
+    assert audit.unscoped_modules(mods, cmap) == {"BuildRootAndDateCheck"}
+
+
+def test_alias_covers_nothing_when_its_modules_emit_nothing():
+    # A mapping to a module that emits nothing must not silently widen to the
+    # unscoped fallback -- an empty result is a gap, which is the loud side.
+    assert not audit.covers_finding(
+        "FileMetadataCheck", "empty-mutant-filemeta",
+        {"post": {"empty-*"}}, {"empty-*"}, {})
+
+
+# ---------------------------------------------------------------------------
+# Dynamic emission sites: the resolver table and its extractors
+# ---------------------------------------------------------------------------
+
+BASHISMS_RS = """\
+pub struct BashismsCheck {
+    use_early_fail: bool,
+}
+
+impl BashismsCheck {
+    fn classify_bashisms(dash_code: Option<i32>, bashisms_code: Option<i32>) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        match dash_code {
+            Some(2) => out.push("bin-sh-syntax-error"),
+            Some(127) | None => return out,
+            _ => {}
+        }
+        if bashisms_code == Some(1) {
+            out.push("potential-bashisms");
+        }
+        let unrelated = "not-a-finding";
+        out
+    }
+
+    fn check_bashisms(&self, path: &str) -> Vec<&'static str> {
+        out.push("potential-bashisms")
+    }
+}
+"""
+
+
+def test_classify_bashisms_resolves_both_names():
+    # commit aa4e2d7 taught audit_port to read bashisms.rs's `warning`
+    # variable back through classify_bashisms; without it the two names were
+    # UNRESOLVED and the findings only stayed covered by luck.
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "bashisms.rs")
+        _write(path, BASHISMS_RS)
+        src = open(path, encoding="utf-8").read()
+    assert audit.fn_push_literals(src, "classify_bashisms") == [
+        "bin-sh-syntax-error", "potential-bashisms"]
+
+
+def test_classify_bashisms_is_scoped_to_the_named_function():
+    # The sibling check_bashisms also pushes a name; scanning it too would
+    # credit the resolver with findings it never reads. The function-name
+    # lookup must be exact, so a prefix collision does not widen the body.
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "bashisms.rs")
+        _write(path, BASHISMS_RS)
+        src = open(path, encoding="utf-8").read()
+    got = audit.fn_push_literals(src, "classify_bashisms")
+    assert "not-a-finding" not in got, got
+    assert len(got) == 2, got
+
+
+ALTERNATIVES_RS = """\
+impl AlternativesCheck {
+    fn check_post_phase(lines: &[String]) -> Result<Vec<(String, String)>, &'static str> {
+        if lines.is_empty() {
+            return Err("update-alternatives-post-call-missing");
+        }
+        let unrelated = "not-a-finding";
+        Ok(vec![])
+    }
+}
+"""
+
+
+def test_check_post_phase_resolves_its_err_literal():
+    # alternatives.rs emits `finding` from an Err(..) returned by
+    # check_post_phase; the site is only resolvable through the Err literal.
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "alternatives.rs")
+        _write(path, ALTERNATIVES_RS)
+        src = open(path, encoding="utf-8").read()
+    assert audit.fn_err_literals(src, "check_post_phase") == [
+        "update-alternatives-post-call-missing"]
+
+
+SYSTEMD_INSTALL_RS = """\
+impl SystemdInstallCheck {
+    fn check_unit(
+        basename: &str,
+        pre: &str,
+        post: &str,
+        preun: &str,
+        postun: &str,
+    ) -> Vec<&'static str> {
+        let escaped = fancy_regex::escape(basename);
+        let patterns = [
+            (
+                format!(r"systemd-update-helper mark-install-system-units .*{}", escaped),
+                pre,
+                "systemd-service-without-service_add_pre",
+            ),
+            (
+                format!(r"systemd-update-helper install-system-units .*{}", escaped),
+                post,
+                "systemd-service-without-service_add_post",
+            ),
+            (
+                format!(r"systemd-update-helper remove-system-units .*{}", escaped),
+                preun,
+                "systemd-service-without-service_del_preun",
+            ),
+            (
+                format!(r"systemd-update-helper mark-restart-system-units .*{}", escaped),
+                postun,
+                "systemd-service-without-service_del_postun",
+            ),
+        ];
+        let mut missing = Vec::new();
+        for (pattern, script, finding) in &patterns {
+            let re = Regex::new(pattern).expect("unit pattern");
+            if !script.lines().any(|line| is_match(&re, line)) {
+                if *finding == "systemd-service-without-service_del_postun"
+                    && postun.lines().any(|l| l.trim() == ":")
+                {
+                    continue;
+                }
+                missing.push(*finding);
+            }
+        }
+        missing
+    }
+}
+"""
+
+
+def test_systemd_check_unit_resolves_all_four_findings():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "systemd_install.rs")
+        _write(path, SYSTEMD_INSTALL_RS)
+        src = open(path, encoding="utf-8").read()
+    assert sorted(set(audit.fn_finding_literals(src, "check_unit"))) == [
+        "systemd-service-without-service_add_post",
+        "systemd-service-without-service_add_pre",
+        "systemd-service-without-service_del_postun",
+        "systemd-service-without-service_del_preun"]
+
+
+def test_systemd_check_unit_drops_non_finding_literals():
+    # The raw body scan also yields the four regex templates and the
+    # "unit pattern" expect message. Those are wildcard-free, so
+    # covers_finding counts them for EVERY module -- an exact template is a
+    # global masking hole, and one named `unit pattern` would silence a real
+    # reference finding of that name. fn_finding_literals is what keeps them
+    # out; dropping them cannot hide a finding, only surface one.
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "systemd_install.rs")
+        _write(path, SYSTEMD_INSTALL_RS)
+        src = open(path, encoding="utf-8").read()
+    raw = set(audit._fn_body_literals(src, "check_unit"))
+    got = set(audit.fn_finding_literals(src, "check_unit"))
+    assert "unit pattern" in raw and ":" in raw, raw
+    assert not got & {"unit pattern", ":",
+                      r"systemd-update-helper install-system-units .*{}"}
+    assert raw - got == {
+        "unit pattern", ":",
+        r"systemd-update-helper mark-install-system-units .*{}",
+        r"systemd-update-helper install-system-units .*{}",
+        r"systemd-update-helper remove-system-units .*{}",
+        r"systemd-update-helper mark-restart-system-units .*{}"}
+
+
+def test_finding_name_filter_matches_every_reference_finding():
+    # The filter must not drop a name the reference really uses: rpmlint
+    # finding names use '-' and '%' (bogus-variable-use-in-%post), '*'
+    # (*-file-ghost), '_' and capitals (use-of-RPM_SOURCE_DIR).
+    ref = audit.resolve_ref_dir(None)
+    if not os.path.isdir(ref):
+        return  # no pinned reference checkout; the fixtures above still pin it
+    findings, _, _ = audit.audit_reference(ref)
+    bad = sorted({n for _, n in findings
+                  if not audit._FINDING_NAME_RE.match(n)})
+    assert bad == [], bad
+
+
+MENU_XDG_RS = """\
+impl MenuXDGCheck {
+    fn parse_desktop(content: &str, filename: &str) -> Result<DesktopSections, ParseError> {
+        let mut sections: DesktopSections = HashMap::new();
+        for line in content.lines() {
+            if line.starts_with('[') {
+                let end = line.find(']').ok_or_else(|| {
+                    if current.is_none() {
+                        (
+                            Level::Error,
+                            "desktopfile-missing-header",
+                            vec![filename.to_string()],
+                        )
+                    } else {
+                        (
+                            Level::Error,
+                            "invalid-desktopfile",
+                            vec![filename.to_string()],
+                        )
+                    }
+                })?;
+            }
+        }
+        Ok(sections)
+    }
+}
+"""
+
+
+def test_parse_desktop_resolves_err_tuple_literals():
+    # menu_xdg.rs reports through ok_or_else(|| { (Level::Error, "name", ..) }),
+    # so it is fn_err_literals' bare-tuple arm -- not the Err((..)) one -- that
+    # makes these two names resolvable at all.
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "menu_xdg.rs")
+        _write(path, MENU_XDG_RS)
+        src = open(path, encoding="utf-8").read()
+    assert sorted(set(audit.fn_err_literals(src, "parse_desktop"))) == [
+        "desktopfile-missing-header", "invalid-desktopfile"]
+
+
+ERR_TUPLE_RS = """\
+impl MenuXDGCheck {
+    fn parse_desktop(content: &str) -> Result<DesktopSections, ParseError> {
+        if content.is_empty() {
+            return Err((Level::Error, "invalid-desktopfile", vec![filename]));
+        }
+        Ok(DesktopSections::new())
+    }
+}
+"""
+
+
+def test_err_tuple_form_is_resolved_too():
+    # The other tuple shape fn_err_literals accepts: Err((Level, "name", ..)).
+    # Bare tuples are common enough that the bare-tuple arm alone would mask a
+    # regression here, so the Err((..)) arm needs its own pin.
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "menu_xdg.rs")
+        _write(path, ERR_TUPLE_RS)
+        src = open(path, encoding="utf-8").read()
+    assert audit.fn_err_literals(src, "parse_desktop") == ["invalid-desktopfile"]
+
+
+MENU_XDG_CHECK_BINARY = """
+    fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
+        for filename in &pkg.files {
+            let content = String::new();
+            match Self::parse_desktop(&content, filename) {
+                Ok(_) => {}
+                Err((level, finding, refs)) => {
+                    add_info(out, level, pkg, finding, &refs);
+                }
+            }
+        }
+    }
+"""
+
+
+def test_menu_xdg_dynamic_site_resolves_both_names():
+    with tempfile.TemporaryDirectory() as d:
+        checks = os.path.join(d, "checks")
+        _write(os.path.join(checks, "menu_xdg.rs"),
+               MENU_XDG_RS + MENU_XDG_CHECK_BINARY)
+        by_module, unresolved = audit.audit_port(checks)
+    assert by_module["menu_xdg"] == {"desktopfile-missing-header",
+                                      "invalid-desktopfile"}, by_module
+    assert unresolved == [], unresolved
+
+
+FILELIST_TOML = """\
+[FileCheck-dev]
+File = /dev/*
+Message = "file-not-in-lang"
+"""
+
+
+def test_rust_filelist_messages_reads_the_embedded_toml():
+    # filelist.rs emits `rule.message`, which is populated at build time from
+    # the include_str!'d TOML. The auditor has to find that file via
+    # dirname(dirname(port_dir))/data, two levels above the checks dir.
+    with tempfile.TemporaryDirectory() as d:
+        port_dir = os.path.join(d, "src", "checks")
+        os.makedirs(port_dir)
+        _write(os.path.join(d, "data", "FilelistCheck.toml"), FILELIST_TOML)
+        assert audit.rust_filelist_messages(port_dir) == ["file-not-in-lang"]
+
+
+def test_rust_filelist_messages_absent_toml_is_empty_not_fatal():
+    # _read already turns a missing file into "", so the guard is invisible
+    # unless the read really raises -- which is what an absent include_str!
+    # would do if the embed ever moved. Force the failure mode so the guard
+    # is pinned rather than merely present.
+    original = audit._read
+    audit._read = _raise_oserror
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            port_dir = os.path.join(d, "src", "checks")
+            os.makedirs(port_dir)
+            assert audit.rust_filelist_messages(port_dir) == []
+    finally:
+        audit._read = original
+
+
+# ---------------------------------------------------------------------------
+# The dynamic_sites table has no silent fallback
+# ---------------------------------------------------------------------------
+
+ALT_CHECK_BINARY = """
+    fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
+        let post_lines = Vec::new();
+        let install = match Self::PRODUCER(&post_lines) {
+            Ok(install) => install,
+            Err(finding) => {
+                add_info(out, Level::Error, pkg, finding, &[]);
+                return;
+            }
+        };
+    }
+"""
+
+
+def _port(files):
+    """audit_port over a synthetic checks dir."""
+    with tempfile.TemporaryDirectory() as d:
+        checks = os.path.join(d, "checks")
+        for name, text in files.items():
+            _write(os.path.join(checks, name), text)
+        return audit.audit_port(checks)
+
+
+def _alt_port(producer):
+    return _port({"alternatives.rs":
+                  ALTERNATIVES_RS.replace("check_post_phase", producer)
+                  + ALT_CHECK_BINARY.replace("PRODUCER", producer)})
+
+
+def test_dynamic_site_resolves_through_the_named_producer():
+    by_module, unresolved = _alt_port("check_post_phase")
+    assert by_module["alternatives"] == {"update-alternatives-post-call-missing"}
+    assert unresolved == [], unresolved
+
+
+def test_renamed_producer_makes_the_site_unresolved():
+    # The property the table must have: no defaulting. Rename the producing
+    # function and the name is NOT silently covered by anything -- it turns
+    # into an UNRESOLVED entry, which exits 1 and says "review by hand".
+    by_module, unresolved = _alt_port("check_post_phase_v2")
+    assert by_module["alternatives"] == set(), by_module["alternatives"]
+    assert len(unresolved) == 1, unresolved
+    assert unresolved[0][0] == "alternatives.rs", unresolved
+    assert unresolved[0][2] == "finding", unresolved
+
+
+BASHISMS_CHECK_BINARY = """
+    fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
+        for pkgfile in &pkg.files {
+            let warnings = self.check_bashisms(&pkgfile.name);
+            for warning in warnings.clone() {
+                add_info(out, Level::Warning, pkg, warning, &[&pkgfile.name]);
+            }
+        }
+    }
+"""
+
+
+def test_bashisms_dynamic_site_resolves_both_names():
+    by_module, unresolved = _port({"bashisms.rs":
+                                   BASHISMS_RS + BASHISMS_CHECK_BINARY})
+    assert by_module["bashisms"] == {"bin-sh-syntax-error",
+                                     "potential-bashisms"}, by_module
+    assert unresolved == [], unresolved
+
+
+SYSTEMD_CHECK_BINARY = """
+    fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
+        let (pre, post, preun, postun) = ("", "", "", "");
+        for basename in &pkg.files {
+            for finding in Self::check_unit(basename, &pre, &post, &preun, &postun) {
+                add_info(out, Level::Error, pkg, finding, &[basename]);
+            }
+        }
+    }
+"""
+
+
+def test_systemd_dynamic_site_resolves_findings_and_nothing_else():
+    # End to end through audit_port, so the table entry and the filter are
+    # pinned together: the four findings arrive, the expect message and the
+    # regex templates do not.
+    by_module, unresolved = _port({"systemd_install.rs":
+                                   SYSTEMD_INSTALL_RS + SYSTEMD_CHECK_BINARY})
+    assert by_module["systemd_install"] == {
+        "systemd-service-without-service_add_pre",
+        "systemd-service-without-service_add_post",
+        "systemd-service-without-service_del_preun",
+        "systemd-service-without-service_del_postun"}, by_module
+    assert unresolved == [], unresolved
+
+
+def test_renamed_systemd_producer_makes_the_site_unresolved():
+    by_module, unresolved = _port({"systemd_install.rs":
+                                   SYSTEMD_INSTALL_RS.replace(
+                                       "check_unit", "check_unit_v2")
+                                   + SYSTEMD_CHECK_BINARY})
+    assert by_module["systemd_install"] == set(), by_module["systemd_install"]
+    assert [u[2] for u in unresolved] == ["finding"], unresolved
 
 
 def main():
