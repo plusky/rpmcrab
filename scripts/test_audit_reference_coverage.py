@@ -628,7 +628,12 @@ def test_finding_name_filter_matches_every_reference_finding():
     # The filter must not drop a name the reference really uses: rpmlint
     # finding names use '-' and '%' (bogus-variable-use-in-%post), '*'
     # (*-file-ghost), '_' and capitals (use-of-RPM_SOURCE_DIR).
-    ref = audit.resolve_ref_dir(None)
+    try:
+        ref = audit.resolve_ref_dir(None)
+    except SystemExit:
+        # resolve_ref_dir exits rather than returning a missing path, and CI
+        # runs the auditor tests before the reference is fetched.
+        return  # no pinned reference checkout; the fixtures above still pin it
     if not os.path.isdir(ref):
         return  # no pinned reference checkout; the fixtures above still pin it
     findings, _, _ = audit.audit_reference(ref)
