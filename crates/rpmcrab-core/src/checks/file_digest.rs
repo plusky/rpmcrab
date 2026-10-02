@@ -2203,7 +2203,6 @@ hash = "deadbeef"
         // Actually hash known content through new_hasher: md5("hello") and
         // sha1("hello") must match the reference values, proving the
         // hasher wiring is correct, not just that config loads.
-        use sha2::Digest as _;
         let mut md5 = new_hasher("md5").expect("md5 hasher");
         md5.update(b"hello");
         assert_eq!(
