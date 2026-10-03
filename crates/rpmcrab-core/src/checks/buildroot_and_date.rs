@@ -122,6 +122,8 @@ impl Check for BuildRootAndDateCheck {
 }
 
 #[cfg(test)]
+// Emission-path tests: each drives check_binary via findings_for_content
+// and pins finding name, level, and detail.
 mod tests {
     use super::*;
 
