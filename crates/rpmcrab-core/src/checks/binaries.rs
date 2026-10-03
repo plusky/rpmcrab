@@ -19,66 +19,94 @@ use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::pkg::pkgfile::{self, PkgFile};
 use crate::tools::{Tool, ToolSource, test_source};
+use std::sync::OnceLock;
 
-fn validso_regex() -> Regex {
-    Regex::new(r"(\.so\.\d+(\.\d+)*|\d\.so)$").expect("static regex")
+static VALIDSO_REGEX: OnceLock<Regex> = OnceLock::new();
+fn validso_regex() -> &'static Regex {
+    VALIDSO_REGEX.get_or_init(|| Regex::new(r"(\.so\.\d+(\.\d+)*|\d\.so)$").expect("static regex"))
 }
 
-fn soversion_regex() -> Regex {
-    Regex::new(r".*(-(?P<pkgversion>[0-9][.0-9]*))?\.so(\.(?P<soversion>[0-9][.0-9]*))?")
+static SOVERSION_REGEX: OnceLock<Regex> = OnceLock::new();
+fn soversion_regex() -> &'static Regex {
+    SOVERSION_REGEX.get_or_init(|| {
+        Regex::new(r".*(-(?P<pkgversion>[0-9][.0-9]*))?\.so(\.(?P<soversion>[0-9][.0-9]*))?")
+            .expect("static regex")
+    })
+}
+
+static USR_LIB_REGEX: OnceLock<Regex> = OnceLock::new();
+fn usr_lib_regex() -> &'static Regex {
+    USR_LIB_REGEX.get_or_init(|| Regex::new(r"^/usr/lib(64)?/").expect("static regex"))
+}
+
+static LDSO_SONAME_REGEX: OnceLock<Regex> = OnceLock::new();
+fn ldso_soname_regex() -> &'static Regex {
+    LDSO_SONAME_REGEX
+        .get_or_init(|| Regex::new(r"^ld(-linux(-(ia|x86_)64))?\.so").expect("static regex"))
+}
+
+static NUMERIC_DIR_REGEX: OnceLock<Regex> = OnceLock::new();
+fn numeric_dir_regex() -> &'static Regex {
+    NUMERIC_DIR_REGEX.get_or_init(|| {
+        Regex::new(r"/usr(?:/share)/man/man./(.*)\.[0-9](?:\.gz|\.bz2)").expect("static regex")
+    })
+}
+
+static VERSIONED_DIR_REGEX: OnceLock<Regex> = OnceLock::new();
+fn versioned_dir_regex() -> &'static Regex {
+    VERSIONED_DIR_REGEX.get_or_init(|| Regex::new(r"[^.][0-9]").expect("static regex"))
+}
+
+static SO_REGEX: OnceLock<Regex> = OnceLock::new();
+fn so_regex() -> &'static Regex {
+    SO_REGEX.get_or_init(|| Regex::new(r"/lib(64)?/[^/]+\.so(\.[0-9]+)*$").expect("static regex"))
+}
+
+static BIN_REGEX: OnceLock<Regex> = OnceLock::new();
+fn bin_regex() -> &'static Regex {
+    BIN_REGEX.get_or_init(|| Regex::new(r"^(/usr(/X11R6)?)?/s?bin/").expect("static regex"))
+}
+
+static LA_FILE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn la_file_regex() -> &'static Regex {
+    LA_FILE_REGEX.get_or_init(|| Regex::new(r"\.la$").expect("static regex"))
+}
+
+static INVALID_DIR_REF_REGEX: OnceLock<Regex> = OnceLock::new();
+fn invalid_dir_ref_regex() -> &'static Regex {
+    INVALID_DIR_REF_REGEX.get_or_init(|| Regex::new(r"/(home|tmp)(\W|$)").expect("static regex"))
+}
+
+static USR_ARCH_SHARE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn usr_arch_share_regex() -> &'static Regex {
+    USR_ARCH_SHARE_REGEX.get_or_init(|| {
+        Regex::new(
+            r"/share/.*/(?:x86|i.86|x86_64|ppc|ppc64|s390|s390x|ia64|m68k|arm|aarch64|mips|riscv)",
+        )
         .expect("static regex")
+    })
 }
 
-fn usr_lib_regex() -> Regex {
-    Regex::new(r"^/usr/lib(64)?/").expect("static regex")
+static PYTHON_MODULE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn python_module_regex() -> &'static Regex {
+    PYTHON_MODULE_REGEX.get_or_init(|| {
+        Regex::new(r".*\.(\w*(python|pypy)\w*(-\w+){4}|abi3)\.so").expect("static regex")
+    })
 }
 
-fn ldso_soname_regex() -> Regex {
-    Regex::new(r"^ld(-linux(-(ia|x86_)64))?\.so").expect("static regex")
+static ELF_REGEX: OnceLock<Regex> = OnceLock::new();
+fn elf_regex() -> &'static Regex {
+    ELF_REGEX.get_or_init(|| Regex::new(r"^(\w+ )?ELF ").expect("static regex"))
 }
 
-fn numeric_dir_regex() -> Regex {
-    Regex::new(r"/usr(?:/share)/man/man./(.*)\.[0-9](?:\.gz|\.bz2)").expect("static regex")
-}
-
-fn versioned_dir_regex() -> Regex {
-    Regex::new(r"[^.][0-9]").expect("static regex")
-}
-
-fn so_regex() -> Regex {
-    Regex::new(r"/lib(64)?/[^/]+\.so(\.[0-9]+)*$").expect("static regex")
-}
-
-fn bin_regex() -> Regex {
-    Regex::new(r"^(/usr(/X11R6)?)?/s?bin/").expect("static regex")
-}
-
-fn la_file_regex() -> Regex {
-    Regex::new(r"\.la$").expect("static regex")
-}
-
-fn invalid_dir_ref_regex() -> Regex {
-    Regex::new(r"/(home|tmp)(\W|$)").expect("static regex")
-}
-
-fn usr_arch_share_regex() -> Regex {
-    Regex::new(
-        r"/share/.*/(?:x86|i.86|x86_64|ppc|ppc64|s390|s390x|ia64|m68k|arm|aarch64|mips|riscv)",
-    )
-    .expect("static regex")
-}
-
-fn python_module_regex() -> Regex {
-    Regex::new(r".*\.(\w*(python|pypy)\w*(-\w+){4}|abi3)\.so").expect("static regex")
-}
-
-fn elf_regex() -> Regex {
-    Regex::new(r"^(\w+ )?ELF ").expect("static regex")
-}
-
-fn default_executable_stack_archs() -> Regex {
-    Regex::new(r"aarch64|alpha|arm.*|hppa|i.86|m68k|microblaze|mips|ppc|s390|s390x|sh|sparc|x86_64")
+static DEFAULT_EXECUTABLE_STACK_ARCHS: OnceLock<Regex> = OnceLock::new();
+fn default_executable_stack_archs() -> &'static Regex {
+    DEFAULT_EXECUTABLE_STACK_ARCHS.get_or_init(|| {
+        Regex::new(
+            r"aarch64|alpha|arm.*|hppa|i.86|m68k|microblaze|mips|ppc|s390|s390x|sh|sparc|x86_64",
+        )
         .expect("static regex")
+    })
 }
 
 fn create_regexp_call(call: &str) -> Regex {
@@ -1616,6 +1644,32 @@ mod tests {
         let config = Config::default();
         let check = BinariesCheck::new(&config);
         assert_eq!(check.name(), "BinariesCheck");
+    }
+
+    #[test]
+    fn regex_factories_are_cached() {
+        // Profiling showed Regex::new per call was ~18% of runtime.
+        // The factories must return the same static, not recompile.
+        assert!(std::ptr::eq(usr_lib_regex(), usr_lib_regex()));
+        assert!(std::ptr::eq(so_regex(), so_regex()));
+        assert!(std::ptr::eq(bin_regex(), bin_regex()));
+    }
+
+    #[test]
+    fn regex_factories_are_fast() {
+        // 10k calls must complete in well under a second. Recompiling
+        // fancy_regex on each call would take several seconds.
+        let start = std::time::Instant::now();
+        for _ in 0..10_000 {
+            let _ = usr_lib_regex().is_match("/usr/lib64/foo.so");
+            let _ = so_regex().is_match("/usr/lib64/foo.so.1");
+            let _ = bin_regex().is_match("/usr/bin/foo");
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "regex factories too slow: {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]

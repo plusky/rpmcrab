@@ -17,6 +17,7 @@ use crate::pkg::Pkg;
 use super::shared::script_body_or_prog;
 use crate::pkg::pkgfile::is_reg;
 use librpm::Tag;
+use std::sync::OnceLock;
 
 pub struct MenuCheck {
     valid_sections: Vec<String>,
@@ -132,17 +133,27 @@ impl MenuCheck {
         out
     }
 
-    fn menu_file_regex() -> Regex {
-        Regex::new(r"^/usr/lib/menu/([^/]+)$").expect("static regex")
+    fn menu_file_regex() -> &'static Regex {
+        static MENU_FILE_REGEX: OnceLock<Regex> = OnceLock::new();
+        MENU_FILE_REGEX
+            .get_or_init(|| Regex::new(r"^/usr/lib/menu/([^/]+)$").expect("static regex"))
     }
-    fn old_menu_file_regex() -> Regex {
-        Regex::new(r"^/usr/share/(gnome/apps|applnk)/([^/]+)$").expect("static regex")
+    fn old_menu_file_regex() -> &'static Regex {
+        static OLD_MENU_FILE_REGEX: OnceLock<Regex> = OnceLock::new();
+        OLD_MENU_FILE_REGEX.get_or_init(|| {
+            Regex::new(r"^/usr/share/(gnome/apps|applnk)/([^/]+)$").expect("static regex")
+        })
     }
-    fn xpm_ext_regex() -> Regex {
-        Regex::new(r"/usr/share/icons/(mini/|large/).*\.xpm$").expect("static regex")
+    fn xpm_ext_regex() -> &'static Regex {
+        static XPM_EXT_REGEX: OnceLock<Regex> = OnceLock::new();
+        XPM_EXT_REGEX.get_or_init(|| {
+            Regex::new(r"/usr/share/icons/(mini/|large/).*\.xpm$").expect("static regex")
+        })
     }
-    fn update_menus_regex() -> Regex {
-        Regex::new(r"(?m)^[^#]*update-menus").expect("static regex")
+    fn update_menus_regex() -> &'static Regex {
+        static UPDATE_MENUS_REGEX: OnceLock<Regex> = OnceLock::new();
+        UPDATE_MENUS_REGEX
+            .get_or_init(|| Regex::new(r"(?m)^[^#]*update-menus").expect("static regex"))
     }
 }
 
@@ -190,7 +201,7 @@ impl Check for MenuCheck {
                     add_info(out, Level::Error, pkg, "old-menu-entry", &[fname]);
                 }
             } else {
-                if is_match(&Self::xpm_ext_regex(), fname)
+                if is_match(Self::xpm_ext_regex(), fname)
                     && is_reg(mode)
                     && pkg.grep(&none_regex, fname).is_none()
                 {
@@ -209,13 +220,13 @@ impl Check for MenuCheck {
         let postin = script_body_or_prog(pkg, Tag::POSTIN, Tag::POSTINPROG);
         if postin.is_empty() {
             add_info(out, Level::Error, pkg, "menu-without-postin", &[]);
-        } else if !is_match(&Self::update_menus_regex(), &postin) {
+        } else if !is_match(Self::update_menus_regex(), &postin) {
             add_info(out, Level::Error, pkg, "postin-without-update-menus", &[]);
         }
         let postun = script_body_or_prog(pkg, Tag::POSTUN, Tag::POSTUNPROG);
         if postun.is_empty() {
             add_info(out, Level::Error, pkg, "menu-without-postun", &[]);
-        } else if !is_match(&Self::update_menus_regex(), &postun) {
+        } else if !is_match(Self::update_menus_regex(), &postun) {
             add_info(out, Level::Error, pkg, "postun-without-update-menus", &[]);
         }
 

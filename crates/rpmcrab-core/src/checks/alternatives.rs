@@ -25,6 +25,7 @@ use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::pkg::pkgfile::is_symlink;
 use librpm::Tag;
+use std::sync::OnceLock;
 
 pub struct AlternativesCheck;
 
@@ -33,17 +34,27 @@ impl AlternativesCheck {
         Self
     }
 
-    fn requirement_regex() -> Regex {
-        Regex::new(r"^(/usr/s?bin/|%\{?_s?bindir\}?/)?update-alternatives$").expect("static regex")
+    fn requirement_regex() -> &'static Regex {
+        static REQUIREMENT_REGEX: OnceLock<Regex> = OnceLock::new();
+        REQUIREMENT_REGEX.get_or_init(|| {
+            Regex::new(r"^(/usr/s?bin/|%\{?_s?bindir\}?/)?update-alternatives$")
+                .expect("static regex")
+        })
     }
 
-    fn install_regex() -> Regex {
-        Regex::new(r"--install\s+(?P<link>\S+)\s+(?P<name>\S+)\s+(\S+)\s+(\S+)")
-            .expect("static regex")
+    fn install_regex() -> &'static Regex {
+        static INSTALL_REGEX: OnceLock<Regex> = OnceLock::new();
+        INSTALL_REGEX.get_or_init(|| {
+            Regex::new(r"--install\s+(?P<link>\S+)\s+(?P<name>\S+)\s+(\S+)\s+(\S+)")
+                .expect("static regex")
+        })
     }
 
-    fn slave_regex() -> Regex {
-        Regex::new(r"--slave\s+(?P<link>\S+)\s+(\S+)\s+(\S+)").expect("static regex")
+    fn slave_regex() -> &'static Regex {
+        static SLAVE_REGEX: OnceLock<Regex> = OnceLock::new();
+        SLAVE_REGEX.get_or_init(|| {
+            Regex::new(r"--slave\s+(?P<link>\S+)\s+(\S+)\s+(\S+)").expect("static regex")
+        })
     }
 
     /// Normalize a scriptlet: join backslash-newlines, strip quotes, keep
@@ -346,7 +357,7 @@ impl Check for AlternativesCheck {
         if !pkg
             .prereq
             .iter()
-            .any(|r| is_match(&Self::requirement_regex(), &r.name))
+            .any(|r| is_match(Self::requirement_regex(), &r.name))
         {
             add_info(
                 out,
@@ -660,8 +671,8 @@ mod tests {
     #[test]
     fn requirement_regex_matches_paths() {
         let re = AlternativesCheck::requirement_regex();
-        assert!(is_match(&re, "update-alternatives"));
-        assert!(is_match(&re, "/usr/bin/update-alternatives"));
-        assert!(!is_match(&re, "update-alternatives-foo"));
+        assert!(is_match(re, "update-alternatives"));
+        assert!(is_match(re, "/usr/bin/update-alternatives"));
+        assert!(!is_match(re, "update-alternatives-foo"));
     }
 }
