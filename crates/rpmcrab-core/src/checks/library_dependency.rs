@@ -8,9 +8,7 @@
 //! then verifies the dependencies in `after_checks`.
 //!
 //! Deliberate divergence (plusky/rpmcrab#74): the per-package maps are keyed
-//! on `(name, arch)` rather than `pkg.name` alone. The reference keys on
-//! name alone, so linting two arches of one package together silently drops
-//! all but the last arch. The port checks each arch.
+//! on `(name, arch)`; the rationale is on `devel_order` below.
 
 use std::collections::HashMap;
 use std::path::Path;
