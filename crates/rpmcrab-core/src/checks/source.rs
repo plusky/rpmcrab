@@ -484,6 +484,22 @@ ValidSrcPerms = ["0o644", "0o755"]
     }
 
     #[test]
+    fn parse_octal_saturates_beyond_u128() {
+        // The ledger documents saturation at u128::MAX where the reference
+        // keeps arbitrary precision; Python accepts the input, so pin the
+        // port's documented behaviour.
+        assert_eq!(
+            parse_octal(&format!("0o{}", "7".repeat(50))),
+            Some(u128::MAX)
+        );
+        // The exact boundary still parses precisely, not via saturation.
+        assert_eq!(
+            parse_octal("0o3777777777777777777777777777777777777777777"),
+            Some(u128::MAX)
+        );
+    }
+
+    #[test]
     fn py_repr_matches_python() {
         assert_eq!(py_repr("foo.tar.xz"), "'foo.tar.xz'");
         // Apostrophe without a double quote: double quotes, like `repr`.
