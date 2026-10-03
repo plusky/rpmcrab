@@ -16,6 +16,7 @@ use librpm::{OwnedTagData, Tag};
 
 use super::is_match;
 use super::shared::{devel_regex, lib_package_regex, macro_regex};
+use super::spdx::suggest_licenses;
 use crate::check::{Check, add_info};
 use crate::config::Config;
 use crate::filter::Filter;
@@ -1103,6 +1104,14 @@ impl TagsCheck {
                 for sub in self.split_license(&part) {
                     if !self.valid_licenses.contains(&sub) {
                         add_info(out, Level::Warning, pkg, "invalid-license", &[&sub]);
+                        let suggestions = suggest_licenses(&sub, 3).join(", ");
+                        add_info(
+                            out,
+                            Level::Info,
+                            pkg,
+                            "invalid-license-spellcheck",
+                            &[&format!("{sub}: {suggestions}")],
+                        );
                         valid_license = false;
                     }
                 }
@@ -1369,7 +1378,7 @@ mod tests {
         for (name, line) in &results {
             assert!(!name.is_empty(), "finding name: {line}");
             assert!(
-                line.contains(": E: ") || line.contains(": W: "),
+                line.contains(": E: ") || line.contains(": W: ") || line.contains(": I: "),
                 "level: {line}"
             );
         }
@@ -1506,5 +1515,82 @@ mod tests {
         assert_eq!(TagsCheck::lang_for_error("C"), None);
         assert_eq!(TagsCheck::lang_for_error("C.UTF-8"), None);
         assert_eq!(TagsCheck::lang_for_error("de"), Some("de"));
+    }
+
+    // Drives the real `check_license` emission path with a misspelled
+    // license: `invalid-license` plus the info-level spellcheck suggestions.
+    fn run_check_license(pkg: &Pkg, config: &Config, license: &str) -> Vec<(String, String)> {
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        let check = TagsCheck::new(config);
+        check.check_license(pkg, &mut out, license);
+        out.results().to_vec()
+    }
+
+    fn licensed_config(licenses: &[&str]) -> Config {
+        let mut config = Config::default();
+        let tbl = &mut config.configuration;
+        tbl.insert(
+            "ValidLicenses".to_string(),
+            toml::Value::Array(
+                licenses
+                    .iter()
+                    .map(|l| toml::Value::String(l.to_string()))
+                    .collect(),
+            ),
+        );
+        tbl.insert(
+            "ValidLicenseExceptions".to_string(),
+            toml::Value::Array(vec![]),
+        );
+        config.finalize().expect("fixture config");
+        config
+    }
+
+    #[test]
+    fn invalid_license_emits_spellcheck_suggestions() {
+        // Upstream rpm-software-management/rpmlint#818: did-you-mean for
+        // invalid licenses. Info-level so it can never break a build.
+        let pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        let config = test_config();
+        let results = run_check_license(&pkg, &config, "GPL-2.0-or-latr");
+        assert_eq!(
+            results,
+            vec![
+                (
+                    "invalid-license".to_string(),
+                    "fcprobe.noarch: W: invalid-license GPL-2.0-or-latr".to_string(),
+                ),
+                (
+                    "invalid-license-spellcheck".to_string(),
+                    "fcprobe.noarch: I: invalid-license-spellcheck GPL-2.0-or-latr: GPL-2.0-or-later, GPL-1.0-or-later, GPL-3.0-or-later"
+                        .to_string(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_license_spellcheck_matches_upstream_example() {
+        // The #818 reporter's own example: "Apache 2" should point at Apache-2.0.
+        let pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        let config = test_config();
+        let results = run_check_license(&pkg, &config, "Apache 2");
+        assert_eq!(
+            results
+                .iter()
+                .find(|(n, _)| n == "invalid-license-spellcheck")
+                .map(|(_, l)| l.as_str()),
+            Some(
+                "fcprobe.noarch: I: invalid-license-spellcheck Apache 2: Apache-2.0, Apache-1.0, Apache-1.1"
+            ),
+        );
+    }
+
+    #[test]
+    fn valid_license_is_silent() {
+        let pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        let config = licensed_config(&["MIT"]);
+        let results = run_check_license(&pkg, &config, "MIT");
+        assert!(results.is_empty(), "unexpected findings: {results:?}");
     }
 }

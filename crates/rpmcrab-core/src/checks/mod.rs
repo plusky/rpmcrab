@@ -38,6 +38,7 @@ pub mod shared;
 pub mod shared_library_policy;
 pub mod signature;
 pub mod source;
+pub mod spdx;
 pub mod spec;
 pub mod suid_permissions;
 pub mod systemd_install;

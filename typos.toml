@@ -36,3 +36,10 @@ gir = "gir"
 tham = "tham"
 # Vai is the Vai script name (Unicode block Vai), not a typo for Via/Vie.
 vai = "vai"
+# iMatix is a genuine SPDX license ID in the spdx.rs suggestion pool
+# (the tokenizer splits it as i + Matix).
+matix = "matix"
+# ND is "No Derivatives" in CC license IDs in the spdx.rs suggestion pool.
+nd = "nd"
+# CAPEC-TOU is a genuine SPDX license ID in the spdx.rs suggestion pool.
+tou = "tou"
