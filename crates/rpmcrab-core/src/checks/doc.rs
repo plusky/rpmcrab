@@ -3,6 +3,11 @@
 //! Ported from `rpmlint/checks/DocCheck.py`. Four findings:
 //! `executable-docs` (E), `doc-file-dependency` (W), `install-file-in-docs`
 //! (W), `package-with-huge-docs` (W).
+//!
+//! `package-with-huge-docs` is additionally skipped for package names ending in
+//! an `ExemptDocSuffixes` entry (default `-javadoc`): fix-in-port for
+//! rpm-software-management/rpmlint#555, whose reference still flags 100%-docs
+//! javadoc packages.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -20,11 +25,48 @@ const DOC_EXTENSIONS: &[&str] = &[
 /// Basenames that must never be executable in documentation.
 const DOC_BASENAMES: &[&str] = &["README", "NEWS", "COPYING", "AUTHORS", "LICENCE", "LICENSE"];
 
-pub struct DocCheck;
+pub struct DocCheck {
+    exempt_doc_suffixes: Vec<String>,
+}
 
 impl DocCheck {
-    pub fn new(_config: &Config) -> Self {
-        Self
+    pub fn new(config: &Config) -> Self {
+        Self {
+            exempt_doc_suffixes: Self::exempt_doc_suffixes(config),
+        }
+    }
+
+    /// `ExemptDocSuffixes` from the configuration. The bundled
+    /// `configdefaults.toml` always ships the key. A missing key, or a
+    /// non-empty array with no usable strings (mistyped elements), falls back
+    /// to the documented default instead of silently disabling the exemption
+    /// (mirrors the `BadnessThreshold` code-default pattern). Only an
+    /// explicitly empty array disables the exemption.
+    fn exempt_doc_suffixes(config: &Config) -> Vec<String> {
+        const DEFAULT: &[&str] = &["-javadoc"];
+        match config.configuration.get("ExemptDocSuffixes") {
+            Some(toml::Value::Array(items)) => {
+                let collected: Vec<String> = items
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                if collected.is_empty() && !items.is_empty() {
+                    DEFAULT.iter().map(|s| (*s).to_owned()).collect()
+                } else {
+                    collected
+                }
+            }
+            _ => DEFAULT.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    /// Whether `name` is exempt from the huge-docs finding by configured suffix.
+    fn exempt_by_suffix(&self, name: &str) -> bool {
+        self.exempt_doc_suffixes
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
     }
 
     fn ignore_pkg(name: &str) -> bool {
@@ -160,6 +202,7 @@ impl Check for DocCheck {
         }
 
         if !Self::ignore_pkg(&pkg.name)
+            && !self.exempt_by_suffix(&pkg.name)
             && let Some(pct) = Self::huge_docs_pct(&pkg.files, &doc_refs)
         {
             add_info(
@@ -225,5 +268,123 @@ mod tests {
         assert!(DocCheck::ignore_pkg("foo-devel"));
         assert!(DocCheck::ignore_pkg("foo-doc"));
         assert!(!DocCheck::ignore_pkg("foo"));
+    }
+
+    /// `Pkg` is header-backed with no test constructor, so open a tiny fixture
+    /// and rewrite the public fields the check reads.
+    fn fixture_pkg() -> Pkg {
+        use std::path::Path;
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg")
+    }
+
+    fn big_doc_file(name: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            mode: 0o100644,
+            size: Some(200 * 1024),
+            ..Default::default()
+        }
+    }
+
+    /// A package that is 100% documentation over the 100 KiB threshold.
+    fn huge_docs_pkg(name: &str) -> Pkg {
+        let mut pkg = fixture_pkg();
+        pkg.name = name.to_string();
+        pkg.arch = "noarch".to_string();
+        let doc = format!("/usr/share/doc/{name}/api.html");
+        pkg.files = vec![big_doc_file(&doc)];
+        pkg.doc_files = vec![doc];
+        pkg
+    }
+
+    fn config_with_suffixes(suffixes: &[&str]) -> Config {
+        let mut table = toml::Table::new();
+        table.insert(
+            "ExemptDocSuffixes".to_string(),
+            toml::Value::Array(
+                suffixes
+                    .iter()
+                    .map(|s| toml::Value::String(s.to_string()))
+                    .collect(),
+            ),
+        );
+        Config {
+            configuration: table,
+            ..Default::default()
+        }
+    }
+
+    fn run(config: &Config, check: &mut DocCheck, pkg: &Pkg) -> Vec<(String, String)> {
+        use crate::color::Color;
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        check.check_binary(pkg, config, &mut out);
+        out.results().to_vec()
+    }
+
+    #[test]
+    fn javadoc_package_with_huge_docs_is_silent() {
+        let config = config_with_suffixes(&["-javadoc"]);
+        let mut check = DocCheck::new(&config);
+        assert!(run(&config, &mut check, &huge_docs_pkg("foo-javadoc")).is_empty());
+    }
+
+    #[test]
+    fn regular_package_with_huge_docs_warns() {
+        let config = config_with_suffixes(&["-javadoc"]);
+        let mut check = DocCheck::new(&config);
+        let results = run(&config, &mut check, &huge_docs_pkg("foo"));
+        assert_eq!(results.len(), 1, "expected one finding, got {results:?}");
+        assert_eq!(results[0].0, "package-with-huge-docs");
+        assert_eq!(results[0].1, "foo.noarch: W: package-with-huge-docs 100%");
+    }
+
+    #[test]
+    fn exempt_suffixes_are_configurable() {
+        // An empty list disables the exemption: the javadoc package warns again.
+        let config = config_with_suffixes(&[]);
+        let mut check = DocCheck::new(&config);
+        let results = run(&config, &mut check, &huge_docs_pkg("foo-javadoc"));
+        assert_eq!(results.len(), 1, "expected one finding, got {results:?}");
+        assert_eq!(results[0].0, "package-with-huge-docs");
+    }
+
+    #[test]
+    fn custom_suffix_exempts_matching_names_only() {
+        // "-apidoc" chosen deliberately: it does not contain "-doc", so the
+        // pre-existing ignore_pkg() cannot mask the suffix exemption.
+        let config = config_with_suffixes(&["-apidoc"]);
+        let mut check = DocCheck::new(&config);
+        assert!(run(&config, &mut check, &huge_docs_pkg("foo-apidoc")).is_empty());
+        assert_eq!(
+            run(&config, &mut check, &huge_docs_pkg("foo-javadoc")).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn mistyped_elements_fall_back_to_javadoc_default() {
+        // A non-empty array with no usable strings is mistyped, not an
+        // explicit opt-out: the exemption keeps working on the default.
+        let mut table = toml::Table::new();
+        table.insert(
+            "ExemptDocSuffixes".to_string(),
+            toml::Value::Array(vec![toml::Value::Integer(5)]),
+        );
+        let config = Config {
+            configuration: table,
+            ..Default::default()
+        };
+        let mut check = DocCheck::new(&config);
+        assert!(run(&config, &mut check, &huge_docs_pkg("foo-javadoc")).is_empty());
+    }
+
+    #[test]
+    fn missing_key_falls_back_to_javadoc_default() {
+        // A bare Config with no ExemptDocSuffixes key still exempts -javadoc.
+        let config = Config::default();
+        let mut check = DocCheck::new(&config);
+        assert!(run(&config, &mut check, &huge_docs_pkg("foo-javadoc")).is_empty());
     }
 }

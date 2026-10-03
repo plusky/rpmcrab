@@ -612,3 +612,11 @@ kind = "behaviour"
 reason = "The suspicious-dir regex widens the build-dir component from \\w+ to [\\w.-]+ so hyphenated/dotted directories like /usr/src/linux-6.1/BUILD match. The reference (PkgConfigCheck.py:11) uses \\w and misses these — the common case for kernel builds — so this is a deliberate fix for reference under-reporting, not a porting gap."
 since = "0.1.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/44"
+
+[[divergence]]
+case = "global"
+check = "DocCheck"
+kind = "behaviour"
+reason = "package-with-huge-docs is skipped for package names ending in a configured ExemptDocSuffixes entry (default -javadoc). The reference has no such exemption (rpm-software-management/rpmlint#555 is still open) and flags 100%-docs javadoc packages."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/555"
