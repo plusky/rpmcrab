@@ -1,8 +1,9 @@
 //! `BinariesCheck`: ELF binary validation, ported from rpmlint's `BinariesCheck.py`.
 //!
 //! Covers the reference's `add_info` call sites: ELF section/header analysis
-//! via `goblin`, dependency analysis via `goblin`, DWARF via `gimli`,
-//! forbidden functions via `strings`, and archive analysis via `ar`.
+//! via `goblin`, dependency analysis via `goblin`, DWARF producer extraction
+//! (not yet implemented), forbidden functions via `strings`, and archive
+//! analysis via `ar`.
 //!
 //! Deliberate gaps are ledgered in `tests/parity/divergences.toml`.
 
@@ -325,7 +326,7 @@ impl ObjdumpInfo {
             producers: Vec::new(),
             failed: None,
         };
-        // TODO: DWARF producer extraction via gimli needs API refinement.
+        // TODO: DWARF producer extraction is not yet implemented.
         // The goblin-based ELF parsing covers the main BinariesCheck
         // functionality; DWARF compile-unit producers are a follow-up.
         // For now, producers is empty which means the mandatory/forbidden
