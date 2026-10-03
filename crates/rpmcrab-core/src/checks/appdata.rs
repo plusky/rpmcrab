@@ -115,8 +115,9 @@ fn type_attr(attrs: &[char]) -> Option<String> {
     None
 }
 
-/// Walk the document, checking XML well-formedness. Returns the component
-/// shape, or `None` when malformed.
+/// Walk the document, checking XML well-formedness. Undefined entity
+/// references (the reference's ElementTree.parse rejects them) also fail
+/// the walk. Returns the component shape, or `None` when malformed.
 fn walk_xml(text: &str) -> Option<ComponentShape> {
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
@@ -127,9 +128,15 @@ fn walk_xml(text: &str) -> Option<ComponentShape> {
     let mut children: HashSet<String> = HashSet::new();
 
     while i < n {
-        // Find next '<'
+        // Find next '<', checking text content for undefined entities
+        // (the reference's ElementTree rejects them).
+        let text_start = i;
         while i < n && chars[i] != '<' {
             i += 1;
+        }
+        let text: String = chars[text_start..i].iter().collect();
+        if AppDataCheck::has_undefined_entity(&text) {
+            return None;
         }
         if i >= n {
             break;
@@ -168,18 +175,26 @@ fn walk_xml(text: &str) -> Option<ComponentShape> {
             return None;
         }
 
-        // Skip attributes, watching for '/>'
+        // Skip attributes, watching for '/>'. Attribute values are
+        // checked for undefined entities (the reference's ElementTree
+        // rejects them).
         let attrs_start = i;
         let mut self_closing = false;
         let mut in_quote: Option<char> = None;
+        let mut attr_start = 0;
         while i < n && chars[i] != '>' {
             let ch = chars[i];
             if let Some(q) = in_quote {
                 if ch == q {
+                    let value: String = chars[attr_start..i].iter().collect();
+                    if AppDataCheck::has_undefined_entity(&value) {
+                        return None;
+                    }
                     in_quote = None;
                 }
             } else if ch == '"' || ch == '\'' {
                 in_quote = Some(ch);
+                attr_start = i + 1;
             } else if ch == '/' && i + 1 < n && chars[i + 1] == '>' {
                 self_closing = true;
             }
@@ -286,6 +301,64 @@ impl AppDataCheck {
     /// resolves `appstream-util` under `dir`.
     pub fn with_tool_dir(dir: Option<&Path>) -> Self {
         Self::with_tool_source(test_source(dir))
+    }
+
+    /// True if the text contains an undefined XML entity reference.
+    ///
+    /// The reference falls back to `ElementTree.parse`, which rejects
+    /// undefined entities (`&foo;`). Only the five predefined entities
+    /// (`lt`, `gt`, `amp`, `apos`, `quot`) and numeric character references
+    /// (`&#65;`, `&#x41;`) are valid. An empty numeric body (`&#;`, `&#x;`)
+    /// is `not well-formed (invalid token)`, and a number outside the XML
+    /// character ranges is `reference to invalid character number`.
+    fn has_undefined_entity(text: &str) -> bool {
+        let chars: Vec<char> = text.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] != '&' {
+                i += 1;
+                continue;
+            }
+            let start = i + 1;
+            let mut end = start;
+            while end < chars.len() && chars[end] != ';' && chars[end] != '&' {
+                end += 1;
+            }
+            if end >= chars.len() || chars[end] != ';' {
+                return true; // unterminated `&`
+            }
+            let entity: String = chars[start..end].iter().collect();
+            let valid = matches!(entity.as_str(), "lt" | "gt" | "amp" | "apos" | "quot")
+                || entity.strip_prefix('#').is_some_and(|num| {
+                    // `"".chars().all(..)` is vacuously true, so the
+                    // emptiness check is explicit: `&#;` is invalid token.
+                    if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
+                        return num.parse::<u32>().is_ok_and(Self::is_valid_xml_char);
+                    }
+                    // `&#x;` likewise; the `x` is lowercase only (`&#X41;`
+                    // is invalid token in the reference).
+                    if let Some(hex) = num.strip_prefix('x') {
+                        return !hex.is_empty()
+                            && hex.chars().all(|c| c.is_ascii_hexdigit())
+                            && u32::from_str_radix(hex, 16).is_ok_and(Self::is_valid_xml_char);
+                    }
+                    false
+                });
+            if !valid {
+                return true;
+            }
+            i = end + 1;
+        }
+        false
+    }
+
+    /// The XML 1.0 character ranges expat accepts in a character reference;
+    /// anything else is `reference to invalid character number`.
+    fn is_valid_xml_char(n: u32) -> bool {
+        matches!(
+            n,
+            0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF
+        )
     }
 
     /// Minimal XML well-formedness check: balanced tags, single root.

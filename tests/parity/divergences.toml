@@ -778,3 +778,11 @@ kind = "behaviour"
 reason = "Emits an Info-level `invalid-license-spellcheck` finding with did-you-mean suggestions for an invalid `License:` tag (upstream rpmlint#818). The reference 2.10.0 has no such check -- neither in `descriptions/` nor in `TagsCheck.py` -- and emits only `W: invalid-license`. The suggestions live in the separate Info finding; `invalid-license`'s detail stays byte-identical to the reference, so the frozen surface is untouched and the new finding can never break a build. Pinned by emission-path tests in tags.rs."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/818"
+
+[[divergence]]
+case = "global"
+check = "AppDataCheck"
+kind = "behaviour"
+reason = "For an appdata file declaring an unknown encoding (e.g. <?xml version=\"1.0\" encoding=\"x-bogus\"?>), the reference's ElementTree.parse raises LookupError, which AppDataCheck.py:35 does not catch, so the whole run aborts via lint.py:293 (sys.exit(3)). The port's native fallback reads the file as UTF-8 and emits nothing. Same reference-abort family as the polkit LookupError case."
+since = "0.1.0"
+ (fix(appdata): reject undefined entities, empty/out-of-range charrefs in native fallback)
