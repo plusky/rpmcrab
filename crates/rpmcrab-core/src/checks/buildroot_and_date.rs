@@ -139,4 +139,72 @@ mod tests {
         assert!(is_match(&re, "/foo-1.2-build/BUILDROOT/"));
         assert!(!is_match(&re, "/usr/lib/foo"));
     }
+    use crate::color::Color;
+    use crate::pkg::pkgfile::PkgFile;
+    use std::path::Path;
+
+    /// Drive `check_binary` with a synthetic file on disk, returning findings.
+    fn findings_for_content(name: &str, content: &str) -> Vec<(String, String)> {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir()).expect("open fixture pkg");
+        // The extraction base dir: PkgFile.path is normpath(dir + "/" + name).
+        let first = &pkg.files[0];
+        let base = first
+            .path
+            .strip_suffix(first.name.trim_start_matches('/'))
+            .expect("base dir")
+            .trim_end_matches('/');
+        let disk_path = format!("{base}{name}");
+        std::fs::create_dir_all(Path::new(&disk_path).parent().unwrap()).expect("mkdirs");
+        std::fs::write(&disk_path, content).expect("write test file");
+        pkg.files = vec![PkgFile {
+            name: name.to_string(),
+            path: disk_path,
+            mode: 0o100644,
+            ..Default::default()
+        }];
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = BuildRootAndDateCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        out.results().to_vec()
+    }
+
+    /// Today's date plus a time triggers `file-contains-date-and-time` (W).
+    #[test]
+    fn today_with_time_is_flagged() {
+        let content = format!("built {} at 14:30:00", today_string());
+        let results = findings_for_content("/usr/bin/with-time", &content);
+        assert_eq!(results.len(), 1, "unexpected: {results:?}");
+        assert_eq!(results[0].0, "file-contains-date-and-time");
+        assert!(results[0].1.contains(": W: "), "level: {}", results[0].1);
+        assert!(
+            results[0].1.contains("/usr/bin/with-time"),
+            "detail: {}",
+            results[0].1
+        );
+    }
+
+    /// Today's date without a time triggers `file-contains-current-date` (W).
+    #[test]
+    fn today_without_time_is_flagged() {
+        let content = format!("built {}", today_string());
+        let results = findings_for_content("/usr/bin/with-date", &content);
+        assert_eq!(results.len(), 1, "unexpected: {results:?}");
+        assert_eq!(results[0].0, "file-contains-current-date");
+        assert!(results[0].1.contains(": W: "), "level: {}", results[0].1);
+    }
+
+    /// A buildroot path triggers `file-contains-buildroot` (E).
+    #[test]
+    fn buildroot_path_is_flagged() {
+        let results = findings_for_content(
+            "/usr/bin/with-buildroot",
+            "prefix=/foo-1.2-build/BUILDROOT/usr",
+        );
+        assert_eq!(results.len(), 1, "unexpected: {results:?}");
+        assert_eq!(results[0].0, "file-contains-buildroot");
+        assert!(results[0].1.contains(": E: "), "level: {}", results[0].1);
+    }
 }
