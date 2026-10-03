@@ -56,6 +56,13 @@ SkipPackagePatterns = ['/home/abuild/rpmbuild/RPMS/noarch/rpmlint-\d']
 # Distribution-specific build root locations that are searched for
 # rpmlintrc files before falling back to the package folder.
 RpmlintrcSearchPaths = ['/home/abuild/rpmbuild/SOURCES', '/usr/src/packages/SOURCES/']
+# Package-name suffixes exempt from DocCheck's package-with-huge-docs finding
+# (fix-in-port for rpm-software-management/rpmlint#555: a 100%-docs ratio is
+# expected for documentation packages such as javadocs). The leading dash is
+# deliberate: only `<name>-javadoc` matches, a package named exactly `javadoc`
+# does not.
+ExemptDocSuffixes = ['-javadoc']
+
 # Never print package extraction stderr, even in verbose mode (e.g. to
 # keep build logs clean).
 SuppressExtractionStderr = true
