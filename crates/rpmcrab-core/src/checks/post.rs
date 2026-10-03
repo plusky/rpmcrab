@@ -121,6 +121,9 @@ impl PostCheck {
         // package payload is installed, so the internal Lua interpreter is
         // the only one guaranteed to exist. A missing -p flag defaults to
         // /bin/sh, which is why an empty prog also warns.
+        // `<lua>` is deliberately hardcoded rather than read from
+        // ValidShells: rpm guarantees the interpreter only for the literal
+        // token, so a config change there must not silence this error.
         if tag == "%pretrans" && prog != "<lua>" {
             out.push((
                 Level::Error,
@@ -651,7 +654,9 @@ mod tests {
     fn parity_fixture_matches_reference() {
         // Pinned against reference rpmlint 2.10.0 (PostCheck.py at 84848c0),
         // verified by running the reference in a Tumbleweed container over
-        // the same RPM: name, level and detail all identical.
+        // the same RPM. This vector pins finding names and their positions
+        // only; level and detail were confirmed by that reference run, and
+        // for `pretrans-not-lua` are pinned by the unit tests below.
         //
         // The three %triggerin entries form a 3-element trigger array whose
         // bodies each trip a different finding family; the exact vector pins
