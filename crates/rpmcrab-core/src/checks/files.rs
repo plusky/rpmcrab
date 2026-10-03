@@ -3307,4 +3307,46 @@ mod tests {
             "missing W-level non-conffile-in-etc on /etc/foo.conf: {results:?}"
         );
     }
+
+    #[test]
+    fn peek_unreadable_file_reports_read_error_detail() {
+        // Pins the port's own read-error detail for FilesCheck.peek (ledgered
+        // divergence: the reference's str(OSError) carries the [Errno N] prefix
+        // and the filename).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let secret = dir.path().join("secret.bin");
+        std::fs::write(&secret, b"\x00\x01").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o0))
+                .expect("chmod 000");
+        }
+        let pkg = Pkg::open(
+            std::path::Path::new(&fixture_path("filescheck-depmod-ok-1.0-1.noarch.rpm")),
+            dir.path(),
+            true,
+        )
+        .expect("open fixture");
+        let pkgfile = PkgFile {
+            name: "/usr/bin/secret".to_string(),
+            path: secret.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = FilesCheck::new(&config);
+        let (chunk, istext) = check.peek(&pkg, &pkgfile, &mut out);
+        assert!(chunk.is_empty() && !istext);
+        let line = out
+            .results()
+            .iter()
+            .find(|(n, _)| n == "read-error")
+            .map(|(_, l)| l.clone())
+            .expect("read-error must fire");
+        assert!(
+            line.contains("Permission denied (os error 13)"),
+            "unexpected detail: {line}"
+        );
+    }
 }
