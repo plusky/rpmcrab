@@ -260,15 +260,14 @@ mod tests {
         use crate::color::Color;
         use crate::pkg::pkgfile::PkgFile;
 
-        let dir = std::env::temp_dir().join("rpmcrab-logrotate-varlog");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
         let conf = dir.join("app");
         std::fs::write(&conf, "/var/log/app.log {\n  weekly\n}\n").expect("write conf");
 
         let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
-        let mut pkg = crate::pkg::Pkg::open(&rpm, &dir, true).expect("open fixture pkg");
+        let mut pkg = crate::pkg::Pkg::open(&rpm, dir, true).expect("open fixture pkg");
         pkg.name = "logrotate-test".to_string();
         pkg.files = vec![
             PkgFile {

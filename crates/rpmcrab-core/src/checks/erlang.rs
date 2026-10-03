@@ -427,8 +427,8 @@ mod tests {
 
     #[test]
     fn beam_chunk_walking_finds_cinf() {
-        let dir = std::env::temp_dir();
-        let path = dir.join("rpmcrab-erlang-test.beam");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("test.beam");
         std::fs::write(&path, beam_with_cinf(&compile_info_term())).unwrap();
         let info = read_compile_info(path.to_str().unwrap())
             .expect("reads")
@@ -442,16 +442,14 @@ mod tests {
             info.source.as_deref(),
             Some("/home/abuild/rpmbuild/BUILD/foo.erl")
         );
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn garbage_is_not_a_beam_file() {
-        let dir = std::env::temp_dir();
-        let path = dir.join("rpmcrab-erlang-garbage.beam");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("garbage.beam");
         std::fs::write(&path, b"not a beam file at all").unwrap();
         assert!(read_compile_info(path.to_str().unwrap()).is_err());
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -462,15 +460,14 @@ mod tests {
         let mut beam = beam_with_cinf(&compile_info_term());
         // Corrupt the chunk name.
         beam[12..16].copy_from_slice(b"XXXX");
-        let dir = std::env::temp_dir();
-        let path = dir.join("rpmcrab-erlang-nocinf.beam");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("nocinf.beam");
         std::fs::write(&path, &beam).unwrap();
         assert!(
             read_compile_info(path.to_str().unwrap())
                 .expect("reads")
                 .is_none()
         );
-        std::fs::remove_file(&path).ok();
     }
 
     /// B5: `source_re` is anchored like the reference's `re.match`: a path
