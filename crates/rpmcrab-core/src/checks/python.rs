@@ -347,6 +347,40 @@ impl PythonCheck {
         Self::eval_marker_expr(&substituted, python_version)
     }
 
+    /// Strip one layer of parentheses, returning `None` unless the `(` at
+    /// index 0 is matched by the final `)`. Depth-tracked: `(a) or (b)`
+    /// starts with `(` and ends with `)` without the outer pair wrapping
+    /// the whole expression, and must not be stripped. (The caller already
+    /// rejected unbalanced input via [`Self::is_malformed_marker`].)
+    fn strip_outer_parens(expr: &str) -> Option<&str> {
+        let bytes = expr.as_bytes();
+        if bytes.len() < 2 || bytes[0] != b'(' || bytes[bytes.len() - 1] != b')' {
+            return None;
+        }
+        let mut depth = 0;
+        let mut in_quote: Option<u8> = None;
+        for (i, &b) in bytes.iter().enumerate() {
+            if let Some(q) = in_quote {
+                if b == q {
+                    in_quote = None;
+                }
+                continue;
+            }
+            match b {
+                b'"' | b'\'' => in_quote = Some(b),
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 && i != bytes.len() - 1 {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(&expr[1..expr.len() - 1])
+    }
+
     /// Evaluate a boolean marker expression with `and`/`or`/`not` over the
     /// single comparisons [`Self::marker_atom_holds`] understands, plus the
     /// `true`/`false` literals substituted for `extra` comparisons.
@@ -356,9 +390,11 @@ impl PythonCheck {
         if Self::is_malformed_marker(expr) {
             return false;
         }
-        // Strip one layer of outer parentheses.
-        if expr.starts_with('(') && expr.ends_with(')') {
-            return Self::eval_marker_expr(&expr[1..expr.len() - 1], python_version);
+        // Strip one layer of outer parentheses, but only when the `(` at
+        // index 0 is matched by the final `)`. A bare first/last-character
+        // check mangles `(a) or (b)` into `a) or (b)`.
+        if let Some(inner) = Self::strip_outer_parens(expr) {
+            return Self::eval_marker_expr(inner, python_version);
         }
         // `or` binds loosest.
         if let Some(idx) = find_top_level(expr, "or") {
@@ -670,32 +706,6 @@ mod tests {
         assert!(!PythonCheck::marker_holds("extra == \"test\"", "3.12"));
     }
 
-    fn fixture_pkg_with_requires(req_names: &[&str]) -> Pkg {
-        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
-        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir()).expect("open fixture pkg");
-        pkg.name = "python-test".to_string();
-        pkg.arch = "noarch".to_string();
-        pkg.req_names = req_names.iter().map(|s| s.to_string()).collect();
-        pkg
-    }
-
-    fn check_requirements_findings(
-        reqs: &[Requirement],
-        req_names: &[&str],
-    ) -> Vec<(String, String)> {
-        use crate::color::Color;
-        let pkg = fixture_pkg_with_requires(req_names);
-        let config = Config::default();
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let check = PythonCheck {
-            pyc_version: None,
-            checked_files: 0,
-        };
-        check.check_requirements(&pkg, &mut out, reqs, "3.12");
-        out.results().to_vec()
-    }
-
     #[test]
     fn leftover_extra_markers_are_evaluated_not_skipped() {
         // Emission-path test through `check_requirements`: the reference
@@ -721,6 +731,83 @@ mod tests {
         let reqs = PythonCheck::parse_requirements(content, true, "3.12");
         let findings = check_requirements_findings(&reqs, &["python3-w6extra"]);
         assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+    }
+
+    #[test]
+    fn marker_boolean_evaluator_handles_parenthesised_operands() {
+        // Direct tests for the `and`/`or` evaluator added by this change.
+        // Expected values verified against `packaging` with
+        // python_version=3.12, os_name=posix. The port treats unknown
+        // markers (`os_name`) as holding, so the false cases below use
+        // only `python_version` atoms to stay comparable.
+        let cases = [
+            ("(python_version >= \"3.9\") or (os_name == \"nt\")", true),
+            (
+                "(python_version >= \"3.9\") and (os_name == \"posix\")",
+                true,
+            ),
+            (
+                "(python_version < \"3.9\") or (python_version > \"4.0\")",
+                false,
+            ),
+            (
+                "(python_version >= \"3.9\") and (python_version < \"3.10\")",
+                false,
+            ),
+            ("((python_version >= \"3.9\"))", true),
+            ("(python_version >= \"3.9\")", true),
+            (
+                "(python_version < \"3.0\") or (python_version >= \"3.9\") and (python_version < \"3.13\")",
+                true,
+            ),
+        ];
+        for (marker, expected) in cases {
+            assert_eq!(
+                PythonCheck::eval_marker_expr(marker, "3.12"),
+                expected,
+                "marker: {marker}"
+            );
+        }
+    }
+
+    #[test]
+    fn leftover_parenthesised_markers_are_evaluated() {
+        // Emission-path test through `check_requirements`: a top-level
+        // boolean with parenthesised operands must not be mangled by paren
+        // stripping. Both markers hold for python_version 3.12 (verified
+        // against `packaging`), so the requirements are wanted and no
+        // `python-leftover-require` fires. With the old first/last-char
+        // stripping the expression becomes malformed, evaluates false, and
+        // a bogus leftover finding is emitted.
+        for marker in [
+            "(python_version >= \"3.9\") or (os_name == \"nt\")",
+            "(python_version >= \"3.9\") and (os_name == \"posix\")",
+        ] {
+            let content = format!("Metadata-Version: 2.1\nRequires-Dist: w6paren; {marker}\n");
+            let reqs = PythonCheck::parse_requirements(&content, true, "3.12");
+            let findings = check_requirements_findings(&reqs, &["python3-w6paren"]);
+            assert!(
+                findings.is_empty(),
+                "marker {marker}: unexpected findings: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn leftover_false_parenthesised_marker_still_fires() {
+        // The paren fix must not make everything true: a parenthesised
+        // marker that genuinely does not hold still yields the leftover.
+        let content = "Metadata-Version: 2.1\nRequires-Dist: w6paren; (python_version < \"3.9\") or (python_version > \"4.0\")\n";
+        let reqs = PythonCheck::parse_requirements(content, true, "3.12");
+        let findings = check_requirements_findings(&reqs, &["python3-w6paren"]);
+        assert_eq!(findings.len(), 1, "unexpected findings: {findings:?}");
+        assert_eq!(findings[0].0, "python-leftover-require");
+        assert!(findings[0].1.contains(": W: "), "level: {}", findings[0].1);
+        assert!(
+            findings[0].1.contains("python3-w6paren"),
+            "detail: {}",
+            findings[0].1
+        );
     }
 
     #[test]
