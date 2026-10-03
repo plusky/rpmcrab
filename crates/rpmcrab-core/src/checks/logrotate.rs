@@ -251,4 +251,66 @@ mod tests {
             "file order, not sorted"
         );
     }
+
+    /// B7: the `/var/log` exemption (rpmlint#551) is scoped to
+    /// `logrotate-log-dir-not-packaged` only. A packaged `/var/log` that
+    /// is user-writable still gets `logrotate-user-writable-log-dir`.
+    #[test]
+    fn packaged_var_log_still_gets_user_writable_check() {
+        use crate::color::Color;
+        use crate::pkg::pkgfile::PkgFile;
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
+        let conf = dir.join("app");
+        std::fs::write(&conf, "/var/log/app.log {\n  weekly\n}\n").expect("write conf");
+
+        let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = crate::pkg::Pkg::open(&rpm, dir, true).expect("open fixture pkg");
+        pkg.name = "logrotate-test".to_string();
+        pkg.files = vec![
+            PkgFile {
+                name: "/etc/logrotate.d/app".to_string(),
+                path: conf.to_string_lossy().into_owned(),
+                mode: 0o100644,
+                ..Default::default()
+            },
+            // /var/log is packaged (so no not-packaged finding) but owned
+            // by a non-root user with a group-writable mode.
+            PkgFile {
+                name: "/var/log".to_string(),
+                path: "/var/log".to_string(),
+                mode: 0o40775,
+                user: "app".to_string(),
+                group: "app".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = LogrotateCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let rendered: Vec<String> = out.results().iter().map(|(_, line)| line.clone()).collect();
+
+        assert!(
+            !rendered
+                .iter()
+                .any(|l| l.contains("logrotate-log-dir-not-packaged")),
+            "unexpected not-packaged: {rendered:?}"
+        );
+        let writable: Vec<&String> = rendered
+            .iter()
+            .filter(|l| l.contains("logrotate-user-writable-log-dir"))
+            .collect();
+        assert_eq!(writable.len(), 1, "{rendered:?}");
+        assert!(
+            writable[0].starts_with(
+                "logrotate-test.noarch: E: logrotate-user-writable-log-dir /var/log app:app 0775"
+            ),
+            "unexpected line: {}",
+            writable[0]
+        );
+    }
 }
