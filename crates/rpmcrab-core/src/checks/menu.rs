@@ -301,10 +301,10 @@ impl MenuCheck {
         req_names: &[&str],
     ) {
         let package_re = Regex::new(r"\?package\((.*)\):").expect("static regex");
-        let command_re = Regex::new(r#"command=(?:"([^"]+)"|([^ \t]+))"#).expect("static regex");
+        let command_re = Regex::new(r#"command=(?:"([^"]+)"|([^ \t"]+))"#).expect("static regex");
         let longtitle_re =
-            Regex::new(r#"longtitle=(?:"([^"]+)"|([^ \t]+))"#).expect("static regex");
-        let title_re = Regex::new(r#"["\s]title=(?:"([^"]+)"|([^ \t]+))"#).expect("static regex");
+            Regex::new(r#"longtitle=(?:"([^"]+)"|([^ \t"]+))"#).expect("static regex");
+        let title_re = Regex::new(r#"["\s]title=(?:"([^"]+)"|([^ \t"]+))"#).expect("static regex");
         let needs_re = Regex::new(r#"needs=("[^"]+"|([^ \t"]+))"#).expect("static regex");
         let section_re = Regex::new(r#"section=("[^"]+"|([^ \t"]+))"#).expect("static regex");
         let icon_re = Regex::new(r#"icon="?([^" ]+)"#).expect("static regex");
@@ -338,6 +338,12 @@ impl MenuCheck {
                     .map(|m| m.as_str())
                     .unwrap_or("");
                 let mut parts = cmd_line.split_whitespace();
+                // Deliberate divergence (ledgered in tests/parity/divergences.toml):
+                // the reference raises IndexError here -- a whitespace-only quoted
+                // command, or a single-token command matching a launcher regexp,
+                // aborts the whole run with exit 3. The port reports
+                // `menu-command-not-in-package` with an empty detail instead, so
+                // one malformed entry does not forfeit the rest of the package.
                 let mut cmd = parts.next().unwrap_or("").to_string();
                 for (launcher_name, launcher_re, binaries) in &self.launchers {
                     let _ = launcher_name;
@@ -359,6 +365,8 @@ impl MenuCheck {
                             );
                         }
                     }
+                    // Same divergence as above: a launcher-only single token
+                    // becomes the empty command rather than an IndexError.
                     cmd = parts.next().unwrap_or("").to_string();
                     break;
                 }
@@ -550,5 +558,112 @@ mod tests {
         }
         assert!(!title_is_capitalized("lowercase title"));
         assert!(!title_is_capitalized("also lowercase"));
+    }
+
+    /// Drive one menu entry line through `check_menu_line` with the bundled
+    /// config, returning the `(finding, rendered line)` pairs in emission order.
+    fn menu_line_results(line: &str) -> Vec<(String, String)> {
+        let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/w6-menulegacy-1.0-1.noarch.rpm");
+        let scratch = tempfile::tempdir().unwrap();
+        let pkg = Pkg::open(&rpm, scratch.path(), true).unwrap();
+        let config = crate::config::load_bundled();
+        let check = MenuCheck::new(&config);
+        let mut out = Filter::new(&config, crate::color::Color::for_tty(false)).unwrap();
+        let files: Vec<&str> = pkg.files.iter().map(|f| f.name.as_str()).collect();
+        let req_names: Vec<&str> = pkg.req_names.iter().map(String::as_str).collect();
+        check.check_menu_line(
+            &pkg,
+            &mut out,
+            "/usr/lib/menu/w6-menulegacy",
+            line,
+            &files,
+            &req_names,
+        );
+        out.results().to_vec()
+    }
+
+    /// MenuCheck.py:137 does `command = command_line[1]` once a launcher regexp
+    /// matches, so a single-token command that is itself a launcher raises
+    /// IndexError; MenuCheck.py:118 raises the same way on a whitespace-only
+    /// quoted command. Both abort the whole reference run with exit 3. The port
+    /// deliberately reports `menu-command-not-in-package` with an empty detail
+    /// instead (see the divergence ledger). Pin the full emission path: no
+    /// panic, the finding name and level, the empty detail, and everything
+    /// else `check_menu_line` emits after `command = Some(cmd)`.
+    #[test]
+    fn degenerate_launcher_command_reports_instead_of_crashing() {
+        // `soundwrapper` is a bundled MenuLaunchers entry with no binaries, so
+        // the launcher arm is exercised without a companion
+        // `use-of-launcher-in-menu-but-no-requires-on` finding.
+        for line in [
+            r#"?package(w6-menulegacy): command="soundwrapper""#,
+            r#"?package(w6-menulegacy): command=" ""#,
+        ] {
+            let results = menu_line_results(line);
+            let finding = results
+                .iter()
+                .find(|(check, _)| check == "menu-command-not-in-package")
+                .unwrap_or_else(|| panic!("{line}: no menu-command-not-in-package in {results:?}"));
+            // An empty detail contributes nothing to the rendered line.
+            assert_eq!(
+                finding.1, "w6-menulegacy.noarch: W: menu-command-not-in-package",
+                "{line}"
+            );
+            let names: Vec<&str> = results.iter().map(|(check, _)| check.as_str()).collect();
+            assert_eq!(
+                names,
+                [
+                    "menu-command-not-in-package",
+                    "no-longtitle-in-menu",
+                    "no-title-in-menu",
+                    "unable-to-parse-menu-needs",
+                    "no-icon-in-menu",
+                    "non-xdg-migrated-menu",
+                ],
+                "{line}: full emission after `command = Some(cmd)`: {results:?}"
+            );
+        }
+    }
+
+    /// The reference's bare alternative excludes `"` (`[^ \t"]+`), so
+    /// `command=foo"bar` parses the command as `foo`. Without the fix the
+    /// port captured `foo"bar`.
+    #[test]
+    fn bare_command_stops_at_embedded_quote() {
+        let results = menu_line_results(r#"?package(w6-menulegacy): command=foo"bar"#);
+        let finding = results
+            .iter()
+            .find(|(check, _)| check == "menu-command-not-in-package")
+            .unwrap_or_else(|| panic!("no menu-command-not-in-package in {results:?}"));
+        assert_eq!(
+            finding.1,
+            "w6-menulegacy.noarch: W: menu-command-not-in-package foo"
+        );
+    }
+
+    /// Same class divergence on `longtitle=` and `title=`: the bare alternative
+    /// must stop at an embedded quote, matching the reference.
+    #[test]
+    fn bare_longtitle_and_title_stop_at_embedded_quote() {
+        let results = menu_line_results(r#"?package(w6-menulegacy): longtitle=foo"bar"#);
+        let finding = results
+            .iter()
+            .find(|(check, _)| check == "menu-longtitle-not-capitalized")
+            .unwrap_or_else(|| panic!("no menu-longtitle-not-capitalized in {results:?}"));
+        assert_eq!(
+            finding.1,
+            "w6-menulegacy.noarch: W: menu-longtitle-not-capitalized foo"
+        );
+
+        let results = menu_line_results(r#"?package(w6-menulegacy): title=foo"bar"#);
+        let finding = results
+            .iter()
+            .find(|(check, _)| check == "menu-title-not-capitalized")
+            .unwrap_or_else(|| panic!("no menu-title-not-capitalized in {results:?}"));
+        assert_eq!(
+            finding.1,
+            "w6-menulegacy.noarch: W: menu-title-not-capitalized foo"
+        );
     }
 }
