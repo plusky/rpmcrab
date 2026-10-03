@@ -48,7 +48,10 @@ impl PolkitCheck {
     }
 
     /// Parse a `polkit-default-privs` profile: `action value` per line,
-    /// `#` comments stripped.
+    /// `#` comments stripped. Lines with fewer than two tokens are skipped
+    /// and both line ends are trimmed; both are deliberate divergences from
+    /// the reference (see divergences.toml), which crashes the whole run on
+    /// a one-token line and whitelists an empty action id for indented ones.
     fn parse_privs_file(filename: &str, privs: &mut HashMap<String, String>) {
         let Ok(content) = std::fs::read_to_string(filename) else {
             return;
@@ -191,6 +194,24 @@ impl PolkitCheck {
                             current_defaults.insert(setting, value);
                         }
                         _ => {}
+                    }
+                }
+                Ok(Event::Empty(e)) => {
+                    if e.name().as_ref() == "action" {
+                        // A self-closing `<action id="x"/>` never yields
+                        // Start/End; the reference's minidom reports it as an
+                        // action without `<defaults>`, so push it with empty
+                        // defaults like a Start immediately followed by End.
+                        let mut id = String::new();
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == "id" {
+                                id = attr
+                                    .normalized_value(XmlVersion::Implicit1_0)
+                                    .map(|v| v.into_owned())
+                                    .unwrap_or_default();
+                            }
+                        }
+                        actions.push((id, HashMap::new()));
                     }
                 }
                 Ok(Event::Eof) => {
@@ -429,5 +450,88 @@ mod tests {
         assert_eq!(results[0].0, "polkit-ghost-file");
         assert!(results[0].1.contains(": E: "), "level: {}", results[0].1);
         assert!(results[0].1.contains(name), "detail: {}", results[0].1);
+    }
+
+    #[test]
+    fn privs_file_skips_one_token_lines() {
+        // PolkitCheck.py:36-38 does `priv = line[0]; value = line[1]`, so a
+        // one-token line raises IndexError, which escapes the check and kills
+        // the whole run (exit 3). The port deliberately skips such lines
+        // instead; the divergence is ledgered in divergences.toml.
+        let dir = std::env::temp_dir();
+        let path = dir.join("rpmcrab-polkit-onetoken.privs");
+        std::fs::write(&path, "org.foo.lonely\norg.foo.bar auth_admin\n").unwrap();
+        let mut privs = HashMap::new();
+        PolkitCheck::parse_privs_file(path.to_str().unwrap(), &mut privs);
+        std::fs::remove_file(&path).ok();
+        assert_eq!(privs.len(), 1, "one-token line leaked in: {privs:?}");
+        assert_eq!(
+            privs.get("org.foo.bar").map(String::as_str),
+            Some("auth_admin")
+        );
+    }
+
+    #[test]
+    fn privs_file_trims_indented_lines() {
+        // The reference strips comments with `line.split('#')[0].rstrip()`
+        // (PolkitCheck.py:34); on an indented line its `re.split(r'\s+',
+        // ...)` yields a leading empty token, so it whitelists the empty
+        // action id with the real id as its value. The port trims both ends;
+        // the divergence is ledgered in divergences.toml.
+        let dir = std::env::temp_dir();
+        let path = dir.join("rpmcrab-polkit-indented.privs");
+        std::fs::write(&path, "  org.foo.indented bar\n").unwrap();
+        let mut privs = HashMap::new();
+        PolkitCheck::parse_privs_file(path.to_str().unwrap(), &mut privs);
+        std::fs::remove_file(&path).ok();
+        assert!(!privs.contains_key(""), "empty-key wart: {privs:?}");
+        assert_eq!(
+            privs.get("org.foo.indented").map(String::as_str),
+            Some("bar")
+        );
+    }
+
+    #[test]
+    fn self_closing_action_reports_untracked_privilege() {
+        // quick-xml reports `<action id="x"/>` as Event::Empty (no
+        // Start/End); the reference's minidom sees it as an action without
+        // <defaults>, which flows through the ledgered no-defaults path.
+        // Without the Empty handling no finding is emitted at all.
+        let dir = std::env::temp_dir();
+        let path = dir.join("rpmcrab-polkit-selfclosing.policy");
+        std::fs::write(
+            &path,
+            "<policyconfig><action id=\"org.foo.selfclosed\"/></policyconfig>",
+        )
+        .unwrap();
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        // Header only, no extraction: `files` is overwritten wholesale below.
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        let name = "/usr/share/polkit-1/actions/org.foo.policy";
+        pkg.files = vec![PkgFile {
+            name: name.to_string(),
+            path: path.to_str().unwrap().to_string(),
+            ..Default::default()
+        }];
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = check();
+        check.check_binary(&pkg, &config, &mut out);
+        std::fs::remove_file(&path).ok();
+        let results = out.results().to_vec();
+        assert_eq!(results.len(), 1, "unexpected results: {results:?}");
+        assert_eq!(results[0].0, "polkit-untracked-privilege");
+        assert!(results[0].1.contains(": E: "), "level: {}", results[0].1);
+        assert!(
+            results[0].1.contains("org.foo.selfclosed"),
+            "detail: {}",
+            results[0].1
+        );
+        assert!(
+            results[0].1.contains("no:no:no"),
+            "detail: {}",
+            results[0].1
+        );
     }
 }
