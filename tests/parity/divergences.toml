@@ -373,13 +373,6 @@ upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
 
 [[divergence]]
 case = "global"
-check = "BuildRootAndDateCheck"
-kind = "missing"
-reason = "BuildRootAndDateCheck is not ported yet; its findings are absent from the port."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "info-files-without-install-info-postin"
 kind = "missing"
 reason = "FilesCheck flags /usr/share/info files when the package has no %post scriptlet at all; the install-info scriptlet analysis is not ported yet."
