@@ -585,3 +585,111 @@ mod tests {
         assert!(!title_is_capitalized("also lowercase"));
     }
 }
+
+#[cfg(test)]
+mod menu_icon_xdg_tests {
+    use super::*;
+    use crate::color::Color;
+
+    /// Config with the menu lists populated so a well-formed entry is quiet.
+    fn menu_test_config() -> Config {
+        let table: toml::Table =
+            toml::from_str("ValidMenuSections = [\"Apps\"]\nExtraMenuNeeds = [\"x11\"]\n")
+                .expect("parse test config");
+        let mut config = Config {
+            configuration: table,
+            ..Default::default()
+        };
+        config.finalize().unwrap();
+        config
+    }
+
+    fn menu_test_pkg() -> Pkg {
+        let mut pkg = Pkg::open(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm"),
+            &std::env::temp_dir(),
+            true,
+        )
+        .expect("open fixture pkg");
+        pkg.name = "menu-test".to_string();
+        pkg.arch = "noarch".to_string();
+        pkg
+    }
+
+    /// Drive the `icon=`/`xdg=` emission path for one menu entry line and
+    /// return the rendered findings in emission order.
+    fn menu_line_findings(icon: &str, xdg: &str) -> Vec<(String, String)> {
+        let config = menu_test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = MenuCheck::new(&config);
+        let pkg = menu_test_pkg();
+        let line = format!(
+            "?package(menu-test): needs=\"x11\" section=\"Apps\" command=/usr/bin/menu-test \
+             title=\"Menu Test\" longtitle=\"Menu Test Long\" icon={icon} xdg={xdg}"
+        );
+        check.check_menu_line(
+            &pkg,
+            &mut out,
+            "menu-test",
+            &line,
+            &["/usr/bin/menu-test"],
+            &[],
+        );
+        out.results().to_vec()
+    }
+
+    fn rendered(name: &str, level: &str, detail: &str) -> (String, String) {
+        let line = if detail.is_empty() {
+            format!("menu-test.noarch: {level}: {name}")
+        } else {
+            format!("menu-test.noarch: {level}: {name} {detail}")
+        };
+        (name.to_string(), line)
+    }
+
+    /// #62 claimed the port's `icon_re`/`xdg_re` required a trailing `"`
+    /// the reference regexes lack. They don't: the `"` before the raw
+    /// string's closing `"#` is the terminator, not part of the pattern, so
+    /// the port already matches the reference byte-for-byte
+    /// (`icon="?([^" ]+)` / `xdg="?([^" ]+)`). This pins that unquoted
+    /// values parse instead of falling through to the spurious
+    /// `no-icon-in-menu` (Warning) / `non-xdg-migrated-menu` (Error).
+    #[test]
+    fn unquoted_icon_and_xdg_are_quiet() {
+        let findings = menu_line_findings("foo.png", "true");
+        assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+    }
+
+    /// An unquoted icon still goes through icon validation: a bad extension
+    /// fires `invalid-menu-icon-type`, not the spurious `no-icon-in-menu`.
+    #[test]
+    fn unquoted_icon_with_bad_extension_is_validated() {
+        let findings = menu_line_findings("foo.xpm", "true");
+        assert_eq!(
+            findings,
+            [rendered("invalid-menu-icon-type", "W", "foo.xpm")]
+        );
+    }
+
+    /// An unquoted non-true xdg value still fires `non-xdg-migrated-menu`.
+    #[test]
+    fn unquoted_xdg_false_still_fires() {
+        let findings = menu_line_findings("foo.png", "false");
+        assert_eq!(findings, [rendered("non-xdg-migrated-menu", "E", "")]);
+    }
+
+    /// Quoted values always matched; pin that they keep behaving the same.
+    #[test]
+    fn quoted_icon_and_xdg_behave_as_before() {
+        let findings = menu_line_findings("\"foo.png\"", "\"true\"");
+        assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+        let findings = menu_line_findings("\"foo.xpm\"", "\"true\"");
+        assert_eq!(
+            findings,
+            [rendered("invalid-menu-icon-type", "W", "foo.xpm")]
+        );
+        let findings = menu_line_findings("\"foo.png\"", "\"false\"");
+        assert_eq!(findings, [rendered("non-xdg-migrated-menu", "E", "")]);
+    }
+}
