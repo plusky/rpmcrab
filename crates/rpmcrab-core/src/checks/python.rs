@@ -655,15 +655,25 @@ mod tests {
 
     #[test]
     fn extra_section_with_marker_combines_correctly() {
-        // `[extra:marker]` synthesizes `(marker) and extra == "extra"`.
+        // `[extra:marker]` must synthesize the section condition AND
+        // `extra == "extra"` in one marker. Exact equality, not `contains`:
+        // loose substring checks pass on wrongly parenthesized or reordered
+        // combinations that drift from the reference's
+        // `(marker) and extra == "extra"` form.
         let content = "[extra:python_version > \"3.8\"]\nw6extra\n";
         let reqs = PythonCheck::parse_requirements(content, false, "3.12");
         assert_eq!(reqs.len(), 1);
-        let marker = reqs[0].marker.as_deref().unwrap_or("");
-        assert!(marker.contains("extra == \"extra\""), "marker: {marker}");
-        assert!(
-            marker.contains("python_version > \"3.8\""),
-            "marker: {marker}"
+        assert_eq!(
+            reqs[0].marker.as_deref(),
+            Some("(python_version > \"3.8\") and extra == \"extra\""),
+            "marker: {:?}",
+            reqs[0].marker
         );
+        // Emission path: the section condition holds for 3.12, but the
+        // synthesized extra marker never does, so `w6extra` must not be
+        // reported missing. If the combination dropped the extra part, the
+        // false positive would fire here.
+        let findings = check_requirements_findings(&reqs, &[]);
+        assert!(findings.is_empty(), "unexpected findings: {findings:?}");
     }
 }
