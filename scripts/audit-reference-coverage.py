@@ -2327,6 +2327,24 @@ def is_ledgered(module, name, entries):
 # Main
 # ---------------------------------------------------------------------------
 
+def is_stale_entry(module, name, missing_modules, port_templates):
+    """Whether a ledger entry is stale: the check is marked missing but the
+    port now implements it with an exact (non-wildcard) pattern for this
+    finding.
+
+    Both the module AND the finding name are checked against missing_modules:
+    most kind="missing" entries are keyed by finding name (6 of 7 --
+    inaccessible-filename, lengthy-symlink,
+    info-files-without-install-info-postin/-postun, sourced-script-with-shebang,
+    symlink-contains-up-and-down-segments); only one (BuildRootAndDateCheck) is
+    keyed by module. Dropping the name half of the disjunction would let a
+    name-keyed entry whose finding the port now emits go undetected.
+    """
+    return (module in missing_modules or name in missing_modules) and any(
+        "*" not in p and p == name for p in port_templates
+    )
+
+
 def main(argv):
     args = [a for a in argv[1:] if not a.startswith("--")]
     opts = {a.split("=")[0]: (a.split("=", 1)[1] if "=" in a else True)
@@ -2369,9 +2387,7 @@ def main(argv):
             # Only an EXACT port pattern counts here. A wildcard template such
             # as `empty-*` "covers" every `empty-` name, including ones no port
             # check emits, so it would report staleness that is not there.
-            if (module in missing_modules or name in missing_modules) and any(
-                "*" not in p and p == name for p in port_templates
-            ):
+            if is_stale_entry(module, name, missing_modules, port_templates):
                 stale.append((module, name))
             continue
         if is_ledgered(module, name, entries):
