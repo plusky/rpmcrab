@@ -422,13 +422,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "tmpfile-not-in-filelist"
-kind = "behaviour"
-reason = "The reference (TmpFilesCheck._check_tmpfile_in_filelist) emits one finding per matching tmpfiles.d line; the port deduplicates by path and emits one finding per missing path. Duplicate lines for the same path produce one finding instead of several."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "LibraryDependencyCheck"
 kind = "behaviour"
 reason = "Deliberate fix (plusky/rpmcrab#74): the per-package maps are keyed on `(name, arch)` instead of `pkg.name` alone. The reference keys on name alone (`LibraryDependencyCheck.py:37-39`), so linting `foo-devel.x86_64` then `foo-devel.aarch64` together silently drops the first arch — only the last arch is ever checked, and no user would want that. The port checks each arch. Pinned by `cross_arch_packages_are_each_checked`."
@@ -612,3 +605,10 @@ kind = "behaviour"
 reason = "The suspicious-dir regex widens the build-dir component from \\w+ to [\\w.-]+ so hyphenated/dotted directories like /usr/src/linux-6.1/BUILD match. The reference (PkgConfigCheck.py:11) uses \\w and misses these — the common case for kernel builds — so this is a deliberate fix for reference under-reporting, not a porting gap."
 since = "0.1.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/44"
+
+[[divergence]]
+case = "global"
+check = "SystemdTmpfilesCheck"
+kind = "behaviour"
+reason = "When the SystemdTmpfiles config section is absent the reference raises KeyError (SystemdTmpfilesCheck.py:62-63) and the whole check fails; the port falls back to the reference's own shipped defaults (DropinDirs /usr/lib/tmpfiles.d + /etc/tmpfiles.d, empty IgnorePackages) so the check still runs. A linter must not die on a missing optional config section."
+since = "0.1.0"
