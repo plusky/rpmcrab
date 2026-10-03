@@ -1796,8 +1796,8 @@ mod tests {
 
         let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
         let extract_dir = tempfile::TempDir::new().expect("tmpdir");
-        let pkg =
-            Pkg::open(std::path::Path::new(&rpm_path), extract_dir.path()).expect("open fixture");
+        let pkg = Pkg::open(std::path::Path::new(&rpm_path), extract_dir.path(), true)
+            .expect("open fixture");
         let pkgfile = PkgFile {
             path: archive.to_string_lossy().into_owned(),
             ..Default::default()

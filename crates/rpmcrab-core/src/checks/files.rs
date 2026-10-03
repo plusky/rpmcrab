@@ -3216,6 +3216,9 @@ mod tests {
                 .iter()
                 .any(|(n, d)| n == "zero-length" && d.contains("empty-script")),
             "missing zero-length on empty-script: {results:?}"
+        );
+    }
+
     /// An absent decompressor must not turn a compressed file into
     /// `file-not-utf8`. The reference decompresses in-process (pkg.py imports
     /// bz2/gzip/lzma/zstandard), so it never needs a binary and always reaches
