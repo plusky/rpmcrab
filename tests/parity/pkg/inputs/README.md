@@ -20,6 +20,7 @@ each exercising a particular check behavior.
 | `libnodoc-test-1.0-1.noarch.rpm` | lib package without docs |
 | `liboutsidelib-test-1.0-1.noarch.rpm` | lib package with non-lib files |
 | `unexpandedmacro-test-1.0-1.noarch.rpm` | Unexpanded macros in filenames |
+| `fsf-address-fixture-1.0-1.noarch.rpm` | incorrect-fsf-address whole-file scan (upstream rpmlint#40): wrong address inside/past the 2048-byte window, plus a silent control |
 
 ## Regeneration
 

@@ -811,6 +811,9 @@ const FILESYS_PACKAGES: &[&str] = &["filesystem"];
 #[derive(Default)]
 struct FileData {
     chunk: Vec<u8>,
+    /// Whole file content, for checks that scan past the 2048-byte chunk
+    /// (incorrect-fsf-address, upstream rpmlint#40).
+    full_bytes: Vec<u8>,
     istext: bool,
     interpreter: Option<String>,
     interpreter_args: String,
@@ -827,34 +830,38 @@ fn is_peek_printable(b: u8) -> bool {
 impl FilesCheck {
     /// Read up to 2048 bytes and decide text-vs-binary, mirroring the
     /// reference's `peek` (including its `read-error` on `OSError`).
-    fn peek(&self, pkg: &Pkg, pkgfile: &PkgFile, out: &mut Filter) -> (Vec<u8>, bool) {
+    ///
+    /// The full file bytes are returned alongside the chunk: the
+    /// incorrect-FSF-address check scans the whole file (upstream rpmlint#40;
+    /// the reference only scans its 2048-byte chunk).
+    fn peek(&self, pkg: &Pkg, pkgfile: &PkgFile, out: &mut Filter) -> (Vec<u8>, bool, Vec<u8>) {
         let bytes = match std::fs::read(&pkgfile.path) {
             Ok(b) => b,
             Err(e) => {
                 add_info(out, Level::Warning, pkg, "read-error", &[&e.to_string()]);
-                return (Vec::new(), false);
+                return (Vec::new(), false, Vec::new());
             }
         };
-        let chunk: Vec<u8> = bytes.into_iter().take(2048).collect();
+        let chunk: Vec<u8> = bytes.iter().take(2048).copied().collect();
         if chunk.contains(&0) {
-            return (chunk, false);
+            return (chunk, false, bytes);
         }
         if chunk.is_empty() {
-            return (chunk, true);
+            return (chunk, true, bytes);
         }
         let lower = pkgfile.path.to_lowercase();
         if lower.ends_with(".pdf") && chunk.starts_with(b"%PDF-") {
-            return (chunk, false);
+            return (chunk, false, bytes);
         }
         if lower.ends_with(".ri") && lower.contains("/ri/") {
-            return (chunk, false);
+            return (chunk, false, bytes);
         }
         if lower.ends_with(".inv") && chunk.starts_with(b"# Sphinx inventory") {
-            return (chunk, false);
+            return (chunk, false, bytes);
         }
         let control = chunk.iter().filter(|b| !is_peek_printable(**b)).count();
         let istext = control as f64 / chunk.len() as f64 <= 0.30;
-        (chunk, istext)
+        (chunk, istext, bytes)
     }
 }
 
@@ -1612,7 +1619,7 @@ impl FilesCheck {
         if !pkgfile::is_reg(realbin.mode) {
             return;
         }
-        let (chunk, _istext) = self.peek(pkg, realbin, out);
+        let (chunk, _istext, _full) = self.peek(pkg, realbin, out);
         let (interpreter, _) = script_interpreter(&chunk);
         // Not a script with shebang, so ignore
         let Some(interpreter) = interpreter else {
@@ -1809,9 +1816,10 @@ impl FilesCheck {
         // The reference's UnicodeError branch has no Rust equivalent: paths
         // are handled as bytes, so it cannot fail that way (divergences.toml).
         if std::fs::File::open(&pkgfile.path).is_ok() {
-            let (chunk, istext) = self.peek(pkg, pkgfile, out);
+            let (chunk, istext, full_bytes) = self.peek(pkg, pkgfile, out);
             fd.chunk = chunk;
             fd.istext = istext;
+            fd.full_bytes = full_bytes;
         }
         let (interpreter, args) = script_interpreter(&fd.chunk);
         fd.interpreter = interpreter;
@@ -2521,7 +2529,10 @@ impl FilesCheck {
                 add_info(out, Level::Warning, pkg, "file-not-utf8", &[fname]);
             }
         }
-        let text = String::from_utf8_lossy(&fd.chunk);
+        // Upstream rpmlint#40: the reference scans only its 2048-byte peek
+        // chunk for the FSF address, missing it in longer files. The port
+        // scans the whole file instead.
+        let text = String::from_utf8_lossy(&fd.full_bytes);
         if is_match(&self.fsf_license_re, text.as_ref())
             && is_match(&self.fsf_wrong_address_re, text.as_ref())
         {
@@ -2719,6 +2730,37 @@ mod tests {
         assert_has(&names, "dir-or-file-in-opt");
         // no read errors: extraction works
         assert_lacks(&names, "read-error");
+    }
+
+    #[test]
+    fn fsf_address_scanned_past_2048_bytes() {
+        // Upstream rpmlint#40: the reference scans only its 2048-byte peek
+        // chunk for the FSF address, missing it in longer files. The port
+        // scans the whole file instead.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
+        let pkg = Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let fsf: Vec<&str> = out
+            .results()
+            .iter()
+            .filter(|(name, _)| name == "incorrect-fsf-address")
+            .map(|(_, line)| line.as_str())
+            .collect();
+        // LICENSE-early carries the wrong address at byte 385 (inside the
+        // old 2048-byte window); LICENSE-late carries it at byte 3372
+        // (past it); LICENSE-ok mentions the GPL with no street address
+        // and must stay silent.
+        assert_eq!(
+            fsf,
+            [
+                "fsf-address-fixture.noarch: E: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-early",
+                "fsf-address-fixture.noarch: E: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-late",
+            ],
+        );
     }
 
     #[test]
