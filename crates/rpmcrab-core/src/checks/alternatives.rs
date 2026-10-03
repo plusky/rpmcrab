@@ -241,9 +241,10 @@ impl AlternativesCheck {
                             );
                             continue;
                         }
+                        let mut found = false;
                         for man in value.split(',') {
                             let man = man.trim();
-                            let found = pkg.files.iter().any(|f| {
+                            found = pkg.files.iter().any(|f| {
                                 f.name.starts_with("/usr/share/man/") && f.name.contains(man)
                             });
                             if !found {
@@ -256,7 +257,14 @@ impl AlternativesCheck {
                                 );
                             }
                         }
-                        man_found = true;
+                        // AlternativesCheck.py:264-271 resets man_found per man
+                        // entry and never sets it outside that loop, so after
+                        // the line it holds only the LAST entry's result. Forcing
+                        // it true made a second `man=` line whose predecessor's
+                        // last man was also missing report double-entries at E
+                        // and skip its own validation, where the reference
+                        // validates and warns per missing entry.
+                        man_found = found;
                     }
                     "group" | "options" => {}
                     _ => {
@@ -438,6 +446,7 @@ impl Check for AlternativesCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::Color;
 
     #[test]
     fn install_line_is_parsed() {
@@ -500,5 +509,83 @@ mod tests {
         assert!(is_match(&re, "update-alternatives"));
         assert!(is_match(&re, "/usr/bin/update-alternatives"));
         assert!(!is_match(&re, "update-alternatives-foo"));
+    }
+
+    /// Build a Pkg with one `alts` symlink and a libalternatives dir holding a
+    /// `.conf` whose `man=` entries all name files the package does not ship.
+    ///
+    /// `man_found` must end up holding only the LAST entry's result, so a
+    /// second `man=` line is validated rather than reported as
+    /// `double-entries`. The reference resets the flag inside the per-entry
+    /// loop (AlternativesCheck.py:264-271) and never sets it outside it.
+    fn pkg_with_two_missing_man_lines(dir: &std::path::Path) -> Pkg {
+        use crate::pkg::pkgfile::PkgFile;
+        let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, dir, true).expect("open fixture pkg");
+        pkg.name = "alternatives-test".to_string();
+        pkg.files.clear();
+
+        let add = |pkg: &mut Pkg, name: &str, mode: u32, linkto: &str| {
+            let path = dir.join(name.trim_start_matches('/'));
+            if mode & 0o170000 == 0o040000 {
+                std::fs::create_dir_all(&path).expect("mkdir");
+            } else if !linkto.is_empty() {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).expect("mkdir");
+                }
+                let _ = std::fs::remove_file(&path);
+                std::os::unix::fs::symlink("/usr/bin/w6alt", &path).expect("symlink");
+            } else {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).expect("mkdir");
+                }
+                std::fs::write(&path, b"").expect("write");
+            }
+            pkg.files.push(PkgFile {
+                name: name.to_string(),
+                path: path.to_string_lossy().into_owned(),
+                mode,
+                linkto: linkto.to_string(),
+                ..Default::default()
+            });
+        };
+
+        add(&mut pkg, "/etc/alternatives/w6cmd", 0o120777, "alts");
+        add(&mut pkg, "/usr/share/libalternatives/w6cmd", 0o040755, "");
+        let conf = dir.join("usr/share/libalternatives/w6cmd/w6alt.conf");
+        std::fs::write(&conf, "man=missing-one.1.gz\nman=missing-two.1.gz\n").expect("conf");
+        pkg.files.push(PkgFile {
+            name: "/usr/share/libalternatives/w6cmd/w6alt.conf".to_string(),
+            path: conf.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            ..Default::default()
+        });
+        pkg
+    }
+
+    #[test]
+    fn two_man_lines_warn_per_entry_and_are_not_double_entries() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let pkg = pkg_with_two_missing_man_lines(dir.path());
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = AlternativesCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let names: Vec<&str> = out.results().iter().map(|(n, _)| n.as_str()).collect();
+
+        assert_eq!(
+            names
+                .iter()
+                .filter(|n| **n == "man-entry-value-not-found")
+                .count(),
+            2,
+            "expected one warning per man entry, got {names:?}"
+        );
+        assert!(
+            !names.contains(&"double-entries"),
+            "double-entries must not fire when the previous line's last man was \
+             also missing: {names:?}"
+        );
     }
 }
