@@ -610,7 +610,7 @@ mod tests {
     fn fixture_pkg_with_requires(req_names: &[&str]) -> Pkg {
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
-        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir()).expect("open fixture pkg");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
         pkg.name = "python-test".to_string();
         pkg.arch = "noarch".to_string();
         pkg.req_names = req_names.iter().map(|s| s.to_string()).collect();
