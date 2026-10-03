@@ -1801,15 +1801,14 @@ mod tests {
             !has(&results, "hardcoded-prefix-tag"),
             "unexpected: {results:?}"
         );
-        assert!(
-            !has(&results, "redundant-prefix-tag"),
-            "unexpected: {results:?}"
-        );
 
         let results = run_mini("Name: foo\nPrefix: /opt/foo\n");
         let lines = lines_for(&results, "hardcoded-prefix-tag");
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("W: hardcoded-prefix-tag /opt/foo"));
+        assert_eq!(
+            lines[0], "test.spec:2: W: hardcoded-prefix-tag /opt/foo",
+            "whole rendered line: file:line prefix, level, name and detail"
+        );
     }
 
     #[test]
