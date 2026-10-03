@@ -25,8 +25,6 @@ workspace = true
 # extraction does NOT use the binding (its PackageReader returns no entries for
 # compressed payloads); it shells out to rpm2archive (M2b).
 librpm = { version = "0.6", default-features = false, features = ["build"] }
-# TOML config + description files.
-serde = { version = "1", features = ["derive"] }
 # `preserve_order`: the reference reads configs into Python dicts (insertion
 # order) and `lookup_check_for_file` is first-match-wins, so table order is
 # observable. Without it `toml::Table` is a BTreeMap (sorted).
@@ -58,8 +56,6 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 spellbook = "0.4.2"
 # ELF parsing for BinariesCheck (replaces readelf/ldd). Pure Rust, MIT.
 goblin = "0.10"
-# DWARF parsing for BinariesCheck (replaces objdump). Pure Rust.
-gimli = "0.31"
 # XML parsing for DBusPolicyCheck (D-Bus policy files). Pure Rust, MIT.
 # XML parsing for PolkitCheck (polkit policy files). Pure Rust, MIT.
 quick-xml = "0.42"
