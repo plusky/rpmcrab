@@ -285,6 +285,99 @@ fn appdata_native_check_flags_malformed_file() {
     );
 }
 
+/// Run `AppDataCheck` with an empty tool dir (forcing the native
+/// well-formedness fallback) over the w6-appdata fixture with the extracted
+/// `w6broken.appdata.xml` overwritten by `content`. This drives the native
+/// fallback through the full emission path.
+fn run_appdata_with_content(content: &str) -> Vec<(String, String)> {
+    let rpm_path = fixture("w6-appdata-1.0-1.noarch.rpm");
+    assert!(
+        rpm_path.is_file(),
+        "fixture missing: {}",
+        rpm_path.display()
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let pkg = Pkg::open(&rpm_path, scratch.path(), true).unwrap();
+    let entry = pkg
+        .files
+        .iter()
+        .find(|f| f.name == "/usr/share/appdata/w6broken.appdata.xml")
+        .expect("w6broken.appdata.xml is not in the fixture");
+    std::fs::write(&entry.path, content).expect("overwrite appdata fixture content");
+    let empty = tempfile::tempdir().unwrap();
+    let config = Config::default();
+    let mut filter = Filter::new(&config, Color::for_tty(false)).unwrap();
+    let mut check = AppDataCheck::with_tool_dir(Some(empty.path()));
+    check.check_binary(&pkg, &config, &mut filter);
+    filter.results().to_vec()
+}
+
+/// The reference's `ElementTree.parse` fallback rejects malformed character
+/// references: empty numeric/hex bodies are `not well-formed (invalid token)`,
+/// and out-of-range numbers (including zero and surrogates) are `reference to
+/// invalid character number`. All must surface as `invalid-appdata-file`.
+#[test]
+fn appdata_charref_classes_emit_invalid_appdata_file() {
+    for (label, xml) in [
+        ("empty numeric", "<a>&#;</a>"),
+        ("empty hex", "<a>&#x;</a>"),
+        ("too big", "<a>&#99999999999;</a>"),
+        ("zero", "<a>&#0;</a>"),
+        ("surrogate", "<a>&#xD800;</a>"),
+        ("over max", "<a>&#x110000;</a>"),
+        ("undefined entity", "<a>&bar;</a>"),
+    ] {
+        let results = run_appdata_with_content(xml);
+        assert!(
+            results
+                .iter()
+                .any(|(_, line)| line.contains("invalid-appdata-file")
+                    && line.contains(": E: ")
+                    && line.contains("w6broken.appdata.xml")),
+            "{label} should emit E invalid-appdata-file: {results:?}"
+        );
+    }
+}
+
+/// Entities inside CDATA, comments, DOCTYPE and processing instructions are
+/// not entity references; the native fallback must not flag them (verified
+/// against the reference).
+#[test]
+fn appdata_entities_in_markup_constructs_are_quiet() {
+    for (label, xml) in [
+        ("cdata", "<a><![CDATA[&bar; &#;]]></a>"),
+        ("comment", "<a><!-- &bar; &#; --></a>"),
+        ("doctype", "<!DOCTYPE a><a>x</a>"),
+        ("pi", "<?pi &bar;?><a>x</a>"),
+        (
+            "valid entities",
+            "<component><name>Foo &lt;&amp;&#65;&#x41;&#x9;&#x10FFFF;</name></component>",
+        ),
+    ] {
+        let results = run_appdata_with_content(xml);
+        assert!(
+            !results
+                .iter()
+                .any(|(_, line)| line.contains("invalid-appdata-file")),
+            "{label} should be quiet: {results:?}"
+        );
+    }
+}
+
+/// `<?xml encoding="x-bogus">` makes the reference abort the whole run
+/// (`LookupError`, `lint.py:293` -> `sys.exit(3)`); the port reads the file
+/// and emits nothing. Ledgered as a deliberate divergence.
+#[test]
+fn appdata_unknown_encoding_emits_nothing() {
+    let results = run_appdata_with_content("<?xml version=\"1.0\" encoding=\"x-bogus\"?><a>x</a>");
+    assert!(
+        !results
+            .iter()
+            .any(|(_, line)| line.contains("invalid-appdata-file")),
+        "unknown encoding should be quiet (ledgered divergence): {results:?}"
+    );
+}
+
 /// With an `appstream-util` configured, the check shells out to it and honors
 /// its exit status. The fake validates well-formedness via minidom, the
 /// reference's own fallback parser.

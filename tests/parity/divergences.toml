@@ -604,3 +604,10 @@ check = "SpecCheck.rpm-tool"
 kind = "behaviour"
 reason = "rpm is needed only by check_specfile_error, which the reference likewise gates on there being a spec file (SpecCheck.py:224-227), so a binary-only lint never reaches it and probing the tool must not be fatal. The reference lets a missing rpm raise from the subprocess; rpmcrab skips the check instead, matching this project's standing treatment for an absent tool (see the PostCheck interpreter and BashismsCheck checkbashisms entries)."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "AppDataCheck"
+kind = "behaviour"
+reason = "For an appdata file declaring an unknown encoding (e.g. <?xml version=\"1.0\" encoding=\"x-bogus\"?>), the reference's ElementTree.parse raises LookupError, which AppDataCheck.py:35 does not catch, so the whole run aborts via lint.py:293 (sys.exit(3)). The port's native fallback reads the file as UTF-8 and emits nothing. Same reference-abort family as the polkit LookupError case."
+since = "0.1.0"
