@@ -285,13 +285,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "tmpfile-not-in-filelist"
-kind = "behaviour"
-reason = "The reference emits one tmpfile-not-in-filelist finding per config line, in file order, including duplicates; the port sorts and dedups the missing paths so the output is deterministic."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "SUIDPermissionsCheck"
 kind = "detail"
 reason = "Drop-in `permissions-parse-error` message texts are paraphrased rather than byte-identical to the reference's wordings; central-profile parse errors abort the run like the reference constructor, emitting no finding."
@@ -610,5 +603,12 @@ upstream = "https://github.com/plusky/rpmcrab/issues/44"
 case = "global"
 check = "SystemdTmpfilesCheck"
 kind = "behaviour"
-reason = "When the SystemdTmpfiles config section is absent the reference raises KeyError (SystemdTmpfilesCheck.py:62-63) and the whole check fails; the port falls back to the reference's own shipped defaults (DropinDirs /usr/lib/tmpfiles.d + /etc/tmpfiles.d, empty IgnorePackages) so the check still runs. A linter must not die on a missing optional config section."
+reason = "When the SystemdTmpfiles config section is absent the reference raises KeyError (SystemdTmpfilesCheck.py:39) and the whole check fails; the port falls back to the reference's own shipped defaults (DropinDirs /usr/lib/tmpfiles.d + /etc/tmpfiles.d, empty IgnorePackages) so the check still runs. A linter must not die on a missing optional config section."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "tmpfile-not-in-filelist"
+kind = "behaviour"
+reason = "The reference (TmpFilesCheck._check_tmpfile_in_filelist) emits one finding per matching tmpfiles.d line, preserving duplicates and file order; the port collects the missing paths, then sorts and dedups them, emitting one finding per path in sorted order. Duplicate lines for the same path produce one finding instead of several, and findings come out sorted rather than in file order."
 since = "0.1.0"
