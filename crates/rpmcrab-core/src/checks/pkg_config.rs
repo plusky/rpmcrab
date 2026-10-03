@@ -22,7 +22,7 @@ fn pc_file_regex() -> Regex {
 }
 
 fn suspicious_dir_regex() -> Regex {
-    Regex::new(r"[=:](?:/usr/src/\w+/BUILD|/var/tmp|/tmp|/home)").expect("static regex")
+    Regex::new(r"[=:](?:/usr/src/[\w.-]+/BUILD|/var/tmp|/tmp|/home)").expect("static regex")
 }
 
 fn wronglib_dir_64_regex() -> Regex {
@@ -170,6 +170,8 @@ mod tests {
             "prefix=/tmp/foo",
             "prefix=/home/user/pkg",
             "prefix=/usr/src/packages/BUILD/usr",
+            "prefix=/usr/src/linux-6.1/BUILD/usr",
+            "prefix=/usr/src/linux-6.1.2/BUILD",
             "exec_prefix:/var/tmp/x",
         ] {
             assert_eq!(

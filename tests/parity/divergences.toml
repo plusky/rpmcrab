@@ -604,3 +604,11 @@ check = "SpecCheck.rpm-tool"
 kind = "behaviour"
 reason = "rpm is needed only by check_specfile_error, which the reference likewise gates on there being a spec file (SpecCheck.py:224-227), so a binary-only lint never reaches it and probing the tool must not be fatal. The reference lets a missing rpm raise from the subprocess; rpmcrab skips the check instead, matching this project's standing treatment for an absent tool (see the PostCheck interpreter and BashismsCheck checkbashisms entries)."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "invalid-pkgconfig-file"
+kind = "behaviour"
+reason = "The suspicious-dir regex widens the build-dir component from \\w+ to [\\w.-]+ so hyphenated/dotted directories like /usr/src/linux-6.1/BUILD match. The reference (PkgConfigCheck.py:11) uses \\w and misses these — the common case for kernel builds — so this is a deliberate fix for reference under-reporting, not a porting gap."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/44"
