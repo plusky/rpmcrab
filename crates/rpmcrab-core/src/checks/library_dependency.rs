@@ -70,7 +70,7 @@ impl LibraryDependencyCheck {
     }
 
     fn is_devel_pkg(name: &str) -> bool {
-        is_match(&devel_regex(), name)
+        is_match(devel_regex(), name)
     }
 }
 

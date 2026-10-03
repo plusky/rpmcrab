@@ -15,6 +15,7 @@ use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
 use librpm::Tag;
+use std::sync::OnceLock;
 
 pub struct PostCheck {
     valid_shells: Vec<String>,
@@ -51,32 +52,46 @@ impl PostCheck {
         }
     }
 
-    fn percent_regex() -> Regex {
-        Regex::new(r"(?m)^[^#]*%+\{?\w{3,}").expect("static regex")
+    fn percent_regex() -> &'static Regex {
+        static PERCENT_REGEX: OnceLock<Regex> = OnceLock::new();
+        PERCENT_REGEX.get_or_init(|| Regex::new(r"(?m)^[^#]*%+\{?\w{3,}").expect("static regex"))
     }
-    fn bracket_regex() -> Regex {
-        Regex::new(r"(?m)^[^#]*if\s+[^ :\]]\]").expect("static regex")
+    fn bracket_regex() -> &'static Regex {
+        static BRACKET_REGEX: OnceLock<Regex> = OnceLock::new();
+        BRACKET_REGEX.get_or_init(|| Regex::new(r"(?m)^[^#]*if\s+[^ :\]]\]").expect("static regex"))
     }
-    fn home_regex() -> Regex {
-        Regex::new(r"(?m)[^a-zA-Z]+~/|\$\{?HOME(\W|$)").expect("static regex")
+    fn home_regex() -> &'static Regex {
+        static HOME_REGEX: OnceLock<Regex> = OnceLock::new();
+        HOME_REGEX
+            .get_or_init(|| Regex::new(r"(?m)[^a-zA-Z]+~/|\$\{?HOME(\W|$)").expect("static regex"))
     }
-    fn dangerous_regex() -> Regex {
-        Regex::new(
+    fn dangerous_regex() -> &'static Regex {
+        static DANGEROUS_REGEX: OnceLock<Regex> = OnceLock::new();
+        DANGEROUS_REGEX.get_or_init(|| Regex::new(
             r"(?m)(^|[;`|]|&&|$\()\s*(?:\S*/s?bin/)?(cp|mv|ln|tar|rpm|chmod|chown|rm|cpio|install|perl|userdel|groupdel)\s",
         )
-        .expect("static regex")
+        .expect("static regex"))
     }
-    fn selinux_regex() -> Regex {
-        Regex::new(r"(?m)(^|[;`|]|&&|$\()\s*(?:\S*/s?bin/)?(chcon|runcon)\s").expect("static regex")
+    fn selinux_regex() -> &'static Regex {
+        static SELINUX_REGEX: OnceLock<Regex> = OnceLock::new();
+        SELINUX_REGEX.get_or_init(|| {
+            Regex::new(r"(?m)(^|[;`|]|&&|$\()\s*(?:\S*/s?bin/)?(chcon|runcon)\s")
+                .expect("static regex")
+        })
     }
-    fn single_command_regex() -> Regex {
-        Regex::new(r"^[ \n]*([^ \n]+)[ \n]*$").expect("static regex")
+    fn single_command_regex() -> &'static Regex {
+        static SINGLE_COMMAND_REGEX: OnceLock<Regex> = OnceLock::new();
+        SINGLE_COMMAND_REGEX
+            .get_or_init(|| Regex::new(r"^[ \n]*([^ \n]+)[ \n]*$").expect("static regex"))
     }
-    fn tmp_regex() -> Regex {
-        Regex::new(r"(?m)^[^#]*\s(/var)?/tmp").expect("static regex")
+    fn tmp_regex() -> &'static Regex {
+        static TMP_REGEX: OnceLock<Regex> = OnceLock::new();
+        TMP_REGEX.get_or_init(|| Regex::new(r"(?m)^[^#]*\s(/var)?/tmp").expect("static regex"))
     }
-    fn bogus_var_regex() -> Regex {
-        Regex::new(r"(\$\{?RPM_BUILD_(ROOT|DIR)}?)").expect("static regex")
+    fn bogus_var_regex() -> &'static Regex {
+        static BOGUS_VAR_REGEX: OnceLock<Regex> = OnceLock::new();
+        BOGUS_VAR_REGEX
+            .get_or_init(|| Regex::new(r"(\$\{?RPM_BUILD_(ROOT|DIR)}?)").expect("static regex"))
     }
 
     /// `sh -n` / `perl -wc` syntax check via subprocess. `None` when the
@@ -146,10 +161,10 @@ impl PostCheck {
         }
 
         if prog == "/bin/sh" || prog == "/bin/bash" || prog == "/usr/bin/perl" {
-            if is_match(&Self::percent_regex(), script) {
+            if is_match(Self::percent_regex(), script) {
                 out.push((Level::Warning, finding("percent-in"), vec![]));
             }
-            if is_match(&Self::bracket_regex(), script) {
+            if is_match(Self::bracket_regex(), script) {
                 out.push((Level::Warning, finding("spurious-bracket-in"), vec![]));
             }
             if let Some(m) = Self::dangerous_regex()
@@ -188,7 +203,7 @@ impl PostCheck {
                     ));
                 }
             }
-            if is_match(&Self::tmp_regex(), script) {
+            if is_match(Self::tmp_regex(), script) {
                 out.push((Level::Error, finding("use-tmp-in"), vec![]));
             }
             // prereq_assoc: chkfontpath, rpm-helper
@@ -217,7 +232,7 @@ impl PostCheck {
             {
                 out.push((Level::Error, finding("shell-syntax-error-in"), vec![]));
             }
-            if is_match(&Self::home_regex(), script) {
+            if is_match(Self::home_regex(), script) {
                 out.push((Level::Error, finding("use-of-home-in"), vec![]));
             }
             if let Some(m) = Self::bogus_var_regex()
