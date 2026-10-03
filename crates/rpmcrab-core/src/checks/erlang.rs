@@ -472,4 +472,47 @@ mod tests {
         );
         std::fs::remove_file(&path).ok();
     }
+
+    /// B5: `source_re` is anchored like the reference's `re.match`: a path
+    /// merely *containing* the build dir must not match.
+    #[test]
+    fn source_re_is_anchored_to_build_dir() {
+        let check = ErlangCheck::new(&Config::default());
+        // The OBS default build dir.
+        assert!(crate::checks::is_match(
+            &check.source_re,
+            "/home/abuild/rpmbuild/BUILD/foo-1.0/src/foo.erl"
+        ));
+        // Contains the build dir but does not start with it: must not match.
+        assert!(!crate::checks::is_match(
+            &check.source_re,
+            "/home/user/home/abuild/rpmbuild/BUILD/foo-1.0/src/foo.erl"
+        ));
+        // A local ~/rpmbuild/BUILD path must not match the OBS default.
+        assert!(!crate::checks::is_match(
+            &check.source_re,
+            "/home/user/rpmbuild/BUILD/foo-1.0/src/foo.erl"
+        ));
+    }
+
+    /// B5: the expected build dir comes from the `ErlangBuildDir` config
+    /// key, so a local build tree can be matched by setting it.
+    #[test]
+    fn source_re_follows_erlang_build_dir_config() {
+        use toml::Value;
+        let mut config = Config::default();
+        config.configuration.insert(
+            "ErlangBuildDir".to_string(),
+            Value::String("/home/user/rpmbuild/BUILD".to_string()),
+        );
+        let check = ErlangCheck::new(&config);
+        assert!(crate::checks::is_match(
+            &check.source_re,
+            "/home/user/rpmbuild/BUILD/foo-1.0/src/foo.erl"
+        ));
+        assert!(!crate::checks::is_match(
+            &check.source_re,
+            "/home/abuild/rpmbuild/BUILD/foo-1.0/src/foo.erl"
+        ));
+    }
 }

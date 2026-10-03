@@ -548,4 +548,74 @@ mod tests {
             .collect();
         assert_eq!(keywords, vec!["Description", "Provides", "Required-Start"]);
     }
+
+    /// B6: `incoherent-subsys` takes its level and detail from the raw
+    /// `$var` token, never the substituted value, and an empty
+    /// substitution does not suppress the finding. Verified against
+    /// InitScriptCheck.py:171-191 (rpmlint 2.10.0).
+    #[test]
+    fn incoherent_subsys_level_and_detail_come_from_raw_token() {
+        let dir = std::env::temp_dir().join("rpmcrab-initscript-subsys");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+
+        // (script body, expected (level, detail) pairs for incoherent-subsys)
+        let cases: &[(&str, Vec<(&str, &str)>)] = &[
+            // $NAME resolves to otherdaemon: W, raw token in detail.
+            (
+                "#!/bin/sh\nNAME=otherdaemon\ntouch /var/lock/subsys/$NAME\n",
+                vec![("W", "$NAME")],
+            ),
+            // Literal mismatch: E, the name itself.
+            (
+                "#!/bin/sh\ntouch /var/lock/subsys/wrongname\n",
+                vec![("E", "wrongname")],
+            ),
+            // ${NAME} resolves to the basename: quiet.
+            (
+                "#!/bin/sh\nNAME=mydaemon\ntouch /var/lock/subsys/${NAME}\n",
+                vec![],
+            ),
+            // $UNSET resolves to "": still emitted, W, raw token.
+            (
+                "#!/bin/sh\ntouch /var/lock/subsys/$UNSET\n",
+                vec![("W", "$UNSET")],
+            ),
+        ];
+
+        for (i, (body, expected)) in cases.iter().enumerate() {
+            let script = dir.join(format!("case{i}"));
+            std::fs::write(&script, body).expect("write script");
+            let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+            let mut pkg = Pkg::open(&rpm, &dir, true).expect("open fixture pkg");
+            pkg.name = "mydaemon".to_string();
+            pkg.files = vec![PkgFile {
+                name: "/etc/init.d/mydaemon".to_string(),
+                path: script.to_string_lossy().into_owned(),
+                mode: 0o100755,
+                ..Default::default()
+            }];
+
+            let config = Config::default();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            let mut check = InitScriptCheck::new(&config);
+            check.check_binary(&pkg, &config, &mut out);
+            let found: Vec<(String, String)> = out
+                .results()
+                .iter()
+                .filter(|(n, _)| n == "incoherent-subsys")
+                .map(|(_, line)| {
+                    let level = if line.contains(": W: ") { "W" } else { "E" }.to_string();
+                    let detail = line.rsplit(' ').next().unwrap_or("").to_string();
+                    (level, detail)
+                })
+                .collect();
+            let want: Vec<(String, String)> = expected
+                .iter()
+                .map(|(l, d)| (l.to_string(), d.to_string()))
+                .collect();
+            assert_eq!(found, want, "case {i} body:\n{body}");
+        }
+    }
 }
