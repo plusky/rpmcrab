@@ -267,9 +267,10 @@ fn filelist_reports_absolute_bad_patterns() {
     );
 }
 
-/// `AppDataCheck` falls back to a native well-formedness check when no
-/// `appstream-util` is configured. The malformed fixture file fails it; the
-/// valid one passes.
+/// `AppDataCheck` falls back to native validation when no `appstream-util`
+/// is configured. The malformed fixture file fails well-formedness; the
+/// native fallback additionally requires the mandatory AppStream tags, so the
+/// well-formed fixture file (which lacks `licence`) is flagged too.
 #[test]
 fn appdata_native_check_flags_malformed_file() {
     let empty = tempfile::tempdir().unwrap();
@@ -277,11 +278,13 @@ fn appdata_native_check_flags_malformed_file() {
     let results = run_check(&mut check, "w6-appdata-1.0-1.noarch.rpm");
     assert_findings(
         &results,
-        &[("invalid-appdata-file", "w6broken.appdata.xml")],
-    );
-    assert!(
-        !results.iter().any(|(_, line)| line.contains("w6valid")),
-        "valid appdata file should be quiet: {results:?}"
+        &[
+            ("invalid-appdata-file", "w6broken.appdata.xml"),
+            (
+                "invalid-appdata-file",
+                "w6valid.appdata.xml: missing required tag(s): licence",
+            ),
+        ],
     );
 }
 
@@ -372,7 +375,9 @@ fn polkit_reports_privilege_findings() {
 }
 
 /// A ghost appdata file draws nothing: the reference drops ghosts from the
-/// dispatch list, so `check_file` never runs for one.
+/// dispatch list, so `check_file` never runs for one. The fixture's other
+/// appdata file (well-formed but licence-less) still warns, which proves the
+/// check really ran.
 #[test]
 fn appdata_ghost_file_is_not_validated() {
     let empty = tempfile::tempdir().unwrap();
@@ -383,8 +388,12 @@ fn appdata_ghost_file_is_not_validated() {
         "/usr/share/appdata/w6broken.appdata.xml",
     );
     assert!(
-        !results.iter().any(|(n, _)| n == "invalid-appdata-file"),
+        !results.iter().any(|(_, line)| line.contains("w6broken")),
         "a ghost file was validated: {results:?}"
+    );
+    assert!(
+        results.iter().any(|(n, _)| n == "invalid-appdata-file"),
+        "the live file drew no finding: {results:?}"
     );
 }
 
