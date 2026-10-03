@@ -35,6 +35,46 @@ struct Requirement {
     extras: Vec<String>,
 }
 
+/// Find the byte index of a top-level `and`/`or` operator, skipping quoted
+/// strings and parenthesized groups.
+fn find_top_level(expr: &str, op: &str) -> Option<usize> {
+    let mut depth = 0;
+    let mut in_quote: Option<char> = None;
+    let bytes = expr.as_bytes();
+    let op_bytes = op.as_bytes();
+    let mut i = 0;
+    while i + op_bytes.len() <= bytes.len() {
+        let c = bytes[i] as char;
+        if let Some(q) = in_quote {
+            if c == q {
+                in_quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' || c == '\'' {
+            in_quote = Some(c);
+            i += 1;
+            continue;
+        }
+        if c == '(' {
+            depth += 1;
+        } else if c == ')' {
+            depth -= 1;
+        }
+        if depth == 0 && &bytes[i..i + op_bytes.len()] == op_bytes {
+            let before = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+            let after = i + op_bytes.len() >= bytes.len()
+                || !bytes[i + op_bytes.len()].is_ascii_alphanumeric();
+            if before && after {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 impl PythonCheck {
     /// Fallback `python_version` marker value (the reference uses the
     /// interpreter running rpmlint; the port has no interpreter to ask).
@@ -193,16 +233,59 @@ impl PythonCheck {
     /// Evaluate the common environment markers. Unknown markers are treated
     /// as holding (the reference evaluates the full PEP 508 environment; we
     /// cover `python_version`, `sys_platform`, and `extra`).
+    ///
+    /// For the missing-requirement check the reference skips any requirement
+    /// whose marker mentions `extra` (`'extra' in str(req.marker)`), so an
+    /// extra marker never holds here.
     fn marker_holds(marker: &str, python_version: &str) -> bool {
         let marker = marker.trim();
         // `extra == "..."` means an optional dependency: skip it.
         if marker.contains("extra") {
             return false;
         }
+        Self::marker_atom_holds(marker, python_version)
+    }
+
+    /// Detect a malformed marker: unbalanced parentheses or unterminated
+    /// quotes. The reference (`packaging`) is fail-closed on these
+    /// (`InvalidRequirement` drops the requirement); we return false.
+    fn is_malformed_marker(expr: &str) -> bool {
+        let mut depth = 0;
+        let mut in_quote: Option<char> = None;
+        for c in expr.chars() {
+            if let Some(q) = in_quote {
+                if c == q {
+                    in_quote = None;
+                }
+                continue;
+            }
+            match c {
+                '"' | '\'' => in_quote = Some(c),
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        depth != 0 || in_quote.is_some()
+    }
+
+    /// Evaluate a single non-boolean marker comparison (no `and`/`or`/`not`).
+    /// Unknown markers are treated as holding; malformed markers are
+    /// fail-closed (false), matching `packaging`.
+    fn marker_atom_holds(atom: &str, python_version: &str) -> bool {
+        let atom = atom.trim();
+        if Self::is_malformed_marker(atom) {
+            return false;
+        }
         // python_version comparisons, e.g. `python_version < "3.10"`.
         let pv_re = Regex::new(r#"python_version\s*(==|!=|<=|>=|<|>)\s*["']([\d.]+)["']"#)
             .expect("static regex");
-        if let Some(caps) = pv_re.captures(marker).ok().flatten() {
+        if let Some(caps) = pv_re.captures(atom).ok().flatten() {
             let op = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let want = caps.get(2).map(|m| m.as_str()).unwrap_or("");
             let cmp = compare_versions(python_version, want);
@@ -217,11 +300,66 @@ impl PythonCheck {
             };
         }
         // sys_platform, e.g. `sys_platform != "win32"`.
-        if marker.contains("sys_platform") {
+        if atom.contains("sys_platform") {
             // We are always on Linux here.
-            return !marker.contains("win32") || marker.contains("!=");
+            return !atom.contains("win32") || atom.contains("!=");
         }
         true
+    }
+
+    /// Evaluate a marker for the leftover-requirements check.
+    ///
+    /// Unlike [`Self::marker_holds`], the reference does not skip
+    /// extra-marked requirements here: it evaluates the marker with the
+    /// full PEP 508 environment. `extra` is never provided, so
+    /// `extra == "..."` is false and `extra != "..."` is true
+    /// (verified against `packaging.markers`).
+    fn marker_holds_leftover(marker: &str, python_version: &str) -> bool {
+        // Substitute extra comparisons with their truth values, then
+        // evaluate the boolean combination.
+        let extra_eq = Regex::new(r#"extra\s*==\s*["'][^"']*["']"#).expect("static regex");
+        let extra_ne = Regex::new(r#"extra\s*!=\s*["'][^"']*["']"#).expect("static regex");
+        let substituted = extra_eq.replace_all(marker, "false");
+        let substituted = extra_ne.replace_all(&substituted, "true");
+        let substituted = substituted.into_owned();
+        Self::eval_marker_expr(&substituted, python_version)
+    }
+
+    /// Evaluate a boolean marker expression with `and`/`or`/`not` over the
+    /// single comparisons [`Self::marker_atom_holds`] understands, plus the
+    /// `true`/`false` literals substituted for `extra` comparisons.
+    fn eval_marker_expr(expr: &str, python_version: &str) -> bool {
+        let expr = expr.trim();
+        // Fail-closed on malformed markers, matching `packaging`.
+        if Self::is_malformed_marker(expr) {
+            return false;
+        }
+        // Strip one layer of outer parentheses.
+        if expr.starts_with('(') && expr.ends_with(')') {
+            return Self::eval_marker_expr(&expr[1..expr.len() - 1], python_version);
+        }
+        // `or` binds loosest.
+        if let Some(idx) = find_top_level(expr, "or") {
+            return Self::eval_marker_expr(&expr[..idx], python_version)
+                || Self::eval_marker_expr(&expr[idx + 2..], python_version);
+        }
+        // Then `and`.
+        if let Some(idx) = find_top_level(expr, "and") {
+            return Self::eval_marker_expr(&expr[..idx], python_version)
+                && Self::eval_marker_expr(&expr[idx + 3..], python_version);
+        }
+        // `not` prefix.
+        if let Some(rest) = expr.strip_prefix("not ") {
+            return !Self::eval_marker_expr(rest, python_version);
+        }
+        let expr = expr.trim();
+        if expr == "true" {
+            return true;
+        }
+        if expr == "false" {
+            return false;
+        }
+        Self::marker_atom_holds(expr, python_version)
     }
 
     /// The `python_version` marker environment, mirroring the reference:
@@ -436,10 +574,12 @@ impl PythonCheck {
         }
 
         // Leftover requirements: python-foo in RPM requires with no match.
+        // Extra markers are evaluated here, not skipped: the reference
+        // runs the full PEP 508 environment over them.
         let mut wanted: Vec<String> = Vec::new();
         for req in reqs {
             if let Some(m) = &req.marker
-                && !Self::marker_holds(m, python_version)
+                && !Self::marker_holds_leftover(m, python_version)
             {
                 continue;
             }
@@ -498,6 +638,59 @@ mod tests {
         // `foo` has an extra marker, which marker_holds rejects.
         assert!(reqs.iter().any(|r| r.name == "foo"));
         assert!(!PythonCheck::marker_holds("extra == \"test\"", "3.12"));
+    }
+
+    fn fixture_pkg_with_requires(req_names: &[&str]) -> Pkg {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir()).expect("open fixture pkg");
+        pkg.name = "python-test".to_string();
+        pkg.arch = "noarch".to_string();
+        pkg.req_names = req_names.iter().map(|s| s.to_string()).collect();
+        pkg
+    }
+
+    fn check_requirements_findings(
+        reqs: &[Requirement],
+        req_names: &[&str],
+    ) -> Vec<(String, String)> {
+        use crate::color::Color;
+        let pkg = fixture_pkg_with_requires(req_names);
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = PythonCheck {
+            pyc_version: None,
+            checked_files: 0,
+        };
+        check.check_requirements(&pkg, &mut out, reqs, "3.12");
+        out.results().to_vec()
+    }
+
+    #[test]
+    fn leftover_extra_markers_are_evaluated_not_skipped() {
+        // Emission-path test through `check_requirements`: the reference
+        // evaluates `extra` markers in the leftover path with the full PEP 508
+        // environment, where `extra` is never provided. `extra == "test"` is
+        // false (requirement not wanted → leftover if the RPM requires it);
+        // `extra != "test"` is true (requirement wanted → no leftover).
+        // Verified against `packaging.markers` and the reference end-to-end.
+        let content = "Metadata-Version: 2.1\nRequires-Dist: w6extra; extra == \"test\"\n";
+        let reqs = PythonCheck::parse_requirements(content, true, "3.12");
+        let findings = check_requirements_findings(&reqs, &["python3-w6extra"]);
+        assert_eq!(findings.len(), 1, "unexpected findings: {findings:?}");
+        assert_eq!(findings[0].0, "python-leftover-require");
+        assert!(findings[0].1.contains(": W: "), "level: {}", findings[0].1);
+        assert!(
+            findings[0].1.contains("python3-w6extra"),
+            "detail: {}",
+            findings[0].1
+        );
+
+        // `extra != "test"` holds, so the requirement is wanted: no leftover.
+        let content = "Metadata-Version: 2.1\nRequires-Dist: w6extra; extra != \"test\"\n";
+        let reqs = PythonCheck::parse_requirements(content, true, "3.12");
+        let findings = check_requirements_findings(&reqs, &["python3-w6extra"]);
+        assert!(findings.is_empty(), "unexpected findings: {findings:?}");
     }
 
     #[test]
