@@ -138,18 +138,23 @@ impl MenuXDGCheck {
     }
 
     /// `desktop-file-validate` output, when the tool exists.
-    fn external_validate(&self, path: &str) -> Vec<String> {
+    ///
+    /// Returns `Err` when the validator's output is not valid UTF-8. The
+    /// reference runs the validator with `text=True`, so the validator
+    /// echoing the offending bytes raises `UnicodeDecodeError`, which
+    /// propagates to the outer handler: only `non-utf8-desktopfile` is
+    /// emitted and the parse never runs.
+    fn external_validate(&self, path: &str) -> Result<Vec<String>, std::string::FromUtf8Error> {
         let Some(mut cmd) = self.validator.command() else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let out = cmd.arg(path).env("LC_ALL", "C").output();
-        let Ok(out) = out else { return Vec::new() };
+        let Ok(out) = out else { return Ok(Vec::new()) };
         if out.status.success() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let text = String::from_utf8_lossy(&out.stdout).into_owned()
-            + &String::from_utf8_lossy(&out.stderr);
-        Self::parse_validate_output(&text)
+        let text = String::from_utf8(out.stdout)? + &String::from_utf8(out.stderr)?;
+        Ok(Self::parse_validate_output(&text))
     }
 
     /// Pull `error: ...` messages out of validator output. The reference
@@ -201,7 +206,26 @@ impl Check for MenuXDGCheck {
                 continue;
             }
             self.checked_files += 1;
-            for error in self.external_validate(&pkgfile.path) {
+            // The reference decodes the validator output as UTF-8
+            // (`text=True`); the validator echoes the offending bytes, so the
+            // decode raises and the outer handler emits only
+            // non-utf8-desktopfile. Mirror that: on decode failure, skip both
+            // the validator findings and the parse.
+            let errors = match self.external_validate(&pkgfile.path) {
+                Ok(errors) => errors,
+                Err(e) => {
+                    let detail = format!("Unicode error: {e}");
+                    add_info(
+                        out,
+                        Level::Error,
+                        pkg,
+                        "non-utf8-desktopfile",
+                        &[filename, &detail],
+                    );
+                    continue;
+                }
+            };
+            for error in errors {
                 if error.is_empty() {
                     add_info(out, Level::Error, pkg, "invalid-desktopfile", &[filename]);
                 } else {
@@ -380,7 +404,7 @@ mod tests {
         std::fs::write(&path, b"[Desktop Entry]\nName=\xff\xfe\n").unwrap();
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
-        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir()).expect("open fixture pkg");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
         let name = "/usr/share/applications/broken.desktop";
         pkg.files = vec![PkgFile {
             name: name.to_string(),
