@@ -9,6 +9,7 @@
 //! XML check (no new dependency).
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 use fancy_regex::Regex;
 
@@ -24,6 +25,13 @@ pub struct AppDataCheck {
     file_regex: Regex,
     checked_files: usize,
     tool: Tool,
+}
+
+static FILE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn file_regex() -> &'static Regex {
+    FILE_REGEX.get_or_init(|| {
+        Regex::new(r"^/usr/share/appdata/.*\.(appdata|metainfo).xml$").expect("static regex")
+    })
 }
 
 impl AppDataCheck {
@@ -44,8 +52,7 @@ impl AppDataCheck {
             // `xml` is unescaped in the reference pattern and stays that way
             // here: it matches any character, so `foo.appdata_xml` is
             // validated upstream and must be here too.
-            file_regex: Regex::new(r"^/usr/share/appdata/.*\.(appdata|metainfo).xml$")
-                .expect("static regex"),
+            file_regex: file_regex().clone(),
             checked_files: 0,
             tool,
         }

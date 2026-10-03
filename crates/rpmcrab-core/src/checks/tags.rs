@@ -97,6 +97,8 @@ pub struct TagsCheck {
     spellchecker: Option<crate::spellcheck::Spellchecker>,
 }
 
+static URL_ESCAPE_RE: OnceLock<Regex> = OnceLock::new();
+
 impl TagsCheck {
     pub fn new(config: &Config) -> Self {
         let tbl = &config.configuration;
@@ -191,7 +193,14 @@ impl TagsCheck {
                 .filter_map(|r| r.ok())
                 .map(|m| m.as_str())
             {
-                if is_url && is_match(&Regex::new(r"(?i)^%[0-9A-F][0-9A-F]$").expect("static"), m) {
+                if is_url
+                    && is_match(
+                        URL_ESCAPE_RE.get_or_init(|| {
+                            Regex::new(r"(?i)^%[0-9A-F][0-9A-F]$").expect("static")
+                        }),
+                        m,
+                    )
+                {
                     continue;
                 }
                 add_info(out, Level::Warning, pkg, "unexpanded-macro", &[tagname, m]);

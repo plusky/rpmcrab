@@ -156,7 +156,6 @@ static DEPMOD_REGEX: OnceLock<Regex> = OnceLock::new();
 fn depmod_regex() -> &'static Regex {
     DEPMOD_REGEX.get_or_init(|| Regex::new(r"(?m)^[^#]*depmod").expect("static regex"))
 }
-}
 
 static INSTALL_INFO_REGEX: OnceLock<Regex> = OnceLock::new();
 fn install_info_regex() -> &'static Regex {

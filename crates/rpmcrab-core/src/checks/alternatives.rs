@@ -29,6 +29,13 @@ use std::sync::OnceLock;
 
 pub struct AlternativesCheck;
 
+static LIBALTERNATIVES_CONF_RE: OnceLock<Regex> = OnceLock::new();
+fn libalternatives_conf_re() -> &'static Regex {
+    LIBALTERNATIVES_CONF_RE.get_or_init(|| {
+        Regex::new(r"^/usr/share/libalternatives/[^/]+/.*\.conf$").expect("static regex")
+    })
+}
+
 impl AlternativesCheck {
     pub fn new(_config: &Config) -> Self {
         Self
@@ -173,10 +180,9 @@ impl AlternativesCheck {
             }
         }
 
-        let conf_re =
-            Regex::new(r"^/usr/share/libalternatives/[^/]+/.*\.conf$").expect("static regex");
+        let conf_re = libalternatives_conf_re();
         for pkgfile in &pkg.files {
-            if !is_match(&conf_re, &pkgfile.name) {
+            if !is_match(conf_re, &pkgfile.name) {
                 continue;
             }
             // The reference checks existence, not readability: a read error
