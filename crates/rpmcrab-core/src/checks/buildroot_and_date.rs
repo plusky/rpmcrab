@@ -20,28 +20,29 @@ pub struct BuildRootAndDateCheck {
     lookslikebuildroot: Regex,
 }
 
-/// Today's date in the reference's `time.strftime('%b %e %Y')` shape,
-/// e.g. `Oct  2 2026` (day space-padded to width 2).
-fn today_string() -> String {
+/// The reference's `time.strftime('%b %e %Y')` shape, e.g. `Oct  2 2026`
+/// (day space-padded to width 2). Pure: takes the datetime so tests can pin
+/// fixed dates without depending on the machine clock. `%b` under the C
+/// locale is the English abbreviations (verified against the reference), so
+/// the names are hardcoded rather than locale-derived.
+fn format_date(dt: time::OffsetDateTime) -> String {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
-    // Days since the Unix epoch -> civil date (Howard Hinnant's algorithm).
-    let days = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() / 86400)
-        .unwrap_or(0) as i64;
-    let z = days + 719468;
-    let era = z.div_euclid(146097);
-    let doe = z.rem_euclid(146097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{} {:2} {}", MONTHS[(m - 1) as usize], d, y)
+    format!(
+        "{} {:2} {}",
+        MONTHS[dt.month() as usize - 1],
+        dt.day(),
+        dt.year()
+    )
+}
+
+/// Today's date as the reference sees it: local time, like `time.strftime`.
+/// Falls back to UTC when the local offset cannot be determined, mirroring
+/// glibc `localtime` with no usable TZ. In-process via libc — no subprocess.
+fn today_string() -> String {
+    let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+    format_date(now)
 }
 
 /// The reference's `prepare_regex`: `%{name}`/`%{version}`/`%{release}`
@@ -143,6 +144,39 @@ mod tests {
         let today = today_string();
         let re = Regex::new(r"^[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{4}$").unwrap();
         assert!(is_match(&re, &today), "{today}");
+    }
+
+    #[test]
+    fn format_date_pins_strftime_shape() {
+        use time::{Date, Month, OffsetDateTime, Time, UtcOffset};
+        let dt = |y: i32, m: Month, d: u8| {
+            OffsetDateTime::new_utc(Date::from_calendar_date(y, m, d).unwrap(), Time::MIDNIGHT)
+        };
+        // `%e`: single-digit day is space-padded, not zero-padded.
+        assert_eq!(format_date(dt(2026, Month::October, 3)), "Oct  3 2026");
+        assert_eq!(format_date(dt(2026, Month::October, 26)), "Oct 26 2026");
+        // `%b` under the C locale: all twelve English abbreviations.
+        let months = [
+            (Month::January, "Jan"),
+            (Month::February, "Feb"),
+            (Month::March, "Mar"),
+            (Month::April, "Apr"),
+            (Month::May, "May"),
+            (Month::June, "Jun"),
+            (Month::July, "Jul"),
+            (Month::August, "Aug"),
+            (Month::September, "Sep"),
+            (Month::October, "Oct"),
+            (Month::November, "Nov"),
+            (Month::December, "Dec"),
+        ];
+        for (m, abbrev) in months {
+            assert_eq!(format_date(dt(2026, m, 15)), format!("{abbrev} 15 2026"));
+        }
+        // A non-UTC offset does not shift the rendered civil date here.
+        let plus2 = UtcOffset::from_hms(2, 0, 0).unwrap();
+        let local = dt(2026, Month::October, 3).to_offset(plus2);
+        assert_eq!(format_date(local), "Oct  3 2026");
     }
 
     #[test]
