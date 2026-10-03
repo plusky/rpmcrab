@@ -19,75 +19,101 @@ use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::pkg::pkgfile::{self, PkgFile};
 use crate::tools::{Tool, ToolSource, test_source};
+use std::sync::OnceLock;
 
-fn validso_regex() -> Regex {
-    Regex::new(r"(\.so\.\d+(\.\d+)*|\d\.so)$").expect("static regex")
+static VALIDSO_REGEX: OnceLock<Regex> = OnceLock::new();
+fn validso_regex() -> &'static Regex {
+    VALIDSO_REGEX.get_or_init(|| Regex::new(r"(\.so\.\d+(\.\d+)*|\d\.so)$").expect("static regex"))
 }
 
-fn soversion_regex() -> Regex {
-    Regex::new(r".*(-(?P<pkgversion>[0-9][.0-9]*))?\.so(\.(?P<soversion>[0-9][.0-9]*))?")
+static SOVERSION_REGEX: OnceLock<Regex> = OnceLock::new();
+fn soversion_regex() -> &'static Regex {
+    SOVERSION_REGEX.get_or_init(|| {
+        Regex::new(r".*(-(?P<pkgversion>[0-9][.0-9]*))?\.so(\.(?P<soversion>[0-9][.0-9]*))?")
+            .expect("static regex")
+    })
+}
+
+static USR_LIB_REGEX: OnceLock<Regex> = OnceLock::new();
+fn usr_lib_regex() -> &'static Regex {
+    USR_LIB_REGEX.get_or_init(|| Regex::new(r"^/usr/lib(64)?/").expect("static regex"))
+}
+
+static LDSO_SONAME_REGEX: OnceLock<Regex> = OnceLock::new();
+fn ldso_soname_regex() -> &'static Regex {
+    LDSO_SONAME_REGEX
+        .get_or_init(|| Regex::new(r"^ld(-linux(-(ia|x86_)64))?\.so").expect("static regex"))
+}
+
+static NUMERIC_DIR_REGEX: OnceLock<Regex> = OnceLock::new();
+fn numeric_dir_regex() -> &'static Regex {
+    NUMERIC_DIR_REGEX.get_or_init(|| {
+        Regex::new(r"/usr(?:/share)/man/man./(.*)\.[0-9](?:\.gz|\.bz2)").expect("static regex")
+    })
+}
+
+static VERSIONED_DIR_REGEX: OnceLock<Regex> = OnceLock::new();
+fn versioned_dir_regex() -> &'static Regex {
+    VERSIONED_DIR_REGEX.get_or_init(|| Regex::new(r"[^.][0-9]").expect("static regex"))
+}
+
+static SO_REGEX: OnceLock<Regex> = OnceLock::new();
+fn so_regex() -> &'static Regex {
+    SO_REGEX.get_or_init(|| Regex::new(r"/lib(64)?/[^/]+\.so(\.[0-9]+)*$").expect("static regex"))
+}
+
+static BIN_REGEX: OnceLock<Regex> = OnceLock::new();
+fn bin_regex() -> &'static Regex {
+    BIN_REGEX.get_or_init(|| Regex::new(r"^(/usr(/X11R6)?)?/s?bin/").expect("static regex"))
+}
+
+static LA_FILE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn la_file_regex() -> &'static Regex {
+    LA_FILE_REGEX.get_or_init(|| Regex::new(r"\.la$").expect("static regex"))
+}
+
+static INVALID_DIR_REF_REGEX: OnceLock<Regex> = OnceLock::new();
+fn invalid_dir_ref_regex() -> &'static Regex {
+    INVALID_DIR_REF_REGEX.get_or_init(|| Regex::new(r"/(home|tmp)(\W|$)").expect("static regex"))
+}
+
+static USR_ARCH_SHARE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn usr_arch_share_regex() -> &'static Regex {
+    USR_ARCH_SHARE_REGEX.get_or_init(|| {
+        Regex::new(
+            r"/share/.*/(?:x86|i.86|x86_64|ppc|ppc64|s390|s390x|ia64|m68k|arm|aarch64|mips|riscv)",
+        )
         .expect("static regex")
+    })
 }
 
-fn usr_lib_regex() -> Regex {
-    Regex::new(r"^/usr/lib(64)?/").expect("static regex")
+static PYTHON_MODULE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn python_module_regex() -> &'static Regex {
+    PYTHON_MODULE_REGEX.get_or_init(|| {
+        Regex::new(r".*\.(\w*(python|pypy)\w*(-\w+){4}|abi3)\.so").expect("static regex")
+    })
 }
 
-fn ldso_soname_regex() -> Regex {
-    Regex::new(r"^ld(-linux(-(ia|x86_)64))?\.so").expect("static regex")
+static ELF_REGEX: OnceLock<Regex> = OnceLock::new();
+fn elf_regex() -> &'static Regex {
+    ELF_REGEX.get_or_init(|| Regex::new(r"^(\w+ )?ELF ").expect("static regex"))
 }
 
-fn numeric_dir_regex() -> Regex {
-    Regex::new(r"/usr(?:/share)/man/man./(.*)\.[0-9](?:\.gz|\.bz2)").expect("static regex")
-}
-
-fn versioned_dir_regex() -> Regex {
-    Regex::new(r"[^.][0-9]").expect("static regex")
-}
-
-fn so_regex() -> Regex {
-    Regex::new(r"/lib(64)?/[^/]+\.so(\.[0-9]+)*$").expect("static regex")
-}
-
-fn bin_regex() -> Regex {
-    Regex::new(r"^(/usr(/X11R6)?)?/s?bin/").expect("static regex")
-}
-
-fn la_file_regex() -> Regex {
-    Regex::new(r"\.la$").expect("static regex")
-}
-
-fn invalid_dir_ref_regex() -> Regex {
-    Regex::new(r"/(home|tmp)(\W|$)").expect("static regex")
-}
-
-fn usr_arch_share_regex() -> Regex {
-    Regex::new(
-        r"/share/.*/(?:x86|i.86|x86_64|ppc|ppc64|s390|s390x|ia64|m68k|arm|aarch64|mips|riscv)",
-    )
-    .expect("static regex")
-}
-
-fn python_module_regex() -> Regex {
-    Regex::new(r".*\.(\w*(python|pypy)\w*(-\w+){4}|abi3)\.so").expect("static regex")
-}
-
-fn elf_regex() -> Regex {
-    Regex::new(r"^(\w+ )?ELF ").expect("static regex")
-}
-
-fn default_executable_stack_archs() -> Regex {
-    Regex::new(r"aarch64|alpha|arm.*|hppa|i.86|m68k|microblaze|mips|ppc|s390|s390x|sh|sparc|x86_64")
+static DEFAULT_EXECUTABLE_STACK_ARCHS: OnceLock<Regex> = OnceLock::new();
+fn default_executable_stack_archs() -> &'static Regex {
+    DEFAULT_EXECUTABLE_STACK_ARCHS.get_or_init(|| {
+        Regex::new(
+            r"aarch64|alpha|arm.*|hppa|i.86|m68k|microblaze|mips|ppc|s390|s390x|sh|sparc|x86_64",
+        )
         .expect("static regex")
+    })
 }
 
-fn create_regexp_call(call: &str) -> Regex {
-    Regex::new(&format!(r"({}(?:@GLIBC\S+)?)(?:\s|$)", call)).expect("static regex")
-}
-
-fn create_nonlibc_regexp_call(call: &str) -> Regex {
-    Regex::new(&format!(r"({})\s?.*$", call)).expect("static regex")
-}
+static SETGID_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static SETUID_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static SETGROUPS_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static MKTEMP_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static GETHOSTBYNAME_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 
 const KERNEL_MODULES_PATHS: &[&str] = &["/lib/modules/", "/usr/lib/modules/"];
 const GLIBC_EMPTY_ARCHIVES: &[&str] = &["libanl", "libdl", "libpthread", "librt", "libutil"];
@@ -454,13 +480,36 @@ impl BinariesCheck {
             pie_exec_regexes,
             usr_lib_exception_regex: Regex::new(usr_lib_exception)
                 .unwrap_or_else(|_| Regex::new("$^").expect("static regex")),
-            setgid_call_regex: create_regexp_call(r"set(?:res|e)?gid"),
-            setuid_call_regex: create_regexp_call(r"set(?:res|e)?uid"),
-            setgroups_call_regex: create_regexp_call(r"(?:ini|se)tgroups"),
-            mktemp_call_regex: create_regexp_call("mktemp"),
-            gethostbyname_call_regex: create_regexp_call(
-                r"(gethostbyname|gethostbyname2|gethostbyaddr|gethostbyname_r|gethostbyname2_r|gethostbyaddr_r)",
-            ),
+            setgid_call_regex: SETGID_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(r"(set(?:res|e)?gid(?:@GLIBC\S+)?)(?:\s|$)")
+                        .expect("static regex")
+                })
+                .clone(),
+            setuid_call_regex: SETUID_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(r"(set(?:res|e)?uid(?:@GLIBC\S+)?)(?:\s|$)")
+                        .expect("static regex")
+                })
+                .clone(),
+            setgroups_call_regex: SETGROUPS_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(r"((?:ini|se)tgroups(?:@GLIBC\S+)?)(?:\s|$)")
+                        .expect("static regex")
+                })
+                .clone(),
+            mktemp_call_regex: MKTEMP_CALL_REGEX
+                .get_or_init(|| Regex::new(r"(mktemp(?:@GLIBC\S+)?)(?:\s|$)")
+                    .expect("static regex"))
+                .clone(),
+            gethostbyname_call_regex: GETHOSTBYNAME_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(
+                        r"((gethostbyname|gethostbyname2|gethostbyaddr|gethostbyname_r|gethostbyname2_r|gethostbyaddr_r)(?:@GLIBC\S+)?)(?:\s|$)",
+                    )
+                    .expect("static regex")
+                })
+                .clone(),
             is_exec: false,
             is_shobj: false,
             is_archive: false,
@@ -1236,16 +1285,17 @@ impl BinariesCheck {
             .configuration
             .get("WarnOnFunction")
             .and_then(toml::Value::as_table);
-        let forbidden: Vec<(String, String, Option<String>)> = forbidden_tbl
+        let forbidden: Vec<(String, String, Regex, Option<Regex>)> = forbidden_tbl
             .map(|t| {
                 t.iter()
                     .filter_map(|(k, v)| {
-                        let f_name = v.get("f_name")?.as_str()?.to_string();
+                        let f_name = v.get("f_name")?.as_str()?;
+                        let f_regex = Regex::new(&format!(r"({})\s?.*$", f_name)).ok()?;
                         let good_param = v
                             .get("good_param")
                             .and_then(|g| g.as_str())
-                            .map(str::to_string);
-                        Some((k.clone(), f_name, good_param))
+                            .and_then(|gp| Regex::new(gp).ok());
+                        Some((k.clone(), f_name.to_string(), f_regex, good_param))
                     })
                     .collect()
             })
@@ -1254,9 +1304,8 @@ impl BinariesCheck {
             return;
         }
         let mut forbidden_calls = Vec::new();
-        for (r_name, f_name, good_param) in &forbidden {
-            let f_regex = create_nonlibc_regexp_call(f_name);
-            if info.has_function_matching(&f_regex) {
+        for (r_name, f_name, f_regex, good_param) in &forbidden {
+            if info.has_function_matching(f_regex) {
                 forbidden_calls.push((r_name.clone(), f_name.clone(), good_param.clone()));
             }
         }
@@ -1280,13 +1329,11 @@ impl BinariesCheck {
         }
         for (r_name, f_name, good_param) in forbidden_calls {
             let mut waived = false;
-            if let Some(gp) = good_param {
-                if let Ok(re) = Regex::new(&gp) {
-                    waived = strings
-                        .strings
-                        .iter()
-                        .any(|s| re.is_match(s).unwrap_or(false));
-                }
+            if let Some(re) = good_param {
+                waived = strings
+                    .strings
+                    .iter()
+                    .any(|s| re.is_match(s).unwrap_or(false));
             }
             if !waived {
                 add_info(out, Level::Warning, pkg, &r_name, &[&pkgfile.name, &f_name]);
@@ -1616,6 +1663,32 @@ mod tests {
         let config = Config::default();
         let check = BinariesCheck::new(&config);
         assert_eq!(check.name(), "BinariesCheck");
+    }
+
+    #[test]
+    fn regex_factories_are_cached() {
+        // Profiling showed Regex::new per call was ~18% of runtime.
+        // The factories must return the same static, not recompile.
+        assert!(std::ptr::eq(usr_lib_regex(), usr_lib_regex()));
+        assert!(std::ptr::eq(so_regex(), so_regex()));
+        assert!(std::ptr::eq(bin_regex(), bin_regex()));
+    }
+
+    #[test]
+    fn regex_factories_are_fast() {
+        // 10k calls must complete in well under a second. Recompiling
+        // fancy_regex on each call would take several seconds.
+        let start = std::time::Instant::now();
+        for _ in 0..10_000 {
+            let _ = usr_lib_regex().is_match("/usr/lib64/foo.so");
+            let _ = so_regex().is_match("/usr/lib64/foo.so.1");
+            let _ = bin_regex().is_match("/usr/bin/foo");
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "regex factories too slow: {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]

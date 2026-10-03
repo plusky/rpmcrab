@@ -16,21 +16,28 @@ use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::pkg::pkgfile::is_reg;
+use std::sync::OnceLock;
 
-fn pc_file_regex() -> Regex {
-    Regex::new(r".*/pkgconfig/.*\.pc$").expect("static regex")
+static PC_FILE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn pc_file_regex() -> &'static Regex {
+    PC_FILE_REGEX.get_or_init(|| Regex::new(r".*/pkgconfig/.*\.pc$").expect("static regex"))
 }
 
-fn suspicious_dir_regex() -> Regex {
-    Regex::new(r"[=:](?:/usr/src/\w+/BUILD|/var/tmp|/tmp|/home)").expect("static regex")
+static SUSPICIOUS_DIR_REGEX: OnceLock<Regex> = OnceLock::new();
+fn suspicious_dir_regex() -> &'static Regex {
+    SUSPICIOUS_DIR_REGEX.get_or_init(|| {
+        Regex::new(r"[=:](?:/usr/src/\w+/BUILD|/var/tmp|/tmp|/home)").expect("static regex")
+    })
 }
 
-fn wronglib_dir_64_regex() -> Regex {
-    Regex::new(r"-L/usr/lib\b").expect("static regex")
+static WRONGLIB_DIR_64_REGEX: OnceLock<Regex> = OnceLock::new();
+fn wronglib_dir_64_regex() -> &'static Regex {
+    WRONGLIB_DIR_64_REGEX.get_or_init(|| Regex::new(r"-L/usr/lib\b").expect("static regex"))
 }
 
-fn wronglib_dir_32_regex() -> Regex {
-    Regex::new(r"-L/usr/lib64\b").expect("static regex")
+static WRONGLIB_DIR_32_REGEX: OnceLock<Regex> = OnceLock::new();
+fn wronglib_dir_32_regex() -> &'static Regex {
+    WRONGLIB_DIR_32_REGEX.get_or_init(|| Regex::new(r"-L/usr/lib64\b").expect("static regex"))
 }
 
 /// 64-bit architectures, as in the reference: `-L/usr/lib` is wrong for
@@ -83,7 +90,7 @@ impl PkgConfigCheck {
         };
         let mut out = Vec::new();
         for line in content.lines() {
-            out.extend(Self::check_line(line, &suspicious, &wronglib));
+            out.extend(Self::check_line(line, suspicious, wronglib));
         }
         out
     }
@@ -109,7 +116,7 @@ impl Check for PkgConfigCheck {
         let re = pc_file_regex();
         let is_64bit = is_64bit_arch(&pkg.arch);
         for file in &pkg.files {
-            if !is_match(&re, &file.name) || !is_reg(file.mode) {
+            if !is_match(re, &file.name) || !is_reg(file.mode) {
                 continue;
             }
             let emit = |out: &mut Filter, check: &str, line: &Option<String>| match line {
@@ -150,8 +157,8 @@ mod tests {
     fn check(line: &str, is_64bit: bool) -> Vec<(&'static str, Option<String>)> {
         PkgConfigCheck::check_line(
             line,
-            &suspicious_dir_regex(),
-            &if is_64bit {
+            suspicious_dir_regex(),
+            if is_64bit {
                 wronglib_dir_64_regex()
             } else {
                 wronglib_dir_32_regex()
@@ -273,9 +280,9 @@ mod tests {
     #[test]
     fn pc_filename_selection() {
         let re = pc_file_regex();
-        assert!(is_match(&re, "usr/lib64/pkgconfig/foo.pc"));
-        assert!(is_match(&re, "usr/share/pkgconfig/foo.pc"));
-        assert!(!is_match(&re, "usr/lib64/pkgconfig/foo.pc.orig"));
-        assert!(!is_match(&re, "usr/bin/foo"));
+        assert!(is_match(re, "usr/lib64/pkgconfig/foo.pc"));
+        assert!(is_match(re, "usr/share/pkgconfig/foo.pc"));
+        assert!(!is_match(re, "usr/lib64/pkgconfig/foo.pc.orig"));
+        assert!(!is_match(re, "usr/bin/foo"));
     }
 }

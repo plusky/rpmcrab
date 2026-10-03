@@ -35,115 +35,158 @@ use crate::pkg::dep::{has_forbidden_controlchars, has_forbidden_controlchars_dep
 use crate::pkg::spec::{self, SpecPkg};
 use crate::pkg::{Pkg, init as pkg_init};
 use crate::tools::{Tool, ToolSource, test_source};
+use std::sync::OnceLock;
 
-/// `re_tag_compile`: `^{tag}\s*:\s*(\S.*?)\s*$`, case-insensitive.
-fn tag_re(tag: &str) -> Regex {
-    Regex::new(&format!(r"(?i)^{tag}\s*:\s*(\S.*?)\s*$")).expect("static regex")
+static PATCH_RE: OnceLock<Regex> = OnceLock::new();
+fn patch_re() -> &'static Regex {
+    PATCH_RE.get_or_init(|| Regex::new(r"(?i)^Patch(\d*)\s*:\s*(\S.*?)\s*$").expect("static regex"))
 }
 
-fn patch_re() -> Regex {
-    tag_re(r"Patch(\d*)")
+static APPLIED_PATCH_RPM420_RE: OnceLock<Regex> = OnceLock::new();
+fn applied_patch_rpm420_re() -> &'static Regex {
+    APPLIED_PATCH_RPM420_RE.get_or_init(|| Regex::new(r"^%patch(\d+)").expect("static regex"))
 }
 
-fn applied_patch_rpm420_re() -> Regex {
-    Regex::new(r"^%patch(\d+)").expect("static regex")
+static APPLIED_PATCH_RE: OnceLock<Regex> = OnceLock::new();
+fn applied_patch_re() -> &'static Regex {
+    APPLIED_PATCH_RE.get_or_init(|| Regex::new(r"^%patch\s*(\d*)").expect("static regex"))
 }
 
-fn applied_patch_re() -> Regex {
-    Regex::new(r"^%patch\s*(\d*)").expect("static regex")
+static APPLIED_PATCH_P_RE: OnceLock<Regex> = OnceLock::new();
+fn applied_patch_p_re() -> &'static Regex {
+    APPLIED_PATCH_P_RE.get_or_init(|| Regex::new(r"\s-P\s*(\d+)\b").expect("static regex"))
 }
 
-fn applied_patch_p_re() -> Regex {
-    Regex::new(r"\s-P\s*(\d+)\b").expect("static regex")
+static APPLIED_PATCH_PIPE_RE: OnceLock<Regex> = OnceLock::new();
+fn applied_patch_pipe_re() -> &'static Regex {
+    APPLIED_PATCH_PIPE_RE
+        .get_or_init(|| Regex::new(r"\s%\{PATCH(\d+)\}\s*(%\{?__)?patch\b").expect("static regex"))
 }
 
-fn applied_patch_pipe_re() -> Regex {
-    Regex::new(r"\s%\{PATCH(\d+)\}\s*(%\{?__)?patch\b").expect("static regex")
+static APPLIED_PATCH_I_RE: OnceLock<Regex> = OnceLock::new();
+fn applied_patch_i_re() -> &'static Regex {
+    APPLIED_PATCH_I_RE.get_or_init(|| {
+        Regex::new(r"(?:%\{?__)?patch\}?.*?\s+(?:<|-i)\s+%\{PATCH(\d+)\}").expect("static regex")
+    })
 }
 
-fn applied_patch_i_re() -> Regex {
-    Regex::new(r"(?:%\{?__)?patch\}?.*?\s+(?:<|-i)\s+%\{PATCH(\d+)\}").expect("static regex")
+static SOURCE_DIR_RE: OnceLock<Regex> = OnceLock::new();
+fn source_dir_re() -> &'static Regex {
+    SOURCE_DIR_RE.get_or_init(|| {
+        Regex::new(r"^[^#]*(\$RPM_SOURCE_DIR|%{?_sourcedir}?)").expect("static regex")
+    })
 }
 
-fn source_dir_re() -> Regex {
-    Regex::new(r"^[^#]*(\$RPM_SOURCE_DIR|%{?_sourcedir}?)").expect("static regex")
+static OBSOLETE_TAGS_RE: OnceLock<Regex> = OnceLock::new();
+fn obsolete_tags_re() -> &'static Regex {
+    OBSOLETE_TAGS_RE.get_or_init(|| {
+        Regex::new(r"(?i)^(?:Serial|Copyright)\s*:\s*(\S.*?)\s*$").expect("static regex")
+    })
 }
 
-fn obsolete_tags_re() -> Regex {
-    tag_re(r"(?:Serial|Copyright)")
+static BUILDROOT_RE: OnceLock<Regex> = OnceLock::new();
+fn buildroot_re() -> &'static Regex {
+    BUILDROOT_RE
+        .get_or_init(|| Regex::new(r"(?i)^BuildRoot\s*:\s*(\S.*?)\s*$").expect("static regex"))
 }
 
-fn buildroot_re() -> Regex {
-    tag_re("BuildRoot")
+static PREFIX_RE: OnceLock<Regex> = OnceLock::new();
+fn prefix_re() -> &'static Regex {
+    PREFIX_RE.get_or_init(|| Regex::new(r"(?i)^Prefix\s*:\s*(\S.*?)\s*$").expect("static regex"))
 }
 
-fn prefix_re() -> Regex {
-    tag_re("Prefix")
+static PACKAGER_RE: OnceLock<Regex> = OnceLock::new();
+fn packager_re() -> &'static Regex {
+    PACKAGER_RE
+        .get_or_init(|| Regex::new(r"(?i)^Packager\s*:\s*(\S.*?)\s*$").expect("static regex"))
 }
 
-fn packager_re() -> Regex {
-    tag_re("Packager")
+static BUILDARCH_RE: OnceLock<Regex> = OnceLock::new();
+fn buildarch_re() -> &'static Regex {
+    BUILDARCH_RE.get_or_init(|| {
+        Regex::new(r"(?i)^BuildArch(?:itectures)?\s*:\s*(\S.*?)\s*$").expect("static regex")
+    })
 }
 
-fn buildarch_re() -> Regex {
-    tag_re(r"BuildArch(?:itectures)?")
+static BUILDPREREQ_RE: OnceLock<Regex> = OnceLock::new();
+fn buildprereq_re() -> &'static Regex {
+    BUILDPREREQ_RE
+        .get_or_init(|| Regex::new(r"(?i)^BuildPreReq\s*:\s*(\S.*?)\s*$").expect("static regex"))
 }
 
-fn buildprereq_re() -> Regex {
-    tag_re("BuildPreReq")
+static PREREQ_RE: OnceLock<Regex> = OnceLock::new();
+fn prereq_re() -> &'static Regex {
+    PREREQ_RE
+        .get_or_init(|| Regex::new(r"(?i)^PreReq(\(.*\))\s*:\s*(\S.*?)\s*$").expect("static regex"))
 }
 
-fn prereq_re() -> Regex {
-    tag_re(r"PreReq(\(.*\))")
+static SUSE_VERSION_RE: OnceLock<Regex> = OnceLock::new();
+fn suse_version_re() -> &'static Regex {
+    SUSE_VERSION_RE.get_or_init(|| {
+        Regex::new(r"%({|{\?)?suse_version}?\s*[<>=]+\s*(?P<version>\d+)").expect("static regex")
+    })
 }
 
-fn suse_version_re() -> Regex {
-    Regex::new(r"%({|{\?)?suse_version}?\s*[<>=]+\s*(?P<version>\d+)").expect("static regex")
+static MAKE_CHECK_RE: OnceLock<Regex> = OnceLock::new();
+fn make_check_re() -> &'static Regex {
+    MAKE_CHECK_RE
+        .get_or_init(|| Regex::new(r"(^|\s|%{?__)make}?\s+(check|test)").expect("static regex"))
 }
 
-fn make_check_re() -> Regex {
-    Regex::new(r"(^|\s|%{?__)make}?\s+(check|test)").expect("static regex")
+static RPM_BUILDROOT_RE: OnceLock<Regex> = OnceLock::new();
+fn rpm_buildroot_re() -> &'static Regex {
+    RPM_BUILDROOT_RE.get_or_init(|| {
+        Regex::new(r"^[^#]*?(?:(\\)*\${?RPM_BUILD_ROOT}?|(%+){?buildroot}?)").expect("static regex")
+    })
 }
 
-fn rpm_buildroot_re() -> Regex {
-    Regex::new(r"^[^#]*?(?:(\\)*\${?RPM_BUILD_ROOT}?|(%+){?buildroot}?)").expect("static regex")
-}
-
-fn configure_libdir_spec_re() -> Regex {
-    Regex::new(r"ln |\./configure[^#]*--libdir=(\S+)[^#]*").expect("static regex")
+static CONFIGURE_LIBDIR_SPEC_RE: OnceLock<Regex> = OnceLock::new();
+fn configure_libdir_spec_re() -> &'static Regex {
+    CONFIGURE_LIBDIR_SPEC_RE.get_or_init(|| {
+        Regex::new(r"ln |\./configure[^#]*--libdir=(\S+)[^#]*").expect("static regex")
+    })
 }
 
 /// `hardcoded_library_paths`, start-anchored: the reference applies it with
 /// `re.match`.
-fn hardcoded_libdir_paths_re() -> Regex {
-    Regex::new(r"^(/lib|/usr/lib|/usr/X11R6/lib/(?!([^/]+/)+)[^/]*\.([oa]|la|so[0-9.]*))")
-        .expect("static regex")
+static HARDCODED_LIBDIR_PATHS_RE: OnceLock<Regex> = OnceLock::new();
+fn hardcoded_libdir_paths_re() -> &'static Regex {
+    HARDCODED_LIBDIR_PATHS_RE.get_or_init(|| {
+        Regex::new(r"^(/lib|/usr/lib|/usr/X11R6/lib/(?!([^/]+/)+)[^/]*\.([oa]|la|so[0-9.]*))")
+            .expect("static regex")
+    })
 }
 
-fn lib_package_re() -> Regex {
-    Regex::new(r"^%package.*\Wlib").expect("static regex")
+static LIB_PACKAGE_RE: OnceLock<Regex> = OnceLock::new();
+fn lib_package_re() -> &'static Regex {
+    LIB_PACKAGE_RE.get_or_init(|| Regex::new(r"^%package.*\Wlib").expect("static regex"))
 }
 
-fn ifarch_re() -> Regex {
-    Regex::new(r"^\s*%ifn?arch\s").expect("static regex")
+static IFARCH_RE: OnceLock<Regex> = OnceLock::new();
+fn ifarch_re() -> &'static Regex {
+    IFARCH_RE.get_or_init(|| Regex::new(r"^\s*%ifn?arch\s").expect("static regex"))
 }
 
-fn if_re() -> Regex {
-    Regex::new(r"^\s*%if\s").expect("static regex")
+static IF_RE: OnceLock<Regex> = OnceLock::new();
+fn if_re() -> &'static Regex {
+    IF_RE.get_or_init(|| Regex::new(r"^\s*%if\s").expect("static regex"))
 }
 
-fn endif_re() -> Regex {
-    Regex::new(r"^\s*%endif\b").expect("static regex")
+static ENDIF_RE: OnceLock<Regex> = OnceLock::new();
+fn endif_re() -> &'static Regex {
+    ENDIF_RE.get_or_init(|| Regex::new(r"^\s*%endif\b").expect("static regex"))
 }
 
 /// `DEFAULT_BIARCH_PACKAGES`: hardcoded library paths are not checked in
 /// biarch packages.
-fn biarch_package_re() -> Regex {
-    Regex::new(r"^(gcc|glibc)").expect("static regex")
+static BIARCH_PACKAGE_RE: OnceLock<Regex> = OnceLock::new();
+fn biarch_package_re() -> &'static Regex {
+    BIARCH_PACKAGE_RE.get_or_init(|| Regex::new(r"^(gcc|glibc)").expect("static regex"))
 }
 
-fn libdir_re() -> Regex {
-    Regex::new(r"%{?_lib(?:dir)?\}?\b").expect("static regex")
+static LIBDIR_RE: OnceLock<Regex> = OnceLock::new();
+fn libdir_re() -> &'static Regex {
+    LIBDIR_RE.get_or_init(|| Regex::new(r"%{?_lib(?:dir)?\}?\b").expect("static regex"))
 }
 
 /// `section_regexs`: `^%<name>(?:\s|$)` for the script sections plus
@@ -197,126 +240,172 @@ const RPM_SCRIPTLETS: &[&str] = &[
     "transfiletriggerpostun",
 ];
 
-fn deprecated_grep_re() -> Regex {
-    Regex::new(r"\b[ef]grep\b").expect("static regex")
+static DEPRECATED_GREP_RE: OnceLock<Regex> = OnceLock::new();
+fn deprecated_grep_re() -> &'static Regex {
+    DEPRECATED_GREP_RE.get_or_init(|| Regex::new(r"\b[ef]grep\b").expect("static regex"))
 }
 
-fn hardcoded_library_path_re() -> Regex {
-    Regex::new(r"^[^#]*((^|\s+|\.\./\.\.|\${?RPM_BUILD_ROOT}?|%{?buildroot}?|%{?_prefix}?)(/lib|/usr/lib|/usr/X11R6/lib/(?!([^/]+/)+)[^/]*\.([oa]|la|so[0-9.]*))(?=[\s;/])([^\s,;]*))")
-        .expect("static regex")
+static HARDCODED_LIBRARY_PATH_RE: OnceLock<Regex> = OnceLock::new();
+fn hardcoded_library_path_re() -> &'static Regex {
+    HARDCODED_LIBRARY_PATH_RE.get_or_init(|| Regex::new(r"^[^#]*((^|\s+|\.\./\.\.|\${?RPM_BUILD_ROOT}?|%{?buildroot}?|%{?_prefix}?)(/lib|/usr/lib|/usr/X11R6/lib/(?!([^/]+/)+)[^/]*\.([oa]|la|so[0-9.]*))(?=[\s;/])([^\s,;]*))")
+        .expect("static regex"))
 }
 
-/// `(^|\s)%(define|global)\s+` + the macro being overridden.
-fn define_re(inner: &str) -> Regex {
-    Regex::new(&format!(r"(^|\s)%(define|global)\s+{inner}")).expect("static regex")
+static DEPSCRIPT_OVERRIDE_RE: OnceLock<Regex> = OnceLock::new();
+fn depscript_override_re() -> &'static Regex {
+    DEPSCRIPT_OVERRIDE_RE.get_or_init(|| {
+        Regex::new(r"(^|\s)%(define|global)\s+__find_(requires|provides)\s").expect("static regex")
+    })
 }
 
-fn depscript_override_re() -> Regex {
-    define_re(r"__find_(requires|provides)\s")
+static DEPGEN_DISABLE_RE: OnceLock<Regex> = OnceLock::new();
+fn depgen_disable_re() -> &'static Regex {
+    DEPGEN_DISABLE_RE.get_or_init(|| {
+        Regex::new(r"(^|\s)%(define|global)\s+_use_internal_dependency_generator\s+0")
+            .expect("static regex")
+    })
 }
 
-fn depgen_disable_re() -> Regex {
-    define_re(r"_use_internal_dependency_generator\s+0")
+static PATCH_FUZZ_OVERRIDE_RE: OnceLock<Regex> = OnceLock::new();
+fn patch_fuzz_override_re() -> &'static Regex {
+    PATCH_FUZZ_OVERRIDE_RE.get_or_init(|| {
+        Regex::new(r"(^|\s)%(define|global)\s+_default_patch_fuzz\s+(\d+)").expect("static regex")
+    })
 }
 
-fn patch_fuzz_override_re() -> Regex {
-    define_re(r"_default_patch_fuzz\s+(\d+)")
+static INDENT_SPACES_RE: OnceLock<Regex> = OnceLock::new();
+fn indent_spaces_re() -> &'static Regex {
+    INDENT_SPACES_RE.get_or_init(|| {
+        Regex::new(r"( \t|(^|\t)([^\t]{8})*[^\t]{4}[^\t]?([^\t][^\t.!?]|[^\t]?[.!?] )  )")
+            .expect("static regex")
+    })
 }
 
-fn indent_spaces_re() -> Regex {
-    Regex::new(r"( \t|(^|\t)([^\t]{8})*[^\t]{4}[^\t]?([^\t][^\t.!?]|[^\t]?[.!?] )  )")
-        .expect("static regex")
+static REQUIRES_RE: OnceLock<Regex> = OnceLock::new();
+fn requires_re() -> &'static Regex {
+    REQUIRES_RE.get_or_init(|| {
+        Regex::new(r"(?i)^(?:Build)?(?:Pre)?Req(?:uires)?(?:\([^\)]+\))?:\s*(.*)")
+            .expect("static regex")
+    })
 }
 
-fn requires_re() -> Regex {
-    Regex::new(r"(?i)^(?:Build)?(?:Pre)?Req(?:uires)?(?:\([^\)]+\))?:\s*(.*)")
-        .expect("static regex")
+static PROVIDES_RE: OnceLock<Regex> = OnceLock::new();
+fn provides_re() -> &'static Regex {
+    PROVIDES_RE
+        .get_or_init(|| Regex::new(r"(?i)^Provides(?:\([^\)]+\))?:\s*(.*)").expect("static regex"))
 }
 
-fn provides_re() -> Regex {
-    Regex::new(r"(?i)^Provides(?:\([^\)]+\))?:\s*(.*)").expect("static regex")
+static OBSOLETES_RE: OnceLock<Regex> = OnceLock::new();
+fn obsoletes_re() -> &'static Regex {
+    OBSOLETES_RE.get_or_init(|| Regex::new(r"(?i)^Obsoletes:\s*(.*)").expect("static regex"))
 }
 
-fn obsoletes_re() -> Regex {
-    Regex::new(r"(?i)^Obsoletes:\s*(.*)").expect("static regex")
+static CONFLICTS_RE: OnceLock<Regex> = OnceLock::new();
+fn conflicts_re() -> &'static Regex {
+    CONFLICTS_RE
+        .get_or_init(|| Regex::new(r"(?i)^(?:Build)?Conflicts:\s*(.*)").expect("static regex"))
 }
 
-fn conflicts_re() -> Regex {
-    Regex::new(r"(?i)^(?:Build)?Conflicts:\s*(.*)").expect("static regex")
+static DECLARATIVE_RE: OnceLock<Regex> = OnceLock::new();
+fn declarative_re() -> &'static Regex {
+    DECLARATIVE_RE.get_or_init(|| Regex::new(r"(?i)^BuildSystem:\s*(.*)").expect("static regex"))
 }
 
-fn declarative_re() -> Regex {
-    Regex::new(r"(?i)^BuildSystem:\s*(.*)").expect("static regex")
-}
-
-fn compop_re() -> Regex {
-    Regex::new(r"[<>=]").expect("static regex")
+static COMPOP_RE: OnceLock<Regex> = OnceLock::new();
+fn compop_re() -> &'static Regex {
+    COMPOP_RE.get_or_init(|| Regex::new(r"[<>=]").expect("static regex"))
 }
 
 /// Anchored: the reference applies it with `re.match` ("intentionally no
 /// whitespace before!").
-fn setup_re() -> Regex {
-    Regex::new(r"^%setup\b").expect("static regex")
+static SETUP_RE: OnceLock<Regex> = OnceLock::new();
+fn setup_re() -> &'static Regex {
+    SETUP_RE.get_or_init(|| Regex::new(r"^%setup\b").expect("static regex"))
 }
 
-fn setup_q_re() -> Regex {
-    Regex::new(r" -[A-Za-z]*q").expect("static regex")
+static SETUP_Q_RE: OnceLock<Regex> = OnceLock::new();
+fn setup_q_re() -> &'static Regex {
+    SETUP_Q_RE.get_or_init(|| Regex::new(r" -[A-Za-z]*q").expect("static regex"))
 }
 
-fn setup_t_re() -> Regex {
-    Regex::new(r" -[A-Za-z]*T").expect("static regex")
+static SETUP_T_RE: OnceLock<Regex> = OnceLock::new();
+fn setup_t_re() -> &'static Regex {
+    SETUP_T_RE.get_or_init(|| Regex::new(r" -[A-Za-z]*T").expect("static regex"))
 }
 
-fn setup_ab_re() -> Regex {
-    Regex::new(r" -[A-Za-z]*[ab]").expect("static regex")
+static SETUP_AB_RE: OnceLock<Regex> = OnceLock::new();
+fn setup_ab_re() -> &'static Regex {
+    SETUP_AB_RE.get_or_init(|| Regex::new(r" -[A-Za-z]*[ab]").expect("static regex"))
 }
 
-fn autosetup_re() -> Regex {
-    Regex::new(r"^\s*%autosetup(\s.*|$)").expect("static regex")
+static AUTOSETUP_RE: OnceLock<Regex> = OnceLock::new();
+fn autosetup_re() -> &'static Regex {
+    AUTOSETUP_RE.get_or_init(|| Regex::new(r"^\s*%autosetup(\s.*|$)").expect("static regex"))
 }
 
-fn autosetup_n_re() -> Regex {
-    Regex::new(r" -[A-Za-z]*N").expect("static regex")
+static AUTOSETUP_N_RE: OnceLock<Regex> = OnceLock::new();
+fn autosetup_n_re() -> &'static Regex {
+    AUTOSETUP_N_RE.get_or_init(|| Regex::new(r" -[A-Za-z]*N").expect("static regex"))
 }
 
-fn autopatch_re() -> Regex {
-    Regex::new(r"^\s*%autopatch(?:\s|$)").expect("static regex")
+static AUTOPATCH_RE: OnceLock<Regex> = OnceLock::new();
+fn autopatch_re() -> &'static Regex {
+    AUTOPATCH_RE.get_or_init(|| Regex::new(r"^\s*%autopatch(?:\s|$)").expect("static regex"))
 }
 
-fn filelist_re() -> Regex {
-    Regex::new(r"\s+-f\s+\S+").expect("static regex")
+static FILELIST_RE: OnceLock<Regex> = OnceLock::new();
+fn filelist_re() -> &'static Regex {
+    FILELIST_RE.get_or_init(|| Regex::new(r"\s+-f\s+\S+").expect("static regex"))
 }
 
-fn pkgname_re() -> Regex {
-    Regex::new(r"\s+(?:-n\s+)?(\S+)").expect("static regex")
+static PKGNAME_RE: OnceLock<Regex> = OnceLock::new();
+fn pkgname_re() -> &'static Regex {
+    PKGNAME_RE.get_or_init(|| Regex::new(r"\s+(?:-n\s+)?(\S+)").expect("static regex"))
 }
 
-fn tarball_re() -> Regex {
-    Regex::new(r"(?i)\.(?:t(?:ar|[glx]z|bz2?)|zip)\b").expect("static regex")
+static TARBALL_RE: OnceLock<Regex> = OnceLock::new();
+fn tarball_re() -> &'static Regex {
+    TARBALL_RE
+        .get_or_init(|| Regex::new(r"(?i)\.(?:t(?:ar|[glx]z|bz2?)|zip)\b").expect("static regex"))
 }
 
-fn python_setup_test_re() -> Regex {
-    Regex::new(r"^[^#]*(setup.py test)").expect("static regex")
+static PYTHON_SETUP_TEST_RE: OnceLock<Regex> = OnceLock::new();
+fn python_setup_test_re() -> &'static Regex {
+    PYTHON_SETUP_TEST_RE.get_or_init(|| Regex::new(r"^[^#]*(setup.py test)").expect("static regex"))
 }
 
-fn python_setup_install_re() -> Regex {
-    Regex::new(r"^[^#]*(setup.py install|%\{?py(thon)?\d*_install)").expect("static regex")
+static PYTHON_SETUP_INSTALL_RE: OnceLock<Regex> = OnceLock::new();
+fn python_setup_install_re() -> &'static Regex {
+    PYTHON_SETUP_INSTALL_RE.get_or_init(|| {
+        Regex::new(r"^[^#]*(setup.py install|%\{?py(thon)?\d*_install)").expect("static regex")
+    })
 }
 
-fn python_module_def_re() -> Regex {
-    Regex::new(r"^[^#]*%{\?!python_module:%define python_module\(\)").expect("static regex")
+static PYTHON_MODULE_DEF_RE: OnceLock<Regex> = OnceLock::new();
+fn python_module_def_re() -> &'static Regex {
+    PYTHON_MODULE_DEF_RE.get_or_init(|| {
+        Regex::new(r"^[^#]*%{\?!python_module:%define python_module\(\)").expect("static regex")
+    })
 }
 
-fn python_sitelib_glob_re() -> Regex {
-    Regex::new(r"^[^#]*%{python_site(lib|arch)}/\*\s*$").expect("static regex")
+static PYTHON_SITELIB_GLOB_RE: OnceLock<Regex> = OnceLock::new();
+fn python_sitelib_glob_re() -> &'static Regex {
+    PYTHON_SITELIB_GLOB_RE
+        .get_or_init(|| Regex::new(r"^[^#]*%{python_site(lib|arch)}/\*\s*$").expect("static regex"))
 }
 
-fn shared_dir_glob_re() -> Regex {
-    Regex::new(r"^[^#]*%{_(?:bin|data|doc|include|man)dir}/\*\s*$").expect("static regex")
+static SHARED_DIR_GLOB_RE: OnceLock<Regex> = OnceLock::new();
+fn shared_dir_glob_re() -> &'static Regex {
+    SHARED_DIR_GLOB_RE.get_or_init(|| {
+        Regex::new(r"^[^#]*%{_(?:bin|data|doc|include|man)dir}/\*\s*$").expect("static regex")
+    })
 }
 
-fn suse_update_desktop_file_re() -> Regex {
-    Regex::new(r"(?i)^BuildRequires:\s*update-desktop-files").expect("static regex")
+static SUSE_UPDATE_DESKTOP_FILE_RE: OnceLock<Regex> = OnceLock::new();
+fn suse_update_desktop_file_re() -> &'static Regex {
+    SUSE_UPDATE_DESKTOP_FILE_RE.get_or_init(|| {
+        Regex::new(r"(?i)^BuildRequires:\s*update-desktop-files").expect("static regex")
+    })
 }
 
 /// Non-breaking space (`UNICODE_NBSP`).
@@ -511,61 +600,61 @@ impl SpecCheck {
             hardcoded_lib_path_exceptions_re: Regex::new(exceptions)
                 .unwrap_or_else(|_| Regex::new("$^").expect("static regex")),
             mini_mode: config.mini_mode,
-            macro_re: macro_regex(),
-            patch_re: patch_re(),
-            applied_patch_rpm420_re: applied_patch_rpm420_re(),
-            applied_patch_re: applied_patch_re(),
-            applied_patch_p_re: applied_patch_p_re(),
-            applied_patch_pipe_re: applied_patch_pipe_re(),
-            applied_patch_i_re: applied_patch_i_re(),
-            source_dir_re: source_dir_re(),
-            obsolete_tags_re: obsolete_tags_re(),
-            buildroot_re: buildroot_re(),
-            prefix_re: prefix_re(),
-            packager_re: packager_re(),
-            buildarch_re: buildarch_re(),
-            buildprereq_re: buildprereq_re(),
-            prereq_re: prereq_re(),
-            suse_version_re: suse_version_re(),
-            make_check_re: make_check_re(),
-            rpm_buildroot_re: rpm_buildroot_re(),
-            configure_libdir_spec_re: configure_libdir_spec_re(),
-            hardcoded_libdir_paths_re: hardcoded_libdir_paths_re(),
-            lib_package_re: lib_package_re(),
-            ifarch_re: ifarch_re(),
-            if_re: if_re(),
-            endif_re: endif_re(),
-            biarch_package_re: biarch_package_re(),
-            libdir_re: libdir_re(),
+            macro_re: macro_regex().clone(),
+            patch_re: patch_re().clone(),
+            applied_patch_rpm420_re: applied_patch_rpm420_re().clone(),
+            applied_patch_re: applied_patch_re().clone(),
+            applied_patch_p_re: applied_patch_p_re().clone(),
+            applied_patch_pipe_re: applied_patch_pipe_re().clone(),
+            applied_patch_i_re: applied_patch_i_re().clone(),
+            source_dir_re: source_dir_re().clone(),
+            obsolete_tags_re: obsolete_tags_re().clone(),
+            buildroot_re: buildroot_re().clone(),
+            prefix_re: prefix_re().clone(),
+            packager_re: packager_re().clone(),
+            buildarch_re: buildarch_re().clone(),
+            buildprereq_re: buildprereq_re().clone(),
+            prereq_re: prereq_re().clone(),
+            suse_version_re: suse_version_re().clone(),
+            make_check_re: make_check_re().clone(),
+            rpm_buildroot_re: rpm_buildroot_re().clone(),
+            configure_libdir_spec_re: configure_libdir_spec_re().clone(),
+            hardcoded_libdir_paths_re: hardcoded_libdir_paths_re().clone(),
+            lib_package_re: lib_package_re().clone(),
+            ifarch_re: ifarch_re().clone(),
+            if_re: if_re().clone(),
+            endif_re: endif_re().clone(),
+            biarch_package_re: biarch_package_re().clone(),
+            libdir_re: libdir_re().clone(),
             section_res: section_res(),
-            deprecated_grep_re: deprecated_grep_re(),
-            hardcoded_library_path_re: hardcoded_library_path_re(),
-            depscript_override_re: depscript_override_re(),
-            depgen_disable_re: depgen_disable_re(),
-            patch_fuzz_override_re: patch_fuzz_override_re(),
-            indent_spaces_re: indent_spaces_re(),
-            requires_re: requires_re(),
-            provides_re: provides_re(),
-            obsoletes_re: obsoletes_re(),
-            conflicts_re: conflicts_re(),
-            declarative_re: declarative_re(),
-            compop_re: compop_re(),
-            setup_re: setup_re(),
-            setup_q_re: setup_q_re(),
-            setup_t_re: setup_t_re(),
-            setup_ab_re: setup_ab_re(),
-            autosetup_re: autosetup_re(),
-            autosetup_n_re: autosetup_n_re(),
-            autopatch_re: autopatch_re(),
-            filelist_re: filelist_re(),
-            pkgname_re: pkgname_re(),
-            tarball_re: tarball_re(),
-            python_setup_test_re: python_setup_test_re(),
-            python_setup_install_re: python_setup_install_re(),
-            python_module_def_re: python_module_def_re(),
-            python_sitelib_glob_re: python_sitelib_glob_re(),
-            shared_dir_glob_re: shared_dir_glob_re(),
-            suse_update_desktop_file_re: suse_update_desktop_file_re(),
+            deprecated_grep_re: deprecated_grep_re().clone(),
+            hardcoded_library_path_re: hardcoded_library_path_re().clone(),
+            depscript_override_re: depscript_override_re().clone(),
+            depgen_disable_re: depgen_disable_re().clone(),
+            patch_fuzz_override_re: patch_fuzz_override_re().clone(),
+            indent_spaces_re: indent_spaces_re().clone(),
+            requires_re: requires_re().clone(),
+            provides_re: provides_re().clone(),
+            obsoletes_re: obsoletes_re().clone(),
+            conflicts_re: conflicts_re().clone(),
+            declarative_re: declarative_re().clone(),
+            compop_re: compop_re().clone(),
+            setup_re: setup_re().clone(),
+            setup_q_re: setup_q_re().clone(),
+            setup_t_re: setup_t_re().clone(),
+            setup_ab_re: setup_ab_re().clone(),
+            autosetup_re: autosetup_re().clone(),
+            autosetup_n_re: autosetup_n_re().clone(),
+            autopatch_re: autopatch_re().clone(),
+            filelist_re: filelist_re().clone(),
+            pkgname_re: pkgname_re().clone(),
+            tarball_re: tarball_re().clone(),
+            python_setup_test_re: python_setup_test_re().clone(),
+            python_setup_install_re: python_setup_install_re().clone(),
+            python_module_def_re: python_module_def_re().clone(),
+            python_sitelib_glob_re: python_sitelib_glob_re().clone(),
+            shared_dir_glob_re: shared_dir_glob_re().clone(),
+            suse_update_desktop_file_re: suse_update_desktop_file_re().clone(),
             spec_file: None,
             spec_name: None,
             patches: BTreeMap::new(),
