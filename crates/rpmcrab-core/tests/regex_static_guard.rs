@@ -70,7 +70,11 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ("menu_xdg.rs", "file_regex", "ctor-once"),
     ("pam_modules.rs", "pam_module_re", "ctor-once"),
     ("shared_library_policy.rs", "re_soname:", "ctor-once"),
-    ("shared_library_policy.rs", "re_soname_strongly_versioned", "ctor-once"),
+    (
+        "shared_library_policy.rs",
+        "re_soname_strongly_versioned",
+        "ctor-once",
+    ),
     ("shared_library_policy.rs", "re_soname_pkg", "ctor-once"),
     ("files.rs", "ldconfig_re", "ctor-once"),
     ("tags.rs", "changelog_text_version_re", "ctor-once"),
@@ -122,10 +126,8 @@ fn is_allowlisted(file: &str, line: &str) -> bool {
         while let Some(idx) = line[start..].find(pat) {
             let s = start + idx;
             let e = s + pat.len();
-            let before_ok =
-                s == 0 || !line[..s].chars().next_back().is_some_and(is_ident_char);
-            let after_ok =
-                e == line.len() || !line[e..].chars().next().is_some_and(is_ident_char);
+            let before_ok = s == 0 || !line[..s].chars().next_back().is_some_and(is_ident_char);
+            let after_ok = e == line.len() || !line[e..].chars().next().is_some_and(is_ident_char);
             if before_ok && after_ok {
                 return true;
             }
@@ -159,7 +161,9 @@ fn owned_regex_factory_detector() {
     assert!(is_owned_regex_factory("    fn make_re(x: &str) -> Regex {"));
     assert!(is_owned_regex_factory("fn f() -> Regex{"));
     // The converted form and other return types are not flagged.
-    assert!(!is_owned_regex_factory("fn zip_regex() -> &'static Regex {"));
+    assert!(!is_owned_regex_factory(
+        "fn zip_regex() -> &'static Regex {"
+    ));
     assert!(!is_owned_regex_factory("fn zip_regex() -> &Regex {"));
     assert!(!is_owned_regex_factory("fn f() -> Result<Regex> {"));
     assert!(!is_owned_regex_factory("fn f() -> Option<Regex> {"));
@@ -175,7 +179,10 @@ fn owned_regex_factory_detector() {
 fn allowlist_matching_is_token_anchored() {
     // "invalid_url_re" is allowlisted for tags.rs; a longer identifier merely
     // containing it must not be permitted.
-    assert!(is_allowlisted("tags.rs", "        invalid_url_re: Regex::new(&x),"));
+    assert!(is_allowlisted(
+        "tags.rs",
+        "        invalid_url_re: Regex::new(&x),"
+    ));
     assert!(!is_allowlisted(
         "tags.rs",
         "        my_invalid_url_re: Regex::new(&x),"
