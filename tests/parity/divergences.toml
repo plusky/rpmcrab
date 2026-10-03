@@ -472,6 +472,27 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "PythonCheck"
+kind = "behaviour"
+reason = "The reference derives the python_version marker from the running interpreter (PythonCheck.py:140, platform.python_version_tuple()). The port is a Rust binary with no interpreter; it uses the Python version detected at build time (build.rs), overridable via the PythonDefaultVersion config key. A non-default PythonDefaultVersion has no reference counterpart: the reference's PythonCheck never reads that key (only FilesCheck.py:377 uses it for pyc magic)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "PythonCheck"
+kind = "behaviour"
+reason = "The reference evaluates the full PEP 508 marker environment via packaging (PythonCheck.py:140-155, env with python_version, os_name, platform_system). The port evaluates only python_version, sys_platform and extra markers; any other marker is treated as holding."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "PythonCheck"
+kind = "behaviour"
+reason = "The reference evaluates sys_platform via packaging against the real platform. The port assumes Linux (marker_holds returns true unless the marker mentions win32)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "buildarch-instead-of-exclusivearch-tag"
 kind = "behaviour"
 reason = "Fixed behaviour per unmerged rpmlint#1600 (fixes rpmlint#698): a trailing line-continuation backslash is stripped before comparing, so 'BuildArch: noarch \\' inside a multi-line macro is not reported as a real architecture. The frozen 2.10.0 reference reports it."
