@@ -627,3 +627,11 @@ kind = "behaviour"
 reason = "Files under /etc/alternatives/ are exempt: they are managed by the alternatives system, not hand-edited config, and flagging them is wrong (rpmlint#1137, still open upstream). The /etc/ld.so.conf.d/ exemption is reference parity, not a divergence."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/1137"
+
+[[divergence]]
+case = "global"
+check = "PostCheck"
+kind = "behaviour"
+reason = "Emits E: pretrans-not-lua when a %pretrans scriptlet is not written in Lua (upstream rpmlint#396, rationale rpm#714): %pretrans runs before any payload is installed, so only the internal Lua interpreter is guaranteed to exist. The reference 2.10.0 has no such check — #396 is still open upstream — so this is a deliberate fix-in-port, not a parity gap."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/396"
