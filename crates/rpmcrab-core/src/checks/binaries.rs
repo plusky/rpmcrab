@@ -109,13 +109,11 @@ fn default_executable_stack_archs() -> &'static Regex {
     })
 }
 
-fn create_regexp_call(call: &str) -> Regex {
-    Regex::new(&format!(r"({}(?:@GLIBC\S+)?)(?:\s|$)", call)).expect("static regex")
-}
-
-fn create_nonlibc_regexp_call(call: &str) -> Regex {
-    Regex::new(&format!(r"({})\s?.*$", call)).expect("static regex")
-}
+static SETGID_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static SETUID_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static SETGROUPS_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static MKTEMP_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static GETHOSTBYNAME_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 
 const KERNEL_MODULES_PATHS: &[&str] = &["/lib/modules/", "/usr/lib/modules/"];
 const GLIBC_EMPTY_ARCHIVES: &[&str] = &["libanl", "libdl", "libpthread", "librt", "libutil"];
@@ -482,13 +480,36 @@ impl BinariesCheck {
             pie_exec_regexes,
             usr_lib_exception_regex: Regex::new(usr_lib_exception)
                 .unwrap_or_else(|_| Regex::new("$^").expect("static regex")),
-            setgid_call_regex: create_regexp_call(r"set(?:res|e)?gid"),
-            setuid_call_regex: create_regexp_call(r"set(?:res|e)?uid"),
-            setgroups_call_regex: create_regexp_call(r"(?:ini|se)tgroups"),
-            mktemp_call_regex: create_regexp_call("mktemp"),
-            gethostbyname_call_regex: create_regexp_call(
-                r"(gethostbyname|gethostbyname2|gethostbyaddr|gethostbyname_r|gethostbyname2_r|gethostbyaddr_r)",
-            ),
+            setgid_call_regex: SETGID_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(r"(set(?:res|e)?gid(?:@GLIBC\S+)?)(?:\s|$)")
+                        .expect("static regex")
+                })
+                .clone(),
+            setuid_call_regex: SETUID_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(r"(set(?:res|e)?uid(?:@GLIBC\S+)?)(?:\s|$)")
+                        .expect("static regex")
+                })
+                .clone(),
+            setgroups_call_regex: SETGROUPS_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(r"((?:ini|se)tgroups(?:@GLIBC\S+)?)(?:\s|$)")
+                        .expect("static regex")
+                })
+                .clone(),
+            mktemp_call_regex: MKTEMP_CALL_REGEX
+                .get_or_init(|| Regex::new(r"(mktemp(?:@GLIBC\S+)?)(?:\s|$)")
+                    .expect("static regex"))
+                .clone(),
+            gethostbyname_call_regex: GETHOSTBYNAME_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(
+                        r"((gethostbyname|gethostbyname2|gethostbyaddr|gethostbyname_r|gethostbyname2_r|gethostbyaddr_r)(?:@GLIBC\S+)?)(?:\s|$)",
+                    )
+                    .expect("static regex")
+                })
+                .clone(),
             is_exec: false,
             is_shobj: false,
             is_archive: false,
@@ -1264,16 +1285,17 @@ impl BinariesCheck {
             .configuration
             .get("WarnOnFunction")
             .and_then(toml::Value::as_table);
-        let forbidden: Vec<(String, String, Option<String>)> = forbidden_tbl
+        let forbidden: Vec<(String, String, Regex, Option<Regex>)> = forbidden_tbl
             .map(|t| {
                 t.iter()
                     .filter_map(|(k, v)| {
-                        let f_name = v.get("f_name")?.as_str()?.to_string();
+                        let f_name = v.get("f_name")?.as_str()?;
+                        let f_regex = Regex::new(&format!(r"({})\s?.*$", f_name)).ok()?;
                         let good_param = v
                             .get("good_param")
                             .and_then(|g| g.as_str())
-                            .map(str::to_string);
-                        Some((k.clone(), f_name, good_param))
+                            .and_then(|gp| Regex::new(gp).ok());
+                        Some((k.clone(), f_name.to_string(), f_regex, good_param))
                     })
                     .collect()
             })
@@ -1282,9 +1304,8 @@ impl BinariesCheck {
             return;
         }
         let mut forbidden_calls = Vec::new();
-        for (r_name, f_name, good_param) in &forbidden {
-            let f_regex = create_nonlibc_regexp_call(f_name);
-            if info.has_function_matching(&f_regex) {
+        for (r_name, f_name, f_regex, good_param) in &forbidden {
+            if info.has_function_matching(f_regex) {
                 forbidden_calls.push((r_name.clone(), f_name.clone(), good_param.clone()));
             }
         }
@@ -1308,13 +1329,11 @@ impl BinariesCheck {
         }
         for (r_name, f_name, good_param) in forbidden_calls {
             let mut waived = false;
-            if let Some(gp) = good_param {
-                if let Ok(re) = Regex::new(&gp) {
-                    waived = strings
-                        .strings
-                        .iter()
-                        .any(|s| re.is_match(s).unwrap_or(false));
-                }
+            if let Some(re) = good_param {
+                waived = strings
+                    .strings
+                    .iter()
+                    .any(|s| re.is_match(s).unwrap_or(false));
             }
             if !waived {
                 add_info(out, Level::Warning, pkg, &r_name, &[&pkgfile.name, &f_name]);

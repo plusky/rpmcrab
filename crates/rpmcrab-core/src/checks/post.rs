@@ -22,6 +22,8 @@ pub struct PostCheck {
     empty_shells: Vec<String>,
 }
 
+static POST_MENU_RE: OnceLock<Regex> = OnceLock::new();
+
 impl PostCheck {
     pub fn new(config: &Config) -> Self {
         let get_list = |key: &str, default: &[&str]| {
@@ -192,10 +194,11 @@ impl PostCheck {
                 ));
             }
             if script.contains("update-menus") {
-                let menu_re =
+                let menu_re = POST_MENU_RE.get_or_init(|| {
                     Regex::new(r"^/usr/lib/menu/|^/etc/menu-methods/|^/usr/share/applications/")
-                        .expect("static regex");
-                if !files.iter().any(|f| is_match(&menu_re, f)) {
+                        .expect("static regex")
+                });
+                if !files.iter().any(|f| is_match(menu_re, f)) {
                     out.push((
                         Level::Error,
                         finding("update-menus-without-menu-file-in"),

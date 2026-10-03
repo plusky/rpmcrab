@@ -93,6 +93,8 @@ pub struct TagsCheck {
     spellchecker: Option<crate::spellcheck::Spellchecker>,
 }
 
+static URL_ESCAPE_RE: OnceLock<Regex> = OnceLock::new();
+
 impl TagsCheck {
     pub fn new(config: &Config) -> Self {
         let tbl = &config.configuration;
@@ -186,7 +188,14 @@ impl TagsCheck {
                 .filter_map(|r| r.ok())
                 .map(|m| m.as_str())
             {
-                if is_url && is_match(&Regex::new(r"(?i)^%[0-9A-F][0-9A-F]$").expect("static"), m) {
+                if is_url
+                    && is_match(
+                        URL_ESCAPE_RE.get_or_init(|| {
+                            Regex::new(r"(?i)^%[0-9A-F][0-9A-F]$").expect("static")
+                        }),
+                        m,
+                    )
+                {
                     continue;
                 }
                 add_info(out, Level::Warning, pkg, "unexpanded-macro", &[tagname, m]);
@@ -2074,7 +2083,7 @@ mod rich_dep_emission_tests {
     fn devel_dependency_matches_rich_leaf() {
         let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
         assert!(
-            !is_match(&devel_regex(), &pkg.name),
+            !is_match(devel_regex(), &pkg.name),
             "fixture must not be a devel package"
         );
         pkg.requires.push(rich_dep("(somelib-devel or plainx)"));

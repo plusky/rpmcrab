@@ -417,16 +417,10 @@ mod tests {
         let actions = PolkitCheck::parse_actions(path.to_str().unwrap()).expect("parse");
         std::fs::remove_file(&path).ok();
         assert_eq!(actions.len(), 1);
-<<<<<<< HEAD
         let (level, finding, detail) = check()
             .check_action("org.foo.nodefaults", &actions[0].1)
             .expect("finding");
         assert_eq!(level, Level::Error);
-=======
-        let (_, finding, detail) = check()
-            .check_action("org.foo.nodefaults", &actions[0].1)
-            .expect("finding");
->>>>>>> cf1e7e7 (perf(checks): cache compiled regexes in OnceLock statics)
         assert_eq!(finding, "polkit-untracked-privilege");
         assert!(detail.contains("no:no:no"), "unexpected detail: {detail}");
     }

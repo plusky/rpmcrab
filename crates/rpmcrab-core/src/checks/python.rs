@@ -427,6 +427,8 @@ impl Check for PythonCheck {
     }
 }
 
+static PYTHON_NAME_RE: OnceLock<Regex> = OnceLock::new();
+
 impl PythonCheck {
     /// Check parsed requirements against the RPM requires.
     fn check_requirements(
@@ -473,7 +475,8 @@ impl PythonCheck {
             wanted.extend(Self::module_names(&req.name, &req.extras));
         }
         let wanted: Vec<String> = wanted.iter().map(|n| n.to_lowercase()).collect();
-        let py_re = Regex::new(r"^python\d*-(?P<name>.+)$").expect("static regex");
+        let py_re = PYTHON_NAME_RE
+            .get_or_init(|| Regex::new(r"^python\d*-(?P<name>.+)$").expect("static regex"));
         for req in &pkg.req_names {
             let Some(caps) = py_re.captures(req).ok().flatten() else {
                 continue;

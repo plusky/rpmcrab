@@ -39,13 +39,9 @@ use crate::pkg::{Pkg, init as pkg_init};
 use crate::tools::{Tool, ToolSource, test_source};
 use std::sync::OnceLock;
 
-/// `re_tag_compile`: `^{tag}\s*:\s*(\S.*?)\s*$`, case-insensitive.
-fn tag_re(tag: &str) -> Regex {
-    Regex::new(&format!(r"(?i)^{tag}\s*:\s*(\S.*?)\s*$")).expect("static regex")
-}
-
-fn patch_re() -> Regex {
-    tag_re(r"Patch(\d*)")
+static PATCH_RE: OnceLock<Regex> = OnceLock::new();
+fn patch_re() -> &'static Regex {
+    PATCH_RE.get_or_init(|| Regex::new(r"(?i)^Patch(\d*)\s*:\s*(\S.*?)\s*$").expect("static regex"))
 }
 
 static APPLIED_PATCH_RPM420_RE: OnceLock<Regex> = OnceLock::new();
@@ -83,32 +79,47 @@ fn source_dir_re() -> &'static Regex {
     })
 }
 
-fn obsolete_tags_re() -> Regex {
-    tag_re(r"(?:Serial|Copyright)")
+static OBSOLETE_TAGS_RE: OnceLock<Regex> = OnceLock::new();
+fn obsolete_tags_re() -> &'static Regex {
+    OBSOLETE_TAGS_RE.get_or_init(|| {
+        Regex::new(r"(?i)^(?:Serial|Copyright)\s*:\s*(\S.*?)\s*$").expect("static regex")
+    })
 }
 
-fn buildroot_re() -> Regex {
-    tag_re("BuildRoot")
+static BUILDROOT_RE: OnceLock<Regex> = OnceLock::new();
+fn buildroot_re() -> &'static Regex {
+    BUILDROOT_RE
+        .get_or_init(|| Regex::new(r"(?i)^BuildRoot\s*:\s*(\S.*?)\s*$").expect("static regex"))
 }
 
-fn prefix_re() -> Regex {
-    tag_re("Prefix")
+static PREFIX_RE: OnceLock<Regex> = OnceLock::new();
+fn prefix_re() -> &'static Regex {
+    PREFIX_RE.get_or_init(|| Regex::new(r"(?i)^Prefix\s*:\s*(\S.*?)\s*$").expect("static regex"))
 }
 
-fn packager_re() -> Regex {
-    tag_re("Packager")
+static PACKAGER_RE: OnceLock<Regex> = OnceLock::new();
+fn packager_re() -> &'static Regex {
+    PACKAGER_RE
+        .get_or_init(|| Regex::new(r"(?i)^Packager\s*:\s*(\S.*?)\s*$").expect("static regex"))
 }
 
-fn buildarch_re() -> Regex {
-    tag_re(r"BuildArch(?:itectures)?")
+static BUILDARCH_RE: OnceLock<Regex> = OnceLock::new();
+fn buildarch_re() -> &'static Regex {
+    BUILDARCH_RE.get_or_init(|| {
+        Regex::new(r"(?i)^BuildArch(?:itectures)?\s*:\s*(\S.*?)\s*$").expect("static regex")
+    })
 }
 
-fn buildprereq_re() -> Regex {
-    tag_re("BuildPreReq")
+static BUILDPREREQ_RE: OnceLock<Regex> = OnceLock::new();
+fn buildprereq_re() -> &'static Regex {
+    BUILDPREREQ_RE
+        .get_or_init(|| Regex::new(r"(?i)^BuildPreReq\s*:\s*(\S.*?)\s*$").expect("static regex"))
 }
 
-fn prereq_re() -> Regex {
-    tag_re(r"PreReq(\(.*\))")
+static PREREQ_RE: OnceLock<Regex> = OnceLock::new();
+fn prereq_re() -> &'static Regex {
+    PREREQ_RE
+        .get_or_init(|| Regex::new(r"(?i)^PreReq(\(.*\))\s*:\s*(\S.*?)\s*$").expect("static regex"))
 }
 
 static SUSE_VERSION_RE: OnceLock<Regex> = OnceLock::new();
@@ -242,21 +253,26 @@ fn hardcoded_library_path_re() -> &'static Regex {
         .expect("static regex"))
 }
 
-/// `(^|\s)%(define|global)\s+` + the macro being overridden.
-fn define_re(inner: &str) -> Regex {
-    Regex::new(&format!(r"(^|\s)%(define|global)\s+{inner}")).expect("static regex")
+static DEPSCRIPT_OVERRIDE_RE: OnceLock<Regex> = OnceLock::new();
+fn depscript_override_re() -> &'static Regex {
+    DEPSCRIPT_OVERRIDE_RE.get_or_init(|| {
+        Regex::new(r"(^|\s)%(define|global)\s+__find_(requires|provides)\s").expect("static regex")
+    })
 }
 
-fn depscript_override_re() -> Regex {
-    define_re(r"__find_(requires|provides)\s")
+static DEPGEN_DISABLE_RE: OnceLock<Regex> = OnceLock::new();
+fn depgen_disable_re() -> &'static Regex {
+    DEPGEN_DISABLE_RE.get_or_init(|| {
+        Regex::new(r"(^|\s)%(define|global)\s+_use_internal_dependency_generator\s+0")
+            .expect("static regex")
+    })
 }
 
-fn depgen_disable_re() -> Regex {
-    define_re(r"_use_internal_dependency_generator\s+0")
-}
-
-fn patch_fuzz_override_re() -> Regex {
-    define_re(r"_default_patch_fuzz\s+(\d+)")
+static PATCH_FUZZ_OVERRIDE_RE: OnceLock<Regex> = OnceLock::new();
+fn patch_fuzz_override_re() -> &'static Regex {
+    PATCH_FUZZ_OVERRIDE_RE.get_or_init(|| {
+        Regex::new(r"(^|\s)%(define|global)\s+_default_patch_fuzz\s+(\d+)").expect("static regex")
+    })
 }
 
 static INDENT_SPACES_RE: OnceLock<Regex> = OnceLock::new();
@@ -587,20 +603,20 @@ impl SpecCheck {
                 .unwrap_or_else(|_| Regex::new("$^").expect("static regex")),
             mini_mode: config.mini_mode,
             macro_re: macro_regex().clone(),
-            patch_re: patch_re(),
+            patch_re: patch_re().clone(),
             applied_patch_rpm420_re: applied_patch_rpm420_re().clone(),
             applied_patch_re: applied_patch_re().clone(),
             applied_patch_p_re: applied_patch_p_re().clone(),
             applied_patch_pipe_re: applied_patch_pipe_re().clone(),
             applied_patch_i_re: applied_patch_i_re().clone(),
             source_dir_re: source_dir_re().clone(),
-            obsolete_tags_re: obsolete_tags_re(),
-            buildroot_re: buildroot_re(),
-            prefix_re: prefix_re(),
-            packager_re: packager_re(),
-            buildarch_re: buildarch_re(),
-            buildprereq_re: buildprereq_re(),
-            prereq_re: prereq_re(),
+            obsolete_tags_re: obsolete_tags_re().clone(),
+            buildroot_re: buildroot_re().clone(),
+            prefix_re: prefix_re().clone(),
+            packager_re: packager_re().clone(),
+            buildarch_re: buildarch_re().clone(),
+            buildprereq_re: buildprereq_re().clone(),
+            prereq_re: prereq_re().clone(),
             suse_version_re: suse_version_re().clone(),
             make_check_re: make_check_re().clone(),
             rpm_buildroot_re: rpm_buildroot_re().clone(),
@@ -615,9 +631,9 @@ impl SpecCheck {
             section_res: section_res(),
             deprecated_grep_re: deprecated_grep_re().clone(),
             hardcoded_library_path_re: hardcoded_library_path_re().clone(),
-            depscript_override_re: depscript_override_re(),
-            depgen_disable_re: depgen_disable_re(),
-            patch_fuzz_override_re: patch_fuzz_override_re(),
+            depscript_override_re: depscript_override_re().clone(),
+            depgen_disable_re: depgen_disable_re().clone(),
+            patch_fuzz_override_re: patch_fuzz_override_re().clone(),
             indent_spaces_re: indent_spaces_re().clone(),
             requires_re: requires_re().clone(),
             provides_re: provides_re().clone(),
