@@ -145,11 +145,17 @@ impl PythonCheck {
                     None => (sec.as_str(), None),
                 };
                 let extra_marker = format!("extra == \"{name}\"");
+                // The reference (`_convert_egg_info_reqs_to_simple_reqs`)
+                // appends the section condition as a second `;`-part to the
+                // requirement verbatim, so a requirement that already carries
+                // a marker keeps it first: `req; req-marker; (section-marker)
+                // and extra == "name"`. The port stores the post-first-`;`
+                // text verbatim instead of merging everything with `and`.
                 req.marker = match (&req.marker, marker) {
                     (Some(existing), Some(m)) => {
-                        Some(format!("({m}) and ({existing}) and {extra_marker}"))
+                        Some(format!("{existing}; ({m}) and {extra_marker}"))
                     }
-                    (Some(existing), None) => Some(format!("({existing}) and {extra_marker}")),
+                    (Some(existing), None) => Some(format!("{existing}; {extra_marker}")),
                     (None, Some(m)) => Some(format!("({m}) and {extra_marker}")),
                     (None, None) => Some(extra_marker),
                 };
@@ -673,6 +679,52 @@ mod tests {
         // synthesized extra marker never does, so `w6extra` must not be
         // reported missing. If the combination dropped the extra part, the
         // false positive would fire here.
+        let findings = check_requirements_findings(&reqs, &[]);
+        assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+    }
+
+    #[test]
+    fn extra_section_with_marker_and_req_marker_uses_double_semicolon_form() {
+        // plusky's #119 review nit: the reference
+        // (`_convert_egg_info_reqs_to_simple_reqs`) appends the section
+        // condition as a second `;`-part to the requirement verbatim, so a
+        // requirement that already carries a marker yields
+        // `w6extra; python_version > "3.9"; (sys_platform == "linux") and
+        // extra == "extra"`. The port used to merge everything into one
+        // `and`ed marker. The assert_eq pins the reference form (it fails on
+        // the old merged form); the emission-path assertion below pins the
+        // no-false-positive invariant (it fails if the extra term is
+        // dropped). Exact equality, like the sibling tests.
+        let content = "[extra:sys_platform == \"linux\"]\nw6extra; python_version > \"3.9\"\n";
+        let reqs = PythonCheck::parse_requirements(content, false, "3.12");
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(
+            reqs[0].marker.as_deref(),
+            Some("python_version > \"3.9\"; (sys_platform == \"linux\") and extra == \"extra\""),
+            "marker: {:?}",
+            reqs[0].marker
+        );
+        // Emission path: the synthesized extra marker never holds, so
+        // `w6extra` must not be reported missing.
+        let findings = check_requirements_findings(&reqs, &[]);
+        assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+    }
+
+    #[test]
+    fn extra_section_req_marker_keeps_section_condition_separate() {
+        // Sibling arm: `[extra]` (no section marker) with a requirement that
+        // already carries a marker. The reference yields
+        // `w6extra; python_version > "3.9"; extra == "extra"`, not one merged
+        // `and`ed marker.
+        let content = "[extra]\nw6extra; python_version > \"3.9\"\n";
+        let reqs = PythonCheck::parse_requirements(content, false, "3.12");
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(
+            reqs[0].marker.as_deref(),
+            Some("python_version > \"3.9\"; extra == \"extra\""),
+            "marker: {:?}",
+            reqs[0].marker
+        );
         let findings = check_requirements_findings(&reqs, &[]);
         assert!(findings.is_empty(), "unexpected findings: {findings:?}");
     }
