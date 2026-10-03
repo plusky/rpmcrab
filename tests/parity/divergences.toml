@@ -741,6 +741,7 @@ kind = "behaviour"
 reason = "A whitespace-only quoted command (command=\" \") or a single-token command that matches a MenuLaunchers regexp (MenuCheck.py:118,137) raises IndexError in the reference and aborts the whole run with exit 3; the port emits `menu-command-not-in-package` with an empty detail and continues. One malformed menu entry must not forfeit the rest of the package."
 since = "0.1.0"
 
+
 [[divergence]]
 case = "global"
 
@@ -778,3 +779,11 @@ check = "PythonCheck"
 kind = "behaviour"
 reason = "Environment markers for PEP 508 `default_environment()` keys the port does not evaluate (`implementation_name`, `implementation_version`, `platform_machine`, `platform_release`, `platform_version`, `python_full_version`, `platform_python_implementation`) fail closed: the requirement is treated as not wanted, which can emit `python-leftover-require` where the reference - evaluating the real environment - stays quiet. `python_version`, `sys_platform`, `os_name` ('posix'), `platform_system` ('Linux') and `extra` (evaluated against \"\") match the reference exactly (`PythonCheck.py:139-143`). Pinned by `marker_pinned_linux_environment`."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "TagsCheck"
+kind = "behaviour"
+reason = "The bundled ReleaseExtension default is the per-distro %{?dist} suffix catalog (fedora/rhel/eln/mageia/amazon linux/openEuler/elrepo/suse); the reference still ships an empty default. rpmcrab therefore warns not-standard-release-extension on releases without a known dist suffix and tolerates known suffixes in the changelog version comparison, where the current reference does neither."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1608"

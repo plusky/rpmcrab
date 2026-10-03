@@ -1006,8 +1006,9 @@ impl TagsCheck {
                             if let Some(e) = epoch {
                                 expected[0] = format!("{e}:{}", expected[0]);
                             }
-                            // Issue #856: the reference does not account for
-                            // `%{?dist}` in Release; replicate as-is.
+                            // A configured `%{?dist}`-style release extension is
+                            // stripped before comparing, so a changelog entry
+                            // without the distro suffix still matches.
                             if let Some(re) = &self.extension_regex {
                                 expected.push(re.replace_all(&expected[0], "").to_string());
                             }
@@ -1441,6 +1442,10 @@ mod tests {
     use crate::color::Color;
 
     fn test_config() -> Config {
+        test_config_with(None)
+    }
+
+    fn test_config_with(release_extension: Option<&str>) -> Config {
         // Minimal config with the keys TagsCheck reads.
         let mut config = Config::default();
         let tbl = &mut config.configuration;
@@ -1457,8 +1462,31 @@ mod tests {
             toml::Value::Array(vec![]),
         );
         tbl.insert("InvalidRequires".to_string(), toml::Value::Array(vec![]));
+        if let Some(ext) = release_extension {
+            tbl.insert(
+                "ReleaseExtension".to_string(),
+                toml::Value::String(ext.to_string()),
+            );
+        }
         config.finalize().expect("fixture config");
         config
+    }
+
+    /// The shipped `ReleaseExtension` catalog: the strip tests pin the live
+    /// default rather than a copy of it.
+    fn shipped_release_extension() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/configdefaults.toml");
+        let raw = std::fs::read_to_string(&path).expect("read configdefaults.toml");
+        let tbl: toml::Table = toml::from_str(&raw).expect("parse configdefaults.toml");
+        let ext = tbl
+            .get("ReleaseExtension")
+            .and_then(toml::Value::as_str)
+            .unwrap_or("");
+        assert!(
+            !ext.is_empty(),
+            "ReleaseExtension default must be non-empty"
+        );
+        ext.to_string()
     }
 
     /// Open a fixture RPM, extracting into a unique tempdir (kept alive by
@@ -1477,10 +1505,83 @@ mod tests {
 
     fn run_check(pkg: &Pkg) -> Vec<(String, String)> {
         let config = test_config();
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let mut check = TagsCheck::new(&config);
-        check.check(pkg, &config, &mut out);
+        run_check_with(&config, pkg)
+    }
+
+    fn run_check_with(config: &Config, pkg: &Pkg) -> Vec<(String, String)> {
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(config);
+        check.check(pkg, config, &mut out);
         out.results().to_vec()
+    }
+
+    #[test]
+    fn release_extension_strip_tolerates_dist_suffix_in_changelog() {
+        // Release 3.fc42 with a changelog entry of 1.15.1-3 (no dist suffix):
+        // the configured extension is stripped before comparing, so no
+        // incoherent-version-in-changelog, and the release itself matches
+        // the catalog so no not-standard-release-extension either.
+        let config = test_config_with(Some(&shipped_release_extension()));
+        let (_tmp, pkg) = fixture_pkg("distrelease-1.15.1-3.fc42.noarch.rpm");
+        let results = run_check_with(&config, &pkg);
+        assert!(
+            results
+                .iter()
+                .all(|(n, _)| n != "incoherent-version-in-changelog"),
+            "unexpected incoherent-version-in-changelog: {results:?}"
+        );
+        assert!(
+            results
+                .iter()
+                .all(|(n, _)| n != "not-standard-release-extension"),
+            "3.fc42 matches the catalog: {results:?}"
+        );
+    }
+
+    #[test]
+    fn release_extension_strip_still_reports_real_incoherence() {
+        // The version itself differs (1.15.2 vs 1.15.1): stripping the dist
+        // suffix must not hide a genuinely incoherent changelog entry.
+        let config = test_config_with(Some(&shipped_release_extension()));
+        let (_tmp, pkg) = fixture_pkg("distrelease-badver-1.15.1-3.fc42.noarch.rpm");
+        let results = run_check_with(&config, &pkg);
+        let finding = results
+            .iter()
+            .find(|(n, _)| n == "incoherent-version-in-changelog")
+            .expect("incoherent-version-in-changelog");
+        assert!(finding.1.contains(": W: "), "level: {}", finding.1);
+        assert!(
+            finding.1.contains("1.15.2-3"),
+            "changelog entry: {}",
+            finding.1
+        );
+        assert!(
+            finding.1.contains(r#"["1.15.1-3.fc42", "1.15.1-3"]"#),
+            "expected candidates: {}",
+            finding.1
+        );
+    }
+
+    #[test]
+    fn release_extension_strip_ignores_unknown_suffix() {
+        // 3.weird9 is not in the catalog: nothing is stripped, so the
+        // suffix-less changelog entry is incoherent, and the release itself
+        // is not a standard extension.
+        let config = test_config_with(Some(&shipped_release_extension()));
+        let (_tmp, pkg) = fixture_pkg("distrelease-weird-1.15.1-3.weird9.noarch.rpm");
+        let results = run_check_with(&config, &pkg);
+        assert!(
+            results
+                .iter()
+                .any(|(n, _)| n == "incoherent-version-in-changelog"),
+            "expected incoherent-version-in-changelog: {results:?}"
+        );
+        let finding = results
+            .iter()
+            .find(|(n, _)| n == "not-standard-release-extension")
+            .expect("not-standard-release-extension");
+        assert!(finding.1.contains(": W: "), "level: {}", finding.1);
+        assert!(finding.1.contains("3.weird9"), "release: {}", finding.1);
     }
 
     #[test]
