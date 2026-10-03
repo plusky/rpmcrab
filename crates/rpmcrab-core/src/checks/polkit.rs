@@ -411,7 +411,7 @@ mod tests {
         // unit tests stopping at check_action never reach.
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
-        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir()).expect("open fixture pkg");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
         let name = "/usr/share/polkit-1/actions/org.foo.ghost.policy";
         pkg.files = vec![PkgFile {
             name: name.to_string(),
