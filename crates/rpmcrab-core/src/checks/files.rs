@@ -605,15 +605,25 @@ impl FilesCheck {
     fn check_bindir_exes(&self, pkg: &Pkg, st: &PkgState, out: &mut Filter) {
         for (exe, paths) in &st.bindir_exes {
             if paths.len() > 1 {
-                let joined = paths.join(" ");
+                // Rendered as a Python list repr, matching the reference
+                // passing `paths` (a list) through filter.py's f-string.
+                let list_repr = format!(
+                    "[{}]",
+                    paths
+                        .iter()
+                        .map(|p| format!("'{p}'"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
                 add_info(
                     out,
                     Level::Warning,
                     pkg,
                     "duplicate-executable",
-                    &[exe, &joined],
+                    &[exe, &list_repr],
                 );
-            } else if !st.man_basenames.contains(exe) {
+            }
+            if !st.man_basenames.contains(exe) {
                 add_info(
                     out,
                     Level::Warning,
@@ -1352,7 +1362,7 @@ impl FilesCheck {
                 }
             }
         }
-        st.hardlinks.entry(key).or_default();
+        st.hardlinks.entry(key).or_default().push(fname.to_string());
     }
 
     fn check_file_crond(&self, pkg: &Pkg, fname: &str, pkgfile: &PkgFile, out: &mut Filter) {
@@ -1428,15 +1438,14 @@ impl FilesCheck {
                 st.man_basenames.insert(m.as_str().to_string());
             }
         }
-        // bindir exes
+        // bindir exes: symlinks register an empty entry (man page existence
+        // check only, not subject to the duplicate binary check).
+        // FilesCheck.py:499-500, 819.
         for bindir in ["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/"] {
             if fname.starts_with(bindir) {
                 let rest = fname.strip_prefix(bindir).unwrap_or("");
                 if !rest.contains('/') {
-                    st.bindir_exes
-                        .entry(rest.to_string())
-                        .or_default()
-                        .push(fname.to_string());
+                    st.bindir_exes.entry(rest.to_string()).or_default();
                 }
                 break;
             }
@@ -1698,7 +1707,7 @@ impl FilesCheck {
         self.check_normal_install_info(pkg, fname, st, out);
         self.check_normal_perl_temp(pkg, fname, out);
         self.check_normal_rpaths_in_buildconfig(pkg, fname, &fd, out);
-        self.check_normal_bin(pkg, fname, pkgfile, out);
+        self.check_normal_bin(pkg, fname, pkgfile, st, out);
         self.check_normal_non_readable(pkg, fname, pkgfile, out);
         self.check_normal_zero_length(pkg, fname, pkgfile, out);
         self.check_normal_world_w(pkg, fname, pkgfile, out);
@@ -1959,15 +1968,33 @@ impl FilesCheck {
         }
     }
 
-    fn check_normal_bin(&self, pkg: &Pkg, fname: &str, pkgfile: &PkgFile, out: &mut Filter) {
-        if is_match(&self.bin_re, fname) && pkgfile.mode & 0o111 == 0 {
-            add_info(
-                out,
-                Level::Warning,
-                pkg,
-                "non-executable-in-bin",
-                &[fname, &format!("{:o}", pkgfile.mode & 0o7777)],
-            );
+    fn check_normal_bin(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        st: &mut PkgState,
+        out: &mut Filter,
+    ) {
+        if let Ok(Some(caps)) = self.bin_re.captures(fname) {
+            if pkgfile.mode & 0o111 == 0 {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "non-executable-in-bin",
+                    &[fname, &format!("{:o}", pkgfile.mode & 0o7777)],
+                );
+            } else if let Some(exe) = caps.get(1).map(|m| m.as_str()) {
+                // FilesCheck.py:1169-1171: only regular executable files feed
+                // the duplicate-executable check.
+                if !exe.contains('/') {
+                    st.bindir_exes
+                        .entry(exe.to_string())
+                        .or_default()
+                        .push(fname.to_string());
+                }
+            }
         }
     }
 
@@ -3051,62 +3078,83 @@ mod tests {
         );
     }
     #[test]
-    fn bindir_exes_emit_in_package_file_order() {
-        let render = || {
-            let dir = tempfile::TempDir::new().expect("tmpdir");
-            let pkg = Pkg::open(
-                std::path::Path::new(&fixture_path("filescheck-depmod-ok-1.0-1.noarch.rpm")),
-                dir.path(),
-                true,
-            )
-            .expect("open fixture");
-            let config = Config::default();
-            let check = FilesCheck::new(&config);
-            let mut st = PkgState::default();
-            for exe in ["link-alt", "link-up", "link-script", "link-abs"] {
-                st.bindir_exes.entry(exe.to_string()).or_default();
-            }
-            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-            check.check_bindir_exes(&pkg, &st, &mut out);
-            out.results()
-                .iter()
-                .map(|(_, line)| line.clone())
-                .collect::<Vec<_>>()
-        };
-        // Two maps built independently in one process draw different hash seeds,
-        // so a HashMap here renders a different order and this fails.
-        assert_eq!(render(), render());
+    fn duplicate_executable_fires_for_two_real_executables() {
+        // Drives check_binary (the real emission path): two regular executable
+        // files sharing a basename across bindirs. FilesCheck.py:1171.
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/mytool", 0o100755, 11),
+            mkfile("/bin/mytool", 0o100755, 12),
+        ]);
+        let results = run_check_binary(&pkg);
+        let line = results
+            .iter()
+            .find(|(n, _)| n == "duplicate-executable")
+            .map(|(_, l)| l.clone())
+            .expect("duplicate-executable should fire for two real executables");
+        assert!(
+            line.contains(": W: duplicate-executable mytool ['/usr/bin/mytool', '/bin/mytool']"),
+            "name, level and Python-list detail must match the reference, got: {line}"
+        );
     }
 
     #[test]
-    fn bindir_exes_emit_in_the_order_files_were_added() {
-        let dir = tempfile::TempDir::new().expect("tmpdir");
-        let pkg = Pkg::open(
-            std::path::Path::new(&fixture_path("filescheck-depmod-ok-1.0-1.noarch.rpm")),
-            dir.path(),
-            true,
-        )
-        .expect("open fixture");
-        let config = Config::default();
-        let check = FilesCheck::new(&config);
-        let mut st = PkgState::default();
-        for exe in ["zzz", "aaa", "mmm"] {
-            st.bindir_exes.entry(exe.to_string()).or_default();
-        }
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_bindir_exes(&pkg, &st, &mut out);
-        let lines: Vec<String> = out.results().iter().map(|(_, l)| l.clone()).collect();
-        let tail = |line: &String| line.rsplit(' ').next().unwrap().to_string();
-        assert_eq!(
-            lines.iter().map(tail).collect::<Vec<_>>(),
-            vec!["zzz", "aaa", "mmm"],
-            "insertion order, not sorted order"
-        );
+    fn duplicate_executable_does_not_fire_for_symlink_pair() {
+        // The reference deliberately excludes symlinks from the duplicate
+        // binary check (FilesCheck.py:499-500): a real exec plus a symlink
+        // sharing a basename must NOT fire duplicate-executable.
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/mytool", 0o100755, 21),
+            PkgFile {
+                linkto: "/usr/bin/mytool".to_string(),
+                ..mkfile("/bin/mytool", 0o120777, 22)
+            },
+        ]);
+        let results = run_check_binary(&pkg);
         assert!(
-            lines
-                .iter()
-                .all(|l| l.contains("no-manual-page-for-binary"))
+            !results.iter().any(|(n, _)| n == "duplicate-executable"),
+            "duplicate-executable must not fire for a symlink pair, got: {results:?}"
         );
+    }
+
+    #[test]
+    fn cross_directory_hard_link_fires() {
+        // Two files sharing (rdev, inode) in different directories.
+        // FilesCheck.py:802.
+        let (pkg, _dir) = pkg_with_files(vec![
+            PkgFile {
+                rdev: 7,
+                inode: 99,
+                ..mkfile("/usr/lib/mydata", 0o100644, 31)
+            },
+            PkgFile {
+                rdev: 7,
+                inode: 99,
+                ..mkfile("/etc/mydata", 0o100644, 32)
+            },
+        ]);
+        let results = run_check_binary(&pkg);
+        let line = results
+            .iter()
+            .find(|(n, _)| n == "cross-directory-hard-link")
+            .map(|(_, l)| l.clone())
+            .expect("cross-directory-hard-link should fire");
+        assert!(
+            line.contains(": W: cross-directory-hard-link"),
+            "name and level must match, got: {line}"
+        );
+    }
+
+    fn mkfile(name: &str, mode: u32, inode: u32) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            mode,
+            user: "root".to_string(),
+            group: "root".to_string(),
+            rdev: 1,
+            inode,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -3238,31 +3286,28 @@ mod tests {
         assert!(
             check.is_utf8_file(&doc.to_string_lossy(), &doc.to_string_lossy()),
             "a compressed file with no decompressor must read as UTF-8"
-    fn duplicate_executable_fires_for_same_name_in_two_bindirs() {
-        let dir = tempfile::TempDir::new().expect("tmpdir");
-        let pkg = Pkg::open(
-            std::path::Path::new(&fixture_path("filescheck-depmod-ok-1.0-1.noarch.rpm")),
-            dir.path(),
-            true,
-        )
-        .expect("open fixture");
-        let config = Config::default();
-        let check = FilesCheck::new(&config);
-        let mut st = PkgState::default();
-        st.bindir_exes
-            .entry("mytool".to_string())
-            .or_default()
-            .push("/usr/bin/mytool".to_string());
-        st.bindir_exes
-            .entry("mytool".to_string())
-            .or_default()
-            .push("/bin/mytool".to_string());
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_bindir_exes(&pkg, &st, &mut out);
-        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
-        assert!(
-            names.contains(&"duplicate-executable".to_string()),
-            "expected duplicate-executable"
         );
+    }
+
+    fn pkg_with_files(files: Vec<PkgFile>) -> (Pkg, tempfile::TempDir) {
+        // Pkg::open with "/" as the extract dir takes the LiveRoot path:
+        // the header is read but nothing is extracted.
+        let rpm = format!(
+            "{}/../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut pkg = Pkg::open(std::path::Path::new(&rpm), std::path::Path::new("/"), true)
+            .expect("open fixture header");
+        pkg.files = files;
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        (pkg, dir)
+    }
+
+    fn run_check_binary(pkg: &Pkg) -> Vec<(String, String)> {
+        let config = test_config();
+        let mut check = FilesCheck::new(&config);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(pkg, &config, &mut out);
+        out.results().to_vec()
     }
 }
