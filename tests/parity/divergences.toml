@@ -619,3 +619,19 @@ kind = "behaviour"
 reason = "The suspicious-dir regex widens the build-dir component from \\w+ to [\\w.-]+ so hyphenated/dotted directories like /usr/src/linux-6.1/BUILD match. The reference (PkgConfigCheck.py:11) uses \\w and misses these — the common case for kernel builds — so this is a deliberate fix for reference under-reporting, not a porting gap."
 since = "0.1.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/44"
+
+[[divergence]]
+case = "global"
+check = "read-error"
+kind = "detail"
+reason = "InitScriptCheck's read-error detail: both reference sites raise from open(path,'rb'), and Filter.add_info renders the exception with f-string interpolation, so the reference emits Python's str(OSError) including the filename -- e.g. [Errno 13] Permission denied: '/etc/init.d/probe' (InitScriptCheck.py:108, via helpers.readlines). The port reformats through os_error_detail() to [Errno 13] Permission denied, matching the reference's prefix form but dropping the filename."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/72"
+
+[[divergence]]
+case = "global"
+check = "read-error"
+kind = "detail"
+reason = "FilesCheck.peek's read-error detail: the reference emits Python's str(OSError) including the filename -- e.g. [Errno 13] Permission denied: '/p' (FilesCheck.py:430, from open(path,'rb')). The port passes std::io::Error's Display (Permission denied (os error 13)), dropping both the [Errno N] prefix and the filename."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/72"
