@@ -120,10 +120,10 @@ impl Config {
                 "opensuse".to_string()
             }
         };
-        self.permissive_by_default = self.get_bool("PermissiveByDefault")?;
+        self.permissive_by_default = self.get_bool("PermissiveByDefault");
         self.skip_package_patterns = self.get_strings("SkipPackagePatterns")?;
         self.rpmlintrc_search_paths = self.get_strings("RpmlintrcSearchPaths")?;
-        self.suppress_extraction_stderr = self.get_bool("SuppressExtractionStderr")?;
+        self.suppress_extraction_stderr = self.get_bool("SuppressExtractionStderr");
         Ok(())
     }
 
@@ -156,20 +156,23 @@ impl Config {
         }
     }
 
-    /// Read a top-level key as a bool (false if absent).
+    /// Read a top-level key as a bool, using Python truthiness to match the
+    /// reference (`if configuration[key]:` in `lint.py`, rpmlint#1592).
     ///
-    /// # Errors
-    /// Returns a diagnostic if the key is present but not a bool.
-    /// A string `"true"` is not a bool: silently defaulting hid real
-    /// misconfigurations (the `get_strings` rationale applies here too).
-    fn get_bool(&self, key: &str) -> Result<bool, String> {
+    /// Absent is false. Every TOML value maps via Python's `bool()`:
+    /// booleans pass through; non-empty strings, non-zero numbers, and
+    /// non-empty arrays/tables are true. Note the reference's footgun is
+    /// preserved: the string `"false"` is true, as in Python.
+    fn get_bool(&self, key: &str) -> bool {
         match self.configuration.get(key) {
-            None => Ok(false),
-            Some(toml::Value::Boolean(b)) => Ok(*b),
-            Some(other) => Err(format!(
-                "'{key}' must be a bool, found {}",
-                value_kind(other)
-            )),
+            None => false,
+            Some(toml::Value::Boolean(b)) => *b,
+            Some(toml::Value::String(s)) => !s.is_empty(),
+            Some(toml::Value::Integer(i)) => *i != 0,
+            Some(toml::Value::Float(f)) => *f != 0.0,
+            Some(toml::Value::Array(a)) => !a.is_empty(),
+            Some(toml::Value::Table(t)) => !t.is_empty(),
+            Some(toml::Value::Datetime(_)) => true,
         }
     }
 
@@ -694,23 +697,63 @@ mod tests {
     }
 
     #[test]
-    fn finalize_rejects_a_string_bool() {
-        // `PermissiveByDefault = "true"` (a string) must not silently become
-        // `false`: that flips the exit code from 0 to 64.
+    fn finalize_string_true_is_true() {
+        // `PermissiveByDefault = "true"` (a string) is truthy in the
+        // reference (`if configuration[key]:`), so it must enable
+        // permissive mode (exit 0), not error or silently become false.
         let mut cfg = Config::default();
         cfg.configuration.insert(
             "PermissiveByDefault".to_string(),
             toml::Value::String("true".to_string()),
         );
-        let err = cfg.finalize().expect_err("string bool must fail");
-        assert!(err.contains("PermissiveByDefault"), "got {err}");
-        assert!(err.contains("bool"), "got {err}");
+        cfg.finalize().expect("string 'true' must finalize");
+        assert!(cfg.permissive_by_default);
+    }
+
+    #[test]
+    fn finalize_string_false_is_true_python_truthiness() {
+        // Python truthiness: any non-empty string is true, including
+        // `"false"`. The reference does `if configuration[key]:`, so the
+        // port matches it exactly rather than second-guessing.
+        let mut cfg = Config::default();
+        cfg.configuration.insert(
+            "PermissiveByDefault".to_string(),
+            toml::Value::String("false".to_string()),
+        );
+        cfg.finalize().expect("string 'false' must finalize");
+        assert!(cfg.permissive_by_default);
+    }
+
+    #[test]
+    fn get_bool_python_truthiness_matrix() {
+        let mut cfg = Config::default();
+        let cases: &[(&str, toml::Value, bool)] = &[
+            ("bool-true", toml::Value::Boolean(true), true),
+            ("bool-false", toml::Value::Boolean(false), false),
+            ("str-true", toml::Value::String("true".into()), true),
+            ("str-false", toml::Value::String("false".into()), true),
+            ("str-empty", toml::Value::String("".into()), false),
+            ("int-1", toml::Value::Integer(1), true),
+            ("int-0", toml::Value::Integer(0), false),
+            ("float-1.5", toml::Value::Float(1.5), true),
+            ("float-0", toml::Value::Float(0.0), false),
+            (
+                "array-nonempty",
+                toml::Value::Array(vec![toml::Value::Integer(1)]),
+                true,
+            ),
+            ("array-empty", toml::Value::Array(vec![]), false),
+        ];
+        for (name, value, expected) in cases {
+            cfg.configuration.insert("K".to_string(), value.clone());
+            assert_eq!(cfg.get_bool("K"), *expected, "case {name}");
+        }
     }
 
     #[test]
     fn get_bool_absent_is_false() {
         let cfg = Config::default();
-        assert!(!cfg.get_bool("Missing").unwrap());
+        assert!(!cfg.get_bool("Missing"));
     }
 
     #[test]
@@ -718,7 +761,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.configuration
             .insert("K".to_string(), toml::Value::Boolean(true));
-        assert!(cfg.get_bool("K").unwrap());
+        assert!(cfg.get_bool("K"));
     }
 
     #[test]

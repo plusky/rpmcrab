@@ -424,9 +424,10 @@ fn permissive_by_default_false_in_config() {
 }
 
 #[test]
-fn permissive_by_default_string_is_config_error() {
-    // `PermissiveByDefault = "true"` (string) must be a config error,
-    // not a silent `false`.
+fn permissive_by_default_string_true_exits_zero() {
+    // `PermissiveByDefault = "true"` (string) is truthy in the reference
+    // (`if configuration[key]:`, rpmlint#1592), so the run is permissive
+    // and exits 0 despite the findings.
     let dir = std::env::temp_dir().join("rpmcrab-permissive-test");
     std::fs::create_dir_all(&dir).unwrap();
     let cfg = dir.join("test-str.toml");
@@ -436,12 +437,5 @@ fn permissive_by_default_string_is_config_error() {
         cfg.to_str().unwrap(),
         "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
     ]);
-    // Config error -> non-zero, and the message names the key.
-    assert_ne!(out.status.code(), Some(0));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stderr.contains("PermissiveByDefault") || stdout.contains("PermissiveByDefault"),
-        "stderr: {stderr}\nstdout: {stdout}"
-    );
+    assert_eq!(out.status.code(), Some(0));
 }
