@@ -150,7 +150,7 @@ since = "0.1.0"
 case = "global"
 check = "hardlink-across-partition"
 kind = "behaviour"
-reason = "Adopted ahead of upstream (proposed in unmerged rpmlint#1603, fixes rpmlint#349): hardlink findings are reported per (rdev, inode) group inside each md5 group. The frozen 2.10.0 reference uses global per-md5 bookkeeping and misattributes hardlinks in mixed hardlink/duplicate groups, reporting the wrong file pair. Additionally the trigger is narrowed per upstream #771: the reference warns whenever the first two path directories differ, false-positiving on e.g. /usr/bin vs /usr/lib64 (inseparable post-usr-merge). A device-based trigger is impossible — rpmbuild deliberately flattens device metadata (FILERDEVS is st_rdev, 0 for regular files; FILEINODES are remapped preserving only hardlink identity; FILEDEVICES is 0/1) — so the port keeps a path heuristic narrowed to the top-level directory: only hardlinks spanning genuinely separable trees (/usr vs /var) are reported."
+reason = "Adopted ahead of upstream (proposed in unmerged rpmlint#1603, fixes rpmlint#349): hardlink findings are reported per (rdev, inode) group inside each md5 group. The frozen 2.10.0 reference uses global per-md5 bookkeeping and misattributes hardlinks in mixed hardlink/duplicate groups, reporting the wrong file pair. Additionally the trigger is narrowed per upstream #771: the reference warns whenever the first two path directories differ, false-positiving on e.g. /usr/bin vs /usr/lib64 (inseparable post-usr-merge). A device-based trigger is impossible — rpmbuild deliberately flattens device metadata (FILERDEVS is st_rdev, 0 for regular files; FILEINODES are remapped preserving only hardlink identity; FILEDEVICES is flattened to 1 for every file (rpm's build/files.c stores fl_dev ? 1 : 0, verified as 1 1 1 on a real package)) — so the port keeps a path heuristic narrowed to the top-level directory: only hardlinks spanning genuinely separable trees (/usr vs /var) are reported. The same narrowed definition feeds the files-duplicate suppression and the files-duplicated-waste total (ledgered under those checks)."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/pull/1603"
 
@@ -158,7 +158,14 @@ upstream = "https://github.com/rpm-software-management/rpmlint/pull/1603"
 case = "global"
 check = "files-duplicate"
 kind = "behaviour"
-reason = "The frozen 2.10.0 reference suppresses duplicates from the waste accounting whenever the first two path directories differ ('can't be linked anyway'). Per upstream #771 the same narrowed top-level-directory definition as hardlink-across-partition is used instead: duplicates under one top-level tree (e.g. /usr/bin vs /usr/lib) can be hardlinked in practice, so they count as actionable waste; only duplicates spanning genuinely separable trees (/usr vs /etc) stay suppressed."
+reason = "The frozen 2.10.0 reference suppresses duplicates from the waste accounting whenever the first two path directories differ ('can't be linked anyway'). Per upstream #771 the same narrowed top-level-directory definition as hardlink-across-partition is used instead: duplicates under one top-level tree (e.g. /usr/bin vs /usr/lib) can be hardlinked in practice, so they count as actionable waste; only duplicates spanning genuinely separable trees (/usr vs /etc) stay suppressed. The suppressed diff also accumulates into the files-duplicated-waste total, so that finding's emitted total shifts with the same narrowing (ledgered under files-duplicated-waste)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "files-duplicated-waste"
+kind = "detail"
+reason = "The accumulated waste total follows the #771 narrowing: duplicates under one top-level tree now count toward the total, so the port reports E: files-duplicated-waste with a larger total where the frozen 2.10.0 reference's two-level prefix suppression keeps the package under the 100000-byte threshold. The finding name and level are unchanged wherever the reference also reports; see the files-duplicate entry for the underlying reason. Keeping the reference's two-level prefix for the waste total alone was rejected: the total accumulates the same suppressed diff that drives files-duplicate, and under the #771 worldview (one top-level tree is linkable) the narrowed total is the more faithful estimate of reclaimable bytes."
 since = "0.1.0"
 
 [[divergence]]

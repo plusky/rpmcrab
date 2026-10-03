@@ -11,14 +11,19 @@
 //! path directories differ, which false-positives on e.g. `/usr/bin` vs
 //! `/usr/lib64` — inseparable post-usr-merge. Device metadata cannot
 //! replace the heuristic: rpmbuild flattens it on purpose (FILERDEVS is
-//! `st_rdev`, 0 for regular files; FILEINODES are remapped to filelist
-//! order preserving only hardlink identity; FILEDEVICES is 0/1), so no
-//! per-device signal survives in the package. The port therefore keeps a
-//! path heuristic but narrows it to the top-level directory: only
-//! hardlinks spanning genuinely separable trees (`/usr` vs `/var`)
-//! are reported. The `files-duplicate` cross-directory suppression uses
-//! the same narrowed definition, since it encodes the same
-//! "can't be hardlinked anyway" assumption.
+//! `st_rdev`, 0 for regular files; FILEDEVICES is `1` for every file —
+//! rpm's `build/files.c` stores `fl_dev ? 1 : 0`, verified as `1 1 1` on
+//! a real package; FILEINODES are remapped to filelist order preserving
+//! only hardlink identity), so no per-device signal survives in the
+//! package. The port therefore keeps a path heuristic but narrows it to
+//! the top-level directory: only hardlinks spanning genuinely separable
+//! trees (`/usr` vs `/var`) are reported. The `files-duplicate`
+//! cross-directory suppression uses the same narrowed definition, since
+//! it encodes the same "can't be hardlinked anyway" assumption — and
+//! because `files-duplicated-waste` accumulates the same suppressed
+//! `diff`, its total shifts in lockstep: the port reports it with a
+//! larger total where the reference's two-level suppression keeps the
+//! package under the threshold (ledgered as a `detail` divergence).
 //!
 //! Four findings: `hardlink-across-partition` (E),
 //! `hardlink-across-config-files` (E), `files-duplicate` (W),
@@ -430,5 +435,32 @@ mod tests {
         assert_eq!(DuplicatesCheck::get_topdir("/var/lib/foo"), "/var");
         assert_eq!(DuplicatesCheck::get_topdir("/a"), "/a");
         assert_eq!(DuplicatesCheck::get_topdir("usr/bin/foo"), "usr");
+    }
+
+    #[test]
+    fn waste_total_follows_narrowed_suppression() {
+        // #771: three same-content files, one per /usr subtree. The
+        // reference's two-level prefix suppression zeroes `diff` and the
+        // waste total; the narrowed top-level comparison keeps both, so
+        // 2 * 60000 = 120000 exceeds the threshold and the port reports
+        // E: files-duplicated-waste with that total. Restoring the
+        // two-level suppression, or raising the threshold, must fail
+        // this test.
+        let files = [
+            pkgfile("/usr/bin/x", "aaa", 60_000, 1),
+            pkgfile("/usr/lib/y", "aaa", 60_000, 2),
+            pkgfile("/usr/share/z", "aaa", 60_000, 3),
+        ];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        assert_eq!(
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost),
+            vec![
+                DuplicateFinding::FilesDuplicate(
+                    "/usr/share/z".into(),
+                    "/usr/bin/x:/usr/lib/y".into(),
+                ),
+                DuplicateFinding::FilesDuplicatedWaste(120_000),
+            ],
+        );
     }
 }
