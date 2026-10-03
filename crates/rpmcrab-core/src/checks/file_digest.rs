@@ -2184,37 +2184,72 @@ hash = "deadbeef"
     }
 
     #[test]
-    fn md5_and_sha1_are_supported() {
-        // md5 and sha1 are valid for the reference's `hashlib.new` and now
-        // implemented here; the run must not die at load.
-        for algorithm in ["md5", "sha1"] {
-            let config = test_config(&format!(
-                "[[FileDigestGroup]]\ntype = \"pam\"\npackage = \"testpkg\"\n[[FileDigestGroup.digests]]\npath = \"/etc/pam.d/login\"\nalgorithm = \"{algorithm}\"\nhash = \"deadbeef\"\n",
-            ));
-            let check = FileDigestCheck::new(&config);
-            assert_eq!(check.digest_groups.len(), 1);
-            assert_eq!(check.digest_groups[0].digests.len(), 1);
-            assert_eq!(check.digest_groups[0].digests[0].algorithm, algorithm);
-        }
-    }
+    fn md5_and_sha1_digest_mismatch_reported() {
+        // md5/sha1 support pinned through check_binary: the parsed config
+        // drives the checker's groups, a wrong expected hash produces a
+        // finding, and the detail pins the computed hash against
+        // known-answer vectors for "hello".
+        let dir = std::env::temp_dir().join("rpmcrab-fd-md5sha1");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let ondisk = write_temp(&dir, "login", b"hello");
 
-    #[test]
-    fn md5_and_sha1_hash_correctly() {
-        // Actually hash known content through new_hasher: md5("hello") and
-        // sha1("hello") must match the reference values, proving the
-        // hasher wiring is correct, not just that config loads.
-        let mut md5 = new_hasher("md5").expect("md5 hasher");
-        md5.update(b"hello");
+        let extra = r#"
+[[FileDigestGroup]]
+type = "pam"
+package = "testpkg"
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/login-md5"
+algorithm = "md5"
+digester = "default"
+hash = "00000000000000000000000000000000"
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/login-sha1"
+algorithm = "sha1"
+digester = "default"
+hash = "0000000000000000000000000000000000000000"
+"#;
+        let config = test_config(extra);
+        let mut check = FileDigestCheck::new(&config);
+        assert_eq!(check.digest_groups.len(), 1);
+        let algorithms: Vec<&str> = check.digest_groups[0]
+            .digests
+            .iter()
+            .map(|d| d.algorithm.as_str())
+            .collect();
+        assert_eq!(algorithms, ["md5", "sha1"]);
+
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![
+            pkgfile("/etc/pam.d/login-md5", &ondisk, 0o100644),
+            pkgfile("/etc/pam.d/login-sha1", &ondisk, 0o100644),
+        ];
+        let results = run_check(&pkg, &config, &mut check);
+        let mismatches: Vec<&(String, String)> = results
+            .iter()
+            .filter(|(n, _)| n == "pam-file-digest-mismatch")
+            .collect();
         assert_eq!(
-            hex::encode(md5.finalize()),
-            "5d41402abc4b2a76b9719d911017c592"
+            mismatches.len(),
+            2,
+            "expected one mismatch per algorithm: {results:?}"
         );
-        let mut sha1 = new_hasher("sha1").expect("sha1 hasher");
-        sha1.update(b"hello");
+        let line_for = |path: &str| {
+            mismatches
+                .iter()
+                .find(|(_, l)| l.contains(path))
+                .map(|(_, l)| l.as_str())
+                .unwrap_or_else(|| panic!("no mismatch for {path}: {results:?}"))
+        };
         assert_eq!(
-            hex::encode(sha1.finalize()),
-            "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
+            line_for("/etc/pam.d/login-md5"),
+            "testpkg.noarch: E: pam-file-digest-mismatch /etc/pam.d/login-md5 expected md5:00000000000000000000000000000000, has:5d41402abc4b2a76b9719d911017c592"
         );
+        assert_eq!(
+            line_for("/etc/pam.d/login-sha1"),
+            "testpkg.noarch: E: pam-file-digest-mismatch /etc/pam.d/login-sha1 expected sha1:0000000000000000000000000000000000000000, has:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
