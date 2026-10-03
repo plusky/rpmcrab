@@ -748,3 +748,10 @@ kind = "behaviour"
 reason = "The port scans the whole file for the FSF license and wrong-address patterns; the reference (FilesCheck.py:1393-1395) searches only its 2048-byte peek chunk, so a stale FSF address past byte 2048 goes unreported. Deliberate fix-in-port of upstream rpmlint#40, open since 2013: the peek limit lets wrong addresses through in longer files."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/40"
+
+[[divergence]]
+case = "global"
+check = "MenuCheck"
+kind = "behaviour"
+reason = "A whitespace-only quoted command (command=\" \") or a single-token command that matches a MenuLaunchers regexp (MenuCheck.py:118,137) raises IndexError in the reference and aborts the whole run with exit 3; the port emits `menu-command-not-in-package` with an empty detail and continues. One malformed menu entry must not forfeit the rest of the package."
+since = "0.1.0"
