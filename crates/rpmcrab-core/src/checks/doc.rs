@@ -210,7 +210,9 @@ impl Check for DocCheck {
                 Level::Warning,
                 pkg,
                 "package-with-huge-docs",
-                &[&format!("{pct}%")],
+                &[&format!(
+                    "{pct}% (documentation should be in a -doc subpackage)"
+                )],
             );
         }
     }
@@ -331,13 +333,16 @@ mod tests {
     }
 
     #[test]
-    fn regular_package_with_huge_docs_warns() {
+    fn regular_package_with_huge_docs_warns_with_doc_convention_hint() {
         let config = config_with_suffixes(&["-javadoc"]);
         let mut check = DocCheck::new(&config);
         let results = run(&config, &mut check, &huge_docs_pkg("foo"));
         assert_eq!(results.len(), 1, "expected one finding, got {results:?}");
         assert_eq!(results[0].0, "package-with-huge-docs");
-        assert_eq!(results[0].1, "foo.noarch: W: package-with-huge-docs 100%");
+        assert_eq!(
+            results[0].1,
+            "foo.noarch: W: package-with-huge-docs 100% (documentation should be in a -doc subpackage)"
+        );
     }
 
     #[test]

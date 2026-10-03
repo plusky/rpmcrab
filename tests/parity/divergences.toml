@@ -620,3 +620,10 @@ kind = "behaviour"
 reason = "package-with-huge-docs is skipped for package names ending in a configured ExemptDocSuffixes entry (default -javadoc). The reference has no such exemption (rpm-software-management/rpmlint#555 is still open) and flags 100%-docs javadoc packages."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/555"
+
+[[divergence]]
+case = "global"
+check = "DocCheck"
+kind = "detail"
+reason = "package-with-huge-docs detail appends \"(documentation should be in a -doc subpackage)\" to the percentage. The reference emits only the percentage (DocCheck.py:117); its long description already carries the -doc advice, so the port surfaces it inline."
+since = "0.1.0"
