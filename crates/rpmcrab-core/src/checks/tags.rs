@@ -21,7 +21,9 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
-use crate::pkg::dep::{DepInfo, version_to_string};
+use crate::pkg::dep::{
+    DepInfo, RPMSENSE_EQUAL, RPMSENSE_GREATER, RPMSENSE_LESS, version_to_string,
+};
 
 /// `invalid_version_regex`: `([0-9](?:rc|alpha|beta|pre).*)`, case-insensitive.
 fn invalid_version_regex() -> Regex {
@@ -53,11 +55,6 @@ fn regex_escape(s: &str) -> String {
     }
     out
 }
-
-/// RPM sense flags (`rpmds.h`).
-const RPMSENSE_LESS: u32 = 2;
-const RPMSENSE_GREATER: u32 = 4;
-const RPMSENSE_EQUAL: u32 = 8;
 
 /// 1995-01-01 UTC, the oldest sane changelog timestamp.
 const OLDEST_CHANGELOG_TIMESTAMP: i64 = 788_918_400;
@@ -233,7 +230,9 @@ impl TagsCheck {
             .chain(&pkg.conflicts)
             .chain(&pkg.obsoletes)
         {
-            ignored_words.push(dep.name.clone());
+            // Rich `(a or b)` expressions contribute their referenced names,
+            // not the raw expression string.
+            ignored_words.extend(dep.leaf_names());
         }
 
         self.check_invalid_packager(pkg, out, &tag_str(Tag::PACKAGER));
@@ -252,7 +251,7 @@ impl TagsCheck {
         self.check_license(pkg, out, &rpm_license);
         self.check_url(pkg, out);
 
-        let prov_names: Vec<&str> = pkg.provides.iter().map(|d| d.name.as_str()).collect();
+        let prov_names: Vec<String> = pkg.provides.iter().flat_map(|d| d.leaf_names()).collect();
         self.check_obsolete_not_provided(pkg, out, &prov_names);
 
         for dep in &pkg.obsoletes {
@@ -383,59 +382,72 @@ impl TagsCheck {
         let mut devel_depend = false;
         for dep in deps {
             let value = format_require(dep);
-            if self.use_epoch
-                && dep.version.is_some()
-                && dep.epoch.is_none()
-                && !dep.name.starts_with("rpmlib(")
-            {
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "no-epoch-in-dependency",
-                    &[&value],
-                );
-            }
-            // Issue #1443/#1444: check every requirement, not just the first.
-            for req in &self.invalid_requires {
-                if is_match(req, &dep.name) {
-                    add_info(out, Level::Error, pkg, "invalid-dependency", &[&dep.name]);
-                }
-            }
-            if dep.name.starts_with("/usr/local/") {
-                add_info(out, Level::Error, pkg, "invalid-dependency", &[&dep.name]);
-            }
-            if is_source {
-                if is_match(&self.lib_devel_number_re, &dep.name) {
-                    add_info(
-                        out,
-                        Level::Error,
-                        pkg,
-                        "invalid-build-requires",
-                        &[&dep.name],
-                    );
-                }
-            } else if !is_devel {
-                if !devel_depend && is_match(&self.devel_re, &dep.name) {
-                    add_info(out, Level::Error, pkg, "devel-dependency", &[&dep.name]);
-                    devel_depend = true;
-                }
-                // Issue #1091: replicate the fuzzy lib heuristic exactly.
-                if dep.flags == 0
-                    && let Ok(Some(caps)) = self.lib_package_re.captures(&dep.name)
-                    && caps.get(1).is_none()
+            // Rich `(a or b)` expressions (RPM >= 4.13): run the name and
+            // version analyses against each referenced leaf instead of the
+            // raw expression string. A plain dependency yields exactly one
+            // leaf identical to the dep itself, so behavior is unchanged.
+            for leaf in dep.leaves() {
+                let leaf_value = leaf.display();
+                if self.use_epoch
+                    && leaf.version.is_some()
+                    && leaf.epoch.is_none()
+                    && !leaf.name.starts_with("rpmlib(")
                 {
                     add_info(
                         out,
-                        Level::Error,
+                        Level::Warning,
                         pkg,
-                        "explicit-lib-dependency",
-                        &[&dep.name],
+                        "no-epoch-in-dependency",
+                        &[&leaf_value],
                     );
                 }
-            }
-            if dep.flags == RPMSENSE_EQUAL && dep.release.is_some() {
-                add_info(out, Level::Warning, pkg, "requires-on-release", &[&value]);
+                // Issue #1443/#1444: check every requirement, not just the first.
+                for req in &self.invalid_requires {
+                    if is_match(req, &leaf.name) {
+                        add_info(out, Level::Error, pkg, "invalid-dependency", &[&leaf.name]);
+                    }
+                }
+                if leaf.name.starts_with("/usr/local/") {
+                    add_info(out, Level::Error, pkg, "invalid-dependency", &[&leaf.name]);
+                }
+                if is_source {
+                    if is_match(&self.lib_devel_number_re, &leaf.name) {
+                        add_info(
+                            out,
+                            Level::Error,
+                            pkg,
+                            "invalid-build-requires",
+                            &[&leaf.name],
+                        );
+                    }
+                } else if !is_devel {
+                    if !devel_depend && is_match(&self.devel_re, &leaf.name) {
+                        add_info(out, Level::Error, pkg, "devel-dependency", &[&leaf.name]);
+                        devel_depend = true;
+                    }
+                    // Issue #1091: replicate the fuzzy lib heuristic exactly.
+                    if leaf.flags == 0
+                        && let Ok(Some(caps)) = self.lib_package_re.captures(&leaf.name)
+                        && caps.get(1).is_none()
+                    {
+                        add_info(
+                            out,
+                            Level::Error,
+                            pkg,
+                            "explicit-lib-dependency",
+                            &[&leaf.name],
+                        );
+                    }
+                }
+                if leaf.flags == RPMSENSE_EQUAL && leaf.release.is_some() {
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "requires-on-release",
+                        &[&leaf_value],
+                    );
+                }
             }
             self.unexpanded_macro(out, pkg, &format!("dependency {value}"), &value);
         }
@@ -1142,9 +1154,9 @@ impl TagsCheck {
         }
     }
 
-    fn check_obsolete_not_provided(&self, pkg: &Pkg, out: &mut Filter, prov_names: &[&str]) {
+    fn check_obsolete_not_provided(&self, pkg: &Pkg, out: &mut Filter, prov_names: &[String]) {
         for obs in &pkg.obsoletes {
-            if !prov_names.contains(&obs.name.as_str()) {
+            if !obs.leaf_names().iter().any(|n| prov_names.contains(n)) {
                 add_info(
                     out,
                     Level::Warning,
@@ -1506,5 +1518,168 @@ mod tests {
         assert_eq!(TagsCheck::lang_for_error("C"), None);
         assert_eq!(TagsCheck::lang_for_error("C.UTF-8"), None);
         assert_eq!(TagsCheck::lang_for_error("de"), Some("de"));
+    }
+}
+
+#[cfg(test)]
+mod rich_dep_emission_tests {
+    use super::*;
+    use crate::color::Color;
+    use crate::pkg::dep::DepInfo;
+    use std::path::Path;
+
+    fn rich_dep(name: &str) -> DepInfo {
+        // What `gather_requires` produces for a rich header entry: the
+        // whole expression in the name, flags 0, no EVR (verified against
+        // rpm 6.1.0: `(foo or bar)` -> name=`(foo or bar)`, flags=0).
+        DepInfo {
+            name: name.to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        }
+    }
+
+    fn rich_test_config(invalid_requires: &[&str], use_epoch: bool) -> Config {
+        let mut config = Config::default();
+        let tbl = &mut config.configuration;
+        tbl.insert(
+            "UseVersionInChangelog".to_string(),
+            toml::Value::Boolean(true),
+        );
+        tbl.insert("UseEpoch".to_string(), toml::Value::Boolean(use_epoch));
+        tbl.insert("MaxLineLength".to_string(), toml::Value::Integer(79));
+        tbl.insert("ValidGroups".to_string(), toml::Value::Array(vec![]));
+        tbl.insert("ValidLicenses".to_string(), toml::Value::Array(vec![]));
+        tbl.insert(
+            "ValidLicenseExceptions".to_string(),
+            toml::Value::Array(vec![]),
+        );
+        tbl.insert(
+            "InvalidRequires".to_string(),
+            toml::Value::Array(
+                invalid_requires
+                    .iter()
+                    .map(|s| toml::Value::String(s.to_string()))
+                    .collect(),
+            ),
+        );
+        config.finalize().expect("fixture config");
+        config
+    }
+
+    fn rich_fixture_pkg(name: &str) -> Pkg {
+        let rpm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs")
+            .join(name);
+        Pkg::open(&rpm_path, &std::env::temp_dir(), true).expect("open fixture pkg")
+    }
+
+    fn run(pkg: &Pkg, config: &Config) -> Vec<(String, String)> {
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(config);
+        check.check(pkg, config, &mut out);
+        out.results().to_vec()
+    }
+
+    fn named<'a>(results: &'a [(String, String)], name: &str) -> Vec<&'a (String, String)> {
+        results.iter().filter(|(n, _)| n == name).collect()
+    }
+
+    #[test]
+    fn invalid_dependency_matches_rich_leaf() {
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires.push(rich_dep("(badpkg or goodpkg)"));
+        let config = rich_test_config(&["^badpkg$"], false);
+        let results = run(&pkg, &config);
+        let hits = named(&results, "invalid-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": E: invalid-dependency"),
+            "line: {}",
+            hits[0].1
+        );
+        assert!(hits[0].1.ends_with(" badpkg"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn devel_dependency_matches_rich_leaf() {
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        assert!(
+            !is_match(&devel_regex(), &pkg.name),
+            "fixture must not be a devel package"
+        );
+        pkg.requires.push(rich_dep("(somelib-devel or plainx)"));
+        let config = rich_test_config(&[], false);
+        let results = run(&pkg, &config);
+        let hits = named(&results, "devel-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": E: devel-dependency"),
+            "line: {}",
+            hits[0].1
+        );
+        assert!(hits[0].1.ends_with(" somelib-devel"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn requires_on_release_uses_leaf_constraint() {
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires.push(rich_dep("(relfoo = 1.0-2 or relbar)"));
+        let config = rich_test_config(&[], false);
+        let results = run(&pkg, &config);
+        let hits = named(&results, "requires-on-release");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": W: requires-on-release"),
+            "line: {}",
+            hits[0].1
+        );
+        assert!(
+            hits[0].1.ends_with(" relfoo = 1.0-2"),
+            "line: {}",
+            hits[0].1
+        );
+    }
+
+    #[test]
+    fn no_epoch_in_dependency_uses_leaf_constraint() {
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires.push(rich_dep("(epochfoo >= 1.0 or plainy)"));
+        let config = rich_test_config(&[], true);
+        let results = run(&pkg, &config);
+        let hits = named(&results, "no-epoch-in-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": W: no-epoch-in-dependency"),
+            "line: {}",
+            hits[0].1
+        );
+        assert!(
+            hits[0].1.ends_with(" epochfoo >= 1.0"),
+            "line: {}",
+            hits[0].1
+        );
+    }
+
+    #[test]
+    fn qualifier_name_matches_literally_like_reference() {
+        // `qux(meta)` keeps its literal name for analyses (the reference
+        // matches the raw string too); the qualifier is only additionally
+        // structured on the leaf.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires.push(rich_dep("qux(meta)"));
+        let config = rich_test_config(&["^qux$"], false);
+        let results = run(&pkg, &config);
+        assert!(
+            named(&results, "invalid-dependency").is_empty(),
+            "all: {results:?}"
+        );
+        let config = rich_test_config(&["^qux\\(meta\\)$"], false);
+        let results = run(&pkg, &config);
+        let hits = named(&results, "invalid-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(hits[0].1.ends_with(" qux(meta)"), "line: {}", hits[0].1);
     }
 }
