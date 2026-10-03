@@ -871,6 +871,30 @@ def test_renamed_systemd_producer_makes_the_site_unresolved():
     assert [u[2] for u in unresolved] == ["finding"], unresolved
 
 
+def test_stale_check_catches_name_keyed_entry():
+    # The staleness check must mark an entry stale when the port emits the
+    # finding of a kind="missing" ledger entry -- whether that entry is keyed
+    # by finding name (the majority: 6 of 7 missing entries) or by module.
+    mod = _load()
+    # A finding whose NAME matches a name-keyed missing entry, but whose
+    # MODULE does not, IS stale (with exact pattern).
+    assert mod.is_stale_entry(
+        "SomeOtherCheck", "inaccessible-filename", {"inaccessible-filename"},
+        {"inaccessible-filename"}
+    ), "name-keyed match should be stale"
+    # A finding whose MODULE matches a module-keyed missing entry IS stale
+    # (with exact pattern).
+    assert mod.is_stale_entry(
+        "BuildRootAndDateCheck", "some-finding", {"BuildRootAndDateCheck"},
+        {"some-finding"}
+    ), "module match should be stale"
+    # Wildcard patterns do not count.
+    assert not mod.is_stale_entry(
+        "BuildRootAndDateCheck", "some-finding", {"BuildRootAndDateCheck"},
+        {"some-*"}
+    ), "wildcard should not mark stale"
+
+
 def main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]
