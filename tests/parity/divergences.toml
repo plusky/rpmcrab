@@ -619,3 +619,11 @@ kind = "behaviour"
 reason = "The suspicious-dir regex widens the build-dir component from \\w+ to [\\w.-]+ so hyphenated/dotted directories like /usr/src/linux-6.1/BUILD match. The reference (PkgConfigCheck.py:11) uses \\w and misses these — the common case for kernel builds — so this is a deliberate fix for reference under-reporting, not a porting gap."
 since = "0.1.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/44"
+
+[[divergence]]
+case = "global"
+check = "non-conffile-in-etc"
+kind = "behaviour"
+reason = "Files under /etc/alternatives/ are exempt: they are managed by the alternatives system, not hand-edited config, and flagging them is wrong (rpmlint#1137, still open upstream). The /etc/ld.so.conf.d/ exemption is reference parity, not a divergence."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/1137"
