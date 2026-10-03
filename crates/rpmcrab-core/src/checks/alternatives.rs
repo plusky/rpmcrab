@@ -509,6 +509,7 @@ mod tests {
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm"),
             &std::env::temp_dir(),
+            true,
         )
         .expect("open fixture pkg");
         pkg.name = "alternatives-test".to_string();
