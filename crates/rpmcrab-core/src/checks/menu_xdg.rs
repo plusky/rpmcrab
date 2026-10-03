@@ -269,6 +269,10 @@ impl Check for MenuXDGCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    use crate::color::Color;
+    use crate::pkg::pkgfile::PkgFile;
 
     #[test]
     fn valid_desktop_parses() {
@@ -363,5 +367,39 @@ mod tests {
             &check.file_regex,
             "/opt/vendor/usr/share/applications/v.desktop"
         ));
+    }
+
+    #[test]
+    fn non_utf8_desktopfile_is_pinned() {
+        // Nothing pins the finding name, level, or the Unicode error prefix,
+        // so the divergence entry can rot silently. Pin all three: an
+        // invalid-UTF-8 payload must surface as Level::Error
+        // non-utf8-desktopfile with a Unicode error detail.
+        let dir = std::env::temp_dir();
+        let path = dir.join("rpmcrab-menuxdg-nonutf8.desktop");
+        std::fs::write(&path, b"[Desktop Entry]\nName=\xff\xfe\n").unwrap();
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir()).expect("open fixture pkg");
+        let name = "/usr/share/applications/broken.desktop";
+        pkg.files = vec![PkgFile {
+            name: name.to_string(),
+            path: path.to_str().unwrap().to_string(),
+            ..Default::default()
+        }];
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = MenuXDGCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(results.len(), 1, "unexpected results: {results:?}");
+        assert_eq!(results[0].0, "non-utf8-desktopfile");
+        assert!(results[0].1.contains(": E: "), "level: {}", results[0].1);
+        assert!(
+            results[0].1.contains("Unicode error:"),
+            "prefix: {}",
+            results[0].1
+        );
     }
 }
