@@ -655,6 +655,12 @@ mod menu_icon_xdg_tests {
     /// (`icon="?([^" ]+)` / `xdg="?([^" ]+)`). This pins that unquoted
     /// values parse instead of falling through to the spurious
     /// `no-icon-in-menu` (Warning) / `non-xdg-migrated-menu` (Error).
+    ///
+    /// Mutation trap: rewriting the pattern with more hashes
+    /// (`r##"icon="?([^" ]+)"##`) is a no-op -- the terminator changes
+    /// but the compiled pattern is byte-identical, so it proves nothing.
+    /// The mutation that genuinely adds a trailing `"` to the pattern
+    /// needs an escaped normal string; these tests fail on that.
     #[test]
     fn unquoted_icon_and_xdg_are_quiet() {
         let findings = menu_line_findings("foo.png", "true");

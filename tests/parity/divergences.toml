@@ -311,7 +311,7 @@ since = "0.1.0"
 case = "global"
 check = "tmpfile-not-in-filelist"
 kind = "behaviour"
-reason = "The reference emits one tmpfile-not-in-filelist finding per config line, in file order, including duplicates; the port sorts and dedups the missing paths so the output is deterministic."
+reason = "The reference (TmpFilesCheck._check_tmpfile_in_filelist) emits one finding per matching tmpfiles.d line, preserving duplicates and file order; the port collects the missing paths, then sorts and dedups them, emitting one finding per path in sorted order. Duplicate lines for the same path produce one finding instead of several, and findings come out sorted rather than in file order."
 since = "0.1.0"
 
 [[divergence]]
@@ -706,7 +706,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-
 check = "read-error"
 kind = "detail"
 reason = "InitScriptCheck's read-error detail: both reference sites raise from open(path,'rb'), and Filter.add_info renders the exception with f-string interpolation, so the reference emits Python's str(OSError) including the filename -- e.g. [Errno 13] Permission denied: '/etc/init.d/probe' (InitScriptCheck.py:108, via helpers.readlines). The port reformats through os_error_detail() to [Errno 13] Permission denied, matching the reference's prefix form but dropping the filename."
@@ -720,8 +719,10 @@ kind = "detail"
 reason = "FilesCheck.peek's read-error detail: the reference emits Python's str(OSError) including the filename -- e.g. [Errno 13] Permission denied: '/p' (FilesCheck.py:430, from open(path,'rb')). The port passes std::io::Error's Display (Permission denied (os error 13)), dropping both the [Errno N] prefix and the filename."
 since = "0.1.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/72"
+
+[[divergence]]
+case = "global"
 check = "SystemdTmpfilesCheck"
 kind = "behaviour"
-reason = "When the SystemdTmpfiles config section is absent the reference raises KeyError (SystemdTmpfilesCheck.py:62-63) and the whole check fails; the port falls back to the reference's own shipped defaults (DropinDirs /usr/lib/tmpfiles.d + /etc/tmpfiles.d, empty IgnorePackages) so the check still runs. A linter must not die on a missing optional config section."
+reason = "When the SystemdTmpfiles config section is absent the reference raises KeyError (SystemdTmpfilesCheck.py:39) and the whole check fails; the port falls back to the reference's own shipped defaults (DropinDirs /usr/lib/tmpfiles.d + /etc/tmpfiles.d, empty IgnorePackages) so the check still runs. A linter must not die on a missing optional config section."
 since = "0.1.0"
-
