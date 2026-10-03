@@ -1021,7 +1021,11 @@ impl TagsCheck {
         }
         let times = crate::pkg::tags::int32_array(header, Tag::CHANGELOGTIME);
         if let Some(&first) = times.first() {
-            let mut clt_time = first as i64 - 26 * 3600;
+            // Roll back 26h to cover timezone differences, mirroring the
+            // reference (TagsCheck.py): the largest tz gap is 26h (Howland
+            // Islands vs Line Islands). Both comparisons below use the
+            // rolled-back value.
+            let clt_time = first as i64 - 26 * 3600;
             if clt_time < OLDEST_CHANGELOG_TIMESTAMP {
                 add_info(
                     out,
@@ -1031,12 +1035,11 @@ impl TagsCheck {
                     &[&format_date(clt_time)],
                 );
             } else {
-                clt_time = first as i64;
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
-                if clt_time > now {
+                if changelog_in_future(first as i64, now) {
                     add_info(
                         out,
                         Level::Error,
@@ -1285,6 +1288,13 @@ fn split_url(url: &str) -> (String, String) {
     }
 }
 
+/// Whether a changelog timestamp is in the future, after the reference's
+/// 26h timezone rollback (TagsCheck.py). `now` is a parameter so the rollback
+/// stays unit-testable without depending on the wall clock.
+fn changelog_in_future(changelog_time: i64, now: i64) -> bool {
+    changelog_time - 26 * 3600 > now
+}
+
 /// Format a Unix timestamp as `YYYY-MM-DD` (UTC).
 fn format_date(ts: i64) -> String {
     // Days since epoch, Howard Hinnant's algorithm.
@@ -1373,6 +1383,17 @@ mod tests {
                 "level: {line}"
             );
         }
+    }
+
+    #[test]
+    fn changelog_in_future_applies_tz_rollback() {
+        let now = 1_700_000_000;
+        // Up to 26h ahead of now is a timezone artifact, not a future date.
+        assert!(!changelog_in_future(now + 3600, now));
+        assert!(!changelog_in_future(now + 26 * 3600, now));
+        // Beyond 26h is genuinely in the future.
+        assert!(changelog_in_future(now + 26 * 3600 + 1, now));
+        assert!(!changelog_in_future(now - 3600, now));
     }
 
     #[test]
