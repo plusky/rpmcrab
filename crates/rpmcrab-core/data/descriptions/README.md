@@ -15,6 +15,9 @@ Provenance, verified against the pinned reference (`84848c0`):
   `descriptions/CheckForXinetd.toml`, renamed to the module name.
 - `I18NCheck.toml` — the reference file plus the `incorrect-locale-subdir`
   block that `checks/i18n.rs` emits.
+- `ConfigFilesCheck.toml` — the reference file, except `non-etc-or-var-file-marked-as-conffile`
+  carries the reword from upstream #1606 (drop `%config` named as an option),
+  staged ahead of the reference per the fix-in-port rule.
 
 Nothing references these files: no `include_str!` points at this directory
 (the only mention is a comment in `crates/rpmcrab-core/src/term.rs` tests),
