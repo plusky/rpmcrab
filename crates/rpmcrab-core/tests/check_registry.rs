@@ -201,14 +201,10 @@ fn every_constructible_check_is_listed_in_checks() {
 /// The reverse direction (issue #85): a name in the default config's
 /// `Checks = [...]` that `check::build` cannot construct is silently
 /// dropped by `load_with`, so the run advertises checks that never execute.
-/// `SignatureCheck` is exempt: it is genuinely on its way in via PR #64.
 #[test]
 fn every_listed_check_is_constructible() {
     let built = names_built_by_registry();
     for name in checks_in_default_config() {
-        if name == "SignatureCheck" {
-            continue;
-        }
         assert!(
             built.contains(&name),
             "`{name}` is listed in `Checks = [...]` in configdefaults.toml \

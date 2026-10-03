@@ -569,6 +569,20 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "BuildRootAndDateCheck"
+kind = "behaviour"
+reason = "today_string() derives the date from UTC, while the reference's time.strftime('%b %e %Y') is local time. On hosts east of UTC the two disagree for 22:00-24:00 UTC, which moves which files trigger file-contains-current-date and file-contains-date-and-time. W-level today, but a real byte-level difference. Fixing it needs a timezone database or libc localtime; the workspace forbids unsafe_code, so this stays ledgered."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "BuildRootAndDateCheck"
+kind = "behaviour"
+reason = "today_string() hardcodes English month abbreviations, while the reference inherits the ambient locale for %b (BuildRootAndDateCheck.__init__ is one of the few places the reference does not apply ENGLISH_ENVIRONMENT). On non-English locales the reference matches e.g. 'Okt' where the port matches 'Oct'."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "config"
 kind = "behaviour"
 reason = "PermissiveByDefault, SkipPackagePatterns, RpmlintrcSearchPaths and SuppressExtractionStderr are real config keys instead of hardcoded SUSE behaviour. The bundled defaults carry the openSUSE flavour values: permissive forced unless -s/--strict (exit 64/65), the rpmlint-package skip guard, rpmlintrc auto-discovery over the two SOURCES dirs, and extraction stderr discarded even in verbose mode. Non-default values are new surface with no reference counterpart. One pre-existing gap rides along unchanged: the reference gates its SOURCES auto-discovery on PYTEST_XDIST_TESTRUNUID (lint.py:205) and rpmcrab never implemented that gate, on main or here."

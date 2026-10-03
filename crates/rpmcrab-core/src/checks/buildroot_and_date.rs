@@ -94,6 +94,10 @@ impl Check for BuildRootAndDateCheck {
             if filename.starts_with("/usr/lib/debug") || !is_reg(f.mode) {
                 continue;
             }
+            // AbstractCheck.py:45 drops ghosts before check_file dispatches.
+            if pkg.ghost_files.iter().any(|g| g == filename) {
+                continue;
+            }
             let data = pkg.read_file(filename);
             if is_match(&self.istoday, &data) {
                 if is_match(&self.looksliketime, &data) {
@@ -155,7 +159,7 @@ mod tests {
     fn findings_for_content(name: &str, content: &str) -> Vec<(String, String)> {
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
-        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir()).expect("open fixture pkg");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
         // The extraction base dir: PkgFile.path is normpath(dir + "/" + name).
         let first = &pkg.files[0];
         let base = first
