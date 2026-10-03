@@ -271,6 +271,15 @@ impl Pkg {
         guarded(|| Self::read(path, extract_dir, suppress_stderr))
     }
 
+    /// Open a fixture RPM's header without extracting its payload.
+    /// For tests that overwrite `files` wholesale: header tags are read, but
+    /// no tempdir is created and no extraction subprocess runs
+    /// (`PkgSource::LiveRoot`, the same path `ExtractDir = "/"` takes).
+    #[cfg(test)]
+    pub fn open_no_extract(path: &Path) -> Result<Self, PkgError> {
+        Self::open(path, Path::new("/"), true)
+    }
+
     /// The body of [`Pkg::open`], run under [`guarded`].
     fn read(path: &Path, extract_dir: &Path, suppress_stderr: bool) -> Result<Self, PkgError> {
         let header = PackageHeader::from_file(path, Some(&VerifyOptions::skip_verification()))
