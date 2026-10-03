@@ -612,3 +612,11 @@ kind = "behaviour"
 reason = "The suspicious-dir regex widens the build-dir component from \\w+ to [\\w.-]+ so hyphenated/dotted directories like /usr/src/linux-6.1/BUILD match. The reference (PkgConfigCheck.py:11) uses \\w and misses these — the common case for kernel builds — so this is a deliberate fix for reference under-reporting, not a porting gap."
 since = "0.1.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/44"
+
+[[divergence]]
+case = "global"
+check = "TagsCheck"
+kind = "behaviour"
+reason = "License: expressions are split into paren-aware leaves before validation, and each leaf gets its own WITH-exception match plus validity check. The reference matches the exception regex against the whole string and then validates only the pre-WITH part, so sibling leaves (an invalid license in another paren group, a trailing tail after a WITH expression) are silently dropped from validation."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/676"
