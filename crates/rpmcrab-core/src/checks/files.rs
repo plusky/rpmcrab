@@ -879,14 +879,21 @@ const STANDARD_DIRS: &[&str] = &[
 /// Packages allowed to own standard directories.
 const FILESYS_PACKAGES: &[&str] = &["filesystem"];
 
+/// Scan window for the whole-file incorrect-fsf-address scan: the file is
+/// streamed in windows of this size so peak memory stays bounded no matter
+/// how large the file is.
+const FSF_SCAN_WINDOW: usize = 8192;
+/// Overlap between consecutive FSF scan windows. Any match of at most this
+/// many bytes straddling a window boundary is still seen whole inside one
+/// window; the FSF patterns only match fixed license/address phrases of tens
+/// of bytes joined by short whitespace runs, so this is ample headroom.
+const FSF_SCAN_OVERLAP: usize = 1024;
+
 /// Per-normal-file scratch state, mirroring the reference's `_file_*`
 /// attributes.
 #[derive(Default)]
 struct FileData {
     chunk: Vec<u8>,
-    /// Whole file content, for checks that scan past the 2048-byte chunk
-    /// (incorrect-fsf-address, upstream rpmlint#40).
-    full_bytes: Vec<u8>,
     istext: bool,
     interpreter: Option<String>,
     interpreter_args: String,
@@ -903,38 +910,94 @@ fn is_peek_printable(b: u8) -> bool {
 impl FilesCheck {
     /// Read up to 2048 bytes and decide text-vs-binary, mirroring the
     /// reference's `peek` (including its `read-error` on `OSError`).
-    ///
-    /// The full file bytes are returned alongside the chunk: the
-    /// incorrect-FSF-address check scans the whole file (upstream rpmlint#40;
-    /// the reference only scans its 2048-byte chunk).
-    fn peek(&self, pkg: &Pkg, pkgfile: &PkgFile, out: &mut Filter) -> (Vec<u8>, bool, Vec<u8>) {
+    fn peek(&self, pkg: &Pkg, pkgfile: &PkgFile, out: &mut Filter) -> (Vec<u8>, bool) {
         let bytes = match std::fs::read(&pkgfile.path) {
             Ok(b) => b,
             Err(e) => {
                 add_info(out, Level::Warning, pkg, "read-error", &[&e.to_string()]);
-                return (Vec::new(), false, Vec::new());
+                return (Vec::new(), false);
             }
         };
-        let chunk: Vec<u8> = bytes.iter().take(2048).copied().collect();
+        let chunk: Vec<u8> = bytes.into_iter().take(2048).collect();
         if chunk.contains(&0) {
-            return (chunk, false, bytes);
+            return (chunk, false);
         }
         if chunk.is_empty() {
-            return (chunk, true, bytes);
+            return (chunk, true);
         }
         let lower = pkgfile.path.to_lowercase();
         if lower.ends_with(".pdf") && chunk.starts_with(b"%PDF-") {
-            return (chunk, false, bytes);
+            return (chunk, false);
         }
         if lower.ends_with(".ri") && lower.contains("/ri/") {
-            return (chunk, false, bytes);
+            return (chunk, false);
         }
         if lower.ends_with(".inv") && chunk.starts_with(b"# Sphinx inventory") {
-            return (chunk, false, bytes);
+            return (chunk, false);
         }
         let control = chunk.iter().filter(|b| !is_peek_printable(**b)).count();
         let istext = control as f64 / chunk.len() as f64 <= 0.30;
-        (chunk, istext, bytes)
+        (chunk, istext)
+    }
+
+    /// Scan the whole file for the FSF license and wrong-address patterns in
+    /// bounded windows.
+    ///
+    /// Upstream rpmlint#40: the reference searches only its 2048-byte peek
+    /// chunk, so a stale FSF address past byte 2048 goes unreported. The port
+    /// scans the whole file instead (divergences.toml), but streams it in
+    /// `FSF_SCAN_WINDOW`-byte windows: each window is lossy-decoded and
+    /// regex-scanned on its own, so peak memory is one window plus overlap
+    /// regardless of file size -- the file is never materialized whole, let
+    /// alone twice via a lossy UTF-8 copy.
+    ///
+    /// Consecutive windows overlap by `FSF_SCAN_OVERLAP` bytes, so a match
+    /// straddling a window boundary is still found whole inside one window.
+    /// A file that cannot be opened, or a read that fails mid-scan, reports
+    /// `read-error` through the same plumbing `peek` uses, and the check is
+    /// skipped loudly rather than on an empty buffer.
+    ///
+    /// Returns true when both patterns match anywhere in the file, mirroring
+    /// the reference's boolean `search() and search()`: one finding per file,
+    /// never per match.
+    fn fsf_address_matches(&self, pkg: &Pkg, pkgfile: &PkgFile, out: &mut Filter) -> bool {
+        let mut file = match std::fs::File::open(&pkgfile.path) {
+            Ok(f) => f,
+            Err(e) => {
+                add_info(out, Level::Warning, pkg, "read-error", &[&e.to_string()]);
+                return false;
+            }
+        };
+        // One window plus the overlap carried over from the previous window.
+        let mut window = vec![0u8; FSF_SCAN_WINDOW + FSF_SCAN_OVERLAP];
+        let mut carry = 0usize;
+        let mut found_license = false;
+        let mut found_address = false;
+        loop {
+            let n =
+                match std::io::Read::read(&mut file, &mut window[carry..FSF_SCAN_WINDOW + carry]) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(e) => {
+                        add_info(out, Level::Warning, pkg, "read-error", &[&e.to_string()]);
+                        return false;
+                    }
+                };
+            let len = carry + n;
+            let text = String::from_utf8_lossy(&window[..len]);
+            if !found_license && is_match(&self.fsf_license_re, text.as_ref()) {
+                found_license = true;
+            }
+            if !found_address && is_match(&self.fsf_wrong_address_re, text.as_ref()) {
+                found_address = true;
+            }
+            if found_license && found_address {
+                return true;
+            }
+            carry = len.min(FSF_SCAN_OVERLAP);
+            window.copy_within(len - carry..len, 0);
+        }
+        found_license && found_address
     }
 }
 
@@ -1692,7 +1755,7 @@ impl FilesCheck {
         if !pkgfile::is_reg(realbin.mode) {
             return;
         }
-        let (chunk, _istext, _full) = self.peek(pkg, realbin, out);
+        let (chunk, _istext) = self.peek(pkg, realbin, out);
         let (interpreter, _) = script_interpreter(&chunk);
         // Not a script with shebang, so ignore
         let Some(interpreter) = interpreter else {
@@ -1889,10 +1952,9 @@ impl FilesCheck {
         // The reference's UnicodeError branch has no Rust equivalent: paths
         // are handled as bytes, so it cannot fail that way (divergences.toml).
         if std::fs::File::open(&pkgfile.path).is_ok() {
-            let (chunk, istext, full_bytes) = self.peek(pkg, pkgfile, out);
+            let (chunk, istext) = self.peek(pkg, pkgfile, out);
             fd.chunk = chunk;
             fd.istext = istext;
-            fd.full_bytes = full_bytes;
         }
         let (interpreter, args) = script_interpreter(&fd.chunk);
         fd.interpreter = interpreter;
@@ -2612,11 +2674,9 @@ impl FilesCheck {
         }
         // Upstream rpmlint#40: the reference scans only its 2048-byte peek
         // chunk for the FSF address, missing it in longer files. The port
-        // scans the whole file instead.
-        let text = String::from_utf8_lossy(&fd.full_bytes);
-        if is_match(&self.fsf_license_re, text.as_ref())
-            && is_match(&self.fsf_wrong_address_re, text.as_ref())
-        {
+        // scans the whole file instead (divergences.toml), streaming it in
+        // bounded windows so a large file never sits in memory twice.
+        if self.fsf_address_matches(pkg, pkgfile, out) {
             add_info(out, Level::Error, pkg, "incorrect-fsf-address", &[fname]);
         }
     }
@@ -2842,6 +2902,47 @@ mod tests {
                 "fsf-address-fixture.noarch: E: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-late",
             ],
         );
+    }
+
+    #[test]
+    fn fsf_address_match_survives_window_boundary() {
+        // The whole-file FSF scan streams in FSF_SCAN_WINDOW-byte windows with
+        // FSF_SCAN_OVERLAP bytes of overlap: a wrong-address match straddling
+        // a window boundary must still be found whole inside one window.
+        // Without the overlap this fails (neither window sees "Place" whole).
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
+        let pkg = Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = FilesCheck::new(&config);
+
+        // "59 Temple Place" starts 4 bytes before the first window ends, so
+        // the address match spans the 8192-byte boundary.
+        let mut content = vec![b'x'; FSF_SCAN_WINDOW - 4];
+        content.extend_from_slice(b"59 Temple Place, Suite 330, Boston, MA 02111-1307 USA");
+        content.extend_from_slice(b"\nGNU General Public License\n");
+        let path = dir.path().join("boundary.txt");
+        std::fs::write(&path, &content).expect("write temp file");
+        let pkgfile = PkgFile {
+            path: path.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        assert!(check.fsf_address_matches(&pkg, &pkgfile, &mut out));
+
+        // Sanity: the license phrase alone, with no street address, stays
+        // silent.
+        let ok_path = dir.path().join("ok.txt");
+        std::fs::write(
+            &ok_path,
+            b"GNU General Public License\nno street address here\n",
+        )
+        .expect("write temp file");
+        let ok_file = PkgFile {
+            path: ok_path.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        assert!(!check.fsf_address_matches(&pkg, &ok_file, &mut out));
     }
 
     #[test]

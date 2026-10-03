@@ -639,6 +639,7 @@ upstream = "https://github.com/plusky/rpmcrab/issues/44"
 
 [[divergence]]
 case = "global"
+
 check = "PythonCheck"
 kind = "behaviour"
 reason = "For a requires.txt requirement that already carries a marker inside a named extra section, the reference (`_convert_egg_info_reqs_to_simple_reqs` in CPython's importlib.metadata, still used by rpmlint 2.10.0's `Distribution.requires` for egg-info) appends the section condition as a second `;`-part verbatim: `w6extra; python_version > \"3.9\"; (sys_platform == \"linux\") and extra == \"extra\"` (verified against CPython 3.13.14). The port stores the post-first-`;` marker text verbatim instead of merging everything into one `and`ed marker. Parity, not a logical divergence: both forms carry the `extra ==` condition so the port skips them identically, and the reference itself drops the double-semicolon string as InvalidRequirement, so findings are unaffected either way. Pinned by emission-path tests."
@@ -726,3 +727,11 @@ check = "SystemdTmpfilesCheck"
 kind = "behaviour"
 reason = "When the SystemdTmpfiles config section is absent the reference raises KeyError (SystemdTmpfilesCheck.py:39) and the whole check fails; the port falls back to the reference's own shipped defaults (DropinDirs /usr/lib/tmpfiles.d + /etc/tmpfiles.d, empty IgnorePackages) so the check still runs. A linter must not die on a missing optional config section."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "incorrect-fsf-address"
+kind = "behaviour"
+reason = "The port scans the whole file for the FSF license and wrong-address patterns; the reference (FilesCheck.py:1393-1395) searches only its 2048-byte peek chunk, so a stale FSF address past byte 2048 goes unreported. Deliberate fix-in-port of upstream rpmlint#40, open since 2013: the peek limit lets wrong addresses through in longer files."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/40"
