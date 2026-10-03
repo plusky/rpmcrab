@@ -66,11 +66,17 @@ impl BuildRootAndDateCheck {
         } else {
             buildroot
         };
+        Self::with_buildroot(&buildroot)
+    }
+
+    /// The macro expansion is platform-dependent (empty on rpm >= 4.20,
+    /// the ambient buildroot otherwise), so tests pin it via this seam.
+    fn with_buildroot(buildroot: &str) -> Self {
         Self {
             looksliketime: Regex::new(r"(2[0-3]|[01]?[0-9]):([0-5]?[0-9]):([0-5]?[0-9])")
                 .expect("static"),
             istoday: Regex::new(&today_string()).expect("static"),
-            lookslikebuildroot: buildroot_regex(&buildroot),
+            lookslikebuildroot: buildroot_regex(buildroot),
         }
     }
 }
@@ -168,7 +174,8 @@ mod tests {
         }];
         let config = Config::default();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let mut check = BuildRootAndDateCheck::new(&config);
+        let mut check =
+            BuildRootAndDateCheck::with_buildroot("/%{NAME}-%{VERSION}-build/BUILDROOT/");
         check.check_binary(&pkg, &config, &mut out);
         out.results().to_vec()
     }
