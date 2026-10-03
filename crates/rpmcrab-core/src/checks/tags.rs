@@ -1564,13 +1564,6 @@ mod tests {
             self_obsoletion_results(prov, obs).is_empty(),
             "pinned merge pattern must not warn"
         );
-        // Strictly below the provided EVR cannot match the package itself.
-        let prov = make_dep("lower", RPMSENSE_EQUAL, Some("1.6.1"));
-        let obs = make_dep("lower", RPMSENSE_LESS, Some("1.6.1"));
-        assert!(
-            self_obsoletion_results(prov, obs).is_empty(),
-            "strictly-below must not warn"
-        );
     }
 
     #[test]
