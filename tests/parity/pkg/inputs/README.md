@@ -20,6 +20,7 @@ each exercising a particular check behavior.
 | `libnodoc-test-1.0-1.noarch.rpm` | lib package without docs |
 | `liboutsidelib-test-1.0-1.noarch.rpm` | lib package with non-lib files |
 | `unexpandedmacro-test-1.0-1.noarch.rpm` | Unexpanded macros in filenames |
+| `richdep-fixture-1.0-1.noarch.rpm` | Rich deps `(foo or bar)`, `(baz >= 1.0 with baz < 2.0)`, nested, `qux(meta)` (#49/#429) |
 
 ## Regeneration
 

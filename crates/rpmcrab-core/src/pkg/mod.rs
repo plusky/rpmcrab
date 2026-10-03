@@ -916,3 +916,61 @@ mod tests {
         assert_eq!(t.get(EXTRACT_RPM), 1.5);
     }
 }
+
+#[cfg(test)]
+mod rich_dep_fixture_tests {
+    use crate::pkg::Pkg;
+    use std::path::Path;
+
+    fn open_fixture() -> Pkg {
+        let rpm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/richdep-fixture-1.0-1.noarch.rpm");
+        Pkg::open(&rpm_path, &std::env::temp_dir(), true).expect("open richdep fixture")
+    }
+
+    #[test]
+    fn header_rich_deps_parse_to_leaves() {
+        // Built by tests/parity/pkg/inputs/build-richdep-fixture.sh in an
+        // openSUSE container; the header stores each expression whole in
+        // REQUIRENAME with flags 0 (verified with `rpm -qp --requires`).
+        let pkg = open_fixture();
+        let by_name = |want: &str| {
+            pkg.requires
+                .iter()
+                .find(|d| d.name == want)
+                .unwrap_or_else(|| panic!("missing require {want:?}"))
+        };
+
+        let dep = by_name("(foo or bar)");
+        assert_eq!(dep.flags, 0);
+        assert_eq!(dep.leaf_names(), vec!["foo".to_string(), "bar".to_string()]);
+
+        let dep = by_name("(baz >= 1.0 with baz < 2.0)");
+        let leaves = dep.leaves();
+        assert_eq!(leaves.len(), 2);
+        assert_eq!(leaves[0].name, "baz");
+        assert_eq!(leaves[0].version.as_deref(), Some("1.0"));
+        assert_eq!(leaves[1].version.as_deref(), Some("2.0"));
+
+        let dep = by_name("(outer and (inner1 or inner2))");
+        assert_eq!(
+            dep.leaf_names(),
+            vec![
+                "outer".to_string(),
+                "inner1".to_string(),
+                "inner2".to_string()
+            ]
+        );
+
+        let dep = by_name("qux(meta)");
+        assert_eq!(dep.leaf_names(), vec!["qux(meta)".to_string()]);
+        assert_eq!(dep.leaves()[0].qualifier.as_deref(), Some("meta"));
+
+        // rpm auto-adds these; the port must keep them literal.
+        let dep = by_name("rpmlib(RichDependencies)");
+        assert_eq!(
+            dep.leaf_names(),
+            vec!["rpmlib(RichDependencies)".to_string()]
+        );
+    }
+}
