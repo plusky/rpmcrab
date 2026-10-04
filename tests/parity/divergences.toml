@@ -1,3 +1,13 @@
+# INTENT — not a live divergence; do not convert to [[divergence]] until wired.
+# `crates/rpmcrab-core/data/descriptions/ConfigFilesCheck.toml` stages the
+# upstream rpmlint#1606 reword of `non-etc-or-var-file-marked-as-conffile`
+# ahead of the reference (provenance: `crates/rpmcrab-core/data/descriptions/README.md`).
+# Nothing reads those staged files at runtime yet, so there is no emitted
+# difference from the reference to ledger. When the M2 `--explain` work wires
+# the staged descriptions up, replace this note with a real [[divergence]]
+# entry for the reword (kind = "detail": the wording differs from the pinned
+# reference while the check behaviour does not). Refs: plusky/rpmcrab#171.
+
 [[divergence]]
 case = "global"
 check = "pkg-layer"
@@ -651,7 +661,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/issues/1137"
 
 [[divergence]]
 case = "global"
-check = "PostCheck"
+check = "pretrans-not-lua"
 kind = "behaviour"
 reason = "Emits E: pretrans-not-lua when a %pretrans scriptlet is not written in Lua (upstream rpmlint#396, rationale rpm#714): %pretrans runs before any payload is installed, so only the internal Lua interpreter is guaranteed to exist. The reference 2.10.0 has no such check — #396 is still open upstream — so this is a deliberate fix-in-port, not a parity gap."
 since = "0.1.0"
