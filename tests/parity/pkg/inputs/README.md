@@ -14,6 +14,7 @@ each exercising a particular check behavior.
 | `filescheck-deps-ok-1.0-1.noarch.rpm` | Dependency checks |
 | `filescheck-installinfo-*.rpm` | install-info scriptlet variants |
 | `filescheck-scripts-1.0-1.noarch.rpm` | Scriptlet content checks |
+| `postcheck-pretrans-lua-1.0-1.noarch.rpm` | `%pretrans -p <lua>` stays silent (pretrans-not-lua, #140) |
 | `ldconfig-test-1.0-1.noarch.rpm` | ldconfig scriptlet handling (#1602) |
 | `dbus-parity-1.0-1.noarch.rpm` | DBusPolicyCheck: two `<policy>` elements, one send-allow + one deny-only (issue #58 B1); toxml() detail (B3) |
 | `parity-1.0-1.noarch.rpm` | InitScriptCheck: init script + `%post`/`%preun` bodies with `-p` interpreters — body wins (issue #58 B2) |

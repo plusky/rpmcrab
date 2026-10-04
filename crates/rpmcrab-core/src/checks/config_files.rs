@@ -85,4 +85,31 @@ mod tests {
             ]
         );
     }
+    #[test]
+    fn staged_description_carries_1606_reword() {
+        // Staged for the M2 `--explain` wiring (see data/descriptions/README.md).
+        // Upstream #1606 reworded this entry to name dropping `%config` as an
+        // option, not just moving files; the other entry stays byte-identical
+        // to the reference (pinned rpmlint@84848c0).
+        let raw = include_str!("../../data/descriptions/ConfigFilesCheck.toml");
+        let table: toml::Table = raw.parse().expect("staged descriptions are valid toml");
+        assert_eq!(
+            table["non-etc-or-var-file-marked-as-conffile"].as_str(),
+            Some(
+                "A file not in /etc or /var is marked as being a configuration file (%config).\n\
+                 Put your configuration files in /etc or /var, or remove the %config attribute\n\
+                 from the corresponding line in the %files section.\n"
+            )
+        );
+        assert_eq!(
+            table["conffile-without-noreplace-flag"].as_str(),
+            Some(
+                "A configuration file is stored in your package without the noreplace flag.\n\
+                 This flag tells RPM not to overwrite or replace a configuration file to protect\n\
+                 local modifications.\n\
+                 A way to resolve this is to put the following in your SPEC file:\n\
+                 %config(noreplace) /etc/your_config_file_here\n"
+            )
+        );
+    }
 }

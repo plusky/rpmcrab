@@ -54,3 +54,12 @@ name = "w6-python"
 
 [[case]]
 name = "w6-systemd-tmpfiles"
+
+[[case]]
+name = "w6-post"
+
+[[case]]
+name = "w6-systemd-install"
+
+[[case]]
+name = "w6-tmpfiles"

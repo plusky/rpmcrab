@@ -1,0 +1,28 @@
+============================ rpmlint session starts ============================
+rpmlint: 2.10.0
+configuration:
+    <VENV>/lib64/python3.13/site-packages/rpmlint/configdefaults.toml
+    <XDG>/rpmlint/cron-whitelist.toml
+    <XDG>/rpmlint/dbus-services.toml
+    <XDG>/rpmlint/device-files-whitelist.toml
+    <XDG>/rpmlint/licenses.toml
+    <XDG>/rpmlint/opensuse.toml
+    <XDG>/rpmlint/pam-modules.toml
+    <XDG>/rpmlint/permissions-whitelist.toml
+    <XDG>/rpmlint/pie-executables.toml
+    <XDG>/rpmlint/polkit-rules-whitelist.toml
+    <XDG>/rpmlint/scoring.toml
+    <XDG>/rpmlint/security.toml
+    <XDG>/rpmlint/sudoers-whitelist.toml
+    <XDG>/rpmlint/sysctl-whitelist.toml
+    <XDG>/rpmlint/systemd-tmpfiles.toml
+    <XDG>/rpmlint/users-groups.toml
+    <XDG>/rpmlint/varlink-whitelist.toml
+    <XDG>/rpmlint/world-writable-whitelist.toml
+    <XDG>/rpmlint/zypper-plugins.toml
+checks: 43, packages: 1
+
+w6-tmpfiles.noarch: W: tmpfile-not-in-filelist /run/w6tmp
+w6-tmpfiles.noarch: W: tmpfile-not-in-filelist /run/w6tmp/file
+w6-tmpfiles.noarch: W: no-url-tag
+ 1 packages and 0 specfiles checked; 0 errors, 3 warnings, 5 filtered, 0 badness; has taken <DURATION> s 

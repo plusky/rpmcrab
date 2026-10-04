@@ -625,6 +625,44 @@ mod tests {
         );
     }
 
+    /// Two `man=` lines whose entries are both missing each warn: the
+    /// reference validates every line (AlternativesCheck.py:264-271 resets
+    /// `man_found` per entry, so after a line it holds only the last
+    /// entry's result). A second line must not be swallowed as
+    /// `double-entries` when the previous line's last entry was also
+    /// missing -- the missing entry would go unreported.
+    #[test]
+    fn two_missing_man_lines_warn_per_entry_not_double_entries() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let pkg = libalternatives_pkg(
+            dir.path(),
+            &[(
+                "foo.conf",
+                "binary = /usr/bin/foo\nman = missing-one.1\nman = missing-two.1\n",
+            )],
+        );
+        let results = findings_for(&pkg);
+        let warnings: Vec<&(String, String)> = results
+            .iter()
+            .filter(|(n, _)| n == "man-entry-value-not-found")
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            2,
+            "expected one warning per missing man entry, got {results:?}"
+        );
+        for (name, line) in &warnings {
+            assert_eq!(name, "man-entry-value-not-found");
+            assert!(line.contains(": W: "), "level: {line}");
+            assert!(line.contains("foo.conf"), "detail: {line}");
+        }
+        assert!(
+            !has(&results, "double-entries"),
+            "double-entries must not fire when the previous line's last man \
+             was also missing: {results:?}"
+        );
+    }
+
     /// A package-chosen symlink basename with an unbalanced bracket makes the
     /// libalternatives conf pattern uncompilable (the reference raises
     /// `re.error` at `AlternativesCheck.py:216`); the check must skip the one
