@@ -631,7 +631,7 @@ mod tests {
     fn check_requirements_findings(
         reqs: &[Requirement],
         req_names: &[&str],
-    ) -> Vec<(String, String)> {
+    ) -> Vec<(String, Level, String)> {
         use crate::color::Color;
         let pkg = fixture_pkg_with_requires(req_names);
         let config = Config::default();
@@ -641,7 +641,50 @@ mod tests {
             checked_files: 0,
         };
         check.check_requirements(&pkg, &mut out, reqs, "3.12");
-        out.results().to_vec()
+        let levels = out.result_levels().to_vec();
+        out.results()
+            .iter()
+            .zip(levels)
+            .map(|((name, line), level)| (name.clone(), level, line.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn missing_require_pins_name_level_and_detail() {
+        // Positive control for the helper: an unsatisfied requirement emits
+        // `python-missing-require` at Warning (the reference emits `W` too).
+        // The helper now returns the level, so this pins it structurally
+        // (plusky's #119 review nit) instead of relying on `is_empty()`.
+        let content = "w6missing\n";
+        let reqs = PythonCheck::parse_requirements(content, false, "3.12");
+        let findings = check_requirements_findings(&reqs, &[]);
+        assert_eq!(findings.len(), 1, "expected one finding: {findings:?}");
+        let (name, level, line) = &findings[0];
+        assert_eq!(name, "python-missing-require");
+        assert_eq!(*level, Level::Warning);
+        assert_eq!(
+            line,
+            "python-test.noarch: W: python-missing-require w6missing"
+        );
+    }
+
+    #[test]
+    fn leftover_require_pins_name_level_and_detail() {
+        // The #119 nit's other half: `python-leftover-require` also had
+        // no level pin. An RPM-level requirement with no matching
+        // requires.txt entry fires at Warning. (One satisfied requirement
+        // is needed: the check returns early when reqs is empty.)
+        let reqs = PythonCheck::parse_requirements("w6satisfied\n", false, "3.12");
+        let findings =
+            check_requirements_findings(&reqs, &["python3-w6satisfied", "python3-w6leftover"]);
+        assert_eq!(findings.len(), 1, "expected one finding: {findings:?}");
+        let (name, level, line) = &findings[0];
+        assert_eq!(name, "python-leftover-require");
+        assert_eq!(*level, Level::Warning);
+        assert_eq!(
+            line,
+            "python-test.noarch: W: python-leftover-require python3-w6leftover"
+        );
     }
 
     #[test]
