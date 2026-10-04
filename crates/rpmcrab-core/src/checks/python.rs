@@ -151,6 +151,11 @@ impl PythonCheck {
                 // a marker keeps it first: `req; req-marker; (section-marker)
                 // and extra == "name"`. The port stores the post-first-`;`
                 // text verbatim instead of merging everything with `and`.
+                // NB: the stored marker can be syntactically invalid PEP 508
+                // (two `;` parts, matching the reference verbatim append).
+                // Fine only because `marker_holds` is the sole consumer and
+                // bails on `contains("extra")` before parsing; a future real
+                // marker parser would choke on it.
                 req.marker = match (&req.marker, marker) {
                     (Some(existing), Some(m)) => {
                         Some(format!("{existing}; ({m}) and {extra_marker}"))
