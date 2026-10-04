@@ -687,3 +687,19 @@ kind = "behaviour"
 reason = "License: this is a deliberate asymmetry, not parity. Expressions are split into pieces before validation, and each piece gets its own WITH-exception match plus validity check, which reports strictly more than the reference -- the safer direction. The reference matches the exception regex against the whole string and then validates only the pre-WITH part, so sibling pieces (an invalid license in another paren group, a trailing tail after a WITH expression) are silently dropped from validation. The piece splitting itself replicates the reference license_regex split exactly, including its nested re-split of non-valid pieces, so unbalanced input like `((GPLv2))` yields the same findings (`invalid-license (GPLv2`, `invalid-license )`) instead of being silently accepted. An empty group `()` is kept as a literal piece (the reference reports invalid-license for it). The split is iterative and linear, so adversarial nesting terminates."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/676"
+
+[[divergence]]
+case = "global"
+check = "AppDataCheck"
+kind = "behaviour"
+reason = "Also scans /usr/share/metainfo/; the reference (AppDataCheck.py) only matches /usr/share/appdata/, but metainfo/ is the current AppStream location, so files there would otherwise never be validated."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/142"
+
+[[divergence]]
+case = "global"
+check = "AppDataCheck"
+kind = "behaviour"
+reason = "The native fallback (no appstream-util) requires the mandatory AppStream tags (id, name, summary, description, licence); the reference fallback only checks XML well-formedness, so a well-formed but tagless file slipped through. project_license satisfies licence (the current spelling; renamed in AppStream 0.12)."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/142"
