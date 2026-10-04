@@ -2,6 +2,7 @@ kind = "captured"
 rpmlint = "2.10.0"
 reference_sha = "84848c05c5571c22274a55ff9afdfe6d88c67dc9"
 flavour = "openSUSE"
+checks = 43
 argv = ["w6-alternatives-1.0-1.noarch.rpm"]
 captured = "2026-10-02"
 

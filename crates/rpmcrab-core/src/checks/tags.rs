@@ -1400,6 +1400,95 @@ mod tests {
         assert!(!changelog_in_future(now - 3600, now));
     }
 
+    /// Copy a fixture RPM with its first CHANGELOGTIME rewritten, returning
+    /// the temp path. The emission path reads the timestamp from the package
+    /// header, which librpm exposes read-only, so the test patches the header
+    /// bytes of a copy: lead (96B), signature header, then the main header's
+    /// index entry for tag 1080 (CHANGELOGTIME, INT32). Opening skips digest
+    /// verification, so the in-place rewrite needs no fixup.
+    fn patch_changelog_time(fixture: &str, stem: &str, new_time: i64) -> std::path::PathBuf {
+        const TAG_CHANGELOGTIME: u32 = 1080;
+        const TYPE_INT32: u32 = 4;
+        let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs")
+            .join(fixture);
+        let mut bytes = std::fs::read(&src).expect("read fixture rpm");
+        assert_eq!(&bytes[0..4], b"\xed\xab\xee\xdb", "rpm lead magic");
+        let u32_at = |off: usize| u32::from_be_bytes(bytes[off..off + 4].try_into().unwrap());
+        // Skip the signature header to the main header (8-byte aligned).
+        let mut off = 96;
+        assert_eq!(
+            &bytes[off..off + 3],
+            b"\x8e\xad\xe8",
+            "signature header magic"
+        );
+        off += 16 + u32_at(off + 8) as usize * 16 + u32_at(off + 12) as usize;
+        off = off.div_ceil(8) * 8;
+        // Find CHANGELOGTIME in the main header index, rewrite its first value.
+        assert_eq!(&bytes[off..off + 3], b"\x8e\xad\xe8", "main header magic");
+        let count = u32_at(off + 8) as usize;
+        let data = off + 16 + count * 16;
+        let mut patched = false;
+        for i in 0..count {
+            let e = off + 16 + i * 16;
+            if u32_at(e) == TAG_CHANGELOGTIME && u32_at(e + 4) == TYPE_INT32 {
+                let at = data + u32_at(e + 8) as usize;
+                bytes[at..at + 4].copy_from_slice(&(new_time as u32).to_be_bytes());
+                patched = true;
+                break;
+            }
+        }
+        assert!(patched, "CHANGELOGTIME missing in {fixture}");
+        let tmp = std::env::temp_dir().join(format!("rpmcrab-changelog-{stem}.rpm"));
+        std::fs::write(&tmp, &bytes).expect("write patched rpm");
+        tmp
+    }
+
+    fn wall_now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("wall clock")
+            .as_secs() as i64
+    }
+
+    /// The #126 fix, comparison half: 1h ahead of now is a timezone artifact,
+    /// so the rolled-back comparison stays quiet through the real emission path.
+    #[test]
+    fn changelog_one_hour_ahead_emits_nothing() {
+        let tmp = patch_changelog_time("w6-tmpfiles-1.0-1.noarch.rpm", "quiet", wall_now() + 3600);
+        let pkg = Pkg::open(&tmp, &std::env::temp_dir(), true).expect("open patched pkg");
+        let results = run_check(&pkg);
+        std::fs::remove_file(&tmp).ok();
+        assert!(
+            results
+                .iter()
+                .all(|(name, _)| name != "changelog-time-in-future"),
+            "unexpected findings: {results:?}"
+        );
+    }
+
+    /// The #126 fix, detail half: the emitted finding pins name, level and the
+    /// rolled-back date. 30h ahead fires; the detail is the timestamp minus 26h.
+    #[test]
+    fn changelog_time_in_future_pins_name_level_and_detail() {
+        let first = wall_now() + 30 * 3600;
+        let tmp = patch_changelog_time("w6-tmpfiles-1.0-1.noarch.rpm", "future", first);
+        let pkg = Pkg::open(&tmp, &std::env::temp_dir(), true).expect("open patched pkg");
+        let results = run_check(&pkg);
+        std::fs::remove_file(&tmp).ok();
+        let hits: Vec<_> = results
+            .iter()
+            .filter(|(name, _)| name.as_str() == "changelog-time-in-future")
+            .collect();
+        assert_eq!(hits.len(), 1, "expected one finding: {results:?}");
+        assert!(hits[0].1.contains(": E: "), "level: {}", hits[0].1);
+        assert!(
+            hits[0].1.contains(&format_date(first - 26 * 3600)),
+            "detail: {}",
+            hits[0].1
+        );
+    }
+
     #[test]
     fn format_require_matches_reference() {
         let dep = DepInfo {
