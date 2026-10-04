@@ -316,8 +316,11 @@ mod tests {
         // absolute DIRNAMES), the reference keys `pkg.files` on the raw tag
         // value (`pkg.py:679,713`) and emits it verbatim
         // (`PkgConfigCheck.py:46`), and this port emits librpm's raw
-        // `rpmfilesFN` the same way. The frozen string is a genuine golden
-        // output.
+        // `rpmfilesFN` the same way. The frozen string is golden for the
+        // port's widened pattern only: the reference's `\w+` never matches
+        // this hyphenated build dir, so it emits no `invalid-pkgconfig-file`
+        // here at all (the widening is already ledgered in
+        // `divergences.toml`).
         let rel = "usr/lib64/pkgconfig/foo.pc";
         pkg.files = vec![PkgFile {
             name: format!("/{rel}"),
