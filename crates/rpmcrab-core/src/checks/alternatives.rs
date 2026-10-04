@@ -651,10 +651,16 @@ mod tests {
             2,
             "expected one warning per missing man entry, got {results:?}"
         );
-        for (name, line) in &warnings {
+        // FREEZE THE OUTPUT: pin both whole rendered lines, including the
+        // per-line `Line: N` component the contains-based asserts could not
+        // see -- a constant line number must fail this test.
+        let expected = [
+            "alternatives-test.noarch: W: man-entry-value-not-found /usr/share/libalternatives/foo/foo.conf Line: 1",
+            "alternatives-test.noarch: W: man-entry-value-not-found /usr/share/libalternatives/foo/foo.conf Line: 2",
+        ];
+        for (i, (name, line)) in warnings.iter().enumerate() {
             assert_eq!(name, "man-entry-value-not-found");
-            assert!(line.contains(": W: "), "level: {line}");
-            assert!(line.contains("foo.conf"), "detail: {line}");
+            assert_eq!(line.as_str(), expected[i], "frozen output line {i}");
         }
         assert!(
             !has(&results, "double-entries"),

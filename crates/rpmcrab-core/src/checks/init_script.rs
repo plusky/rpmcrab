@@ -493,11 +493,10 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../tests/parity/pkg/inputs/parity-1.0-1.noarch.rpm"
         );
-        let dir = std::env::temp_dir().join("rpmcrab-initscript-parity");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
         let pkg =
-            crate::pkg::Pkg::open(std::path::Path::new(rpm), &dir, true).expect("fixture opens");
+            crate::pkg::Pkg::open(std::path::Path::new(rpm), dir, true).expect("fixture opens");
         let config = Config::default();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = InitScriptCheck::new(&config);
@@ -510,9 +509,8 @@ mod tests {
     fn redundant_lsb_keywords_have_deterministic_order() {
         // Three duplicate LSB keywords: without sorting, the HashMap iteration
         // order would randomize the finding sequence across runs.
-        let dir = std::env::temp_dir().join("rpmcrab-init-order");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
         let script = dir.join("order");
         std::fs::write(
             &script,
@@ -522,7 +520,7 @@ mod tests {
 
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
-        let mut pkg = Pkg::open(&rpm, &dir, true).expect("open fixture pkg");
+        let mut pkg = Pkg::open(&rpm, dir, true).expect("open fixture pkg");
         pkg.files = vec![PkgFile {
             name: "/etc/init.d/order".to_string(),
             path: script.to_string_lossy().into_owned(),
@@ -547,5 +545,85 @@ mod tests {
             .map(|(_, line)| line.rsplit(' ').next().unwrap_or(""))
             .collect();
         assert_eq!(keywords, vec!["Description", "Provides", "Required-Start"]);
+    }
+
+    /// B6: `incoherent-subsys` takes its level and detail from the raw
+    /// `$var` token, never the substituted value, and an empty
+    /// substitution does not suppress the finding. Verified against
+    /// InitScriptCheck.py:171-191 (rpmlint 2.10.0).
+    ///
+    /// Expected lines are pinned verbatim instead of parsed back into
+    /// fields: re-deriving the level from the rendered text (e.g.
+    /// `contains(": W: ")` defaulting to `E`) is what would misread an
+    /// `I:` level as `E`. Pinning the whole line pins the package
+    /// prefix, the level letter, the finding name, the fname detail and
+    /// the emission order in one assertion.
+    #[test]
+    fn incoherent_subsys_level_and_detail_come_from_raw_token() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
+
+        // (script body, expected rendered lines, in emission order)
+        let cases: &[(&str, Vec<&str>)] = &[
+            // $NAME resolves to otherdaemon: W, raw token in detail.
+            (
+                "#!/bin/sh\nNAME=otherdaemon\ntouch /var/lock/subsys/$NAME\n",
+                vec!["mydaemon.noarch: W: incoherent-subsys /etc/init.d/mydaemon $NAME"],
+            ),
+            // Literal mismatch: E, the name itself.
+            (
+                "#!/bin/sh\ntouch /var/lock/subsys/wrongname\n",
+                vec!["mydaemon.noarch: E: incoherent-subsys /etc/init.d/mydaemon wrongname"],
+            ),
+            // ${NAME} resolves to the basename: quiet.
+            (
+                "#!/bin/sh\nNAME=mydaemon\ntouch /var/lock/subsys/${NAME}\n",
+                vec![],
+            ),
+            // $UNSET resolves to "": still emitted, W, raw token.
+            (
+                "#!/bin/sh\ntouch /var/lock/subsys/$UNSET\n",
+                vec!["mydaemon.noarch: W: incoherent-subsys /etc/init.d/mydaemon $UNSET"],
+            ),
+            // Two findings: emission order follows the script lines.
+            (
+                "#!/bin/sh\nNAME=otherdaemon\ntouch /var/lock/subsys/$NAME\ntouch /var/lock/subsys/wrongname\n",
+                vec![
+                    "mydaemon.noarch: W: incoherent-subsys /etc/init.d/mydaemon $NAME",
+                    "mydaemon.noarch: E: incoherent-subsys /etc/init.d/mydaemon wrongname",
+                ],
+            ),
+        ];
+
+        for (i, (body, expected)) in cases.iter().enumerate() {
+            let script = dir.join(format!("case{i}"));
+            std::fs::write(&script, body).expect("write script");
+            let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+            let mut pkg = Pkg::open(&rpm, dir, true).expect("open fixture pkg");
+            pkg.name = "mydaemon".to_string();
+            pkg.files = vec![PkgFile {
+                name: "/etc/init.d/mydaemon".to_string(),
+                path: script.to_string_lossy().into_owned(),
+                mode: 0o100755,
+                ..Default::default()
+            }];
+
+            let config = Config::default();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            let mut check = InitScriptCheck::new(&config);
+            check.check_binary(&pkg, &config, &mut out);
+            let found: Vec<(&str, &str)> = out
+                .results()
+                .iter()
+                .filter(|(n, _)| n == "incoherent-subsys")
+                .map(|(n, line)| (n.as_str(), line.as_str()))
+                .collect();
+            let want: Vec<(&str, &str)> = expected
+                .iter()
+                .map(|line| ("incoherent-subsys", *line))
+                .collect();
+            assert_eq!(found, want, "case {i} body:\n{body}");
+        }
     }
 }
