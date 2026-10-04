@@ -1010,7 +1010,10 @@ impl TagsCheck {
                             // stripped before comparing, so a changelog entry
                             // without the distro suffix still matches.
                             if let Some(re) = &self.extension_regex {
-                                expected.push(re.replace_all(&expected[0], "").to_string());
+                                let stripped = re.replace_all(&expected[0], "").to_string();
+                                if stripped != expected[0] {
+                                    expected.push(stripped);
+                                }
                             }
                             if !expected.contains(&ret) {
                                 let exp_str = if expected.len() == 1 {
@@ -1570,11 +1573,16 @@ mod tests {
         let config = test_config_with(Some(&shipped_release_extension()));
         let (_tmp, pkg) = fixture_pkg("distrelease-weird-1.15.1-3.weird9.noarch.rpm");
         let results = run_check_with(&config, &pkg);
+        let inco = results
+            .iter()
+            .find(|(n, _)| n == "incoherent-version-in-changelog")
+            .expect("incoherent-version-in-changelog");
+        // The catalog matches nothing here, so the detail keeps the gh-main
+        // single-string shape -- no duplicated candidate list.
         assert!(
-            results
-                .iter()
-                .any(|(n, _)| n == "incoherent-version-in-changelog"),
-            "expected incoherent-version-in-changelog: {results:?}"
+            inco.1.contains("1.15.1-3.weird9") && !inco.1.contains('['),
+            "single-string detail shape, not a duplicated candidate list: {}",
+            inco.1
         );
         let finding = results
             .iter()
