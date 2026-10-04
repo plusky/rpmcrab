@@ -1475,12 +1475,18 @@ mod tests {
     }
 
     /// Copy a fixture RPM with its first CHANGELOGTIME rewritten, returning
-    /// the temp path. The emission path reads the timestamp from the package
-    /// header, which librpm exposes read-only, so the test patches the header
-    /// bytes of a copy: lead (96B), signature header, then the main header's
-    /// index entry for tag 1080 (CHANGELOGTIME, INT32). Opening skips digest
-    /// verification, so the in-place rewrite needs no fixup.
-    fn patch_changelog_time(fixture: &str, stem: &str, new_time: i64) -> std::path::PathBuf {
+    /// the tempdir (kept alive by the caller) and the patched path. The
+    /// patched bytes live in a unique tempdir, never a fixed `temp_dir()`
+    /// path: two concurrent runs must not share one file. The emission path
+    /// reads the timestamp from the package header, which librpm exposes
+    /// read-only, so the test patches the header bytes of a copy: lead (96B),
+    /// signature header, then the main header's index entry for tag 1080
+    /// (CHANGELOGTIME, INT32). Opening skips digest verification, so the
+    /// in-place rewrite needs no fixup.
+    fn patch_changelog_time(
+        fixture: &str,
+        new_time: i64,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
         const TAG_CHANGELOGTIME: u32 = 1080;
         const TYPE_INT32: u32 = 4;
         let src = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1513,9 +1519,12 @@ mod tests {
             }
         }
         assert!(patched, "CHANGELOGTIME missing in {fixture}");
-        let tmp = std::env::temp_dir().join(format!("rpmcrab-changelog-{stem}.rpm"));
-        std::fs::write(&tmp, &bytes).expect("write patched rpm");
-        tmp
+        let tmp = tempfile::tempdir().expect("tmpdir for patched rpm");
+        // Keep the fixture's own filename: the basename feeds
+        // `non-coherent-filename`, and a renamed copy would emit it.
+        let rpm_path = tmp.path().join(fixture);
+        std::fs::write(&rpm_path, &bytes).expect("write patched rpm");
+        (tmp, rpm_path)
     }
 
     fn wall_now() -> i64 {
@@ -1529,15 +1538,28 @@ mod tests {
     /// so the rolled-back comparison stays quiet through the real emission path.
     #[test]
     fn changelog_one_hour_ahead_emits_nothing() {
-        let tmp = patch_changelog_time("w6-tmpfiles-1.0-1.noarch.rpm", "quiet", wall_now() + 3600);
-        let pkg = Pkg::open(&tmp, &std::env::temp_dir(), true).expect("open patched pkg");
+        let (_tmp, tmp) = patch_changelog_time("w6-tmpfiles-1.0-1.noarch.rpm", wall_now() + 3600);
+        let pkg = Pkg::open_no_extract(&tmp).expect("open patched pkg");
         let results = run_check(&pkg);
-        std::fs::remove_file(&tmp).ok();
         assert!(
             results
                 .iter()
                 .all(|(name, _)| name != "changelog-time-in-future"),
             "unexpected findings: {results:?}"
+        );
+        // Positive control: the unpatched fixture runs the same emission
+        // path, so an identical finding count means this run genuinely
+        // checked the package rather than passing vacuously.
+        let baseline = {
+            let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/parity/pkg/inputs/w6-tmpfiles-1.0-1.noarch.rpm");
+            let pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+            run_check(&pkg)
+        };
+        assert_eq!(
+            results.len(),
+            baseline.len(),
+            "patched run diverged from unpatched baseline: {results:?} vs {baseline:?}"
         );
     }
 
@@ -1546,20 +1568,23 @@ mod tests {
     #[test]
     fn changelog_time_in_future_pins_name_level_and_detail() {
         let first = wall_now() + 30 * 3600;
-        let tmp = patch_changelog_time("w6-tmpfiles-1.0-1.noarch.rpm", "future", first);
-        let pkg = Pkg::open(&tmp, &std::env::temp_dir(), true).expect("open patched pkg");
+        let (_tmp, tmp) = patch_changelog_time("w6-tmpfiles-1.0-1.noarch.rpm", first);
+        let pkg = Pkg::open_no_extract(&tmp).expect("open patched pkg");
         let results = run_check(&pkg);
-        std::fs::remove_file(&tmp).ok();
         let hits: Vec<_> = results
             .iter()
             .filter(|(name, _)| name.as_str() == "changelog-time-in-future")
             .collect();
         assert_eq!(hits.len(), 1, "expected one finding: {results:?}");
-        assert!(hits[0].1.contains(": E: "), "level: {}", hits[0].1);
-        assert!(
-            hits[0].1.contains(&format_date(first - 26 * 3600)),
-            "detail: {}",
-            hits[0].1
+        // Whole-line pin: the package prefix, level letter, finding name and
+        // rolled-back date in one assertion, so no added field goes unnoticed.
+        assert_eq!(
+            hits[0].1,
+            format!(
+                "w6-tmpfiles.noarch: E: changelog-time-in-future {}",
+                format_date(first - 26 * 3600)
+            ),
+            "unexpected line"
         );
     }
 
