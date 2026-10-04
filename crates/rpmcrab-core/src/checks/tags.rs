@@ -1140,10 +1140,11 @@ impl TagsCheck {
             // piece the split yields is checked, and a non-valid piece is
             // split once more -- that is what turns `((GPLv2))` into the two
             // findings `(GPLv2` and `)` instead of silently accepting it.
-            // Unlike the reference, the WITH-exception match runs per piece:
-            // the reference matches it against the whole string and then
-            // validates only the pre-WITH part, silently dropping sibling
-            // pieces (see divergences.toml).
+            // Deliberate asymmetry, not parity: the WITH-exception match
+            // runs per piece, so it reports strictly more than the
+            // reference, in the safer direction. The reference matches it
+            // against the whole string and then validates only the pre-WITH
+            // part, silently dropping sibling pieces (see divergences.toml).
             for l1 in Self::split_license(rpm_license) {
                 let (lic, lexception) = self.split_license_exception(&l1);
                 // SPDX allows "<license> WITH <license-exception>"
