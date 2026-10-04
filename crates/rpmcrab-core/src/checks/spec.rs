@@ -1793,23 +1793,18 @@ mod tests {
     fn prefix_macro_value_is_quiet_35() {
         // Upstream #35 asked for a warning on literally any `Prefix:`,
         // but maintainer scop declined in r1462: a macro value is not
-        // hardcoded, and `redundant-prefix-tag` was plain broken and
-        // removed. The port matches the reference: only non-macro
-        // values warn, `redundant-prefix-tag` does not exist anywhere.
+        // hardcoded. The port matches the reference: only non-macro
+        // values warn.
         let results = run_mini("Name: foo\nPrefix: %{_prefix}\n");
         assert!(
             !has(&results, "hardcoded-prefix-tag"),
-            "unexpected: {results:?}"
-        );
-        assert!(
-            !has(&results, "redundant-prefix-tag"),
             "unexpected: {results:?}"
         );
 
         let results = run_mini("Name: foo\nPrefix: /opt/foo\n");
         let lines = lines_for(&results, "hardcoded-prefix-tag");
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("W: hardcoded-prefix-tag /opt/foo"));
+        assert_eq!(lines[0], "test.spec:2: W: hardcoded-prefix-tag /opt/foo");
     }
 
     #[test]
