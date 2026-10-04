@@ -1,0 +1,69 @@
+---
+name: spdx-sync
+# Keep the vendored SPDX ID list in crates/rpmcrab-core/src/checks/spdx.rs
+# from drifting behind spdx/license-list-data.
+# - Manual trigger: refresh on demand (workflow_dispatch)
+# - Monthly schedule: the list ships a few releases a year; monthly is plenty
+# On drift the job opens a refresh PR; when the data is current it is a
+# green no-op. The generated file stamps only the SPDX release version (no
+# fetch date), so a plain git diff is the drift signal: the version is read
+# from the same JSON as the IDs, therefore a diff means the data changed
+# and no diff means nothing did -- no no-op PRs.
+#
+# The checked-in file stays the build's source of truth; the generator never
+# runs at build time.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 1 * *' # 1st of month 03:00 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spdx-sync
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Regenerate SPDX ID list
+        run: python3 scripts/generate-spdx-list.py
+      - name: Check for drift
+        id: diff
+        run: |
+          if git diff --quiet -- crates/rpmcrab-core/src/checks/spdx.rs; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Open refresh PR
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          new_ver=$(sed -n 's|^/// SPDX license list version: ||p' crates/rpmcrab-core/src/checks/spdx.rs)
+          branch="spdx-sync-${new_ver}-$(date -u +%F)"
+          git -c user.name=github-actions -c user.email=github-actions@github.com \
+            checkout -B "$branch"
+          git add crates/rpmcrab-core/src/checks/spdx.rs
+          git -c user.name=github-actions -c user.email=github-actions@github.com \
+            commit -m "Refresh SPDX license IDs to ${new_ver}"
+          git push -u origin "$branch"
+          if [ -z "$(gh pr list --head "$branch" --json number --jq '.[].number')" ]; then
+            added=$(git show --format= --unified=0 HEAD -- crates/rpmcrab-core/src/checks/spdx.rs \
+              | grep -c '^\+    "[^"]*", *$' || true)
+            removed=$(git show --format= --unified=0 HEAD -- crates/rpmcrab-core/src/checks/spdx.rs \
+              | grep -c '^\-    "[^"]*", *$' || true)
+            gh pr create --base main --head "$branch" \
+              --title "Refresh SPDX license IDs to ${new_ver}" \
+              --body "SPDX license-list-data released ${new_ver}: ${added} IDs added, ${removed} removed from the spellcheck suggestion pool. Produced by the monthly spdx-sync job."
+          fi

@@ -7,7 +7,11 @@
 
 /// Non-deprecated SPDX license IDs: the suggestion pool for
 /// `invalid-license-spellcheck`.
+///
+/// SPDX license list version: 3.29.0
+/// Regenerate with `scripts/generate-spdx-list.py`; do not edit the list by hand.
 pub const SPDX_LICENSE_IDS: &[&str] = &[
+    // BEGIN GENERATED SPDX IDs
     "0BSD",
     "3D-Slicer-1.0",
     "AAL",
@@ -716,6 +720,7 @@ pub const SPDX_LICENSE_IDS: &[&str] = &[
     "xpp",
     "xzoom",
     "zlib-acknowledgement",
+    // END GENERATED SPDX IDs
 ];
 
 /// Levenshtein edit distance over Unicode scalar values.
