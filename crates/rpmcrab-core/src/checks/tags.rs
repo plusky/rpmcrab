@@ -1864,6 +1864,15 @@ mod tests {
         out.results().to_vec()
     }
 
+    fn invalid_license_warnings(results: Vec<(String, String)>) -> Vec<(String, String)> {
+        // The `invalid-license-spellcheck` info finding accompanies every
+        // invalid-license warning; these tests pin the warning itself.
+        results
+            .into_iter()
+            .filter(|(n, _)| n == "invalid-license")
+            .collect()
+    }
+
     #[test]
     fn license_split_matches_reference() {
         // Expectations verified against the reference's
@@ -1926,13 +1935,12 @@ mod tests {
     fn license_empty_paren_group_is_reported() {
         // The reference reports `W: invalid-license ()` for an empty
         // group: the leaf must not vanish.
-        let results = license_findings("()");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "invalid-license");
-        assert_eq!(results[0].1, "fcprobe.noarch: W: invalid-license ()");
-        let results = license_findings("MIT and ()");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].1, "fcprobe.noarch: W: invalid-license ()");
+        let warnings = invalid_license_warnings(license_findings("()"));
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].1, "fcprobe.noarch: W: invalid-license ()");
+        let warnings = invalid_license_warnings(license_findings("MIT and ()"));
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].1, "fcprobe.noarch: W: invalid-license ()");
         // A whitespace-only group vanishes, like the reference's
         // empty-split filtering.
         assert!(license_findings("( )").is_empty());
@@ -1954,19 +1962,17 @@ mod tests {
     fn license_doubly_wrapped_parens_are_reported() {
         // The reference flags the unbalanced pieces of `((GPLv2))`; the
         // splitter must not silently accept them.
-        let results = license_findings("((GPLv2))");
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].0, "invalid-license");
-        assert_eq!(results[0].1, "fcprobe.noarch: W: invalid-license (GPLv2");
-        assert_eq!(results[1].0, "invalid-license");
-        assert_eq!(results[1].1, "fcprobe.noarch: W: invalid-license )");
+        let warnings = invalid_license_warnings(license_findings("((GPLv2))"));
+        assert_eq!(warnings.len(), 2);
+        assert_eq!(warnings[0].1, "fcprobe.noarch: W: invalid-license (GPLv2");
+        assert_eq!(warnings[1].1, "fcprobe.noarch: W: invalid-license )");
         // Neighbouring unbalanced shapes agree with the reference too.
-        let results = license_findings("((GPLv2)");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].1, "fcprobe.noarch: W: invalid-license (GPLv2");
-        let results = license_findings("(GPLv2))");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].1, "fcprobe.noarch: W: invalid-license )");
+        let warnings = invalid_license_warnings(license_findings("((GPLv2)"));
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].1, "fcprobe.noarch: W: invalid-license (GPLv2");
+        let warnings = invalid_license_warnings(license_findings("(GPLv2))"));
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].1, "fcprobe.noarch: W: invalid-license )");
     }
 
     #[test]
@@ -1996,7 +2002,8 @@ mod tests {
         // `and MIT` after a WITH expression used to be dropped entirely.
         let results =
             license_findings("GPL-2.0-only WITH Classpath-exception-2.0 and BogusLicense");
-        let names: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
+        let warnings = invalid_license_warnings(results);
+        let names: Vec<&str> = warnings.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["invalid-license"]);
     }
 
@@ -2008,11 +2015,11 @@ mod tests {
 
     #[test]
     fn license_plain_invalid_is_reported() {
-        let results = license_findings("BogusLicense-1.0");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "invalid-license");
+        let warnings = invalid_license_warnings(license_findings("BogusLicense-1.0"));
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].0, "invalid-license");
         assert_eq!(
-            results[0].1,
+            warnings[0].1,
             "fcprobe.noarch: W: invalid-license BogusLicense-1.0"
         );
     }
