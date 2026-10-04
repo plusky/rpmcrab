@@ -235,6 +235,20 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "PolkitCheck"
+kind = "behaviour"
+reason = "A privs profile line with a single token makes the reference (PolkitCheck.py:36-38, `value = line[1]`) raise IndexError, which escapes check() and is caught only by lint.py:293: the whole run dies with exit 3 and no finding is emitted for any package. The port skips one-token lines instead -- refusing to abandon every package over one malformed line in a system config file is the deliberate, saner behavior."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "PolkitCheck"
+kind = "behaviour"
+reason = "The reference strips comments with `line.split('#')[0].rstrip()` (PolkitCheck.py:34) while the port trims both ends. On an indented line such as `  org.foo bar`, the reference's `re.split(r'\\s+', ...)` yields `['', 'org.foo', 'bar']`, so it whitelists the empty action id with the real id as its value -- a wart, since no real profile indents entries and no action has an empty id. The port registers the entry as `org.foo -> bar`. Deliberate fix of an obvious reference wart rather than a replicated bug."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "AtomicUpdateCheck"
 kind = "behaviour"
 reason = "A present-but-wrong-type AtomicCheckGhosts (e.g. the string \"false\") panics at construction; the reference treats any truthy value as enabled and runs. The port deliberately fails fast on a misconfigured type instead of reproducing the reference's permissiveness."
