@@ -75,8 +75,8 @@ jobs:
           brew install rpm popt dash desktop-file-utils
           # checkbashisms has no Homebrew formula (Debian devscripts only);
           # `[tools].present` in tests/parity/cases/*/meta.toml is recorded
-          # at capture time (scripts/capture-parity.sh) and read only by the
-          # parity_manifest.rs guard test; no parity runner gates on it yet.
+          # at capture time (scripts/capture-parity.sh) for provenance;
+          # nothing reads it yet and no parity runner gates on it.
           echo "LIBRARY_PATH=$(brew --prefix rpm)/lib" >> "$GITHUB_ENV"
           echo "BINDGEN_EXTRA_CLANG_ARGS=-I$(brew --prefix rpm)/include -I$(brew --prefix popt)/include" >> "$GITHUB_ENV"
       # Spellcheck tests need real hunspell dictionaries; the spellchecker
