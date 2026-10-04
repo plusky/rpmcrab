@@ -40,8 +40,9 @@ cases/<name>/
 kind = "captured"            # "captured" | "synthetic"
 rpmlint = "2.10.0"           # reference version that produced `expected/`
 reference_sha = "84848c0…"   # the pinned rpmlint commit (see setup-rpmlint-ref.sh)
-flavour = "openSUSE"         # config flavour; the contract is checks: 43
-argv = ["llvm21-gold-….rpm"] # exactly what was passed (basenames)
+flavour = "openSUSE"         # config flavour; see "The overlay trap" below
+checks = 43                  # reference check count under the openSUSE overlay
+argv = ["llvm21-gold-….rpm"] # exactly what was passed (basenames); no config arg (see below)
 captured = "2026-09-28"
 
 [source]
@@ -79,6 +80,28 @@ larger records the input's `sha256` and a fetchable source in `meta.toml` and
 does **not** commit the bytes; the runner (M1+) fetches it on demand. Prefer
 small packages that still exercise the path under test (e.g. `liblto21`, 64 K,
 covers the exit-66 badness abort).
+
+## The overlay trap
+
+`meta.toml` records `flavour = "openSUSE"` and an `argv` with no config
+argument. That is not an omission: `scripts/capture-parity.sh` runs the
+reference with `XDG_CONFIG_HOME` pointed at the openSUSE overlay
+(`.parity-ref/xdg`), so the check set is ambient, not in argv. The captured
+`expected/` only means something under that overlay.
+
+Three different check sets, three different outputs:
+
+| Runner | Checks |
+|---|---|
+| Reference rpmlint, defaults | 28 |
+| rpmcrab, defaults | 33 (adds `SharedLibraryPolicyCheck`, `BrandingPolicyCheck`, `DeviceFilesCheck`, `KMPPolicyCheck`, `WorldWritableCheck`) |
+| Reference under the openSUSE overlay — what the cases pin | 43 |
+
+`meta.toml` records the pinned count as `checks = 43`. A port-side runner
+**must** load the same overlay — the port resolves config pyxdg-style, so
+`XDG_CONFIG_HOME=.parity-ref/xdg` reproduces it — or every comparison it
+makes is meaningless. Run the port under its own 33-check default config and
+the fixtures diverge heavily; that divergence is the config, not the port.
 
 ## Normalization
 

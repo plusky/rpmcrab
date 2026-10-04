@@ -159,7 +159,10 @@ impl SourceCheck {
 /// The value is unbounded like the reference's: magnitudes beyond `u128`
 /// saturate at `u128::MAX` (ledgered as `kind = "detail"` — the saturated
 /// value can never equal a real file mode, which is the only comparison
-/// this value feeds, so the saturation is unobservable).
+/// this value feeds). Digits past the saturation point are still validated:
+/// trailing garbage makes this return `None`, and `SourceCheck::new` panics
+/// on `None` — the reference's `int(value, 8)` raises `ValueError` on the
+/// same input, so both die on the bad entry instead of silently accepting it.
 fn parse_octal(s: &str) -> Option<u128> {
     let s = s.trim();
     let (s, neg) = match s.as_bytes().first() {
@@ -180,7 +183,13 @@ fn parse_octal(s: &str) -> Option<u128> {
     let mut value: u128 = 0;
     // An underscore may follow the prefix or a digit, never anything else.
     let mut underscore_ok = after_prefix;
-    let mut digits = 0u32;
+    // u64: the counter now runs past saturation over the whole string,
+    // so a u32 could overflow (and panic a debug build) on an absurdly long entry.
+    let mut digits = 0u64;
+    // Once the magnitude overflows u128 the value saturates, but every
+    // remaining digit is still validated: the reference raises ValueError
+    // for trailing garbage regardless of the leading magnitude.
+    let mut saturated = false;
     for c in s.chars() {
         if c == '_' {
             if !underscore_ok {
@@ -192,13 +201,23 @@ fn parse_octal(s: &str) -> Option<u128> {
         let d = unicode_octal_digit(c)?;
         underscore_ok = true;
         digits += 1;
-        value = match value.checked_mul(8).and_then(|v| v.checked_add(d as u128)) {
-            Some(v) => v,
-            None => return Some(u128::MAX),
-        };
+        if !saturated {
+            value = match value.checked_mul(8).and_then(|v| v.checked_add(d as u128)) {
+                Some(v) => v,
+                None => {
+                    saturated = true;
+                    u128::MAX
+                }
+            };
+        }
     }
     if digits == 0 || !underscore_ok {
         return None;
+    }
+    if saturated {
+        // The magnitude alone already exceeds u128, so the sign is moot:
+        // saturation wins exactly as the old immediate return did.
+        return Some(u128::MAX);
     }
     Some(if neg { value.wrapping_neg() } else { value })
 }
@@ -481,6 +500,41 @@ ValidSrcPerms = ["0o644", "0o755"]
         assert_eq!(parse_octal("bogus"), None);
         assert_eq!(parse_octal(""), None);
         assert_eq!(parse_octal("0o"), None);
+    }
+
+    #[test]
+    fn parse_octal_saturates_beyond_u128() {
+        // The ledger documents saturation at u128::MAX where the reference
+        // keeps arbitrary precision; Python accepts the input, so pin the
+        // port's documented behaviour.
+        assert_eq!(
+            parse_octal(&format!("0o{}", "7".repeat(50))),
+            Some(u128::MAX)
+        );
+        // The exact boundary still parses precisely, not via saturation.
+        assert_eq!(
+            parse_octal("0o3777777777777777777777777777777777777777777"),
+            Some(u128::MAX)
+        );
+    }
+
+    #[test]
+    fn parse_octal_overflow_still_validates_trailing_digits() {
+        // The overflow arm used to return Some(u128::MAX) immediately,
+        // abandoning validation of the remaining digits; the reference
+        // raises ValueError for every one of these (plusky's #123 review).
+        let huge = format!("0o{}", "7".repeat(43));
+        for tail in ["9", "8", "_", "0x1"] {
+            assert_eq!(parse_octal(&format!("{huge}{tail}")), None, "tail {tail:?}");
+        }
+        // Valid digits past the saturation point still saturate, ...
+        assert_eq!(parse_octal(&format!("{huge}7")), Some(u128::MAX));
+        assert_eq!(parse_octal(&format!("{huge}_7")), Some(u128::MAX));
+        // ... and saturation wins over the sign, as the old early return did.
+        assert_eq!(
+            parse_octal(&format!("-0o{}", "7".repeat(50))),
+            Some(u128::MAX)
+        );
     }
 
     #[test]

@@ -1,10 +1,11 @@
 //! The `Pkg` abstraction — the Rust equivalent of rpmlint's `pkg.py`.
 //!
-//! Two sources: **file-backed** (the payload extracted into a tempdir so
-//! `PkgFile.path` and `magic` match the reference) and **installed** (`db::Db`,
-//! rooted at the live filesystem). Both expose the header, the nine dependency
-//! lists, the file map, and the derived `config/doc/ghost/noreplace/missingok`
-//! name lists. The spec `FakePkg` is M3.
+//! Two package kinds: **binary RPM** ([`Package::Rpm`], the payload extracted
+//! into a tempdir so `PkgFile.path` and `magic` match the reference) and
+//! **spec file** ([`Package::Spec`], `SpecPkg` — the former `FakePkg`, now
+//! shipped). The binary kind exposes the header, the nine dependency lists,
+//! the file map, and the derived `config/doc/ghost/noreplace/missingok`
+//! name lists.
 
 pub mod dep;
 pub mod extract;
@@ -70,7 +71,7 @@ pub enum PkgError {
     /// a database it cannot open reads as empty (see `installed`).
     #[error("rpmdb: {0}")]
     Db(#[from] librpm::error::Error),
-    /// A panic inside a librpm safe-API call, contained by [`guarded`].
+    /// A panic inside a librpm safe-API call, contained by `guarded`.
     #[error("librpm could not decode the package: {message}")]
     Decode { message: String },
 }
@@ -131,7 +132,9 @@ pub fn init() -> Result<(), PkgError> {
 /// Where a [`Pkg`]'s bytes come from. The reference distinguishes exactly these
 /// situations, so they are a closed set: separate `dir_name`/`extracted`
 /// fields cannot express an impossible combination, and a read can never
-/// silently fall back to the host filesystem again.
+/// silently fall back to the host filesystem again. The one extra variant,
+/// `Sandboxed`, is test-only: it gives header-only test opens an owned empty
+/// base dir, so they stay hermetic without pretending an extraction ran.
 #[derive(Debug)]
 pub(crate) enum PkgSource {
     /// Payload unpacked into an owned tempdir (removed on drop).
@@ -147,6 +150,19 @@ pub(crate) enum PkgSource {
     /// A file package with `ExtractDir='/'`: no extraction, reads resolve
     /// against the live filesystem, `extracted == false`.
     LiveRoot,
+    /// A test-only header open with no extraction: reads resolve against an
+    /// owned empty sandbox tempdir (removed on drop), so tests are hermetic —
+    /// no read can touch the live filesystem. `extracted == false`, as no
+    /// extraction ran; that is why this is its own variant rather than
+    /// reusing `Extracted` (which claims an extraction happened) or
+    /// `CleanedUp` (which points at a removed path).
+    #[cfg(test)]
+    Sandboxed {
+        /// The sandbox directory.
+        dir: PathBuf,
+        /// Owns the tempdir; dropping it removes the directory.
+        tempdir: tempfile::TempDir,
+    },
     /// [`Pkg::cleanup`] dropped the tempdir; reads fail to `''`, exactly as
     /// the reference's post-cleanup reads do. Still points at the removed
     /// path, like the reference's `dirname`.
@@ -157,12 +173,15 @@ pub(crate) enum PkgSource {
 }
 
 impl PkgSource {
-    /// The directory reads resolve against: the extraction directory, or `/`
-    /// for the live-filesystem sources. `CleanedUp` keeps pointing at the
-    /// removed path, so reads fail there instead of falling back to `/`.
+    /// The directory reads resolve against: the extraction directory, the
+    /// owned empty sandbox for test-only header opens, or `/` for the
+    /// live-filesystem sources. `CleanedUp` keeps pointing at the removed
+    /// path, so reads fail there instead of falling back to `/`.
     fn base_dir(&self) -> &Path {
         match self {
             PkgSource::Extracted { dir, .. } => dir,
+            #[cfg(test)]
+            PkgSource::Sandboxed { dir, .. } => dir,
             PkgSource::Installed | PkgSource::LiveRoot => Path::new("/"),
             PkgSource::CleanedUp { dir } => dir,
         }
@@ -176,6 +195,8 @@ impl PkgSource {
                 true
             }
             PkgSource::LiveRoot => false,
+            #[cfg(test)]
+            PkgSource::Sandboxed { .. } => false,
         }
     }
 }
@@ -257,6 +278,16 @@ const EXTRACT_RPM: &str = "ExtractRpm";
 /// The `libmagic` phase name.
 const LIBMAGIC: &str = "libmagic";
 
+/// Read a package header, skipping signature checks as rpmlint does.
+fn read_header(path: &Path) -> Result<PackageHeader, PkgError> {
+    PackageHeader::from_file(path, Some(&VerifyOptions::skip_verification())).map_err(|source| {
+        PkgError::Open {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
+}
+
 impl Pkg {
     /// Open a `.rpm` file, unpack its payload into a tempdir under
     /// `extract_dir`, and build the package. Signature checks are skipped, as
@@ -272,21 +303,41 @@ impl Pkg {
     }
 
     /// Open a fixture RPM's header without extracting its payload.
-    /// For tests that overwrite `files` wholesale: header tags are read, but
-    /// no tempdir is created and no extraction subprocess runs
-    /// (`PkgSource::LiveRoot`, the same path `ExtractDir = "/"` takes).
+    /// For tests that overwrite `files` wholesale: header tags are read, no
+    /// extraction subprocess runs, and reads resolve against an owned empty
+    /// sandbox tempdir ([`PkgSource::Sandboxed`]) rather than the live
+    /// filesystem — the test stays hermetic (reading a fixture absolute path
+    /// returns `''` instead of host content). `extracted` stays false, as no
+    /// extraction ran.
     #[cfg(test)]
     pub fn open_no_extract(path: &Path) -> Result<Self, PkgError> {
-        Self::open(path, Path::new("/"), true)
+        init()?;
+        guarded(|| {
+            let header = read_header(path)?;
+            let filename = path.to_string_lossy().into_owned();
+            // An owned empty sandbox: reads resolve against it (via
+            // `base_dir`), and it is removed on drop. Prefix joins the
+            // `rpmlint.` family the extraction tempdirs use.
+            let tempdir = tempfile::Builder::new()
+                .prefix("rpmlint.sandbox.")
+                .tempdir()?;
+            let source = PkgSource::Sandboxed {
+                dir: tempdir.path().to_path_buf(),
+                tempdir,
+            };
+            Ok(Self::build(
+                header,
+                source,
+                filename,
+                None,
+                Timers::with_extract(0.0),
+            ))
+        })
     }
 
     /// The body of [`Pkg::open`], run under [`guarded`].
     fn read(path: &Path, extract_dir: &Path, suppress_stderr: bool) -> Result<Self, PkgError> {
-        let header = PackageHeader::from_file(path, Some(&VerifyOptions::skip_verification()))
-            .map_err(|source| PkgError::Open {
-                path: path.to_path_buf(),
-                source,
-            })?;
+        let header = read_header(path)?;
         // rpmlint stores the as-passed path verbatim (`self.filename = filename`)
         // — not the basename. `SignatureCheck` prints it, and it is resolved
         // for extraction.
@@ -335,7 +386,7 @@ impl Pkg {
     /// filename is synthesized, and `is_source` is forced false.
     /// # Errors
     /// [`PkgError::Decode`] when a header field cannot be decoded; see
-    /// [`guarded`]. An installed package is read the same way as a file, so it
+    /// `guarded`. An installed package is read the same way as a file, so it
     /// fails the same way.
     pub fn installed(header: PackageHeader) -> Result<Self, PkgError> {
         guarded(|| {
@@ -477,9 +528,9 @@ impl Pkg {
         &self.header
     }
 
-    /// The directory reads resolve against: the extraction directory, `/`
-    /// for the live-filesystem sources, or the removed path after
-    /// [`Pkg::cleanup`].
+    /// The directory reads resolve against: the extraction directory, the
+    /// owned empty sandbox for test-only header opens, `/` for the
+    /// live-filesystem sources, or the removed path after [`Pkg::cleanup`].
     pub fn dir_name(&self) -> &Path {
         self.source.base_dir()
     }
@@ -555,13 +606,15 @@ impl Pkg {
         None
     }
 
-    /// Remove the extraction tempdir (rpmlint `cleanup`); it is also removed on
-    /// drop. The source becomes [`PkgSource::CleanedUp`], still pointing at
-    /// the removed path, so a read after cleanup fails to `''` exactly as the
-    /// reference does.
+    /// Remove the owned tempdir (rpmlint `cleanup`); it is also removed on
+    /// drop. This covers the extraction tempdir and the test-only sandbox
+    /// tempdir alike. The source becomes `PkgSource::CleanedUp`, still
+    /// pointing at the removed path, so a read after cleanup fails to `''`
+    /// exactly as the reference does.
     pub fn cleanup(&mut self) {
-        // Only an extracted package owns a tempdir. Taking the source drops
-        // the old `TempDir` below, removing the directory from the filesystem.
+        // Only a tempdir-owning source (`Extracted`, or the test-only
+        // `Sandboxed`) is dropped early here. Taking the source drops the old
+        // `TempDir` below, removing the directory from the filesystem.
         let old = std::mem::replace(
             &mut self.source,
             PkgSource::CleanedUp {
@@ -570,6 +623,13 @@ impl Pkg {
         );
         self.source = match old {
             PkgSource::Extracted { dir, tempdir } => {
+                drop(tempdir);
+                PkgSource::CleanedUp { dir }
+            }
+            // A header-only test package sandbox is removed on cleanup too,
+            // exactly like an extraction tempdir.
+            #[cfg(test)]
+            PkgSource::Sandboxed { dir, tempdir } => {
                 drop(tempdir);
                 PkgSource::CleanedUp { dir }
             }
@@ -923,5 +983,81 @@ mod tests {
         assert_eq!(t.get(EXTRACT_RPM), 0.0);
         let t = Timers::with_extract(1.5);
         assert_eq!(t.get(EXTRACT_RPM), 1.5);
+    }
+
+    #[test]
+    fn open_no_extract_is_hermetic() {
+        // A header-only open resolves reads against an owned empty sandbox,
+        // not the live filesystem. `/etc/hosts` exists on every unix/macOS
+        // host with content, so it distinguishes the two: with the old
+        // `LiveRoot` base dir, `read_file` would return live content and
+        // `grep` would find it.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let pkg = Pkg::open_no_extract(&rpm).expect("open fixture");
+        // The sandbox dir exists for the life of the pkg.
+        assert!(pkg.dir_name().is_dir(), "sandbox dir must exist");
+        assert!(!pkg.extracted(), "no extraction ran");
+        assert_eq!(pkg.read_file("/etc/hosts"), "");
+        let re = fancy_regex::Regex::new(".").expect("static regex");
+        assert_eq!(pkg.grep(&re, "/etc/hosts"), None);
+    }
+}
+
+#[cfg(test)]
+mod rich_dep_fixture_tests {
+    use crate::pkg::Pkg;
+    use std::path::Path;
+
+    fn open_fixture() -> Pkg {
+        let rpm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/richdep-fixture-1.0-1.noarch.rpm");
+        Pkg::open(&rpm_path, &std::env::temp_dir(), true).expect("open richdep fixture")
+    }
+
+    #[test]
+    fn header_rich_deps_parse_to_leaves() {
+        // Built by tests/parity/pkg/inputs/build-richdep-fixture.sh in an
+        // openSUSE container; the header stores each expression whole in
+        // REQUIRENAME with flags 0 (verified with `rpm -qp --requires`).
+        let pkg = open_fixture();
+        let by_name = |want: &str| {
+            pkg.requires
+                .iter()
+                .find(|d| d.name == want)
+                .unwrap_or_else(|| panic!("missing require {want:?}"))
+        };
+
+        let dep = by_name("(foo or bar)");
+        assert_eq!(dep.flags, 0);
+        assert_eq!(dep.leaf_names(), vec!["foo".to_string(), "bar".to_string()]);
+
+        let dep = by_name("(baz >= 1.0 with baz < 2.0)");
+        let leaves = dep.leaves();
+        assert_eq!(leaves.len(), 2);
+        assert_eq!(leaves[0].name, "baz");
+        assert_eq!(leaves[0].version.as_deref(), Some("1.0"));
+        assert_eq!(leaves[1].version.as_deref(), Some("2.0"));
+
+        let dep = by_name("(outer and (inner1 or inner2))");
+        assert_eq!(
+            dep.leaf_names(),
+            vec![
+                "outer".to_string(),
+                "inner1".to_string(),
+                "inner2".to_string()
+            ]
+        );
+
+        let dep = by_name("qux(meta)");
+        assert_eq!(dep.leaf_names(), vec!["qux(meta)".to_string()]);
+        assert_eq!(dep.leaves()[0].qualifier.as_deref(), Some("meta"));
+
+        // rpm auto-adds these; the port must keep them literal.
+        let dep = by_name("rpmlib(RichDependencies)");
+        assert_eq!(
+            dep.leaf_names(),
+            vec!["rpmlib(RichDependencies)".to_string()]
+        );
     }
 }

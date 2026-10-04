@@ -1,0 +1,17 @@
+kind = "captured"
+rpmlint = "2.10.0"
+reference_sha = "84848c05c5571c22274a55ff9afdfe6d88c67dc9"
+flavour = "openSUSE"
+checks = 43
+argv = ["w6-systemd-install-1.0-1.noarch.rpm"]
+captured = "2026-10-03"
+
+[source]
+description = "Hand-built fixture: /usr/lib/systemd/system/w6si.service whose %pre/%post call the systemd-update-helper add macros while %preun/%postun are absent. Reference emits E systemd-service-without-service_del_preun and E systemd-service-without-service_del_postun. Exit 0."
+
+[tools]
+present = ["checkbashisms","dash","desktop-file-validate","readelf","objdump","ldd","file"]
+
+[[input]]
+file = "w6-systemd-install-1.0-1.noarch.rpm"
+sha256 = "72ed646a2e9e852cd29d07f68c1c78974bb03180be5fdc7d020dd678d00c1265"

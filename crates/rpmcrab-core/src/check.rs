@@ -245,6 +245,9 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
             crate::checks::alternatives::AlternativesCheck::new(config),
         )),
         "AppDataCheck" => Some(Box::new(crate::checks::appdata::AppDataCheck::new(config))),
+        "BuildRootAndDateCheck" => Some(Box::new(
+            crate::checks::buildroot_and_date::BuildRootAndDateCheck::new(config),
+        )),
         "BashismsCheck" => Some(Box::new(crate::checks::bashisms::BashismsCheck::new(
             config,
         ))),

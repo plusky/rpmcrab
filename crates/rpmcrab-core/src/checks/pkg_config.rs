@@ -146,6 +146,8 @@ impl Check for PkgConfigCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::Color;
+    use crate::pkg::pkgfile::PkgFile;
 
     fn check(line: &str, is_64bit: bool) -> Vec<(&'static str, Option<String>)> {
         PkgConfigCheck::check_line(
@@ -279,5 +281,63 @@ mod tests {
         assert!(is_match(&re, "usr/share/pkgconfig/foo.pc"));
         assert!(!is_match(&re, "usr/lib64/pkgconfig/foo.pc.orig"));
         assert!(!is_match(&re, "usr/bin/foo"));
+    }
+
+    /// plusky's #108 nit: `suspicious_build_dirs_are_reported` is
+    /// helper-level only -- it drives `check_line` and pins the finding name.
+    /// This one drives `check_binary` on a `.pc` file whose prefix points at
+    /// a hyphenated build dir, pinning the emitted name, level and detail.
+    /// The `Pkg` comes from `open_no_extract` (no payload extraction into
+    /// the shared temp dir): `files` is overwritten wholesale and the `.pc`
+    /// bytes are read from `file.path`, never through the package root.
+    #[test]
+    fn hyphenated_build_dir_emits_error_through_check_binary() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let pc = dir.path().join("foo.pc");
+        std::fs::write(
+            &pc,
+            "prefix=/usr/src/linux-6.1/BUILD/usr\n\
+             exec_prefix=${prefix}\n\
+             Name: foo\n\
+             Description: fixture\n\
+             Version: 1.0\n\
+             Libs: -L/usr/lib64 -lfoo\n",
+        )
+        .expect("write fixture pc file");
+        let mut pkg = Pkg::open_no_extract(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm"),
+        )
+        .expect("open fixture pkg header");
+        pkg.name = "pkgconfig-test".to_string();
+        pkg.arch = "x86_64".to_string();
+        // The leading slash is what the real pipeline emits, not a fixture
+        // artifact: real `RPMTAG_FILENAMES` entries carry it (rpmbuild writes
+        // absolute DIRNAMES), the reference keys `pkg.files` on the raw tag
+        // value (`pkg.py:679,713`) and emits it verbatim
+        // (`PkgConfigCheck.py:46`), and this port emits librpm's raw
+        // `rpmfilesFN` the same way. The frozen string is golden for the
+        // port's widened pattern only: the reference's `\w+` never matches
+        // this hyphenated build dir, so it emits no `invalid-pkgconfig-file`
+        // here at all (the widening is already ledgered in
+        // `divergences.toml`).
+        let rel = "usr/lib64/pkgconfig/foo.pc";
+        pkg.files = vec![PkgFile {
+            name: format!("/{rel}"),
+            path: pc.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            ..Default::default()
+        }];
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).expect("filter");
+        let mut check = PkgConfigCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(results.len(), 1, "unexpected results: {results:?}");
+        assert_eq!(results[0].0, "invalid-pkgconfig-file");
+        assert_eq!(
+            results[0].1,
+            "pkgconfig-test.x86_64: E: invalid-pkgconfig-file /usr/lib64/pkgconfig/foo.pc"
+        );
     }
 }

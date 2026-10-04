@@ -197,3 +197,18 @@ fn every_constructible_check_is_listed_in_checks() {
         );
     }
 }
+
+/// The reverse direction (issue #85): a name in the default config's
+/// `Checks = [...]` that `check::build` cannot construct is silently
+/// dropped by `load_with`, so the run advertises checks that never execute.
+#[test]
+fn every_listed_check_is_constructible() {
+    let built = names_built_by_registry();
+    for name in checks_in_default_config() {
+        assert!(
+            built.contains(&name),
+            "`{name}` is listed in `Checks = [...]` in configdefaults.toml \
+             but `check::build` cannot construct it, so it silently never runs"
+        );
+    }
+}

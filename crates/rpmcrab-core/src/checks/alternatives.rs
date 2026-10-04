@@ -625,6 +625,50 @@ mod tests {
         );
     }
 
+    /// Two `man=` lines whose entries are both missing each warn: the
+    /// reference validates every line (AlternativesCheck.py:264-271 resets
+    /// `man_found` per entry, so after a line it holds only the last
+    /// entry's result). A second line must not be swallowed as
+    /// `double-entries` when the previous line's last entry was also
+    /// missing -- the missing entry would go unreported.
+    #[test]
+    fn two_missing_man_lines_warn_per_entry_not_double_entries() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let pkg = libalternatives_pkg(
+            dir.path(),
+            &[(
+                "foo.conf",
+                "binary = /usr/bin/foo\nman = missing-one.1\nman = missing-two.1\n",
+            )],
+        );
+        let results = findings_for(&pkg);
+        let warnings: Vec<&(String, String)> = results
+            .iter()
+            .filter(|(n, _)| n == "man-entry-value-not-found")
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            2,
+            "expected one warning per missing man entry, got {results:?}"
+        );
+        // FREEZE THE OUTPUT: pin both whole rendered lines, including the
+        // per-line `Line: N` component the contains-based asserts could not
+        // see -- a constant line number must fail this test.
+        let expected = [
+            "alternatives-test.noarch: W: man-entry-value-not-found /usr/share/libalternatives/foo/foo.conf Line: 1",
+            "alternatives-test.noarch: W: man-entry-value-not-found /usr/share/libalternatives/foo/foo.conf Line: 2",
+        ];
+        for (i, (name, line)) in warnings.iter().enumerate() {
+            assert_eq!(name, "man-entry-value-not-found");
+            assert_eq!(line.as_str(), expected[i], "frozen output line {i}");
+        }
+        assert!(
+            !has(&results, "double-entries"),
+            "double-entries must not fire when the previous line's last man \
+             was also missing: {results:?}"
+        );
+    }
+
     /// A package-chosen symlink basename with an unbalanced bracket makes the
     /// libalternatives conf pattern uncompilable (the reference raises
     /// `re.error` at `AlternativesCheck.py:216`); the check must skip the one

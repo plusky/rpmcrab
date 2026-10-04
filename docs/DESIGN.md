@@ -591,18 +591,24 @@ invocations go through shared quoting/path helpers with golden tests.
 `dir_name`/`extracted`/`tempdir` fields are gone.*
 
 `Pkg` is the binary-RPM model (file-backed or installed). *Where its bytes
-come from* is a closed set, so it is represented as one: a `PkgSource` sum
-type, not separate fields whose combinations the type system cannot check.
+come from* is a closed set for the situations the reference actually
+distinguishes, so it is represented as one: a `PkgSource` sum type, not
+separate fields whose combinations the type system cannot check.
 The variants follow the situations the reference actually distinguishes, so
 the reference's `extracted` flag is a total function of the variant — no flag
-field remains:
+field remains. The one extra variant is test-only and never surfaces in
+production reads:
 
 - `Extracted { dir, tempdir }` — payload unpacked into an owned tempdir
   (removed on drop);
 - `Installed` — an installed package (`extracted` true);
 - `LiveRoot` — a file package with `ExtractDir='/'` (`extracted` false);
 - `CleanedUp` — the tempdir was dropped; reads fail to `''`, exactly as the
-  reference's post-cleanup reads do.
+  reference's post-cleanup reads do;
+- `Sandboxed { dir, tempdir }` — `#[cfg(test)]`-only: a header-only test open
+  with no extraction. Reads resolve against an owned empty sandbox tempdir
+  (removed on drop), so the test stays hermetic; `extracted` is false, as no
+  extraction ran.
 
 `Installed` and `LiveRoot` both read from the live filesystem, but they stay
 separate variants because the reference reports different `extracted` values
