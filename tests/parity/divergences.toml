@@ -351,13 +351,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "FileDigestCheck"
-kind = "behaviour"
-reason = "The `xml` digester is a hand-rolled approximation, not C14N 2.0 like the reference's `ET.canonicalize(strip_text=True)`: it keeps the XML declaration and the DOCTYPE (including internal subsets), does not expand empty elements (`<b/>` stays; the reference emits `<b></b>`), collapses text whitespace instead of per-node handling, and misses the attribute sorting, namespace hoisting/elision, entity/char-ref expansion, and CDATA-as-escaped-text subtleties of canonicalization. A differential against the reference on 30 XML samples showed 14 mismatches. C14N is fully specified and implementable, so this is unfinished work, not a port constraint — recorded as behaviour, never limitation."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "AtomicUpdateCheck"
 kind = "behaviour"
 reason = "A non-string element in AtomicAllowedDirs/AtomicDisallowedSubdirs (e.g. AtomicDisallowedSubdirs = [42]) panics at construction; the reference raises TypeError later, at check time. The port deliberately fails fast on a misconfigured type instead of reproducing the reference's deferred failure."
@@ -567,14 +560,6 @@ check = "SUIDPermissionsCheck"
 kind = "behaviour"
 reason = "Deliberate improvement over the reference: drop-in profile application order follows package file order (insertion-ordered set) instead of the reference's nondeterministic Python `set` iteration (measured 7/12 vs 5/12 across 12 runs on a two-drop-in fixture), so `permissions-incorrect` no longer depends on hash seed. No upstream issue covers the ordering."
 since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "FileDigestCheck"
-kind = "behaviour"
-reason = "The `xml` digester is disabled pending a C14N-conformant implementation (plusky/rpmcrab#75): entries with `digester = \"xml\"` are treated as skipped, producing no digest and no mismatch finding. The hand-rolled approximation it replaced mismatched the reference's `ET.canonicalize(strip_text=True)` on every real D-Bus service file, so all 156 `digester = \"xml\"` entries in dbus-services.toml would have false-positived `dbus-file-digest-mismatch`."
-since = "0.1.0"
-upstream = "https://github.com/plusky/rpmcrab/issues/75"
 
 [[divergence]]
 case = "global"
