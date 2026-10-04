@@ -527,9 +527,9 @@ impl Pkg {
         &self.header
     }
 
-    /// The directory reads resolve against: the extraction directory, `/`
-    /// for the live-filesystem sources, or the removed path after
-    /// [`Pkg::cleanup`].
+    /// The directory reads resolve against: the extraction directory, the
+    /// owned empty sandbox for test-only header opens, `/` for the
+    /// live-filesystem sources, or the removed path after [`Pkg::cleanup`].
     pub fn dir_name(&self) -> &Path {
         self.source.base_dir()
     }
@@ -605,10 +605,11 @@ impl Pkg {
         None
     }
 
-    /// Remove the extraction tempdir (rpmlint `cleanup`); it is also removed on
-    /// drop. The source becomes [`PkgSource::CleanedUp`], still pointing at
-    /// the removed path, so a read after cleanup fails to `''` exactly as the
-    /// reference does.
+    /// Remove the owned tempdir (rpmlint `cleanup`); it is also removed on
+    /// drop. This covers the extraction tempdir and the test-only sandbox
+    /// tempdir alike. The source becomes [`PkgSource::CleanedUp`], still
+    /// pointing at the removed path, so a read after cleanup fails to `''`
+    /// exactly as the reference does.
     pub fn cleanup(&mut self) {
         // Only a tempdir-owning source (`Extracted`, or the test-only
         // `Sandboxed`) is dropped early here. Taking the source drops the old
