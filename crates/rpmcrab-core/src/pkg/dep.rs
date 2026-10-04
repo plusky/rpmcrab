@@ -306,7 +306,12 @@ impl DepLeaf {
 /// nest only a handful of levels; 64 is an order of magnitude beyond anything
 /// legitimate and comfortably below the ~400-level overflow threshold measured
 /// in a test thread. Past the budget the input falls back to `Simple` holding
-/// the raw string. The bound also caps the `Box` tree depth, so the drop glue
+/// the raw string.
+///
+/// At depth 65+ even a well-formed expression reads exactly like a parse error:
+/// one opaque `Simple` leaf, and every leaf analysis goes dark.
+///
+/// The bound also caps the `Box` tree depth, so the drop glue
 /// can never recurse into an overflow either.
 const MAX_RICH_DEP_DEPTH: usize = 64;
 
