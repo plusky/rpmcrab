@@ -270,7 +270,7 @@ fn filelist_reports_absolute_bad_patterns() {
 /// `AppDataCheck` falls back to native validation when no `appstream-util`
 /// is configured. The malformed fixture file fails well-formedness; the
 /// native fallback additionally requires the mandatory AppStream tags, so the
-/// well-formed fixture file (which lacks `licence`) is flagged too.
+/// well-formed fixture file (which lacks `metadata_license`) is flagged too.
 #[test]
 fn appdata_native_check_flags_malformed_file() {
     let empty = tempfile::tempdir().unwrap();
@@ -282,7 +282,7 @@ fn appdata_native_check_flags_malformed_file() {
             ("invalid-appdata-file", "w6broken.appdata.xml"),
             (
                 "invalid-appdata-file",
-                "w6valid.appdata.xml: missing required tag(s): licence",
+                "w6valid.appdata.xml: missing required tag(s): metadata_license",
             ),
         ],
     );

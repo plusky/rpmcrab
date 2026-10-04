@@ -3,13 +3,24 @@
 //! Ported from `rpmlint/checks/AppDataCheck.py`. One finding:
 //! `invalid-appdata-file`.
 //!
-//! The reference runs `appstream-util validate-relax --nonet` and falls back
-//! to a bare XML well-formedness check when the tool is absent. This port
-//! keeps that shape but extends it (ledgered): files under
-//! `/usr/share/metainfo/` are scanned too — the reference only looks at
-//! `/usr/share/appdata/`, but metainfo is the current AppStream location —
-//! and the native fallback additionally requires the mandatory AppStream
-//! tags (`id`, `name`, `summary`, `description`, `licence`).
+//! The reference runs `appstream-util validate-relax --nonet` when the tool
+//! is present and falls back to a bare XML well-formedness check when it is
+//! absent. This port keeps that two-path shape, deliberately: when the real
+//! validator is available it is deferred to entirely, because second-guessing
+//! it with a stricter native tag check would emit findings the reference
+//! never produces. The native path is an extension of the reference's
+//! fallback (ledgered): files under `/usr/share/metainfo/` are scanned too —
+//! the reference only looks at `/usr/share/appdata/`, but metainfo is the
+//! current AppStream location — and the fallback additionally requires the
+//! mandatory AppStream tags, where the reference only checks well-formedness.
+//!
+//! The mandatory licence tag is `metadata_license` (AppStream §2 "Metainfo
+//! Files"); `licence`/`project_license` are accepted as alternatives so
+//! legacy files are not flagged. The required set is type-aware: `id`,
+//! `name`, `summary` and the licence for every component, plus `description`
+//! only where the spec mandates it (`desktop-application`, and `desktop`,
+//! its legacy alias) — a fixed set false-positives on legitimate types like
+//! `generic`, which needs no `description`.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -24,10 +35,23 @@ use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::tools::{Tool, ToolSource, test_source};
 
-/// Required AppStream component tags. `project_license` satisfies `licence`:
-/// it is the current spelling (renamed in AppStream 0.12), so demanding the
-/// literal old name would flag every modern file.
-const REQUIRED_TAGS: [&str; 5] = ["id", "name", "summary", "description", "licence"];
+/// AppStream's mandatory licence tag is `metadata_license`
+/// (§2 "Metainfo Files"; `project_license` is explicitly optional).
+/// `licence` is the pre-0.12 spelling of `project_license`; both are
+/// accepted as alternatives so legacy files are not flagged.
+const LICENCE_TAGS: [&str; 3] = ["metadata_license", "licence", "project_license"];
+
+/// Required tags for every component type (AppStream §2).
+const BASE_REQUIRED_TAGS: [&str; 3] = ["id", "name", "summary"];
+
+/// Component types whose required set includes `description` (AppStream §2.3;
+/// `desktop` is the legacy alias of `desktop-application`).
+fn description_required(component_type: Option<&str>) -> bool {
+    matches!(
+        component_type,
+        Some("desktop-application") | Some("desktop")
+    )
+}
 
 /// Outcome of the native (no `appstream-util`) validation.
 #[derive(Debug, PartialEq, Eq)]
@@ -54,14 +78,50 @@ fn tag_name(chars: &[char], i: &mut usize) -> String {
     chars[start..*i].iter().collect()
 }
 
-/// Walk the document, checking XML well-formedness. Returns the tag names of
-/// the root element's direct children, or `None` when malformed.
-fn walk_xml(text: &str) -> Option<HashSet<String>> {
+/// What `walk_xml` recovers from a document: the root `<component>`'s
+/// `type` attribute and its direct children's tag names.
+struct ComponentShape {
+    component_type: Option<String>,
+    children: HashSet<String>,
+}
+
+/// The `type` attribute's value in a raw attribute slice, if present.
+fn type_attr(attrs: &[char]) -> Option<String> {
+    let s: String = attrs.iter().collect();
+    let mut rest = s.as_str();
+    while let Some(pos) = rest.find("type") {
+        let before = &rest[..pos];
+        let after = &rest[pos + "type".len()..];
+        // `type` must be a standalone attribute name: a boundary before it
+        // (so `prototype` does not match) and `=` after it.
+        let boundary = before.is_empty()
+            || before
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_whitespace());
+        if boundary && let Some(val) = after.trim_start().strip_prefix('=') {
+            let val = val.trim_start();
+            let quote = val.chars().next()?;
+            if quote == '"' || quote == '\'' {
+                let inner = &val[quote.len_utf8()..];
+                return inner.find(quote).map(|end| inner[..end].to_string());
+            }
+            return None;
+        }
+        rest = after;
+    }
+    None
+}
+
+/// Walk the document, checking XML well-formedness. Returns the component
+/// shape, or `None` when malformed.
+fn walk_xml(text: &str) -> Option<ComponentShape> {
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
     let mut i = 0;
     let mut stack: Vec<String> = Vec::new();
     let mut root_seen = false;
+    let mut component_type: Option<String> = None;
     let mut children: HashSet<String> = HashSet::new();
 
     while i < n {
@@ -107,6 +167,7 @@ fn walk_xml(text: &str) -> Option<HashSet<String>> {
         }
 
         // Skip attributes, watching for '/>'
+        let attrs_start = i;
         let mut self_closing = false;
         let mut in_quote: Option<char> = None;
         while i < n && chars[i] != '>' {
@@ -129,6 +190,7 @@ fn walk_xml(text: &str) -> Option<HashSet<String>> {
                 return None; // second root element
             }
             root_seen = true;
+            component_type = type_attr(&chars[attrs_start..i]);
         } else if stack.len() == 1 {
             // Direct child of the root element.
             children.insert(name.clone());
@@ -138,34 +200,43 @@ fn walk_xml(text: &str) -> Option<HashSet<String>> {
         }
     }
     if root_seen && stack.is_empty() {
-        Some(children)
+        Some(ComponentShape {
+            component_type,
+            children,
+        })
     } else {
         None
     }
 }
 
-/// Required tags absent from the root's direct children, in
-/// [`REQUIRED_TAGS`] order.
-fn missing_required_tags(children: &HashSet<String>) -> Vec<String> {
-    REQUIRED_TAGS
-        .iter()
-        .filter(|tag| {
-            if **tag == "licence" {
-                !(children.contains("licence") || children.contains("project_license"))
-            } else {
-                !children.contains(**tag)
-            }
-        })
-        .map(|s| s.to_string())
-        .collect()
+/// Required tags absent from the component, in spec order: `id`, `name`,
+/// `summary`, `metadata_license`, then `description` for component types
+/// that mandate it. A missing licence is reported as `metadata_license`,
+/// the mandatory spelling; `licence`/`project_license` satisfy it.
+fn missing_required_tags(shape: &ComponentShape) -> Vec<String> {
+    let mut missing = Vec::new();
+    for tag in BASE_REQUIRED_TAGS {
+        if !shape.children.contains(tag) {
+            missing.push(tag.to_string());
+        }
+    }
+    if !LICENCE_TAGS.iter().any(|t| shape.children.contains(*t)) {
+        missing.push("metadata_license".to_string());
+    }
+    if description_required(shape.component_type.as_deref())
+        && !shape.children.contains("description")
+    {
+        missing.push("description".to_string());
+    }
+    missing
 }
 
 /// Native validation: XML well-formedness plus required AppStream tags.
 fn native_validate(text: &str) -> NativeOutcome {
     match walk_xml(text) {
         None => NativeOutcome::Malformed,
-        Some(children) => {
-            let missing = missing_required_tags(&children);
+        Some(shape) => {
+            let missing = missing_required_tags(&shape);
             if missing.is_empty() {
                 NativeOutcome::Ok
             } else {
@@ -358,7 +429,8 @@ mod tests {
 
     #[test]
     fn root_children_are_collected() {
-        let children = walk_xml("<component><id>x</id><name>y</name></component>").unwrap();
+        let shape = walk_xml("<component><id>x</id><name>y</name></component>").unwrap();
+        let children = &shape.children;
         assert!(children.contains("id"));
         assert!(children.contains("name"));
         assert!(!children.contains("component"));
@@ -366,18 +438,40 @@ mod tests {
 
     #[test]
     fn nested_tags_are_not_root_children() {
-        let children = walk_xml(
+        let shape = walk_xml(
             "<component><description><p><name>nested</name></p></description></component>",
         )
         .unwrap();
+        let children = &shape.children;
         assert!(!children.contains("name"));
         assert!(children.contains("description"));
     }
 
     #[test]
     fn self_closing_root_child_is_collected() {
-        let children = walk_xml("<component><launchable/></component>").unwrap();
+        let shape = walk_xml("<component><launchable/></component>").unwrap();
+        let children = &shape.children;
         assert!(children.contains("launchable"));
+    }
+
+    #[test]
+    fn root_type_attribute_is_captured() {
+        let shape =
+            walk_xml(r#"<component type="desktop-application"><id>x</id></component>"#).unwrap();
+        assert_eq!(shape.component_type.as_deref(), Some("desktop-application"));
+    }
+
+    #[test]
+    fn missing_type_attribute_is_none() {
+        let shape = walk_xml("<component><id>x</id></component>").unwrap();
+        assert_eq!(shape.component_type, None);
+    }
+
+    #[test]
+    fn type_like_attribute_names_do_not_match() {
+        // `prototype` contains "type" but is not the type attribute.
+        let shape = walk_xml(r#"<component prototype="x"><id>y</id></component>"#).unwrap();
+        assert_eq!(shape.component_type, None);
     }
 
     const COMPLETE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -484,7 +578,7 @@ mod tests {
         assert_eq!(
             results[0].1,
             "appdata-test.noarch: E: invalid-appdata-file \
-             /usr/share/metainfo/org.example.foo.metainfo.xml: missing required tag(s): summary, description, licence"
+             /usr/share/metainfo/org.example.foo.metainfo.xml: missing required tag(s): summary, metadata_license, description"
         );
     }
 
@@ -500,16 +594,121 @@ mod tests {
         assert!(results.is_empty(), "results: {results:?}");
     }
 
-    /// `project_license` satisfies the `licence` requirement.
+    /// A real spec-compliant file — `metadata_license`, no
+    /// `project_license` (the shape of e.g. gstreamer-plugins-base's
+    /// appdata file, which the old `licence` requirement false-positived
+    /// on) — is silent.
+    const SPEC_COMPLIANT_NO_PROJECT_LICENSE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<component type="codec">
+  <id>org.example.codec</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <name>Example codec</name>
+  <summary>Decodes examples</summary>
+  <description><p>Fixture.</p></description>
+</component>
+"#;
+
     #[test]
-    fn project_license_satisfies_licence() {
-        // COMPLETE uses project_license and no licence tag.
+    fn metadata_license_without_project_license_is_silent() {
         let dir = tempfile::tempdir().expect("tmpdir");
         let (pkg, tool_dir) = appdata_pkg(
             dir.path(),
-            &[("usr/share/metainfo/org.example.foo.metainfo.xml", COMPLETE)],
+            &[(
+                "usr/share/metainfo/org.example.codec.metainfo.xml",
+                SPEC_COMPLIANT_NO_PROJECT_LICENSE,
+            )],
         );
         assert!(findings_for(&pkg, tool_dir.path()).is_empty());
+    }
+
+    /// `licence`/`project_license` are accepted as alternatives to the
+    /// mandatory `metadata_license` spelling.
+    #[test]
+    fn legacy_licence_spellings_satisfy_the_requirement() {
+        for tag in ["licence", "project_license"] {
+            let xml = format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<component type="generic">
+  <id>org.example.foo</id>
+  <{tag}>CC0-1.0</{tag}>
+  <name>Foo</name>
+  <summary>Does foo things</summary>
+</component>
+"#
+            );
+            let dir = tempfile::tempdir().expect("tmpdir");
+            let (pkg, tool_dir) = appdata_pkg(
+                dir.path(),
+                &[("usr/share/metainfo/org.example.foo.metainfo.xml", &xml)],
+            );
+            assert!(findings_for(&pkg, tool_dir.path()).is_empty(), "tag: {tag}");
+        }
+    }
+
+    /// No licence tag at all is reported as the mandatory spelling.
+    #[test]
+    fn missing_licence_is_reported_as_metadata_license() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<component type="generic">
+  <id>org.example.foo</id>
+  <name>Foo</name>
+  <summary>Does foo things</summary>
+</component>
+"#;
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let (pkg, tool_dir) = appdata_pkg(
+            dir.path(),
+            &[("usr/share/metainfo/org.example.foo.metainfo.xml", xml)],
+        );
+        let results = findings_for(&pkg, tool_dir.path());
+        assert_eq!(results.len(), 1, "results: {results:?}");
+        assert!(
+            results[0]
+                .1
+                .contains("missing required tag(s): metadata_license")
+        );
+    }
+
+    /// `generic` needs no `description`; `desktop-application` does.
+    #[test]
+    fn required_set_is_type_aware() {
+        let generic = r#"<?xml version="1.0" encoding="UTF-8"?>
+<component type="generic">
+  <id>org.example.foo</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <name>Foo</name>
+  <summary>Does foo things</summary>
+</component>
+"#;
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let (pkg, tool_dir) = appdata_pkg(
+            dir.path(),
+            &[("usr/share/metainfo/org.example.foo.metainfo.xml", generic)],
+        );
+        assert!(
+            findings_for(&pkg, tool_dir.path()).is_empty(),
+            "generic without description must be silent"
+        );
+
+        let desktop_no_desc = generic.replace(
+            r#"<component type="generic">"#,
+            r#"<component type="desktop-application">"#,
+        );
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let (pkg, tool_dir) = appdata_pkg(
+            dir.path(),
+            &[(
+                "usr/share/metainfo/org.example.foo.metainfo.xml",
+                &desktop_no_desc,
+            )],
+        );
+        let results = findings_for(&pkg, tool_dir.path());
+        assert_eq!(results.len(), 1, "results: {results:?}");
+        assert!(
+            results[0]
+                .1
+                .contains("missing required tag(s): description")
+        );
     }
 
     /// Malformed XML keeps the reference's bare-filename detail.
