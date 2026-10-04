@@ -933,14 +933,6 @@ impl TagsCheck {
 }
 
 impl TagsCheck {
-    /// Maximum paren layers unwrapped by [`Self::split_license_leaves`].
-    /// Past this depth the remainder is treated as one opaque leaf: the
-    /// reference's regex split answers instantly on adversarial nesting,
-    /// while an unbounded recursive unwrap is quadratic and overflows the
-    /// stack in unoptimised builds. No real license expression nests this
-    /// deep.
-    const MAX_LICENSE_PAREN_DEPTH: usize = 64;
-
     fn check_changelog(&self, pkg: &Pkg, out: &mut Filter, changelog: &[String]) {
         let header = pkg.header();
         let version = crate::pkg::tags::str_tag(header, Tag::VERSION).unwrap_or_default();
@@ -1058,109 +1050,68 @@ impl TagsCheck {
         }
     }
 
-    /// Split a license expression into leaf licenses, respecting parentheses.
-    ///
-    /// `(GPLv2 or GPLv3) and (GPLv2+ with exceptions)` becomes
-    /// `["GPLv2", "GPLv3", "GPLv2+ with exceptions"]`: a fully parenthesized
-    /// expression is unwrapped iteratively (bounded by
-    /// [`Self::MAX_LICENSE_PAREN_DEPTH`], past which the remainder is one
-    /// opaque leaf), and `and`/`or` (either case, the reference's operator
-    /// set) split at the top level only, so a `with` inside one group never
-    /// leaks into the exception match of another group.
-    ///
-    /// A bare `()` survives as a literal leaf (the reference reports
-    /// `invalid-license ()` for it); a whitespace-only group is dropped,
+    /// Split a license expression exactly like the reference's `license_regex`
+    /// (`\s(?:and|or|AND|OR)\s` or `\(([^)]+)\)`): a parenthesized group
+    /// contributes its inside as a piece, boolean operators split, and anything
+    /// else -- including unbalanced parens -- is kept verbatim. Mirrors Python's
+    /// `re.split` with the capture group (captured text is kept in the output);
+    /// pieces are stripped and empties dropped, like the reference's
+    /// `split_license`. A bare `()` survives as a literal piece (the reference
+    /// reports `invalid-license ()` for it); a whitespace-only group vanishes,
     /// like the reference's empty-split filtering.
-    fn split_license_leaves(text: &str) -> Vec<String> {
-        let mut text = text.trim();
-        if text.is_empty() {
-            return Vec::new();
-        }
-        let mut depth = 0usize;
-        while let Some(inner) = Self::strip_enclosing_parens(text) {
-            let inner = inner.trim();
-            if inner.is_empty() {
-                return if text == "()" {
-                    vec![text.to_string()]
-                } else {
-                    Vec::new()
-                };
-            }
-            depth += 1;
-            if depth > Self::MAX_LICENSE_PAREN_DEPTH {
-                return vec![text.to_string()];
-            }
-            text = inner;
-        }
-        let chars: Vec<(usize, char)> = text.char_indices().collect();
-        let mut parts = Vec::new();
-        let mut depth = 0usize;
+    ///
+    /// Iterative and linear: once one `(` finds no closing `)` ahead, no later
+    /// one can either, so adversarial nesting terminates instead of hanging.
+    fn split_license(text: &str) -> Vec<String> {
+        let mut parts: Vec<&str> = Vec::new();
         let mut start = 0usize;
-        let mut k = 0usize;
-        while k < chars.len() {
-            let (i, c) = chars[k];
-            if c == '(' {
-                depth += 1;
-            } else if c == ')' {
-                depth = depth.saturating_sub(1);
-            } else if depth == 0
-                && (i == 0 || text[..i].ends_with(char::is_whitespace))
-                && let Some(op_len) = Self::match_bool_op(&text[i..])
-            {
-                parts.push(text[start..i].trim());
-                start = i + op_len;
-                while k < chars.len() && chars[k].0 < start {
-                    k += 1;
+        let mut i = 0usize;
+        let mut paren_dead = false;
+        while i < text.len() {
+            let rest = &text[i..];
+            // `\(([^)]+)\)`
+            if !paren_dead && rest.starts_with('(') {
+                match rest.find(')') {
+                    None => paren_dead = true,
+                    Some(close) if close > 1 => {
+                        parts.push(text[start..i].trim());
+                        parts.push(rest[1..close].trim());
+                        i += close + 1;
+                        start = i;
+                        continue;
+                    }
+                    _ => {}
                 }
-                continue;
             }
-            k += 1;
-        }
-        if parts.is_empty() {
-            return vec![text.to_string()];
+            // `\s(?:and|or|AND|OR)\s`
+            let mut advanced = false;
+            if let Some((_, c)) = rest.char_indices().next()
+                && c.is_whitespace()
+            {
+                let after_ws = &rest[c.len_utf8()..];
+                for op in ["and", "or", "AND", "OR"] {
+                    if let Some(after_op) = after_ws.strip_prefix(op)
+                        && let Some((_, tc)) = after_op.char_indices().next()
+                        && tc.is_whitespace()
+                    {
+                        parts.push(text[start..i].trim());
+                        i += c.len_utf8() + op.len() + tc.len_utf8();
+                        start = i;
+                        advanced = true;
+                        break;
+                    }
+                }
+            }
+            if !advanced {
+                i += rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+            }
         }
         parts.push(text[start..].trim());
-        let mut leaves = Vec::new();
-        for part in parts {
-            if !part.is_empty() {
-                leaves.extend(Self::split_license_leaves(part));
-            }
-        }
-        leaves
-    }
-
-    /// If `s` is wrapped in a single balanced paren pair, return the inside.
-    fn strip_enclosing_parens(s: &str) -> Option<&str> {
-        let s = s.trim();
-        if s.len() < 2 || !s.starts_with('(') || !s.ends_with(')') {
-            return None;
-        }
-        let mut depth = 0i32;
-        for (i, c) in s.char_indices() {
-            if c == '(' {
-                depth += 1;
-            } else if c == ')' {
-                depth -= 1;
-                if depth == 0 && i != s.len() - 1 {
-                    return None;
-                }
-            }
-        }
-        (depth == 0).then(|| &s[1..s.len() - 1])
-    }
-
-    /// Length of a boolean operator at the start of `s` (`and`/`or`, either
-    /// case), requiring whitespace after it. The caller ensures whitespace
-    /// (or the start) before it.
-    fn match_bool_op(s: &str) -> Option<usize> {
-        for op in ["and", "or", "AND", "OR"] {
-            if let Some(rest) = s.strip_prefix(op)
-                && rest.starts_with(char::is_whitespace)
-            {
-                return Some(op.len());
-            }
-        }
-        None
+        parts
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect()
     }
 
     /// Split `"<license> WITH <exception>"`; returns `(license, exception)`.
@@ -1185,29 +1136,36 @@ impl TagsCheck {
         }
         let mut valid_license = true;
         if !self.valid_licenses.contains(&rpm_license.to_string()) {
-            // Each leaf is validated on its own: the old whole-string
-            // exception match replaced the license string with just the
-            // pre-WITH part, silently dropping every other leaf (and any
-            // trailing `and MIT`-style tail) from validation.
-            for leaf in Self::split_license_leaves(rpm_license) {
-                let (lic, lexception) = self.split_license_exception(&leaf);
-                if !lexception.is_empty() {
-                    // SPDX allows "<license> WITH <license-exception>"
-                    if !self.valid_license_exceptions.contains(&lexception) {
-                        add_info(
-                            out,
-                            Level::Warning,
-                            pkg,
-                            "invalid-license-exception",
-                            &[&lexception],
-                        );
+            // Pieces are validated like the reference's nested loop: each
+            // piece the split yields is checked, and a non-valid piece is
+            // split once more -- that is what turns `((GPLv2))` into the two
+            // findings `(GPLv2` and `)` instead of silently accepting it.
+            // Unlike the reference, the WITH-exception match runs per piece:
+            // the reference matches it against the whole string and then
+            // validates only the pre-WITH part, silently dropping sibling
+            // pieces (see divergences.toml).
+            for l1 in Self::split_license(rpm_license) {
+                let (lic, lexception) = self.split_license_exception(&l1);
+                // SPDX allows "<license> WITH <license-exception>"
+                if !lexception.is_empty() && !self.valid_license_exceptions.contains(&lexception) {
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "invalid-license-exception",
+                        &[&lexception],
+                    );
+                    valid_license = false;
+                }
+                let lic = if lexception.is_empty() { l1 } else { lic };
+                if lic.is_empty() || self.valid_licenses.contains(&lic) {
+                    continue;
+                }
+                for l2 in Self::split_license(&lic) {
+                    if !self.valid_licenses.contains(&l2) {
+                        add_info(out, Level::Warning, pkg, "invalid-license", &[&l2]);
                         valid_license = false;
                     }
-                }
-                let lic = if lexception.is_empty() { leaf } else { lic };
-                if !lic.is_empty() && !self.valid_licenses.contains(&lic) {
-                    add_info(out, Level::Warning, pkg, "invalid-license", &[&lic]);
-                    valid_license = false;
                 }
             }
         }
@@ -1838,30 +1796,37 @@ mod tests {
     }
 
     #[test]
-    fn license_leaves_respect_parens() {
+    fn license_split_matches_reference() {
+        // Expectations verified against the reference's
+        // `license_regex.split`: a paren group contributes its inside,
+        // boolean operators split, unbalanced parens are kept verbatim.
         assert_eq!(
-            TagsCheck::split_license_leaves("(GPLv2 or GPLv3) and (GPLv2+ with exceptions)"),
-            vec!["GPLv2", "GPLv3", "GPLv2+ with exceptions"],
+            TagsCheck::split_license("(GPLv2 or GPLv3) and (GPLv2+ with exceptions)"),
+            vec!["GPLv2 or GPLv3", "GPLv2+ with exceptions"],
         );
         assert_eq!(
-            TagsCheck::split_license_leaves("((GPLv2 or GPLv3) and MIT)"),
-            vec!["GPLv2", "GPLv3", "MIT"],
+            TagsCheck::split_license("((GPLv2 or GPLv3) and MIT)"),
+            vec!["(GPLv2 or GPLv3", "MIT)"],
         );
         assert_eq!(
-            TagsCheck::split_license_leaves("GPLv2 AND GPLv3"),
+            TagsCheck::split_license("GPLv2 AND GPLv3"),
             vec!["GPLv2", "GPLv3"],
         );
-        assert_eq!(TagsCheck::split_license_leaves("MIT"), vec!["MIT"]);
+        assert_eq!(TagsCheck::split_license("MIT"), vec!["MIT"]);
         // `or` inside a word is not an operator.
         assert_eq!(
-            TagsCheck::split_license_leaves("GPL-2.0-or-later"),
+            TagsCheck::split_license("GPL-2.0-or-later"),
             vec!["GPL-2.0-or-later"],
         );
         // Multi-byte input must not panic on slicing.
         assert_eq!(
-            TagsCheck::split_license_leaves("GPLv2é or MIT"),
+            TagsCheck::split_license("GPLv2é or MIT"),
             vec!["GPLv2é", "MIT"],
         );
+        // Unbalanced input is kept verbatim for the validator to flag.
+        assert_eq!(TagsCheck::split_license("((GPLv2))"), vec!["(GPLv2", ")"]);
+        assert_eq!(TagsCheck::split_license("()"), vec!["()"]);
+        assert!(TagsCheck::split_license("( )").is_empty());
     }
 
     #[test]
@@ -1906,12 +1871,33 @@ mod tests {
 
     #[test]
     fn license_deeply_nested_parens_terminates() {
-        // Adversarial nesting: the unwrap is bounded, so this terminates
-        // instead of going quadratic or overflowing the stack. Past the
-        // depth cap the remainder is one opaque leaf.
+        // Adversarial nesting: the split is iterative and linear, so this
+        // terminates instead of hanging or overflowing the stack.
         let text = format!("({}MIT{})", "(".repeat(10_000), ")".repeat(10_000));
-        let leaves = TagsCheck::split_license_leaves(&text);
-        assert_eq!(leaves.len(), 1);
+        let pieces = TagsCheck::split_license(&text);
+        assert_eq!(pieces.len(), 2);
+        // No closing paren at all: still linear, one verbatim piece.
+        let text = "(".repeat(10_000);
+        assert_eq!(TagsCheck::split_license(&text), vec![text]);
+    }
+
+    #[test]
+    fn license_doubly_wrapped_parens_are_reported() {
+        // The reference flags the unbalanced pieces of `((GPLv2))`; the
+        // splitter must not silently accept them.
+        let results = license_findings("((GPLv2))");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "invalid-license");
+        assert_eq!(results[0].1, "fcprobe.noarch: W: invalid-license (GPLv2");
+        assert_eq!(results[1].0, "invalid-license");
+        assert_eq!(results[1].1, "fcprobe.noarch: W: invalid-license )");
+        // Neighbouring unbalanced shapes agree with the reference too.
+        let results = license_findings("((GPLv2)");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1, "fcprobe.noarch: W: invalid-license (GPLv2");
+        let results = license_findings("(GPLv2))");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1, "fcprobe.noarch: W: invalid-license )");
     }
 
     #[test]
