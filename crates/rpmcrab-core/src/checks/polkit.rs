@@ -596,10 +596,21 @@ mod tests {
             "first: {}",
             results[0].1
         );
+        assert!(
+            results[0].1.contains("no:no:no"),
+            "first detail: {}",
+            results[0].1
+        );
         assert_eq!(results[1].0, "polkit-untracked-privilege");
+        assert!(results[1].1.contains(": E: "), "level: {}", results[1].1);
         assert!(
             results[1].1.contains("org.foo.inner"),
             "second: {}",
+            results[1].1
+        );
+        assert!(
+            results[1].1.contains("no:no:no"),
+            "second detail: {}",
             results[1].1
         );
     }

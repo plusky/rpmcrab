@@ -159,9 +159,10 @@ impl SourceCheck {
 /// The value is unbounded like the reference's: magnitudes beyond `u128`
 /// saturate at `u128::MAX` (ledgered as `kind = "detail"` — the saturated
 /// value can never equal a real file mode, which is the only comparison
-/// this value feeds, so the saturation is unobservable). Digits past the
-/// saturation point are still validated, so trailing garbage fails just
-/// like the reference's `ValueError`.
+/// this value feeds). Digits past the saturation point are still validated:
+/// trailing garbage makes this return `None`, and `SourceCheck::new` panics
+/// on `None` — the reference's `int(value, 8)` raises `ValueError` on the
+/// same input, so both die on the bad entry instead of silently accepting it.
 fn parse_octal(s: &str) -> Option<u128> {
     let s = s.trim();
     let (s, neg) = match s.as_bytes().first() {
@@ -182,7 +183,9 @@ fn parse_octal(s: &str) -> Option<u128> {
     let mut value: u128 = 0;
     // An underscore may follow the prefix or a digit, never anything else.
     let mut underscore_ok = after_prefix;
-    let mut digits = 0u32;
+    // u64: the counter now runs past saturation over the whole string,
+    // so a u32 could overflow (and panic a debug build) on an absurdly long entry.
+    let mut digits = 0u64;
     // Once the magnitude overflows u128 the value saturates, but every
     // remaining digit is still validated: the reference raises ValueError
     // for trailing garbage regardless of the leading magnitude.
