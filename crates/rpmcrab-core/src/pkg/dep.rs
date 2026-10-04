@@ -22,6 +22,64 @@ impl DepInfo {
     }
 }
 
+/// RPM `RPMSENSE_*` flags (`rpmds.h`); also synthesized for rich-dependency
+/// leaf version constraints.
+pub const RPMSENSE_LESS: u32 = 2;
+pub const RPMSENSE_GREATER: u32 = 4;
+pub const RPMSENSE_EQUAL: u32 = 8;
+
+impl DepInfo {
+    /// The plain dependencies referenced by this entry.
+    ///
+    /// Rich `(a or b)` expressions (RPM >= 4.13) expand to their leaves; a
+    /// plain name — with an optional RPM >= 4.16 `(qualifier)`, recorded
+    /// but kept in the leaf name — yields one leaf carrying the header
+    /// flags/EVR. The name stays literal (`rpmlib(CompressedFileNames)`,
+    /// `qux(meta)`), exactly like the reference’s string matching; only
+    /// the qualifier is additionally structured. Malformed input falls back
+    /// to the raw name.
+    pub fn leaves(&self) -> Vec<DepLeaf> {
+        match parse_dep_expr(&self.name) {
+            DepExpr::Simple {
+                qualifier,
+                flags,
+                epoch,
+                version,
+                release,
+                ..
+            } => {
+                // A header entry's flags/EVR describe a plain name; an
+                // inline version constraint (only from rich-expression
+                // terms) takes precedence when present.
+                let (flags, epoch, version, release) = if version.is_some() || flags != 0 {
+                    (flags, epoch, version, release)
+                } else {
+                    (
+                        self.flags,
+                        self.epoch,
+                        self.version.clone(),
+                        self.release.clone(),
+                    )
+                };
+                vec![DepLeaf {
+                    name: self.name.clone(),
+                    qualifier,
+                    flags,
+                    epoch,
+                    version,
+                    release,
+                }]
+            }
+            expr => expr.leaves(),
+        }
+    }
+
+    /// Bare names referenced by this entry, for name-based analyses.
+    pub fn leaf_names(&self) -> Vec<String> {
+        self.leaves().iter().map(|l| l.name.clone()).collect()
+    }
+}
+
 /// rpmlint's `stringToVersion`: parse `[epoch:]version[-release]`.
 /// A non-numeric epoch is ignored; an empty version part becomes `None`.
 pub fn string_to_version(s: &str) -> (Option<i64>, Option<String>, Option<String>) {
@@ -110,12 +168,41 @@ mod tests {
 /// pairs. The version is `Some` exactly when the dep is versioned (the
 /// reference's `flags != 0`); only its presence is ever read (`unversioned`),
 /// never the value.
+/// Split a dep line on whitespace/commas, keeping parenthesized rich
+/// expressions (`(a or b)`) as single tokens instead of shredding them into
+/// plain-name pieces the way the reference does.
+fn split_dep_tokens(line: &str) -> Vec<&str> {
+    let mut tokens: Vec<&str> = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut depth = 0u32;
+    for (i, c) in line.char_indices() {
+        match c {
+            '(' => {
+                start.get_or_insert(i);
+                depth += 1;
+            }
+            ')' => {
+                start.get_or_insert(i);
+                depth = depth.saturating_sub(1);
+            }
+            _ if (c.is_whitespace() || c == ',') && depth == 0 => {
+                if let Some(s) = start.take() {
+                    tokens.push(&line[s..i]);
+                }
+            }
+            _ => {
+                start.get_or_insert(i);
+            }
+        }
+    }
+    if let Some(s) = start {
+        tokens.push(&line[s..]);
+    }
+    tokens
+}
+
 pub fn parse_deps(line: &str) -> Vec<(String, Option<String>)> {
-    let mut tokens: Vec<&str> = line
-        .trim()
-        .split(|c: char| c.is_whitespace() || c == ',')
-        .filter(|t| !t.is_empty())
-        .collect();
+    let mut tokens: Vec<&str> = split_dep_tokens(line);
     // Drop a trailing line-continuation backslash from a multi-line macro
     // definition (`pkg.py:310-311`).
     if tokens.last().is_some_and(|t| *t == "\\") {
@@ -171,6 +258,388 @@ pub fn has_forbidden_controlchars(s: &str) -> Option<String> {
 pub fn has_forbidden_controlchars_deps(deps: &[(String, Option<String>)]) -> Option<String> {
     deps.first()
         .and_then(|(name, _)| has_forbidden_controlchars(name))
+}
+
+/// A single plain dependency referenced inside a (possibly rich) dependency
+/// expression: the bare name with its qualifier and version constraint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepLeaf {
+    pub name: String,
+    pub qualifier: Option<String>,
+    pub flags: u32,
+    pub epoch: Option<i64>,
+    pub version: Option<String>,
+    pub release: Option<String>,
+}
+
+impl DepLeaf {
+    /// `name [<|>|= evr]`, mirroring `formatRequire` for one leaf.
+    pub fn display(&self) -> String {
+        let mut s = self.name.clone();
+        if self.flags & (RPMSENSE_LESS | RPMSENSE_GREATER | RPMSENSE_EQUAL) != 0 {
+            s.push(' ');
+            if self.flags & RPMSENSE_LESS != 0 {
+                s.push('<');
+            }
+            if self.flags & RPMSENSE_GREATER != 0 {
+                s.push('>');
+            }
+            if self.flags & RPMSENSE_EQUAL != 0 {
+                s.push('=');
+            }
+            s.push(' ');
+            s.push_str(&version_to_string(
+                self.epoch,
+                self.version.as_deref(),
+                self.release.as_deref(),
+            ));
+        }
+        s
+    }
+}
+
+/// Maximum nesting depth of a rich-dependency expression.
+///
+/// The parser recurses once per parenthesis level over a package-controlled
+/// header string, so an unbounded expression (`((((...))))` in `REQUIRENAME`)
+/// overflows the stack and aborts the process. Real-world rich dependencies
+/// nest only a handful of levels; 64 is an order of magnitude beyond anything
+/// legitimate and comfortably below the ~400-level overflow threshold measured
+/// in a test thread. Past the budget the input falls back to `Simple` holding
+/// the raw string.
+///
+/// At depth 65+ even a well-formed expression reads exactly like a parse error:
+/// one opaque `Simple` leaf, and every leaf analysis goes dark.
+///
+/// The bound also caps the `Box` tree depth, so the drop glue
+/// can never recurse into an overflow either.
+const MAX_RICH_DEP_DEPTH: usize = 64;
+
+/// A parsed RPM rich (boolean) dependency expression (rpm.org, RPM >= 4.13),
+/// including RPM >= 4.16 dependency qualifiers (`foo(meta)`).
+///
+/// Malformed input parses to `Simple` holding the raw string, so a
+/// parenthesized expression is never silently shredded into plain-name
+/// tokens the way the reference's `parse_deps` shreds it.
+///
+/// This is not rpm's grammar: all six operators share one left-associative
+/// loop, so `(a or b with c)` parses as `With([Or(a,b), c])` where rpm's
+/// yacc grammar gives `Or([a, With(b,c)])`. rpm rejects mixed-operator
+/// chains outright (`error: Cannot chain different ops`), so the shape is
+/// unreachable from any rpm-built package, and no consumer inspects tree
+/// shape -- only `leaves()` (a left-to-right flatten) and `is_rich()` are
+/// read, both order-identical either way.
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DepExpr {
+    Simple {
+        name: String,
+        qualifier: Option<String>,
+        flags: u32,
+        epoch: Option<i64>,
+        version: Option<String>,
+        release: Option<String>,
+    },
+    And(Vec<DepExpr>),
+    Or(Vec<DepExpr>),
+    If {
+        cond: Box<DepExpr>,
+        then: Box<DepExpr>,
+    },
+    Unless {
+        cond: Box<DepExpr>,
+        then: Box<DepExpr>,
+    },
+    With {
+        lhs: Box<DepExpr>,
+        rhs: Box<DepExpr>,
+    },
+    Without {
+        lhs: Box<DepExpr>,
+        rhs: Box<DepExpr>,
+    },
+}
+
+impl DepExpr {
+    /// All plain dependencies referenced, flattened left to right.
+    ///
+    /// Iterative over an explicit stack: the tree is built from a
+    /// package-controlled string, so a recursive walk would reintroduce
+    /// the stack exhaustion the parse budget guards against.
+    pub fn leaves(&self) -> Vec<DepLeaf> {
+        fn simple_leaf(
+            name: &str,
+            qualifier: &Option<String>,
+            flags: u32,
+            epoch: Option<i64>,
+            version: &Option<String>,
+            release: &Option<String>,
+        ) -> DepLeaf {
+            DepLeaf {
+                name: name.to_string(),
+                qualifier: qualifier.clone(),
+                flags,
+                epoch,
+                version: version.clone(),
+                release: release.clone(),
+            }
+        }
+        let mut out = Vec::new();
+        let mut stack: Vec<&DepExpr> = vec![self];
+        while let Some(e) = stack.pop() {
+            match e {
+                DepExpr::Simple {
+                    name,
+                    qualifier,
+                    flags,
+                    epoch,
+                    version,
+                    release,
+                } => out.push(simple_leaf(
+                    name, qualifier, *flags, *epoch, version, release,
+                )),
+                // Push children reversed so the leftmost pops first;
+                // `if`/`unless` list `then` before `cond`, preserving the
+                // original recursive order.
+                DepExpr::And(v) | DepExpr::Or(v) => stack.extend(v.iter().rev()),
+                DepExpr::If { cond, then } | DepExpr::Unless { cond, then } => {
+                    stack.push(cond);
+                    stack.push(then);
+                }
+                DepExpr::With { lhs, rhs } | DepExpr::Without { lhs, rhs } => {
+                    stack.push(rhs);
+                    stack.push(lhs);
+                }
+            }
+        }
+        out
+    }
+
+    /// True for a well-formed boolean expression, as opposed to a plain
+    /// (possibly qualified) name.
+    pub fn is_rich(&self) -> bool {
+        !matches!(self, DepExpr::Simple { .. })
+    }
+}
+
+fn tokenize_rich(s: &str) -> Vec<String> {
+    let mut toks = Vec::new();
+    let mut cur = String::new();
+    for c in s.chars() {
+        if c == '(' || c == ')' {
+            if !cur.is_empty() {
+                toks.push(std::mem::take(&mut cur));
+            }
+            toks.push(c.to_string());
+        } else if c.is_whitespace() {
+            if !cur.is_empty() {
+                toks.push(std::mem::take(&mut cur));
+            }
+        } else {
+            cur.push(c);
+        }
+    }
+    if !cur.is_empty() {
+        toks.push(cur);
+    }
+    toks
+}
+
+fn is_bool_op(tok: &str) -> bool {
+    matches!(tok, "and" | "or" | "if" | "unless" | "with" | "without")
+}
+
+fn version_op_flags(tok: &str) -> Option<u32> {
+    match tok {
+        "=" => Some(RPMSENSE_EQUAL),
+        "<" => Some(RPMSENSE_LESS),
+        ">" => Some(RPMSENSE_GREATER),
+        "<=" => Some(RPMSENSE_LESS | RPMSENSE_EQUAL),
+        ">=" => Some(RPMSENSE_GREATER | RPMSENSE_EQUAL),
+        _ => None,
+    }
+}
+
+struct RichParser {
+    toks: Vec<String>,
+    pos: usize,
+    depth: usize,
+}
+
+impl RichParser {
+    fn peek(&self) -> Option<&str> {
+        self.toks.get(self.pos).map(|s| s.as_str())
+    }
+
+    fn peek_at(&self, off: usize) -> Option<&str> {
+        self.toks.get(self.pos + off).map(|s| s.as_str())
+    }
+
+    fn next(&mut self) -> Option<String> {
+        let t = self.toks.get(self.pos).cloned();
+        if t.is_some() {
+            self.pos += 1;
+        }
+        t
+    }
+
+    /// `expr := term (op term)*`, left-associative; runs of `and`/`or`
+    /// flatten into one n-ary node.
+    fn parse_expr(&mut self) -> Result<DepExpr, ()> {
+        let mut node = self.parse_term()?;
+        loop {
+            let op: &str = match self.peek() {
+                Some("and") => "and",
+                Some("or") => "or",
+                Some("if") => "if",
+                Some("unless") => "unless",
+                Some("with") => "with",
+                Some("without") => "without",
+                _ => break,
+            };
+            self.pos += 1;
+            let rhs = self.parse_term()?;
+            node = match op {
+                "and" => match node {
+                    DepExpr::And(mut v) => {
+                        v.push(rhs);
+                        DepExpr::And(v)
+                    }
+                    _ => DepExpr::And(vec![node, rhs]),
+                },
+                "or" => match node {
+                    DepExpr::Or(mut v) => {
+                        v.push(rhs);
+                        DepExpr::Or(v)
+                    }
+                    _ => DepExpr::Or(vec![node, rhs]),
+                },
+                "if" => DepExpr::If {
+                    cond: Box::new(rhs),
+                    then: Box::new(node),
+                },
+                "unless" => DepExpr::Unless {
+                    cond: Box::new(rhs),
+                    then: Box::new(node),
+                },
+                "with" => DepExpr::With {
+                    lhs: Box::new(node),
+                    rhs: Box::new(rhs),
+                },
+                _ => DepExpr::Without {
+                    lhs: Box::new(node),
+                    rhs: Box::new(rhs),
+                },
+            };
+        }
+        Ok(node)
+    }
+
+    fn parse_term(&mut self) -> Result<DepExpr, ()> {
+        match self.peek() {
+            Some("(") => {
+                // One recursion per nesting level over package-controlled
+                // input: cap the depth so a malicious header string cannot
+                // overflow the stack. Past the budget the whole input
+                // falls back to `Simple` holding the raw string.
+                if self.depth >= MAX_RICH_DEP_DEPTH {
+                    return Err(());
+                }
+                self.depth += 1;
+                self.pos += 1;
+                let e = self.parse_expr()?;
+                self.depth -= 1;
+                if self.peek() != Some(")") {
+                    return Err(());
+                }
+                self.pos += 1;
+                Ok(e)
+            }
+            Some(t) if is_bool_op(t) || t == ")" => Err(()),
+            Some(_) => self.parse_simple(),
+            None => Err(()),
+        }
+    }
+
+    /// `name [(qualifier)] [op version]`
+    fn parse_simple(&mut self) -> Result<DepExpr, ()> {
+        let name = self.next().ok_or(())?;
+        // A qualifier is `(word)` directly after the name (RPM >= 4.16,
+        // e.g. `foo(meta)`); anything else parenthesized is not one.
+        let mut qualifier = None;
+        if self.peek() == Some("(")
+            && self
+                .peek_at(1)
+                .is_some_and(|w| !is_bool_op(w) && w != "(" && w != ")")
+            && self.peek_at(2) == Some(")")
+        {
+            self.pos += 1;
+            qualifier = self.next();
+            self.pos += 1; // consume ")"
+        }
+        let mut flags = 0u32;
+        let mut epoch = None;
+        let mut version = None;
+        let mut release = None;
+        if let Some(op) = self.peek().and_then(version_op_flags) {
+            self.pos += 1;
+            let v = self
+                .next()
+                .filter(|t| !is_bool_op(t) && t != "(" && t != ")")
+                .ok_or(())?;
+            flags = op;
+            (epoch, version, release) = string_to_version(&v);
+        }
+        Ok(DepExpr::Simple {
+            name,
+            qualifier,
+            flags,
+            epoch,
+            version,
+            release,
+        })
+    }
+}
+
+/// Parse a dependency name into a rich-expression tree.
+///
+/// `(a or b)` and friends become structured nodes; a plain name (with an
+/// optional RPM 4.16 `(qualifier)`) becomes `Simple`. Anything malformed
+/// becomes `Simple` holding the raw string.
+pub fn parse_dep_expr(s: &str) -> DepExpr {
+    let raw = || DepExpr::Simple {
+        name: s.to_string(),
+        qualifier: None,
+        flags: 0,
+        epoch: None,
+        version: None,
+        release: None,
+    };
+    let toks = tokenize_rich(s);
+    if toks.is_empty() {
+        return raw();
+    }
+    let mut p = RichParser {
+        toks,
+        pos: 0,
+        depth: 0,
+    };
+    // A bare name parses as `simple`; a leading `(` needs the full
+    // expression grammar.
+    let parsed = if p.peek() == Some("(") {
+        p.parse_expr()
+    } else {
+        p.parse_simple()
+    };
+    match parsed {
+        Ok(e) if p.pos == p.toks.len() => e,
+        _ => raw(),
+    }
+}
+
+/// True when `s` is a well-formed rich dependency expression.
+pub fn is_rich_dep_expr(s: &str) -> bool {
+    parse_dep_expr(s).is_rich()
 }
 
 #[cfg(test)]
@@ -243,5 +712,330 @@ mod parse_deps_tests {
         );
         let empty: Vec<(String, Option<String>)> = Vec::new();
         assert_eq!(has_forbidden_controlchars_deps(&empty), None);
+    }
+}
+
+#[cfg(test)]
+mod rich_dep_depth_tests {
+    use super::*;
+
+    fn nested_parens(depth: usize) -> String {
+        format!("{}a{}", "(".repeat(depth), ")".repeat(depth))
+    }
+
+    #[test]
+    fn deep_nesting_falls_back_to_raw_without_crashing() {
+        // Regression: a package-controlled header string with thousands of
+        // nested parens overflowed the parser stack and aborted the process
+        // (SIGABRT). Past the depth budget the input degrades to `Simple`
+        // holding the raw string.
+        let s = nested_parens(2000);
+        let parsed = parse_dep_expr(&s);
+        assert!(!parsed.is_rich());
+        assert_eq!(
+            parsed,
+            DepExpr::Simple {
+                name: s.clone(),
+                qualifier: None,
+                flags: 0,
+                epoch: None,
+                version: None,
+                release: None,
+            }
+        );
+        // The fallback is also what `leaves()` sees: one leaf, raw name.
+        let dep = DepInfo {
+            name: s.clone(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        };
+        let leaves = dep.leaves();
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0].name, s);
+    }
+
+    #[test]
+    fn over_budget_nesting_falls_back_to_raw() {
+        let s = nested_parens(MAX_RICH_DEP_DEPTH + 36);
+        assert!(!parse_dep_expr(&s).is_rich());
+    }
+
+    #[test]
+    fn at_budget_nesting_still_parses() {
+        // The budget itself is usable depth; only past it degrades.
+        // (Bare parens around a name are not a rich expression, so nest
+        // real `or`s to probe the boundary.)
+        let mut s = String::from("a0");
+        for i in 1..=MAX_RICH_DEP_DEPTH {
+            s = format!("(a{i} or {s})");
+        }
+        assert!(parse_dep_expr(&s).is_rich());
+        let mut s = String::from("a0");
+        for i in 1..=MAX_RICH_DEP_DEPTH + 1 {
+            s = format!("(a{i} or {s})");
+        }
+        assert!(!parse_dep_expr(&s).is_rich());
+    }
+
+    #[test]
+    fn leaves_is_iterative_on_deep_tree() {
+        // A 1000-deep tree would overflow a recursive walk (the test-thread
+        // threshold is ~400-500); the iterative walk flattens it left to
+        // right. The tree is forgotten, not dropped: the test only proves
+        // the walk is iterative, and a recursive drop would abort.
+        let mut tree = DepExpr::Simple {
+            name: "leaf0".to_string(),
+            qualifier: None,
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        };
+        for i in 1..1000usize {
+            tree = DepExpr::Or(vec![
+                DepExpr::Simple {
+                    name: format!("leaf{i}"),
+                    qualifier: None,
+                    flags: 0,
+                    epoch: None,
+                    version: None,
+                    release: None,
+                },
+                tree,
+            ]);
+        }
+        let names: Vec<String> = tree.leaves().into_iter().map(|l| l.name).collect();
+        assert_eq!(names.len(), 1000);
+        assert_eq!(names[0], "leaf999");
+        assert_eq!(names[999], "leaf0");
+        std::mem::forget(tree);
+    }
+
+    #[test]
+    fn deep_but_in_budget_parses_and_flattens() {
+        // 60 nested `or`s: within budget, parses rich, flattens in order.
+        let mut s = String::from("a0");
+        for i in 1..60usize {
+            s = format!("(a{i} or {s})");
+        }
+        let parsed = parse_dep_expr(&s);
+        assert!(parsed.is_rich());
+        let names: Vec<String> = parsed.leaves().into_iter().map(|l| l.name).collect();
+        assert_eq!(names.len(), 60);
+        assert_eq!(names[0], "a59");
+        assert_eq!(names[59], "a0");
+    }
+}
+
+#[cfg(test)]
+mod rich_dep_tests {
+    use super::*;
+
+    fn simple(name: &str) -> DepExpr {
+        DepExpr::Simple {
+            name: name.to_string(),
+            qualifier: None,
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        }
+    }
+
+    fn ver(name: &str, flags: u32, version: &str) -> DepExpr {
+        DepExpr::Simple {
+            name: name.to_string(),
+            qualifier: None,
+            flags,
+            epoch: None,
+            version: Some(version.to_string()),
+            release: None,
+        }
+    }
+
+    #[test]
+    fn plain_name_stays_simple() {
+        assert_eq!(parse_dep_expr("foo"), simple("foo"));
+        assert_eq!(parse_dep_expr("foo-1.2"), simple("foo-1.2"));
+        assert!(!is_rich_dep_expr("foo"));
+    }
+
+    #[test]
+    fn qualifier_is_parsed_but_name_stays_whole() {
+        // RPM >= 4.16 dependency qualifier (#429).
+        assert_eq!(
+            parse_dep_expr("qux(meta)"),
+            DepExpr::Simple {
+                name: "qux".to_string(),
+                qualifier: Some("meta".to_string()),
+                flags: 0,
+                epoch: None,
+                version: None,
+                release: None,
+            }
+        );
+        let dep = DepInfo {
+            name: "qux(meta)".to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        };
+        // Like the reference, analyses match the literal name; the
+        // qualifier is only additionally structured. Stripping would mangle
+        // real capability names such as `rpmlib(CompressedFileNames)`.
+        assert_eq!(dep.leaf_names(), vec!["qux(meta)".to_string()]);
+        assert_eq!(dep.leaves()[0].qualifier.as_deref(), Some("meta"));
+    }
+
+    #[test]
+    fn or_expression() {
+        assert_eq!(
+            parse_dep_expr("(foo or bar)"),
+            DepExpr::Or(vec![simple("foo"), simple("bar")])
+        );
+    }
+
+    #[test]
+    fn and_flattens() {
+        assert_eq!(
+            parse_dep_expr("(a and b and c)"),
+            DepExpr::And(vec![simple("a"), simple("b"), simple("c")])
+        );
+    }
+
+    #[test]
+    fn nested_expression() {
+        assert_eq!(
+            parse_dep_expr("(outer and (inner1 or inner2))"),
+            DepExpr::And(vec![
+                simple("outer"),
+                DepExpr::Or(vec![simple("inner1"), simple("inner2")]),
+            ])
+        );
+    }
+
+    #[test]
+    fn if_unless_with_without() {
+        assert_eq!(
+            parse_dep_expr("(a if b)"),
+            DepExpr::If {
+                cond: Box::new(simple("b")),
+                then: Box::new(simple("a")),
+            }
+        );
+        assert_eq!(
+            parse_dep_expr("(a unless b)"),
+            DepExpr::Unless {
+                cond: Box::new(simple("b")),
+                then: Box::new(simple("a")),
+            }
+        );
+        assert_eq!(
+            parse_dep_expr("(a with b)"),
+            DepExpr::With {
+                lhs: Box::new(simple("a")),
+                rhs: Box::new(simple("b")),
+            }
+        );
+        assert_eq!(
+            parse_dep_expr("(a without b)"),
+            DepExpr::Without {
+                lhs: Box::new(simple("a")),
+                rhs: Box::new(simple("b")),
+            }
+        );
+    }
+
+    #[test]
+    fn versioned_terms_inside_expression() {
+        // `(baz >= 1.0 with baz < 2.0)`: the canonical rpm.org example.
+        assert_eq!(
+            parse_dep_expr("(baz >= 1.0 with baz < 2.0)"),
+            DepExpr::With {
+                lhs: Box::new(ver("baz", RPMSENSE_GREATER | RPMSENSE_EQUAL, "1.0")),
+                rhs: Box::new(ver("baz", RPMSENSE_LESS, "2.0")),
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_input_falls_back_to_raw_name() {
+        for bad in ["(foo or", "(foo or)", "()", "( and b)", "foo bar", ""] {
+            let expr = parse_dep_expr(bad);
+            assert_eq!(
+                expr,
+                DepExpr::Simple {
+                    name: bad.to_string(),
+                    qualifier: None,
+                    flags: 0,
+                    epoch: None,
+                    version: None,
+                    release: None,
+                },
+                "input: {bad:?}"
+            );
+            assert!(!expr.is_rich());
+        }
+    }
+
+    #[test]
+    fn leaves_flatten_in_order() {
+        let expr = parse_dep_expr("(outer and (inner1 or inner2))");
+        let names: Vec<String> = expr.leaves().iter().map(|l| l.name.clone()).collect();
+        assert_eq!(names, vec!["outer", "inner1", "inner2"]);
+    }
+
+    #[test]
+    fn dep_info_leaves_carry_header_evr_for_plain_names() {
+        let dep = DepInfo {
+            name: "foo".to_string(),
+            flags: RPMSENSE_EQUAL,
+            epoch: None,
+            version: Some("1.0".to_string()),
+            release: Some("2".to_string()),
+        };
+        let leaves = dep.leaves();
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0].name, "foo");
+        assert_eq!(leaves[0].flags, RPMSENSE_EQUAL);
+        assert_eq!(leaves[0].display(), "foo = 1.0-2");
+    }
+
+    #[test]
+    fn rich_dep_leaves_use_inner_constraints() {
+        let dep = DepInfo {
+            name: "(relfoo = 1.0-2 or relbar)".to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        };
+        let leaves = dep.leaves();
+        assert_eq!(leaves.len(), 2);
+        assert_eq!(leaves[0].display(), "relfoo = 1.0-2");
+        assert_eq!(leaves[0].flags, RPMSENSE_EQUAL);
+        assert_eq!(leaves[0].release.as_deref(), Some("2"));
+        assert_eq!(leaves[1].name, "relbar");
+    }
+
+    #[test]
+    fn parse_deps_keeps_parenthesized_expression_whole() {
+        // The reference shreds `(foo or bar)` into `(foo`/`or`/`bar)`;
+        // the port keeps it as one token.
+        assert_eq!(
+            parse_deps("(foo or bar)"),
+            vec![("(foo or bar)".to_string(), None)]
+        );
+        assert_eq!(
+            parse_deps("plain, (a or b), other >= 1.0"),
+            vec![
+                ("plain".to_string(), None),
+                ("(a or b)".to_string(), None),
+                ("other".to_string(), Some("1.0".to_string())),
+            ]
+        );
     }
 }

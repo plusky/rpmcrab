@@ -21,7 +21,9 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
-use crate::pkg::dep::{DepInfo, version_to_string};
+use crate::pkg::dep::{
+    DepInfo, RPMSENSE_EQUAL, RPMSENSE_GREATER, RPMSENSE_LESS, version_to_string,
+};
 
 /// `invalid_version_regex`: `([0-9](?:rc|alpha|beta|pre).*)`, case-insensitive.
 fn invalid_version_regex() -> Regex {
@@ -54,11 +56,6 @@ fn regex_escape(s: &str) -> String {
     out
 }
 
-/// RPM sense flags (`rpmds.h`).
-const RPMSENSE_LESS: u32 = 2;
-const RPMSENSE_GREATER: u32 = 4;
-const RPMSENSE_EQUAL: u32 = 8;
-
 /// 1995-01-01 UTC, the oldest sane changelog timestamp.
 const OLDEST_CHANGELOG_TIMESTAMP: i64 = 788_918_400;
 
@@ -85,7 +82,6 @@ pub struct TagsCheck {
     changelog_text_version_re: Regex,
     devel_number_re: Regex,
     leading_space_re: Regex,
-    license_re: Regex,
     license_exception_re: Regex,
     pkg_config_re: Regex,
     tag_re: Regex,
@@ -157,7 +153,6 @@ impl TagsCheck {
             changelog_text_version_re: Regex::new(r"^\s*-\s*((\d+:)?[\w\.]+-[\w\.]+)").expect("static regex"),
             devel_number_re: Regex::new(r"(.*?)([0-9.]+)(_[0-9.]+)?-devel").expect("static regex"),
             leading_space_re: Regex::new(r"^\s+").expect("static regex"),
-            license_re: Regex::new(r"\(([^)]+)\)|\s(?:and|or|AND|OR)\s").expect("static regex"),
             license_exception_re: Regex::new(r"([^(\s]+)\s(?:WITH|with)\s([^)\s]+)").expect("static regex"),
             pkg_config_re: Regex::new(r"^/usr/(?:lib\d*|share)/pkgconfig/").expect("static regex"),
             tag_re: Regex::new(r"(?i)^((?:Auto(?:Req|Prov|ReqProv)|Build(?:Arch(?:itectures)?|Root)|(?:Build)?Conflicts|(?:Build)?(?:Pre)?Requires|Copyright|(?:CVS|SVN)Id|Dist(?:ribution|Tag|URL)|DocDir|(?:Build)?Enhances|Epoch|Exclude(?:Arch|OS)|Exclusive(?:Arch|OS)|Group|Icon|License|Name|No(?:Patch|Source)|Obsoletes|Packager|Patch\d*|Prefix(?:es)?|Provides|(?:Build)?Recommends|Release|RHNPlatform|Serial|Source\d*|(?:Build)?Suggests|Summary|(?:Build)?Supplements|(?:Bug)?URL|Vendor|Version)(?:\([^)]+\))?:)\s*\S").expect("static regex"),
@@ -233,7 +228,9 @@ impl TagsCheck {
             .chain(&pkg.conflicts)
             .chain(&pkg.obsoletes)
         {
-            ignored_words.push(dep.name.clone());
+            // Rich `(a or b)` expressions contribute their referenced names,
+            // not the raw expression string.
+            ignored_words.extend(dep.leaf_names());
         }
 
         self.check_invalid_packager(pkg, out, &tag_str(Tag::PACKAGER));
@@ -383,59 +380,72 @@ impl TagsCheck {
         let mut devel_depend = false;
         for dep in deps {
             let value = format_require(dep);
-            if self.use_epoch
-                && dep.version.is_some()
-                && dep.epoch.is_none()
-                && !dep.name.starts_with("rpmlib(")
-            {
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "no-epoch-in-dependency",
-                    &[&value],
-                );
-            }
-            // Issue #1443/#1444: check every requirement, not just the first.
-            for req in &self.invalid_requires {
-                if is_match(req, &dep.name) {
-                    add_info(out, Level::Error, pkg, "invalid-dependency", &[&dep.name]);
-                }
-            }
-            if dep.name.starts_with("/usr/local/") {
-                add_info(out, Level::Error, pkg, "invalid-dependency", &[&dep.name]);
-            }
-            if is_source {
-                if is_match(&self.lib_devel_number_re, &dep.name) {
-                    add_info(
-                        out,
-                        Level::Error,
-                        pkg,
-                        "invalid-build-requires",
-                        &[&dep.name],
-                    );
-                }
-            } else if !is_devel {
-                if !devel_depend && is_match(&self.devel_re, &dep.name) {
-                    add_info(out, Level::Error, pkg, "devel-dependency", &[&dep.name]);
-                    devel_depend = true;
-                }
-                // Issue #1091: replicate the fuzzy lib heuristic exactly.
-                if dep.flags == 0
-                    && let Ok(Some(caps)) = self.lib_package_re.captures(&dep.name)
-                    && caps.get(1).is_none()
+            // Rich `(a or b)` expressions (RPM >= 4.13): run the name and
+            // version analyses against each referenced leaf instead of the
+            // raw expression string. A plain dependency yields exactly one
+            // leaf identical to the dep itself, so behavior is unchanged.
+            for leaf in dep.leaves() {
+                let leaf_value = leaf.display();
+                if self.use_epoch
+                    && leaf.version.is_some()
+                    && leaf.epoch.is_none()
+                    && !leaf.name.starts_with("rpmlib(")
                 {
                     add_info(
                         out,
-                        Level::Error,
+                        Level::Warning,
                         pkg,
-                        "explicit-lib-dependency",
-                        &[&dep.name],
+                        "no-epoch-in-dependency",
+                        &[&leaf_value],
                     );
                 }
-            }
-            if dep.flags == RPMSENSE_EQUAL && dep.release.is_some() {
-                add_info(out, Level::Warning, pkg, "requires-on-release", &[&value]);
+                // Issue #1443/#1444: check every requirement, not just the first.
+                for req in &self.invalid_requires {
+                    if is_match(req, &leaf.name) {
+                        add_info(out, Level::Error, pkg, "invalid-dependency", &[&leaf.name]);
+                    }
+                }
+                if leaf.name.starts_with("/usr/local/") {
+                    add_info(out, Level::Error, pkg, "invalid-dependency", &[&leaf.name]);
+                }
+                if is_source {
+                    if is_match(&self.lib_devel_number_re, &leaf.name) {
+                        add_info(
+                            out,
+                            Level::Error,
+                            pkg,
+                            "invalid-build-requires",
+                            &[&leaf.name],
+                        );
+                    }
+                } else if !is_devel {
+                    if !devel_depend && is_match(&self.devel_re, &leaf.name) {
+                        add_info(out, Level::Error, pkg, "devel-dependency", &[&leaf.name]);
+                        devel_depend = true;
+                    }
+                    // Issue #1091: replicate the fuzzy lib heuristic exactly.
+                    if leaf.flags == 0
+                        && let Ok(Some(caps)) = self.lib_package_re.captures(&leaf.name)
+                        && caps.get(1).is_none()
+                    {
+                        add_info(
+                            out,
+                            Level::Error,
+                            pkg,
+                            "explicit-lib-dependency",
+                            &[&leaf.name],
+                        );
+                    }
+                }
+                if leaf.flags == RPMSENSE_EQUAL && leaf.release.is_some() {
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "requires-on-release",
+                        &[&leaf_value],
+                    );
+                }
             }
             self.unexpanded_macro(out, pkg, &format!("dependency {value}"), &value);
         }
@@ -1052,13 +1062,67 @@ impl TagsCheck {
         }
     }
 
-    /// Split a license string on `license_re`, dropping empties.
-    fn split_license(&self, text: &str) -> Vec<String> {
-        self.license_re
-            .split(text)
-            .filter_map(|r| r.ok())
-            .map(|m| m.trim().to_string())
-            .filter(|s| !s.is_empty())
+    /// Split a license expression exactly like the reference's `license_regex`
+    /// (`\s(?:and|or|AND|OR)\s` or `\(([^)]+)\)`): a parenthesized group
+    /// contributes its inside as a piece, boolean operators split, and anything
+    /// else -- including unbalanced parens -- is kept verbatim. Mirrors Python's
+    /// `re.split` with the capture group (captured text is kept in the output);
+    /// pieces are stripped and empties dropped, like the reference's
+    /// `split_license`. A bare `()` survives as a literal piece (the reference
+    /// reports `invalid-license ()` for it); a whitespace-only group vanishes,
+    /// like the reference's empty-split filtering.
+    ///
+    /// Iterative and linear: once one `(` finds no closing `)` ahead, no later
+    /// one can either, so adversarial nesting terminates instead of hanging.
+    fn split_license(text: &str) -> Vec<String> {
+        let mut parts: Vec<&str> = Vec::new();
+        let mut start = 0usize;
+        let mut i = 0usize;
+        let mut paren_dead = false;
+        while i < text.len() {
+            let rest = &text[i..];
+            // `\(([^)]+)\)`
+            if !paren_dead && rest.starts_with('(') {
+                match rest.find(')') {
+                    None => paren_dead = true,
+                    Some(close) if close > 1 => {
+                        parts.push(text[start..i].trim());
+                        parts.push(rest[1..close].trim());
+                        i += close + 1;
+                        start = i;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            // `\s(?:and|or|AND|OR)\s`
+            let mut advanced = false;
+            if let Some((_, c)) = rest.char_indices().next()
+                && c.is_whitespace()
+            {
+                let after_ws = &rest[c.len_utf8()..];
+                for op in ["and", "or", "AND", "OR"] {
+                    if let Some(after_op) = after_ws.strip_prefix(op)
+                        && let Some((_, tc)) = after_op.char_indices().next()
+                        && tc.is_whitespace()
+                    {
+                        parts.push(text[start..i].trim());
+                        i += c.len_utf8() + op.len() + tc.len_utf8();
+                        start = i;
+                        advanced = true;
+                        break;
+                    }
+                }
+            }
+            if !advanced {
+                i += rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+            }
+        }
+        parts.push(text[start..].trim());
+        parts
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
             .collect()
     }
 
@@ -1084,11 +1148,19 @@ impl TagsCheck {
         }
         let mut valid_license = true;
         if !self.valid_licenses.contains(&rpm_license.to_string()) {
-            let mut license_string = rpm_license.to_string();
-            let (l1, lexception) = self.split_license_exception(rpm_license);
-            if !lexception.is_empty() {
-                license_string = l1.clone();
-                if !self.valid_license_exceptions.contains(&lexception) {
+            // Pieces are validated like the reference's nested loop: each
+            // piece the split yields is checked, and a non-valid piece is
+            // split once more -- that is what turns `((GPLv2))` into the two
+            // findings `(GPLv2` and `)` instead of silently accepting it.
+            // Deliberate asymmetry, not parity: the WITH-exception match
+            // runs per piece, so it reports strictly more than the
+            // reference, in the safer direction. The reference matches it
+            // against the whole string and then validates only the pre-WITH
+            // part, silently dropping sibling pieces (see divergences.toml).
+            for l1 in Self::split_license(rpm_license) {
+                let (lic, lexception) = self.split_license_exception(&l1);
+                // SPDX allows "<license> WITH <license-exception>"
+                if !lexception.is_empty() && !self.valid_license_exceptions.contains(&lexception) {
                     add_info(
                         out,
                         Level::Warning,
@@ -1098,14 +1170,13 @@ impl TagsCheck {
                     );
                     valid_license = false;
                 }
-            }
-            for part in self.split_license(&license_string) {
-                if self.valid_licenses.contains(&part) {
+                let lic = if lexception.is_empty() { l1 } else { lic };
+                if lic.is_empty() || self.valid_licenses.contains(&lic) {
                     continue;
                 }
-                for sub in self.split_license(&part) {
-                    if !self.valid_licenses.contains(&sub) {
-                        add_info(out, Level::Warning, pkg, "invalid-license", &[&sub]);
+                for l2 in Self::split_license(&lic) {
+                    if !self.valid_licenses.contains(&l2) {
+                        add_info(out, Level::Warning, pkg, "invalid-license", &[&l2]);
                         valid_license = false;
                     }
                 }
@@ -1147,6 +1218,9 @@ impl TagsCheck {
 
     fn check_obsolete_not_provided(&self, pkg: &Pkg, out: &mut Filter, prov_names: &[&str]) {
         for obs in &pkg.obsoletes {
+            // Plain names: rpm rejects rich dependencies in both Obsoletes
+            // and Provides (`No rich dependencies allowed for this type`),
+            // so leaf expansion is unreachable here.
             if !prov_names.contains(&obs.name.as_str()) {
                 add_info(
                     out,
@@ -1695,5 +1769,379 @@ mod tests {
         assert_eq!(TagsCheck::lang_for_error("C"), None);
         assert_eq!(TagsCheck::lang_for_error("C.UTF-8"), None);
         assert_eq!(TagsCheck::lang_for_error("de"), Some("de"));
+    }
+
+    fn license_test_config() -> Config {
+        // Like test_config but with populated license lists.
+        let mut config = Config::default();
+        let tbl = &mut config.configuration;
+        tbl.insert(
+            "UseVersionInChangelog".to_string(),
+            toml::Value::Boolean(true),
+        );
+        tbl.insert("UseEpoch".to_string(), toml::Value::Boolean(false));
+        tbl.insert("MaxLineLength".to_string(), toml::Value::Integer(79));
+        tbl.insert("ValidGroups".to_string(), toml::Value::Array(vec![]));
+        tbl.insert(
+            "ValidLicenses".to_string(),
+            toml::Value::Array(
+                ["GPLv2", "GPLv3", "GPLv2+", "GPL-2.0-only", "MIT"]
+                    .into_iter()
+                    .map(|s| toml::Value::String(s.to_string()))
+                    .collect(),
+            ),
+        );
+        tbl.insert(
+            "ValidLicenseExceptions".to_string(),
+            toml::Value::Array(vec![toml::Value::String(
+                "Classpath-exception-2.0".to_string(),
+            )]),
+        );
+        tbl.insert("InvalidRequires".to_string(), toml::Value::Array(vec![]));
+        config.finalize().expect("fixture config");
+        config
+    }
+
+    fn license_findings(license: &str) -> Vec<(String, String)> {
+        let config = license_test_config();
+        let pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = TagsCheck::new(&config);
+        check.check_license(&pkg, &mut out, license);
+        out.results().to_vec()
+    }
+
+    #[test]
+    fn license_split_matches_reference() {
+        // Expectations verified against the reference's
+        // `license_regex.split`: a paren group contributes its inside,
+        // boolean operators split, unbalanced parens are kept verbatim.
+        assert_eq!(
+            TagsCheck::split_license("(GPLv2 or GPLv3) and (GPLv2+ with exceptions)"),
+            vec!["GPLv2 or GPLv3", "GPLv2+ with exceptions"],
+        );
+        assert_eq!(
+            TagsCheck::split_license("((GPLv2 or GPLv3) and MIT)"),
+            vec!["(GPLv2 or GPLv3", "MIT)"],
+        );
+        assert_eq!(
+            TagsCheck::split_license("GPLv2 AND GPLv3"),
+            vec!["GPLv2", "GPLv3"],
+        );
+        assert_eq!(TagsCheck::split_license("MIT"), vec!["MIT"]);
+        // `or` inside a word is not an operator.
+        assert_eq!(
+            TagsCheck::split_license("GPL-2.0-or-later"),
+            vec!["GPL-2.0-or-later"],
+        );
+        // Multi-byte input must not panic on slicing.
+        assert_eq!(
+            TagsCheck::split_license("GPLv2é or MIT"),
+            vec!["GPLv2é", "MIT"],
+        );
+        // Unbalanced input is kept verbatim for the validator to flag.
+        assert_eq!(TagsCheck::split_license("((GPLv2))"), vec!["(GPLv2", ")"]);
+        assert_eq!(TagsCheck::split_license("()"), vec!["()"]);
+        assert!(TagsCheck::split_license("( )").is_empty());
+    }
+
+    #[test]
+    fn license_paren_groups_yield_clean_findings() {
+        // Two WITH expressions in separate paren groups: the old
+        // whole-string exception match saw only the first, silently
+        // dropping the second.
+        let results = license_findings("(GPLv2+ with exceptions) and (MIT with BogusException)");
+        for (name, line) in &results {
+            eprintln!("GOT: {name}: {line}");
+        }
+        // Both exceptions are reported, each with a clean token: no paren
+        // may leak into any detail.
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "invalid-license-exception");
+        assert_eq!(
+            results[0].1,
+            "fcprobe.noarch: W: invalid-license-exception exceptions"
+        );
+        assert_eq!(results[1].0, "invalid-license-exception");
+        assert_eq!(
+            results[1].1,
+            "fcprobe.noarch: W: invalid-license-exception BogusException"
+        );
+    }
+
+    #[test]
+    fn license_empty_paren_group_is_reported() {
+        // The reference reports `W: invalid-license ()` for an empty
+        // group: the leaf must not vanish.
+        let results = license_findings("()");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "invalid-license");
+        assert_eq!(results[0].1, "fcprobe.noarch: W: invalid-license ()");
+        let results = license_findings("MIT and ()");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1, "fcprobe.noarch: W: invalid-license ()");
+        // A whitespace-only group vanishes, like the reference's
+        // empty-split filtering.
+        assert!(license_findings("( )").is_empty());
+    }
+
+    #[test]
+    fn license_deeply_nested_parens_terminates() {
+        // Adversarial nesting: the split is iterative and linear, so this
+        // terminates instead of hanging or overflowing the stack.
+        let text = format!("({}MIT{})", "(".repeat(10_000), ")".repeat(10_000));
+        let pieces = TagsCheck::split_license(&text);
+        assert_eq!(pieces.len(), 2);
+        // No closing paren at all: still linear, one verbatim piece.
+        let text = "(".repeat(10_000);
+        assert_eq!(TagsCheck::split_license(&text), vec![text]);
+    }
+
+    #[test]
+    fn license_doubly_wrapped_parens_are_reported() {
+        // The reference flags the unbalanced pieces of `((GPLv2))`; the
+        // splitter must not silently accept them.
+        let results = license_findings("((GPLv2))");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "invalid-license");
+        assert_eq!(results[0].1, "fcprobe.noarch: W: invalid-license (GPLv2");
+        assert_eq!(results[1].0, "invalid-license");
+        assert_eq!(results[1].1, "fcprobe.noarch: W: invalid-license )");
+        // Neighbouring unbalanced shapes agree with the reference too.
+        let results = license_findings("((GPLv2)");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1, "fcprobe.noarch: W: invalid-license (GPLv2");
+        let results = license_findings("(GPLv2))");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1, "fcprobe.noarch: W: invalid-license )");
+    }
+
+    #[test]
+    fn license_invalid_leaf_in_paren_group_is_reported() {
+        // The old whole-string exception match replaced the license string
+        // with just the pre-WITH part, silently dropping every other leaf.
+        let results = license_findings("(BogusLicense or GPLv3) and (GPLv2+ with exceptions)");
+        for (name, line) in &results {
+            eprintln!("GOT: {name}: {line}");
+        }
+        let names: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"invalid-license"),
+            "BogusLicense must be flagged"
+        );
+        assert!(names.contains(&"invalid-license-exception"));
+        let bad: Vec<_> = results
+            .iter()
+            .filter(|(n, _)| n == "invalid-license")
+            .collect();
+        assert_eq!(bad.len(), 1);
+        assert_eq!(bad[0].1, "fcprobe.noarch: W: invalid-license BogusLicense");
+    }
+
+    #[test]
+    fn license_trailing_tail_after_with_is_validated() {
+        // `and MIT` after a WITH expression used to be dropped entirely.
+        let results =
+            license_findings("GPL-2.0-only WITH Classpath-exception-2.0 and BogusLicense");
+        let names: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["invalid-license"]);
+    }
+
+    #[test]
+    fn license_valid_with_exception_is_silent() {
+        let results = license_findings("GPL-2.0-only WITH Classpath-exception-2.0");
+        assert!(results.is_empty(), "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn license_plain_invalid_is_reported() {
+        let results = license_findings("BogusLicense-1.0");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "invalid-license");
+        assert_eq!(
+            results[0].1,
+            "fcprobe.noarch: W: invalid-license BogusLicense-1.0"
+        );
+    }
+}
+
+#[cfg(test)]
+mod rich_dep_emission_tests {
+    use super::*;
+    use crate::color::Color;
+    use crate::pkg::dep::DepInfo;
+    use std::path::Path;
+
+    fn rich_dep(name: &str) -> DepInfo {
+        // What `gather_requires` produces for a rich header entry: the
+        // whole expression in the name, flags 0, no EVR (verified against
+        // rpm 6.1.0: `(foo or bar)` -> name=`(foo or bar)`, flags=0).
+        DepInfo {
+            name: name.to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        }
+    }
+
+    fn rich_test_config(invalid_requires: &[&str], use_epoch: bool) -> Config {
+        let mut config = Config::default();
+        let tbl = &mut config.configuration;
+        tbl.insert(
+            "UseVersionInChangelog".to_string(),
+            toml::Value::Boolean(true),
+        );
+        tbl.insert("UseEpoch".to_string(), toml::Value::Boolean(use_epoch));
+        tbl.insert("MaxLineLength".to_string(), toml::Value::Integer(79));
+        tbl.insert("ValidGroups".to_string(), toml::Value::Array(vec![]));
+        tbl.insert("ValidLicenses".to_string(), toml::Value::Array(vec![]));
+        tbl.insert(
+            "ValidLicenseExceptions".to_string(),
+            toml::Value::Array(vec![]),
+        );
+        tbl.insert(
+            "InvalidRequires".to_string(),
+            toml::Value::Array(
+                invalid_requires
+                    .iter()
+                    .map(|s| toml::Value::String(s.to_string()))
+                    .collect(),
+            ),
+        );
+        config.finalize().expect("fixture config");
+        config
+    }
+
+    fn rich_fixture_pkg(name: &str) -> Pkg {
+        let rpm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs")
+            .join(name);
+        Pkg::open(&rpm_path, &std::env::temp_dir(), true).expect("open fixture pkg")
+    }
+
+    fn run(pkg: &Pkg, config: &Config) -> Vec<(String, String)> {
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(config);
+        check.check(pkg, config, &mut out);
+        out.results().to_vec()
+    }
+
+    fn named<'a>(results: &'a [(String, String)], name: &str) -> Vec<&'a (String, String)> {
+        results.iter().filter(|(n, _)| n == name).collect()
+    }
+
+    #[test]
+    fn deeply_nested_header_does_not_crash_check() {
+        // Regression: `gather_requires` copies REQUIRENAME verbatim, so a
+        // package-controlled header string with thousands of nested parens
+        // drove the recursive parser into a stack overflow (SIGABRT) inside
+        // the check. Past the depth budget the expression degrades to the
+        // raw name, so the full check stays silent and alive.
+        let evil = format!("{}a{}", "(".repeat(2000), ")".repeat(2000));
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires.push(rich_dep(&evil));
+        let config = rich_test_config(&["^badpkg$"], false);
+        let results = run(&pkg, &config);
+        assert!(
+            named(&results, "invalid-dependency").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_dependency_matches_rich_leaf() {
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires.push(rich_dep("(badpkg or goodpkg)"));
+        let config = rich_test_config(&["^badpkg$"], false);
+        let results = run(&pkg, &config);
+        let hits = named(&results, "invalid-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": E: invalid-dependency"),
+            "line: {}",
+            hits[0].1
+        );
+        assert!(hits[0].1.ends_with(" badpkg"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn devel_dependency_matches_rich_leaf() {
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        assert!(
+            !is_match(&devel_regex(), &pkg.name),
+            "fixture must not be a devel package"
+        );
+        pkg.requires.push(rich_dep("(somelib-devel or plainx)"));
+        let config = rich_test_config(&[], false);
+        let results = run(&pkg, &config);
+        let hits = named(&results, "devel-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": E: devel-dependency"),
+            "line: {}",
+            hits[0].1
+        );
+        assert!(hits[0].1.ends_with(" somelib-devel"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn requires_on_release_uses_leaf_constraint() {
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires.push(rich_dep("(relfoo = 1.0-2 or relbar)"));
+        let config = rich_test_config(&[], false);
+        let results = run(&pkg, &config);
+        let hits = named(&results, "requires-on-release");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": W: requires-on-release"),
+            "line: {}",
+            hits[0].1
+        );
+        assert!(
+            hits[0].1.ends_with(" relfoo = 1.0-2"),
+            "line: {}",
+            hits[0].1
+        );
+    }
+
+    #[test]
+    fn no_epoch_in_dependency_uses_leaf_constraint() {
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires.push(rich_dep("(epochfoo >= 1.0 or plainy)"));
+        let config = rich_test_config(&[], true);
+        let results = run(&pkg, &config);
+        let hits = named(&results, "no-epoch-in-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": W: no-epoch-in-dependency"),
+            "line: {}",
+            hits[0].1
+        );
+        assert!(
+            hits[0].1.ends_with(" epochfoo >= 1.0"),
+            "line: {}",
+            hits[0].1
+        );
+    }
+
+    #[test]
+    fn qualifier_name_matches_literally_like_reference() {
+        // `qux(meta)` keeps its literal name for analyses (the reference
+        // matches the raw string too); the qualifier is only additionally
+        // structured on the leaf.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires.push(rich_dep("qux(meta)"));
+        let config = rich_test_config(&["^qux$"], false);
+        let results = run(&pkg, &config);
+        assert!(
+            named(&results, "invalid-dependency").is_empty(),
+            "all: {results:?}"
+        );
+        let config = rich_test_config(&["^qux\\(meta\\)$"], false);
+        let results = run(&pkg, &config);
+        let hits = named(&results, "invalid-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(hits[0].1.ends_with(" qux(meta)"), "line: {}", hits[0].1);
     }
 }

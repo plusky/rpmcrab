@@ -59,8 +59,8 @@ sha256 = "…"
 
 `reference_sha` pins the reference commit that produced `expected/` — a
 floating clone is not a frozen reference. `[tools].present` records the
-external-tool set, so a degraded capture (a missing tool changes findings) is
-detectable after the fact.
+external-tool set at capture time for provenance; nothing reads it yet, so a
+degraded capture is not automatically detected.
 
 ### `captured` vs `synthetic`
 

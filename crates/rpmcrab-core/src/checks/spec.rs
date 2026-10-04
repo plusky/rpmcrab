@@ -31,7 +31,9 @@ use crate::checks::shared::macro_regex;
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
-use crate::pkg::dep::{has_forbidden_controlchars, has_forbidden_controlchars_deps, parse_deps};
+use crate::pkg::dep::{
+    has_forbidden_controlchars, has_forbidden_controlchars_deps, is_rich_dep_expr, parse_deps,
+};
 use crate::pkg::spec::{self, SpecPkg};
 use crate::pkg::{Pkg, init as pkg_init};
 use crate::tools::{Tool, ToolSource, test_source};
@@ -1370,7 +1372,13 @@ impl SpecCheck {
                 );
             }
             for (req, version) in &reqs {
-                if version.is_none() && self.compop_re.is_match(req).unwrap_or(false) {
+                // Rich expressions contain comparison operators as syntax
+                // (`>=` in `(baz >= 1.0 with baz < 2.0)`); the regex would
+                // false-positive on them, so they are skipped.
+                if version.is_none()
+                    && !is_rich_dep_expr(req)
+                    && self.compop_re.is_match(req).unwrap_or(false)
+                {
                     self.info(
                         out,
                         pkg,
@@ -1407,7 +1415,9 @@ impl SpecCheck {
                             &[prov],
                         );
                     }
-                    if self.compop_re.is_match(prov).unwrap_or(false) {
+                    // As above: operators inside a rich expression are
+                    // syntax, not a comparison in a dep token.
+                    if !is_rich_dep_expr(prov) && self.compop_re.is_match(prov).unwrap_or(false) {
                         self.info(
                             out,
                             pkg,
@@ -1445,7 +1455,9 @@ impl SpecCheck {
                             &[obs],
                         );
                     }
-                    if self.compop_re.is_match(obs).unwrap_or(false) {
+                    // As above: operators inside a rich expression are
+                    // syntax, not a comparison in a dep token.
+                    if !is_rich_dep_expr(obs) && self.compop_re.is_match(obs).unwrap_or(false) {
                         self.info(
                             out,
                             pkg,
@@ -1473,7 +1485,12 @@ impl SpecCheck {
                 );
             }
             for (conf, version) in &confs {
-                if version.is_none() && self.compop_re.is_match(conf).unwrap_or(false) {
+                // As above: operators inside a rich expression are
+                // syntax, not a comparison in a dep token.
+                if version.is_none()
+                    && !is_rich_dep_expr(conf)
+                    && self.compop_re.is_match(conf).unwrap_or(false)
+                {
                     self.info(
                         out,
                         pkg,
