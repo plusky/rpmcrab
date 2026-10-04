@@ -2367,8 +2367,16 @@ impl FilesCheck {
         pkgfile: &PkgFile,
         out: &mut Filter,
     ) {
-        // non-conffile in /etc
-        if fname.starts_with("/etc/") && !pkgfile.is_config() && !pkgfile.is_ghost() {
+        // A non-config file under /etc is usually a packaging mistake, but
+        // drop-in directories managed by other tooling are exempt: the
+        // reference exempts /etc/ld.so.conf.d/, and /etc/alternatives/ is
+        // managed by the alternatives system (upstream rpmlint#1137).
+        if fname.starts_with("/etc/")
+            && !pkgfile.is_config()
+            && !pkgfile.is_ghost()
+            && !fname.starts_with("/etc/ld.so.conf.d/")
+            && !fname.starts_with("/etc/alternatives/")
+        {
             add_info(out, Level::Warning, pkg, "non-conffile-in-etc", &[fname]);
         }
     }
@@ -3234,6 +3242,69 @@ mod tests {
         assert!(
             check.is_utf8_file(&doc.to_string_lossy(), &doc.to_string_lossy()),
             "a compressed file with no decompressor must read as UTF-8"
+        );
+    }
+
+    #[test]
+    fn non_conf_in_etc_exempts_managed_dropins() {
+        // Upstream rpmlint#1137: entries under /etc/alternatives/ are managed
+        // by the alternatives system, not hand-edited config, so flagging
+        // them is wrong. The reference additionally exempts
+        // /etc/ld.so.conf.d/ drop-ins; a genuine non-config file under /etc
+        // must still warn. Drive through check_binary.
+        let config = test_config();
+        let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg =
+            Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        pkg.files = vec![
+            PkgFile {
+                name: "/etc/alternatives/foo".to_string(),
+                path: "/etc/alternatives/foo".to_string(),
+                mode: 0o100644,
+                size: Some(100),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/etc/ld.so.conf.d/foo.conf".to_string(),
+                path: "/etc/ld.so.conf.d/foo.conf".to_string(),
+                mode: 0o100644,
+                size: Some(100),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/etc/foo.conf".to_string(),
+                path: "/etc/foo.conf".to_string(),
+                mode: 0o100644,
+                size: Some(100),
+                ..Default::default()
+            },
+        ];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let results: Vec<(String, String)> = out
+            .results()
+            .iter()
+            .map(|(n, d)| (n.clone(), d.clone()))
+            .collect();
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "non-conffile-in-etc" && d.contains("alternatives")),
+            "false positive on /etc/alternatives: {results:?}"
+        );
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "non-conffile-in-etc" && d.contains("ld.so.conf.d")),
+            "false positive on /etc/ld.so.conf.d: {results:?}"
+        );
+        assert!(
+            results.iter().any(|(n, d)| n == "non-conffile-in-etc"
+                && d.contains(": W: non-conffile-in-etc")
+                && d.contains("/etc/foo.conf")),
+            "missing W-level non-conffile-in-etc on /etc/foo.conf: {results:?}"
         );
     }
 }

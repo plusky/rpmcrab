@@ -1021,7 +1021,11 @@ impl TagsCheck {
         }
         let times = crate::pkg::tags::int32_array(header, Tag::CHANGELOGTIME);
         if let Some(&first) = times.first() {
-            let mut clt_time = first as i64 - 26 * 3600;
+            // Roll back 26h to cover timezone differences, mirroring the
+            // reference (TagsCheck.py): the largest tz gap is 26h (Howland
+            // Islands vs Line Islands). Both comparisons below use the
+            // rolled-back value.
+            let clt_time = first as i64 - 26 * 3600;
             if clt_time < OLDEST_CHANGELOG_TIMESTAMP {
                 add_info(
                     out,
@@ -1031,12 +1035,11 @@ impl TagsCheck {
                     &[&format_date(clt_time)],
                 );
             } else {
-                clt_time = first as i64;
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
-                if clt_time > now {
+                if changelog_in_future(first as i64, now) {
                     add_info(
                         out,
                         Level::Error,
@@ -1214,6 +1217,10 @@ impl TagsCheck {
         }
     }
 
+    /// A versioned Obsoletes entry that matches a Provides entry of the same
+    /// name without reaching beyond the provided EVR is the documented
+    /// package-merge pattern (e.g. `Provides: foo = 1.6.1` with
+    /// `Obsoletes: foo <= 1.6.1`) and is not reported.
     fn check_self_obsoletion(&self, pkg: &Pkg, out: &mut Filter) {
         if pkg.obsoletes.is_empty() {
             return;
@@ -1283,6 +1290,13 @@ fn split_url(url: &str) -> (String, String) {
         }
         None => (String::new(), String::new()),
     }
+}
+
+/// Whether a changelog timestamp is in the future, after the reference's
+/// 26h timezone rollback (TagsCheck.py). `now` is a parameter so the rollback
+/// stays unit-testable without depending on the wall clock.
+fn changelog_in_future(changelog_time: i64, now: i64) -> bool {
+    changelog_time - 26 * 3600 > now
 }
 
 /// Format a Unix timestamp as `YYYY-MM-DD` (UTC).
@@ -1373,6 +1387,17 @@ mod tests {
                 "level: {line}"
             );
         }
+    }
+
+    #[test]
+    fn changelog_in_future_applies_tz_rollback() {
+        let now = 1_700_000_000;
+        // Up to 26h ahead of now is a timezone artifact, not a future date.
+        assert!(!changelog_in_future(now + 3600, now));
+        assert!(!changelog_in_future(now + 26 * 3600, now));
+        // Beyond 26h is genuinely in the future.
+        assert!(changelog_in_future(now + 26 * 3600 + 1, now));
+        assert!(!changelog_in_future(now - 3600, now));
     }
 
     #[test]
@@ -1491,6 +1516,88 @@ mod tests {
             release: None,
         };
         assert!(!range_compare(&obs, &prov), "strictly-below must not match");
+    }
+
+    /// Build a [`DepInfo`] from an optional `epoch:version-release` string.
+    fn make_dep(name: &str, flags: u32, evr: Option<&str>) -> DepInfo {
+        let (epoch, version, release) = match evr {
+            Some(s) => crate::pkg::dep::string_to_version(s),
+            None => (None, None, None),
+        };
+        DepInfo {
+            name: name.to_string(),
+            flags,
+            epoch,
+            version,
+            release,
+        }
+    }
+
+    /// Run the full check with the fixture's Provides/Obsoletes replaced,
+    /// returning the emitted `self-obsoletion` findings.
+    fn self_obsoletion_results(provides: DepInfo, obsoletes: DepInfo) -> Vec<(String, String)> {
+        let mut pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.provides = vec![provides];
+        pkg.obsoletes = vec![obsoletes];
+        run_check(&pkg)
+            .into_iter()
+            .filter(|(name, _)| name == "self-obsoletion")
+            .collect()
+    }
+
+    /// Emission-path port of Tom's upstream `test_self_obsoletion` (#1599):
+    /// the documented merge pattern stays silent, unversioned self-Obsoletes
+    /// and overreaching ranges still warn with name, level and detail pinned.
+    #[test]
+    fn self_obsoletion_merge_pattern_is_silent() {
+        // Provides: merged = 1.6.1, Obsoletes: merged <= 1.6.1
+        let prov = make_dep("merged", RPMSENSE_EQUAL, Some("1.6.1"));
+        let obs = make_dep("merged", RPMSENSE_LESS | RPMSENSE_EQUAL, Some("1.6.1"));
+        assert!(
+            self_obsoletion_results(prov, obs).is_empty(),
+            "merge pattern must not warn"
+        );
+        // Pinned to exactly the provided EVR: same legitimate shape.
+        let prov = make_dep("mergedeq", RPMSENSE_EQUAL, Some("1.6.1"));
+        let obs = make_dep("mergedeq", RPMSENSE_EQUAL, Some("1.6.1"));
+        assert!(
+            self_obsoletion_results(prov, obs).is_empty(),
+            "pinned merge pattern must not warn"
+        );
+        // Strictly below the provided EVR cannot match the package itself.
+        let prov = make_dep("lower", RPMSENSE_EQUAL, Some("1.6.1"));
+        let obs = make_dep("lower", RPMSENSE_LESS, Some("1.6.1"));
+        assert!(
+            self_obsoletion_results(prov, obs).is_empty(),
+            "strictly-below must not warn"
+        );
+    }
+
+    #[test]
+    fn self_obsoletion_unversioned_and_overreaching_still_warn() {
+        // Unversioned Obsoletes genuinely obsoletes the package itself.
+        let prov = make_dep("selfobs", RPMSENSE_EQUAL, Some("1.0"));
+        let obs = make_dep("selfobs", 0, None);
+        assert_eq!(
+            self_obsoletion_results(prov, obs),
+            [(
+                "self-obsoletion".to_string(),
+                "fcprobe.noarch: W: self-obsoletion selfobs obsoletes selfobs = 1.0".to_string(),
+            )],
+            "unversioned self-obsoletes must warn"
+        );
+        // Range reaching beyond the provided EVR covers the package itself.
+        let prov = make_dep("higher", RPMSENSE_EQUAL, Some("1.6.1"));
+        let obs = make_dep("higher", RPMSENSE_LESS | RPMSENSE_EQUAL, Some("2.0"));
+        assert_eq!(
+            self_obsoletion_results(prov, obs),
+            [(
+                "self-obsoletion".to_string(),
+                "fcprobe.noarch: W: self-obsoletion higher <= 2.0 obsoletes higher = 1.6.1"
+                    .to_string(),
+            )],
+            "overreaching range must warn"
+        );
     }
 
     #[test]
