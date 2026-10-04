@@ -13,10 +13,17 @@
 //! ALLOWLIST categories (each entry documents WHY it cannot be a static):
 //! - "config": pattern comes from user configuration at runtime.
 //! - "package": pattern incorporates package data (names, paths).
+//! - "runtime": pattern incorporates runtime values (RPM macro expansions,
+//!   the current date) that are unknowable at compile time.
 //! - "ctor-once": compiled once in a constructor, stored in the struct.
 //! - "fallback": constant never-matching pattern used as the error path when a
 //!   config-supplied pattern fails to compile; kept as a runtime fallback
 //!   rather than a static because it only exists for the error path.
+//! - "test": `Regex::new` inside unit tests; never on a hot path.
+//!
+//! The same list also feeds `no_owned_regex_factories`: an owned-`Regex`
+//! factory is legitimate only when the pattern depends on a runtime value
+//! and the result is compiled once in a constructor, stored in the struct.
 
 use std::path::PathBuf;
 
@@ -104,6 +111,19 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     // Config-driven with format!.
     ("tags.rs", "invalid_url", "config"),
     ("tags.rs", "forbidden_words", "config"),
+    // buildroot_and_date.rs (landed on main after this branch): the buildroot
+    // pattern embeds the runtime `%{?buildroot}` macro value and `istoday`
+    // embeds today's date, so neither can be a static; both are compiled once
+    // in the constructor and stored in the struct. `looksliketime` is a
+    // constant struct-field pattern (ctor-once, matching the entries above).
+    ("buildroot_and_date.rs", "Regex::new(&pattern)", "runtime"),
+    ("buildroot_and_date.rs", "looksliketime", "ctor-once"),
+    ("buildroot_and_date.rs", "istoday", "runtime"),
+    // Owned-Regex factory with a runtime-data pattern; called once in the
+    // constructor, never on the per-file hot path.
+    ("buildroot_and_date.rs", "fn buildroot_regex", "runtime"),
+    // Unit-test shape assertion for `today_string()`.
+    ("buildroot_and_date.rs", "^[A-Z][a-z]{2}", "test"),
 ];
 
 fn checks_dir() -> PathBuf {
@@ -212,7 +232,7 @@ fn no_owned_regex_factories() {
         }
         let src = std::fs::read_to_string(entry.path()).unwrap();
         for (i, line) in src.lines().enumerate() {
-            if is_owned_regex_factory(line) {
+            if is_owned_regex_factory(line) && !is_allowlisted(&fname, line) {
                 violations.push(format!("{}:{}: {}", fname, i + 1, line.trim()));
             }
         }
@@ -220,7 +240,7 @@ fn no_owned_regex_factories() {
 
     assert!(
         violations.is_empty(),
-        "functions returning owned Regex (use OnceLock statics returning &'static Regex):\n{}",
+        "functions returning owned Regex (use OnceLock statics returning &'static Regex; add to ALLOWLIST with reason if legitimate):\n{}",
         violations.join("\n")
     );
 }
