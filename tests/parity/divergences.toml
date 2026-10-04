@@ -672,3 +672,10 @@ check = "PolkitCheck"
 kind = "behaviour"
 reason = "Self-closing `<allow_any/>` / `<allow_inactive/>` / `<allow_active/>` elements inside `<defaults>` are ignored by the port (rendered `no`), while the reference raises `AttributeError` on `i.firstChild.data` (PolkitCheck.py: `settings[i.nodeName] = i.firstChild.data`; a self-closing element has no firstChild) and exits 3 — the same class of crash as the missing-`<defaults>` `IndexError` divergence above, and the natural companion to it: this entry covers the settings elements, that one covers the absent `<defaults>` element, so nothing is double-counted."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "PolkitCheck"
+kind = "behaviour"
+reason = "PolkitCheck.py:70 does `action.getElementsByTagName('defaults')[0]`, a descendant search, so an outer `<action>` with no `<defaults>` of its own inherits the first `<defaults>` of a nested descendant action: on `<action id='aaa.outer.nodefaults'><action id='bbb.inner.withdefaults'><defaults><allow_any>yes</allow_any>...` the reference emits `E: polkit-user-privilege ... aaa.outer.nodefaults (yes:no:no)` while the port scopes each action to its own `<defaults>` and emits `E: polkit-untracked-privilege ... aaa.outer.nodefaults (no:no:no)` -- name, detail and order all diverge on the outer action, on package-controlled XML. Nested actions are rejected by real polkit, so this is pathological input and the inheritance is a minidom artifact; the port's per-action scoping is the deliberate, saner behavior. The IndexError entry above covers the no-`<defaults>`-anywhere case, this entry covers the nested-descendant case, so nothing is double-counted."
+since = "0.1.0"
