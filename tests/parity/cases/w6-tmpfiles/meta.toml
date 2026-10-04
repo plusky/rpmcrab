@@ -1,0 +1,16 @@
+kind = "captured"
+rpmlint = "2.10.0"
+reference_sha = "84848c05c5571c22274a55ff9afdfe6d88c67dc9"
+flavour = "openSUSE"
+argv = ["w6-tmpfiles-1.0-1.noarch.rpm"]
+captured = "2026-10-03"
+
+[source]
+description = "Hand-built fixture: /usr/lib/tmpfiles.d/test.conf with d/f entries tripping tmpfile-not-in-filelist plus one clean entry (uninteresting 'r' type). Reference emits 2x W tmpfile-not-in-filelist. Exit 0."
+
+[tools]
+present = ["checkbashisms","dash","desktop-file-validate","readelf","objdump","ldd","file"]
+
+[[input]]
+file = "w6-tmpfiles-1.0-1.noarch.rpm"
+sha256 = "cf3a8ec41b2ed57f6e05b5cfd70c3ddb6f6e8e97abc75d967b16e1e56125deb9"
