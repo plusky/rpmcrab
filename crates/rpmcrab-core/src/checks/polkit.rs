@@ -24,6 +24,16 @@ use crate::pkg::Pkg;
 /// Parsed actions: (action_id, defaults).
 type PolkitActions = Vec<(String, HashMap<String, String>)>;
 
+/// An `<action>` element whose end tag has not been seen yet: its slot in
+/// the result vector, plus whether its `<defaults>` is currently open.
+/// Nested `<action>` elements are pathological (polkit rejects them), but
+/// each level needs its own state so an inner `<defaults>` cannot clobber
+/// the outer action's.
+struct OpenAction {
+    idx: usize,
+    in_defaults: bool,
+}
+
 pub struct PolkitCheck {
     privs: HashMap<String, String>,
 }
@@ -109,6 +119,19 @@ impl PolkitCheck {
         }
     }
 
+    /// `action.getAttribute('id')`: '' when the attribute is absent.
+    fn action_id(attrs: quick_xml::events::attributes::Attributes<'_>) -> String {
+        for attr in attrs.flatten() {
+            if attr.key.as_ref() == "id" {
+                return attr
+                    .normalized_value(XmlVersion::Implicit1_0)
+                    .map(|v| v.into_owned())
+                    .unwrap_or_default();
+            }
+        }
+        String::new()
+    }
+
     /// Parse a polkit policy file, returning `(action_id, defaults)` pairs.
     /// Err on malformed XML (the reference's `polkit-xml-exception`).
     fn parse_actions(path: &str) -> Result<PolkitActions, String> {
@@ -120,11 +143,12 @@ impl PolkitCheck {
         // tags at EOF error, and check end-tag names so mismatches error.
         reader.config_mut().check_end_names = true;
         let mut depth = 0u32;
-        let mut actions = Vec::new();
-        let mut current_id: Option<String> = None;
-        let mut current_defaults: HashMap<String, String> = HashMap::new();
-        let mut in_action = false;
-        let mut in_defaults = false;
+        let mut actions: PolkitActions = Vec::new();
+        // Open `<action>` elements, innermost last. Each action takes its
+        // result slot at its start tag: the reference's minidom
+        // `getElementsByTagName` yields document order, and pushing at the
+        // end tag reported a nested self-closing action before its parent.
+        let mut open: Vec<OpenAction> = Vec::new();
         let mut current_setting: Option<String> = None;
         let mut current_text = String::new();
 
@@ -134,21 +158,24 @@ impl PolkitCheck {
                     depth += 1;
                     match e.name().as_ref() {
                         "action" => {
-                            in_action = true;
-                            current_id = None;
-                            current_defaults = HashMap::new();
-                            for attr in e.attributes().flatten() {
-                                if attr.key.as_ref() == "id" {
-                                    current_id = Some(
-                                        attr.normalized_value(XmlVersion::Implicit1_0)
-                                            .map(|v| v.into_owned())
-                                            .unwrap_or_default(),
-                                    );
-                                }
+                            // `action.getAttribute('id')` (PolkitCheck.py:61)
+                            // yields '' for an action with no id, and the
+                            // action is still evaluated. Dropping it instead
+                            // would silently skip a privilege declaration.
+                            actions.push((Self::action_id(e.attributes()), HashMap::new()));
+                            open.push(OpenAction {
+                                idx: actions.len() - 1,
+                                in_defaults: false,
+                            });
+                        }
+                        "defaults" => {
+                            if let Some(top) = open.last_mut() {
+                                top.in_defaults = true;
                             }
                         }
-                        "defaults" if in_action => in_defaults = true,
-                        "allow_any" | "allow_inactive" | "allow_active" if in_defaults => {
+                        "allow_any" | "allow_inactive" | "allow_active"
+                            if open.last().is_some_and(|top| top.in_defaults) =>
+                        {
                             current_setting = Some(e.name().as_ref().to_owned());
                             current_text.clear();
                         }
@@ -173,16 +200,13 @@ impl PolkitCheck {
                     depth = depth.saturating_sub(1);
                     match e.name().as_ref() {
                         "action" => {
-                            // `action.getAttribute('id')` (PolkitCheck.py:61)
-                            // yields '' for an action with no id, and the action
-                            // is still evaluated. Dropping it instead would
-                            // silently skip a privilege declaration.
-                            let id = current_id.take().unwrap_or_default();
-                            actions.push((id, std::mem::take(&mut current_defaults)));
-                            in_action = false;
-                            in_defaults = false;
+                            open.pop();
                         }
-                        "defaults" => in_defaults = false,
+                        "defaults" => {
+                            if let Some(top) = open.last_mut() {
+                                top.in_defaults = false;
+                            }
+                        }
                         name @ ("allow_any" | "allow_inactive" | "allow_active")
                             if current_setting.as_deref() == Some(name) =>
                         {
@@ -191,7 +215,12 @@ impl PolkitCheck {
                                 .map(|v| v.into_owned())
                                 .unwrap_or_default();
                             current_text.clear();
-                            current_defaults.insert(setting, value);
+                            // The setting belongs to the innermost open action;
+                            // `check_end_names` guarantees an action is still
+                            // open here, the `if let` is just belt and braces.
+                            if let Some(top) = open.last() {
+                                actions[top.idx].1.insert(setting, value);
+                            }
                         }
                         _ => {}
                     }
@@ -200,18 +229,10 @@ impl PolkitCheck {
                     if e.name().as_ref() == "action" {
                         // A self-closing `<action id="x"/>` never yields
                         // Start/End; the reference's minidom reports it as an
-                        // action without `<defaults>`, so push it with empty
-                        // defaults like a Start immediately followed by End.
-                        let mut id = String::new();
-                        for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == "id" {
-                                id = attr
-                                    .normalized_value(XmlVersion::Implicit1_0)
-                                    .map(|v| v.into_owned())
-                                    .unwrap_or_default();
-                            }
-                        }
-                        actions.push((id, HashMap::new()));
+                        // action without `<defaults>`, so it takes its
+                        // document-order slot like a Start immediately
+                        // followed by End.
+                        actions.push((Self::action_id(e.attributes()), HashMap::new()));
                     }
                 }
                 Ok(Event::Eof) => {
@@ -532,6 +553,54 @@ mod tests {
             results[0].1.contains("no:no:no"),
             "detail: {}",
             results[0].1
+        );
+    }
+
+    #[test]
+    fn nested_actions_report_in_document_order() {
+        // plusky's #185 follow-up nit: minidom's `getElementsByTagName`
+        // yields document order, so for pathological nesting
+        // `<action id="a"><action id="b"/></action>` the reference reports
+        // a before b. The port used to push each action at its end tag, so
+        // the self-closing inner action (an `Empty` event, pushed at once)
+        // came out before its still-open parent. Reverting the start-tag
+        // slotting fails this with the ids swapped.
+        let dir = std::env::temp_dir();
+        let path = dir.join("rpmcrab-polkit-nested.policy");
+        std::fs::write(
+            &path,
+            "<policyconfig><action id=\"org.foo.outer\"><action id=\"org.foo.inner\"/></action></policyconfig>",
+        )
+        .unwrap();
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        // Header only, no extraction: `files` is overwritten wholesale below.
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        let name = "/usr/share/polkit-1/actions/org.foo.policy";
+        pkg.files = vec![PkgFile {
+            name: name.to_string(),
+            path: path.to_str().unwrap().to_string(),
+            ..Default::default()
+        }];
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = check();
+        check.check_binary(&pkg, &config, &mut out);
+        std::fs::remove_file(&path).ok();
+        let results = out.results().to_vec();
+        assert_eq!(results.len(), 2, "unexpected results: {results:?}");
+        assert_eq!(results[0].0, "polkit-untracked-privilege");
+        assert!(results[0].1.contains(": E: "), "level: {}", results[0].1);
+        assert!(
+            results[0].1.contains("org.foo.outer"),
+            "first: {}",
+            results[0].1
+        );
+        assert_eq!(results[1].0, "polkit-untracked-privilege");
+        assert!(
+            results[1].1.contains("org.foo.inner"),
+            "second: {}",
+            results[1].1
         );
     }
 }
