@@ -770,3 +770,11 @@ check = "DocCheck"
 kind = "detail"
 reason = "package-with-huge-docs detail appends \"(documentation should be in a -doc subpackage)\" to the percentage. The reference emits only the percentage (DocCheck.py:117); its long description already carries the -doc advice, so the port surfaces it inline."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "TagsCheck"
+kind = "behaviour"
+reason = "Emits an Info-level `invalid-license-spellcheck` finding with did-you-mean suggestions for an invalid `License:` tag (upstream rpmlint#818). The reference 2.10.0 has no such check -- neither in `descriptions/` nor in `TagsCheck.py` -- and emits only `W: invalid-license`. The suggestions live in the separate Info finding; `invalid-license`'s detail stays byte-identical to the reference, so the frozen surface is untouched and the new finding can never break a build. Pinned by emission-path tests in tags.rs."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/818"
