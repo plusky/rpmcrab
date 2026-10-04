@@ -641,24 +641,11 @@ mod tests {
             checked_files: 0,
         };
         check.check_requirements(&pkg, &mut out, reqs, "3.12");
+        let levels = out.result_levels().to_vec();
         out.results()
             .iter()
-            .map(|(name, line)| {
-                // The rendered line is the frozen output contract
-                // (`{prefix} {letter}: {check}...`); the letter carries the
-                // level that `Filter::results` otherwise discards.
-                let letter = line
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|t| t.strip_suffix(':'));
-                let level = match letter {
-                    Some("E") => Level::Error,
-                    Some("W") => Level::Warning,
-                    Some("I") => Level::Info,
-                    other => panic!("cannot parse level from line: {line:?} ({other:?})"),
-                };
-                (name.clone(), level, line.clone())
-            })
+            .zip(levels)
+            .map(|((name, line), level)| (name.clone(), level, line.clone()))
             .collect()
     }
 
@@ -675,7 +662,28 @@ mod tests {
         let (name, level, line) = &findings[0];
         assert_eq!(name, "python-missing-require");
         assert_eq!(*level, Level::Warning);
-        assert!(line.contains("w6missing"), "detail missing: {line}");
+        assert_eq!(line, "python-test.noarch: W: python-missing-require w6missing");
+    }
+
+    #[test]
+    fn leftover_require_pins_name_level_and_detail() {
+        // The #119 nit's other half: `python-leftover-require` also had
+        // no level pin. An RPM-level requirement with no matching
+        // requires.txt entry fires at Warning. (One satisfied requirement
+        // is needed: the check returns early when reqs is empty.)
+        let reqs = PythonCheck::parse_requirements("w6satisfied\n", false, "3.12");
+        let findings = check_requirements_findings(
+            &reqs,
+            &["python3-w6satisfied", "python3-w6leftover"],
+        );
+        assert_eq!(findings.len(), 1, "expected one finding: {findings:?}");
+        let (name, level, line) = &findings[0];
+        assert_eq!(name, "python-leftover-require");
+        assert_eq!(*level, Level::Warning);
+        assert_eq!(
+            line,
+            "python-test.noarch: W: python-leftover-require python3-w6leftover"
+        );
     }
 
     #[test]
