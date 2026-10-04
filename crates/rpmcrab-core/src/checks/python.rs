@@ -631,7 +631,7 @@ mod tests {
     fn check_requirements_findings(
         reqs: &[Requirement],
         req_names: &[&str],
-    ) -> Vec<(String, String)> {
+    ) -> Vec<(String, Level, String)> {
         use crate::color::Color;
         let pkg = fixture_pkg_with_requires(req_names);
         let config = Config::default();
@@ -641,7 +641,41 @@ mod tests {
             checked_files: 0,
         };
         check.check_requirements(&pkg, &mut out, reqs, "3.12");
-        out.results().to_vec()
+        out.results()
+            .iter()
+            .map(|(name, line)| {
+                // The rendered line is the frozen output contract
+                // (`{prefix} {letter}: {check}...`); the letter carries the
+                // level that `Filter::results` otherwise discards.
+                let letter = line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|t| t.strip_suffix(':'));
+                let level = match letter {
+                    Some("E") => Level::Error,
+                    Some("W") => Level::Warning,
+                    Some("I") => Level::Info,
+                    other => panic!("cannot parse level from line: {line:?} ({other:?})"),
+                };
+                (name.clone(), level, line.clone())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn missing_require_pins_name_level_and_detail() {
+        // Positive control for the helper: an unsatisfied requirement emits
+        // `python-missing-require` at Warning (the reference emits `W` too).
+        // The helper now returns the level, so this pins it structurally
+        // (plusky's #119 review nit) instead of relying on `is_empty()`.
+        let content = "w6missing\n";
+        let reqs = PythonCheck::parse_requirements(content, false, "3.12");
+        let findings = check_requirements_findings(&reqs, &[]);
+        assert_eq!(findings.len(), 1, "expected one finding: {findings:?}");
+        let (name, level, line) = &findings[0];
+        assert_eq!(name, "python-missing-require");
+        assert_eq!(*level, Level::Warning);
+        assert!(line.contains("w6missing"), "detail missing: {line}");
     }
 
     #[test]
