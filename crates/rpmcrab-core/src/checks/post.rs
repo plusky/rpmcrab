@@ -117,6 +117,18 @@ impl PostCheck {
         }
         let finding = |f: &str| format!("{f}-{tag}");
 
+        // upstream rpmlint#396 (rationale rpm#714): %pretrans runs before any
+        // package payload is installed, so the internal Lua interpreter is
+        // the only one guaranteed to exist. A missing -p flag defaults to
+        // /bin/sh, which is why an empty prog also warns.
+        if tag == "%pretrans" && prog != "<lua>" {
+            out.push((
+                Level::Error,
+                "pretrans-not-lua".to_string(),
+                vec![prog.to_string()],
+            ));
+        }
+
         if !prog.is_empty() {
             if !self.valid_shells.iter().any(|s| s == prog) {
                 out.push((
@@ -274,6 +286,10 @@ const FORBIDDEN_SELINUX_DETAIL: &str = "A command which requires intimate knowle
 /// `non-empty-<scriptlet>`:
 const NON_EMPTY_DETAIL: &str = "Scriptlets for the interpreter mentioned in the message should be empty.\n        One common case where they are unintentionally not is when the specfile\n        contains comments after the scriptlet and before the next section. Review\n        and clean up the scriptlet contents if appropriate.";
 fn register_error_details(out: &mut Filter) {
+    out.set_error_detail(
+        "pretrans-not-lua",
+        "The %pretrans scriptlet must be written in Lua: it runs before any package payload is installed, so the internal Lua interpreter is the only one guaranteed to exist.".to_string(),
+    );
     out.set_error_detail(
         "postin-without-ghost-file-creation",
         "A file tagged as ghost is not created during %prein nor during %postin.".to_string(),
@@ -446,7 +462,11 @@ mod tests {
 
     fn check() -> PostCheck {
         PostCheck {
-            valid_shells: vec!["/bin/sh".to_string(), "/usr/bin/perl".to_string()],
+            valid_shells: vec![
+                "<lua>".to_string(),
+                "/bin/sh".to_string(),
+                "/usr/bin/perl".to_string(),
+            ],
             empty_shells: vec!["/sbin/ldconfig".to_string()],
         }
     }
@@ -459,6 +479,40 @@ mod tests {
                 .iter()
                 .any(|(l, f, _)| *l == Level::Error && f == "invalid-shell-in-%post")
         );
+    }
+
+    #[test]
+    fn pretrans_shell_is_flagged() {
+        // upstream rpmlint#396 (rationale rpm#714): a shell %pretrans
+        // cannot run — only the internal Lua interpreter is guaranteed
+        // to exist when %pretrans executes.
+        let found = check().check_scriptlet("/bin/sh", "echo pretrans", "%pretrans", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "pretrans-not-lua"
+            && d == &vec!["/bin/sh".to_string()]));
+    }
+
+    #[test]
+    fn pretrans_missing_prog_is_flagged() {
+        // No -p flag means the default /bin/sh, which is equally not Lua.
+        let found = check().check_scriptlet("", "echo pretrans", "%pretrans", &[], &[]);
+        assert!(
+            found
+                .iter()
+                .any(|(l, f, _)| *l == Level::Error && f == "pretrans-not-lua")
+        );
+    }
+
+    #[test]
+    fn pretrans_lua_is_quiet() {
+        let found = check().check_scriptlet("<lua>", "print('hello')", "%pretrans", &[], &[]);
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn pretrans_check_ignores_other_scriptlets() {
+        let found = check().check_scriptlet("/bin/sh", "echo hi", "%post", &[], &[]);
+        assert!(!found.iter().any(|(_, f, _)| f == "pretrans-not-lua"));
     }
 
     #[test]
@@ -613,6 +667,10 @@ mod tests {
                 "percent-in-%trigger",
                 "dangerous-command-in-%trigger",
                 "use-tmp-in-%trigger",
+                // Deliberate divergence from the pinned reference: the
+                // fixture's shell %pretrans trips pretrans-not-lua, which
+                // upstream #396 asks for but 2.10.0 does not implement.
+                "pretrans-not-lua",
                 "percent-in-%filetrigger",
                 "dangerous-command-in-%transfiletrigger",
                 "postin-without-ghost-file-creation",
@@ -629,6 +687,16 @@ mod tests {
                 "ghost-files-without-postin",
                 "postin-without-ghost-file-creation",
             ]
+        );
+    }
+
+    #[test]
+    fn lua_pretrans_fixture_is_quiet() {
+        // `%pretrans -p <lua>` is the only form RPM guarantees at
+        // pretrans time: PostCheck must stay silent on it.
+        assert_eq!(
+            check_fixture_names("postcheck-pretrans-lua-1.0-1.noarch.rpm"),
+            Vec::<String>::new()
         );
     }
 
