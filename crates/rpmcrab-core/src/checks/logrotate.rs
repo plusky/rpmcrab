@@ -313,4 +313,69 @@ mod tests {
             writable[0]
         );
     }
+
+    /// Run `LogrotateCheck::check_binary` over a package whose only logrotate
+    /// conf references `log_path`, with the log dir itself unpackaged, and
+    /// return the rendered lines.
+    fn run_logrotate_not_packaged_case(log_path: &str) -> Vec<String> {
+        use crate::color::Color;
+        use crate::pkg::pkgfile::PkgFile;
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
+        let conf = dir.join("app");
+        std::fs::write(&conf, format!("{log_path} {{\n  weekly\n}}\n")).expect("write conf");
+
+        let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = crate::pkg::Pkg::open(&rpm, dir, true).expect("open fixture pkg");
+        pkg.name = "logrotate-test".to_string();
+        // The log dir is deliberately absent: this exercises the not-packaged
+        // branch, which the packaged-/var/log test above never reaches.
+        pkg.files = vec![PkgFile {
+            name: "/etc/logrotate.d/app".to_string(),
+            path: conf.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            ..Default::default()
+        }];
+
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = LogrotateCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        out.results().iter().map(|(_, line)| line.clone()).collect()
+    }
+
+    /// B7b: the `/var/log` exemption (rpmlint#551) is scoped to the exact
+    /// `/var/log` directory. With `/var/log` itself unpackaged no
+    /// `logrotate-log-dir-not-packaged` fires; an unpackaged `/var/log/samba`
+    /// is still reported.
+    #[test]
+    fn unpackaged_log_dir_exemption_is_scoped_to_var_log() {
+        // (log path in the conf, unpackaged dir, expect the finding)
+        let cases: &[(&str, &str, bool)] = &[
+            ("/var/log/app.log", "/var/log", false),
+            ("/var/log/samba/app.log", "/var/log/samba", true),
+        ];
+        for (log_path, dir, expect_finding) in cases {
+            let rendered = run_logrotate_not_packaged_case(log_path);
+            let hits: Vec<&String> = rendered
+                .iter()
+                .filter(|l| l.contains("logrotate-log-dir-not-packaged"))
+                .collect();
+            if *expect_finding {
+                assert_eq!(hits.len(), 1, "case {log_path}: {rendered:?}");
+                assert_eq!(
+                    hits[0],
+                    &format!("logrotate-test.noarch: E: logrotate-log-dir-not-packaged {dir}"),
+                    "case {log_path}"
+                );
+            } else {
+                assert!(
+                    hits.is_empty(),
+                    "case {log_path}: unexpected {hits:?} in {rendered:?}"
+                );
+            }
+        }
+    }
 }

@@ -1,10 +1,11 @@
 //! The `Pkg` abstraction — the Rust equivalent of rpmlint's `pkg.py`.
 //!
-//! Two sources: **file-backed** (the payload extracted into a tempdir so
-//! `PkgFile.path` and `magic` match the reference) and **installed** (`db::Db`,
-//! rooted at the live filesystem). Both expose the header, the nine dependency
-//! lists, the file map, and the derived `config/doc/ghost/noreplace/missingok`
-//! name lists. The spec `FakePkg` is M3.
+//! Two package kinds: **binary RPM** ([`Package::Rpm`], the payload extracted
+//! into a tempdir so `PkgFile.path` and `magic` match the reference) and
+//! **spec file** ([`Package::Spec`], `SpecPkg` — the former `FakePkg`, now
+//! shipped). The binary kind exposes the header, the nine dependency lists,
+//! the file map, and the derived `config/doc/ghost/noreplace/missingok`
+//! name lists.
 
 pub mod dep;
 pub mod extract;
@@ -70,7 +71,7 @@ pub enum PkgError {
     /// a database it cannot open reads as empty (see `installed`).
     #[error("rpmdb: {0}")]
     Db(#[from] librpm::error::Error),
-    /// A panic inside a librpm safe-API call, contained by [`guarded`].
+    /// A panic inside a librpm safe-API call, contained by `guarded`.
     #[error("librpm could not decode the package: {message}")]
     Decode { message: String },
 }
@@ -385,7 +386,7 @@ impl Pkg {
     /// filename is synthesized, and `is_source` is forced false.
     /// # Errors
     /// [`PkgError::Decode`] when a header field cannot be decoded; see
-    /// [`guarded`]. An installed package is read the same way as a file, so it
+    /// `guarded`. An installed package is read the same way as a file, so it
     /// fails the same way.
     pub fn installed(header: PackageHeader) -> Result<Self, PkgError> {
         guarded(|| {
@@ -607,7 +608,7 @@ impl Pkg {
 
     /// Remove the owned tempdir (rpmlint `cleanup`); it is also removed on
     /// drop. This covers the extraction tempdir and the test-only sandbox
-    /// tempdir alike. The source becomes [`PkgSource::CleanedUp`], still
+    /// tempdir alike. The source becomes `PkgSource::CleanedUp`, still
     /// pointing at the removed path, so a read after cleanup fails to `''`
     /// exactly as the reference does.
     pub fn cleanup(&mut self) {
