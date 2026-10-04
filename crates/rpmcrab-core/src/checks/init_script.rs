@@ -585,6 +585,9 @@ mod tests {
                 "#!/bin/sh\ntouch /var/lock/subsys/$UNSET\n",
                 vec!["mydaemon.noarch: W: incoherent-subsys /etc/init.d/mydaemon $UNSET"],
             ),
+            // Empty raw token: `}` truncates to "", suppressed by the
+            // `if error and len(name)` guard (InitScriptCheck.py:189).
+            ("#!/bin/sh\ntouch /var/lock/subsys/}\n", vec![]),
             // Two findings: emission order follows the script lines.
             (
                 "#!/bin/sh\nNAME=otherdaemon\ntouch /var/lock/subsys/$NAME\ntouch /var/lock/subsys/wrongname\n",
