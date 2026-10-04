@@ -37,8 +37,9 @@ use crate::tools::{Tool, ToolSource, test_source};
 
 /// AppStream's mandatory licence tag is `metadata_license`
 /// (§2 "Metainfo Files"; `project_license` is explicitly optional).
-/// `licence` is the pre-0.12 spelling of `project_license`; both are
-/// accepted as alternatives so legacy files are not flagged.
+/// The commonly-misspelled `licence` is a Fedora-era misspelling, not an
+/// AppStream tag; it is accepted alongside the legacy `project_license`
+/// spelling so legacy files are not flagged.
 const LICENCE_TAGS: [&str; 3] = ["metadata_license", "licence", "project_license"];
 
 /// Required tags for every component type (AppStream §2).
