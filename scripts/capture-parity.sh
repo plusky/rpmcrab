@@ -119,6 +119,11 @@ tools_joined="$(IFS=', '; echo "${present_tools[*]}")"
     # The reference's own flavour (its config), recorded at capture time.
     # Distinct from the rpmcrab `Flavor` TOML key (the flavor selector).
     echo 'flavour = "openSUSE"'
+    # The reference check count under the openSUSE overlay at capture time
+    # (see tests/parity/README.md "The overlay trap"). A port-side runner
+    # must reproduce this check set; update the number if the overlay's
+    # check list changes.
+    echo 'checks = 43'
     # argv: extra args then input basenames, each quoted, joined by ", ".
     argv_items=()
     for a in ${extra[@]+"${extra[@]}"}; do argv_items+=("\"$a\""); done
