@@ -374,7 +374,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
 case = "global"
 check = "SourceCheck"
 kind = "detail"
-reason = "parse_octal mirrors the reference's int(value, 8) (sign, 0o prefix, PEP 515 underscores, Unicode decimal digits), but magnitudes beyond u128 saturate at u128::MAX where the reference keeps arbitrary precision. The value only feeds equality against file mode bits, which neither a saturated nor an arbitrary-precision huge value can equal, so the saturation is unobservable."
+reason = "parse_octal mirrors the reference's int(value, 8) (sign, 0o prefix, PEP 515 underscores, Unicode decimal digits), but magnitudes beyond u128 saturate at u128::MAX where the reference keeps arbitrary precision. The saturated value only feeds equality against file mode bits, which neither a saturated nor an arbitrary-precision huge value can equal. Digits past saturation are still validated: trailing garbage makes parse_octal return None and SourceCheck::new panic, where the reference's int(value, 8) raises ValueError — both die on the bad entry rather than silently accepting it."
 since = "0.1.0"
 
 [[divergence]]
