@@ -933,6 +933,14 @@ impl TagsCheck {
 }
 
 impl TagsCheck {
+    /// Maximum paren layers unwrapped by [`Self::split_license_leaves`].
+    /// Past this depth the remainder is treated as one opaque leaf: the
+    /// reference's regex split answers instantly on adversarial nesting,
+    /// while an unbounded recursive unwrap is quadratic and overflows the
+    /// stack in unoptimised builds. No real license expression nests this
+    /// deep.
+    const MAX_LICENSE_PAREN_DEPTH: usize = 64;
+
     fn check_changelog(&self, pkg: &Pkg, out: &mut Filter, changelog: &[String]) {
         let header = pkg.header();
         let version = crate::pkg::tags::str_tag(header, Tag::VERSION).unwrap_or_default();
@@ -1054,17 +1062,35 @@ impl TagsCheck {
     ///
     /// `(GPLv2 or GPLv3) and (GPLv2+ with exceptions)` becomes
     /// `["GPLv2", "GPLv3", "GPLv2+ with exceptions"]`: a fully parenthesized
-    /// expression is unwrapped one layer at a time, and `and`/`or` (either
-    /// case, the reference's operator set) split at the top level only, so a
-    /// `with` inside one group never leaks into the exception match of
-    /// another group.
+    /// expression is unwrapped iteratively (bounded by
+    /// [`Self::MAX_LICENSE_PAREN_DEPTH`], past which the remainder is one
+    /// opaque leaf), and `and`/`or` (either case, the reference's operator
+    /// set) split at the top level only, so a `with` inside one group never
+    /// leaks into the exception match of another group.
+    ///
+    /// A bare `()` survives as a literal leaf (the reference reports
+    /// `invalid-license ()` for it); a whitespace-only group is dropped,
+    /// like the reference's empty-split filtering.
     fn split_license_leaves(text: &str) -> Vec<String> {
-        let text = text.trim();
+        let mut text = text.trim();
         if text.is_empty() {
             return Vec::new();
         }
-        if let Some(inner) = Self::strip_enclosing_parens(text) {
-            return Self::split_license_leaves(inner);
+        let mut depth = 0usize;
+        while let Some(inner) = Self::strip_enclosing_parens(text) {
+            let inner = inner.trim();
+            if inner.is_empty() {
+                return if text == "()" {
+                    vec![text.to_string()]
+                } else {
+                    Vec::new()
+                };
+            }
+            depth += 1;
+            if depth > Self::MAX_LICENSE_PAREN_DEPTH {
+                return vec![text.to_string()];
+            }
+            text = inner;
         }
         let chars: Vec<(usize, char)> = text.char_indices().collect();
         let mut parts = Vec::new();
@@ -1840,18 +1866,52 @@ mod tests {
 
     #[test]
     fn license_paren_groups_yield_clean_findings() {
-        let results = license_findings("(GPLv2 or GPLv3) and (GPLv2+ with exceptions)");
+        // Two WITH expressions in separate paren groups: the old
+        // whole-string exception match saw only the first, silently
+        // dropping the second.
+        let results = license_findings("(GPLv2+ with exceptions) and (MIT with BogusException)");
         for (name, line) in &results {
             eprintln!("GOT: {name}: {line}");
         }
-        // The exception is genuinely unknown, so it is still reported, but
-        // with a clean token: no paren may leak into any detail.
-        assert_eq!(results.len(), 1);
+        // Both exceptions are reported, each with a clean token: no paren
+        // may leak into any detail.
+        assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, "invalid-license-exception");
         assert_eq!(
             results[0].1,
             "fcprobe.noarch: W: invalid-license-exception exceptions"
         );
+        assert_eq!(results[1].0, "invalid-license-exception");
+        assert_eq!(
+            results[1].1,
+            "fcprobe.noarch: W: invalid-license-exception BogusException"
+        );
+    }
+
+    #[test]
+    fn license_empty_paren_group_is_reported() {
+        // The reference reports `W: invalid-license ()` for an empty
+        // group: the leaf must not vanish.
+        let results = license_findings("()");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "invalid-license");
+        assert_eq!(results[0].1, "fcprobe.noarch: W: invalid-license ()");
+        let results = license_findings("MIT and ()");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1, "fcprobe.noarch: W: invalid-license ()");
+        // A whitespace-only group vanishes, like the reference's
+        // empty-split filtering.
+        assert!(license_findings("( )").is_empty());
+    }
+
+    #[test]
+    fn license_deeply_nested_parens_terminates() {
+        // Adversarial nesting: the unwrap is bounded, so this terminates
+        // instead of going quadratic or overflowing the stack. Past the
+        // depth cap the remainder is one opaque leaf.
+        let text = format!("({}MIT{})", "(".repeat(10_000), ")".repeat(10_000));
+        let leaves = TagsCheck::split_license_leaves(&text);
+        assert_eq!(leaves.len(), 1);
     }
 
     #[test]
