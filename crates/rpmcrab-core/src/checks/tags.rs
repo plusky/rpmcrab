@@ -16,6 +16,7 @@ use librpm::{OwnedTagData, Tag};
 
 use super::is_match;
 use super::shared::{devel_regex, lib_package_regex, macro_regex};
+use super::spdx::suggest_licenses;
 use crate::check::{Check, add_info};
 use crate::config::Config;
 use crate::filter::Filter;
@@ -1191,6 +1192,14 @@ impl TagsCheck {
                 for l2 in Self::split_license(&lic) {
                     if !self.valid_licenses.contains(&l2) {
                         add_info(out, Level::Warning, pkg, "invalid-license", &[&l2]);
+                        let suggestions = suggest_licenses(&l2, 3).join(", ");
+                        add_info(
+                            out,
+                            Level::Info,
+                            pkg,
+                            "invalid-license-spellcheck",
+                            &[&format!("{l2}: {suggestions}")],
+                        );
                         valid_license = false;
                     }
                 }
@@ -1476,7 +1485,7 @@ mod tests {
         for (name, line) in &results {
             assert!(!name.is_empty(), "finding name: {line}");
             assert!(
-                line.contains(": E: ") || line.contains(": W: "),
+                line.contains(": E: ") || line.contains(": W: ") || line.contains(": I: "),
                 "level: {line}"
             );
         }
@@ -2005,6 +2014,42 @@ mod tests {
         assert_eq!(
             results[0].1,
             "fcprobe.noarch: W: invalid-license BogusLicense-1.0"
+        );
+    }
+
+    #[test]
+    fn invalid_license_emits_spellcheck_suggestions() {
+        // Upstream rpm-software-management/rpmlint#818: did-you-mean for
+        // invalid licenses. Info-level so it can never break a build.
+        let results = license_findings("GPL-2.0-or-latr");
+        assert_eq!(
+            results,
+            vec![
+                (
+                    "invalid-license".to_string(),
+                    "fcprobe.noarch: W: invalid-license GPL-2.0-or-latr".to_string(),
+                ),
+                (
+                    "invalid-license-spellcheck".to_string(),
+                    "fcprobe.noarch: I: invalid-license-spellcheck GPL-2.0-or-latr: GPL-2.0-or-later, GPL-1.0-or-later, GPL-3.0-or-later"
+                        .to_string(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_license_spellcheck_matches_upstream_example() {
+        // The #818 reporter's own example: "Apache 2" should point at Apache-2.0.
+        let results = license_findings("Apache 2");
+        assert_eq!(
+            results
+                .iter()
+                .find(|(n, _)| n == "invalid-license-spellcheck")
+                .map(|(_, l)| l.as_str()),
+            Some(
+                "fcprobe.noarch: I: invalid-license-spellcheck Apache 2: Apache-2.0, Apache-1.0, Apache-1.1"
+            ),
         );
     }
 }
