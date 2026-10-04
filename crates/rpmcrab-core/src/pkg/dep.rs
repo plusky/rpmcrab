@@ -298,12 +298,33 @@ impl DepLeaf {
     }
 }
 
+/// Maximum nesting depth of a rich-dependency expression.
+///
+/// The parser recurses once per parenthesis level over a package-controlled
+/// header string, so an unbounded expression (`((((...))))` in `REQUIRENAME`)
+/// overflows the stack and aborts the process. Real-world rich dependencies
+/// nest only a handful of levels; 64 is an order of magnitude beyond anything
+/// legitimate and comfortably below the ~400-level overflow threshold measured
+/// in a test thread. Past the budget the input falls back to `Simple` holding
+/// the raw string. The bound also caps the `Box` tree depth, so the drop glue
+/// can never recurse into an overflow either.
+const MAX_RICH_DEP_DEPTH: usize = 64;
+
 /// A parsed RPM rich (boolean) dependency expression (rpm.org, RPM >= 4.13),
 /// including RPM >= 4.16 dependency qualifiers (`foo(meta)`).
 ///
 /// Malformed input parses to `Simple` holding the raw string, so a
 /// parenthesized expression is never silently shredded into plain-name
 /// tokens the way the reference's `parse_deps` shreds it.
+///
+/// This is not rpm's grammar: all six operators share one left-associative
+/// loop, so `(a or b with c)` parses as `With([Or(a,b), c])` where rpm's
+/// yacc grammar gives `Or([a, With(b,c)])`. rpm rejects mixed-operator
+/// chains outright (`error: Cannot chain different ops`), so the shape is
+/// unreachable from any rpm-built package, and no consumer inspects tree
+/// shape -- only `leaves()` (a left-to-right flatten) and `is_rich()` are
+/// read, both order-identical either way.
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DepExpr {
     Simple {
@@ -336,35 +357,57 @@ pub enum DepExpr {
 
 impl DepExpr {
     /// All plain dependencies referenced, flattened left to right.
+    ///
+    /// Iterative over an explicit stack: the tree is built from a
+    /// package-controlled string, so a recursive walk would reintroduce
+    /// the stack exhaustion the parse budget guards against.
     pub fn leaves(&self) -> Vec<DepLeaf> {
-        match self {
-            DepExpr::Simple {
-                name,
-                qualifier,
+        fn simple_leaf(
+            name: &str,
+            qualifier: &Option<String>,
+            flags: u32,
+            epoch: Option<i64>,
+            version: &Option<String>,
+            release: &Option<String>,
+        ) -> DepLeaf {
+            DepLeaf {
+                name: name.to_string(),
+                qualifier: qualifier.clone(),
                 flags,
                 epoch,
-                version,
-                release,
-            } => vec![DepLeaf {
-                name: name.clone(),
-                qualifier: qualifier.clone(),
-                flags: *flags,
-                epoch: *epoch,
                 version: version.clone(),
                 release: release.clone(),
-            }],
-            DepExpr::And(v) | DepExpr::Or(v) => v.iter().flat_map(|e| e.leaves()).collect(),
-            DepExpr::If { cond, then } | DepExpr::Unless { cond, then } => {
-                let mut l = then.leaves();
-                l.extend(cond.leaves());
-                l
-            }
-            DepExpr::With { lhs, rhs } | DepExpr::Without { lhs, rhs } => {
-                let mut l = lhs.leaves();
-                l.extend(rhs.leaves());
-                l
             }
         }
+        let mut out = Vec::new();
+        let mut stack: Vec<&DepExpr> = vec![self];
+        while let Some(e) = stack.pop() {
+            match e {
+                DepExpr::Simple {
+                    name,
+                    qualifier,
+                    flags,
+                    epoch,
+                    version,
+                    release,
+                } => out.push(simple_leaf(
+                    name, qualifier, *flags, *epoch, version, release,
+                )),
+                // Push children reversed so the leftmost pops first;
+                // `if`/`unless` list `then` before `cond`, preserving the
+                // original recursive order.
+                DepExpr::And(v) | DepExpr::Or(v) => stack.extend(v.iter().rev()),
+                DepExpr::If { cond, then } | DepExpr::Unless { cond, then } => {
+                    stack.push(cond);
+                    stack.push(then);
+                }
+                DepExpr::With { lhs, rhs } | DepExpr::Without { lhs, rhs } => {
+                    stack.push(rhs);
+                    stack.push(lhs);
+                }
+            }
+        }
+        out
     }
 
     /// True for a well-formed boolean expression, as opposed to a plain
@@ -415,6 +458,7 @@ fn version_op_flags(tok: &str) -> Option<u32> {
 struct RichParser {
     toks: Vec<String>,
     pos: usize,
+    depth: usize,
 }
 
 impl RichParser {
@@ -489,8 +533,17 @@ impl RichParser {
     fn parse_term(&mut self) -> Result<DepExpr, ()> {
         match self.peek() {
             Some("(") => {
+                // One recursion per nesting level over package-controlled
+                // input: cap the depth so a malicious header string cannot
+                // overflow the stack. Past the budget the whole input
+                // falls back to `Simple` holding the raw string.
+                if self.depth >= MAX_RICH_DEP_DEPTH {
+                    return Err(());
+                }
+                self.depth += 1;
                 self.pos += 1;
                 let e = self.parse_expr()?;
+                self.depth -= 1;
                 if self.peek() != Some(")") {
                     return Err(());
                 }
@@ -561,7 +614,11 @@ pub fn parse_dep_expr(s: &str) -> DepExpr {
     if toks.is_empty() {
         return raw();
     }
-    let mut p = RichParser { toks, pos: 0 };
+    let mut p = RichParser {
+        toks,
+        pos: 0,
+        depth: 0,
+    };
     // A bare name parses as `simple`; a leading `(` needs the full
     // expression grammar.
     let parsed = if p.peek() == Some("(") {
@@ -650,6 +707,120 @@ mod parse_deps_tests {
         );
         let empty: Vec<(String, Option<String>)> = Vec::new();
         assert_eq!(has_forbidden_controlchars_deps(&empty), None);
+    }
+}
+
+#[cfg(test)]
+mod rich_dep_depth_tests {
+    use super::*;
+
+    fn nested_parens(depth: usize) -> String {
+        format!("{}a{}", "(".repeat(depth), ")".repeat(depth))
+    }
+
+    #[test]
+    fn deep_nesting_falls_back_to_raw_without_crashing() {
+        // Regression: a package-controlled header string with thousands of
+        // nested parens overflowed the parser stack and aborted the process
+        // (SIGABRT). Past the depth budget the input degrades to `Simple`
+        // holding the raw string.
+        let s = nested_parens(2000);
+        let parsed = parse_dep_expr(&s);
+        assert!(!parsed.is_rich());
+        assert_eq!(
+            parsed,
+            DepExpr::Simple {
+                name: s.clone(),
+                qualifier: None,
+                flags: 0,
+                epoch: None,
+                version: None,
+                release: None,
+            }
+        );
+        // The fallback is also what `leaves()` sees: one leaf, raw name.
+        let dep = DepInfo {
+            name: s.clone(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        };
+        let leaves = dep.leaves();
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0].name, s);
+    }
+
+    #[test]
+    fn over_budget_nesting_falls_back_to_raw() {
+        let s = nested_parens(MAX_RICH_DEP_DEPTH + 36);
+        assert!(!parse_dep_expr(&s).is_rich());
+    }
+
+    #[test]
+    fn at_budget_nesting_still_parses() {
+        // The budget itself is usable depth; only past it degrades.
+        // (Bare parens around a name are not a rich expression, so nest
+        // real `or`s to probe the boundary.)
+        let mut s = String::from("a0");
+        for i in 1..=MAX_RICH_DEP_DEPTH {
+            s = format!("(a{i} or {s})");
+        }
+        assert!(parse_dep_expr(&s).is_rich());
+        let mut s = String::from("a0");
+        for i in 1..=MAX_RICH_DEP_DEPTH + 1 {
+            s = format!("(a{i} or {s})");
+        }
+        assert!(!parse_dep_expr(&s).is_rich());
+    }
+
+    #[test]
+    fn leaves_is_iterative_on_deep_tree() {
+        // A 1000-deep tree would overflow a recursive walk (the test-thread
+        // threshold is ~400-500); the iterative walk flattens it left to
+        // right. The tree is forgotten, not dropped: the test only proves
+        // the walk is iterative, and a recursive drop would abort.
+        let mut tree = DepExpr::Simple {
+            name: "leaf0".to_string(),
+            qualifier: None,
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        };
+        for i in 1..1000usize {
+            tree = DepExpr::Or(vec![
+                DepExpr::Simple {
+                    name: format!("leaf{i}"),
+                    qualifier: None,
+                    flags: 0,
+                    epoch: None,
+                    version: None,
+                    release: None,
+                },
+                tree,
+            ]);
+        }
+        let names: Vec<String> = tree.leaves().into_iter().map(|l| l.name).collect();
+        assert_eq!(names.len(), 1000);
+        assert_eq!(names[0], "leaf999");
+        assert_eq!(names[999], "leaf0");
+        std::mem::forget(tree);
+    }
+
+    #[test]
+    fn deep_but_in_budget_parses_and_flattens() {
+        // 60 nested `or`s: within budget, parses rich, flattens in order.
+        let mut s = String::from("a0");
+        for i in 1..60usize {
+            s = format!("(a{i} or {s})");
+        }
+        let parsed = parse_dep_expr(&s);
+        assert!(parsed.is_rich());
+        let names: Vec<String> = parsed.leaves().into_iter().map(|l| l.name).collect();
+        assert_eq!(names.len(), 60);
+        assert_eq!(names[0], "a59");
+        assert_eq!(names[59], "a0");
     }
 }
 

@@ -249,7 +249,7 @@ impl TagsCheck {
         self.check_license(pkg, out, &rpm_license);
         self.check_url(pkg, out);
 
-        let prov_names: Vec<String> = pkg.provides.iter().flat_map(|d| d.leaf_names()).collect();
+        let prov_names: Vec<&str> = pkg.provides.iter().map(|d| d.name.as_str()).collect();
         self.check_obsolete_not_provided(pkg, out, &prov_names);
 
         for dep in &pkg.obsoletes {
@@ -1216,9 +1216,12 @@ impl TagsCheck {
         }
     }
 
-    fn check_obsolete_not_provided(&self, pkg: &Pkg, out: &mut Filter, prov_names: &[String]) {
+    fn check_obsolete_not_provided(&self, pkg: &Pkg, out: &mut Filter, prov_names: &[&str]) {
         for obs in &pkg.obsoletes {
-            if !obs.leaf_names().iter().any(|n| prov_names.contains(n)) {
+            // Plain names: rpm rejects rich dependencies in both Obsoletes
+            // and Provides (`No rich dependencies allowed for this type`),
+            // so leaf expansion is unreachable here.
+            if !prov_names.contains(&obs.name.as_str()) {
                 add_info(
                     out,
                     Level::Warning,
@@ -2026,6 +2029,24 @@ mod rich_dep_emission_tests {
 
     fn named<'a>(results: &'a [(String, String)], name: &str) -> Vec<&'a (String, String)> {
         results.iter().filter(|(n, _)| n == name).collect()
+    }
+
+    #[test]
+    fn deeply_nested_header_does_not_crash_check() {
+        // Regression: `gather_requires` copies REQUIRENAME verbatim, so a
+        // package-controlled header string with thousands of nested parens
+        // drove the recursive parser into a stack overflow (SIGABRT) inside
+        // the check. Past the depth budget the expression degrades to the
+        // raw name, so the full check stays silent and alive.
+        let evil = format!("{}a{}", "(".repeat(2000), ")".repeat(2000));
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires.push(rich_dep(&evil));
+        let config = rich_test_config(&["^badpkg$"], false);
+        let results = run(&pkg, &config);
+        assert!(
+            named(&results, "invalid-dependency").is_empty(),
+            "all: {results:?}"
+        );
     }
 
     #[test]

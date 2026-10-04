@@ -1372,6 +1372,9 @@ impl SpecCheck {
                 );
             }
             for (req, version) in &reqs {
+                // Rich expressions contain comparison operators as syntax
+                // (`>=` in `(baz >= 1.0 with baz < 2.0)`); the regex would
+                // false-positive on them, so they are skipped.
                 if version.is_none()
                     && !is_rich_dep_expr(req)
                     && self.compop_re.is_match(req).unwrap_or(false)
@@ -1412,6 +1415,8 @@ impl SpecCheck {
                             &[prov],
                         );
                     }
+                    // As above: operators inside a rich expression are
+                    // syntax, not a comparison in a dep token.
                     if !is_rich_dep_expr(prov) && self.compop_re.is_match(prov).unwrap_or(false) {
                         self.info(
                             out,
@@ -1450,6 +1455,8 @@ impl SpecCheck {
                             &[obs],
                         );
                     }
+                    // As above: operators inside a rich expression are
+                    // syntax, not a comparison in a dep token.
                     if !is_rich_dep_expr(obs) && self.compop_re.is_match(obs).unwrap_or(false) {
                         self.info(
                             out,
@@ -1478,6 +1485,8 @@ impl SpecCheck {
                 );
             }
             for (conf, version) in &confs {
+                // As above: operators inside a rich expression are
+                // syntax, not a comparison in a dep token.
                 if version.is_none()
                     && !is_rich_dep_expr(conf)
                     && self.compop_re.is_match(conf).unwrap_or(false)

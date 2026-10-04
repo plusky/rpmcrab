@@ -703,3 +703,10 @@ kind = "behaviour"
 reason = "The native fallback (no appstream-util) requires the mandatory AppStream tags; the reference fallback only checks XML well-formedness, so a well-formed but tagless file slipped through. The mandatory licence tag is `metadata_license` (AppStream section 2); `licence`/`project_license` are accepted as alternatives so legacy files are not flagged. The required set is type-aware but deliberately conservative: AppStream requires `<description>` for essentially every non-`generic` component type, whereas the port requires it only for `desktop-application`/`desktop`, since a wider fixed set false-positives on legitimate types like `generic`. When `appstream-util` is present the tool is deferred to entirely (reference parity); the native tag validation only strengthens the fallback."
 since = "0.1.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/142"
+
+[[divergence]]
+case = "global"
+check = "TagsCheck"
+kind = "behaviour"
+reason = "Rich `(a or b)` expressions (RPM >= 4.13) are parsed into their leaves and the name/version analyses run against each leaf, so `Requires: (any or goodpkg)` emits `E: invalid-dependency any` where the reference emits nothing: its `parse_deps` (pkg.py:294, `re.split(r'[\\s,]+')`) shreds the expression into `(any`, `or`, `goodpkg)` and the `^any$` invalid-requires pattern never matches a fragment. Flagging the real leaf is the intended analysis, not shredded-string noise; treating the expression as one opaque token would hide genuinely invalid dependencies. Pinned by emission-path tests in tags.rs."
+since = "0.1.0"
