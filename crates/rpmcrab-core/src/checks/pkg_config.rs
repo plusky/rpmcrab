@@ -311,6 +311,13 @@ mod tests {
         .expect("open fixture pkg header");
         pkg.name = "pkgconfig-test".to_string();
         pkg.arch = "x86_64".to_string();
+        // The leading slash is what the real pipeline emits, not a fixture
+        // artifact: real `RPMTAG_FILENAMES` entries carry it (rpmbuild writes
+        // absolute DIRNAMES), the reference keys `pkg.files` on the raw tag
+        // value (`pkg.py:679,713`) and emits it verbatim
+        // (`PkgConfigCheck.py:46`), and this port emits librpm's raw
+        // `rpmfilesFN` the same way. The frozen string is a genuine golden
+        // output.
         let rel = "usr/lib64/pkgconfig/foo.pc";
         pkg.files = vec![PkgFile {
             name: format!("/{rel}"),
