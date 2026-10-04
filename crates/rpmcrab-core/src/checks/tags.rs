@@ -1427,13 +1427,18 @@ mod tests {
         config
     }
 
-    fn fixture_pkg(name: &str) -> Pkg {
+    /// Open a fixture RPM, extracting into a unique tempdir (kept alive by
+    /// the caller) rather than the shared `temp_dir()`: concurrent runs must
+    /// not share one extraction directory.
+    fn fixture_pkg(name: &str) -> (tempfile::TempDir, Pkg) {
         // Hand-built fixture RPMs in tests/parity/pkg/inputs/, not distro
         // packages. The llvm21-gold corpus is reserved for parity tests.
         let rpm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs")
             .join(name);
-        Pkg::open(&rpm_path, &std::env::temp_dir(), true).expect("open fixture pkg")
+        let tmp = tempfile::tempdir().expect("tmpdir for fixture extraction");
+        let pkg = Pkg::open(&rpm_path, tmp.path(), true).expect("open fixture pkg");
+        (tmp, pkg)
     }
 
     fn run_check(pkg: &Pkg) -> Vec<(String, String)> {
@@ -1446,7 +1451,7 @@ mod tests {
 
     #[test]
     fn tags_check_runs_on_fixture() {
-        let pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        let (_tmp, pkg) = fixture_pkg("fcprobe-1-1.noarch.rpm");
         let results = run_check(&pkg);
         for (name, line) in &results {
             eprintln!("GOT: {}: {}", name, line);
@@ -1482,7 +1487,8 @@ mod tests {
     /// read-only, so the test patches the header bytes of a copy: lead (96B),
     /// signature header, then the main header's index entry for tag 1080
     /// (CHANGELOGTIME, INT32). Opening skips digest verification, so the
-    /// in-place rewrite needs no fixup.
+    /// in-place rewrite needs no fixup. The reference rejects the rewritten
+    /// digests, so it cannot arbitrate these runs.
     fn patch_changelog_time(
         fixture: &str,
         new_time: i64,
@@ -1536,6 +1542,10 @@ mod tests {
 
     /// The #126 fix, comparison half: 1h ahead of now is a timezone artifact,
     /// so the rolled-back comparison stays quiet through the real emission path.
+    /// The positive control shares the emission code path: the same fixture
+    /// patched 30h ahead must emit exactly one changelog-time-in-future. If
+    /// the emission branch ever dies, the control fails instead of the quiet
+    /// assertion passing vacuously.
     #[test]
     fn changelog_one_hour_ahead_emits_nothing() {
         let (_tmp, tmp) = patch_changelog_time("w6-tmpfiles-1.0-1.noarch.rpm", wall_now() + 3600);
@@ -1547,20 +1557,15 @@ mod tests {
                 .all(|(name, _)| name != "changelog-time-in-future"),
             "unexpected findings: {results:?}"
         );
-        // Positive control: the unpatched fixture runs the same emission
-        // path, so an identical finding count means this run genuinely
-        // checked the package rather than passing vacuously.
-        let baseline = {
-            let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../tests/parity/pkg/inputs/w6-tmpfiles-1.0-1.noarch.rpm");
-            let pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
-            run_check(&pkg)
-        };
-        assert_eq!(
-            results.len(),
-            baseline.len(),
-            "patched run diverged from unpatched baseline: {results:?} vs {baseline:?}"
-        );
+        let (_tmp2, tmp2) =
+            patch_changelog_time("w6-tmpfiles-1.0-1.noarch.rpm", wall_now() + 30 * 3600);
+        let future_pkg = Pkg::open_no_extract(&tmp2).expect("open future pkg");
+        let future_results = run_check(&future_pkg);
+        let hits: Vec<_> = future_results
+            .iter()
+            .filter(|(name, _)| name.as_str() == "changelog-time-in-future")
+            .collect();
+        assert_eq!(hits.len(), 1, "positive control failed: {hits:?}");
     }
 
     /// The #126 fix, detail half: the emitted finding pins name, level and the
@@ -1724,7 +1729,7 @@ mod tests {
     /// Run the full check with the fixture's Provides/Obsoletes replaced,
     /// returning the emitted `self-obsoletion` findings.
     fn self_obsoletion_results(provides: DepInfo, obsoletes: DepInfo) -> Vec<(String, String)> {
-        let mut pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        let (_tmp, mut pkg) = fixture_pkg("fcprobe-1-1.noarch.rpm");
         pkg.provides = vec![provides];
         pkg.obsoletes = vec![obsoletes];
         run_check(&pkg)
@@ -1829,7 +1834,7 @@ mod tests {
 
     fn license_findings(license: &str) -> Vec<(String, String)> {
         let config = license_test_config();
-        let pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        let (_tmp, pkg) = fixture_pkg("fcprobe-1-1.noarch.rpm");
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let check = TagsCheck::new(&config);
         check.check_license(&pkg, &mut out, license);
