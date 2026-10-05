@@ -46,7 +46,10 @@ cat >"$work/src/cryptobad.c" <<'EOF'
 typedef struct ssl_ctx_st SSL_CTX;
 extern int SSL_CTX_set_cipher_list(SSL_CTX *ctx, const char *str);
 /* Modern GCC emits undefined imports as NOTYPE; the reference fixture
-   (arbitron) carries them as FUNC, which is what the check scans for. */
+   (arbitron) carries them as FUNC, which is what the check scans for.
+   Do not remove this directive: if a future toolchain ignores it, the
+   symbol reverts to NOTYPE, the port stops matching it, and the
+   forbidden-function tests would still go green. */
 __asm__(".type SSL_CTX_set_cipher_list, @function");
 int set_ciphers(SSL_CTX *ctx) { return SSL_CTX_set_cipher_list(ctx, "DEFAULT"); }
 EOF

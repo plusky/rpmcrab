@@ -1924,6 +1924,10 @@ description = "explicit priority string bypasses the system crypto policy"
         // libcryptobad.so is stripped: SSL_CTX_set_cipher_list exists only as
         // an undefined import in .dynsym. The pre-fix scan of .symtab alone
         // could never see it, so this test fails with the bug live.
+        // NOTE: this depends on the fixture carrying the import as FUNC via
+        // the __asm__(".type ..., @function") hack in build.sh. If the hack
+        // ever stops working the symbol reverts to NOTYPE and this test goes
+        // green without guarding anything, so do not remove it.
         let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
         let config = warn_on_function_config();
         let (results, levels, _dir) = run_binaries_check_with_config(&rpm_path, &config);
