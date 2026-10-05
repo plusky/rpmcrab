@@ -183,7 +183,7 @@ since = "0.1.0"
 case = "global"
 check = "missing-mandatory-optflags"
 kind = "behaviour"
-reason = "DWARF producer extraction via gimli is not yet implemented; the mandatory/forbidden optflags check degrades gracefully (no findings) until DWARF parsing lands."
+reason = "DWARF producer extraction is not yet implemented; the mandatory/forbidden optflags check degrades gracefully (no findings) until DWARF parsing lands."
 since = "0.1.0"
 
 [[divergence]]
