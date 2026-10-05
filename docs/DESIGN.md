@@ -689,22 +689,23 @@ against the openSUSE:Factory 2.10.0 tarball. The run header prints
 | `WorldWritableCheck` | **ported** |
 | `AtomicUpdateCheck` | **ported** |
 
-Three more reference modules are **ported** but sit outside the 43: the
-reference ships `LSBCheck`, `PAMModulesCheck` and `XinetdDepCheck` as
-modules enabled by neither `configdefaults.toml` nor `opensuse.toml`;
-rpmcrab ports them anyway (registered in `crates/rpmcrab-core/src/checks/`,
-selectable via `Checks`). **Intentionally out:** `FileMetadataCheck` —
-dormant in the reference (present in the tree, in no `Checks` list); §3.2
-says do not port it. (`AbstractCheck` is a base class and `TmpfilesParser`
-a parser, not checks.)
+Four more reference modules are **ported** but sit outside the 43: the
+reference ships `LSBCheck`, `PAMModulesCheck`, `XinetdDepCheck` and
+`InitScriptCheck` as modules enabled by neither `configdefaults.toml` nor
+`opensuse.toml`; rpmcrab ports them anyway (registered in
+`crates/rpmcrab-core/src/checks/`, selectable via `Checks`).
+**Intentionally out:** `FileMetadataCheck` — dormant in the reference
+(present in the tree, in no `Checks` list); §3.2 says do not port it.
+(`AbstractCheck` is a base class and `TmpfilesParser` a parser, not
+checks.)
 
 *Snapshot, not contract.* This table was true at the commit that wrote it
-and is hand-maintained; the mechanical inventory guard landing with this
-audit round (tooling workstream) derives the same rows from the tree on
-every run and is the source of truth going forward.
+and is hand-maintained — nothing enforces it, so it can drift (and has).
+A mechanical inventory guard (tooling workstream) deriving the same rows
+from the tree on every run is the planned source of truth going forward.
 
-`add_info` has 475 call sites / 417 distinct tag names upstream; the port
-tracks tag-name parity per check.
+`add_info` appears 527 times in the pinned `rpmlint/checks/*.py`
+(naive `.add_info(` count); the port tracks tag-name parity per check.
 
 A check that panics is contained per package: the package becomes a fatal
 result (reported, exit 3 after the batch) and the run continues with the
