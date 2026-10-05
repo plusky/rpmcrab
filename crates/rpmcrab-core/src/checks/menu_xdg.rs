@@ -140,20 +140,29 @@ impl MenuXDGCheck {
     /// `desktop-file-validate` output, when the tool exists.
     ///
     /// Returns `Err` when the validator's output is not valid UTF-8. The
-    /// reference runs the validator with `text=True`, so the validator
-    /// echoing the offending bytes raises `UnicodeDecodeError`, which
-    /// propagates to the outer handler: only `non-utf8-desktopfile` is
-    /// emitted and the parse never runs.
+    /// validator must run under the reference's locale (`LC_ALL=en_US.UTF-8`):
+    /// there glib echoes the offending bytes raw, so the strict decode raises
+    /// and the outer handler emits only `non-utf8-desktopfile` without ever
+    /// parsing. Under `LC_ALL=C` glib escapes the bytes instead and the decode
+    /// succeeds, producing spurious `invalid-desktopfile` findings.
     fn external_validate(&self, path: &str) -> Result<Vec<String>, std::string::FromUtf8Error> {
         let Some(mut cmd) = self.validator.command() else {
             return Ok(Vec::new());
         };
-        let out = cmd.arg(path).env("LC_ALL", "C").output();
+        let out = cmd
+            .arg(path)
+            .env("LC_ALL", "en_US.UTF-8")
+            .env("LANGUAGE", "en_US")
+            .output();
         let Ok(out) = out else { return Ok(Vec::new()) };
         if out.status.success() {
             return Ok(Vec::new());
         }
-        let text = String::from_utf8(out.stdout)? + &String::from_utf8(out.stderr)?;
+        // Decode the concatenated bytes once: a multi-byte sequence
+        // straddling the stdout/stderr boundary must not fail the decode.
+        let mut combined = out.stdout;
+        combined.extend_from_slice(&out.stderr);
+        let text = String::from_utf8(combined)?;
         Ok(Self::parse_validate_output(&text))
     }
 
@@ -207,10 +216,10 @@ impl Check for MenuXDGCheck {
             }
             self.checked_files += 1;
             // The reference decodes the validator output as UTF-8
-            // (`text=True`); the validator echoes the offending bytes, so the
-            // decode raises and the outer handler emits only
-            // non-utf8-desktopfile. Mirror that: on decode failure, skip both
-            // the validator findings and the parse.
+            // (`text=True`) under its en_US.UTF-8 locale, where the validator
+            // echoes the offending bytes raw; the decode raises and the outer
+            // handler emits only non-utf8-desktopfile. Mirror that: on decode
+            // failure, skip both the validator findings and the parse.
             let errors = match self.external_validate(&pkgfile.path) {
                 Ok(errors) => errors,
                 Err(e) => {
