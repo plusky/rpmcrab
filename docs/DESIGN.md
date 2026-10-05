@@ -621,9 +621,9 @@ A spec is text with line numbers, not an RPM with a payload, and the reference
 keeps them as separate classes (`Pkg` vs `FakePkg`) with a separate dispatch
 hook: `check_spec` is dispatched on holding a `FakePkg`, *not* on `is_source`
 (which is about src.rpms). The lint loop dispatches on
-`enum Package { Rpm(Pkg), Spec(SpecPkg) }`, and the `Check` trait gains
-`check_spec` with that milestone. Decided now so `Pkg` never grows a second
-personality when `SpecCheck` is ported.
+`enum Package { Rpm(Pkg), Spec(SpecPkg) }`, and the `Check` trait carries
+`check_spec` for it. Decided when `SpecCheck` was ported so `Pkg` never
+grows a second personality.
 
 There is one named-durations type (insertion-ordered, like the reference's
 dict): `Pkg.timers` and the lint loop's accumulator share it.
