@@ -940,11 +940,10 @@ def test_renamed_describe_producer_makes_the_site_unresolved():
 def test_stale_check_catches_name_keyed_entry():
     # The staleness check must mark an entry stale when the port emits the
     # finding of a kind="missing" ledger entry. The corpus pins the shape:
-    # all 2 current missing entries are keyed by finding name (case
-    # "global") -- there is no module-keyed missing entry, so the test
-    # drives the mechanism with the real ledger rather than a synthetic
-    # module set. (The module arm of the disjunction has no live data
-    # behind it; nothing here pretends otherwise.)
+    # all missing entries are keyed by finding name (case "global") except
+    # "InitScriptCheck", the first module-keyed one (issue #214), which is
+    # covered by test_stale_check_module_keyed_entry_needs_own_module_pattern
+    # below; this test drives the name-keyed mechanism with the real ledger.
     mod = _load()
     ledger = mod.load_ledger(os.path.join(
         os.path.dirname(HERE), "tests", "parity", "divergences.toml"))
@@ -953,6 +952,8 @@ def test_stale_check_catches_name_keyed_entry():
     assert names == {
         "inaccessible-filename",
         "lengthy-symlink",
+        "InitScriptCheck",
+        "missing-dependency-to-xinetd",
     }, names
     assert all(e.get("case") == "global" for e in missing), [
         (e.get("case"), e.get("check")) for e in missing]
@@ -963,7 +964,7 @@ def test_stale_check_catches_name_keyed_entry():
         # A finding whose NAME matches a name-keyed missing entry, but whose
         # MODULE does not, IS stale (with exact pattern).
         assert mod.is_stale_entry(
-            "SomeOtherCheck", name, missing_modules, {name}
+            "SomeOtherCheck", name, missing_modules, {name}, {}, {}
         ), f"name-keyed match should be stale: {name}"
     # A wildcard template must not count even when it literally equals the
     # finding name: only exact non-wildcard patterns mark an entry stale.
@@ -972,8 +973,34 @@ def test_stale_check_catches_name_keyed_entry():
     # passed vacuously since p == name was already false.
     star_name = "inaccessible-filen*me"
     assert not mod.is_stale_entry(
-        "SomeOtherCheck", star_name, missing_modules | {star_name}, {star_name}
+        "SomeOtherCheck", star_name, missing_modules | {star_name}, {star_name},
+        {}, {},
     ), f"wildcard template should not mark stale: {star_name}"
+
+
+def test_stale_check_module_keyed_entry_needs_own_module_pattern():
+    # A module-keyed kind="missing" entry must not go stale when the finding
+    # name is emitted by a *different* port module. `read-error` is emitted
+    # by both the reference's InitScriptCheck and its FilesCheck; deleting
+    # InitScriptCheck (issue #214) leaves the port emitting `read-error`
+    # from FilesCheck, and the deleted module's entry is still correct.
+    mod = _load()
+    missing_modules = {"GoneCheck"}
+    assert not mod.is_stale_entry(
+        "GoneCheck", "shared-finding", missing_modules, {"shared-finding"},
+        {"other_check": {"shared-finding"}}, {},
+    ), "shared name from another module must not mark stale"
+    # But when the port's own module for the check emits the name, the
+    # entry really is stale.
+    assert mod.is_stale_entry(
+        "GoneCheck", "shared-finding", missing_modules, {"shared-finding"},
+        {"gone_check": {"shared-finding"}}, {"GoneCheck": "gone_check"},
+    ), "own-module pattern should mark stale"
+    # Name-keyed entries keep the old flat behavior regardless of modules.
+    assert mod.is_stale_entry(
+        "SomeOtherCheck", "shared-finding", {"shared-finding"},
+        {"shared-finding"}, {"other_check": {"shared-finding"}}, {},
+    ), "name-keyed match should be stale"
 
 
 def main():

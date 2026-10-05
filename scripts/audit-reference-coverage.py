@@ -2365,20 +2365,34 @@ def missing_check_names(entries):
     return {e.get("check") for e in entries if e.get("kind") == "missing"}
 
 
-def is_stale_entry(module, name, missing_modules, port_templates):
+def is_stale_entry(module, name, missing_modules, port_templates, by_module, check_map):
     """Whether a ledger entry is stale: the check is marked missing but the
     port now implements it with an exact (non-wildcard) pattern for this
     finding.
 
-    Both the module AND the finding name are checked against missing_modules:
-    all 2 kind="missing" entries are currently keyed by finding name
-    (inaccessible-filename, lengthy-symlink). Dropping the name half of the
-    disjunction would let a name-keyed entry whose finding the port now emits
-    go undetected.
+    A name-keyed entry goes stale when the port emits the name exactly,
+    wherever it lives. A module-keyed entry goes stale only when the port's
+    own module for that check emits the name: a finding name shared with
+    another check must not make the entry stale. `read-error` is emitted by
+    both the reference's `InitScriptCheck` and its `FilesCheck`; deleting
+    `InitScriptCheck` (issue #214) leaves the port emitting `read-error`
+    from `FilesCheck`, and the deleted module's entry is still correct. A
+    module with no port owner at all (deleted, or never ported) has no
+    patterns of its own, so its entry can never go stale this way.
     """
-    return (module in missing_modules or name in missing_modules) and any(
+    if name in missing_modules and any(
         "*" not in p and p == name for p in port_templates
-    )
+    ):
+        return True
+    if module in missing_modules:
+        owner = check_map.get(module)
+        owners = [owner] if owner else PORT_MODULE_ALIASES.get(module, [])
+        return any(
+            "*" not in p and p == name
+            for o in owners
+            for p in by_module.get(o, ())
+        )
+    return False
 
 
 def main(argv):
@@ -2423,7 +2437,8 @@ def main(argv):
             # Only an EXACT port pattern counts here. A wildcard template such
             # as `empty-*` "covers" every `empty-` name, including ones no port
             # check emits, so it would report staleness that is not there.
-            if is_stale_entry(module, name, missing_modules, port_templates):
+            if is_stale_entry(module, name, missing_modules, port_templates,
+                                by_module, check_map):
                 stale.append((module, name))
             continue
         if is_ledgered(module, name, entries):
