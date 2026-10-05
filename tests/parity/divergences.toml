@@ -639,7 +639,6 @@ upstream = "https://github.com/plusky/rpmcrab/issues/44"
 
 [[divergence]]
 case = "global"
-
 check = "PythonCheck"
 kind = "behaviour"
 reason = "For a requires.txt requirement that already carries a marker inside a named extra section, the reference (`_convert_egg_info_reqs_to_simple_reqs` in CPython's importlib.metadata, still used by rpmlint 2.10.0's `Distribution.requires` for egg-info) appends the section condition as a second `;`-part verbatim: `w6extra; python_version > \"3.9\"; (sys_platform == \"linux\") and extra == \"extra\"` (verified against CPython 3.13.14). The port stores the post-first-`;` marker text verbatim instead of merging everything into one `and`ed marker. Parity, not a logical divergence: both forms carry the `extra ==` condition so the port skips them identically, and the reference itself drops the double-semicolon string as InvalidRequirement, so findings are unaffected either way. Pinned by emission-path tests."
