@@ -9,6 +9,7 @@ BuildArch:      noarch
 Fixture: sourced scripts under /etc/profile.d exercising the
 sourced-script analysis --
   w6-shebang.sh: shebang, not executable (sourced-script-with-shebang),
+  w6-args.sh:    shebang with interpreter args (detail pins the args),
   w6-exec.sh:    shebang and executable (both sourced-script findings),
   w6-clean.sh:   no shebang (silent control),
   w6module.pm:   shebang ignored via the perl-module exception (silent).
@@ -21,6 +22,12 @@ cat > %{buildroot}/etc/profile.d/w6-shebang.sh <<EOF
 export W6_SOURCED=1
 EOF
 chmod 644 %{buildroot}/etc/profile.d/w6-shebang.sh
+cat > %{buildroot}/etc/profile.d/w6-args.sh <<EOF
+#!/bin/sh -x -e
+# w6 fixture: sourced script whose shebang carries interpreter args
+export W6_ARGS=1
+EOF
+chmod 644 %{buildroot}/etc/profile.d/w6-args.sh
 cat > %{buildroot}/etc/profile.d/w6-exec.sh <<EOF
 #!/bin/sh
 # w6 fixture: executable sourced script carrying a shebang
@@ -42,6 +49,7 @@ chmod 644 %{buildroot}/etc/profile.d/w6module.pm
 %files
 %defattr(-,root,root,-)
 /etc/profile.d/w6-shebang.sh
+/etc/profile.d/w6-args.sh
 /etc/profile.d/w6-exec.sh
 /etc/profile.d/w6-clean.sh
 /etc/profile.d/w6module.pm

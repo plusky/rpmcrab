@@ -2914,9 +2914,10 @@ mod tests {
     #[test]
     fn sourced_script_with_shebang_pins_name_level_and_detail() {
         // A sourced script (profile.d) carrying a shebang is an Error naming
-        // the file and its interpreter; the executable variant additionally
-        // fires executable-sourced-script. The shebang-less and .pm controls
-        // stay silent (the perl-module shebang exception).
+        // the file and its interpreter; the args variant pins the
+        // interpreter arguments in the detail. The executable variant
+        // additionally fires executable-sourced-script. The shebang-less
+        // and .pm controls stay silent (the perl-module shebang exception).
         let config = test_config();
         let dir = tempfile::TempDir::new().expect("tmpdir");
         let rpm = fixture_path("w6-sourced-script-1.0-1.noarch.rpm");
@@ -2943,6 +2944,7 @@ mod tests {
         assert_eq!(
             details,
             [
+                "w6-sourced-script.noarch: E: sourced-script-with-shebang /etc/profile.d/w6-args.sh /bin/sh -x -e",
                 "w6-sourced-script.noarch: E: sourced-script-with-shebang /etc/profile.d/w6-exec.sh /bin/sh",
                 "w6-sourced-script.noarch: E: sourced-script-with-shebang /etc/profile.d/w6-shebang.sh /bin/sh",
             ],
