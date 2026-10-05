@@ -60,7 +60,7 @@ goblin = "0.10"
 # XML parsing for PolkitCheck (polkit policy files). Pure Rust, MIT.
 quick-xml = "0.42"
 # SHA-2 digests for FileDigestCheck (pure Rust).
-md-5 = "0.10"
+md-5 = "0.11"
 sha1 = "0.10"
 sha2 = "0.10"
 # Local civil date for `BuildRootAndDateCheck`: the reference formats "today" with
