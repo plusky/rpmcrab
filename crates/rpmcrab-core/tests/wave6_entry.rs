@@ -318,26 +318,37 @@ fn run_appdata_with_content(content: &str) -> Vec<(String, String)> {
 /// The reference's `ElementTree.parse` fallback rejects malformed character
 /// references: empty numeric/hex bodies are `not well-formed (invalid token)`,
 /// and out-of-range numbers (including zero and surrogates) are `reference to
-/// invalid character number`. All must surface as `invalid-appdata-file`.
+/// invalid character number`. All must surface as `invalid-appdata-file` with
+/// the bare filename as the detail.
+///
+/// Each case is a tag-complete component (as in the quiet sibling test) so the
+/// required-tag validation stays silent. The `!contains("missing required
+/// tag(s)")` guard is load-bearing: `NativeOutcome::MissingTags` also emits
+/// `invalid-appdata-file`, and without it the assertion would pass on the
+/// missing-tags detail even with the entity check disabled.
 #[test]
 fn appdata_charref_classes_emit_invalid_appdata_file() {
-    for (label, xml) in [
-        ("empty numeric", "<a>&#;</a>"),
-        ("empty hex", "<a>&#x;</a>"),
-        ("too big", "<a>&#99999999999;</a>"),
-        ("zero", "<a>&#0;</a>"),
-        ("surrogate", "<a>&#xD800;</a>"),
-        ("over max", "<a>&#x110000;</a>"),
-        ("undefined entity", "<a>&bar;</a>"),
+    for (label, bad) in [
+        ("empty numeric", "&#;"),
+        ("empty hex", "&#x;"),
+        ("too big", "&#99999999999;"),
+        ("zero", "&#0;"),
+        ("surrogate", "&#xD800;"),
+        ("over max", "&#x110000;"),
+        ("undefined entity", "&bar;"),
     ] {
-        let results = run_appdata_with_content(xml);
+        let xml = format!(
+            "<component><id>c</id><name>Foo {bad}</name><summary>s</summary><metadata_license>MIT</metadata_license></component>"
+        );
+        let results = run_appdata_with_content(&xml);
         assert!(
             results
                 .iter()
-                .any(|(_, line)| line.contains("invalid-appdata-file")
+                .any(|(name, line)| name == "invalid-appdata-file"
                     && line.contains(": E: ")
-                    && line.contains("w6broken.appdata.xml")),
-            "{label} should emit E invalid-appdata-file: {results:?}"
+                    && line.contains("w6broken.appdata.xml")
+                    && !line.contains("missing required tag(s)")),
+            "{label} should emit E invalid-appdata-file with the bare filename detail: {results:?}"
         );
     }
 }
