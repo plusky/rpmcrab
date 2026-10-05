@@ -21,7 +21,6 @@ pub mod filelist;
 pub mod files;
 pub mod i18n;
 pub mod icon_sizes;
-pub mod init_script;
 pub mod kmp_policy;
 pub mod library_dependency;
 pub mod logrotate;

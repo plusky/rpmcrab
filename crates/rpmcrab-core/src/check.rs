@@ -218,9 +218,6 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
             crate::checks::device_files::DeviceFilesCheck::new(config),
         )),
         "ErlangCheck" => Some(Box::new(crate::checks::erlang::ErlangCheck::new(config))),
-        "InitScriptCheck" => Some(Box::new(crate::checks::init_script::InitScriptCheck::new(
-            config,
-        ))),
         "KMPPolicyCheck" => Some(Box::new(crate::checks::kmp_policy::KMPPolicyCheck::new(
             config,
         ))),
@@ -386,6 +383,14 @@ mod tests {
         });
         let names: Vec<&str> = built.iter().map(|c| c.name()).collect();
         assert_eq!(names, vec!["TagsCheck", "FilesCheck"]);
+    }
+
+    #[test]
+    fn init_script_check_is_not_buildable() {
+        // Issue #214: systemd-only world. The whole check was deleted; the
+        // registry must not resurrect it, or the ledger's kind="missing"
+        // entry goes stale and divergences_missing.rs fails.
+        assert!(build("InitScriptCheck", &Config::default()).is_none());
     }
 
     #[test]

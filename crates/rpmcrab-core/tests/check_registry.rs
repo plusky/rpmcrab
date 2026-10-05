@@ -158,7 +158,7 @@ fn checks_in_default_config() -> Vec<String> {
 /// A check that `check::build` can construct but the default config never
 /// selects can never run — the same class of defect as #49 (issue #66).
 /// The documented exceptions are modules the reference ships but lists in no
-/// shipped config's `Checks` (`InitScriptCheck`, `LSBCheck`, `XinetdDepCheck`),
+/// shipped config's `Checks` (`LSBCheck`, `XinetdDepCheck`),
 /// plus `PAMModulesCheck`, which the reference lists only in the Fedora
 /// flavour config (not yet ported); the port mirrors all of that.
 /// `AtomicUpdateCheck` is exempt deliberately: plusky asked that the
@@ -173,8 +173,7 @@ fn checks_in_default_config() -> Vec<String> {
 fn every_constructible_check_is_listed_in_checks() {
     let listed = checks_in_default_config();
     for name in names_built_by_registry() {
-        if name == "InitScriptCheck"
-            || name == "LSBCheck"
+        if name == "LSBCheck"
             || name == "XinetdDepCheck"
             || name == "PAMModulesCheck"
             || name == "AtomicUpdateCheck"

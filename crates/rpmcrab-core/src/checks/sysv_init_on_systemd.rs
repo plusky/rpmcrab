@@ -130,6 +130,10 @@ impl Check for SysVInitOnSystemdCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    use crate::color::Color;
+    use crate::pkg::pkgfile::PkgFile;
 
     fn classify(names: &[&str]) -> (Vec<String>, Vec<String>, Vec<String>) {
         SysVInitOnSystemdCheck::find_services_and_scripts(names.iter().copied(), &[])
@@ -189,5 +193,32 @@ mod tests {
             &ghosts,
         );
         assert!(init.is_empty());
+    }
+
+    #[test]
+    fn deprecated_init_script_still_fires() {
+        // Issue #214 keeps this Error while InitScriptCheck itself is
+        // deleted: shipping a SysV init script on a systemd system stays an
+        // error.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = vec![PkgFile {
+            name: "/etc/init.d/mydaemon".to_string(),
+            path: "/etc/init.d/mydaemon".to_string(),
+            ..Default::default()
+        }];
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SysVInitOnSystemdCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(results.len(), 1, "{results:?}");
+        let (name, line) = &results[0];
+        assert_eq!(name, "deprecated-init-script");
+        assert!(
+            line.contains(": E: deprecated-init-script mydaemon"),
+            "unexpected line: {line}"
+        );
     }
 }
