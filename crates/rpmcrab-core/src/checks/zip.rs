@@ -264,7 +264,9 @@ mod tests {
             archive.write_all(data).unwrap();
         }
         if let Some(text) = manifest {
-            let options = SimpleFileOptions::default();
+            // zip 8 defaults FileOptions to deflate; the manifest must stay stored.
+            let options =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
             archive.start_file("META-INF/MANIFEST.MF", options).unwrap();
             archive.write_all(text.as_bytes()).unwrap();
         }
@@ -480,7 +482,8 @@ mod tests {
         let mut archive = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
         let options = SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored)
-            .with_deprecated_encryption(b"secret");
+            .with_deprecated_encryption(b"secret")
+            .expect("non-empty password");
         archive.start_file("secret.txt", options).unwrap();
         archive.write_all(b"top secret").unwrap();
         archive.finish().unwrap();
