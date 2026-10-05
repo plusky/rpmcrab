@@ -1433,34 +1433,42 @@ impl BinariesCheck {
         if !info.is_shlib {
             return;
         }
-        for elf_file in &info.sections {
-            let needle = [".hash", ".gnu.hash"];
-            let mut remaining: Vec<&&str> = needle.iter().collect();
+        // The reference scans the whole section list of the ELF file once
+        // (readelfparser.py ElfSectionInfo.elf_files) and emits at most one
+        // finding of each kind. The missing set must not reset per section:
+        // ReadelfInfo stores one section per inner vec, so the old loop
+        // re-emitted both findings for every non-hash section (#218).
+        let mut missing_hash = true;
+        let mut missing_gnu_hash = true;
+        'sections: for elf_file in &info.sections {
             for section in elf_file {
-                remaining.retain(|n| ***n != section.name);
-                if remaining.is_empty() {
-                    break;
+                if section.name == ".hash" {
+                    missing_hash = false;
+                } else if section.name == ".gnu.hash" {
+                    missing_gnu_hash = false;
+                }
+                if !missing_hash && !missing_gnu_hash {
+                    break 'sections;
                 }
             }
-            let missing: Vec<String> = remaining.iter().map(|s| s.to_string()).collect();
-            if missing.contains(&".hash".to_string()) {
-                add_info(
-                    out,
-                    Level::Error,
-                    pkg,
-                    "missing-hash-section",
-                    &[&pkgfile.name],
-                );
-            }
-            if missing.contains(&".gnu.hash".to_string()) {
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "missing-gnu-hash-section",
-                    &[&pkgfile.name],
-                );
-            }
+        }
+        if missing_hash {
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "missing-hash-section",
+                &[&pkgfile.name],
+            );
+        }
+        if missing_gnu_hash {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "missing-gnu-hash-section",
+                &[&pkgfile.name],
+            );
         }
     }
 
@@ -1885,5 +1893,113 @@ mod tests {
             "no findings invented: {:?}",
             out.results()
         );
+    }
+
+    #[test]
+    fn hash_sections_fire_at_most_once_per_file() {
+        // #218: the missing-section needle used to reset for every section
+        // (ReadelfInfo stores one section per inner vec), so each non-hash
+        // section re-emitted both findings. The reference scans the whole
+        // section list once and emits at most one finding of each kind.
+        let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
+        let (results, _dir) = run_binaries_check(&rpm_path);
+        // Both fixture libraries carry .hash and .gnu.hash, and the pinned
+        // reference is quiet on them: neither finding may fire.
+        assert_lacks(&results, "missing-hash-section");
+        assert_lacks(&results, "missing-gnu-hash-section");
+    }
+
+    #[test]
+    fn hash_sections_match_reference_on_corpus_cases() {
+        // #218 oracle: the pinned reference emits neither missing-hash-section
+        // nor missing-gnu-hash-section on the liblto21 / llvm21-gold corpus
+        // cases (both libraries carry .hash and .gnu.hash); the port emitted
+        // one finding per ELF section.
+        let cases = [
+            "../../tests/parity/cases/liblto21/input/libLTO21-21.1.8-9.2.aarch64.rpm",
+            "../../tests/parity/cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm",
+        ];
+        for case in cases {
+            let rpm_path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), case);
+            let (results, _dir) = run_binaries_check(&rpm_path);
+            assert_lacks(&results, "missing-hash-section");
+            assert_lacks(&results, "missing-gnu-hash-section");
+        }
+    }
+
+    #[test]
+    fn hash_sections_pin_positive_cases() {
+        // Reference semantics for the remaining combinations, driven through
+        // check_hash_sections with the real one-section-per-vec ReadelfInfo
+        // shape: .gnu.hash-only gets exactly one missing-hash-section (E);
+        // neither section gets exactly one of each; both stay quiet.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg =
+            Pkg::open(std::path::Path::new(&rpm_path), dir.path(), true).expect("open fixture");
+        let pkgfile = PkgFile {
+            name: "/usr/lib64/libprobe.so.1".to_string(),
+            ..Default::default()
+        };
+
+        let run = |sections: Vec<Vec<ElfSection>>| {
+            let info = ReadelfInfo {
+                sections,
+                program_headers: Vec::new(),
+                symbols: Vec::new(),
+                is_shlib: true,
+                is_debug: false,
+                soname: None,
+                needed: Vec::new(),
+                runpaths: Vec::new(),
+                has_textrel: false,
+                failed: None,
+            };
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_hash_sections(&pkg, &pkgfile, &info, &mut out);
+            out.results().to_vec()
+        };
+        let sec = |name: &str| ElfSection {
+            name: name.to_string(),
+            size: 100,
+        };
+
+        let results = run(vec![
+            vec![sec(".text")],
+            vec![sec(".gnu.hash")],
+            vec![sec(".data")],
+        ]);
+        let hash_lines = lines_for(&results, "missing-hash-section");
+        assert_eq!(hash_lines.len(), 1, "one missing-hash-section: {results:?}");
+        assert!(
+            hash_lines[0].contains(" E: "),
+            "missing-hash-section is Error: {}",
+            hash_lines[0]
+        );
+        assert_lacks(&results, "missing-gnu-hash-section");
+
+        let results = run(vec![vec![sec(".text")], vec![sec(".data")]]);
+        assert_eq!(
+            lines_for(&results, "missing-hash-section").len(),
+            1,
+            "one missing-hash-section: {results:?}"
+        );
+        let gnu_lines = lines_for(&results, "missing-gnu-hash-section");
+        assert_eq!(
+            gnu_lines.len(),
+            1,
+            "one missing-gnu-hash-section: {results:?}"
+        );
+        assert!(
+            gnu_lines[0].contains(" W: "),
+            "missing-gnu-hash-section is Warning: {}",
+            gnu_lines[0]
+        );
+
+        let results = run(vec![vec![sec(".hash")], vec![sec(".gnu.hash")]]);
+        assert_lacks(&results, "missing-hash-section");
+        assert_lacks(&results, "missing-gnu-hash-section");
     }
 }
