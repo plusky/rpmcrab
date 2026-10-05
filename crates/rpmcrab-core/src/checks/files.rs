@@ -3345,6 +3345,10 @@ mod tests {
             .map(|(_, l)| l.clone())
             .expect("read-error must fire");
         assert!(
+            line.contains(": W: "),
+            "read-error must be Warning level: {line}"
+        );
+        assert!(
             line.contains("Permission denied (os error 13)"),
             "unexpected detail: {line}"
         );

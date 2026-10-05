@@ -638,10 +638,8 @@ mod tests {
         // The reference decodes with errors='replace' (helpers.readlines), so
         // a non-UTF-8 init script must not raise read-error and its LSB block
         // must still be parsed.
-        let dir = std::env::temp_dir().join("rpmcrab-init-nonutf8");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tmpdir");
-        let script = dir.join("bad");
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let script = dir.path().join("bad");
         std::fs::write(
             &script,
             b"#!/bin/sh\n# \xff\xfe undecodable\n### BEGIN INIT INFO\n# Provides: bad\n# Provides: bad2\n### END INIT INFO\n",
@@ -650,7 +648,7 @@ mod tests {
 
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
-        let mut pkg = Pkg::open(&rpm, &dir, true).expect("open fixture pkg");
+        let mut pkg = Pkg::open(&rpm, dir.path(), true).expect("open fixture pkg");
         pkg.files = vec![PkgFile {
             name: "/etc/init.d/bad".to_string(),
             path: script.to_string_lossy().into_owned(),
@@ -679,10 +677,8 @@ mod tests {
     fn unreadable_init_script_reports_read_error() {
         // Pins the port's own read-error detail (ledgered divergence: the
         // reference's str(OSError) also carries the filename).
-        let dir = std::env::temp_dir().join("rpmcrab-init-unreadable");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tmpdir");
-        let script = dir.join("secret");
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let script = dir.path().join("secret");
         std::fs::write(&script, b"#!/bin/sh\n").expect("write script");
         #[cfg(unix)]
         {
@@ -693,7 +689,7 @@ mod tests {
 
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
-        let mut pkg = Pkg::open(&rpm, &dir, true).expect("open fixture pkg");
+        let mut pkg = Pkg::open(&rpm, dir.path(), true).expect("open fixture pkg");
         pkg.files = vec![PkgFile {
             name: "/etc/init.d/secret".to_string(),
             path: script.to_string_lossy().into_owned(),
@@ -711,6 +707,10 @@ mod tests {
             .find(|(n, _)| n == "read-error")
             .map(|(_, l)| l.as_str())
             .expect("read-error must fire on unreadable script");
+        assert!(
+            line.contains(": W: "),
+            "read-error must be Warning level: {line}"
+        );
         assert!(
             line.contains("[Errno 13] Permission denied"),
             "unexpected detail: {line}"
