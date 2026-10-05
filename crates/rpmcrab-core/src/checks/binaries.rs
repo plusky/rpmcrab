@@ -2127,10 +2127,12 @@ description = "explicit priority string bypasses the system crypto policy"
             gnu_lines[0]
         );
         // Name, detail, severity, ORDER byte-identical: E fires before W.
-        let hash_pos = results
-            .iter()
-            .position(|(n, _)| n == "missing-hash-section");
-        let gnu_pos = results
+        // The report order comes from Filter::render_results sorting, not
+        // emission order, so pin the positions on the sorted (wire) vec.
+        let mut sorted = results.clone();
+        crate::filter::sort_results(&mut sorted);
+        let hash_pos = sorted.iter().position(|(n, _)| n == "missing-hash-section");
+        let gnu_pos = sorted
             .iter()
             .position(|(n, _)| n == "missing-gnu-hash-section");
         assert!(
