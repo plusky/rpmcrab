@@ -224,18 +224,27 @@ fn every_allowlist_entry_matches_a_guarded_line() {
     // that stopped matching (e.g. the four pruned when token anchoring
     // landed: the real lines had all been renamed). The fragment must match
     // on a line the guards actually consult — a `Regex::new` line (comments
-    // excluded, as in `no_bare_regex_new`) or an owned-`Regex` factory line
-    // (as in `no_owned_regex_factories`): a bare mention elsewhere (struct
-    // field, call site, test fn) does not keep an entry alive. This caught
-    // `appdata.rs` `file_regex`, which had migrated to a `OnceLock` static
-    // while the fragment lingered on unrelated lines.
+    // and `get_or_init`-closure lines excluded, as in `no_bare_regex_new`)
+    // or an owned-`Regex` factory line (as in `no_owned_regex_factories`):
+    // a bare mention elsewhere (struct field, call site, test fn) does not
+    // keep an entry alive. This caught `appdata.rs` `file_regex`, which had
+    // migrated to a `OnceLock` static while the fragment lingered on
+    // unrelated lines.
     let dir = checks_dir();
     let mut dead = Vec::new();
     for (file, pat, _) in ALLOWLIST {
         let src = std::fs::read_to_string(dir.join(file)).unwrap();
-        let live = src.lines().any(|line| {
+        let lines: Vec<&str> = src.lines().collect();
+        let live = lines.iter().enumerate().any(|(i, line)| {
+            // Mirror the guards: `no_bare_regex_new` skips `Regex::new`
+            // inside `get_or_init` closures before consulting the
+            // allowlist, so such a line cannot keep an entry alive.
+            // `no_owned_regex_factories` has no such skip, so the factory
+            // arm stays as-is.
             fragment_matches_token_anchored(line, pat)
-                && ((line.contains("Regex::new") && !line.trim_start().starts_with("//"))
+                && ((line.contains("Regex::new")
+                    && !line.trim_start().starts_with("//")
+                    && !in_get_or_init_closure(&lines, i))
                     || is_owned_regex_factory(line))
         });
         if !live {
