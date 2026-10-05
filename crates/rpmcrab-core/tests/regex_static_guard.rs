@@ -83,7 +83,6 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ("files.rs", "ldconfig_re", "ctor-once"),
     ("tags.rs", "changelog_text_version_re", "ctor-once"),
     ("tags.rs", "changelog_version_re", "ctor-once"),
-    ("appdata.rs", "file_regex", "ctor-once"),
     // Fallback "never matches" pattern for config-driven regexes.
     ("binaries.rs", "Regex::new(\"$^\")", "fallback"),
     ("files.rs", "Regex::new(\"$^\")", "fallback"),
@@ -220,24 +219,32 @@ fn allowlist_matching_is_token_anchored() {
 }
 
 #[test]
-fn every_allowlist_entry_matches_a_real_line() {
+fn every_allowlist_entry_matches_a_guarded_line() {
     // Dead entries rot silently: without this test nothing reports an entry
     // that stopped matching (e.g. the four pruned when token anchoring
-    // landed: the real lines had all been renamed).
+    // landed: the real lines had all been renamed). The fragment must match
+    // on a line the guards actually consult — a `Regex::new` line (comments
+    // excluded, as in `no_bare_regex_new`) or an owned-`Regex` factory line
+    // (as in `no_owned_regex_factories`): a bare mention elsewhere (struct
+    // field, call site, test fn) does not keep an entry alive. This caught
+    // `appdata.rs` `file_regex`, which had migrated to a `OnceLock` static
+    // while the fragment lingered on unrelated lines.
     let dir = checks_dir();
     let mut dead = Vec::new();
     for (file, pat, _) in ALLOWLIST {
         let src = std::fs::read_to_string(dir.join(file)).unwrap();
-        if !src
-            .lines()
-            .any(|line| fragment_matches_token_anchored(line, pat))
-        {
+        let live = src.lines().any(|line| {
+            fragment_matches_token_anchored(line, pat)
+                && ((line.contains("Regex::new") && !line.trim_start().starts_with("//"))
+                    || is_owned_regex_factory(line))
+        });
+        if !live {
             dead.push(format!("{file}: {pat}"));
         }
     }
     assert!(
         dead.is_empty(),
-        "allowlist entries matching no real line (prune them):\n{}",
+        "allowlist entries matching no guarded line (prune them):\n{}",
         dead.join("\n")
     );
 }
@@ -301,16 +308,25 @@ fn net_parens_outside_strings(line: &str) -> i32 {
                 }
             }
             b'"' => {
-                // Raw string r#*"..."*# (the terminator is `"` followed by
-                // exactly the opening hash count). `br#"..."#` byte-string raw
-                // strings are NOT recognized: the `b` reads as an identifier
-                // char, so parens inside them would be miscounted. None exist
-                // in src/ today, so this is a documented limitation, not a bug.
+                // Raw string r#*"..."*# or byte-string br#*"..."*# (the
+                // terminator is `"` followed by exactly the opening hash
+                // count). The prefix must not be glued to an identifier
+                // (`formatr#"..."#` is not a raw string); the same boundary
+                // applies to the `b` of `br#`.
                 let mut j = i;
                 while j > 0 && b[j - 1] == b'#' {
                     j -= 1;
                 }
-                let raw = j > 0 && b[j - 1] == b'r' && (j < 2 || !is_ident_char(b[j - 2] as char));
+                let raw = if j > 0 && b[j - 1] == b'r' {
+                    let start = if j > 1 && b[j - 2] == b'b' {
+                        j - 2
+                    } else {
+                        j - 1
+                    };
+                    start == 0 || !is_ident_char(b[start - 1] as char)
+                } else {
+                    false
+                };
                 if raw {
                     let hashes = i - j;
                     i += 1;
@@ -488,4 +504,27 @@ fn get_or_init_skip_is_membership_not_proximity() {
         "    })",
     ];
     assert!(in_get_or_init_closure(&tricky, 3));
+}
+
+#[test]
+fn net_parens_ignores_raw_and_byte_raw_strings() {
+    // Parens inside raw strings must not move the depth counter; the
+    // get_or_init skip depends on it. Byte-string raw strings (`br#"..."#`)
+    // used to fall through to ordinary-string scanning, which ends the
+    // string at the first `"` of the content and counts the rest as code.
+    assert_eq!(net_parens_outside_strings("f(r\"(x)\")"), 0);
+    assert_eq!(net_parens_outside_strings("f(br\"(x)\")"), 0);
+    assert_eq!(net_parens_outside_strings("f(br#\"(x)\"#)"), 0);
+    // `"` inside the content must not end the string early: the `(` after
+    // the fake end used to be counted.
+    assert_eq!(net_parens_outside_strings("f(br#\"a\"\"#)"), 0);
+    assert_eq!(net_parens_outside_strings("f(br#\"a\"(\"#)"), 0);
+    // The `r`/`br` prefix must not be glued to an identifier.
+    assert_eq!(net_parens_outside_strings("formatr#\"x\"#"), 0);
+    // The `b` of `br#` is subject to the same boundary: `xbr#` is an
+    // identifier tail, so the `(` after the fake string end counts.
+    assert_eq!(net_parens_outside_strings("xbr#\"a\"(\"#"), 1);
+    // Unbalanced delimiters outside strings still count.
+    assert_eq!(net_parens_outside_strings("f(g("), 2);
+    assert_eq!(net_parens_outside_strings("f(g))"), -1);
 }
