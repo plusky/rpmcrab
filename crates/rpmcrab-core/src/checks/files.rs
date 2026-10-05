@@ -46,6 +46,14 @@ fn log_regex() -> &'static Regex {
     LOG_REGEX.get_or_init(|| Regex::new(r"/var/log/").expect("static regex"))
 }
 
+static SCM_REGEX: OnceLock<Regex> = OnceLock::new();
+fn scm_regex() -> &'static Regex {
+    SCM_REGEX.get_or_init(|| {
+        Regex::new(r"/(?:RCS|CVS)/[^/]+$|/\.(?:bzr|cvs|git|hg|svn)ignore$|,v$|/\.hgtags$|/\.(?:bzr|git|hg|svn)/|/(?:\.arch-ids|{arch})/")
+            .expect("static regex")
+    })
+}
+
 static KERNEL_PACKAGE_REGEX: OnceLock<Regex> = OnceLock::new();
 fn kernel_package_regex() -> &'static Regex {
     KERNEL_PACKAGE_REGEX.get_or_init(|| {
@@ -278,6 +286,64 @@ fn start_private_key_regex() -> &'static Regex {
     // the explicit newline keeps the reference behavior.
     Regex::new(r"^----BEGIN PRIVATE KEY-----\n?$").expect("static regex"),
     )
+}
+
+/// Look for the file path in all tmpfiles.d configs declared in this package
+/// and return the permission column. Mirrors the reference's
+/// `find_perm_in_tmpfiles`: defaults are `0644`/`root`/`root`, the last
+/// matching line wins, and unreadable configs are skipped.
+fn find_perm_in_tmpfiles(pkg: &Pkg, fname: &str) -> (String, String, String) {
+    let mut perms = "0644".to_string();
+    let mut user = "root".to_string();
+    let mut group = "root".to_string();
+    // The reference realpaths the package path; package paths are already
+    // normalized here, so a lexical clean is equivalent.
+    let fname = clean_path(fname);
+    let needle = format!(" {fname} ");
+
+    for pkgfile in &pkg.files {
+        if !pkgfile.name.contains("tmpfiles.d") || !pkgfile.name.ends_with(".conf") {
+            continue;
+        }
+        let path = Path::new(&pkgfile.path);
+        if !path.exists() || path.is_dir() {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for line in content.lines() {
+            if !line.contains(&needle) {
+                continue;
+            }
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 5 {
+                continue;
+            }
+            perms = fields[2].to_string();
+            user = fields[3].to_string();
+            group = fields[4].to_string();
+        }
+    }
+
+    (perms, user, group)
+}
+
+/// Lexically normalize a path (resolve `.` and `..`), without touching the
+/// filesystem.
+fn clean_path(path: &str) -> String {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            _ => out.push(component.as_os_str()),
+        }
+    }
+    out.to_string_lossy().into_owned()
 }
 
 #[allow(dead_code)]
@@ -1353,11 +1419,7 @@ impl FilesCheck {
     }
 
     fn check_file_version_control_internal_file(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
-        if fname.contains("/.git/")
-            || fname.contains("/.svn/")
-            || fname.contains("/.hg/")
-            || fname.contains("/CVS/")
-        {
+        if is_match(scm_regex(), fname) {
             add_info(
                 out,
                 Level::Error,
@@ -1539,12 +1601,15 @@ impl FilesCheck {
         let perm = pkgfile.mode & 0o7777;
         if perm == 0 {
             if pkgfile.is_ghost() {
+                let (perms, user, group) = find_perm_in_tmpfiles(pkg, fname);
                 add_info(
                     out,
                     Level::Warning,
                     pkg,
                     "zero-perms-ghost",
-                    &[&format!("Suggestion: \"%ghost %attr(,,) {fname}\"")],
+                    &[&format!(
+                        "Suggestion: \"%ghost %attr({perms},{user},{group}) {fname}\""
+                    )],
                 );
             } else {
                 add_info(
@@ -4119,5 +4184,159 @@ mod tests {
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_binary(pkg, &config, &mut out);
         out.results().to_vec()
+    }
+
+    #[test]
+    fn scm_regex_matches_reference_cases() {
+        // Port of the reference's test_scm_regex cases plus the
+        // test_invalid_package `/.gitignore` case.
+        for path in [
+            "/foo/CVS/bar",
+            "/foo/RCS/bar",
+            "/bar/foo,v",
+            "bar/.svnignore",
+            "bar/.git/refs",
+            "/.gitignore",
+            "/usr/src/foo/.git/HEAD",
+            "/opt/bar/.hg/store",
+            "/x/.bzr/branch",
+        ] {
+            assert!(is_match(scm_regex(), path), "scm_regex must match {path}");
+        }
+        for path in [
+            "/usr/bin/foo",
+            "/etc/gitconfig",
+            "bar/.gitignore.bak",
+            "/home/user/.github/workflows",
+        ] {
+            assert!(
+                !is_match(scm_regex(), path),
+                "scm_regex must not match {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn version_control_internal_file_fires_on_scm_paths() {
+        let config = test_config();
+        let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture");
+        pkg.files = vec![
+            PkgFile {
+                name: "/bar/foo,v".to_string(),
+                path: "/bar/foo,v".to_string(),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/.gitignore".to_string(),
+                path: "/.gitignore".to_string(),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/bin/foo".to_string(),
+                path: "/usr/bin/foo".to_string(),
+                ..Default::default()
+            },
+        ];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let hits: Vec<_> = out
+            .results()
+            .iter()
+            .filter(|(n, _)| n == "version-control-internal-file")
+            .map(|(_, d)| d.clone())
+            .collect();
+        assert_eq!(hits.len(), 2, "expected 2 findings, got: {hits:?}");
+        assert!(hits.iter().any(|d| d.contains("/bar/foo,v")));
+        assert!(hits.iter().any(|d| d.contains("/.gitignore")));
+    }
+
+    #[test]
+    fn zero_perms_ghost_uses_tmpfiles_suggestion() {
+        // Mirrors the reference's test_files_without_perms_tmpfiles: the
+        // suggestion's perms/user/group come from the tmpfiles.d config,
+        // not from a static string. Non-default 0640/netdev/netdev pins
+        // that the values are read, not defaulted.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let conf_path = dir.path().join("netconfig.conf");
+        std::fs::write(
+            &conf_path,
+            "d /run/netconfig 0755 root group -\n\
+             f /run/netconfig/resolv.conf 0640 netdev netdev -\n",
+        )
+        .expect("write tmpfiles conf");
+        let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture");
+        pkg.files = vec![
+            PkgFile {
+                name: "/run/netconfig".to_string(),
+                path: "/run/netconfig".to_string(),
+                mode: 0,
+                flags: RPMFILE_GHOST,
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/run/netconfig/resolv.conf".to_string(),
+                path: "/run/netconfig/resolv.conf".to_string(),
+                mode: 0,
+                flags: RPMFILE_GHOST,
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/lib/tmpfiles.d/netconfig.conf".to_string(),
+                path: conf_path.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+        ];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let hits: Vec<_> = out
+            .results()
+            .iter()
+            .filter(|(n, _)| n == "zero-perms-ghost")
+            .map(|(_, d)| d.clone())
+            .collect();
+        assert_eq!(hits.len(), 2, "expected 2 findings, got: {hits:?}");
+        assert!(
+            hits.iter()
+                .any(|d| d.contains("%ghost %attr(0640,netdev,netdev) /run/netconfig/resolv.conf")),
+            "suggestion must use tmpfiles.d perms: {hits:?}"
+        );
+        assert!(
+            hits.iter()
+                .any(|d| d.contains("%ghost %attr(0755,root,group) /run/netconfig")),
+            "suggestion must use tmpfiles.d perms: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn zero_perms_ghost_falls_back_without_tmpfiles() {
+        // No tmpfiles.d config declaring the path: defaults 0644/root/root.
+        let config = test_config();
+        let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture");
+        pkg.files = vec![PkgFile {
+            name: "/var/cache/ghost.dat".to_string(),
+            path: "/var/cache/ghost.dat".to_string(),
+            mode: 0,
+            flags: RPMFILE_GHOST,
+            ..Default::default()
+        }];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let line = out
+            .results()
+            .iter()
+            .find(|(n, _)| n == "zero-perms-ghost")
+            .map(|(_, d)| d.clone())
+            .expect("zero-perms-ghost must fire");
+        assert!(
+            line.contains("%ghost %attr(0644,root,root) /var/cache/ghost.dat"),
+            "suggestion must use defaults: {line}"
+        );
     }
 }

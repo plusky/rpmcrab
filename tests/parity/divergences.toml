@@ -822,3 +822,10 @@ kind = "behaviour"
 reason = "New port-only Error: any file shipped under /etc/xinetd.d/ emits E deprecated-xinetd-config with the detail 'use a systemd socket unit instead'. The reference has no such finding -- its xinetd file rule is typo-dead (FilesCheck.py:783) and its deprecation signal is only E obsolete-xinetd-requirement on the dependency. Deliberate: systemd socket units are the replacement, and validating the dependency plumbing of a dead service manager is wasted effort. Pinned by emission-path tests in xinetd_dep.rs."
 since = "0.1.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/214"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "behaviour"
+reason = "find_perm_in_tmpfiles normalizes the ghost path lexically (clean_path); the reference calls os.path.realpath, which additionally resolves symlinks against the build host's filesystem, so the match sets can differ when a tmpfiles.d path traverses a build-host symlink. Package paths from the RPM header are already canonical, and resolving them against the build host is meaningless for target-system paths. Separately, on a tmpfiles.d line with fewer than 5 whitespace-separated fields the reference's unpack raises ValueError (its except catches only IndexError), aborting the whole run via lint.py:293 (sys.exit(3)); the port skips the malformed line and continues with defaults."
+since = "0.1.0"
