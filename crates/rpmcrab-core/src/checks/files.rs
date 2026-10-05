@@ -727,6 +727,7 @@ impl FilesCheck {
         self.check_file_kernel_modules(pkg, fname, &st.is_kernel_package, out);
         self.check_file_dir_or_file(pkg, fname, out);
         self.check_file_non_ghost_in_run(pkg, fname, pkg, out);
+        self.check_file_mimeinfo_cache(pkg, fname, pkgfile, out);
         self.check_file_systemd_unit_in_etc(pkg, fname, out);
         self.check_file_udev_rule_in_etc(pkg, fname, out);
         self.check_file_tmpfiles_conf_in_etc(pkg, fname, out);
@@ -1273,6 +1274,25 @@ impl FilesCheck {
                 );
                 add_info(out, Level::Error, pkg, &tag, &[fname]);
             }
+        }
+    }
+
+    /// Upstream rpmlint#435: `usr/share/applications/mimeinfo.cache` is
+    /// generated at install time and must not be packaged as a real file.
+    /// The `desktop-file-utils` exception ships it `%ghost`, which has no
+    /// payload and is skipped.
+    fn check_file_mimeinfo_cache(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        out: &mut Filter,
+    ) {
+        if fname == "/usr/share/applications/mimeinfo.cache"
+            && !pkgfile.is_ghost()
+            && !pkg.ghost_files.iter().any(|g| g == fname)
+        {
+            add_info(out, Level::Error, pkg, "mimeinfo-cache-packaged", &[fname]);
         }
     }
 
@@ -3789,6 +3809,96 @@ mod tests {
                     && d.contains(": E: library-without-ldconfig-postin")
                     && d.contains("libfoo.so.1.2.3")),
             "missing E-level finding on real .so: {results:?}"
+        );
+    }
+
+    // Upstream rpmlint#435: mimeinfo.cache must not be packaged as a real file.
+    #[test]
+    fn mimeinfo_cache_packaged_errors() {
+        let config = test_config();
+        let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture");
+        pkg.files = vec![PkgFile {
+            name: "/usr/share/applications/mimeinfo.cache".to_string(),
+            path: "/usr/share/applications/mimeinfo.cache".to_string(),
+            mode: 0o100644,
+            size: Some(100),
+            ..Default::default()
+        }];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let results: Vec<(String, String)> = out.results().to_vec();
+        let lines: Vec<&String> = results
+            .iter()
+            .filter(|(n, _)| n == "mimeinfo-cache-packaged")
+            .map(|(_, l)| l)
+            .collect();
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+        assert!(
+            lines[0]
+                .contains(": E: mimeinfo-cache-packaged /usr/share/applications/mimeinfo.cache"),
+            "name, level and detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn mimeinfo_cache_ghost_is_quiet() {
+        // The desktop-file-utils exception: a %ghost mimeinfo.cache has no
+        // payload and must not warn.
+        let config = test_config();
+        let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture");
+        pkg.files = vec![PkgFile {
+            name: "/usr/share/applications/mimeinfo.cache".to_string(),
+            path: "/usr/share/applications/mimeinfo.cache".to_string(),
+            mode: 0o100644,
+            size: Some(100),
+            ..Default::default()
+        }];
+        pkg.ghost_files = vec!["/usr/share/applications/mimeinfo.cache".to_string()];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let results: Vec<(String, String)> = out.results().to_vec();
+        assert!(
+            !results.iter().any(|(n, _)| n == "mimeinfo-cache-packaged"),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn mimeinfo_cache_other_desktop_files_are_quiet() {
+        // The check is an exact path match: other files under
+        // /usr/share/applications/ — including a sibling name a prefix
+        // match would catch — must not warn.
+        let config = test_config();
+        let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture");
+        pkg.files = vec![
+            PkgFile {
+                name: "/usr/share/applications/foo.desktop".to_string(),
+                path: "/usr/share/applications/foo.desktop".to_string(),
+                mode: 0o100644,
+                size: Some(100),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/share/applications/mimeinfo.cache.bak".to_string(),
+                path: "/usr/share/applications/mimeinfo.cache.bak".to_string(),
+                mode: 0o100644,
+                size: Some(100),
+                ..Default::default()
+            },
+        ];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let results: Vec<(String, String)> = out.results().to_vec();
+        assert!(
+            !results.iter().any(|(n, _)| n == "mimeinfo-cache-packaged"),
+            "unexpected: {results:?}"
         );
     }
 

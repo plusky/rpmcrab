@@ -344,6 +344,14 @@ ValidShells = [
 ]
 # Values for the Group tag, if not specified pulled from RPM
 ValidGroups = []
+# Obsolete MIME-format directory prefixes (upstream rpmlint#437): GNOME 1 /
+# KDE 1 era dirs superseded by shared-mime-info. Files installed under one
+# of these prefixes warn obsolete-mime-format-dir (FilelistCheck).
+ObsoleteDirPrefixes = [
+    "/usr/share/mime-info",
+    "/usr/share/application-registry",
+    "/usr/share/mimelnk",
+]
 # Permissions for files in source packages
 ValidSrcPerms = [
     "0o644",

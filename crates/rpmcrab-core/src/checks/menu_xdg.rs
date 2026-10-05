@@ -197,6 +197,35 @@ impl MenuXDGCheck {
     }
 }
 
+impl MenuXDGCheck {
+    /// Upstream rpmlint#19: desktop entries with unexpanded RPM macros
+    /// (`Name=%{title}`) — the macro was never expanded at build time.
+    /// Only the display fields are scanned; `Exec=` legitimately contains
+    /// `%`-codes (`%f`, `%U`) but never `%{`.
+    fn check_unexpanded_macros(
+        &self,
+        pkg: &Pkg,
+        out: &mut Filter,
+        filename: &str,
+        entry: &HashMap<String, String>,
+    ) {
+        // Keys are already lowercased by parse_desktop.
+        for (key, field) in [("name", "Name"), ("comment", "Comment"), ("icon", "Icon")] {
+            if let Some(value) = entry.get(key)
+                && value.contains("%{")
+            {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "unexpanded-macro-in-desktop-file",
+                    &[filename, &format!("{field}={value}")],
+                );
+            }
+        }
+    }
+}
+
 impl Check for MenuXDGCheck {
     fn name(&self) -> &'static str {
         "MenuXDGCheck"
@@ -269,6 +298,9 @@ impl Check for MenuXDGCheck {
                     add_info(out, level, pkg, finding, &refs);
                 }
                 Ok(sections) => {
+                    if let Some(entry) = sections.get("Desktop Entry") {
+                        self.check_unexpanded_macros(pkg, out, filename, entry);
+                    }
                     if let Some(entry) = sections.get("Desktop Entry")
                         && let Some(exec) = entry.get("exec")
                     {
@@ -400,6 +432,93 @@ mod tests {
             &check.file_regex,
             "/opt/vendor/usr/share/applications/v.desktop"
         ));
+    }
+
+    /// Drive check_binary over a hand-written desktop file: the fcprobe
+    /// header is only a shell, the payload is the temp file.
+    fn run_desktop(content: &str) -> Vec<(String, String)> {
+        // Unique temp file: tests run in parallel and must not share one.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("macrotest.desktop");
+        std::fs::write(&path, content).unwrap();
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
+        let name = "/usr/share/applications/macrotest.desktop";
+        pkg.files = vec![crate::pkg::pkgfile::PkgFile {
+            name: name.to_string(),
+            path: path.to_str().unwrap().to_string(),
+            mode: 0o100644,
+            ..Default::default()
+        }];
+        let config = Config::default();
+        let mut out = Filter::new(&config, crate::color::Color::for_tty(false)).unwrap();
+        let mut check = MenuXDGCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        drop(dir);
+        results
+    }
+
+    // Upstream rpmlint#19: unexpanded macros in desktop entries.
+    #[test]
+    fn unexpanded_macro_in_name_warns() {
+        let results = run_desktop("[Desktop Entry]\nName=%{title}\nExec=foo\n");
+        let lines: Vec<&String> = results
+            .iter()
+            .filter(|(n, _)| n == "unexpanded-macro-in-desktop-file")
+            .map(|(_, l)| l)
+            .collect();
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+        assert!(
+            lines[0].contains("W: unexpanded-macro-in-desktop-file"),
+            "level: {}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("Name=%{title}"),
+            "field detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn unexpanded_macro_in_comment_and_icon_warns() {
+        let results =
+            run_desktop("[Desktop Entry]\nName=Foo\nComment=%{summary}\nIcon=%{icon}\nExec=foo\n");
+        let names: Vec<&str> = results
+            .iter()
+            .filter(|(n, _)| n == "unexpanded-macro-in-desktop-file")
+            .map(|(n, _)| n.as_str())
+            .collect();
+        // One finding per offending field.
+        assert_eq!(names.len(), 2, "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn expanded_desktop_entry_is_quiet() {
+        // A bare `%` is not a macro: only `%{` marks an unexpanded one.
+        let results =
+            run_desktop("[Desktop Entry]\nName=100% Foo\nComment=A tool\nIcon=foo\nExec=foo %f\n");
+        assert!(
+            !results
+                .iter()
+                .any(|(n, _)| n == "unexpanded-macro-in-desktop-file"),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn exec_percent_codes_are_not_macros() {
+        // `%f`/`%U` in Exec= are desktop field codes, not RPM macros:
+        // only Name/Comment/Icon are scanned.
+        let results = run_desktop("[Desktop Entry]\nName=Foo\nExec=foo %f %U\n");
+        assert!(
+            !results
+                .iter()
+                .any(|(n, _)| n == "unexpanded-macro-in-desktop-file"),
+            "unexpected: {results:?}"
+        );
     }
 
     #[test]

@@ -66,10 +66,28 @@ pub struct FilelistCheck {
     good_prefixes: Vec<String>,
     restricted_dirs: Vec<String>,
     rules: Vec<FilelistRule>,
+    /// Upstream rpmlint#437: GNOME 1 / KDE 1 era MIME dirs superseded by
+    /// shared-mime-info. From `ObsoleteDirPrefixes` (config-driven).
+    obsolete_dir_prefixes: Vec<String>,
 }
 
 impl FilelistCheck {
-    pub fn new(_config: &Config) -> Self {
+    pub fn new(config: &Config) -> Self {
+        // Default to the three obsolete MIME-format dirs; an explicit
+        // (even empty) config list overrides.
+        let obsolete_dir_prefixes: Vec<String> =
+            match config.configuration.get("ObsoleteDirPrefixes") {
+                Some(toml::Value::Array(a)) => a
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .map(str::to_string)
+                    .collect(),
+                _ => vec![
+                    "/usr/share/mime-info".to_string(),
+                    "/usr/share/application-registry".to_string(),
+                    "/usr/share/mimelnk".to_string(),
+                ],
+            };
         let table: toml::Table = toml::from_str(FILELIST_TOML).expect("bundled FilelistCheck.toml");
         let good_prefixes: Vec<String> = table
             .get("GoodPrefixes")
@@ -163,7 +181,26 @@ impl FilelistCheck {
             good_prefixes,
             restricted_dirs,
             rules,
+            obsolete_dir_prefixes,
         }
+    }
+
+    /// The obsolete MIME-format dirs (upstream rpmlint#437) this package
+    /// installs into, one finding per directory: the finding is about the
+    /// directory being obsolete, so per-file reports would only add noise.
+    fn obsolete_mime_dirs(&self, pkg: &Pkg) -> Vec<String> {
+        let mut found = std::collections::BTreeSet::new();
+        for pkgfile in &pkg.files {
+            let f = pkgfile.name.as_str();
+            for prefix in &self.obsolete_dir_prefixes {
+                // Match the dir itself and anything under it, without
+                // matching a longer sibling (`/usr/share/mimelnk2`).
+                if f == prefix || f.starts_with(&format!("{prefix}/")) {
+                    found.insert(prefix.clone());
+                }
+            }
+        }
+        found.into_iter().collect()
     }
 
     /// The FHS-prefix violations, deduplicated to one report per directory.
@@ -259,12 +296,129 @@ impl Check for FilelistCheck {
         for f in &invalid_opt {
             add_info(out, Level::Error, pkg, "filelist-forbidden-opt", &[f]);
         }
+        for d in self.obsolete_mime_dirs(pkg) {
+            add_info(out, Level::Warning, pkg, "obsolete-mime-format-dir", &[&d]);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::Color;
+    use crate::pkg::pkgfile::PkgFile;
+
+    /// Hand-built package shell: the fcprobe header with a caller-supplied
+    /// file list, so the test drives the real emission path without a
+    /// fixture RPM carrying the payload.
+    fn pkg_with_files(files: &[&str]) -> Pkg {
+        let rpm = format!(
+            "{}/../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut pkg = Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture shell");
+        pkg.files = files
+            .iter()
+            .map(|f| PkgFile {
+                name: f.to_string(),
+                path: f.to_string(),
+                mode: 0o100644,
+                ..Default::default()
+            })
+            .collect();
+        pkg
+    }
+
+    fn run(config: &Config, pkg: &Pkg) -> Vec<(String, String)> {
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        let mut check = FilelistCheck::new(config);
+        check.check_binary(pkg, config, &mut out);
+        out.results().to_vec()
+    }
+
+    fn lines_for(results: &[(String, String)], name: &str) -> Vec<String> {
+        results
+            .iter()
+            .filter(|(n, _)| n == name)
+            .map(|(_, l)| l.clone())
+            .collect()
+    }
+
+    // Upstream rpmlint#437: obsolete GNOME 1 / KDE 1 MIME dirs.
+    #[test]
+    fn obsolete_mime_dirs_warn_once_per_dir() {
+        let pkg = pkg_with_files(&[
+            "/usr/share/mimelnk/foo.desktop",
+            "/usr/share/mimelnk/bar.desktop",
+            "/usr/share/mime-info/gnome.keys",
+        ]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "obsolete-mime-format-dir");
+        // One finding per obsolete dir, not per file.
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[0].contains("W: obsolete-mime-format-dir /usr/share/mime-info"),
+            "name, level and detail: {}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("W: obsolete-mime-format-dir /usr/share/mimelnk"),
+            "name, level and detail: {}",
+            lines[1]
+        );
+    }
+
+    #[test]
+    fn obsolete_mime_dirs_sibling_prefix_is_quiet() {
+        // The boundary match must not fire on a longer sibling
+        // (`/usr/share/mimelnk2` is not `/usr/share/mimelnk/`).
+        let pkg = pkg_with_files(&["/usr/share/mimelnk2/foo.desktop", "/usr/bin/foo"]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        assert!(
+            lines_for(&results, "obsolete-mime-format-dir").is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn obsolete_mime_dirs_are_config_driven() {
+        let mut tbl = toml::Table::new();
+        tbl.insert(
+            "ObsoleteDirPrefixes".to_string(),
+            toml::Value::Array(vec![toml::Value::String("/opt/obsolete".to_string())]),
+        );
+        let config = Config {
+            configuration: tbl,
+            ..Default::default()
+        };
+        let pkg = pkg_with_files(&["/opt/obsolete/foo", "/usr/share/mimelnk/foo.desktop"]);
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "obsolete-mime-format-dir");
+        // The explicit list replaces the default: only /opt/obsolete warns.
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("/opt/obsolete"), "detail: {}", lines[0]);
+    }
+
+    #[test]
+    fn obsolete_mime_dirs_empty_list_is_quiet() {
+        let mut tbl = toml::Table::new();
+        tbl.insert(
+            "ObsoleteDirPrefixes".to_string(),
+            toml::Value::Array(vec![]),
+        );
+        let config = Config {
+            configuration: tbl,
+            ..Default::default()
+        };
+        let pkg = pkg_with_files(&["/usr/share/mimelnk/foo.desktop"]);
+        let results = run(&config, &pkg);
+        assert!(
+            lines_for(&results, "obsolete-mime-format-dir").is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
 
     #[test]
     fn fnmatch_star_becomes_dot_star() {
