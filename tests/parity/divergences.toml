@@ -784,7 +784,7 @@ since = "0.1.0"
 case = "global"
 check = "TagsCheck"
 kind = "behaviour"
-reason = "The bundled ReleaseExtension default is the per-distro %{?dist} suffix catalog (fedora/rhel/eln/mageia/amazon linux/openEuler/elrepo/suse); the reference still ships an empty default. rpmcrab therefore warns not-standard-release-extension on releases without a known dist suffix and tolerates known suffixes in the changelog version comparison, where the current reference does neither. Under the pinned openSUSE flavour the new finding is suppressed by opensuse.toml:66, so every committed parity footer shows exactly one more filtered finding than the frozen expected/stdout (e.g. `6 filtered` vs `5 filtered`); across the 33 corpus RPMs no finding name, order, severity or detail differs."
+reason = "The bundled ReleaseExtension default is the per-distro %{?dist} suffix catalog (fedora/rhel/eln/mageia/amazon linux/openEuler/elrepo/suse); the reference still ships an empty default. rpmcrab therefore warns not-standard-release-extension on releases without a known dist suffix and tolerates known suffixes in the changelog version comparison, where the current reference does neither. Under the pinned openSUSE flavour the new finding is suppressed by opensuse.toml:66; of the 20 committed parity cases, the 11 whose footer matched on `gh-main` are each exactly +1 filtered over the frozen expected/stdout (e.g. `6 filtered` vs `5 filtered`); the other 9 were already off on `gh-main` and are unchanged. Across the 33 corpus RPMs no finding name, order, severity or detail differs."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/pull/1608"
 
