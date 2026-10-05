@@ -236,4 +236,32 @@ mod tests {
             "regular ghost must not warn: {rendered:?}"
         );
     }
+
+    /// A ghost symlink still warns: the `is_reg` check runs before the ghost
+    /// skip. Reordering the ghost early-return ahead of `is_reg` would
+    /// silently drop this warning.
+    #[test]
+    fn ghost_symlink_conf_still_warns() {
+        let rendered = run_tmpfiles(vec![PkgFile {
+            name: "/usr/lib/tmpfiles.d/ghostlink.conf".to_string(),
+            mode: 0o120777,
+            linkto: "/some/where/some.conf".to_string(),
+            flags: RPMFILE_GHOST,
+            ..Default::default()
+        }]);
+        let not_regular: Vec<&String> = rendered
+            .iter()
+            .filter(|l| l.contains("tmpfile-not-regular-file"))
+            .collect();
+        assert_eq!(
+            not_regular.len(),
+            1,
+            "ghost symlink must warn: {rendered:?}"
+        );
+        assert_eq!(
+            not_regular[0].as_str(),
+            "tmpfiles-test.noarch: W: tmpfile-not-regular-file /usr/lib/tmpfiles.d/ghostlink.conf",
+            "level/name/detail",
+        );
+    }
 }
