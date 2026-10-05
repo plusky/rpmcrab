@@ -365,6 +365,15 @@ ObsoleteDirPrefixes = [
     "/usr/share/application-registry",
     "/usr/share/mimelnk",
 ]
+# Bot/invalid changelog authors (upstream rpmlint#180, TagsCheck): a
+# changelog entry matching one of these regexes warns
+# invalid-changelog-author.
+InvalidChangelogAuthors = [
+    "opensuse-packaging@opensuse.org",
+    "nobody@fedoraproject.org",
+    "nobody@mageia.org",
+    ".*@example\\.com",
+]
 # Permissions for files in source packages
 ValidSrcPerms = [
     "0o644",

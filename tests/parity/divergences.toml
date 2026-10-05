@@ -864,3 +864,11 @@ kind = "behaviour"
 reason = "Upstream rpmlint#2: a new `translated-description` warning fires on `%description -l <lang>` sections, which some distros don't want to ship. The frozen 2.10.0 reference has no such check."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/2"
+
+[[divergence]]
+case = "global"
+check = "TagsCheck"
+kind = "behaviour"
+reason = "Upstream rpmlint#180: a new `invalid-changelog-author` warning fires for changelog entries whose author matches the `InvalidChangelogAuthors` config regex list (defaults: opensuse-packaging@opensuse.org, nobody@fedoraproject.org, nobody@mageia.org, .*@example\\.com) — bot accounts hide who to contact and can generate list mail. The frozen 2.10.0 reference has no such check. One warning per offending entry; an uncompilable pattern is skipped like InvalidRequires."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/180"

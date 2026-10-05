@@ -70,6 +70,9 @@ pub struct TagsCheck {
     valid_groups: Vec<String>,
     valid_licenses: Vec<String>,
     invalid_requires: Vec<Regex>,
+    /// Upstream rpmlint#180: bot/invalid changelog authors, from the
+    /// `InvalidChangelogAuthors` config regex list.
+    invalid_changelog_authors: Vec<Regex>,
     packager_regex: Option<Regex>,
     extension_regex: Option<Regex>,
     use_version_in_changelog: bool,
@@ -127,6 +130,10 @@ impl TagsCheck {
             valid_groups: get_strings("ValidGroups"),
             valid_licenses: get_strings("ValidLicenses"),
             invalid_requires: get_strings("InvalidRequires")
+                .iter()
+                .filter_map(|p| Regex::new(p).ok())
+                .collect(),
+            invalid_changelog_authors: get_strings("InvalidChangelogAuthors")
                 .iter()
                 .filter_map(|p| Regex::new(p).ok())
                 .collect(),
@@ -930,6 +937,30 @@ impl TagsCheck {
 }
 
 impl TagsCheck {
+    /// Upstream rpmlint#180: bot accounts (e.g. `opensuse-packaging@`)
+    /// in changelog authors hide who to contact and can generate list
+    /// mail. One warning per offending entry.
+    fn check_changelog_authors(&self, pkg: &Pkg, out: &mut Filter, changelog: &[String]) {
+        if self.invalid_changelog_authors.is_empty() {
+            return;
+        }
+        for entry in changelog {
+            if self
+                .invalid_changelog_authors
+                .iter()
+                .any(|re| is_match(re, entry))
+            {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "invalid-changelog-author",
+                    &[entry],
+                );
+            }
+        }
+    }
+
     fn check_changelog(&self, pkg: &Pkg, out: &mut Filter, changelog: &[String]) {
         let version = pkg.tag_str(Tag::VERSION).unwrap_or_default();
         let release = pkg.tag_str(Tag::RELEASE).unwrap_or_default();
@@ -939,6 +970,7 @@ impl TagsCheck {
             add_info(out, Level::Error, pkg, "no-changelogname-tag", &[]);
             return;
         }
+        self.check_changelog_authors(pkg, out, changelog);
         let clt: Vec<String> = pkg.tag_str_array(Tag::CHANGELOGTEXT);
         if self.use_version_in_changelog {
             let mut found: Option<String> = None;
@@ -1772,6 +1804,104 @@ mod tests {
             ),
             "unexpected line"
         );
+    }
+
+    // Upstream rpmlint#180: bot/invalid changelog authors.
+    fn authors_config(authors: &[&str]) -> Config {
+        let mut config = test_config();
+        config.configuration.insert(
+            "InvalidChangelogAuthors".to_string(),
+            toml::Value::Array(
+                authors
+                    .iter()
+                    .map(|s| toml::Value::String(s.to_string()))
+                    .collect(),
+            ),
+        );
+        config
+    }
+
+    fn authors_fixture() -> Pkg {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/changelog-author-fixture-1.0-1.noarch.rpm");
+        // Header only: the check reads CHANGELOGNAME, no payload needed.
+        Pkg::open_no_extract(&rpm).expect("open fixture")
+    }
+
+    #[test]
+    fn invalid_changelog_author_warns_on_bot_entries() {
+        // The fixture carries two bot entries and one human entry.
+        let config = authors_config(&[
+            "opensuse-packaging@opensuse.org",
+            "nobody@fedoraproject.org",
+            "nobody@mageia.org",
+            ".*@example\\.com",
+        ]);
+        let pkg = authors_fixture();
+        let results = run_check_with(&config, &pkg);
+        let hits: Vec<_> = results
+            .iter()
+            .filter(|(name, _)| name.as_str() == "invalid-changelog-author")
+            .collect();
+        assert_eq!(hits.len(), 2, "expected two findings: {results:?}");
+        assert_eq!(
+            hits[0].1,
+            "changelog-author-fixture.noarch: W: invalid-changelog-author \
+             openSUSE Packaging <opensuse-packaging@opensuse.org> - 1.0-1",
+            "name, level and detail"
+        );
+        assert_eq!(
+            hits[1].1,
+            "changelog-author-fixture.noarch: W: invalid-changelog-author \
+             Example Bot <bot@example.com> - 1.0-1",
+            "name, level and detail"
+        );
+    }
+
+    #[test]
+    fn invalid_changelog_author_empty_list_is_quiet() {
+        let config = authors_config(&[]);
+        let pkg = authors_fixture();
+        let results = run_check_with(&config, &pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(name, _)| name.as_str() == "invalid-changelog-author"),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_changelog_author_list_is_config_driven() {
+        // Only the example.com pattern configured: the opensuse-packaging
+        // entry stays quiet.
+        let config = authors_config(&[".*@example\\.com"]);
+        let pkg = authors_fixture();
+        let results = run_check_with(&config, &pkg);
+        let hits: Vec<_> = results
+            .iter()
+            .filter(|(name, _)| name.as_str() == "invalid-changelog-author")
+            .collect();
+        assert_eq!(hits.len(), 1, "expected one finding: {results:?}");
+        assert!(
+            hits[0].1.contains("bot@example.com"),
+            "detail: {}",
+            hits[0].1
+        );
+    }
+
+    #[test]
+    fn invalid_changelog_author_bad_regex_is_skipped() {
+        // An uncompilable pattern must not kill the check: the valid
+        // patterns still apply (same policy as InvalidRequires).
+        let config = authors_config(&["(unclosed", "opensuse-packaging@opensuse.org"]);
+        let pkg = authors_fixture();
+        let results = run_check_with(&config, &pkg);
+        let hits: Vec<_> = results
+            .iter()
+            .filter(|(name, _)| name.as_str() == "invalid-changelog-author")
+            .collect();
+        assert_eq!(hits.len(), 1, "expected one finding: {results:?}");
     }
 
     #[test]
