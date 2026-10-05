@@ -29,6 +29,8 @@ pub struct Filter {
     /// kept clean (no colour suffix) so `-v` description lookup never has to
     /// re-parse it off the rendered line.
     results: Vec<(String, String)>,
+    /// Levels parallel to `results`, in emission order.
+    levels: Vec<Level>,
     /// `check` -> long explanation, for `-v`.
     error_details: HashMap<String, String>,
 
@@ -80,6 +82,7 @@ impl Filter {
             info: config.info,
             color,
             results: Vec::new(),
+            levels: Vec::new(),
             error_details: HashMap::new(),
             score: 0,
             filtered_out: 0,
@@ -121,8 +124,9 @@ impl Filter {
                 finding.level = Level::Warning;
             }
         }
-        // Strict treats everything as an error (and counts the promotions) but
-        // adds no badness.
+        // Strict promotes everything to error (and counts the promotions);
+        // default badness is computed after promotion, so promoted
+        // findings get the E default of 1.
         if self.strict {
             if finding.level != Level::Error {
                 self.promoted_to_error += 1;
@@ -158,6 +162,7 @@ impl Filter {
         }
         self.results
             .push((finding.check.clone(), finding.line(&self.color)));
+        self.levels.push(finding.level);
     }
 
     /// Register a long explanation for `-v` (from `descriptions/*.toml`,
@@ -169,6 +174,14 @@ impl Filter {
     /// The findings that survived suppression, in emission order.
     pub fn results(&self) -> &[(String, String)] {
         &self.results
+    }
+
+    /// The level of each finding in `results()`, in the same order.
+    /// Test plumbing: `results()` discards the level, and recovering it
+    /// by re-parsing the rendered line would couple tests to the line
+    /// format.
+    pub fn result_levels(&self) -> &[Level] {
+        &self.levels
     }
 
     /// The description for a check (`-v` explanations), textwrap-filled to 78
@@ -210,6 +223,7 @@ impl Filter {
     /// and summing the counters equals the sequential run exactly.
     pub fn merge_from(&mut self, other: Filter) {
         self.results.extend(other.results);
+        self.levels.extend(other.levels);
         self.score += other.score;
         self.filtered_out += other.filtered_out;
         self.promoted_to_error += other.promoted_to_error;
@@ -307,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_promotes_without_badness() {
+    fn strict_promotes_with_default_badness() {
         let mut c = cfg();
         c.strict = true;
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();

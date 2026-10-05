@@ -125,6 +125,18 @@ fn default_jobs() -> i32 {
         .unwrap_or(1)
 }
 
+/// Resolve effective permissive mode from CLI flags and the
+/// `PermissiveByDefault` config key (rpmlint#1592).
+///
+/// `--permissive` wins outright; otherwise permissive applies unless
+/// `--strict` was passed and the config default is off. This is the
+/// production expression previously inline in `run()`; the
+/// `render_llvm21_gold` test re-derived it by hand, so it gets its own
+/// unit tests here.
+fn resolve_permissive(cli_permissive: bool, cli_strict: bool, permissive_by_default: bool) -> bool {
+    cli_permissive || (!cli_strict && permissive_by_default)
+}
+
 /// The clap `Command` for the `rpmcrab` binary, shared by `main.rs` and the
 /// `rpmcrab-gen` asset generator so the man page and shell completions can
 /// never drift from the shipped CLI.
@@ -170,7 +182,7 @@ pub fn run() -> ExitCode {
     cfg.info = cli.verbose;
     // rpmlint#1592: `--permissive` only when asked; otherwise the
     // `PermissiveByDefault` config key decides (openSUSE runs permissive).
-    cfg.permissive = cli.permissive || (!cli.strict && cfg.permissive_by_default);
+    cfg.permissive = resolve_permissive(cli.permissive, cli.strict, cfg.permissive_by_default);
     cfg.mini_mode = cli.mini_mode;
 
     if cli.print_config {
@@ -201,23 +213,9 @@ pub fn run() -> ExitCode {
     }
 
     // rpmlintrc: explicit `-r` files win outright; with none, auto-discovery
-    // looks in the two OBS SOURCES directories and then beside a single
-    // positional argument (`lint.py:198-224`).
-    let mut rc_files = cli.rpmlintrc.clone();
-    if rc_files.is_empty() {
-        for dir in &cfg.rpmlintrc_search_paths {
-            rc_files.extend(find_rpmlintrc_files(Path::new(dir)));
-        }
-        // A lone positional argument also looks next to itself, so that
-        // `rpmlint foo.spec` picks up `foo.rpmlintrc`.
-        if rc_files.is_empty() && files.len() == 1 {
-            let mut arg = files[0].clone();
-            if arg.is_file() {
-                arg.pop();
-            }
-            rc_files.extend(find_rpmlintrc_files(&arg));
-        }
-    }
+    // looks in the configured `RpmlintrcSearchPaths` and then beside a
+    // single positional argument (`lint.py:198-224`, rpmlint#1592).
+    let rc_files = discover_rpmlintrc_files(&cli.rpmlintrc, &cfg.rpmlintrc_search_paths, &files);
     if rc_files.len() > 1 {
         warn!(
             color,
@@ -390,6 +388,33 @@ pub fn run() -> ExitCode {
 /// `Lint._find_rpmlintrc_files`: `*.rpmlintrc` first, then `*-rpmlintrc`, each
 /// group sorted. Both patterns are a bare suffix in a single directory, which
 /// `fnmatch` and `Path.glob` reduce to.
+/// Auto-discover rpmlintrc files: explicit `-r` files win outright; with
+/// none, look in each configured `RpmlintrcSearchPaths` directory
+/// (rpmlint#1592), then beside a lone positional argument
+/// (`lint.py:198-224`).
+fn discover_rpmlintrc_files(
+    explicit: &[PathBuf],
+    search_paths: &[String],
+    positional: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mut rc_files: Vec<PathBuf> = explicit.to_vec();
+    if rc_files.is_empty() {
+        for dir in search_paths {
+            rc_files.extend(find_rpmlintrc_files(Path::new(dir)));
+        }
+        // A lone positional argument also looks next to itself, so that
+        // `rpmlint foo.spec` picks up `foo.rpmlintrc`.
+        if rc_files.is_empty() && positional.len() == 1 {
+            let mut arg = positional[0].clone();
+            if arg.is_file() {
+                arg.pop();
+            }
+            rc_files.extend(find_rpmlintrc_files(&arg));
+        }
+    }
+    rc_files
+}
+
 fn find_rpmlintrc_files(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -457,6 +482,70 @@ fn has_package_suffix(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discover_rpmlintrc_reads_configured_search_paths() {
+        // Production code must READ `RpmlintrcSearchPaths`: an rpmlintrc
+        // file in a configured directory is discovered without `-r`.
+        let dir = tempfile::tempdir().unwrap();
+        let rc = dir.path().join("test.rpmlintrc");
+        std::fs::write(&rc, "addFilter('x')\n").unwrap();
+        let found =
+            discover_rpmlintrc_files(&[], &[dir.path().to_string_lossy().into_owned()], &[]);
+        assert_eq!(found, vec![rc]);
+    }
+
+    #[test]
+    fn discover_rpmlintrc_explicit_wins_over_search_paths() {
+        // Explicit `-r` files win outright; search paths are not consulted.
+        let dir = tempfile::tempdir().unwrap();
+        let rc = dir.path().join("test.rpmlintrc");
+        std::fs::write(&rc, "addFilter('x')\n").unwrap();
+        let explicit = PathBuf::from("/nonexistent/explicit.rpmlintrc");
+        let found = discover_rpmlintrc_files(
+            std::slice::from_ref(&explicit),
+            &[dir.path().to_string_lossy().into_owned()],
+            &[],
+        );
+        assert_eq!(found, vec![explicit]);
+    }
+
+    #[test]
+    fn discover_rpmlintrc_falls_back_to_positional_dir() {
+        // No explicit files and empty search paths: look beside the lone
+        // positional argument.
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("foo.spec");
+        std::fs::write(&pkg, "Name: foo\n").unwrap();
+        let rc = dir.path().join("foo.rpmlintrc");
+        std::fs::write(&rc, "addFilter('x')\n").unwrap();
+        let found = discover_rpmlintrc_files(&[], &[], &[pkg]);
+        assert_eq!(found, vec![rc]);
+    }
+
+    #[test]
+    fn resolve_permissive_matrix() {
+        // (cli_permissive, cli_strict, permissive_by_default) -> effective.
+        // `--permissive` always wins; `--strict` beats the config default;
+        // otherwise the default decides.
+        let cases = [
+            (false, false, false, false),
+            (false, false, true, true),
+            (false, true, false, false),
+            (false, true, true, false),
+            (true, false, false, true),
+            (true, false, true, true),
+            (true, true, false, true),
+            (true, true, true, true),
+        ];
+        for (cli_p, cli_s, def, expected) in cases {
+            assert_eq!(
+                resolve_permissive(cli_p, cli_s, def),
+                expected,
+                "cli_permissive={cli_p} cli_strict={cli_s} default={def}"
+            );
+        }
+    }
 
     /// `Lint._expand_filelist` keeps only the three package suffixes and
     /// recurses into directories, in `readdir` order.

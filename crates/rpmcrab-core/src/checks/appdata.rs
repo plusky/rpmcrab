@@ -24,6 +24,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use fancy_regex::Regex;
 
@@ -247,6 +248,14 @@ fn native_validate(text: &str) -> NativeOutcome {
     }
 }
 
+static FILE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn file_regex() -> &'static Regex {
+    FILE_REGEX.get_or_init(|| {
+        Regex::new(r"^/usr/share/(appdata|metainfo)/.*\.(appdata|metainfo).xml$")
+            .expect("static regex")
+    })
+}
+
 impl AppDataCheck {
     pub fn new(_config: &Config) -> Self {
         Self::with_tool_source(ToolSource::Path)
@@ -267,8 +276,7 @@ impl AppDataCheck {
             // matches any character, so `foo.appdata_xml` is validated
             // upstream and must be here too. `/usr/share/metainfo/` is a
             // deliberate extension (ledgered): the reference predates it.
-            file_regex: Regex::new(r"^/usr/share/(appdata|metainfo)/.*\.(appdata|metainfo).xml$")
-                .expect("static regex"),
+            file_regex: file_regex().clone(),
             checked_files: 0,
             tool,
         }

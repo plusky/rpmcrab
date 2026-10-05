@@ -24,15 +24,20 @@ use crate::pkg::Pkg;
 use crate::pkg::dep::{
     DepInfo, RPMSENSE_EQUAL, RPMSENSE_GREATER, RPMSENSE_LESS, version_to_string,
 };
+use std::sync::OnceLock;
 
 /// `invalid_version_regex`: `([0-9](?:rc|alpha|beta|pre).*)`, case-insensitive.
-fn invalid_version_regex() -> Regex {
-    Regex::new(r"(?i)([0-9](?:rc|alpha|beta|pre).*)").expect("static regex")
+static INVALID_VERSION_REGEX: OnceLock<Regex> = OnceLock::new();
+fn invalid_version_regex() -> &'static Regex {
+    INVALID_VERSION_REGEX
+        .get_or_init(|| Regex::new(r"(?i)([0-9](?:rc|alpha|beta|pre).*)").expect("static regex"))
 }
 
 /// `lib_devel_number_regex`: `^lib(.*?)([0-9.]+)(_[0-9.]+)?-devel`.
-fn lib_devel_number_regex() -> Regex {
-    Regex::new(r"^lib(.*?)([0-9.]+)(_[0-9.]+)?-devel").expect("static regex")
+static LIB_DEVEL_NUMBER_REGEX: OnceLock<Regex> = OnceLock::new();
+fn lib_devel_number_regex() -> &'static Regex {
+    LIB_DEVEL_NUMBER_REGEX
+        .get_or_init(|| Regex::new(r"^lib(.*?)([0-9.]+)(_[0-9.]+)?-devel").expect("static regex"))
 }
 
 /// Words that may start a summary in lowercase (`CAPITALIZED_IGNORE_LIST`).
@@ -87,6 +92,8 @@ pub struct TagsCheck {
     tag_re: Regex,
     spellchecker: Option<crate::spellcheck::Spellchecker>,
 }
+
+static URL_ESCAPE_RE: OnceLock<Regex> = OnceLock::new();
 
 impl TagsCheck {
     pub fn new(config: &Config) -> Self {
@@ -144,11 +151,11 @@ impl TagsCheck {
                 .and_then(toml::Value::as_integer)
                 .unwrap_or(79) as usize,
             valid_license_exceptions: get_strings("ValidLicenseExceptions"),
-            macro_re: macro_regex(),
-            devel_re: devel_regex(),
-            lib_devel_number_re: lib_devel_number_regex(),
-            lib_package_re: lib_package_regex(),
-            invalid_version_re: invalid_version_regex(),
+            macro_re: macro_regex().clone(),
+            devel_re: devel_regex().clone(),
+            lib_devel_number_re: lib_devel_number_regex().clone(),
+            lib_package_re: lib_package_regex().clone(),
+            invalid_version_re: invalid_version_regex().clone(),
             changelog_version_re: Regex::new(r"[^>]([^ >]+)\s*$").expect("static regex"),
             changelog_text_version_re: Regex::new(r"^\s*-\s*((\d+:)?[\w\.]+-[\w\.]+)").expect("static regex"),
             devel_number_re: Regex::new(r"(.*?)([0-9.]+)(_[0-9.]+)?-devel").expect("static regex"),
@@ -181,7 +188,14 @@ impl TagsCheck {
                 .filter_map(|r| r.ok())
                 .map(|m| m.as_str())
             {
-                if is_url && is_match(&Regex::new(r"(?i)^%[0-9A-F][0-9A-F]$").expect("static"), m) {
+                if is_url
+                    && is_match(
+                        URL_ESCAPE_RE.get_or_init(|| {
+                            Regex::new(r"(?i)^%[0-9A-F][0-9A-F]$").expect("static")
+                        }),
+                        m,
+                    )
+                {
                     continue;
                 }
                 add_info(out, Level::Warning, pkg, "unexpanded-macro", &[tagname, m]);
@@ -2069,7 +2083,7 @@ mod rich_dep_emission_tests {
     fn devel_dependency_matches_rich_leaf() {
         let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
         assert!(
-            !is_match(&devel_regex(), &pkg.name),
+            !is_match(devel_regex(), &pkg.name),
             "fixture must not be a devel package"
         );
         pkg.requires.push(rich_dep("(somelib-devel or plainx)"));

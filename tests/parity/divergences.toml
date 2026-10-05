@@ -183,7 +183,7 @@ since = "0.1.0"
 case = "global"
 check = "missing-mandatory-optflags"
 kind = "behaviour"
-reason = "DWARF producer extraction via gimli is not yet implemented; the mandatory/forbidden optflags check degrades gracefully (no findings) until DWARF parsing lands."
+reason = "DWARF producer extraction is not yet implemented; the mandatory/forbidden optflags check degrades gracefully (no findings) until DWARF parsing lands."
 since = "0.1.0"
 
 [[divergence]]
@@ -677,7 +677,7 @@ since = "0.1.0"
 case = "global"
 check = "PolkitCheck"
 kind = "behaviour"
-reason = "PolkitCheck.py:70 does `action.getElementsByTagName('defaults')[0]`, a descendant search, so an outer `<action>` with no `<defaults>` of its own inherits the first `<defaults>` of a nested descendant action: on `<action id='aaa.outer.nodefaults'><action id='bbb.inner.withdefaults'><defaults><allow_any>yes</allow_any>...` the reference emits `E: polkit-user-privilege ... aaa.outer.nodefaults (yes:no:no)` while the port scopes each action to its own `<defaults>` and emits `E: polkit-untracked-privilege ... aaa.outer.nodefaults (no:no:no)` -- name, detail and order all diverge on the outer action, on package-controlled XML. Nested actions are rejected by real polkit, so this is pathological input and the inheritance is a minidom artifact; the port's per-action scoping is the deliberate, saner behavior. The IndexError entry above covers the no-`<defaults>`-anywhere case, this entry covers the nested-descendant case, so nothing is double-counted."
+reason = "PolkitCheck.py:70 does `action.getElementsByTagName('defaults')[0]`, a descendant search, so an outer `<action>` with no `<defaults>` of its own inherits the first `<defaults>` of a nested descendant action: on `<action id='aaa.outer.nodefaults'><action id='bbb.inner.withdefaults'><defaults><allow_any>yes</allow_any>...` the reference emits `E: polkit-user-privilege ... aaa.outer.nodefaults (yes:no:no)` while the port scopes each action to its own `<defaults>` and emits `E: polkit-untracked-privilege ... aaa.outer.nodefaults (no:no:no)` -- name and detail diverge on the outer action, on package-controlled XML; the order divergence is entailed by the name divergence, not a second bug: `__diag_sortkey` is `(name, level)` in both (`filter.py:236` vs `filter.rs:237`), so with equal names the reference keeps document order and only the differing finding names reorder the port's lines. Nested actions are rejected by real polkit, so this is pathological input and the inheritance is a minidom artifact; the port's per-action scoping is the deliberate, saner behavior. The IndexError entry above covers the no-`<defaults>`-anywhere case, this entry covers the nested-descendant case, so nothing is double-counted."
 since = "0.1.0"
 
 [[divergence]]
