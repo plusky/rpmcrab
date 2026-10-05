@@ -708,6 +708,20 @@ mod tests {
     }
 
     #[test]
+    fn finalize_rejects_a_string_false_bool() {
+        // A misspelled string value must fail loudly, not silently
+        // enable permissive mode.
+        let mut cfg = Config::default();
+        cfg.configuration.insert(
+            "PermissiveByDefault".to_string(),
+            toml::Value::String("false".to_string()),
+        );
+        let err = cfg.finalize().expect_err("string bool must fail");
+        assert!(err.contains("PermissiveByDefault"), "got {err}");
+        assert!(err.contains("bool"), "got {err}");
+    }
+
+    #[test]
     fn get_bool_absent_is_false() {
         let cfg = Config::default();
         assert!(!cfg.get_bool("Missing").unwrap());
