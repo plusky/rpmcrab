@@ -537,3 +537,48 @@ fn net_parens_ignores_raw_and_byte_raw_strings() {
     assert_eq!(net_parens_outside_strings("f(g("), 2);
     assert_eq!(net_parens_outside_strings("f(g))"), -1);
 }
+
+#[test]
+fn allowlist_liveness_get_or_init_closure_skip() {
+    // plusky's #225 nit: the get_or_init-closure skip in the allowlist
+    // liveness check must be non-inert. Mirror the liveness predicate from
+    // `every_allowlist_entry_matches_a_guarded_line` over synthetic lines
+    // (shape borrowed from `get_or_init_skip_is_membership_not_proximity`
+    // below).
+    fn is_live(lines: &[&str], pat: &str) -> bool {
+        lines.iter().enumerate().any(|(i, line)| {
+            fragment_matches_token_anchored(line, pat)
+                && ((line.contains("Regex::new")
+                    && !line.trim_start().starts_with("//")
+                    && !in_get_or_init_closure(lines, i))
+                    || is_owned_regex_factory(line))
+        })
+    }
+
+    // The sole `Regex::new` match sits inside a get_or_init closure: the
+    // entry must not stay alive.
+    let closed: Vec<&str> = vec![
+        "static FOO_RE: OnceLock<Regex> = OnceLock::new();",
+        "fn foo_re() -> &'static Regex {",
+        "    FOO_RE.get_or_init(|| {",
+        "        Regex::new(r\"^foo\").expect(\"static regex\")",
+        "    })",
+        "}",
+    ];
+    assert!(
+        !is_live(&closed, "^foo"),
+        "entry whose sole match is inside a get_or_init closure must not stay alive"
+    );
+
+    // Converse: a `Regex::new` below the *closed* closure is outside it, so
+    // it keeps the entry alive. Under the old proximity rule this line (14
+    // lines down, inside the 20-line window) would have been skipped and the
+    // entry wrongly reported dead — this is the #225 tightening biting.
+    let mut open = closed.clone();
+    open.extend(std::iter::repeat_n("    let _pad = 1;", 14));
+    open.push("    let re = Regex::new(r\"^foo\");");
+    assert!(
+        is_live(&open, "^foo"),
+        "per-call compile below a closed closure keeps the entry alive"
+    );
+}
