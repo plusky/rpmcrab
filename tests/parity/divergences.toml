@@ -640,7 +640,7 @@ upstream = "https://github.com/plusky/rpmcrab/issues/44"
 case = "global"
 check = "PythonCheck"
 kind = "behaviour"
-reason = "For a requires.txt requirement that already carries a marker inside a named extra section, the reference (`_convert_egg_info_reqs_to_simple_reqs` in CPython's importlib.metadata, still used by rpmlint 2.10.0's `Distribution.requires` for egg-info) appends the section condition as a second `;`-part verbatim: `w6extra; python_version > \"3.9\"; (sys_platform == \"linux\") and extra == \"extra\"` (verified against CPython 3.13.14). The port stores the post-first-`;` marker text verbatim instead of merging everything into one `and`ed marker. Parity, not a logical divergence: both forms carry the `extra ==` condition so the port skips them identically, and the reference itself drops the double-semicolon string as InvalidRequirement, so findings are unaffected either way. Pinned by emission-path tests."
+reason = "For a requires.txt requirement that already carries a marker inside a named extra section, the reference (`_convert_egg_info_reqs_to_simple_reqs` in CPython's importlib.metadata, still used by rpmlint 2.10.0's `Distribution.requires` for egg-info) appends the section condition as a second `;`-part verbatim: `w6extra; python_version > \"3.9\"; (sys_platform == \"linux\") and extra == \"extra\"` (verified against CPython 3.13.14). The port stores the post-first-`;` marker text verbatim instead of merging everything into one `and`ed marker. Parity, not a logical divergence: both forms carry the `extra ==` condition, which the leftover evaluator treats as not holding (`extra` is never provided), and the reference itself drops the double-semicolon string as InvalidRequirement, so findings are unaffected either way. Pinned by emission-path tests."
 since = "0.1.0"
 
 [[divergence]]
@@ -743,6 +743,7 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+
 check = "DocCheck"
 kind = "behaviour"
 reason = "package-with-huge-docs is skipped for package names ending in a configured ExemptDocSuffixes entry (default -javadoc). The reference has no such exemption (rpm-software-management/rpmlint#555 is still open) and flags 100%-docs javadoc packages."
@@ -769,4 +770,11 @@ case = "global"
 check = "AppDataCheck"
 kind = "behaviour"
 reason = "For an appdata file declaring an unknown encoding (e.g. <?xml version=\"1.0\" encoding=\"x-bogus\"?>), the reference's ElementTree.parse raises LookupError, which AppDataCheck.py:35 does not catch, so the whole run aborts via lint.py:293 (sys.exit(3)). The port's native fallback reads the file as UTF-8 and emits nothing. Same reference-abort family as the polkit LookupError case."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "PythonCheck"
+kind = "behaviour"
+reason = "Environment markers for PEP 508 `default_environment()` keys the port does not evaluate (`implementation_name`, `implementation_version`, `platform_machine`, `platform_release`, `platform_version`, `python_full_version`, `platform_python_implementation`) fail closed: the requirement is treated as not wanted, which can emit `python-leftover-require` where the reference - evaluating the real environment - stays quiet. `python_version`, `sys_platform`, `os_name` ('posix'), `platform_system` ('Linux') and `extra` (evaluated against \"\") match the reference exactly (`PythonCheck.py:139-143`). Pinned by `marker_pinned_linux_environment`."
 since = "0.1.0"

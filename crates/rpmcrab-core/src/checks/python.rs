@@ -251,7 +251,8 @@ impl PythonCheck {
 
     /// Evaluate the common environment markers. Unknown markers are treated
     /// as holding (the reference evaluates the full PEP 508 environment; we
-    /// cover `python_version`, `sys_platform`, and `extra`).
+    /// cover `python_version`, `sys_platform`, `os_name`, `platform_system`,
+    /// and `extra`).
     ///
     /// For the missing-requirement check the reference skips any requirement
     /// whose marker mentions `extra` (`'extra' in str(req.marker)`), so an
@@ -294,8 +295,13 @@ impl PythonCheck {
     }
 
     /// Evaluate a single non-boolean marker comparison (no `and`/`or`/`not`).
-    /// Unknown markers are treated as holding; malformed markers are
-    /// fail-closed (false), matching `packaging`.
+    /// The reference evaluates markers with the full PEP 508 environment,
+    /// pinning `os_name='posix'` and `platform_system='Linux'`
+    /// (`PythonCheck.py:139-143`); the port mirrors that for the keys it
+    /// knows and fails closed for the remaining `default_environment()`
+    /// keys (ledgered in `divergences.toml`). A variable that is not a PEP
+    /// 508 environment key is still treated as holding. Malformed markers
+    /// are fail-closed (false), matching `packaging`.
     fn marker_atom_holds(atom: &str, python_version: &str) -> bool {
         let atom = atom.trim();
         if Self::is_malformed_marker(atom) {
@@ -321,12 +327,55 @@ impl PythonCheck {
                 _ => true,
             };
         }
+        // `extra` is never provided: `packaging` evaluates markers with
+        // `extra == ""`, so only `extra == ""` holds.
+        if let Some(holds) = Self::string_marker_holds(atom, "extra", "") {
+            return holds;
+        }
         // sys_platform, e.g. `sys_platform != "win32"`.
         if atom.contains("sys_platform") {
             // We are always on Linux here.
             return !atom.contains("win32") || atom.contains("!=");
         }
+        // The port only ever runs on Linux, mirroring the reference's
+        // pinned environment.
+        if let Some(holds) = Self::string_marker_holds(atom, "os_name", "posix") {
+            return holds;
+        }
+        if let Some(holds) = Self::string_marker_holds(atom, "platform_system", "Linux") {
+            return holds;
+        }
+        // The remaining `default_environment()` keys are not evaluated:
+        // fail closed rather than guess.
+        for key in [
+            "implementation_name",
+            "implementation_version",
+            "platform_machine",
+            "platform_release",
+            "platform_version",
+            "python_full_version",
+            "platform_python_implementation",
+        ] {
+            if atom.contains(key) {
+                return false;
+            }
+        }
         true
+    }
+
+    /// Evaluate a `var == "value"` / `var != "value"` comparison against a
+    /// pinned value. Returns `None` when the atom is not such a comparison.
+    fn string_marker_holds(atom: &str, var: &str, pinned: &str) -> Option<bool> {
+        let pattern = format!(r#"{var}\s*(==|!=)\s*["']([^"']*)["']"#);
+        let re = Regex::new(&pattern).expect("static regex");
+        let caps = re.captures(atom).ok().flatten()?;
+        let op = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        let want = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+        match op {
+            "==" => Some(want == pinned),
+            "!=" => Some(want != pinned),
+            _ => None,
+        }
     }
 
     /// Evaluate a marker for the leftover-requirements check.
@@ -334,17 +383,10 @@ impl PythonCheck {
     /// Unlike [`Self::marker_holds`], the reference does not skip
     /// extra-marked requirements here: it evaluates the marker with the
     /// full PEP 508 environment. `extra` is never provided, so
-    /// `extra == "..."` is false and `extra != "..."` is true
-    /// (verified against `packaging.markers`).
+    /// [`Self::marker_atom_holds`] evaluates `extra` comparisons against
+    /// `""` (verified against `packaging.markers`).
     fn marker_holds_leftover(marker: &str, python_version: &str) -> bool {
-        // Substitute extra comparisons with their truth values, then
-        // evaluate the boolean combination.
-        let extra_eq = Regex::new(r#"extra\s*==\s*["'][^"']*["']"#).expect("static regex");
-        let extra_ne = Regex::new(r#"extra\s*!=\s*["'][^"']*["']"#).expect("static regex");
-        let substituted = extra_eq.replace_all(marker, "false");
-        let substituted = extra_ne.replace_all(&substituted, "true");
-        let substituted = substituted.into_owned();
-        Self::eval_marker_expr(&substituted, python_version)
+        Self::eval_marker_expr(marker, python_version)
     }
 
     /// Strip one layer of parentheses, returning `None` unless the `(` at
@@ -382,8 +424,7 @@ impl PythonCheck {
     }
 
     /// Evaluate a boolean marker expression with `and`/`or`/`not` over the
-    /// single comparisons [`Self::marker_atom_holds`] understands, plus the
-    /// `true`/`false` literals substituted for `extra` comparisons.
+    /// single comparisons [`Self::marker_atom_holds`] understands.
     fn eval_marker_expr(expr: &str, python_version: &str) -> bool {
         let expr = expr.trim();
         // Fail-closed on malformed markers, matching `packaging`.
@@ -718,13 +759,10 @@ mod tests {
         let reqs = PythonCheck::parse_requirements(content, true, "3.12");
         let findings = check_requirements_findings(&reqs, &["python3-w6extra"]);
         assert_eq!(findings.len(), 1, "unexpected findings: {findings:?}");
-        assert_eq!(findings[0].0, "python-leftover-require");
-        assert!(findings[0].1.contains(": W: "), "level: {}", findings[0].1);
-        assert!(
-            findings[0].1.contains("python3-w6extra"),
-            "detail: {}",
-            findings[0].1
-        );
+        let (name, level, line) = &findings[0];
+        assert_eq!(name, "python-leftover-require");
+        assert_eq!(*level, Level::Warning);
+        assert!(line.contains("python3-w6extra"), "detail: {line}");
 
         // `extra != "test"` holds, so the requirement is wanted: no leftover.
         let content = "Metadata-Version: 2.1\nRequires-Dist: w6extra; extra != \"test\"\n";
@@ -737,9 +775,9 @@ mod tests {
     fn marker_boolean_evaluator_handles_parenthesised_operands() {
         // Direct tests for the `and`/`or` evaluator added by this change.
         // Expected values verified against `packaging` with
-        // python_version=3.12, os_name=posix. The port treats unknown
-        // markers (`os_name`) as holding, so the false cases below use
-        // only `python_version` atoms to stay comparable.
+        // python_version=3.12, os_name=posix. `os_name`/`platform_system`
+        // are pinned to the reference's Linux environment, so the cases
+        // below are comparable on both sides.
         let cases = [
             ("(python_version >= \"3.9\") or (os_name == \"nt\")", true),
             (
@@ -801,13 +839,65 @@ mod tests {
         let reqs = PythonCheck::parse_requirements(content, true, "3.12");
         let findings = check_requirements_findings(&reqs, &["python3-w6paren"]);
         assert_eq!(findings.len(), 1, "unexpected findings: {findings:?}");
-        assert_eq!(findings[0].0, "python-leftover-require");
-        assert!(findings[0].1.contains(": W: "), "level: {}", findings[0].1);
-        assert!(
-            findings[0].1.contains("python3-w6paren"),
-            "detail: {}",
-            findings[0].1
-        );
+        let (name, level, line) = &findings[0];
+        assert_eq!(name, "python-leftover-require");
+        assert_eq!(*level, Level::Warning);
+        assert!(line.contains("python3-w6paren"), "detail: {line}");
+    }
+
+    #[test]
+    fn leftover_empty_extra_marker_holds() {
+        // `packaging` evaluates markers with `extra == ""`, so
+        // `extra == ""` holds and the requirement is wanted: no leftover.
+        // The old substitution treated every `extra == "<anything>"` as
+        // false, emitting a false `python-leftover-require`. Expected
+        // values verified against `packaging.markers`.
+        assert!(PythonCheck::marker_holds_leftover("extra == \"\"", "3.12"));
+        assert!(!PythonCheck::marker_holds_leftover("extra != \"\"", "3.12"));
+        assert!(!PythonCheck::marker_holds_leftover(
+            "extra == \"test\"",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_holds_leftover(
+            "extra != \"test\"",
+            "3.12"
+        ));
+        // Emission path: `extra == ""` holds, so no finding.
+        let content = "Metadata-Version: 2.1\nRequires-Dist: w6ext; extra == \"\"\n";
+        let reqs = PythonCheck::parse_requirements(content, true, "3.12");
+        let findings = check_requirements_findings(&reqs, &["python3-w6ext"]);
+        assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+    }
+
+    #[test]
+    fn marker_pinned_linux_environment() {
+        // The reference pins `os_name='posix'` and `platform_system='Linux'`
+        // (`PythonCheck.py:139-143`); the port only ever runs on Linux.
+        // Expected values verified against `packaging` with the reference
+        // environment.
+        assert!(PythonCheck::marker_atom_holds(
+            "os_name == \"posix\"",
+            "3.12"
+        ));
+        assert!(!PythonCheck::marker_atom_holds("os_name == \"nt\"", "3.12"));
+        assert!(PythonCheck::marker_atom_holds("os_name != \"nt\"", "3.12"));
+        assert!(PythonCheck::marker_atom_holds(
+            "platform_system == \"Linux\"",
+            "3.12"
+        ));
+        assert!(!PythonCheck::marker_atom_holds(
+            "platform_system == \"Windows\"",
+            "3.12"
+        ));
+        // The remaining `default_environment()` keys fail closed.
+        assert!(!PythonCheck::marker_atom_holds(
+            "platform_machine == \"x86_64\"",
+            "3.12"
+        ));
+        assert!(!PythonCheck::marker_atom_holds(
+            "python_full_version == \"3.12.1\"",
+            "3.12"
+        ));
     }
 
     #[test]
