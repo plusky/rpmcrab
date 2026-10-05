@@ -15,6 +15,7 @@
 use std::path::Path;
 
 use fancy_regex::Regex;
+use std::sync::OnceLock;
 
 use crate::check::{Check, add_info};
 use crate::checks::is_match;
@@ -52,32 +53,39 @@ impl PythonCheck {
     }
 
     /// `(regex, key)` for warning paths.
-    fn warn_paths() -> Vec<(Regex, &'static str)> {
-        vec![
-            (
-                Regex::new(&format!("{}/[^/]+/docs?$", Self::sitelib_pattern())).expect("static"),
-                "doc",
-            ),
-            (Regex::new(r".*/\.doctrees$").expect("static"), "sphinx"),
-        ]
+    fn warn_paths() -> &'static [(Regex, &'static str)] {
+        static WARN_PATHS: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
+        WARN_PATHS.get_or_init(|| {
+            vec![
+                (
+                    Regex::new(&format!("{}/[^/]+/docs?$", Self::sitelib_pattern()))
+                        .expect("static"),
+                    "doc",
+                ),
+                (Regex::new(r".*/\.doctrees$").expect("static"), "sphinx"),
+            ]
+        })
     }
 
     /// `(regex, key)` for error paths.
-    fn err_paths() -> Vec<(Regex, &'static str)> {
-        vec![
-            (
-                Regex::new(&format!("{}/tests?$", Self::sitelib_pattern())).expect("static"),
-                "tests",
-            ),
-            (
-                Regex::new(&format!("{}/docs?$", Self::sitelib_pattern())).expect("static"),
-                "doc",
-            ),
-            (
-                Regex::new(&format!("{}/src$", Self::sitelib_pattern())).expect("static"),
-                "src",
-            ),
-        ]
+    fn err_paths() -> &'static [(Regex, &'static str)] {
+        static ERR_PATHS: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
+        ERR_PATHS.get_or_init(|| {
+            vec![
+                (
+                    Regex::new(&format!("{}/tests?$", Self::sitelib_pattern())).expect("static"),
+                    "tests",
+                ),
+                (
+                    Regex::new(&format!("{}/docs?$", Self::sitelib_pattern())).expect("static"),
+                    "doc",
+                ),
+                (
+                    Regex::new(&format!("{}/src$", Self::sitelib_pattern())).expect("static"),
+                    "src",
+                ),
+            ]
+        })
     }
 
     /// Name variants: the name itself plus `-`/`_` swaps, plus
@@ -211,8 +219,11 @@ impl PythonCheck {
             return false;
         }
         // python_version comparisons, e.g. `python_version < "3.10"`.
-        let pv_re = Regex::new(r#"python_version\s*(==|!=|<=|>=|<|>)\s*["']([\d.]+)["']"#)
-            .expect("static regex");
+        static PV_RE: OnceLock<Regex> = OnceLock::new();
+        let pv_re = PV_RE.get_or_init(|| {
+            Regex::new(r#"python_version\s*(==|!=|<=|>=|<|>)\s*["']([\d.]+)["']"#)
+                .expect("static regex")
+        });
         if let Some(caps) = pv_re.captures(marker).ok().flatten() {
             let op = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let want = caps.get(2).map(|m| m.as_str()).unwrap_or("");
@@ -245,7 +256,9 @@ impl PythonCheck {
         {
             version = v.to_string();
         }
-        let sitelib_re = Regex::new(Self::sitelib_pattern()).expect("static regex");
+        static SITELIB_RE: OnceLock<Regex> = OnceLock::new();
+        let sitelib_re =
+            SITELIB_RE.get_or_init(|| Regex::new(Self::sitelib_pattern()).expect("static regex"));
         if let Some(caps) = sitelib_re.captures(filename).ok().flatten()
             && let Some(v) = caps.get(1)
         {
@@ -300,8 +313,11 @@ impl Check for PythonCheck {
 
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
         self.pyc_version = None;
-        let egg_info_re = Regex::new(r".*egg-info$").expect("static regex");
-        let pyc_re = Regex::new(r"cpython-(\d+)").expect("static regex");
+        static EGG_INFO_RE: OnceLock<Regex> = OnceLock::new();
+        static PYC_RE: OnceLock<Regex> = OnceLock::new();
+        let egg_info_re =
+            EGG_INFO_RE.get_or_init(|| Regex::new(r".*egg-info$").expect("static regex"));
+        let pyc_re = PYC_RE.get_or_init(|| Regex::new(r"cpython-(\d+)").expect("static regex"));
         let file_names: Vec<&str> = pkg.files.iter().map(|f| f.name.as_str()).collect();
 
         for pkgfile in &pkg.files {
@@ -329,7 +345,7 @@ impl Check for PythonCheck {
                 self.check_requirements(pkg, out, &reqs, &python_version);
                 continue;
             }
-            if is_match(&egg_info_re, filename) {
+            if is_match(egg_info_re, filename) {
                 // The legacy distutils layout is a plain file named
                 // `*.egg-info`; the reference flags it with `is_file()`.
                 let full = Path::new(pkg.dir_name()).join(filename.trim_start_matches('/'));
@@ -345,8 +361,8 @@ impl Check for PythonCheck {
                 continue;
             }
 
-            for (re, key) in Self::warn_paths() {
-                if is_match(&re, filename) {
+            for &(ref re, key) in Self::warn_paths() {
+                if is_match(re, filename) {
                     if key == "doc" {
                         let module_file = format!("{filename}/__init__.py");
                         if file_names.contains(&module_file.as_str()) {
@@ -370,8 +386,8 @@ impl Check for PythonCheck {
                     }
                 }
             }
-            for (re, key) in Self::err_paths() {
-                if is_match(&re, filename) {
+            for &(ref re, key) in Self::err_paths() {
+                if is_match(re, filename) {
                     let finding = match key {
                         "tests" => "python-tests-in-site-packages",
                         "doc" => "python-doc-in-site-packages",
@@ -410,6 +426,8 @@ impl Check for PythonCheck {
         Some(self.checked_files)
     }
 }
+
+static PYTHON_NAME_RE: OnceLock<Regex> = OnceLock::new();
 
 impl PythonCheck {
     /// Check parsed requirements against the RPM requires.
@@ -457,7 +475,8 @@ impl PythonCheck {
             wanted.extend(Self::module_names(&req.name, &req.extras));
         }
         let wanted: Vec<String> = wanted.iter().map(|n| n.to_lowercase()).collect();
-        let py_re = Regex::new(r"^python\d*-(?P<name>.+)$").expect("static regex");
+        let py_re = PYTHON_NAME_RE
+            .get_or_init(|| Regex::new(r"^python\d*-(?P<name>.+)$").expect("static regex"));
         for req in &pkg.req_names {
             let Some(caps) = py_re.captures(req).ok().flatten() else {
                 continue;

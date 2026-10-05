@@ -2327,6 +2327,30 @@ def is_ledgered(module, name, entries):
 # Main
 # ---------------------------------------------------------------------------
 
+def missing_check_names(entries):
+    """Names of checks with kind="missing" ledger entries. Shared by main()
+    and the test suite so drift in the construction is caught."""
+    return {e.get("check") for e in entries if e.get("kind") == "missing"}
+
+
+def is_stale_entry(module, name, missing_modules, port_templates):
+    """Whether a ledger entry is stale: the check is marked missing but the
+    port now implements it with an exact (non-wildcard) pattern for this
+    finding.
+
+    Both the module AND the finding name are checked against missing_modules:
+    all 6 kind="missing" entries are currently keyed by finding name
+    (inaccessible-filename, lengthy-symlink,
+    info-files-without-install-info-postin/-postun, sourced-script-with-shebang,
+    symlink-contains-up-and-down-segments). Dropping the name half of the
+    disjunction would let a name-keyed entry whose finding the port now emits
+    go undetected.
+    """
+    return (module in missing_modules or name in missing_modules) and any(
+        "*" not in p and p == name for p in port_templates
+    )
+
+
 def main(argv):
     args = [a for a in argv[1:] if not a.startswith("--")]
     opts = {a.split("=")[0]: (a.split("=", 1)[1] if "=" in a else True)
@@ -2360,7 +2384,7 @@ def main(argv):
     # A check is unmapped regardless of whether any of its findings happen to be
     # covered, so derive this before the loop rather than while iterating.
     unscoped = unscoped_modules({module for module, _ in findings}, check_map)
-    missing_modules = {e.get("check") for e in entries if e.get("kind") == "missing"}
+    missing_modules = missing_check_names(entries)
     for module, name in sorted(findings):
         if covers_finding(module, name, by_module, port_templates, check_map):
             # A kind="missing" entry must not be able to silence a module the
@@ -2369,9 +2393,7 @@ def main(argv):
             # Only an EXACT port pattern counts here. A wildcard template such
             # as `empty-*` "covers" every `empty-` name, including ones no port
             # check emits, so it would report staleness that is not there.
-            if (module in missing_modules or name in missing_modules) and any(
-                "*" not in p and p == name for p in port_templates
-            ):
+            if is_stale_entry(module, name, missing_modules, port_templates):
                 stale.append((module, name))
             continue
         if is_ledgered(module, name, entries):

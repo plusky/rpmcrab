@@ -6,6 +6,25 @@
 //! reference at the pinned commit misattributes hardlinks in mixed
 //! hardlink/duplicate groups, reporting the wrong file pair (ledgered).
 //!
+//! `hardlink-across-partition` deliberately diverges from the reference's
+//! trigger (upstream #771): the reference warns whenever the first two
+//! path directories differ, which false-positives on e.g. `/usr/bin` vs
+//! `/usr/lib64` — inseparable post-usr-merge. Device metadata cannot
+//! replace the heuristic: rpmbuild flattens it on purpose (FILERDEVS is
+//! `st_rdev`, 0 for regular files; FILEDEVICES is `1` for every file —
+//! rpm's `build/files.c` stores `fl_dev ? 1 : 0`, verified as `1 1 1` on
+//! a real package; FILEINODES are remapped to filelist order preserving
+//! only hardlink identity), so no per-device signal survives in the
+//! package. The port therefore keeps a path heuristic but narrows it to
+//! the top-level directory: only hardlinks spanning genuinely separable
+//! trees (`/usr` vs `/var`) are reported. The `files-duplicate`
+//! cross-directory suppression uses the same narrowed definition, since
+//! it encodes the same "can't be hardlinked anyway" assumption — and
+//! because `files-duplicated-waste` accumulates the same suppressed
+//! `diff`, its total shifts in lockstep: the port reports it with a
+//! larger total where the reference's two-level suppression keeps the
+//! package under the threshold (ledgered as a `detail` divergence).
+//!
 //! Four findings: `hardlink-across-partition` (E),
 //! `hardlink-across-config-files` (E), `files-duplicate` (W),
 //! `files-duplicated-waste` (E).
@@ -47,13 +66,20 @@ impl DuplicatesCheck {
         Self { min_size }
     }
 
-    /// First two directories of the path (`_get_prefix`).
-    fn get_prefix(name: &str) -> String {
-        let parts: Vec<&str> = name.split('/').collect();
-        if parts.len() == 3 {
-            parts[0..2].join("/")
-        } else {
-            parts[0..3.min(parts.len())].join("/")
+    /// First directory of the path: `/usr` for `/usr/bin/foo`.
+    ///
+    /// Cross-partition detection cannot consult device numbers — rpmbuild
+    /// deliberately flattens them (see the module docs) — so the check
+    /// stays a path heuristic. Only the top-level directory is compared:
+    /// subdirectories of one top-level tree (e.g. `/usr/bin` vs
+    /// `/usr/lib64`) cannot live on different partitions in any supported
+    /// layout (upstream #771), while distinct top-level trees (`/usr` vs
+    /// `/var`) genuinely can.
+    fn get_topdir(name: &str) -> &str {
+        let rest = name.strip_prefix('/').unwrap_or(name);
+        match rest.find('/') {
+            Some(idx) => &name[..name.len() - rest.len() + idx],
+            None => name,
         }
     }
 
@@ -63,7 +89,8 @@ impl DuplicatesCheck {
     /// Implements the #1603 fix: within each md5 group, files are further
     /// grouped by `(rdev, inode)` so hardlinked files are told apart from
     /// genuine duplicates, and hardlink findings are reported per inode
-    /// group even in mixed groups.
+    /// group even in mixed groups. `hardlink-across-partition` fires only
+    /// when a hardlink group's paths span top-level directories (#771).
     fn find_duplicates(
         files: &[&PkgFile],
         min_size: u64,
@@ -116,10 +143,10 @@ impl DuplicatesCheck {
                 let group_first_idx = group_sorted.pop().unwrap();
                 let group_first = files[group_first_idx];
                 let group_first_is_config = is_config(&group_first.name);
-                let group_prefix = Self::get_prefix(&group_first.name);
+                let group_topdir = Self::get_topdir(&group_first.name);
                 for &di in &group_sorted {
                     let dup = files[di];
-                    if group_prefix != Self::get_prefix(&dup.name) {
+                    if group_topdir != Self::get_topdir(&dup.name) {
                         out.push(DuplicateFinding::HardlinkAcrossPartition(
                             group_first.name.clone(),
                             dup.name.clone(),
@@ -143,9 +170,13 @@ impl DuplicatesCheck {
 
             if diff > 0 {
                 let mut diff = diff;
-                let prefix = Self::get_prefix(&first.name);
+                let topdir = Self::get_topdir(&first.name);
                 for &di in &duplicates {
-                    if prefix != Self::get_prefix(&files[di].name) {
+                    // Duplicates under a different top-level directory
+                    // cannot be hardlinked together, so they do not count
+                    // as wasted space (#771: same narrowed definition as
+                    // the hardlink-across-partition trigger).
+                    if topdir != Self::get_topdir(&files[di].name) {
                         diff -= 1;
                     }
                 }
@@ -308,7 +339,7 @@ mod tests {
         // and reports the true hardlink pair (a, b).
         let files = [
             pkgfile("/usr/bin/a", "aaa", 100, 1),
-            pkgfile("/opt/bin/b", "aaa", 100, 1), // hardlink to a, other prefix
+            pkgfile("/opt/bin/b", "aaa", 100, 1), // hardlink to a, other topdir
             pkgfile("/usr/bin/c", "aaa", 100, 2), // genuine duplicate
         ];
         let refs: Vec<&PkgFile> = files.iter().collect();
@@ -327,8 +358,109 @@ mod tests {
     }
 
     #[test]
-    fn get_prefix_two_dirs() {
-        assert_eq!(DuplicatesCheck::get_prefix("/usr/bin/foo"), "/usr/bin");
-        assert_eq!(DuplicatesCheck::get_prefix("/a"), "/a");
+    fn hardlink_within_one_topdir_is_quiet_771() {
+        // Upstream #771: hardlinking /usr/bin against /usr/lib64 must not
+        // report hardlink-across-partition — the two directories cannot live
+        // on different partitions post-usr-merge. The reference's two-level
+        // prefix comparison fires here; the narrowed top-level comparison
+        // stays quiet.
+        let files = [
+            pkgfile("/usr/bin/uic-qt5", "aaa", 100, 7),
+            pkgfile("/usr/lib64/qt5/bin/uic", "aaa", 100, 7),
+        ];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        assert!(
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost).is_empty(),
+            "hardlink inside one top-level directory is not across-partition"
+        );
+    }
+
+    #[test]
+    fn hardlink_across_topdirs_is_reported() {
+        // /usr vs /var are genuinely separable filesystems: still an error.
+        let files = [
+            pkgfile("/usr/bin/a", "aaa", 100, 1),
+            pkgfile("/var/lib/b", "aaa", 100, 1),
+        ];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        assert_eq!(
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost),
+            vec![DuplicateFinding::HardlinkAcrossPartition(
+                "/var/lib/b".into(),
+                "/usr/bin/a".into(),
+            )],
+        );
+    }
+
+    #[test]
+    fn duplicate_within_one_topdir_counts_as_waste() {
+        // #771 applied to the suppression side: /usr/bin vs /usr/lib can be
+        // hardlinked in practice, so the duplicate is actionable waste.
+        // The reference's two-level prefix comparison suppresses it.
+        let files = [
+            pkgfile("/usr/bin/a", "aaa", 100, 1),
+            pkgfile("/usr/lib/b", "aaa", 100, 2),
+        ];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        assert_eq!(
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost),
+            vec![DuplicateFinding::FilesDuplicate(
+                "/usr/lib/b".into(),
+                "/usr/bin/a".into(),
+            )],
+        );
+    }
+
+    #[test]
+    fn duplicate_across_topdirs_stays_suppressed() {
+        // /usr vs /etc cannot be hardlinked together: still suppressed.
+        let files = [
+            pkgfile("/usr/bin/a", "aaa", 100, 1),
+            pkgfile("/etc/cron.d/b", "aaa", 100, 2),
+        ];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        assert!(
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost).is_empty(),
+            "duplicates across top-level directories cannot be linked"
+        );
+    }
+
+    #[test]
+    fn get_topdir_cases() {
+        assert_eq!(DuplicatesCheck::get_topdir("/usr/bin/foo"), "/usr");
+        assert_eq!(
+            DuplicatesCheck::get_topdir("/usr/lib64/qt5/bin/uic"),
+            "/usr"
+        );
+        assert_eq!(DuplicatesCheck::get_topdir("/var/lib/foo"), "/var");
+        assert_eq!(DuplicatesCheck::get_topdir("/a"), "/a");
+        assert_eq!(DuplicatesCheck::get_topdir("usr/bin/foo"), "usr");
+    }
+
+    #[test]
+    fn waste_total_follows_narrowed_suppression() {
+        // #771: three same-content files, one per /usr subtree. The
+        // reference's two-level prefix suppression zeroes `diff` and the
+        // waste total; the narrowed top-level comparison keeps both, so
+        // 2 * 60000 = 120000 exceeds the threshold and the port reports
+        // E: files-duplicated-waste with that total. Restoring the
+        // two-level suppression, or raising the threshold, must fail
+        // this test.
+        let files = [
+            pkgfile("/usr/bin/x", "aaa", 60_000, 1),
+            pkgfile("/usr/lib/y", "aaa", 60_000, 2),
+            pkgfile("/usr/share/z", "aaa", 60_000, 3),
+        ];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        assert_eq!(
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost),
+            vec![
+                DuplicateFinding::FilesDuplicate(
+                    "/usr/share/z".into(),
+                    "/usr/bin/x:/usr/lib/y".into(),
+                ),
+                DuplicateFinding::FilesDuplicatedWaste(120_000),
+            ],
+        );
     }
 }

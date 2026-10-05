@@ -871,6 +871,49 @@ def test_renamed_systemd_producer_makes_the_site_unresolved():
     assert [u[2] for u in unresolved] == ["finding"], unresolved
 
 
+def test_stale_check_catches_name_keyed_entry():
+    # The staleness check must mark an entry stale when the port emits the
+    # finding of a kind="missing" ledger entry. The corpus pins the shape:
+    # all 6 current missing entries are keyed by finding name (case
+    # "global") -- there is no module-keyed missing entry, so the test
+    # drives the mechanism with the real ledger rather than a synthetic
+    # module set. (The module arm of the disjunction has no live data
+    # behind it; nothing here pretends otherwise.)
+    mod = _load()
+    ledger = mod.load_ledger(os.path.join(
+        os.path.dirname(HERE), "tests", "parity", "divergences.toml"))
+    missing = [e for e in ledger if e.get("kind") == "missing"]
+    names = {e.get("check") for e in missing}
+    assert names == {
+        "inaccessible-filename",
+        "lengthy-symlink",
+        "info-files-without-install-info-postin",
+        "info-files-without-install-info-postun",
+        "sourced-script-with-shebang",
+        "symlink-contains-up-and-down-segments",
+    }, names
+    assert all(e.get("case") == "global" for e in missing), [
+        (e.get("case"), e.get("check")) for e in missing]
+    # missing_modules exactly as main() builds it (shared helper, so drift
+    # in either direction breaks this test).
+    missing_modules = mod.missing_check_names(ledger)
+    for name in sorted(names):
+        # A finding whose NAME matches a name-keyed missing entry, but whose
+        # MODULE does not, IS stale (with exact pattern).
+        assert mod.is_stale_entry(
+            "SomeOtherCheck", name, missing_modules, {name}
+        ), f"name-keyed match should be stale: {name}"
+    # A wildcard template must not count even when it literally equals the
+    # finding name: only exact non-wildcard patterns mark an entry stale.
+    # This pins the "*" not in p guard -- deleting it makes this fail, while
+    # the old form (template "inaccessible-*" vs name "inaccessible-filename")
+    # passed vacuously since p == name was already false.
+    star_name = "inaccessible-filen*me"
+    assert not mod.is_stale_entry(
+        "SomeOtherCheck", star_name, missing_modules | {star_name}, {star_name}
+    ), f"wildcard template should not mark stale: {star_name}"
+
+
 def main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]
