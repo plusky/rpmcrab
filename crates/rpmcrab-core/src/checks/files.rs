@@ -3197,10 +3197,14 @@ mod tests {
             &fixture_path("filescheck-installinfo-nopostin-1.0-1.noarch.rpm"),
             &config,
         );
-        let (name, level, line) = triples
+        // Count, not just presence: Filter::add_info does not dedupe,
+        // so a doubled emission would slip past .find().
+        let hits: Vec<_> = triples
             .iter()
-            .find(|(n, _, _)| n == "info-files-without-install-info-postin")
-            .expect("info-files-without-install-info-postin");
+            .filter(|(n, _, _)| n == "info-files-without-install-info-postin")
+            .collect();
+        assert_eq!(hits.len(), 1, "exactly one emission: {triples:?}");
+        let (name, level, line) = hits[0];
         assert_eq!(name, "info-files-without-install-info-postin");
         assert_eq!(*level, Level::Error);
         assert!(
@@ -3218,10 +3222,14 @@ mod tests {
             &fixture_path("filescheck-installinfo-nopostun-1.0-1.noarch.rpm"),
             &config,
         );
-        let (name, level, line) = triples
+        // Count, not just presence: Filter::add_info does not dedupe,
+        // so a doubled emission would slip past .find().
+        let hits: Vec<_> = triples
             .iter()
-            .find(|(n, _, _)| n == "info-files-without-install-info-postun")
-            .expect("info-files-without-install-info-postun");
+            .filter(|(n, _, _)| n == "info-files-without-install-info-postun")
+            .collect();
+        assert_eq!(hits.len(), 1, "exactly one emission: {triples:?}");
+        let (name, level, line) = hits[0];
         assert_eq!(name, "info-files-without-install-info-postun");
         assert_eq!(*level, Level::Error);
         assert!(

@@ -11,7 +11,7 @@
 #       (expects E info-files-without-install-info-postun).
 #
 # Usage: bash tests/parity/pkg/inputs/build-installinfo-fixtures.sh
-# Needs: podman, an openSUSE container image with rpm-build
+# Needs: podman (or PODMAN=/path/to/podman), an openSUSE container image with rpm-build
 # Output: tests/parity/pkg/inputs/filescheck-installinfo-nopostin-1.0-1.noarch.rpm
 #         tests/parity/pkg/inputs/filescheck-installinfo-nopostun-1.0-1.noarch.rpm
 set -euo pipefail
@@ -20,6 +20,8 @@ here="$(cd "$(dirname "$0")" && pwd)"
 work="$HOME/.rpmbuild-fixture-work"
 rm -rf "$work"
 mkdir -p "$work/rpmbuild"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+
+podman_bin="${PODMAN:-podman}"
 
 build_one() {
     local name="$1" post="$2" postun="$3"
@@ -47,8 +49,7 @@ echo "dummy info file" > %{buildroot}/usr/share/info/foo.info
 %files
 /usr/share/info/foo.info
 EOF
-    podman() { /opt/homebrew/bin/podman "$@"; }
-    podman run --rm \
+    "$podman_bin" run --rm \
         -v "$work/rpmbuild:/rpmbuild:z" \
         registry.opensuse.org/opensuse/tumbleweed:latest \
         bash -c "zypper -n in -y rpm-build >/dev/null 2>&1; rpmbuild --define '_topdir /rpmbuild' --nosignature -bb /rpmbuild/SPECS/fixture.spec" >/dev/null
