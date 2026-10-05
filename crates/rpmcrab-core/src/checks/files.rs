@@ -2615,6 +2615,15 @@ impl FilesCheck {
         }
         // sourced scripts should not be executable
         if is_match(&self.sourced_script_re, fname) {
+            if let Some(interpreter) = fd.interpreter.as_deref() {
+                add_info(
+                    out,
+                    Level::Error,
+                    pkg,
+                    "sourced-script-with-shebang",
+                    &[fname, interpreter, &fd.interpreter_args],
+                );
+            }
             if mode_is_exec {
                 add_info(
                     out,
@@ -2900,6 +2909,59 @@ mod tests {
         assert_has(&names, "dir-or-file-in-opt");
         // no read errors: extraction works
         assert_lacks(&names, "read-error");
+    }
+
+    #[test]
+    fn sourced_script_with_shebang_pins_name_level_and_detail() {
+        // A sourced script (profile.d) carrying a shebang is an Error naming
+        // the file and its interpreter; the executable variant additionally
+        // fires executable-sourced-script. The shebang-less and .pm controls
+        // stay silent (the perl-module shebang exception).
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let rpm = fixture_path("w6-sourced-script-1.0-1.noarch.rpm");
+        let pkg = Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let levels = out.result_levels().to_vec();
+        let findings: Vec<(String, Level, String)> = out
+            .results()
+            .iter()
+            .zip(levels)
+            .map(|((name, detail), level)| (name.clone(), level, detail.clone()))
+            .collect();
+        let mut details: Vec<&str> = findings
+            .iter()
+            .filter(|(name, _, _)| name == "sourced-script-with-shebang")
+            .map(|(_, level, detail)| {
+                assert_eq!(*level, Level::Error, "sourced-script-with-shebang is E");
+                detail.as_str()
+            })
+            .collect();
+        details.sort_unstable();
+        assert_eq!(
+            details,
+            [
+                "w6-sourced-script.noarch: E: sourced-script-with-shebang /etc/profile.d/w6-exec.sh /bin/sh",
+                "w6-sourced-script.noarch: E: sourced-script-with-shebang /etc/profile.d/w6-shebang.sh /bin/sh",
+            ],
+            "name+level+detail: {findings:?}"
+        );
+        let exec: Vec<_> = findings
+            .iter()
+            .filter(|(name, _, _)| name == "executable-sourced-script")
+            .collect();
+        assert_eq!(exec.len(), 1, "only the executable variant: {findings:?}");
+        assert!(exec[0].2.contains("w6-exec.sh"), "detail: {}", exec[0].2);
+        for (name, _, detail) in &findings {
+            if name == "sourced-script-with-shebang" || name == "executable-sourced-script" {
+                assert!(
+                    !detail.contains("w6-clean.sh") && !detail.contains("w6module.pm"),
+                    "control fired {name}: {detail}"
+                );
+            }
+        }
     }
 
     #[test]

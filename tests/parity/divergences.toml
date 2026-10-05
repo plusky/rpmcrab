@@ -418,13 +418,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "sourced-script-with-shebang"
-kind = "missing"
-reason = "FilesCheck flags sourced scripts (profile.d et al.) that carry a shebang; the sourced-script analysis is not ported yet."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "symlink-contains-up-and-down-segments"
 kind = "missing"
 reason = "FilesCheck flags symlinks whose target contains '..' segments; the symlink segment analysis is not ported yet."
