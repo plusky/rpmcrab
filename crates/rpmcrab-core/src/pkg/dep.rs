@@ -638,8 +638,14 @@ pub fn parse_dep_expr(s: &str) -> DepExpr {
 }
 
 /// True when `s` is a well-formed rich dependency expression.
+///
+/// Skips the tokenizing parse for strings without parens: the expression
+/// grammar is only entered on a leading `(`, and `parse_simple` always
+/// yields `Simple`, so a paren-less string can never be rich. This keeps
+/// the per-token guards in SpecCheck from allocating a token vec for
+/// every plain dependency name.
 pub fn is_rich_dep_expr(s: &str) -> bool {
-    parse_dep_expr(s).is_rich()
+    s.contains('(') && parse_dep_expr(s).is_rich()
 }
 
 #[cfg(test)]
@@ -860,6 +866,27 @@ mod rich_dep_tests {
         assert_eq!(parse_dep_expr("foo"), simple("foo"));
         assert_eq!(parse_dep_expr("foo-1.2"), simple("foo-1.2"));
         assert!(!is_rich_dep_expr("foo"));
+    }
+
+    #[test]
+    fn rich_check_agrees_with_full_parse() {
+        // The paren short-circuit in `is_rich_dep_expr` must never
+        // diverge from the tokenizing parse it skips.
+        for s in [
+            "",
+            "foo",
+            "foo >= 1.0",
+            "foo(bar)",
+            "(foo)",
+            "(a or b)",
+            "(a >= 1.0 with b < 2.0)",
+            "((a))",
+            "(a",
+            "a)",
+            "()",
+        ] {
+            assert_eq!(is_rich_dep_expr(s), parse_dep_expr(s).is_rich(), "{s:?}");
+        }
     }
 
     #[test]
