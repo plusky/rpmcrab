@@ -8,7 +8,8 @@
 //! then verifies the dependencies in `after_checks`.
 //!
 //! Deliberate divergence (plusky/rpmcrab#74): the per-package maps are keyed
-//! on `(name, arch)`; the rationale is on `devel_order` below.
+//! on `(name, arch)`; the rationale is in the doc comment on the
+//! `devel_order` field below.
 
 use std::collections::HashMap;
 use std::path::Path;
