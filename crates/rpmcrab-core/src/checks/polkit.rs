@@ -620,7 +620,8 @@ mod tests {
         // plusky's #207 review: the strengthened order test above ships
         // beside the nested-defaults divergence entry, but its fixture had
         // no `<defaults>` anywhere, so its `no:no:no` assertions were fed by
-        // the absent-defaults default rather than by per-action scoping —        // the ledgered divergence could be silently fixed or introduced with
+        // the absent-defaults default rather than by per-action scoping —
+        // the ledgered divergence could be silently fixed or introduced with
         // nothing failing. Here the inner action carries its own `<defaults>`
         // with `allow_any=yes` while the outer has none: the port scopes
         // each action to its own `<defaults>`, so the outer stays

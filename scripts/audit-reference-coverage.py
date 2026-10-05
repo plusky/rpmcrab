@@ -2327,6 +2327,12 @@ def is_ledgered(module, name, entries):
 # Main
 # ---------------------------------------------------------------------------
 
+def missing_check_names(entries):
+    """Names of checks with kind="missing" ledger entries. Shared by main()
+    and the test suite so drift in the construction is caught."""
+    return {e.get("check") for e in entries if e.get("kind") == "missing"}
+
+
 def is_stale_entry(module, name, missing_modules, port_templates):
     """Whether a ledger entry is stale: the check is marked missing but the
     port now implements it with an exact (non-wildcard) pattern for this
@@ -2378,7 +2384,7 @@ def main(argv):
     # A check is unmapped regardless of whether any of its findings happen to be
     # covered, so derive this before the loop rather than while iterating.
     unscoped = unscoped_modules({module for module, _ in findings}, check_map)
-    missing_modules = {e.get("check") for e in entries if e.get("kind") == "missing"}
+    missing_modules = missing_check_names(entries)
     for module, name in sorted(findings):
         if covers_finding(module, name, by_module, port_templates, check_map):
             # A kind="missing" entry must not be able to silence a module the
