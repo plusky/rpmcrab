@@ -79,8 +79,12 @@ fn find_top_level(expr: &str, op: &str) -> Option<usize> {
 
 impl PythonCheck {
     /// Fallback `python_version` marker value when `PythonDefaultVersion`
-    /// is not configured (the reference uses the interpreter running
-    /// rpmlint; the port has no interpreter to ask).
+    /// is empty (as in the shipped defaults). The reference evaluates
+    /// markers with the interpreter running rpmlint
+    /// (`platform.python_version_tuple()[:2]`, `PythonCheck.py:140`) and
+    /// never reads this key; the port consults it deliberately so a distro
+    /// can pin the marker-evaluation version via config without rebuilding
+    /// (ledgered under `PythonCheck` in `tests/parity/divergences.toml`).
     const DEFAULT_PYTHON: &'static str = "3.12";
 
     pub fn new(config: &Config) -> Self {
@@ -1012,7 +1016,10 @@ mod tests {
 
     #[test]
     fn marker_python_version_honors_configured_default() {
-        let mut config = Config::default();
+        // Built on the shipped config rather than `Config::default()`: the
+        // empty value there is the branch production actually takes, and the
+        // override must win over it.
+        let mut config = crate::config::load_bundled();
         config.configuration.insert(
             "PythonDefaultVersion".to_string(),
             toml::Value::String("3.9".to_string()),
@@ -1020,6 +1027,78 @@ mod tests {
         let check = PythonCheck::new(&config);
         let version = check.marker_python_version(&[], "/somewhere/foo-1.0.dist-info/METADATA");
         assert_eq!(version, "3.9");
+    }
+
+    #[test]
+    fn shipped_config_empty_python_default_version_falls_back_to_312() {
+        // Pins the branch production actually takes: the shipped
+        // `configdefaults.toml` leaves `PythonDefaultVersion = ""`, so the
+        // empty-string filter in `new` fires and the hardcoded default
+        // applies.
+        let config = crate::config::load_bundled();
+        assert_eq!(
+            config
+                .configuration
+                .get("PythonDefaultVersion")
+                .and_then(toml::Value::as_str),
+            Some(""),
+            "shipped configdefaults.toml must leave PythonDefaultVersion empty"
+        );
+        let check = PythonCheck::new(&config);
+        assert_eq!(check.default_python, PythonCheck::DEFAULT_PYTHON);
+    }
+
+    #[test]
+    fn configured_python_version_drives_marker_evaluation_through_check_binary() {
+        use crate::color::Color;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+
+        // Gated on `python_version < "3.10"`: holds at 3.9, not at 3.11.
+        // The requires.txt lives outside any versioned sitelib path so the
+        // configured default — not a path-embedded version — decides, and
+        // the emission runs through the real `check_binary` path.
+        let content = "unavailable-dep; python_version < \"3.10\"\n";
+        for (version, expect_finding) in [("3.9", true), ("3.11", false)] {
+            let mut config = crate::config::load_bundled();
+            config.configuration.insert(
+                "PythonDefaultVersion".to_string(),
+                toml::Value::String(version.to_string()),
+            );
+            let mut check = PythonCheck::new(&config);
+
+            let mut pkg = fixture_pkg_with_requires(&[]);
+            pkg.requires = Vec::new();
+            let n = SEQ.fetch_add(1, Ordering::SeqCst);
+            let rel = format!("cfgtest-{n}/somelib-1.0.egg-info/requires.txt");
+            let disk = pkg.dir_name().join(&rel);
+            std::fs::create_dir_all(disk.parent().unwrap()).expect("test dirs");
+            std::fs::write(&disk, content).expect("test requires.txt");
+            let mut pf = pkg.files[0].clone();
+            pf.name = format!("/{rel}");
+            pf.path = disk.to_string_lossy().into_owned();
+            pkg.files.push(pf);
+
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_binary(&pkg, &config, &mut out);
+            let missing: Vec<_> = out
+                .results()
+                .iter()
+                .filter(|(name, _)| name == "python-missing-require")
+                .collect();
+            if expect_finding {
+                assert_eq!(missing.len(), 1, "results: {:?}", out.results());
+                assert!(
+                    missing[0].1.contains("W:") && missing[0].1.contains("unavailable-dep"),
+                    "line: {}",
+                    missing[0].1
+                );
+            } else {
+                assert!(missing.is_empty(), "results: {:?}", out.results());
+            }
+            std::fs::remove_dir_all(pkg.dir_name().join(format!("cfgtest-{n}"))).ok();
+        }
     }
 
     #[test]

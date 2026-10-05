@@ -799,3 +799,10 @@ kind = "behaviour"
 reason = "Upstream rpmlint#1156: a new `--format json` CLI flag (and `OutputFormat` config key) emits the run's findings as a machine-readable JSON document (findings sorted like the text report, plus a summary with the footer counters and exit code). The frozen 2.10.0 reference has no structured output. The text wire format is untouched; `--format text` (the default) renders byte-identical output."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/1156"
+
+[[divergence]]
+case = "global"
+check = "PythonCheck"
+kind = "behaviour"
+reason = "The `python_version` marker default is config-driven where the reference is interpreter-driven. The reference (`PythonCheck.py:140`) evaluates markers with `platform.python_version_tuple()[:2]` -- the interpreter actually running rpmlint -- and never reads `PythonDefaultVersion` (its only reference consumer is `FilesCheck.py:377`, for pyc magic, already wired in the port). The port reads `PythonDefaultVersion` from the config instead: the shipped `configdefaults.toml` leaves it `\"\"`, which the port maps to the hardcoded `3.12` fallback, so out of the box markers evaluate at 3.12 (the reference venv here is 3.13, so the effective versions already differ). This is a deliberate divergence, not a parity gap: a distro -- e.g. an SLE release -- can pin the marker-evaluation Python version via config without rebuilding the binary. A non-default `PythonDefaultVersion` value has no reference counterpart; rpmlint keeps using its interpreter."
+since = "0.1.0"
