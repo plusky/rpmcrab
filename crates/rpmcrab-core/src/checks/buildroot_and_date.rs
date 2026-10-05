@@ -199,8 +199,11 @@ mod tests {
         use std::process::Command;
         use time::{OffsetDateTime, UtcOffset};
 
-        // Child mode: print `today_string()` for the parent to read.
-        if std::env::var("RPMCRAB_TZ_PROBE_CHILD").is_ok() {
+        // Child mode: print `today_string()` for the parent to read. The
+        // value must be exactly "1": merely being set (e.g. a stray export in
+        // the ambient environment) must not divert the parent into the child
+        // path, where the test would pass trivially.
+        if std::env::var("RPMCRAB_TZ_PROBE_CHILD").as_deref() == Ok("1") {
             // Fail loudly when the zone does not resolve: without tzdata
             // `now_local()` silently falls back to UTC, and the date
             // comparison below would then fail exactly like a genuine
@@ -224,6 +227,13 @@ mod tests {
             return;
         }
 
+        // A stray `RPMCRAB_TZ_PROBE_CHILD` in the ambient environment would
+        // otherwise make the parent take the child path above and pass
+        // trivially. Fail loudly instead.
+        assert!(
+            std::env::var("RPMCRAB_TZ_PROBE_CHILD").is_err(),
+            "RPMCRAB_TZ_PROBE_CHILD must not be set in the ambient environment"
+        );
         let now = OffsetDateTime::now_utc();
         // NB: POSIX inverts the sign — `Etc/GMT-14` is UTC+14.
         let (tz_name, offset) =
