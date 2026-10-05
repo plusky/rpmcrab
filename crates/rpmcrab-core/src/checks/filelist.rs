@@ -171,14 +171,8 @@ impl FilelistCheck {
         let mut invalid_fhs = std::collections::BTreeSet::new();
         let mut invalid_opt = std::collections::BTreeSet::new();
         let is_suse = pkg
-            .header()
-            .get_owned(librpm::Tag::VENDOR)
-            .and_then(|d| match d {
-                librpm::OwnedTagData::Str(s) => Some(s),
-                _ => None,
-            })
-            .map(|v| v.contains("SUSE"))
-            .unwrap_or(false);
+            .tag_str(librpm::Tag::VENDOR)
+            .is_some_and(|v| v.contains("SUSE"));
 
         for pkgfile in &pkg.files {
             let mut f = pkgfile.name.clone();

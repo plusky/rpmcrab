@@ -12,7 +12,7 @@
 use std::path::Path;
 
 use fancy_regex::Regex;
-use librpm::{OwnedTagData, Tag};
+use librpm::Tag;
 
 use super::is_match;
 use super::shared::{devel_regex, lib_package_regex, macro_regex};
@@ -212,18 +212,14 @@ impl TagsCheck {
 impl TagsCheck {
     /// The reference `check()`: runs for binary and source packages alike.
     fn run(&self, pkg: &Pkg, out: &mut Filter) {
-        let header = pkg.header();
-        let tag_str = |t| crate::pkg::tags::str_tag(header, t).unwrap_or_default();
-        let epoch: Option<i64> = match header.get_owned(Tag::EPOCH) {
-            Some(OwnedTagData::Int32(v)) => v.into_iter().next().map(|e| e as i64),
-            _ => None,
-        };
+        let tag_str = |t| pkg.tag_str(t).unwrap_or_default();
+        let epoch: Option<i64> = pkg.tag_i64(Tag::EPOCH);
         let group = pkg.tag_str(Tag::GROUP).unwrap_or_default();
         let buildhost = tag_str(Tag::BUILDHOST);
-        let langs = crate::pkg::tags::str_array(header, Tag::HEADERI18NTABLE);
+        let langs = pkg.tag_str_array(Tag::HEADERI18NTABLE);
         let summary = tag_str(Tag::SUMMARY);
         let description = tag_str(Tag::DESCRIPTION);
-        let changelog: Vec<String> = crate::pkg::tags::str_array(header, Tag::CHANGELOGNAME);
+        let changelog: Vec<String> = pkg.tag_str_array(Tag::CHANGELOGNAME);
         let rpm_license = tag_str(Tag::LICENSE);
         let name = pkg.name.clone();
         let deps: Vec<DepInfo> = pkg.requires.iter().chain(&pkg.prereq).cloned().collect();
@@ -635,12 +631,8 @@ impl TagsCheck {
                         break;
                     }
                 }
-                let header = pkg.header();
-                let version = crate::pkg::tags::str_tag(header, Tag::VERSION).unwrap_or_default();
-                let epoch: Option<i64> = match header.get_owned(Tag::EPOCH) {
-                    Some(OwnedTagData::Int32(v)) => v.into_iter().next().map(|e| e as i64),
-                    _ => None,
-                };
+                let version = pkg.tag_str(Tag::VERSION).unwrap_or_default();
+                let epoch: Option<i64> = pkg.tag_i64(Tag::EPOCH);
                 if let (Some(dep), true) = (dep_match, !version.is_empty()) {
                     let exp = (epoch, Some(version.as_str()), None);
                     let sexp = version_to_string(exp.0, exp.1, exp.2);
@@ -717,32 +709,10 @@ impl TagsCheck {
             self.unexpanded_macro(out, pkg, "Summary", summary);
         } else {
             for lang in langs {
-                let s = self.lang_string(pkg, Tag::SUMMARY, lang);
+                let s = pkg.tag_i18n_str(Tag::SUMMARY, lang);
                 self.check_summary(pkg, out, &s, lang, ignored);
             }
         }
-    }
-
-    /// Read a tag in a specific language. The `C` locale is the header default;
-    /// other locales are selected from the raw i18n table.
-    fn lang_string(&self, pkg: &Pkg, tag: Tag, lang: &str) -> String {
-        let header = pkg.header();
-        if lang == "C" || lang == "C.UTF-8" {
-            return crate::pkg::tags::str_tag(header, tag).unwrap_or_default();
-        }
-        let table = crate::pkg::tags::str_array(header, Tag::HEADERI18NTABLE);
-        if let Some(idx) = table.iter().position(|l| l == lang)
-            && let Some(OwnedTagData::I18NStr(v)) = header.get_owned_with_options(
-                tag,
-                librpm::package::GetOptions {
-                    raw: true,
-                    ..Default::default()
-                },
-            )
-        {
-            return v.get(idx).cloned().unwrap_or_default();
-        }
-        String::new()
     }
 
     fn check_summary(
@@ -856,7 +826,7 @@ impl TagsCheck {
             self.unexpanded_macro(out, pkg, "%description", description);
         } else {
             for lang in langs {
-                let d = self.lang_string(pkg, Tag::DESCRIPTION, lang);
+                let d = pkg.tag_i18n_str(Tag::DESCRIPTION, lang);
                 self.check_description(pkg, out, &d, lang, ignored);
             }
         }
@@ -961,19 +931,15 @@ impl TagsCheck {
 
 impl TagsCheck {
     fn check_changelog(&self, pkg: &Pkg, out: &mut Filter, changelog: &[String]) {
-        let header = pkg.header();
-        let version = crate::pkg::tags::str_tag(header, Tag::VERSION).unwrap_or_default();
-        let release = crate::pkg::tags::str_tag(header, Tag::RELEASE).unwrap_or_default();
+        let version = pkg.tag_str(Tag::VERSION).unwrap_or_default();
+        let release = pkg.tag_str(Tag::RELEASE).unwrap_or_default();
         let name = pkg.name.as_str();
-        let epoch: Option<i64> = match header.get_owned(Tag::EPOCH) {
-            Some(OwnedTagData::Int32(v)) => v.into_iter().next().map(|e| e as i64),
-            _ => None,
-        };
+        let epoch: Option<i64> = pkg.tag_i64(Tag::EPOCH);
         if changelog.is_empty() {
             add_info(out, Level::Error, pkg, "no-changelogname-tag", &[]);
             return;
         }
-        let clt: Vec<String> = crate::pkg::tags::str_array(header, Tag::CHANGELOGTEXT);
+        let clt: Vec<String> = pkg.tag_str_array(Tag::CHANGELOGTEXT);
         if self.use_version_in_changelog {
             let mut found: Option<String> = None;
             if let Ok(Some(caps)) = self.changelog_version_re.captures(&changelog[0]) {
@@ -995,8 +961,7 @@ impl TagsCheck {
                 }
                 Some(ret) => {
                     if !version.is_empty() && !release.is_empty() {
-                        let srpm =
-                            crate::pkg::tags::str_tag(header, Tag::SOURCERPM).unwrap_or_default();
+                        let srpm = pkg.tag_str(Tag::SOURCERPM).unwrap_or_default();
                         let srpm_base = srpm
                             .strip_suffix(".src.rpm")
                             .or_else(|| srpm.strip_suffix(".rpm"))
@@ -1048,7 +1013,7 @@ impl TagsCheck {
                 break;
             }
         }
-        let times = crate::pkg::tags::int32_array(header, Tag::CHANGELOGTIME);
+        let times = pkg.tag_int32_array(Tag::CHANGELOGTIME);
         if let Some(&first) = times.first() {
             // Roll back 26h to cover timezone differences, mirroring the
             // reference (TagsCheck.py): the largest tz gap is 26h (Howland
@@ -1226,13 +1191,12 @@ impl TagsCheck {
     }
 
     fn check_url(&self, pkg: &Pkg, out: &mut Filter) {
-        let header = pkg.header();
         for (tagname, tag) in [
             ("URL", Tag::URL),
             ("DistURL", Tag::DISTURL),
             ("BugURL", Tag::BUGURL),
         ] {
-            let url = crate::pkg::tags::str_tag(header, tag).unwrap_or_default();
+            let url = pkg.tag_str(tag).unwrap_or_default();
             self.unexpanded_macros(out, pkg, tagname, std::slice::from_ref(&url), true);
             if !url.is_empty() {
                 let (scheme, netloc) = split_url(&url);
@@ -1357,9 +1321,8 @@ impl TagsCheck {
     }
 
     fn check_non_coherent_filename(&self, pkg: &Pkg, out: &mut Filter) {
-        let header = pkg.header();
-        let version = crate::pkg::tags::str_tag(header, Tag::VERSION).unwrap_or_default();
-        let release = crate::pkg::tags::str_tag(header, Tag::RELEASE).unwrap_or_default();
+        let version = pkg.tag_str(Tag::VERSION).unwrap_or_default();
+        let release = pkg.tag_str(Tag::RELEASE).unwrap_or_default();
         // `%{_build_name_fmt}` is `%{ARCH}/%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}.rpm`;
         // the reference takes the basename. `pkg.arch` is already `src`/`nosrc`
         // for source packages.

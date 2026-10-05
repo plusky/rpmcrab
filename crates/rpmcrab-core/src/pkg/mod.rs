@@ -22,7 +22,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use librpm::verify::VerifyOptions;
-use librpm::{PackageHeader, Tag};
+use librpm::{OwnedTagData, PackageHeader, Tag};
 
 use dep::{DepInfo, string_to_version};
 use pkgfile::PkgFile;
@@ -525,11 +525,6 @@ impl Pkg {
         }
     }
 
-    /// The underlying librpm header, for tag access.
-    pub fn header(&self) -> &PackageHeader {
-        &self.header
-    }
-
     /// The directory reads resolve against: the extraction directory, the
     /// owned empty sandbox for test-only header opens, `/` for the
     /// live-filesystem sources, or the removed path after [`Pkg::cleanup`].
@@ -561,6 +556,50 @@ impl Pkg {
     /// Read a STRING_ARRAY tag.
     pub fn tag_str_array(&self, tag: Tag) -> Vec<String> {
         tags::str_array(&self.header, tag)
+    }
+
+    /// Read an INT32 scalar tag as `i64` (rpmlint `pkg[tag]` on EPOCH): the
+    /// first element, or `None` when absent.
+    pub fn tag_i64(&self, tag: Tag) -> Option<i64> {
+        match self.header.get_owned(tag) {
+            Some(OwnedTagData::Int32(v)) => v.into_iter().next().map(|e| e as i64),
+            _ => None,
+        }
+    }
+
+    /// Read an INT32 array tag; empty when absent.
+    pub fn tag_int32_array(&self, tag: Tag) -> Vec<i32> {
+        tags::int32_array(&self.header, tag)
+    }
+
+    /// Read a tag in a specific language. The `C` locale is the header
+    /// default; other locales are selected from the raw i18n table.
+    pub fn tag_i18n_str(&self, tag: Tag, lang: &str) -> String {
+        if lang == "C" || lang == "C.UTF-8" {
+            return self.tag_str(tag).unwrap_or_default();
+        }
+        let table = self.tag_str_array(Tag::HEADERI18NTABLE);
+        if let Some(idx) = table.iter().position(|l| l == lang)
+            && let Some(OwnedTagData::I18NStr(v)) = self.header.get_owned_with_options(
+                tag,
+                librpm::package::GetOptions {
+                    raw: true,
+                    ..Default::default()
+                },
+            )
+        {
+            return v.get(idx).cloned().unwrap_or_default();
+        }
+        String::new()
+    }
+
+    /// Build an installed [`Pkg`] from a fixture RPM on disk, skipping
+    /// signature verification (test-only).
+    #[cfg(test)]
+    pub(crate) fn installed_from_file(path: &std::path::Path) -> Self {
+        let header = PackageHeader::from_file(path, Some(&VerifyOptions::skip_verification()))
+            .expect("open fixture header");
+        Self::installed(header).expect("build installed package")
     }
 
     /// The interpreter for a scriptlet tag (rpmlint `scriptprog`): `''` when

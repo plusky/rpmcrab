@@ -1300,12 +1300,7 @@ paths = ["/etc/pam.d/link-allowed"]
     fn fixture_pkg() -> Pkg {
         let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
-        let header = librpm::PackageHeader::from_file(
-            &rpm,
-            Some(&librpm::verify::VerifyOptions::skip_verification()),
-        )
-        .expect("open fixture header");
-        let mut pkg = Pkg::installed(header).expect("build installed package");
+        let mut pkg = Pkg::installed_from_file(&rpm);
         pkg.name = "testpkg".to_string();
         pkg
     }

@@ -16,7 +16,6 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
-use crate::pkg::tags;
 use std::sync::OnceLock;
 
 static NAME_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -73,9 +72,8 @@ impl Check for LSBCheck {
     /// The reference overrides `check()`, not `check_binary()`, so this runs
     /// for source packages too.
     fn check(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
-        let header = pkg.header();
-        let version = tags::str_tag(header, Tag::VERSION);
-        let release = tags::str_tag(header, Tag::RELEASE);
+        let version = pkg.tag_str(Tag::VERSION);
+        let release = pkg.tag_str(Tag::RELEASE);
         for (check, value) in Self::collect(&pkg.name, version.as_deref(), release.as_deref()) {
             add_info(out, Level::Error, pkg, check, &[&value]);
         }

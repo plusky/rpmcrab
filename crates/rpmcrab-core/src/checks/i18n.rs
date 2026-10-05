@@ -15,7 +15,6 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
-use crate::pkg::tags;
 use std::sync::OnceLock;
 
 #[path = "i18n_codes.rs"]
@@ -303,7 +302,7 @@ impl Check for I18NCheck {
     }
 
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
-        let i18n_tags = tags::str_array(pkg.header(), Tag::HEADERI18NTABLE);
+        let i18n_tags = pkg.tag_str_array(Tag::HEADERI18NTABLE);
         let files: Vec<(&str, &str)> = pkg
             .files
             .iter()

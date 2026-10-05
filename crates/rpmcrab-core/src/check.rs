@@ -460,12 +460,7 @@ mod add_info_tests {
     fn corpus() -> Pkg {
         let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm");
-        let header = librpm::PackageHeader::from_file(
-            &rpm,
-            Some(&librpm::verify::VerifyOptions::skip_verification()),
-        )
-        .expect("open corpus header");
-        Pkg::installed(header).expect("build installed package")
+        Pkg::installed_from_file(&rpm)
     }
 
     /// The finding's package context comes from the header, not from a path, so
