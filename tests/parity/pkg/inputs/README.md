@@ -7,6 +7,8 @@ each exercising a particular check behavior.
 ## Fixtures
 
 | File | Purpose |
+|  | Rich deps , , nested,  (#49/#429) |
+|  | incorrect-fsf-address whole-file scan (upstream rpmlint#40): wrong address inside/past the 2048-byte window, plus a silent control |
 |------|---------|
 | `fcprobe-1-1.noarch.rpm` | Hand-built binary-bearing RPM for smoke tests |
 | `filescheck-depmod-*.rpm` | depmod scriptlet variants (ok/wrong/missing) |
@@ -22,15 +24,4 @@ each exercising a particular check behavior.
 | `liboutsidelib-test-1.0-1.noarch.rpm` | lib package with non-lib files |
 | `unexpandedmacro-test-1.0-1.noarch.rpm` | Unexpanded macros in filenames |
 | `richdep-fixture-1.0-1.noarch.rpm` | Rich deps `(foo or bar)`, `(baz >= 1.0 with baz < 2.0)`, nested, `qux(meta)` (#49/#429) |
-
-## Regeneration
-
-These were built with `rpmbuild`. See individual build scripts where present.
-To rebuild, use an openSUSE container with `rpm-build` installed.
-
-## Distinction from corpus
-
-Real distro packages for parity testing live in `tests/parity/cases/`
-(e.g., `llvm21-gold`). Those are reserved for parity tests that validate
-output against the reference implementation. Unit tests should use the
-fixtures here, never the corpus.
+| `fsf-address-fixture-1.0-1.noarch.rpm` | incorrect-fsf-address whole-file scan (upstream rpmlint#40): wrong address inside/past the 2048-byte window, plus a silent control |

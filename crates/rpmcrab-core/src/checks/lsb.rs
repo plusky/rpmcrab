@@ -17,13 +17,16 @@ use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::pkg::tags;
+use std::sync::OnceLock;
 
-fn name_regex() -> Regex {
-    Regex::new(r"^[a-z0-9.+-]+$").expect("static regex")
+static NAME_REGEX: OnceLock<Regex> = OnceLock::new();
+fn name_regex() -> &'static Regex {
+    NAME_REGEX.get_or_init(|| Regex::new(r"^[a-z0-9.+-]+$").expect("static regex"))
 }
 
-fn version_regex() -> Regex {
-    Regex::new(r"^[a-zA-Z0-9.+]+$").expect("static regex")
+static VERSION_REGEX: OnceLock<Regex> = OnceLock::new();
+fn version_regex() -> &'static Regex {
+    VERSION_REGEX.get_or_init(|| Regex::new(r"^[a-zA-Z0-9.+]+$").expect("static regex"))
 }
 
 pub struct LSBCheck;
@@ -43,18 +46,18 @@ impl LSBCheck {
         let name_re = name_regex();
         let version_re = version_regex();
         let mut out = Vec::new();
-        if !name.is_empty() && !is_match(&name_re, name) {
+        if !name.is_empty() && !is_match(name_re, name) {
             out.push(("non-lsb-compliant-package-name", name.to_string()));
         }
         if let Some(v) = version
             && !v.is_empty()
-            && !is_match(&version_re, v)
+            && !is_match(version_re, v)
         {
             out.push(("non-lsb-compliant-version", v.to_string()));
         }
         if let Some(r) = release
             && !r.is_empty()
-            && !is_match(&version_re, r)
+            && !is_match(version_re, r)
         {
             out.push(("non-lsb-compliant-release", r.to_string()));
         }

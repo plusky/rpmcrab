@@ -23,188 +23,261 @@ use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::pkg::pkgfile::{self, PkgFile};
 use crate::tools::{Tool, ToolSource, test_source};
+use std::sync::OnceLock;
 
-fn man_regex() -> Regex {
-    Regex::new(r"/man(?:\d[px]?|n)/").expect("static regex")
+static MAN_REGEX: OnceLock<Regex> = OnceLock::new();
+fn man_regex() -> &'static Regex {
+    MAN_REGEX.get_or_init(|| Regex::new(r"/man(?:\d[px]?|n)/").expect("static regex"))
 }
 
-fn man_base_regex() -> Regex {
-    Regex::new(r"(?i)^(?P<path>/usr/share/man|/usr/man)/(?:(?P<lang>[a-z_]+)/)?man(?P<category>[^/]+)/(?P<filename>[^/]+)$")
-        .expect("static regex")
+static MAN_BASE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn man_base_regex() -> &'static Regex {
+    MAN_BASE_REGEX.get_or_init(|| Regex::new(r"(?i)^(?P<path>/usr/share/man|/usr/man)/(?:(?P<lang>[a-z_]+)/)?man(?P<category>[^/]+)/(?P<filename>[^/]+)$")
+        .expect("static regex"))
 }
 
-fn info_regex() -> Regex {
-    Regex::new(r"(/usr/share|/usr)/info/").expect("static regex")
+static INFO_REGEX: OnceLock<Regex> = OnceLock::new();
+fn info_regex() -> &'static Regex {
+    INFO_REGEX.get_or_init(|| Regex::new(r"(/usr/share|/usr)/info/").expect("static regex"))
 }
 
-fn log_regex() -> Regex {
-    Regex::new(r"/var/log/").expect("static regex")
+static LOG_REGEX: OnceLock<Regex> = OnceLock::new();
+fn log_regex() -> &'static Regex {
+    LOG_REGEX.get_or_init(|| Regex::new(r"/var/log/").expect("static regex"))
 }
 
-fn kernel_package_regex() -> Regex {
-    Regex::new(r"^kernel(-(default|desktop|pae|xen|vanilla|debug|kdump|source|syms))?$")
-        .expect("static regex")
+static KERNEL_PACKAGE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn kernel_package_regex() -> &'static Regex {
+    KERNEL_PACKAGE_REGEX.get_or_init(|| {
+        Regex::new(r"^kernel(-(default|desktop|pae|xen|vanilla|debug|kdump|source|syms))?$")
+            .expect("static regex")
+    })
 }
 
-fn debuginfo_package_regex() -> Regex {
-    Regex::new(r"-debuginfo$").expect("static regex")
+static DEBUGINFO_PACKAGE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn debuginfo_package_regex() -> &'static Regex {
+    DEBUGINFO_PACKAGE_REGEX.get_or_init(|| Regex::new(r"-debuginfo$").expect("static regex"))
 }
 
-fn debugsource_package_regex() -> Regex {
-    Regex::new(r"-debugsource$").expect("static regex")
+static DEBUGSOURCE_PACKAGE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn debugsource_package_regex() -> &'static Regex {
+    DEBUGSOURCE_PACKAGE_REGEX.get_or_init(|| Regex::new(r"-debugsource$").expect("static regex"))
 }
 
-fn kernel_modules_regex() -> Regex {
-    Regex::new(r"^/lib/modules/").expect("static regex")
+static KERNEL_MODULES_REGEX: OnceLock<Regex> = OnceLock::new();
+fn kernel_modules_regex() -> &'static Regex {
+    KERNEL_MODULES_REGEX.get_or_init(|| Regex::new(r"^/lib/modules/").expect("static regex"))
 }
 
-fn quotes_regex() -> Regex {
-    Regex::new(r#"['"]"#).expect("static regex")
+static QUOTES_REGEX: OnceLock<Regex> = OnceLock::new();
+fn quotes_regex() -> &'static Regex {
+    QUOTES_REGEX.get_or_init(|| Regex::new(r#"['"]"#).expect("static regex"))
 }
 
-fn compr_regex() -> Regex {
-    Regex::new(r"\.(gz|z|Z|zip|bz2|lzma|xz|zst)$").expect("static regex")
+static COMPR_REGEX: OnceLock<Regex> = OnceLock::new();
+fn compr_regex() -> &'static Regex {
+    COMPR_REGEX
+        .get_or_init(|| Regex::new(r"\.(gz|z|Z|zip|bz2|lzma|xz|zst)$").expect("static regex"))
 }
 
-fn absolute_regex() -> Regex {
-    Regex::new(r"^/([^/]+)").expect("static regex")
+static ABSOLUTE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn absolute_regex() -> &'static Regex {
+    ABSOLUTE_REGEX.get_or_init(|| Regex::new(r"^/([^/]+)").expect("static regex"))
 }
 
-fn absolute2_regex() -> Regex {
-    Regex::new(r"^/?([^/]+)").expect("static regex")
+static ABSOLUTE2_REGEX: OnceLock<Regex> = OnceLock::new();
+fn absolute2_regex() -> &'static Regex {
+    ABSOLUTE2_REGEX.get_or_init(|| Regex::new(r"^/?([^/]+)").expect("static regex"))
 }
 
-fn points_regex() -> Regex {
-    Regex::new(r"^\.\./(.*)").expect("static regex")
+static POINTS_REGEX: OnceLock<Regex> = OnceLock::new();
+fn points_regex() -> &'static Regex {
+    POINTS_REGEX.get_or_init(|| Regex::new(r"^\.\./(.*)").expect("static regex"))
 }
 
-fn doc_regex() -> Regex {
-    Regex::new(r"^/usr(/share|/X11R6)?/(doc|man|info)/|^/usr/share/gnome/help")
-        .expect("static regex")
+static DOC_REGEX: OnceLock<Regex> = OnceLock::new();
+fn doc_regex() -> &'static Regex {
+    DOC_REGEX.get_or_init(|| {
+        Regex::new(r"^/usr(/share|/X11R6)?/(doc|man|info)/|^/usr/share/gnome/help")
+            .expect("static regex")
+    })
 }
 
-fn bin_regex() -> Regex {
-    Regex::new(r"^/(?:usr/(?:s?bin|games)|s?bin)/(.*)").expect("static regex")
+static BIN_REGEX: OnceLock<Regex> = OnceLock::new();
+fn bin_regex() -> &'static Regex {
+    BIN_REGEX
+        .get_or_init(|| Regex::new(r"^/(?:usr/(?:s?bin|games)|s?bin)/(.*)").expect("static regex"))
 }
 
-fn includefile_regex() -> Regex {
-    Regex::new(r"(?i)\.(c|h)(pp|xx)?$").expect("static regex")
+static INCLUDEFILE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn includefile_regex() -> &'static Regex {
+    INCLUDEFILE_REGEX.get_or_init(|| Regex::new(r"(?i)\.(c|h)(pp|xx)?$").expect("static regex"))
 }
 
-fn develfile_regex() -> Regex {
-    Regex::new(r"\.(a|cmxa?|mli?|gir)$").expect("static regex")
+static DEVELFILE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn develfile_regex() -> &'static Regex {
+    DEVELFILE_REGEX.get_or_init(|| Regex::new(r"\.(a|cmxa?|mli?|gir)$").expect("static regex"))
 }
 
-fn buildconfigfile_regex() -> Regex {
-    Regex::new(r"(\.pc|/bin/.+-config)$").expect("static regex")
+static BUILDCONFIGFILE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn buildconfigfile_regex() -> &'static Regex {
+    BUILDCONFIGFILE_REGEX
+        .get_or_init(|| Regex::new(r"(\.pc|/bin/.+-config)$").expect("static regex"))
 }
 
-fn buildconfig_rpath_regex() -> Regex {
-    Regex::new(r"(?:-rpath|Wl,-R)\b").expect("static regex")
+static BUILDCONFIG_RPATH_REGEX: OnceLock<Regex> = OnceLock::new();
+fn buildconfig_rpath_regex() -> &'static Regex {
+    BUILDCONFIG_RPATH_REGEX.get_or_init(|| Regex::new(r"(?:-rpath|Wl,-R)\b").expect("static regex"))
 }
 
-fn sofile_regex() -> Regex {
-    Regex::new(r"/lib(64)?/(.+/)?lib[^/]+\.so$").expect("static regex")
+static SOFILE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn sofile_regex() -> &'static Regex {
+    SOFILE_REGEX.get_or_init(|| Regex::new(r"/lib(64)?/(.+/)?lib[^/]+\.so$").expect("static regex"))
 }
 
-fn lib_regex() -> Regex {
-    Regex::new(r"/lib(?:64)?/lib[A-Za-z0-9](?:(?:|[\w\-\.]*[A-Za-z0-9])\.so\.[\w+\.]+|\w*-\d(?:|[\w\-\.]*[A-Za-z0-9])\.so)$")
-        .expect("static regex")
+static LIB_REGEX: OnceLock<Regex> = OnceLock::new();
+fn lib_regex() -> &'static Regex {
+    LIB_REGEX.get_or_init(|| Regex::new(r"/lib(?:64)?/lib[A-Za-z0-9](?:(?:|[\w\-\.]*[A-Za-z0-9])\.so\.[\w+\.]+|\w*-\d(?:|[\w\-\.]*[A-Za-z0-9])\.so)$")
+        .expect("static regex"))
 }
 
 /// Files exempt from the zero-length check (FilesCheck.py:180).
-fn normal_zero_length_regex() -> Regex {
-    Regex::new(
-        r"^/etc/security/console\.apps/|/\.nosearch$|/__init__\.py$|/py\.typed$|\.dist-info/REQUESTED$|/gem\.build_complete$",
-    )
-    .expect("static regex")
-}
-
-fn depmod_regex() -> Regex {
-    Regex::new(r"(?m)^[^#]*depmod").expect("static regex")
-}
-
-fn install_info_regex() -> Regex {
-    Regex::new(r"(?m)^[^#]*install-info").expect("static regex")
-}
-
-fn perl_temp_file_regex() -> Regex {
-    Regex::new(r".*perl.*/(\.packlist|perllocal\.pod)$").expect("static regex")
-}
-
-fn interpreter_regex() -> Regex {
-    Regex::new(r"^/(?:usr/)?(?:s?bin|games|libexec(?:/.+)?|(?:lib(?:64)?|share)/.+)/([^/]+)$")
+static NORMAL_ZERO_LENGTH_REGEX: OnceLock<Regex> = OnceLock::new();
+fn normal_zero_length_regex() -> &'static Regex {
+    NORMAL_ZERO_LENGTH_REGEX.get_or_init(|| {
+        Regex::new(
+            r"^/etc/security/console\.apps/|/\.nosearch$|/__init__\.py$|/py\.typed$|\.dist-info/REQUESTED$|/gem\.build_complete$",
+        )
         .expect("static regex")
+    })
 }
 
-fn script_regex() -> Regex {
-    Regex::new(
+static DEPMOD_REGEX: OnceLock<Regex> = OnceLock::new();
+fn depmod_regex() -> &'static Regex {
+    DEPMOD_REGEX.get_or_init(|| Regex::new(r"(?m)^[^#]*depmod").expect("static regex"))
+}
+
+static INSTALL_INFO_REGEX: OnceLock<Regex> = OnceLock::new();
+fn install_info_regex() -> &'static Regex {
+    INSTALL_INFO_REGEX.get_or_init(|| Regex::new(r"(?m)^[^#]*install-info").expect("static regex"))
+}
+
+static PERL_TEMP_FILE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn perl_temp_file_regex() -> &'static Regex {
+    PERL_TEMP_FILE_REGEX
+        .get_or_init(|| Regex::new(r".*perl.*/(\.packlist|perllocal\.pod)$").expect("static regex"))
+}
+
+static INTERPRETER_REGEX: OnceLock<Regex> = OnceLock::new();
+fn interpreter_regex() -> &'static Regex {
+    INTERPRETER_REGEX.get_or_init(|| {
+        Regex::new(r"^/(?:usr/)?(?:s?bin|games|libexec(?:/.+)?|(?:lib(?:64)?|share)/.+)/([^/]+)$")
+            .expect("static regex")
+    })
+}
+
+static SCRIPT_REGEX: OnceLock<Regex> = OnceLock::new();
+fn script_regex() -> &'static Regex {
+    SCRIPT_REGEX.get_or_init(|| {
+        Regex::new(
         r"^/((usr/)?s?bin|etc/(rc\.d/init\.d|X11/xinit\.d|cron\.(hourly|daily|monthly|weekly)))/",
     )
     .expect("static regex")
+    })
 }
 
-fn sourced_script_regex() -> Regex {
-    Regex::new(r"^/etc/(bash_completion\.d|profile\.d)/").expect("static regex")
+static SOURCED_SCRIPT_REGEX: OnceLock<Regex> = OnceLock::new();
+fn sourced_script_regex() -> &'static Regex {
+    SOURCED_SCRIPT_REGEX.get_or_init(|| {
+        Regex::new(r"^/etc/(bash_completion\.d|profile\.d)/").expect("static regex")
+    })
 }
 
-fn fsf_license_regex() -> Regex {
-    Regex::new(r"(?i)(GNU((\s+(Library|Lesser|Affero))?(\s+General)?\s+Public|\s+Free\s+Documentation)\s+Licen[cs]e|(GP|FD)L)")
-        .expect("static regex")
+static FSF_LICENSE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn fsf_license_regex() -> &'static Regex {
+    FSF_LICENSE_REGEX.get_or_init(|| Regex::new(r"(?i)(GNU((\s+(Library|Lesser|Affero))?(\s+General)?\s+Public|\s+Free\s+Documentation)\s+Licen[cs]e|(GP|FD)L)")
+        .expect("static regex"))
 }
 
-fn fsf_wrong_address_regex() -> Regex {
-    Regex::new(r"(?i)(675\s+Mass\s+Ave|59\s+Temple\s+Place|02139|51\s+Franklin\s+St)")
-        .expect("static regex")
+static FSF_WRONG_ADDRESS_REGEX: OnceLock<Regex> = OnceLock::new();
+fn fsf_wrong_address_regex() -> &'static Regex {
+    FSF_WRONG_ADDRESS_REGEX.get_or_init(|| {
+        Regex::new(r"(?i)(675\s+Mass\s+Ave|59\s+Temple\s+Place|02139|51\s+Franklin\s+St)")
+            .expect("static regex")
+    })
 }
 
-fn scalable_icon_regex() -> Regex {
-    Regex::new(r"^/usr(?:/local)?/share/icons/.*/scalable/").expect("static regex")
+static SCALABLE_ICON_REGEX: OnceLock<Regex> = OnceLock::new();
+fn scalable_icon_regex() -> &'static Regex {
+    SCALABLE_ICON_REGEX.get_or_init(|| {
+        Regex::new(r"^/usr(?:/local)?/share/icons/.*/scalable/").expect("static regex")
+    })
 }
 
-fn tcl_regex() -> Regex {
-    Regex::new(r"^/usr/lib(64)?/([^/]+/)?pkgIndex\.tcl").expect("static regex")
+static TCL_REGEX: OnceLock<Regex> = OnceLock::new();
+fn tcl_regex() -> &'static Regex {
+    TCL_REGEX
+        .get_or_init(|| Regex::new(r"^/usr/lib(64)?/([^/]+/)?pkgIndex\.tcl").expect("static regex"))
 }
 
-fn perl_regex() -> Regex {
-    Regex::new(r"^/usr/lib/perl5/(?:vendor_perl/)?([0-9]+\.[0-9]+)\.([0-9]+)/")
-        .expect("static regex")
+static PERL_REGEX: OnceLock<Regex> = OnceLock::new();
+fn perl_regex() -> &'static Regex {
+    PERL_REGEX.get_or_init(|| {
+        Regex::new(r"^/usr/lib/perl5/(?:vendor_perl/)?([0-9]+\.[0-9]+)\.([0-9]+)/")
+            .expect("static regex")
+    })
 }
 
-fn python_regex() -> Regex {
-    Regex::new(r"^/usr/lib(?:64)?/python([.0-9]+)/").expect("static regex")
+static PYTHON_REGEX: OnceLock<Regex> = OnceLock::new();
+fn python_regex() -> &'static Regex {
+    PYTHON_REGEX
+        .get_or_init(|| Regex::new(r"^/usr/lib(?:64)?/python([.0-9]+)/").expect("static regex"))
 }
 
-fn python_bytecode_pep3147_regex() -> Regex {
-    Regex::new(r"^(.*)/__pycache__/(.*?)\.([^.]+)(\.opt-[12])?\.py[oc]$").expect("static regex")
+static PYTHON_BYTECODE_PEP3147_REGEX: OnceLock<Regex> = OnceLock::new();
+fn python_bytecode_pep3147_regex() -> &'static Regex {
+    PYTHON_BYTECODE_PEP3147_REGEX.get_or_init(|| {
+        Regex::new(r"^(.*)/__pycache__/(.*?)\.([^.]+)(\.opt-[12])?\.py[oc]$").expect("static regex")
+    })
 }
 
-fn python_bytecode_regex() -> Regex {
-    Regex::new(r"^(.*)(\.py[oc])$").expect("static regex")
+static PYTHON_BYTECODE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn python_bytecode_regex() -> &'static Regex {
+    PYTHON_BYTECODE_REGEX.get_or_init(|| Regex::new(r"^(.*)(\.py[oc])$").expect("static regex"))
 }
 
-fn depmod_kernel_regex() -> Regex {
-    Regex::new(r"^(?:/usr)/lib/modules/([0-9]+\.[0-9]+\.[0-9]+[^/]*?)/").expect("static regex")
+static DEPMOD_KERNEL_REGEX: OnceLock<Regex> = OnceLock::new();
+fn depmod_kernel_regex() -> &'static Regex {
+    DEPMOD_KERNEL_REGEX.get_or_init(|| {
+        Regex::new(r"^(?:/usr)/lib/modules/([0-9]+\.[0-9]+\.[0-9]+[^/]*?)/").expect("static regex")
+    })
 }
 
-fn log_file_regex() -> Regex {
-    Regex::new(r"^/var/log/[^/]+$").expect("static regex")
+static LOG_FILE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn log_file_regex() -> &'static Regex {
+    LOG_FILE_REGEX.get_or_init(|| Regex::new(r"^/var/log/[^/]+$").expect("static regex"))
 }
 
-fn lib_path_regex() -> Regex {
-    Regex::new(r"^(/usr(/X11R6)?)?/lib(64)?").expect("static regex")
+static LIB_PATH_REGEX: OnceLock<Regex> = OnceLock::new();
+fn lib_path_regex() -> &'static Regex {
+    LIB_PATH_REGEX.get_or_init(|| Regex::new(r"^(/usr(/X11R6)?)?/lib(64)?").expect("static regex"))
 }
 
-fn start_certificate_regex() -> Regex {
-    Regex::new(r"^-----BEGIN CERTIFICATE-----\n?$").expect("static regex")
+static START_CERTIFICATE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn start_certificate_regex() -> &'static Regex {
+    START_CERTIFICATE_REGEX
+        .get_or_init(|| Regex::new(r"^-----BEGIN CERTIFICATE-----\n?$").expect("static regex"))
 }
 
-fn start_private_key_regex() -> Regex {
-    // NB: the reference spells this with four leading dashes, so it cannot
+static START_PRIVATE_KEY_REGEX: OnceLock<Regex> = OnceLock::new();
+fn start_private_key_regex() -> &'static Regex {
+    START_PRIVATE_KEY_REGEX.get_or_init(
+        || // NB: the reference spells this with four leading dashes, so it cannot
     // match a well-formed PEM header; replicated exactly.
     // Python's `$` matches before a trailing newline, Rust's does not;
     // the explicit newline keeps the reference behavior.
-    Regex::new(r"^----BEGIN PRIVATE KEY-----\n?$").expect("static regex")
+    Regex::new(r"^----BEGIN PRIVATE KEY-----\n?$").expect("static regex"),
+    )
 }
 
 #[allow(dead_code)]
@@ -377,56 +450,56 @@ impl FilesCheck {
         let skipdocs = get_str("SkipDocsRegexp");
         let meta_pkg = get_str("MetaPackageRegexp");
         Self {
-            man_re: man_regex(),
-            man_base_re: man_base_regex(),
-            info_re: info_regex(),
-            log_re: log_regex(),
-            devel_re: devel_regex(),
-            lib_package_re: lib_package_regex(),
-            kernel_package_re: kernel_package_regex(),
-            debuginfo_package_re: debuginfo_package_regex(),
-            debugsource_package_re: debugsource_package_regex(),
-            kernel_modules_re: kernel_modules_regex(),
-            macro_re: macro_regex(),
-            quotes_re: quotes_regex(),
+            man_re: man_regex().clone(),
+            man_base_re: man_base_regex().clone(),
+            info_re: info_regex().clone(),
+            log_re: log_regex().clone(),
+            devel_re: devel_regex().clone(),
+            lib_package_re: lib_package_regex().clone(),
+            kernel_package_re: kernel_package_regex().clone(),
+            debuginfo_package_re: debuginfo_package_regex().clone(),
+            debugsource_package_re: debugsource_package_regex().clone(),
+            kernel_modules_re: kernel_modules_regex().clone(),
+            macro_re: macro_regex().clone(),
+            quotes_re: quotes_regex().clone(),
             games_group_re: Regex::new(&games_group)
                 .unwrap_or_else(|_| Regex::new("$^").expect("static")),
             skipdocs_re: Regex::new(&format!("(?i){skipdocs}"))
                 .unwrap_or_else(|_| Regex::new("$^").expect("static")),
             meta_package_re: Regex::new(&meta_pkg)
                 .unwrap_or_else(|_| Regex::new("$^").expect("static")),
-            compr_re: compr_regex(),
-            absolute_re: absolute_regex(),
-            absolute2_re: absolute2_regex(),
-            points_re: points_regex(),
-            doc_re: doc_regex(),
-            bin_re: bin_regex(),
-            includefile_re: includefile_regex(),
-            develfile_re: develfile_regex(),
-            buildconfigfile_re: buildconfigfile_regex(),
-            buildconfig_rpath_re: buildconfig_rpath_regex(),
-            sofile_re: sofile_regex(),
-            lib_re: lib_regex(),
-            normal_zero_length_re: normal_zero_length_regex(),
-            depmod_re: depmod_regex(),
-            install_info_re: install_info_regex(),
-            perl_temp_file_re: perl_temp_file_regex(),
-            interpreter_re: interpreter_regex(),
-            script_re: script_regex(),
-            sourced_script_re: sourced_script_regex(),
-            fsf_license_re: fsf_license_regex(),
-            fsf_wrong_address_re: fsf_wrong_address_regex(),
-            scalable_icon_re: scalable_icon_regex(),
-            tcl_re: tcl_regex(),
-            perl_re: perl_regex(),
-            python_re: python_regex(),
-            python_bytecode_pep3147_re: python_bytecode_pep3147_regex(),
-            python_bytecode_re: python_bytecode_regex(),
-            depmod_kernel_re: depmod_kernel_regex(),
-            log_file_re: log_file_regex(),
-            lib_path_re: lib_path_regex(),
-            start_certificate_re: start_certificate_regex(),
-            start_private_key_re: start_private_key_regex(),
+            compr_re: compr_regex().clone(),
+            absolute_re: absolute_regex().clone(),
+            absolute2_re: absolute2_regex().clone(),
+            points_re: points_regex().clone(),
+            doc_re: doc_regex().clone(),
+            bin_re: bin_regex().clone(),
+            includefile_re: includefile_regex().clone(),
+            develfile_re: develfile_regex().clone(),
+            buildconfigfile_re: buildconfigfile_regex().clone(),
+            buildconfig_rpath_re: buildconfig_rpath_regex().clone(),
+            sofile_re: sofile_regex().clone(),
+            lib_re: lib_regex().clone(),
+            normal_zero_length_re: normal_zero_length_regex().clone(),
+            depmod_re: depmod_regex().clone(),
+            install_info_re: install_info_regex().clone(),
+            perl_temp_file_re: perl_temp_file_regex().clone(),
+            interpreter_re: interpreter_regex().clone(),
+            script_re: script_regex().clone(),
+            sourced_script_re: sourced_script_regex().clone(),
+            fsf_license_re: fsf_license_regex().clone(),
+            fsf_wrong_address_re: fsf_wrong_address_regex().clone(),
+            scalable_icon_re: scalable_icon_regex().clone(),
+            tcl_re: tcl_regex().clone(),
+            perl_re: perl_regex().clone(),
+            python_re: python_regex().clone(),
+            python_bytecode_pep3147_re: python_bytecode_pep3147_regex().clone(),
+            python_bytecode_re: python_bytecode_regex().clone(),
+            depmod_kernel_re: depmod_kernel_regex().clone(),
+            log_file_re: log_file_regex().clone(),
+            lib_path_re: lib_path_regex().clone(),
+            start_certificate_re: start_certificate_regex().clone(),
+            start_private_key_re: start_private_key_regex().clone(),
             use_debugsource: get_bool("UseDebugSource"),
             module_rpms_ok: get_bool("KernelModuleRPMsOK"),
             use_relative_symlinks: get_bool("UseRelativeSymlinks"),
@@ -806,6 +879,16 @@ const STANDARD_DIRS: &[&str] = &[
 /// Packages allowed to own standard directories.
 const FILESYS_PACKAGES: &[&str] = &["filesystem"];
 
+/// Scan window for the whole-file incorrect-fsf-address scan: the file is
+/// streamed in windows of this size so peak memory stays bounded no matter
+/// how large the file is.
+const FSF_SCAN_WINDOW: usize = 8192;
+/// Overlap between consecutive FSF scan windows. Any match of at most this
+/// many bytes straddling a window boundary is still seen whole inside one
+/// window; the FSF patterns only match fixed license/address phrases of tens
+/// of bytes joined by short whitespace runs, so this is ample headroom.
+const FSF_SCAN_OVERLAP: usize = 1024;
+
 /// Per-normal-file scratch state, mirroring the reference's `_file_*`
 /// attributes.
 #[derive(Default)]
@@ -855,6 +938,66 @@ impl FilesCheck {
         let control = chunk.iter().filter(|b| !is_peek_printable(**b)).count();
         let istext = control as f64 / chunk.len() as f64 <= 0.30;
         (chunk, istext)
+    }
+
+    /// Scan the whole file for the FSF license and wrong-address patterns in
+    /// bounded windows.
+    ///
+    /// Upstream rpmlint#40: the reference searches only its 2048-byte peek
+    /// chunk, so a stale FSF address past byte 2048 goes unreported. The port
+    /// scans the whole file instead (divergences.toml), but streams it in
+    /// `FSF_SCAN_WINDOW`-byte windows: each window is lossy-decoded and
+    /// regex-scanned on its own, so peak memory is one window plus overlap
+    /// regardless of file size -- the file is never materialized whole, let
+    /// alone twice via a lossy UTF-8 copy.
+    ///
+    /// Consecutive windows overlap by `FSF_SCAN_OVERLAP` bytes, so a match
+    /// straddling a window boundary is still found whole inside one window.
+    /// A file that cannot be opened, or a read that fails mid-scan, reports
+    /// `read-error` through the same plumbing `peek` uses, and the check is
+    /// skipped loudly rather than on an empty buffer.
+    ///
+    /// Returns true when both patterns match anywhere in the file, mirroring
+    /// the reference's boolean `search() and search()`: one finding per file,
+    /// never per match.
+    fn fsf_address_matches(&self, pkg: &Pkg, pkgfile: &PkgFile, out: &mut Filter) -> bool {
+        let mut file = match std::fs::File::open(&pkgfile.path) {
+            Ok(f) => f,
+            Err(e) => {
+                add_info(out, Level::Warning, pkg, "read-error", &[&e.to_string()]);
+                return false;
+            }
+        };
+        // One window plus the overlap carried over from the previous window.
+        let mut window = vec![0u8; FSF_SCAN_WINDOW + FSF_SCAN_OVERLAP];
+        let mut carry = 0usize;
+        let mut found_license = false;
+        let mut found_address = false;
+        loop {
+            let n =
+                match std::io::Read::read(&mut file, &mut window[carry..FSF_SCAN_WINDOW + carry]) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(e) => {
+                        add_info(out, Level::Warning, pkg, "read-error", &[&e.to_string()]);
+                        return false;
+                    }
+                };
+            let len = carry + n;
+            let text = String::from_utf8_lossy(&window[..len]);
+            if !found_license && is_match(&self.fsf_license_re, text.as_ref()) {
+                found_license = true;
+            }
+            if !found_address && is_match(&self.fsf_wrong_address_re, text.as_ref()) {
+                found_address = true;
+            }
+            if found_license && found_address {
+                return true;
+            }
+            carry = len.min(FSF_SCAN_OVERLAP);
+            window.copy_within(len - carry..len, 0);
+        }
+        found_license && found_address
     }
 }
 
@@ -2529,10 +2672,11 @@ impl FilesCheck {
                 add_info(out, Level::Warning, pkg, "file-not-utf8", &[fname]);
             }
         }
-        let text = String::from_utf8_lossy(&fd.chunk);
-        if is_match(&self.fsf_license_re, text.as_ref())
-            && is_match(&self.fsf_wrong_address_re, text.as_ref())
-        {
+        // Upstream rpmlint#40: the reference scans only its 2048-byte peek
+        // chunk for the FSF address, missing it in longer files. The port
+        // scans the whole file instead (divergences.toml), streaming it in
+        // bounded windows so a large file never sits in memory twice.
+        if self.fsf_address_matches(pkg, pkgfile, out) {
             add_info(out, Level::Error, pkg, "incorrect-fsf-address", &[fname]);
         }
     }
@@ -2727,6 +2871,78 @@ mod tests {
         assert_has(&names, "dir-or-file-in-opt");
         // no read errors: extraction works
         assert_lacks(&names, "read-error");
+    }
+
+    #[test]
+    fn fsf_address_scanned_past_2048_bytes() {
+        // Upstream rpmlint#40: the reference scans only its 2048-byte peek
+        // chunk for the FSF address, missing it in longer files. The port
+        // scans the whole file instead.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
+        let pkg = Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let fsf: Vec<&str> = out
+            .results()
+            .iter()
+            .filter(|(name, _)| name == "incorrect-fsf-address")
+            .map(|(_, line)| line.as_str())
+            .collect();
+        // LICENSE-early carries the wrong address at byte 385 (inside the
+        // old 2048-byte window); LICENSE-late carries it at byte 3372
+        // (past it); LICENSE-ok mentions the GPL with no street address
+        // and must stay silent.
+        assert_eq!(
+            fsf,
+            [
+                "fsf-address-fixture.noarch: E: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-early",
+                "fsf-address-fixture.noarch: E: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-late",
+            ],
+        );
+    }
+
+    #[test]
+    fn fsf_address_match_survives_window_boundary() {
+        // The whole-file FSF scan streams in FSF_SCAN_WINDOW-byte windows with
+        // FSF_SCAN_OVERLAP bytes of overlap: a wrong-address match straddling
+        // a window boundary must still be found whole inside one window.
+        // Without the overlap this fails (neither window sees "Place" whole).
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
+        let pkg = Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = FilesCheck::new(&config);
+
+        // "59 Temple Place" starts 4 bytes before the first window ends, so
+        // the address match spans the 8192-byte boundary.
+        let mut content = vec![b'x'; FSF_SCAN_WINDOW - 4];
+        content.extend_from_slice(b"59 Temple Place, Suite 330, Boston, MA 02111-1307 USA");
+        content.extend_from_slice(b"\nGNU General Public License\n");
+        let path = dir.path().join("boundary.txt");
+        std::fs::write(&path, &content).expect("write temp file");
+        let pkgfile = PkgFile {
+            path: path.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        assert!(check.fsf_address_matches(&pkg, &pkgfile, &mut out));
+
+        // Sanity: the license phrase alone, with no street address, stays
+        // silent.
+        let ok_path = dir.path().join("ok.txt");
+        std::fs::write(
+            &ok_path,
+            b"GNU General Public License\nno street address here\n",
+        )
+        .expect("write temp file");
+        let ok_file = PkgFile {
+            path: ok_path.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        assert!(!check.fsf_address_matches(&pkg, &ok_file, &mut out));
     }
 
     #[test]
@@ -3305,6 +3521,52 @@ mod tests {
                 && d.contains(": W: non-conffile-in-etc")
                 && d.contains("/etc/foo.conf")),
             "missing W-level non-conffile-in-etc on /etc/foo.conf: {results:?}"
+        );
+    }
+
+    #[test]
+    fn peek_unreadable_file_reports_read_error_detail() {
+        // Pins the port's own read-error detail for FilesCheck.peek (ledgered
+        // divergence: the reference's str(OSError) carries the [Errno N] prefix
+        // and the filename).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let secret = dir.path().join("secret.bin");
+        std::fs::write(&secret, b"\x00\x01").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o0))
+                .expect("chmod 000");
+        }
+        let pkg = Pkg::open(
+            std::path::Path::new(&fixture_path("filescheck-depmod-ok-1.0-1.noarch.rpm")),
+            dir.path(),
+            true,
+        )
+        .expect("open fixture");
+        let pkgfile = PkgFile {
+            name: "/usr/bin/secret".to_string(),
+            path: secret.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = FilesCheck::new(&config);
+        let (chunk, istext) = check.peek(&pkg, &pkgfile, &mut out);
+        assert!(chunk.is_empty() && !istext);
+        let line = out
+            .results()
+            .iter()
+            .find(|(n, _)| n == "read-error")
+            .map(|(_, l)| l.clone())
+            .expect("read-error must fire");
+        assert!(
+            line.contains(": W: "),
+            "read-error must be Warning level: {line}"
+        );
+        assert!(
+            line.contains("Permission denied (os error 13)"),
+            "unexpected detail: {line}"
         );
     }
 }

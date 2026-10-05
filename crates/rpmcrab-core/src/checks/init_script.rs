@@ -44,8 +44,9 @@ const RECOMMENDED_LSB_KEYWORDS: &[&str] = &[
     "Short-Description",
 ];
 
-/// Python's `str(OSError)` for the `read-error` detail: `[Errno 13] Permission
-/// denied`. Rust's `Display` renders `Permission denied (os error 13)`.
+/// The reference's `[Errno N]` prefix form for the `read-error` detail.
+/// The reference's full detail is Python's `str(OSError)`, which also appends
+/// the filename; that part is dropped here (see the ledger entry).
 fn os_error_detail(e: &std::io::Error) -> String {
     match e.raw_os_error() {
         Some(code) => {
@@ -199,8 +200,10 @@ impl Check for InitScriptCheck {
                 add_info(out, Level::Error, pkg, "preun-without-chkconfig", &[fname]);
             }
 
-            let content = match std::fs::read_to_string(&file.path) {
-                Ok(c) => c,
+            // The reference decodes with errors='replace' (helpers.readlines),
+            // so undecodable bytes must not raise read-error here.
+            let content = match std::fs::read(&file.path) {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
                 Err(e) => {
                     add_info(
                         out,
@@ -628,5 +631,89 @@ mod tests {
                 .collect();
             assert_eq!(found, want, "case {i} body:\n{body}");
         }
+    }
+
+    #[test]
+    fn non_utf8_init_script_decodes_lossy_without_read_error() {
+        // The reference decodes with errors='replace' (helpers.readlines), so
+        // a non-UTF-8 init script must not raise read-error and its LSB block
+        // must still be parsed.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let script = dir.path().join("bad");
+        std::fs::write(
+            &script,
+            b"#!/bin/sh\n# \xff\xfe undecodable\n### BEGIN INIT INFO\n# Provides: bad\n# Provides: bad2\n### END INIT INFO\n",
+        )
+        .expect("write script");
+
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, dir.path(), true).expect("open fixture pkg");
+        pkg.files = vec![PkgFile {
+            name: "/etc/init.d/bad".to_string(),
+            path: script.to_string_lossy().into_owned(),
+            mode: 0o100755,
+            ..Default::default()
+        }];
+
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = InitScriptCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        let names: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            !names.contains(&"read-error"),
+            "lossy decode must not raise read-error: {results:?}"
+        );
+        // The LSB block was parsed, not skipped.
+        assert!(
+            names.contains(&"redundant-lsb-keyword"),
+            "LSB block must be parsed: {results:?}"
+        );
+    }
+
+    #[test]
+    fn unreadable_init_script_reports_read_error() {
+        // Pins the port's own read-error detail (ledgered divergence: the
+        // reference's str(OSError) also carries the filename).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let script = dir.path().join("secret");
+        std::fs::write(&script, b"#!/bin/sh\n").expect("write script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o0))
+                .expect("chmod 000");
+        }
+
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, dir.path(), true).expect("open fixture pkg");
+        pkg.files = vec![PkgFile {
+            name: "/etc/init.d/secret".to_string(),
+            path: script.to_string_lossy().into_owned(),
+            mode: 0o100755,
+            ..Default::default()
+        }];
+
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = InitScriptCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        let line = results
+            .iter()
+            .find(|(n, _)| n == "read-error")
+            .map(|(_, l)| l.as_str())
+            .expect("read-error must fire on unreadable script");
+        assert!(
+            line.contains(": W: "),
+            "read-error must be Warning level: {line}"
+        );
+        assert!(
+            line.contains("[Errno 13] Permission denied"),
+            "unexpected detail: {line}"
+        );
     }
 }

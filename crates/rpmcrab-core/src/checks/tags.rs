@@ -24,15 +24,20 @@ use crate::pkg::Pkg;
 use crate::pkg::dep::{
     DepInfo, RPMSENSE_EQUAL, RPMSENSE_GREATER, RPMSENSE_LESS, version_to_string,
 };
+use std::sync::OnceLock;
 
 /// `invalid_version_regex`: `([0-9](?:rc|alpha|beta|pre).*)`, case-insensitive.
-fn invalid_version_regex() -> Regex {
-    Regex::new(r"(?i)([0-9](?:rc|alpha|beta|pre).*)").expect("static regex")
+static INVALID_VERSION_REGEX: OnceLock<Regex> = OnceLock::new();
+fn invalid_version_regex() -> &'static Regex {
+    INVALID_VERSION_REGEX
+        .get_or_init(|| Regex::new(r"(?i)([0-9](?:rc|alpha|beta|pre).*)").expect("static regex"))
 }
 
 /// `lib_devel_number_regex`: `^lib(.*?)([0-9.]+)(_[0-9.]+)?-devel`.
-fn lib_devel_number_regex() -> Regex {
-    Regex::new(r"^lib(.*?)([0-9.]+)(_[0-9.]+)?-devel").expect("static regex")
+static LIB_DEVEL_NUMBER_REGEX: OnceLock<Regex> = OnceLock::new();
+fn lib_devel_number_regex() -> &'static Regex {
+    LIB_DEVEL_NUMBER_REGEX
+        .get_or_init(|| Regex::new(r"^lib(.*?)([0-9.]+)(_[0-9.]+)?-devel").expect("static regex"))
 }
 
 /// Words that may start a summary in lowercase (`CAPITALIZED_IGNORE_LIST`).
@@ -87,6 +92,8 @@ pub struct TagsCheck {
     tag_re: Regex,
     spellchecker: Option<crate::spellcheck::Spellchecker>,
 }
+
+static URL_ESCAPE_RE: OnceLock<Regex> = OnceLock::new();
 
 impl TagsCheck {
     pub fn new(config: &Config) -> Self {
@@ -144,11 +151,11 @@ impl TagsCheck {
                 .and_then(toml::Value::as_integer)
                 .unwrap_or(79) as usize,
             valid_license_exceptions: get_strings("ValidLicenseExceptions"),
-            macro_re: macro_regex(),
-            devel_re: devel_regex(),
-            lib_devel_number_re: lib_devel_number_regex(),
-            lib_package_re: lib_package_regex(),
-            invalid_version_re: invalid_version_regex(),
+            macro_re: macro_regex().clone(),
+            devel_re: devel_regex().clone(),
+            lib_devel_number_re: lib_devel_number_regex().clone(),
+            lib_package_re: lib_package_regex().clone(),
+            invalid_version_re: invalid_version_regex().clone(),
             changelog_version_re: Regex::new(r"[^>]([^ >]+)\s*$").expect("static regex"),
             changelog_text_version_re: Regex::new(r"^\s*-\s*((\d+:)?[\w\.]+-[\w\.]+)").expect("static regex"),
             devel_number_re: Regex::new(r"(.*?)([0-9.]+)(_[0-9.]+)?-devel").expect("static regex"),
@@ -181,7 +188,14 @@ impl TagsCheck {
                 .filter_map(|r| r.ok())
                 .map(|m| m.as_str())
             {
-                if is_url && is_match(&Regex::new(r"(?i)^%[0-9A-F][0-9A-F]$").expect("static"), m) {
+                if is_url
+                    && is_match(
+                        URL_ESCAPE_RE.get_or_init(|| {
+                            Regex::new(r"(?i)^%[0-9A-F][0-9A-F]$").expect("static")
+                        }),
+                        m,
+                    )
+                {
                     continue;
                 }
                 add_info(out, Level::Warning, pkg, "unexpanded-macro", &[tagname, m]);
@@ -1427,13 +1441,18 @@ mod tests {
         config
     }
 
-    fn fixture_pkg(name: &str) -> Pkg {
+    /// Open a fixture RPM, extracting into a unique tempdir (kept alive by
+    /// the caller) rather than the shared `temp_dir()`: concurrent runs must
+    /// not share one extraction directory.
+    fn fixture_pkg(name: &str) -> (tempfile::TempDir, Pkg) {
         // Hand-built fixture RPMs in tests/parity/pkg/inputs/, not distro
         // packages. The llvm21-gold corpus is reserved for parity tests.
         let rpm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs")
             .join(name);
-        Pkg::open(&rpm_path, &std::env::temp_dir(), true).expect("open fixture pkg")
+        let tmp = tempfile::tempdir().expect("tmpdir for fixture extraction");
+        let pkg = Pkg::open(&rpm_path, tmp.path(), true).expect("open fixture pkg");
+        (tmp, pkg)
     }
 
     fn run_check(pkg: &Pkg) -> Vec<(String, String)> {
@@ -1446,7 +1465,7 @@ mod tests {
 
     #[test]
     fn tags_check_runs_on_fixture() {
-        let pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        let (_tmp, pkg) = fixture_pkg("fcprobe-1-1.noarch.rpm");
         let results = run_check(&pkg);
         for (name, line) in &results {
             eprintln!("GOT: {}: {}", name, line);
@@ -1475,12 +1494,19 @@ mod tests {
     }
 
     /// Copy a fixture RPM with its first CHANGELOGTIME rewritten, returning
-    /// the temp path. The emission path reads the timestamp from the package
-    /// header, which librpm exposes read-only, so the test patches the header
-    /// bytes of a copy: lead (96B), signature header, then the main header's
-    /// index entry for tag 1080 (CHANGELOGTIME, INT32). Opening skips digest
-    /// verification, so the in-place rewrite needs no fixup.
-    fn patch_changelog_time(fixture: &str, stem: &str, new_time: i64) -> std::path::PathBuf {
+    /// the tempdir (kept alive by the caller) and the patched path. The
+    /// patched bytes live in a unique tempdir, never a fixed `temp_dir()`
+    /// path: two concurrent runs must not share one file. The emission path
+    /// reads the timestamp from the package header, which librpm exposes
+    /// read-only, so the test patches the header bytes of a copy: lead (96B),
+    /// signature header, then the main header's index entry for tag 1080
+    /// (CHANGELOGTIME, INT32). Opening skips digest verification, so the
+    /// in-place rewrite needs no fixup. The reference rejects the rewritten
+    /// digests, so it cannot arbitrate these runs.
+    fn patch_changelog_time(
+        fixture: &str,
+        new_time: i64,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
         const TAG_CHANGELOGTIME: u32 = 1080;
         const TYPE_INT32: u32 = 4;
         let src = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1513,9 +1539,12 @@ mod tests {
             }
         }
         assert!(patched, "CHANGELOGTIME missing in {fixture}");
-        let tmp = std::env::temp_dir().join(format!("rpmcrab-changelog-{stem}.rpm"));
-        std::fs::write(&tmp, &bytes).expect("write patched rpm");
-        tmp
+        let tmp = tempfile::tempdir().expect("tmpdir for patched rpm");
+        // Keep the fixture's own filename: the basename feeds
+        // `non-coherent-filename`, and a renamed copy would emit it.
+        let rpm_path = tmp.path().join(fixture);
+        std::fs::write(&rpm_path, &bytes).expect("write patched rpm");
+        (tmp, rpm_path)
     }
 
     fn wall_now() -> i64 {
@@ -1527,18 +1556,30 @@ mod tests {
 
     /// The #126 fix, comparison half: 1h ahead of now is a timezone artifact,
     /// so the rolled-back comparison stays quiet through the real emission path.
+    /// The positive control shares the emission code path: the same fixture
+    /// patched 30h ahead must emit exactly one changelog-time-in-future. If
+    /// the emission branch ever dies, the control fails instead of the quiet
+    /// assertion passing vacuously.
     #[test]
     fn changelog_one_hour_ahead_emits_nothing() {
-        let tmp = patch_changelog_time("w6-tmpfiles-1.0-1.noarch.rpm", "quiet", wall_now() + 3600);
-        let pkg = Pkg::open(&tmp, &std::env::temp_dir(), true).expect("open patched pkg");
+        let (_tmp, tmp) = patch_changelog_time("w6-tmpfiles-1.0-1.noarch.rpm", wall_now() + 3600);
+        let pkg = Pkg::open_no_extract(&tmp).expect("open patched pkg");
         let results = run_check(&pkg);
-        std::fs::remove_file(&tmp).ok();
         assert!(
             results
                 .iter()
                 .all(|(name, _)| name != "changelog-time-in-future"),
             "unexpected findings: {results:?}"
         );
+        let (_tmp2, tmp2) =
+            patch_changelog_time("w6-tmpfiles-1.0-1.noarch.rpm", wall_now() + 30 * 3600);
+        let future_pkg = Pkg::open_no_extract(&tmp2).expect("open future pkg");
+        let future_results = run_check(&future_pkg);
+        let hits: Vec<_> = future_results
+            .iter()
+            .filter(|(name, _)| name.as_str() == "changelog-time-in-future")
+            .collect();
+        assert_eq!(hits.len(), 1, "positive control failed: {hits:?}");
     }
 
     /// The #126 fix, detail half: the emitted finding pins name, level and the
@@ -1546,20 +1587,23 @@ mod tests {
     #[test]
     fn changelog_time_in_future_pins_name_level_and_detail() {
         let first = wall_now() + 30 * 3600;
-        let tmp = patch_changelog_time("w6-tmpfiles-1.0-1.noarch.rpm", "future", first);
-        let pkg = Pkg::open(&tmp, &std::env::temp_dir(), true).expect("open patched pkg");
+        let (_tmp, tmp) = patch_changelog_time("w6-tmpfiles-1.0-1.noarch.rpm", first);
+        let pkg = Pkg::open_no_extract(&tmp).expect("open patched pkg");
         let results = run_check(&pkg);
-        std::fs::remove_file(&tmp).ok();
         let hits: Vec<_> = results
             .iter()
             .filter(|(name, _)| name.as_str() == "changelog-time-in-future")
             .collect();
         assert_eq!(hits.len(), 1, "expected one finding: {results:?}");
-        assert!(hits[0].1.contains(": E: "), "level: {}", hits[0].1);
-        assert!(
-            hits[0].1.contains(&format_date(first - 26 * 3600)),
-            "detail: {}",
-            hits[0].1
+        // Whole-line pin: the package prefix, level letter, finding name and
+        // rolled-back date in one assertion, so no added field goes unnoticed.
+        assert_eq!(
+            hits[0].1,
+            format!(
+                "w6-tmpfiles.noarch: E: changelog-time-in-future {}",
+                format_date(first - 26 * 3600)
+            ),
+            "unexpected line"
         );
     }
 
@@ -1699,7 +1743,7 @@ mod tests {
     /// Run the full check with the fixture's Provides/Obsoletes replaced,
     /// returning the emitted `self-obsoletion` findings.
     fn self_obsoletion_results(provides: DepInfo, obsoletes: DepInfo) -> Vec<(String, String)> {
-        let mut pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        let (_tmp, mut pkg) = fixture_pkg("fcprobe-1-1.noarch.rpm");
         pkg.provides = vec![provides];
         pkg.obsoletes = vec![obsoletes];
         run_check(&pkg)
@@ -1804,7 +1848,7 @@ mod tests {
 
     fn license_findings(license: &str) -> Vec<(String, String)> {
         let config = license_test_config();
-        let pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        let (_tmp, pkg) = fixture_pkg("fcprobe-1-1.noarch.rpm");
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let check = TagsCheck::new(&config);
         check.check_license(&pkg, &mut out, license);
@@ -2069,7 +2113,7 @@ mod rich_dep_emission_tests {
     fn devel_dependency_matches_rich_leaf() {
         let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
         assert!(
-            !is_match(&devel_regex(), &pkg.name),
+            !is_match(devel_regex(), &pkg.name),
             "fixture must not be a devel package"
         );
         pkg.requires.push(rich_dep("(somelib-devel or plainx)"));

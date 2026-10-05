@@ -22,17 +22,21 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
+use std::sync::OnceLock;
 
-fn zip_regex() -> Regex {
-    Regex::new(r"\.(zip|[ewj]ar)$").expect("static regex")
+static ZIP_REGEX: OnceLock<Regex> = OnceLock::new();
+fn zip_regex() -> &'static Regex {
+    ZIP_REGEX.get_or_init(|| Regex::new(r"\.(zip|[ewj]ar)$").expect("static regex"))
 }
 
-fn jar_regex() -> Regex {
-    Regex::new(r"\.[ewj]ar$").expect("static regex")
+static JAR_REGEX: OnceLock<Regex> = OnceLock::new();
+fn jar_regex() -> &'static Regex {
+    JAR_REGEX.get_or_init(|| Regex::new(r"\.[ewj]ar$").expect("static regex"))
 }
 
-fn classpath_regex() -> Regex {
-    Regex::new(r"(?im)^\s*Class-Path\s*:").expect("static regex")
+static CLASSPATH_REGEX: OnceLock<Regex> = OnceLock::new();
+fn classpath_regex() -> &'static Regex {
+    CLASSPATH_REGEX.get_or_init(|| Regex::new(r"(?im)^\s*Class-Path\s*:").expect("static regex"))
 }
 
 /// How entry-data reading failed: a CRC failure names the entry
@@ -185,14 +189,14 @@ impl ZipCheck {
         if is_uncompressed(&mut archive) {
             out.push((Level::Error, "uncompressed-zip", vec![fname.to_string()]));
         }
-        if is_match(&jar_regex(), fname) {
+        if is_match(jar_regex(), fname) {
             // `namelist()` membership, not `by_name`: a corrupt entry is
             // still listed, as in the reference.
             let names: Vec<String> = archive.file_names().map(str::to_string).collect();
             if names.iter().any(|n| n == "META-INF/MANIFEST.MF") {
                 match manifest_text(&mut archive) {
                     Ok(manifest) => {
-                        if is_match(&classpath_regex(), &manifest) {
+                        if is_match(classpath_regex(), &manifest) {
                             out.push((
                                 Level::Warning,
                                 "class-path-in-manifest",
@@ -223,7 +227,7 @@ impl Check for ZipCheck {
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
         let zip_re = zip_regex();
         for file in &pkg.files {
-            if !is_match(&zip_re, &file.name) {
+            if !is_match(zip_re, &file.name) {
                 continue;
             }
             let path = Path::new(&file.path);
@@ -492,11 +496,11 @@ mod tests {
         // The filename regex is what selects archives; exercised via inspect
         // indirectly: a .txt name never reaches the archive code.
         let re = zip_regex();
-        assert!(is_match(&re, "a.zip"));
-        assert!(is_match(&re, "a.jar"));
-        assert!(is_match(&re, "a.war"));
-        assert!(is_match(&re, "a.ear"));
-        assert!(!is_match(&re, "a.txt"));
-        assert!(!is_match(&re, "a.zip.bak"));
+        assert!(is_match(re, "a.zip"));
+        assert!(is_match(re, "a.jar"));
+        assert!(is_match(re, "a.war"));
+        assert!(is_match(re, "a.ear"));
+        assert!(!is_match(re, "a.txt"));
+        assert!(!is_match(re, "a.zip.bak"));
     }
 }
