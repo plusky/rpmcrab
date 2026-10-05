@@ -45,8 +45,6 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ("tags.rs", "Regex::new(p).ok()", "config"),
     ("tags.rs", "Regex::new(&packager).ok()", "config"),
     ("tags.rs", "Regex::new(&release_ext).ok()", "config"),
-    ("tags.rs", "invalid_url_re", "config"),
-    ("tags.rs", "forbidden_words_re", "config"),
     ("tags.rs", "Regex::new(&valid_buildhost).ok()", "config"),
     ("spec.rs", "Regex::new(exceptions)", "config"),
     // Package-data-driven: patterns incorporate package names/paths.
@@ -76,7 +74,6 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ("kmp_policy.rs", "re_kmp_pkg", "ctor-once"),
     ("menu_xdg.rs", "file_regex", "ctor-once"),
     ("pam_modules.rs", "pam_module_re", "ctor-once"),
-    ("shared_library_policy.rs", "re_soname:", "ctor-once"),
     (
         "shared_library_policy.rs",
         "re_soname_strongly_versioned",
@@ -94,7 +91,6 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     // Constant patterns in struct fields (compile once per instance).
     ("tags.rs", "devel_number_re", "ctor-once"),
     ("tags.rs", "leading_space_re", "ctor-once"),
-    ("tags.rs", "license_re", "ctor-once"),
     ("tags.rs", "license_exception_re", "ctor-once"),
     ("tags.rs", "pkg_config_re", "ctor-once"),
     ("tags.rs", "tag_re:", "ctor-once"),
@@ -134,26 +130,30 @@ fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
+/// Whether `pat` occurs in `line` as a whole token: an allowlisted fragment
+/// must not silently permit an unrelated line that merely contains it as a
+/// substring (e.g. `invalid_url` must not match `invalid_url_regex`).
+fn fragment_matches_token_anchored(line: &str, pat: &str) -> bool {
+    let mut start = 0;
+    while let Some(idx) = line[start..].find(pat) {
+        let s = start + idx;
+        let e = s + pat.len();
+        let before_ok = s == 0 || !line[..s].chars().next_back().is_some_and(is_ident_char);
+        let after_ok = e == line.len() || !line[e..].chars().next().is_some_and(is_ident_char);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = s + 1;
+    }
+    false
+}
+
 fn is_allowlisted(file: &str, line: &str) -> bool {
     ALLOWLIST.iter().any(|(f, pat, _)| {
         if *f != file {
             return false;
         }
-        // The fragment must appear as a whole token, not embedded in a longer
-        // identifier: an allowlisted fragment must not silently permit an
-        // unrelated line that merely contains it as a substring.
-        let mut start = 0;
-        while let Some(idx) = line[start..].find(pat) {
-            let s = start + idx;
-            let e = s + pat.len();
-            let before_ok = s == 0 || !line[..s].chars().next_back().is_some_and(is_ident_char);
-            let after_ok = e == line.len() || !line[e..].chars().next().is_some_and(is_ident_char);
-            if before_ok && after_ok {
-                return true;
-            }
-            start = s + 1;
-        }
-        false
+        fragment_matches_token_anchored(line, pat)
     })
 }
 
@@ -197,15 +197,15 @@ fn owned_regex_factory_detector() {
 
 #[test]
 fn allowlist_matching_is_token_anchored() {
-    // "invalid_url_re" is allowlisted for tags.rs; a longer identifier merely
+    // "tag_re:" is allowlisted for tags.rs; a longer identifier merely
     // containing it must not be permitted.
     assert!(is_allowlisted(
         "tags.rs",
-        "        invalid_url_re: Regex::new(&x),"
+        "        tag_re: Regex::new(r\"x\"),"
     ));
     assert!(!is_allowlisted(
         "tags.rs",
-        "        my_invalid_url_re: Regex::new(&x),"
+        "        my_tag_re: Regex::new(r\"x\"),"
     ));
     // Full-call fragments still match as whole tokens.
     assert!(is_allowlisted(
@@ -217,6 +217,29 @@ fn allowlist_matching_is_token_anchored() {
         "files.rs",
         "        filter_map(|r| Regex::new(r).ok()),"
     ));
+}
+
+#[test]
+fn every_allowlist_entry_matches_a_real_line() {
+    // Dead entries rot silently: without this test nothing reports an entry
+    // that stopped matching (e.g. the four pruned when token anchoring
+    // landed: the real lines had all been renamed).
+    let dir = checks_dir();
+    let mut dead = Vec::new();
+    for (file, pat, _) in ALLOWLIST {
+        let src = std::fs::read_to_string(dir.join(file)).unwrap();
+        if !src
+            .lines()
+            .any(|line| fragment_matches_token_anchored(line, pat))
+        {
+            dead.push(format!("{file}: {pat}"));
+        }
+    }
+    assert!(
+        dead.is_empty(),
+        "allowlist entries matching no real line (prune them):\n{}",
+        dead.join("\n")
+    );
 }
 
 #[test]
