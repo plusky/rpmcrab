@@ -313,6 +313,21 @@ fn declarative_re() -> &'static Regex {
     DECLARATIVE_RE.get_or_init(|| Regex::new(r"(?i)^BuildSystem:\s*(.*)").expect("static regex"))
 }
 
+/// `Summary:` tag lines (optional language qualifier) — prose for the
+/// `non-break-space` relaxation (upstream rpmlint#554).
+static SUMMARY_RE: OnceLock<Regex> = OnceLock::new();
+fn summary_re() -> &'static Regex {
+    SUMMARY_RE.get_or_init(|| Regex::new(r"(?i)^\s*Summary(\([^)]*\))?\s*:").expect("static regex"))
+}
+
+/// `SourceN:`/`PatchN:` tag lines — a conditional one (inside `%if`) warns
+/// `conditional-source-or-patch` (upstream rpmlint#45).
+static SOURCE_PATCH_RE: OnceLock<Regex> = OnceLock::new();
+fn source_patch_re() -> &'static Regex {
+    SOURCE_PATCH_RE
+        .get_or_init(|| Regex::new(r"^\s*(Source\d*|Patch\d*)\s*:").expect("static regex"))
+}
+
 static COMPOP_RE: OnceLock<Regex> = OnceLock::new();
 fn compop_re() -> &'static Regex {
     COMPOP_RE.get_or_init(|| Regex::new(r"[<>=]").expect("static regex"))
@@ -526,6 +541,8 @@ pub struct SpecCheck {
     obsoletes_re: Regex,
     conflicts_re: Regex,
     declarative_re: Regex,
+    summary_re: Regex,
+    source_patch_re: Regex,
     compop_re: Regex,
     setup_re: Regex,
     setup_q_re: Regex,
@@ -642,6 +659,8 @@ impl SpecCheck {
             obsoletes_re: obsoletes_re().clone(),
             conflicts_re: conflicts_re().clone(),
             declarative_re: declarative_re().clone(),
+            summary_re: summary_re().clone(),
+            source_patch_re: source_patch_re().clone(),
             compop_re: compop_re().clone(),
             setup_re: setup_re().clone(),
             setup_q_re: setup_q_re().clone(),
@@ -1018,6 +1037,9 @@ impl SpecCheck {
         self.checkline_python_module_def(pkg, out, line);
         self.checkline_python_sitelib_glob(pkg, out, line);
         self.checkline_shared_dir_glob(pkg, out, line);
+        // Before the `%if`/`%endif` depth update below: a `Source:` on the
+        // `%if` line itself is not conditional.
+        self.checkline_conditional_source_patch(pkg, out, line);
 
         if self.ifarch_re.is_match(line).unwrap_or(false) {
             self.if_depth += 1;
@@ -1044,6 +1066,16 @@ impl SpecCheck {
     }
 
     fn checkline_break_space(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
+        // Upstream rpmlint#554: NBSP in prose (%description bodies,
+        // Summary: tag lines, %changelog entries) is harmless typesetting,
+        // not a syntax hazard; flagging it is a false positive. Code and
+        // scriptlet sections keep the warning.
+        if self.current_section == "description"
+            || self.current_section == "changelog"
+            || self.summary_re.is_match(line).unwrap_or(false)
+        {
+            return;
+        }
         if let Some(char) = line.find(NBSP) {
             let detail = format!(
                 "line {}, char {}",
@@ -1052,6 +1084,28 @@ impl SpecCheck {
             );
             self.info(out, pkg, Level::Warning, "non-break-space", &[&detail]);
         }
+    }
+
+    /// Warn when a `Source:`/`Patch:` tag sits inside `%if`/`%endif`:
+    /// the resulting SRPM can miss the files the spec references
+    /// (upstream rpmlint#45). Only the preamble (`package` section)
+    /// carries these tags; prose elsewhere may mention them freely.
+    fn checkline_conditional_source_patch(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
+        if self.if_depth <= 0 || self.current_section != "package" {
+            return;
+        }
+        let Ok(Some(caps)) = self.source_patch_re.captures(line) else {
+            return;
+        };
+        let tag = format!("{}:", caps.get(1).map(|m| m.as_str()).unwrap_or(""));
+        // The spec-line prefix already carries the line number.
+        self.info(
+            out,
+            pkg,
+            Level::Warning,
+            "conditional-source-or-patch",
+            &[&tag],
+        );
     }
 
     fn checkline_section(&mut self, line: &str) -> bool {
@@ -1972,6 +2026,88 @@ mod tests {
         let lines = lines_for(&results, "invalid-suse-version-check");
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("E: invalid-suse-version-check 1700"));
+    }
+
+    // Upstream rpmlint#554: NBSP in prose is not a syntax hazard.
+    #[test]
+    fn nbsp_in_description_is_quiet() {
+        let results = run_mini("Name: foo\n%description\nhot\u{a0} latte\n");
+        assert!(!has(&results, "non-break-space"), "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn nbsp_in_summary_is_quiet() {
+        let results = run_mini("Name: foo\nSummary: hot\u{a0} latte\n");
+        assert!(!has(&results, "non-break-space"), "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn nbsp_in_changelog_is_quiet() {
+        let results = run_mini("Name: foo\n%changelog\n* Wed hot\u{a0} latte\n");
+        assert!(!has(&results, "non-break-space"), "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn nbsp_in_scriptlet_still_warns() {
+        // The relaxation is prose-only: a NBSP in a code section is still a
+        // syntax hazard, so the check must still fire there.
+        let results = run_mini("Name: foo\n%prep\nhot\u{a0} latte\n");
+        let lines = lines_for(&results, "non-break-space");
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("W: non-break-space line 3, char 3"));
+    }
+
+    #[test]
+    fn nbsp_on_summary_keyword_line_only() {
+        // A bare word "Summary" elsewhere is not a tag line.
+        let results = run_mini("Name: foo\n%prep\necho Summary\u{a0} here\n");
+        assert!(has(&results, "non-break-space"), "missing: {results:?}");
+    }
+
+    // Upstream rpmlint#45: conditional Source:/Patch: tags.
+    #[test]
+    fn conditional_source_warns() {
+        let results = run_mini("Name: foo\n%if 0%{?suse_version}\nSource0: a.tar.gz\n%endif\n");
+        let lines = lines_for(&results, "conditional-source-or-patch");
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("W: conditional-source-or-patch Source0:"));
+    }
+
+    #[test]
+    fn conditional_patch_warns() {
+        let results = run_mini("Name: foo\n%ifarch x86_64\nPatch1: b.patch\n%endif\n");
+        let lines = lines_for(&results, "conditional-source-or-patch");
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("W: conditional-source-or-patch Patch1:"));
+    }
+
+    #[test]
+    fn unconditional_source_is_quiet() {
+        let results = run_mini("Name: foo\nSource0: a.tar.gz\n");
+        assert!(
+            !has(&results, "conditional-source-or-patch"),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn source_after_endif_is_quiet() {
+        let results = run_mini("Name: foo\n%if 0\n%endif\nSource0: a.tar.gz\n");
+        assert!(
+            !has(&results, "conditional-source-or-patch"),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn source_word_in_description_is_quiet() {
+        // Only the preamble carries Source:/Patch: tags; prose mentioning
+        // them must not warn.
+        let results = run_mini("Name: foo\n%description\n%if 0\nSource0: a.tar.gz\n%endif\n");
+        assert!(
+            !has(&results, "conditional-source-or-patch"),
+            "unexpected: {results:?}"
+        );
     }
 
     #[test]
