@@ -418,13 +418,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "symlink-contains-up-and-down-segments"
-kind = "missing"
-reason = "FilesCheck flags symlinks whose target contains '..' segments; the symlink segment analysis is not ported yet."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "SignatureCheck"
 kind = "detail"
 reason = "SignatureCheck runs `rpm -Kv` under `LC_ALL=C` instead of the reference's `en_US.UTF-8`/`LANGUAGE=en_US` environment. stderr is merged into the captured output like the reference."

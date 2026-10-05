@@ -1735,6 +1735,19 @@ impl FilesCheck {
                     );
                 }
             }
+            // A .. left in the target after the leading run means the
+            // link goes up and then back down, e.g. ../foo/../bar.
+            for segment in mylink.split("/") {
+                if segment == ".." {
+                    add_info(
+                        out,
+                        Level::Error,
+                        pkg,
+                        "symlink-contains-up-and-down-segments",
+                        &[fname, link],
+                    );
+                }
+            }
         }
     }
 
@@ -3187,6 +3200,68 @@ mod tests {
         );
         assert_has(&names, "symlink-should-be-absolute");
         assert_lacks(&names, "symlink-should-be-relative");
+    }
+
+    #[test]
+    fn symlink_up_and_down_segments() {
+        // The reference emits E symlink-contains-up-and-down-segments once
+        // per ".." segment left in the link target after the leading "../"
+        // run is consumed. Only targets starting with "../" are examined;
+        // an empty remainder stays silent. Cases verified against the
+        // pinned reference interpreter.
+        let config = test_config();
+        let check = FilesCheck::new(&config);
+        // (fname, link target, expected E count)
+        let cases = [
+            ("/a/b/c", "../foo/../bar", 1),
+            ("/a/b/c", "../../x/../y", 1),
+            ("/a/b/c", "../../a/../b/../c", 2),
+            ("/a/b/c", "../..", 1),
+            ("/a/b/c", "../", 0),
+            ("/a/b/c", "foo/../bar", 0),
+            ("/a/b/c", "../foo", 0),
+            ("/a/b/c", "/abs/path", 0),
+        ];
+        for (fname, link, expected) in cases {
+            let dir = tempfile::TempDir::new().expect("tmpdir");
+            let mut pkg = Pkg::open(
+                std::path::Path::new(&fixture_path("fcprobe-1-1.noarch.rpm")),
+                dir.path(),
+                true,
+            )
+            .expect("open fixture");
+            // Silence the dangling-relative-symlink warning so the count
+            // below sees only this check's emissions.
+            let parent = std::path::Path::new(fname)
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            pkg.req_names
+                .push(crate::pkg::normalize_path(&format!("{parent}/{link}")));
+            let pkgfile = crate::pkg::pkgfile::PkgFile {
+                name: fname.to_string(),
+                linkto: link.to_string(),
+                ..Default::default()
+            };
+            let st = PkgState::default();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_link_relative(&pkg, fname, &pkgfile, &st, &mut out);
+            let hits: Vec<(usize, &(String, String))> = out
+                .results()
+                .iter()
+                .enumerate()
+                .filter(|(_, (name, _))| name == "symlink-contains-up-and-down-segments")
+                .collect();
+            assert_eq!(hits.len(), expected, "fname={fname} link={link}");
+            for (i, (name, line)) in hits {
+                assert_eq!(name, "symlink-contains-up-and-down-segments");
+                assert_eq!(out.result_levels()[i], Level::Error);
+                assert!(
+                    line.contains(fname) && line.contains(link),
+                    "detail must name the file and target, got: {line}"
+                );
+            }
+        }
     }
 
     #[test]
