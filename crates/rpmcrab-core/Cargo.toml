@@ -62,7 +62,7 @@ quick-xml = "0.42"
 # SHA-2 digests for FileDigestCheck (pure Rust).
 md-5 = "0.10"
 sha1 = "0.10"
-sha2 = "0.10"
+sha2 = "0.11"
 # Local civil date for `BuildRootAndDateCheck`: the reference formats "today" with
 # `time.strftime('%b %e %Y')` (local time, C locale). `OffsetDateTime::now_local`
 # reads the system tz database via libc in-process (no subprocess);
