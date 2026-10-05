@@ -41,7 +41,7 @@ impl SharedLibraryPolicyCheck {
     /// `(soname, needed)` from an ELF file, or the parse failure reason.
     fn elf_dynamic(path: &str) -> Result<(Option<String>, Vec<String>), String> {
         let data = std::fs::read(path).map_err(|e| e.to_string())?;
-        let elf = goblin::elf::Elf::parse(&data).map_err(|e| e.to_string())?;
+        let elf = crate::checks::binaries::parse_elf(&data).map_err(|e| e.to_string())?;
         let mut soname = None;
         let mut needed = Vec::new();
         if let Some(dynamic) = &elf.dynamic {

@@ -27,3 +27,22 @@ Needs `podman` and `rpmbuild`. The binaries are compiled in an openSUSE
 Tumbleweed container so they are genuine Linux ELFs regardless of host OS.
 The container architecture (currently aarch64) does not matter — goblin
 parses all ELF types and the findings are architecture-independent.
+
+## Dangling DT_GNU_HASH fixture
+
+A second RPM, `input/rpmcrab-binaries-dangling-gnuhash-1.0-1.<arch>.rpm`,
+used by `dangling_dt_gnu_hash_still_emits_hash_findings` in
+`crates/rpmcrab-core/src/checks/binaries.rs`. It contains one shared library
+(`/usr/lib64/libdangling-stripped.so.1`) whose `.hash` and `.gnu.hash`
+sections were removed with objcopy, leaving the `DT_GNU_HASH` (and
+`DT_HASH`) dynamic entries dangling. Expected findings:
+`missing-hash-section` at **Error** and `missing-gnu-hash-section` at
+**Warning**; no `readelf-failed` (the port retries goblin's parse
+permissively on this shape, like the reference which never inspects the
+hash table).
+
+Regenerate with:
+
+```bash
+bash tests/fixtures/binaries-check/build-dangling-gnuhash.sh
+```

@@ -137,6 +137,21 @@ struct ElfProgramHeader {
     flags: String,
 }
 
+/// Parse ELF bytes, tolerating a dangling DT_GNU_HASH: stripping hash
+/// sections with objcopy leaves the dynamic entry behind, which fails
+/// goblin's strict parse. The reference never inspects the hash table, so
+/// retry permissively and let the sections read as missing instead of
+/// failing the whole file.
+pub(crate) fn parse_elf(data: &[u8]) -> Result<goblin::elf::Elf<'_>, goblin::error::Error> {
+    match goblin::elf::Elf::parse(data) {
+        Ok(elf) => Ok(elf),
+        Err(goblin::error::Error::Malformed(msg)) if msg.starts_with("Invalid DT_GNU_HASH:") => {
+            goblin::elf::Elf::parse_with_opts(data, &goblin::options::ParseOptions::permissive())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 struct ReadelfInfo {
     sections: Vec<Vec<ElfSection>>,
     program_headers: Vec<ElfProgramHeader>,
@@ -181,7 +196,7 @@ impl ReadelfInfo {
             }
         };
 
-        let elf = match goblin::elf::Elf::parse(&data) {
+        let elf = match parse_elf(&data) {
             Ok(e) => e,
             Err(e) => {
                 info.failed = Some(e.to_string());
@@ -321,7 +336,7 @@ impl LddInfo {
             }
         };
 
-        let elf = match goblin::elf::Elf::parse(&data) {
+        let elf = match parse_elf(&data) {
             Ok(e) => e,
             Err(e) => {
                 info.failed = Some(e.to_string());
@@ -3771,5 +3786,37 @@ description = "explicit priority string bypasses the system crypto policy"
         let results = out.results().to_vec();
         assert_lacks(&results, "readelf-failed");
         assert_lacks(&results, "ldd-failed");
+    }
+
+    #[test]
+    fn dangling_dt_gnu_hash_still_emits_hash_findings() {
+        // #220 follow-up: objcopy --remove-section=.hash
+        // --remove-section=.gnu.hash leaves the DT_GNU_HASH dynamic entry
+        // dangling; goblin's strict parse rejects the file, and the port
+        // used to emit readelf-failed and skip the hash-section analysis
+        // while the reference emits both findings. The fixture .so was built
+        // and stripped on openSUSE Tumbleweed, then packaged with rpmbuild;
+        // the test drives it through the full BinariesCheck.
+        let rpm_path = fixture_path("rpmcrab-binaries-dangling-gnuhash-1.0-1.aarch64.rpm");
+        let (results, _dir) = run_binaries_check(&rpm_path);
+        assert_lacks(&results, "readelf-failed");
+        let hash_lines = lines_for(&results, "missing-hash-section");
+        assert_eq!(hash_lines.len(), 1, "one missing-hash-section: {results:?}");
+        assert!(
+            hash_lines[0].contains(" E: "),
+            "missing-hash-section is Error: {}",
+            hash_lines[0]
+        );
+        let gnu_lines = lines_for(&results, "missing-gnu-hash-section");
+        assert_eq!(
+            gnu_lines.len(),
+            1,
+            "one missing-gnu-hash-section: {results:?}"
+        );
+        assert!(
+            gnu_lines[0].contains(" W: "),
+            "missing-gnu-hash-section is Warning: {}",
+            gnu_lines[0]
+        );
     }
 }
