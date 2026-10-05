@@ -23,7 +23,7 @@
 //! because `files-duplicated-waste` accumulates the same suppressed
 //! `diff`, its total shifts in lockstep: the port reports it with a
 //! larger total where the reference's two-level suppression keeps the
-//! package under the threshold (ledgered as a `detail` divergence).
+//! package under the threshold (ledgered as a `behaviour` divergence).
 //!
 //! Four findings: `hardlink-across-partition` (E),
 //! `hardlink-across-config-files` (E), `files-duplicate` (W),
@@ -205,6 +205,32 @@ impl DuplicatesCheck {
         }
         out
     }
+
+    /// Output level, finding name and detail strings for one finding.
+    /// A named function rather than an inline `match` in `check` so tests
+    /// can pin the E/W mapping without constructing a full `Pkg`.
+    fn describe(f: &DuplicateFinding) -> (Level, &'static str, Vec<String>) {
+        match f {
+            DuplicateFinding::HardlinkAcrossPartition(a, b) => (
+                Level::Error,
+                "hardlink-across-partition",
+                vec![a.clone(), b.clone()],
+            ),
+            DuplicateFinding::HardlinkAcrossConfigFiles(a, b) => (
+                Level::Error,
+                "hardlink-across-config-files",
+                vec![a.clone(), b.clone()],
+            ),
+            DuplicateFinding::FilesDuplicate(a, b) => (
+                Level::Warning,
+                "files-duplicate",
+                vec![a.clone(), b.clone()],
+            ),
+            DuplicateFinding::FilesDuplicatedWaste(n) => {
+                (Level::Error, "files-duplicated-waste", vec![n.to_string()])
+            }
+        }
+    }
 }
 
 impl Check for DuplicatesCheck {
@@ -223,33 +249,10 @@ impl Check for DuplicatesCheck {
             |n| pkg.config_files.contains(&n.to_string()),
             |n| pkg.ghost_files.contains(&n.to_string()),
         );
-        for f in findings {
-            match f {
-                DuplicateFinding::HardlinkAcrossPartition(a, b) => add_info(
-                    out,
-                    Level::Error,
-                    pkg,
-                    "hardlink-across-partition",
-                    &[&a, &b],
-                ),
-                DuplicateFinding::HardlinkAcrossConfigFiles(a, b) => add_info(
-                    out,
-                    Level::Error,
-                    pkg,
-                    "hardlink-across-config-files",
-                    &[&a, &b],
-                ),
-                DuplicateFinding::FilesDuplicate(a, b) => {
-                    add_info(out, Level::Warning, pkg, "files-duplicate", &[&a, &b])
-                }
-                DuplicateFinding::FilesDuplicatedWaste(n) => add_info(
-                    out,
-                    Level::Error,
-                    pkg,
-                    "files-duplicated-waste",
-                    &[&n.to_string()],
-                ),
-            }
+        for f in &findings {
+            let (level, name, details) = Self::describe(f);
+            let detail_refs: Vec<&str> = details.iter().map(String::as_str).collect();
+            add_info(out, level, pkg, name, &detail_refs);
         }
     }
 }
@@ -462,5 +465,35 @@ mod tests {
                 DuplicateFinding::FilesDuplicatedWaste(120_000),
             ],
         );
+    }
+
+    #[test]
+    fn finding_output_levels_are_pinned() {
+        // The E/W mapping lives in `describe`, which `check` renders
+        // verbatim: flipping any level here must fail. `Level::letter`
+        // is the byte that appears in the output line.
+        let cases = [
+            (
+                DuplicateFinding::HardlinkAcrossPartition("a".into(), "b".into()),
+                ('E', "hardlink-across-partition"),
+            ),
+            (
+                DuplicateFinding::HardlinkAcrossConfigFiles("a".into(), "b".into()),
+                ('E', "hardlink-across-config-files"),
+            ),
+            (
+                DuplicateFinding::FilesDuplicate("a".into(), "b".into()),
+                ('W', "files-duplicate"),
+            ),
+            (
+                DuplicateFinding::FilesDuplicatedWaste(120_000),
+                ('E', "files-duplicated-waste"),
+            ),
+        ];
+        for (finding, (letter, name)) in cases {
+            let (level, got_name, _) = DuplicatesCheck::describe(&finding);
+            assert_eq!(level.letter(), letter, "{finding:?}");
+            assert_eq!(got_name, name, "{finding:?}");
+        }
     }
 }
