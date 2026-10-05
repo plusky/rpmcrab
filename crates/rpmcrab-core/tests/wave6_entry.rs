@@ -288,6 +288,132 @@ fn appdata_native_check_flags_malformed_file() {
     );
 }
 
+/// Run `AppDataCheck` with an empty tool dir (forcing the native
+/// well-formedness fallback) over the w6-appdata fixture with the extracted
+/// `w6broken.appdata.xml` overwritten by `content`. This drives the native
+/// fallback through the full emission path.
+fn run_appdata_with_content(content: &str) -> Vec<(String, String)> {
+    let rpm_path = fixture("w6-appdata-1.0-1.noarch.rpm");
+    assert!(
+        rpm_path.is_file(),
+        "fixture missing: {}",
+        rpm_path.display()
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let pkg = Pkg::open(&rpm_path, scratch.path(), true).unwrap();
+    let entry = pkg
+        .files
+        .iter()
+        .find(|f| f.name == "/usr/share/appdata/w6broken.appdata.xml")
+        .expect("w6broken.appdata.xml is not in the fixture");
+    std::fs::write(&entry.path, content).expect("overwrite appdata fixture content");
+    let empty = tempfile::tempdir().unwrap();
+    let config = Config::default();
+    let mut filter = Filter::new(&config, Color::for_tty(false)).unwrap();
+    let mut check = AppDataCheck::with_tool_dir(Some(empty.path()));
+    check.check_binary(&pkg, &config, &mut filter);
+    filter.results().to_vec()
+}
+
+/// The reference's `ElementTree.parse` fallback rejects malformed character
+/// references: empty numeric/hex bodies are `not well-formed (invalid token)`,
+/// and out-of-range numbers (including zero and surrogates) are `reference to
+/// invalid character number`. All must surface as `invalid-appdata-file` with
+/// the bare filename as the detail.
+///
+/// Each case is a tag-complete component (as in the quiet sibling test) so the
+/// required-tag validation stays silent. The `!contains("missing required
+/// tag(s)")` guard is load-bearing: `NativeOutcome::MissingTags` also emits
+/// `invalid-appdata-file`, and without it the assertion would pass on the
+/// missing-tags detail even with the entity check disabled.
+#[test]
+fn appdata_charref_classes_emit_invalid_appdata_file() {
+    for (label, bad) in [
+        ("empty numeric", "&#;"),
+        ("empty hex", "&#x;"),
+        ("too big", "&#99999999999;"),
+        ("zero", "&#0;"),
+        ("surrogate", "&#xD800;"),
+        ("over max", "&#x110000;"),
+        ("undefined entity", "&bar;"),
+    ] {
+        let xml = format!(
+            "<component><id>c</id><name>Foo {bad}</name><summary>s</summary><metadata_license>MIT</metadata_license></component>"
+        );
+        let results = run_appdata_with_content(&xml);
+        assert!(
+            results
+                .iter()
+                .any(|(name, line)| name == "invalid-appdata-file"
+                    && line.contains(": E: ")
+                    && line.contains("w6broken.appdata.xml")
+                    && !line.contains("missing required tag(s)")),
+            "{label} should emit E invalid-appdata-file with the bare filename detail: {results:?}"
+        );
+    }
+}
+
+/// Entities inside CDATA, comments, DOCTYPE and processing instructions are
+/// not entity references; the native fallback must not flag them (verified
+/// against the reference). Each case is a tag-complete component so the
+/// required-tag validation stays quiet; findings are scoped to the
+/// overwritten file because the fixture's other file (w6valid.appdata.xml,
+/// missing metadata_license) is flagged by the required-tag validation.
+#[test]
+fn appdata_entities_in_markup_constructs_are_quiet() {
+    for (label, xml) in [
+        (
+            "cdata",
+            "<component><id>c</id><name>n</name><summary>s</summary><metadata_license>MIT</metadata_license><description><p><![CDATA[&bar; &#;]]></p></description></component>",
+        ),
+        (
+            "comment",
+            "<component><id>c</id><name>n</name><summary>s</summary><metadata_license>MIT</metadata_license><!-- &bar; &#; --></component>",
+        ),
+        (
+            "doctype",
+            "<!DOCTYPE component><component><id>c</id><name>n</name><summary>s</summary><metadata_license>MIT</metadata_license></component>",
+        ),
+        (
+            "pi",
+            "<?pi &bar;?><component><id>c</id><name>n</name><summary>s</summary><metadata_license>MIT</metadata_license></component>",
+        ),
+        (
+            "valid entities",
+            "<component><id>c</id><name>Foo &lt;&amp;&#65;&#x41;&#x9;&#x10FFFF;</name><summary>s</summary><metadata_license>MIT</metadata_license></component>",
+        ),
+    ] {
+        let results = run_appdata_with_content(xml);
+        assert!(
+            !results
+                .iter()
+                .any(|(_, line)| line.contains("invalid-appdata-file")
+                    && line.contains("w6broken.appdata.xml")),
+            "{label} should be quiet: {results:?}"
+        );
+    }
+}
+
+/// `<?xml encoding="x-bogus">` makes the reference abort the whole run
+/// (`LookupError`, `lint.py:293` -> `sys.exit(3)`); the port reads the file
+/// and emits nothing. Ledgered as a deliberate divergence.
+#[test]
+fn appdata_unknown_encoding_emits_nothing() {
+    // Tag-complete component: the port reads the file as UTF-8 (ledgered
+    // divergence) and the required-tag validation must stay quiet, so only
+    // an encoding-triggered finding would fail this.
+    let results = run_appdata_with_content(
+        "<?xml version=\"1.0\" encoding=\"x-bogus\"?><component><id>c</id><name>n</name><summary>s</summary><metadata_license>MIT</metadata_license></component>",
+    );
+    assert!(
+        !results
+            .iter()
+            .any(|(_, line)| line.contains("invalid-appdata-file")
+                && line.contains("w6broken.appdata.xml")),
+        "unknown encoding should be quiet (ledgered divergence): {results:?}"
+    );
+}
+
 /// With an `appstream-util` configured, the check shells out to it and honors
 /// its exit status. The fake validates well-formedness via minidom, the
 /// reference's own fallback parser.

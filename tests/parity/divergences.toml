@@ -351,13 +351,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "FileDigestCheck"
-kind = "behaviour"
-reason = "The `xml` digester is a hand-rolled approximation, not C14N 2.0 like the reference's `ET.canonicalize(strip_text=True)`: it keeps the XML declaration and the DOCTYPE (including internal subsets), does not expand empty elements (`<b/>` stays; the reference emits `<b></b>`), collapses text whitespace instead of per-node handling, and misses the attribute sorting, namespace hoisting/elision, entity/char-ref expansion, and CDATA-as-escaped-text subtleties of canonicalization. A differential against the reference on 30 XML samples showed 14 mismatches. C14N is fully specified and implementable, so this is unfinished work, not a port constraint — recorded as behaviour, never limitation."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "AtomicUpdateCheck"
 kind = "behaviour"
 reason = "A non-string element in AtomicAllowedDirs/AtomicDisallowedSubdirs (e.g. AtomicDisallowedSubdirs = [42]) panics at construction; the reference raises TypeError later, at check time. The port deliberately fails fast on a misconfigured type instead of reproducing the reference's deferred failure."
@@ -570,14 +563,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "FileDigestCheck"
-kind = "behaviour"
-reason = "The `xml` digester is disabled pending a C14N-conformant implementation (plusky/rpmcrab#75): entries with `digester = \"xml\"` are treated as skipped, producing no digest and no mismatch finding. The hand-rolled approximation it replaced mismatched the reference's `ET.canonicalize(strip_text=True)` on every real D-Bus service file, so all 156 `digester = \"xml\"` entries in dbus-services.toml would have false-positived `dbus-file-digest-mismatch`."
-since = "0.1.0"
-upstream = "https://github.com/plusky/rpmcrab/issues/75"
-
-[[divergence]]
-case = "global"
 check = "non-utf8-desktopfile"
 kind = "detail"
 reason = "The reference reports Python's UnicodeDecodeError (`'utf-8' codec can't decode byte 0xff in position 0: invalid start byte`); the port reports Rust's FromUtf8Error (`invalid utf-8 sequence of 1 bytes from index 0`). The finding name, severity and `Unicode error:` prefix match. The position is not reproducible, not merely formatted differently: the reference decodes through codecs.open + cfp.read_file, which pulls one line at a time, so UnicodeDecodeError.start is the offset WITHIN THE CURRENT LINE, whereas the port reads the whole file and reports a file-wide byte index. Verified: a bad byte at file offset 36 (line 3, column 3) is reported by the reference as position 0. The two agree only while the bad byte is on the first line."
@@ -778,3 +763,10 @@ kind = "behaviour"
 reason = "Emits an Info-level `invalid-license-spellcheck` finding with did-you-mean suggestions for an invalid `License:` tag (upstream rpmlint#818). The reference 2.10.0 has no such check -- neither in `descriptions/` nor in `TagsCheck.py` -- and emits only `W: invalid-license`. The suggestions live in the separate Info finding; `invalid-license`'s detail stays byte-identical to the reference, so the frozen surface is untouched and the new finding can never break a build. Pinned by emission-path tests in tags.rs."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/818"
+
+[[divergence]]
+case = "global"
+check = "AppDataCheck"
+kind = "behaviour"
+reason = "For an appdata file declaring an unknown encoding (e.g. <?xml version=\"1.0\" encoding=\"x-bogus\"?>), the reference's ElementTree.parse raises LookupError, which AppDataCheck.py:35 does not catch, so the whole run aborts via lint.py:293 (sys.exit(3)). The port's native fallback reads the file as UTF-8 and emits nothing. Same reference-abort family as the polkit LookupError case."
+since = "0.1.0"
