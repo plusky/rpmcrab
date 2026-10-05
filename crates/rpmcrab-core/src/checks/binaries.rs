@@ -1979,13 +1979,20 @@ mod tests {
             "missing-hash-section is Error: {}",
             hash_lines[0]
         );
+        assert!(
+            hash_lines[0].contains("/usr/lib64/libprobe.so.1"),
+            "missing-hash-section names the library: {}",
+            hash_lines[0]
+        );
         assert_lacks(&results, "missing-gnu-hash-section");
 
         let results = run(vec![vec![sec(".text")], vec![sec(".data")]]);
-        assert_eq!(
-            lines_for(&results, "missing-hash-section").len(),
-            1,
-            "one missing-hash-section: {results:?}"
+        let hash_lines = lines_for(&results, "missing-hash-section");
+        assert_eq!(hash_lines.len(), 1, "one missing-hash-section: {results:?}");
+        assert!(
+            hash_lines[0].contains("/usr/lib64/libprobe.so.1"),
+            "missing-hash-section names the library: {}",
+            hash_lines[0]
         );
         let gnu_lines = lines_for(&results, "missing-gnu-hash-section");
         assert_eq!(
@@ -1997,6 +2004,22 @@ mod tests {
             gnu_lines[0].contains(" W: "),
             "missing-gnu-hash-section is Warning: {}",
             gnu_lines[0]
+        );
+        assert!(
+            gnu_lines[0].contains("/usr/lib64/libprobe.so.1"),
+            "missing-gnu-hash-section names the library: {}",
+            gnu_lines[0]
+        );
+        // Name, detail, severity, ORDER byte-identical: E fires before W.
+        let hash_pos = results
+            .iter()
+            .position(|(n, _)| n == "missing-hash-section");
+        let gnu_pos = results
+            .iter()
+            .position(|(n, _)| n == "missing-gnu-hash-section");
+        assert!(
+            hash_pos < gnu_pos,
+            "missing-hash-section (E) before missing-gnu-hash-section (W): {hash_pos:?} vs {gnu_pos:?}"
         );
 
         let results = run(vec![vec![sec(".hash")], vec![sec(".gnu.hash")]]);
