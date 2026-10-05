@@ -30,7 +30,7 @@ fn validso_regex() -> &'static Regex {
 static SOVERSION_REGEX: OnceLock<Regex> = OnceLock::new();
 fn soversion_regex() -> &'static Regex {
     SOVERSION_REGEX.get_or_init(|| {
-        Regex::new(r".*(-(?P<pkgversion>[0-9][.0-9]*))?\.so(\.(?P<soversion>[0-9][.0-9]*))?")
+        Regex::new(r".*?(-(?P<pkgversion>[0-9][.0-9]*))?\.so(\.(?P<soversion>[0-9][.0-9]*))?")
             .expect("static regex")
     })
 }
@@ -559,13 +559,11 @@ impl BinariesCheck {
         if pkgfile.magic.contains("shell script") {
             if let Ok(data) = std::fs::read(&pkgfile.path) {
                 let head = &data[..data.len().min(2048)];
-                if head
-                    .windows(50)
-                    .any(|w| w == b"This wrapper script should never be moved out of the")
-                    || String::from_utf8_lossy(head).contains(
-                        "This wrapper script should never be moved out of the build directory",
-                    )
-                {
+                // A 50-byte window could never equal the 52-byte marker
+                // prefix; the substring search alone matches the reference.
+                if String::from_utf8_lossy(head).contains(
+                    "This wrapper script should never be moved out of the build directory",
+                ) {
                     add_info(
                         out,
                         Level::Error,
@@ -2145,5 +2143,1087 @@ description = "explicit priority string bypasses the system crypto policy"
         let results = run(vec![vec![sec(".hash")], vec![sec(".gnu.hash")]]);
         assert_lacks(&results, "missing-hash-section");
         assert_lacks(&results, "missing-gnu-hash-section");
+    }
+    // ---- Emission pins for previously unasserted findings ----
+    //
+    // The findings below were implemented with no test pinning them:
+    // deleting any emission would have kept the suite green. Each test
+    // drives the real emission function (or the full check_binary driver
+    // where the finding only fires from the file loop) over hand-built
+    // inputs and asserts name + level + detail.
+
+    fn synthetic_pkg(name: &str, arch: &str, files: Vec<PkgFile>) -> Pkg {
+        let rpm = format!(
+            "{}/../../tests/fixtures/binaries-check/input/rpmcrab-binaries-fixture-1.0-1.aarch64.rpm",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut pkg =
+            Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture header");
+        pkg.name = name.to_string();
+        pkg.arch = arch.to_string();
+        pkg.files = files;
+        pkg
+    }
+
+    fn syn_file(name: &str, magic: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            magic: magic.to_string(),
+            mode: 0o100644,
+            ..Default::default()
+        }
+    }
+
+    fn syn_link(name: &str, linkto: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            magic: String::new(),
+            mode: 0o100777,
+            linkto: linkto.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn syn_info() -> ReadelfInfo {
+        ReadelfInfo {
+            sections: Vec::new(),
+            program_headers: Vec::new(),
+            functions: Vec::new(),
+            is_shlib: false,
+            is_debug: false,
+            soname: None,
+            needed: Vec::new(),
+            runpaths: Vec::new(),
+            has_textrel: false,
+            failed: None,
+        }
+    }
+
+    fn sec(name: &str) -> ElfSection {
+        ElfSection {
+            name: name.to_string(),
+            size: 100,
+        }
+    }
+
+    fn syn_ldd() -> LddInfo {
+        LddInfo {
+            dependencies: Vec::new(),
+            unused_dependencies: Vec::new(),
+            undefined_symbols: Vec::new(),
+            failed: None,
+        }
+    }
+
+    fn config_with(snippet: &str) -> Config {
+        let mut table: toml::Table = toml::from_str(include_str!("../../data/configdefaults.toml"))
+            .expect("parse configdefaults");
+        let overlay: toml::Table = toml::from_str(snippet).expect("parse overlay");
+        for (k, v) in overlay {
+            table.insert(k, v);
+        }
+        Config {
+            configuration: table,
+            ..Default::default()
+        }
+    }
+
+    fn driver_results(pkg: &Pkg, config: &Config) -> Vec<(String, String)> {
+        let mut check = BinariesCheck::with_tool_dir(config, None);
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        check.check_binary(pkg, config, &mut out);
+        out.results().to_vec()
+    }
+
+    fn fake_tool_dir(name: &str, script_body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let tool_dir = dir.path().join("tools");
+        std::fs::create_dir(&tool_dir).expect("mkdir tools");
+        let path = tool_dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{script_body}\n")).expect("write fake tool");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake tool");
+        }
+        (dir, tool_dir)
+    }
+
+    // A minimal ELF64 executable parseable by goblin, so run_elf_checks
+    // reaches the ldd branch without a toolchain-produced fixture.
+    fn parseable_elf() -> Vec<u8> {
+        let mut elf: Vec<u8> = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        elf.extend_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+        elf.extend_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+        elf.extend_from_slice(&1u32.to_le_bytes()); // version
+        elf.extend_from_slice(&0u64.to_le_bytes()); // entry
+        elf.extend_from_slice(&64u64.to_le_bytes()); // phoff
+        elf.extend_from_slice(&0u64.to_le_bytes()); // shoff
+        elf.extend_from_slice(&0u32.to_le_bytes()); // flags
+        elf.extend_from_slice(&64u16.to_le_bytes()); // ehsize
+        elf.extend_from_slice(&56u16.to_le_bytes()); // phentsize
+        elf.extend_from_slice(&1u16.to_le_bytes()); // phnum
+        elf.extend_from_slice(&0u16.to_le_bytes()); // shentsize
+        elf.extend_from_slice(&0u16.to_le_bytes()); // shnum
+        elf.extend_from_slice(&0u16.to_le_bytes()); // shstrndx
+        // One PT_LOAD segment.
+        elf.extend_from_slice(&1u32.to_le_bytes()); // p_type
+        elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags R+X
+        elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset
+        elf.extend_from_slice(&0u64.to_le_bytes()); // p_vaddr
+        elf.extend_from_slice(&0u64.to_le_bytes()); // p_paddr
+        elf.extend_from_slice(&120u64.to_le_bytes()); // p_filesz
+        elf.extend_from_slice(&120u64.to_le_bytes()); // p_memsz
+        elf.extend_from_slice(&0x1000u64.to_le_bytes()); // p_align
+        elf
+    }
+
+    #[test]
+    fn noarch_package_with_binary_is_error() {
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "noarchpkg",
+            "noarch",
+            vec![syn_file(
+                "/bin/main",
+                "ELF 64-bit LSB executable, x86-64, version 1 (SYSV)",
+            )],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/bin/main"),
+            "detail names the binary: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn noarch_package_with_relocatable_object_is_error() {
+        // Reference test_no_arch_error: a plain .o in a noarch package fires.
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "noarchpkg",
+            "noarch",
+            vec![syn_file(
+                "/opt/x86_64.o",
+                "ELF 64-bit LSB relocatable, x86-64, version 1 (SYSV), not stripped",
+            )],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/opt/x86_64.o"),
+            "detail names the object: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn arch_package_with_binary_has_no_arch_finding() {
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file(
+                "/bin/main",
+                "ELF 64-bit LSB executable, x86-64, version 1 (SYSV)",
+            )],
+        );
+        let results = driver_results(&pkg, &config);
+        assert_lacks(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+    }
+
+    #[test]
+    fn ebpf_object_is_exempt_from_noarch_check() {
+        // Reference test_no_arch_eBPF: eBPF objects never trigger the
+        // arch-independent finding, even in a noarch package.
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "noarchpkg",
+            "noarch",
+            vec![syn_file(
+                "/opt/ebpf.o",
+                "ELF 64-bit LSB relocatable, eBPF, version 1 (SYSV), not stripped",
+            )],
+        );
+        let results = driver_results(&pkg, &config);
+        assert!(
+            results.is_empty(),
+            "eBPF object must be fully quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn noarch_with_lib64_is_error() {
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "noarchpkg",
+            "noarch",
+            vec![syn_file("/usr/lib64/libfoo.so.1", "data")],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "noarch-with-lib64");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+    }
+
+    #[test]
+    fn package_without_binary_is_error() {
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file("/usr/share/doc/testpkg/README", "ASCII text")],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "no-binary");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+    }
+
+    #[test]
+    fn arch_dependent_file_in_usr_share() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary_in_usr_share(&pkg, "/usr/share/main", &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "arch-dependent-file-in-usr-share");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(lines[0].contains("/usr/share/main"), "detail: {}", lines[0]);
+
+        // An arch-qualified share path is exempt.
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary_in_usr_share(&pkg, "/usr/share/doc/x86_64/foo", &mut out);
+        assert!(
+            out.results().is_empty(),
+            "exempt path must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn binary_in_etc() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        for name in ["/etc/foo", "/usr/etc/foo"] {
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_binary_in_etc(&pkg, name, &mut out);
+            let results = out.results().to_vec();
+            let lines = lines_for(&results, "binary-in-etc");
+            assert_eq!(lines.len(), 1, "one finding for {name}: {results:?}");
+            assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+            assert!(lines[0].contains(name), "detail: {}", lines[0]);
+        }
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary_in_etc(&pkg, "/usr/bin/foo", &mut out);
+        assert!(
+            out.results().is_empty(),
+            "non-etc path must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn libtool_wrapper_in_package() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let path = dir.path().join("wrapper");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\n# This wrapper script should never be moved out of the build directory\n",
+        )
+        .expect("write wrapper");
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut pkgfile = syn_file("/usr/bin/wrapper", "Bourne-Again shell script");
+        pkgfile.path = path.to_string_lossy().into_owned();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_libtool_wrapper(&pkg, "/usr/bin/wrapper", &pkgfile, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "libtool-wrapper-in-package");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/bin/wrapper"),
+            "detail: {}",
+            lines[0]
+        );
+
+        // A shell script without the marker is not a libtool wrapper.
+        std::fs::write(&path, "#!/bin/sh\necho hello\n").expect("write plain script");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_libtool_wrapper(&pkg, "/usr/bin/wrapper", &pkgfile, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "plain script must be quiet: {:?}",
+            out.results()
+        );
+
+        // A truncated marker (common prefix only) must not match: the check
+        // pins the full marker text, so a prefix-only match would fail here.
+        std::fs::write(
+            &path,
+            "#!/bin/sh\n# This wrapper script should never be moved out of the\n",
+        )
+        .expect("write truncated marker");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_libtool_wrapper(&pkg, "/usr/bin/wrapper", &pkgfile, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "truncated marker must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn unstripped_binary_is_warning() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file(
+            "/usr/bin/foo",
+            "ELF 64-bit LSB executable, x86-64, version 1 (SYSV), not stripped",
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_unstripped_binary("/usr/bin/foo", &pkg, &pkgfile, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "unstripped-binary-or-object");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert!(lines[0].contains("/usr/bin/foo"), "detail: {}", lines[0]);
+
+        // Stripped binaries and debug files are quiet.
+        let pkgfile = syn_file(
+            "/usr/bin/foo",
+            "ELF 64-bit LSB executable, x86-64, version 1 (SYSV), stripped",
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_unstripped_binary("/usr/bin/foo", &pkg, &pkgfile, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "stripped binary must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn non_pie_executable_error_with_patterns() {
+        // Reference test_non_position_independent: a PieExecutables pattern
+        // matching the path turns the suggestion into an error.
+        let config = config_with("PieExecutables = [\".*\"]");
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_non_pie(&pkg, "/usr/bin/bcc-lua", &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "non-position-independent-executable");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/bin/bcc-lua"),
+            "detail: {}",
+            lines[0]
+        );
+        assert_lacks(&results, "position-independent-executable-suggested");
+    }
+
+    #[test]
+    fn non_pie_executable_warns_without_patterns() {
+        // Reference test_non_position_independent_sugg: with an empty
+        // PieExecutables list the same file only gets the suggestion.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_non_pie(&pkg, "/usr/bin/bcc-lua", &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "position-independent-executable-suggested");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert_lacks(&results, "non-position-independent-executable");
+
+        // Shared objects are exempt either way.
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_shobj = true;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_non_pie(&pkg, "/usr/lib64/libfoo.so", &mut out);
+        assert!(
+            out.results().is_empty(),
+            "shobj must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn executable_in_library_package() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_exec_in_library(&pkg, true, &["/usr/bin/foo".to_string()], &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "executable-in-library-package");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(lines[0].contains("/usr/bin/foo"), "detail: {}", lines[0]);
+
+        // One finding per exec file: two files must yield two findings, so
+        // a count assertion that cannot fail on multiplicity is impossible.
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_exec_in_library(
+            &pkg,
+            true,
+            &["/usr/bin/foo".to_string(), "/usr/bin/bar".to_string()],
+            &mut out,
+        );
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "executable-in-library-package");
+        assert_eq!(lines.len(), 2, "one finding per exec file: {results:?}");
+
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_exec_in_library(&pkg, false, &[], &mut out);
+        assert!(
+            out.results().is_empty(),
+            "no libs means quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn invalid_ldconfig_symlink() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_link("/usr/lib64/libfoo.so.1", "libfoo.so.9.9.9")],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_soname_symlink(&pkg, "/usr/lib64/libfoo.so.1.2.3", "libfoo.so.1", &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "invalid-ldconfig-symlink");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("libfoo.so.9.9.9"),
+            "detail names the bad target: {}",
+            lines[0]
+        );
+
+        // A symlink pointing at the library itself is valid.
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_link("/usr/lib64/libfoo.so.1", "libfoo.so.1.2.3")],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_soname_symlink(&pkg, "/usr/lib64/libfoo.so.1.2.3", "libfoo.so.1", &mut out);
+        assert!(
+            out.results().is_empty(),
+            "valid symlink must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn missing_ldconfig_symlink() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_soname_symlink(&pkg, "/usr/lib64/libfoo.so.1.2.3", "libfoo.so.1", &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "no-ldconfig-symlink");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/lib64/libfoo.so.1.2.3"),
+            "detail: {}",
+            lines[0]
+        );
+
+        // A missing symlink for a non-library file is not reported.
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_soname_symlink(&pkg, "/usr/lib64/foo", "foo", &mut out);
+        assert!(
+            out.results().is_empty(),
+            "non-library name must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn shared_library_soname_findings() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkgfile = syn_file("/usr/lib64/libfoo.so.1", "ELF 64-bit LSB shared object");
+
+        // Missing SONAME -> W no-soname.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.is_shlib = true;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_shared_library(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "no-soname");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/lib64/libfoo.so.1"),
+            "detail: {}",
+            lines[0]
+        );
+
+        // Malformed SONAME -> E invalid-soname.
+        let mut info = syn_info();
+        info.is_shlib = true;
+        info.soname = Some("b soname".to_string());
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_shared_library(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "invalid-soname");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("b soname"),
+            "detail names the soname: {}",
+            lines[0]
+        );
+
+        // A well-formed SONAME with a correct symlink is quiet.
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_link("/usr/lib64/libfoo.so.1", "libfoo.so.1.2.3")],
+        );
+        let pkgfile = syn_file("/usr/lib64/libfoo.so.1.2.3", "ELF 64-bit LSB shared object");
+        let mut info = syn_info();
+        info.is_shlib = true;
+        info.soname = Some("libfoo.so.1".to_string());
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_shared_library(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "valid soname must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn shlib_policy_name_error() {
+        // Reference test_shlib_policy.py: SONAME/package-suffix policy.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg(
+            "libgame",
+            "x86_64",
+            vec![
+                syn_file("/lib64/libgame.so", "ELF 64-bit LSB shared object"),
+                syn_link("/lib64/libgame2-1.9.so.10.0.0", "libgame.so"),
+            ],
+        );
+        let mut info = syn_info();
+        info.is_shlib = true;
+        info.soname = Some("libgame2-1.9.so.10.0.0".to_string());
+        let pkgfile = syn_file("/lib64/libgame.so", "ELF 64-bit LSB shared object");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_shared_library(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "shlib-policy-name-error");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains(
+                "SONAME: libgame2-1.9.so.10.0.0 (/lib64/libgame.so), \
+                 expected package suffix: 1_9-10_0_0"
+            ),
+            "detail: {}",
+            lines[0]
+        );
+        assert_lacks(&results, "no-ldconfig-symlink");
+        assert_lacks(&results, "invalid-ldconfig-symlink");
+    }
+
+    #[test]
+    fn shared_library_not_executable() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.is_shlib = true;
+        let mut pkgfile = syn_file("/usr/lib64/libfoo.so.1", "ELF 64-bit LSB shared object");
+        pkgfile.mode = 0o100644;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_executable_shlib(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "shared-library-not-executable");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/lib64/libfoo.so.1"),
+            "detail: {}",
+            lines[0]
+        );
+
+        pkgfile.mode = 0o100755;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_executable_shlib(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "executable shlib must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn lto_bytecode_in_archive() {
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib64/libfoo.a", "current ar archive");
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".text"), sec(".gnu.lto_.foo")]];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_lto_section(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "lto-bytecode");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/lib64/libfoo.a"),
+            "detail: {}",
+            lines[0]
+        );
+
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".text")]];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_lto_section(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "no LTO sections must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn lto_no_text_in_archive() {
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib64/libfoo.a", "current ar archive");
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".comment")]];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_no_text_in_archive(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "lto-no-text-in-archive");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/lib64/libfoo.a"),
+            "detail: {}",
+            lines[0]
+        );
+
+        // A .text section means the archive carries real code.
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".comment"), sec(".text")]];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_no_text_in_archive(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            ".text present must be quiet: {:?}",
+            out.results()
+        );
+
+        // Known-empty glibc archives and their GHC (_p) variants are exempt.
+        for name in ["/usr/lib64/libdl.a", "/usr/lib64/libdl_p.a"] {
+            let pkgfile = syn_file(name, "current ar archive");
+            let mut info = syn_info();
+            info.sections = vec![vec![sec(".comment")]];
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_no_text_in_archive(&pkg, &pkgfile, &info, &mut out);
+            assert!(
+                out.results().is_empty(),
+                "{name} must be exempt: {:?}",
+                out.results()
+            );
+        }
+    }
+
+    #[test]
+    fn static_library_without_symtab() {
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib64/libfoo.a", "current ar archive");
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".text"), sec(".strtab")]];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_missing_symtab_in_archive(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "static-library-without-symtab");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/lib64/libfoo.a"),
+            "detail: {}",
+            lines[0]
+        );
+
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".text"), sec(".symtab")]];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_missing_symtab_in_archive(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            ".symtab present must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn static_library_without_debuginfo() {
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib64/libfoo.a", "current ar archive");
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".text"), sec(".symtab")]];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_missing_debug_info_in_archive(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "static-library-without-debuginfo");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/lib64/libfoo.a"),
+            "detail: {}",
+            lines[0]
+        );
+
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".text"), sec(".debug_info")]];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_missing_debug_info_in_archive(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            ".debug_info present must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn patchable_function_entry_in_archive() {
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib64/libfoo.a", "current ar archive");
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".text"), sec("__patchable_function_entries")]];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_no_patchable_function_entries_in_archive(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "patchable-function-entry-in-archive");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/lib64/libfoo.a"),
+            "detail: {}",
+            lines[0]
+        );
+
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".text")]];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_no_patchable_function_entries_in_archive(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "no patchable entries must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn bca_archive_is_not_standard() {
+        // .bca (LLVM bitcode archives) are never standard ar archives:
+        // the check bails out quietly instead of running ELF checks.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file(
+            "/usr/lib64/klee/runtime/libkleeRuntimeFreeStanding.bca",
+            "data",
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        assert!(
+            !check.is_standard_archive(&pkg, &pkgfile, &mut out),
+            ".bca is not a standard archive"
+        );
+        assert!(
+            out.results().is_empty(),
+            ".bca must stay quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn undefined_non_weak_symbol() {
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_dynamically_linked = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib64/libfoo.so.1", "ELF 64-bit LSB shared object");
+        let mut ldd = syn_ldd();
+        ldd.undefined_symbols = vec!["GSS_C_NT_HOSTBASED_SERVICE".to_string()];
+
+        // Undefined symbols in a shared object -> Error.
+        let mut info = syn_info();
+        info.is_shlib = true;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_dependency(&pkg, &pkgfile, &info, &ldd, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("GSS_C_NT_HOSTBASED_SERVICE"),
+            "detail names the symbol: {}",
+            lines[0]
+        );
+
+        // The same in a plain executable -> Warning.
+        let info = syn_info();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_dependency(&pkg, &pkgfile, &info, &ldd, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // Not dynamically linked -> quiet.
+        check.is_dynamically_linked = false;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_dependency(&pkg, &pkgfile, &info, &ldd, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn linked_against_opt_library() {
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_dynamically_linked = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/bin/opt-dependency", "ELF 64-bit LSB executable");
+        let mut ldd = syn_ldd();
+        ldd.dependencies = vec!["/opt/libfoo.so".to_string()];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_library_dependency_location(&pkg, &pkgfile, &ldd, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "linked-against-opt-library");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/bin/opt-dependency") && lines[0].contains("/opt/libfoo.so"),
+            "detail names file and dependency: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn linked_against_usr_library() {
+        // Reference test_ldd_parser.py:109: a /bin binary linked against
+        // /usr/libfoo.so warns.
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_dynamically_linked = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/bin/usr-dependency", "ELF 64-bit LSB executable");
+        let mut ldd = syn_ldd();
+        ldd.dependencies = vec!["/usr/libfoo.so".to_string()];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_library_dependency_location(&pkg, &pkgfile, &ldd, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "linked-against-usr-library");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/bin/usr-dependency") && lines[0].contains("/usr/libfoo.so"),
+            "detail names file and dependency: {}",
+            lines[0]
+        );
+
+        // A binary outside /bin//lib//sbin is not subject to the check.
+        let pkgfile = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_library_dependency_location(&pkg, &pkgfile, &ldd, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn security_function_findings() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+
+        // mktemp -> Error.
+        let mut info = syn_info();
+        info.functions = vec!["mktemp".to_string()];
+        let pkgfile = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "call-to-mktemp");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(lines[0].contains("/usr/bin/foo"), "detail: {}", lines[0]);
+
+        // gethostbyname -> Warning.
+        let mut info = syn_info();
+        info.functions = vec!["gethostbyname".to_string()];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "binary-or-shlib-calls-gethostbyname");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // setuid+setgid without setgroups: Error when installed setuid,
+        // Warning otherwise.
+        let mut info = syn_info();
+        info.functions = vec!["setuid".to_string(), "setgid".to_string()];
+        let mut pkgfile = syn_file("/usr/bin/setuidbin", "ELF 64-bit LSB executable");
+        pkgfile.mode = 0o104755;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+
+        pkgfile.mode = 0o100755;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // Calling setgroups silences the finding.
+        let mut info = syn_info();
+        info.functions = vec![
+            "setuid".to_string(),
+            "setgid".to_string(),
+            "setgroups".to_string(),
+        ];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "setgroups present must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn forbidden_function_crypto_policy() {
+        // Reference warn-on-functions.toml: the finding fires on a bare
+        // SSL_CTX_set_cipher_list call, and is waived when the strings
+        // output shows the PROFILE=SYSTEM good_param.
+        let config = config_with(
+            "[WarnOnFunction.crypto-policy-non-compliance-openssl]\n\
+             f_name = \"SSL_CTX_set_cipher_list\"\n\
+             good_param = \"PROFILE=SYSTEM\"\n",
+        );
+        let (_tmp, tool_dir) = fake_tool_dir("strings", "echo symbol-table-dump");
+        let check = BinariesCheck::with_tool_dir(&config, Some(&tool_dir));
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/bin/openssl-app", "ELF 64-bit LSB executable");
+        let mut info = syn_info();
+        info.functions = vec!["SSL_CTX_set_cipher_list".to_string()];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_forbidden_functions(&pkg, &pkgfile, &info, &config, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "crypto-policy-non-compliance-openssl");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert!(
+            lines[0].contains("SSL_CTX_set_cipher_list"),
+            "detail names the function: {}",
+            lines[0]
+        );
+
+        // The good_param in the strings output waives the finding.
+        let (_tmp, tool_dir) = fake_tool_dir("strings", "echo PROFILE=SYSTEM");
+        let check = BinariesCheck::with_tool_dir(&config, Some(&tool_dir));
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_forbidden_functions(&pkg, &pkgfile, &info, &config, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "waived call must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn ldd_failed_is_unreachable_on_parseable_elf() {
+        // ReadelfInfo::parse and LddInfo::parse fail on exactly the same
+        // inputs (both read the file and run goblin over it), so
+        // readelf-failed always fires first: ldd-failed has no reachable
+        // emission in the port. Pin the negative on a parseable ELF.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let elf_path = dir.path().join("libok.so");
+        std::fs::write(&elf_path, parseable_elf()).expect("write elf");
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_dynamically_linked = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = PkgFile {
+            name: "/usr/lib64/libok.so".to_string(),
+            path: elf_path.to_string_lossy().into_owned(),
+            magic: "ELF 64-bit LSB shared object, x86-64".to_string(),
+            mode: 0o100755,
+            ..Default::default()
+        };
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.run_elf_checks(&pkg, &pkgfile, &config, &mut out);
+        let results = out.results().to_vec();
+        assert_lacks(&results, "readelf-failed");
+        assert_lacks(&results, "ldd-failed");
     }
 }

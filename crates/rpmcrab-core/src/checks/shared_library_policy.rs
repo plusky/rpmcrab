@@ -396,4 +396,50 @@ mod tests {
         assert_eq!(elf.len() as u64, total);
         elf
     }
+
+    #[test]
+    fn fixed_dependency_on_non_lib_package_warns() {
+        // A versioned library package with a hard (=) dependency on a
+        // non-library package: W shlib-fixed-dependency.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let so_path = dir.path().join("libfoo.so");
+        std::fs::write(&so_path, minimal_elf("libfoo.so")).expect("write elf");
+
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture header");
+        pkg.name = "libfoo1".to_string();
+        pkg.files = vec![PkgFile {
+            name: "/usr/lib64/libfoo.so".to_string(),
+            path: so_path.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            magic: "ELF 64-bit LSB shared object".to_string(),
+            ..Default::default()
+        }];
+        pkg.requires = vec![DepInfo {
+            name: "barbaz".to_string(),
+            flags: RPMSENSE_EQUAL,
+            epoch: None,
+            version: Some("1.0".to_string()),
+            release: Some("1".to_string()),
+        }];
+
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = checker();
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        let lines: Vec<&str> = results
+            .iter()
+            .filter(|(n, _)| n == "shlib-fixed-dependency")
+            .map(|(_, line)| line.as_str())
+            .collect();
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert!(
+            lines[0].contains("barbaz = 1.0-1"),
+            "detail names the pinned dependency: {}",
+            lines[0]
+        );
+    }
 }
