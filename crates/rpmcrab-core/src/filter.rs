@@ -121,8 +121,9 @@ impl Filter {
                 finding.level = Level::Warning;
             }
         }
-        // Strict treats everything as an error (and counts the promotions) but
-        // adds no badness.
+        // Strict promotes everything to error (and counts the promotions);
+        // default badness is computed after promotion, so promoted
+        // findings get the E default of 1.
         if self.strict {
             if finding.level != Level::Error {
                 self.promoted_to_error += 1;
@@ -307,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_promotes_without_badness() {
+    fn strict_promotes_with_default_badness() {
         let mut c = cfg();
         c.strict = true;
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
