@@ -806,3 +806,19 @@ kind = "missing"
 reason = "Deliberate: systemd-only world (issue #214). The reference validates SysV init scripts against LSB/chkconfig conventions (InitScriptCheck.py at 84848c05); the port does not port that validation, it deletes the whole check instead of porting dead-service plumbing. Deprecation is still signaled: E deprecated-init-script fires from SysVInitOnSystemdCheck for any /etc/init.d/ or /etc/rc.d/init.d/ file."
 since = "0.1.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/214"
+
+[[divergence]]
+case = "global"
+check = "missing-dependency-to-xinetd"
+kind = "missing"
+reason = "Deliberate: the port does not emit missing-dependency-to-xinetd; its live /etc/xinetd.d/ rule is deleted. The reference rule can never fire -- FilesCheck.py:783 tests the typo'd prefix '/etc/xinet.d/' -- so the port's corrected-prefix version was an unledgered behavioral divergence, and one that contradicted E obsolete-xinetd-requirement (no package could ship an xinetd config without an error either way). Shipping xinetd configs is now E deprecated-xinetd-config instead."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/214"
+
+[[divergence]]
+case = "global"
+check = "deprecated-xinetd-config"
+kind = "behaviour"
+reason = "New port-only Error: any file shipped under /etc/xinetd.d/ emits E deprecated-xinetd-config with the detail 'use a systemd socket unit instead'. The reference has no such finding -- its xinetd file rule is typo-dead (FilesCheck.py:783) and its deprecation signal is only E obsolete-xinetd-requirement on the dependency. Deliberate: systemd socket units are the replacement, and validating the dependency plumbing of a dead service manager is wasted effort. Pinned by emission-path tests in xinetd_dep.rs."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/214"

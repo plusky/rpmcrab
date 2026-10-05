@@ -742,7 +742,6 @@ impl FilesCheck {
         self.check_file_makefile_junk(pkg, fname, out);
         self.check_file_logrotate(pkg, fname, st, out);
         self.check_file_crontab(pkg, fname, out);
-        self.check_file_xinetd(pkg, fname, out);
         self.check_file_compressed_symlink(pkg, fname, pkgfile, out);
         self.check_file_hardlink(pkg, fname, pkgfile, st, out);
         self.check_file_normal_file(pkg, fname, pkgfile, st, out);
@@ -1459,20 +1458,6 @@ impl FilesCheck {
                 pkg,
                 "missing-dependency-to-crontabs",
                 &["for cron script", fname],
-            );
-        }
-    }
-
-    fn check_file_xinetd(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
-        let deps: Vec<&str> = pkg.requires.iter().map(|d| d.name.as_str()).collect();
-        if fname.starts_with("/etc/xinetd.d/") && !deps.contains(&"xinetd") && pkg.name != "xinetd"
-        {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "missing-dependency-to-xinetd",
-                &["for xinet.d script", fname],
             );
         }
     }
@@ -2932,6 +2917,28 @@ mod tests {
             .map(|((name, line), level)| (name.clone(), level, line.clone()))
             .collect();
         (triples, dir)
+    }
+
+    #[test]
+    fn missing_dependency_to_xinetd_is_gone() {
+        // Issue #214: the rule was deleted outright (it contradicted
+        // E obsolete-xinetd-requirement). A package shipping /etc/xinetd.d/
+        // files must not get missing-dependency-to-xinetd from FilesCheck;
+        // the deprecation signal moved to XinetdDepCheck.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = vec![PkgFile {
+            name: "/etc/xinetd.d/daytime".to_string(),
+            path: "/etc/xinetd.d/daytime".to_string(),
+            ..Default::default()
+        }];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_lacks(&names, "missing-dependency-to-xinetd");
     }
 
     #[test]
