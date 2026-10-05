@@ -1583,14 +1583,13 @@ impl FilesCheck {
         }
         // bindir exes: symlinks register an empty entry (man page existence
         // check only, not subject to the duplicate binary check).
-        // FilesCheck.py:499-500, 819.
-        for bindir in ["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/"] {
-            if fname.starts_with(bindir) {
-                let rest = fname.strip_prefix(bindir).unwrap_or("");
-                if !rest.contains('/') {
-                    st.bindir_exes.entry(rest.to_string()).or_default();
+        // FilesCheck.py:499-500, 819. bin_re is the reference's bin_regex,
+        // so /usr/games symlinks register too.
+        if let Ok(Some(caps)) = self.bin_re.captures(fname) {
+            if let Some(exe) = caps.get(1).map(|m| m.as_str()) {
+                if !exe.contains('/') {
+                    st.bindir_exes.entry(exe.to_string()).or_default();
                 }
-                break;
             }
         }
         // dangling symlink checks
@@ -3390,6 +3389,28 @@ mod tests {
                 .iter()
                 .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("mytool")),
             "no-manual-page-for-binary must fire alongside duplicate-executable: {results:?}"
+        );
+    }
+
+    #[test]
+    fn usr_games_symlink_registers_for_man_page_check() {
+        // The reference's bin_regex covers /usr/games (FilesCheck.py:158),
+        // so a symlink there must feed no-manual-page-for-binary. Reverting
+        // the symlink registration to the hand-rolled
+        // /bin//sbin//usr/bin//usr/sbin/ loop drops gamelink silently.
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/gametool", 0o100755, 51),
+            PkgFile {
+                linkto: "/usr/bin/gametool".to_string(),
+                ..mkfile("/usr/games/gamelink", 0o120777, 52)
+            },
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("gamelink")),
+            "no-manual-page-for-binary must fire for a /usr/games symlink: {results:?}"
         );
     }
 
