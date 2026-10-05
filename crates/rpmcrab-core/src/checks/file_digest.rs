@@ -400,19 +400,16 @@ pub struct FileDigestCheck {
 impl FileDigestCheck {
     pub fn new(config: &Config) -> Self {
         // The reference reads `self.config.configuration['FileDigestLocation']`,
-        // raising `KeyError` when the key is absent: fail loudly here too.
+        // raising `KeyError` when the key is absent. An absent (or non-table)
+        // key means no digest locations: construct empty and emit nothing
+        // rather than panicking on a path the config merge can never produce
+        // (it only adds or overwrites keys).
+        let empty = toml::map::Map::new();
         let locations = config
             .configuration
             .get("FileDigestLocation")
-            .unwrap_or_else(|| {
-                panic!(
-                    "FileDigestCheck requires the FileDigestLocation configuration key \
-                 (the reference raises KeyError when it is absent)"
-                )
-            });
-        let locations = locations
-            .as_table()
-            .unwrap_or_else(|| panic!("FileDigestCheck: FileDigestLocation must be a table"));
+            .and_then(toml::Value::as_table)
+            .unwrap_or(&empty);
 
         let mut checks = Vec::new();
         let mut trie = TrieNode::default();
@@ -1611,13 +1608,15 @@ ContentCheck = "VarlinkServiceCheck"
     }
 
     #[test]
-    fn missing_file_digest_location_panics() {
+    fn missing_file_digest_location_is_empty() {
         let mut config = Config::default();
         config.finalize().unwrap();
-        let result = std::panic::catch_unwind(|| FileDigestCheck::new(&config));
+        // Absent FileDigestLocation: the check constructs without panicking
+        // and has no locations to check.
+        let check = FileDigestCheck::new(&config);
         assert!(
-            result.is_err(),
-            "absent FileDigestLocation must fail loudly"
+            check.checks.is_empty(),
+            "no locations means no digest checks"
         );
     }
 

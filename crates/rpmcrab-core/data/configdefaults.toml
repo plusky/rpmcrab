@@ -30,11 +30,21 @@ Checks = [
     "ZyppSyntaxCheck",
     # openSUSE flavour checks (reference configs/openSUSE/opensuse.toml),
     # in reference order.
+    "BashismsCheck",
+    "TmpFilesCheck",
+    "SysVInitOnSystemdCheck",
     "SharedLibraryPolicyCheck",
     "BrandingPolicyCheck",
     "DeviceFilesCheck",
+    "FileDigestCheck",
+    "FilelistCheck",
     "KMPPolicyCheck",
+    "PolkitCheck",
+    "SystemdInstallCheck",
+    "SystemdTmpfilesCheck",
+    "SUIDPermissionsCheck",
     "WorldWritableCheck",
+    "AtomicUpdateCheck",
 ]
 # List of error titles that should be filtered
 FilterErrorTitles = []
@@ -668,3 +678,12 @@ entries = [
     "d /var/google-users.d",
     "d /var/google-sudoers.d"
 ]
+
+# File digest verification locations (reference configs/openSUSE/opensuse.toml
+# ships both tables empty; the distro layers real entries via the
+# `*-whitelist.toml` family, which the port does not bundle). An absent
+# `FileDigestLocation` means no digest locations: the check constructs empty
+# and emits nothing.
+[FileDigestLocation]
+
+[FileDigestGroup]

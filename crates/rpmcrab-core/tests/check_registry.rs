@@ -160,34 +160,13 @@ fn checks_in_default_config() -> Vec<String> {
 /// The documented exceptions are modules the reference ships but lists in no
 /// shipped config's `Checks` (`LSBCheck`, `XinetdDepCheck`),
 /// plus `PAMModulesCheck`, which the reference lists only in the Fedora
-/// flavour config (not yet ported); the port mirrors all of that.
-/// `AtomicUpdateCheck` is exempt deliberately: plusky asked that the
-/// `Checks` entry wait for the central issue #66 rather than landing in any
-/// single PR and conflicting with the others touching the same list. The
-/// Wave 6 checks below are exempt for the same reason: their `Checks`
-/// entries also wait for the central issue #66.
-/// single PR and conflicting with the others touching the same list. The Wave
-/// 7b checks `FileDigestCheck` and `SUIDPermissionsCheck` are exempt for the
-/// same reason (`SignatureCheck` is already listed in `Checks`).
+/// flavour config (not yet ported); the port mirrors all of that. Every other
+/// constructible check must appear in `Checks = [...]` (issue #66 closed).
 #[test]
 fn every_constructible_check_is_listed_in_checks() {
     let listed = checks_in_default_config();
     for name in names_built_by_registry() {
-        if name == "LSBCheck"
-            || name == "XinetdDepCheck"
-            || name == "PAMModulesCheck"
-            || name == "AtomicUpdateCheck"
-            // Wave 6 (PR #48): `Checks` entries wait for the central issue #66.
-            || name == "BashismsCheck"
-            || name == "FilelistCheck"
-            || name == "PolkitCheck"
-            || name == "SystemdInstallCheck"
-            || name == "SystemdTmpfilesCheck"
-            || name == "SysVInitOnSystemdCheck"
-            || name == "TmpFilesCheck"
-            || name == "FileDigestCheck"
-            || name == "SUIDPermissionsCheck"
-        {
+        if name == "LSBCheck" || name == "XinetdDepCheck" || name == "PAMModulesCheck" {
             continue;
         }
         assert!(
