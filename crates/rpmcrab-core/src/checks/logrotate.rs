@@ -378,4 +378,75 @@ mod tests {
             }
         }
     }
+
+    /// Run `LogrotateCheck::check_binary` over a package with two logrotate
+    /// configs and return the rendered lines.
+    fn run_logrotate_two_confs(first: &str, second: &str) -> Vec<String> {
+        use crate::color::Color;
+        use crate::pkg::pkgfile::PkgFile;
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
+        let mut files = Vec::new();
+        for (name, content) in [("a", first), ("b", second)] {
+            let conf = dir.join(name);
+            std::fs::write(&conf, content).expect("write conf");
+            files.push(PkgFile {
+                name: format!("/etc/logrotate.d/{name}"),
+                path: conf.to_string_lossy().into_owned(),
+                mode: 0o100644,
+                ..Default::default()
+            });
+        }
+
+        let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = crate::pkg::Pkg::open(&rpm, dir, true).expect("open fixture pkg");
+        pkg.name = "logrotate-test".to_string();
+        pkg.files = files;
+
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = LogrotateCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        out.results().iter().map(|(_, line)| line.clone()).collect()
+    }
+
+    /// The reference's `test_logrotate` (test_logrotate.py:18): the same log
+    /// dir in two configs with different `su` owners fires
+    /// `logrotate-duplicate`; identical owners stay quiet.
+    #[test]
+    fn logrotate_duplicate_fires_on_different_su_owners() {
+        let rendered = run_logrotate_two_confs(
+            "/var/log/myapp/*.log {\n  su user1 group1\n}\n",
+            "/var/log/myapp/*.log {\n  su user2 group2\n}\n",
+        );
+        let duplicates: Vec<&String> = rendered
+            .iter()
+            .filter(|l| l.contains("logrotate-duplicate"))
+            .collect();
+        assert_eq!(
+            duplicates.len(),
+            1,
+            "expected one logrotate-duplicate: {rendered:?}"
+        );
+        assert_eq!(
+            duplicates[0].as_str(),
+            "logrotate-test.noarch: E: logrotate-duplicate /var/log/myapp",
+            "level/name/detail",
+        );
+    }
+
+    /// The negative side: the same owners in both configs must not fire.
+    #[test]
+    fn logrotate_duplicate_quiet_on_same_su_owners() {
+        let rendered = run_logrotate_two_confs(
+            "/var/log/myapp/*.log {\n  su user1 group1\n}\n",
+            "/var/log/myapp/*.log {\n  su user1 group1\n}\n",
+        );
+        assert!(
+            !rendered.iter().any(|l| l.contains("logrotate-duplicate")),
+            "same owners must not duplicate: {rendered:?}"
+        );
+    }
 }

@@ -170,4 +170,70 @@ mod tests {
         assert!(TmpFilesCheck::pre_creates_tmpfile(pre, "foo.conf"));
         assert!(!TmpFilesCheck::pre_creates_tmpfile("", "foo.conf"));
     }
+    use crate::pkg::pkgfile::{PkgFile, RPMFILE_GHOST};
+
+    /// Run `TmpFilesCheck::check_binary` over a package with the given files
+    /// and return the rendered lines.
+    fn run_tmpfiles(files: Vec<PkgFile>) -> Vec<String> {
+        use crate::color::Color;
+
+        let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let mut pkg = Pkg::open(&rpm, dir.path(), true).expect("open fixture pkg");
+        pkg.name = "tmpfiles-test".to_string();
+        pkg.files = files;
+
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = TmpFilesCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        out.results().iter().map(|(_, line)| line.clone()).collect()
+    }
+
+    /// The reference's `test_tmpfiles` (test_tmp_files.py:22): a symlink under
+    /// `/usr/lib/tmpfiles.d/` is `W: tmpfile-not-regular-file`. The `is_reg`
+    /// check runs before the ghost skip, so a ghost symlink still warns —
+    /// pinning that ordering.
+    #[test]
+    fn symlink_conf_is_not_regular_file() {
+        let rendered = run_tmpfiles(vec![PkgFile {
+            name: "/usr/lib/tmpfiles.d/symlink.conf".to_string(),
+            mode: 0o120777,
+            linkto: "/some/where/some.conf".to_string(),
+            ..Default::default()
+        }]);
+        let not_regular: Vec<&String> = rendered
+            .iter()
+            .filter(|l| l.contains("tmpfile-not-regular-file"))
+            .collect();
+        assert_eq!(
+            not_regular.len(),
+            1,
+            "expected tmpfile-not-regular-file: {rendered:?}"
+        );
+        assert_eq!(
+            not_regular[0].as_str(),
+            "tmpfiles-test.noarch: W: tmpfile-not-regular-file /usr/lib/tmpfiles.d/symlink.conf",
+            "level/name/detail",
+        );
+    }
+
+    /// A regular ghost conf skips the not-regular-file warning entirely: the
+    /// ghost early-return only runs after `is_reg` passes.
+    #[test]
+    fn regular_ghost_conf_skips_not_regular_file() {
+        let rendered = run_tmpfiles(vec![PkgFile {
+            name: "/usr/lib/tmpfiles.d/ghost.conf".to_string(),
+            mode: 0o100644,
+            flags: RPMFILE_GHOST,
+            ..Default::default()
+        }]);
+        assert!(
+            !rendered
+                .iter()
+                .any(|l| l.contains("tmpfile-not-regular-file")),
+            "regular ghost must not warn: {rendered:?}"
+        );
+    }
 }

@@ -530,4 +530,85 @@ mod tests {
         let entry = TmpfilesEntry::parse("t.conf", "L /etc/foo - - - - /bar");
         assert!(!check.is_sensitive_entry(&entry));
     }
+
+    /// Build a config mirroring the reference's `SystemdTmpfilesWhitelist`
+    /// shape: `goodpkg` may ship the sensitive `/tmp/.rpmlint-stuff` entry.
+    fn whitelist_config() -> Config {
+        let toml_src = r#"
+[SystemdTmpfiles]
+DropinDirs = ["/tmpfiles1", "/tmpfiles2"]
+
+[[SystemdTmpfilesWhitelist]]
+package = "goodpkg"
+path = "/tmpfiles1/some.conf"
+entries = [
+    "d /tmp/.rpmlint-stuff 0777 root root -"
+]
+"#;
+        let table: toml::Table = toml::from_str(toml_src).expect("parse test config");
+        let mut config = Config {
+            configuration: table,
+            ..Default::default()
+        };
+        config.finalize().expect("finalize test config");
+        config
+    }
+
+    /// The reference's `test_whitelistings` (test_systemd_tmpfiles.py:63).
+    /// `is_whitelisted` is the security gate: a regression silently suppresses
+    /// real `systemd-tmpfile-entry-unauthorized` findings or false-positives
+    /// valid packages. `goodpkg`'s whitelisted sensitive entry is accepted;
+    /// `badpkg`'s identical entry is rejected with the finding pinned.
+    #[test]
+    fn whitelist_accepts_goodpkg_rejects_badpkg() {
+        use crate::color::Color;
+        use crate::pkg::pkgfile::PkgFile;
+
+        let config = whitelist_config();
+        let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        for (pkg_name, expect_finding) in [("goodpkg", false), ("badpkg", true)] {
+            let dir = tempfile::tempdir().expect("tmpdir");
+            let mut pkg = Pkg::open(&rpm, dir.path(), true).expect("open fixture pkg");
+            pkg.name = pkg_name.to_string();
+            pkg.files.clear();
+            // check_binary reads through `Pkg::read_file`, which resolves
+            // against the package's base dir rather than the PkgFile path.
+            let rel = "tmpfiles1/some.conf";
+            let ondisk = pkg.dir_name().join(rel);
+            std::fs::create_dir_all(ondisk.parent().unwrap()).expect("mkdirs");
+            std::fs::write(&ondisk, "d /tmp/.rpmlint-stuff 0777 root root -\n")
+                .expect("write conf");
+            pkg.files.push(PkgFile {
+                name: format!("/{rel}"),
+                path: ondisk.to_string_lossy().into_owned(),
+                mode: 0o100644,
+                ..Default::default()
+            });
+
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            let mut check = SystemdTmpfilesCheck::new(&config);
+            check.check_binary(&pkg, &config, &mut out);
+            let unauthorized: Vec<String> = out
+                .results()
+                .iter()
+                .filter(|(n, _)| *n == "systemd-tmpfile-entry-unauthorized")
+                .map(|(_, l)| l.clone())
+                .collect();
+            assert_eq!(
+                !unauthorized.is_empty(),
+                expect_finding,
+                "pkg {pkg_name}: {:?}",
+                out.results()
+            );
+            if expect_finding {
+                assert_eq!(
+                    unauthorized[0].as_str(),
+                    "badpkg.noarch: E: systemd-tmpfile-entry-unauthorized \
+                     /tmpfiles1/some.conf \"d /tmp/.rpmlint-stuff 0777 root root -\"",
+                    "level/name/detail",
+                );
+            }
+        }
+    }
 }

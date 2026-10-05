@@ -725,4 +725,219 @@ mod tests {
         assert!(is_match(re, "/usr/bin/update-alternatives"));
         assert!(!is_match(re, "update-alternatives-foo"));
     }
+
+    /// `alts-requirement-missed`: a package shipping libalternatives content
+    /// without an `alts` requirement. The `libalternatives_pkg` helper wires
+    /// no requirement, so the finding fires; the level and empty detail are
+    /// pinned.
+    #[test]
+    fn alts_requirement_missed_fires_without_alts_require() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let pkg =
+            libalternatives_pkg(dir.path(), &[("foo.conf", "binary = /usr/bin/foo\n")]);
+        let results = findings_for(&pkg);
+        let missed: Vec<&(String, String)> = results
+            .iter()
+            .filter(|(n, _)| n == "alts-requirement-missed")
+            .collect();
+        assert_eq!(
+            missed.len(),
+            1,
+            "expected alts-requirement-missed: {results:?}"
+        );
+        assert_eq!(
+            missed[0].1.as_str(),
+            "alternatives-test.noarch: E: alts-requirement-missed",
+            "level/name",
+        );
+    }
+
+    /// `libalternatives-directory-not-exists`: a symlink with `linkto == "alts"`
+    /// whose `/usr/share/libalternatives/<basename>` directory is absent.
+    #[test]
+    fn libalternatives_directory_not_exists_fires() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        // The dummy conf makes has_libalts true so the file-list checks run.
+        let mut pkg =
+            libalternatives_pkg(dir.path(), &[("dummy.conf", "binary = /usr/bin/dummy\n")]);
+        pkg.files.push(PkgFile {
+            name: "/usr/bin/lonely".to_string(),
+            mode: 0o120777,
+            linkto: "alts".to_string(),
+            ..Default::default()
+        });
+        let results = findings_for(&pkg);
+        let missing: Vec<&(String, String)> = results
+            .iter()
+            .filter(|(n, _)| n == "libalternatives-directory-not-exists")
+            .collect();
+        assert_eq!(
+            missing.len(),
+            1,
+            "expected libalternatives-directory-not-exists: {results:?}"
+        );
+        assert!(
+            missing[0].1.starts_with(
+                "alternatives-test.noarch: E: libalternatives-directory-not-exists \
+                 /usr/share/libalternatives/lonely"
+            ),
+            "level/name/detail: {}",
+            missing[0].1
+        );
+    }
+
+    /// `empty-libalternatives-directory`: the libalternatives directory exists
+    /// but holds no `.conf` file. The directory-not-exists finding must not
+    /// fire alongside it.
+    #[test]
+    fn empty_libalternatives_directory_fires() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let mut pkg =
+            libalternatives_pkg(dir.path(), &[("dummy.conf", "binary = /usr/bin/dummy\n")]);
+        pkg.files.push(PkgFile {
+            name: "/usr/bin/lonely".to_string(),
+            mode: 0o120777,
+            linkto: "alts".to_string(),
+            ..Default::default()
+        });
+        pkg.files.push(PkgFile {
+            name: "/usr/share/libalternatives/lonely".to_string(),
+            mode: 0o040755,
+            ..Default::default()
+        });
+        let results = findings_for(&pkg);
+        assert!(
+            has(&results, "empty-libalternatives-directory"),
+            "expected empty-libalternatives-directory: {results:?}"
+        );
+        assert!(
+            !has(&results, "libalternatives-directory-not-exists"),
+            "directory exists, so not-exists must not fire: {results:?}"
+        );
+        let line = results
+            .iter()
+            .find(|(n, _)| n == "empty-libalternatives-directory")
+            .map(|(_, l)| l.as_str())
+            .unwrap();
+        assert!(
+            line.starts_with(
+                "alternatives-test.noarch: E: empty-libalternatives-directory \
+                 /usr/share/libalternatives/lonely"
+            ),
+            "level/name/detail: {line}"
+        );
+    }
+
+    /// `libalternatives-conf-not-found`: a `.conf` under libalternatives whose
+    /// on-disk path does not exist — Error for a real file, Info for a ghost.
+    #[test]
+    fn libalternatives_conf_not_found_fires() {
+        use crate::pkg::pkgfile::RPMFILE_GHOST;
+
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let mut pkg =
+            libalternatives_pkg(dir.path(), &[("dummy.conf", "binary = /usr/bin/dummy\n")]);
+        pkg.files.push(PkgFile {
+            name: "/usr/share/libalternatives/gone/gone.conf".to_string(),
+            path: dir
+                .path()
+                .join("does-not-exist.conf")
+                .to_string_lossy()
+                .into_owned(),
+            mode: 0o100644,
+            ..Default::default()
+        });
+        pkg.files.push(PkgFile {
+            name: "/usr/share/libalternatives/ghosted/ghosted.conf".to_string(),
+            path: dir
+                .path()
+                .join("does-not-exist-either.conf")
+                .to_string_lossy()
+                .into_owned(),
+            mode: 0o100644,
+            flags: RPMFILE_GHOST,
+            ..Default::default()
+        });
+        let results = findings_for(&pkg);
+        let not_found: Vec<&(String, String)> = results
+            .iter()
+            .filter(|(n, _)| n == "libalternatives-conf-not-found")
+            .collect();
+        assert_eq!(
+            not_found.len(),
+            2,
+            "expected real + ghost conf-not-found: {results:?}"
+        );
+        let real = not_found
+            .iter()
+            .find(|(_, l)| l.contains("/gone/gone.conf"))
+            .expect("real-file entry");
+        assert!(
+            real.1.starts_with(
+                "alternatives-test.noarch: E: libalternatives-conf-not-found \
+                 /usr/share/libalternatives/gone/gone.conf"
+            ),
+            "real file is Error: {}",
+            real.1
+        );
+        let ghost = not_found
+            .iter()
+            .find(|(_, l)| l.contains("/ghosted/ghosted.conf"))
+            .expect("ghost entry");
+        assert!(
+            ghost
+                .1
+                .starts_with("alternatives-test.noarch: I: libalternatives-conf-not-found"),
+            "ghost file is Info: {}",
+            ghost.1
+        );
+    }
+
+    /// `wrong-tag-found`, `wrong-entry-format`, `binary-entry-value-not-found`:
+    /// conf content validation. Mirrors the reference's borked-conf shapes
+    /// (test_alternatives.py:92).
+    #[test]
+    fn conf_content_validations_fire() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let pkg = libalternatives_pkg(
+            dir.path(),
+            &[(
+                "borked.conf",
+                "binary = /usr/bin/nowhere\nbogus = 1\nnot a kv line\n",
+            )],
+        );
+        let results = findings_for(&pkg);
+        for name in [
+            "binary-entry-value-not-found",
+            "wrong-tag-found",
+            "wrong-entry-format",
+        ] {
+            assert!(has(&results, name), "expected {name}: {results:?}");
+        }
+        let line = |name: &str| {
+            results
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, l)| l.as_str())
+                .unwrap()
+        };
+        assert!(
+            line("binary-entry-value-not-found")
+                .starts_with("alternatives-test.noarch: W: binary-entry-value-not-found"),
+            "warning level: {}",
+            line("binary-entry-value-not-found")
+        );
+        assert!(
+            line("wrong-tag-found")
+                .starts_with("alternatives-test.noarch: W: wrong-tag-found"),
+            "warning level: {}",
+            line("wrong-tag-found")
+        );
+        assert!(
+            line("wrong-entry-format")
+                .starts_with("alternatives-test.noarch: E: wrong-entry-format"),
+            "error level: {}",
+            line("wrong-entry-format")
+        );
+    }
 }

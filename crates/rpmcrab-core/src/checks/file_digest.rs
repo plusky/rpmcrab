@@ -2296,4 +2296,213 @@ nodigests = ["/skip/me"]
         assert_eq!(digests[1].path, "/skip/me");
         assert_eq!(digests[1].algorithm, "skip");
     }
+
+    /// A digest group for an explicit package name. The shared `group_toml`
+    /// helper pins `package = "testpkg"`; these tests need other names.
+    fn group_toml_for_package(package: &str, path: &str, content: &[u8]) -> String {
+        format!(
+            r#"
+[[FileDigestGroup]]
+type = "pam"
+package = "{package}"
+[[FileDigestGroup.digests]]
+path = "{path}"
+algorithm = "sha256"
+digester = "default"
+hash = "{}"
+"#,
+            sha256_hex(content)
+        )
+    }
+
+    /// The reference's `test_wrong_pkg_name` (test_file_digest.py:179): a
+    /// package whose name matches no digest group must not validate. This is
+    /// the security core of the check — a package-name scoping regression
+    /// would let a foreign package pass whitelisting silently.
+    #[test]
+    fn wrong_package_name_does_not_validate() {
+        let dir = std::env::temp_dir().join("rpmcrab-fd-wrongpkg");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let content = b"session required pam_unix.so\n";
+        let ondisk = write_temp(&dir, "login", content);
+
+        let config =
+            test_config(&group_toml_for_package("testpkg", "/etc/pam.d/login", content));
+        let mut pkg = fixture_pkg();
+        pkg.name = "otherpkg".to_string();
+        pkg.files = vec![pkgfile("/etc/pam.d/login", &ondisk, 0o100644)];
+
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        let unauthorized: Vec<&(String, String)> = results
+            .iter()
+            .filter(|(n, _)| *n == "pam-file-unauthorized")
+            .collect();
+        assert_eq!(
+            unauthorized.len(),
+            1,
+            "wrong package must not validate: {results:?}"
+        );
+        assert!(
+            unauthorized[0]
+                .1
+                .starts_with("otherpkg.noarch: E: pam-file-unauthorized /etc/pam.d/login"),
+            "level/name/detail: {}",
+            unauthorized[0].1
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reference's `test_multiple_packages` (test_file_digest.py:278):
+    /// a `packages = [...]` group validates each listed package; an unlisted
+    /// package is rejected.
+    #[test]
+    fn multiple_packages_group_validates_listed_only() {
+        let dir = std::env::temp_dir().join("rpmcrab-fd-multipkg");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let content = b"some file content\n";
+        let ondisk = write_temp(&dir, "afile", content);
+
+        let extra = format!(
+            r#"
+[[FileDigestGroup]]
+type = "pam"
+packages = ["testpkg2", "otherpkg"]
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/afile"
+algorithm = "sha256"
+digester = "default"
+hash = "{}"
+"#,
+            sha256_hex(content)
+        );
+        let config = test_config(&extra);
+        for (pkg_name, expect_ok) in [("testpkg2", true), ("otherpkg", true), ("badpkg", false)] {
+            let mut pkg = fixture_pkg();
+            pkg.name = pkg_name.to_string();
+            pkg.files = vec![pkgfile("/etc/pam.d/afile", &ondisk, 0o100644)];
+            let mut check = FileDigestCheck::new(&config);
+            let results = run_check(&pkg, &config, &mut check);
+            if expect_ok {
+                assert!(
+                    results.is_empty(),
+                    "{pkg_name}: listed package must validate quietly, got {results:?}"
+                );
+            } else {
+                assert!(
+                    results
+                        .iter()
+                        .any(|(n, _)| *n == "pam-file-unauthorized"),
+                    "{pkg_name}: unlisted package must be rejected, got {results:?}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reference's `test_matching_nodigests` / `test_missing_nodigests_entry`
+    /// (test_file_digest.py:206, :218): `nodigests` paths stay silent, while an
+    /// extra file not present in the whitelist is still flagged.
+    #[test]
+    fn nodigests_paths_stay_silent_extra_files_flagged() {
+        let dir = std::env::temp_dir().join("rpmcrab-fd-nodigests");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let skipped = write_temp(&dir, "skipped", b"whatever\n");
+        let evil = write_temp(&dir, "evil", b"evil stuff\n");
+
+        let extra = r#"
+[[FileDigestGroup]]
+type = "pam"
+package = "testpkg"
+nodigests = ["/etc/pam.d/skipped"]
+"#
+        .to_string();
+        let config = test_config(&extra);
+
+        // Whitelisted path: silent.
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![pkgfile("/etc/pam.d/skipped", &skipped, 0o100644)];
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        assert!(
+            results.is_empty(),
+            "nodigests path must stay silent: {results:?}"
+        );
+
+        // Extra file: still flagged.
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![
+            pkgfile("/etc/pam.d/skipped", &skipped, 0o100644),
+            pkgfile("/etc/pam.d/evil", &evil, 0o100644),
+        ];
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        let unauthorized: Vec<&(String, String)> = results
+            .iter()
+            .filter(|(n, _)| *n == "pam-file-unauthorized")
+            .collect();
+        assert_eq!(
+            unauthorized.len(),
+            1,
+            "extra file must be flagged: {results:?}"
+        );
+        assert!(
+            unauthorized[0].1.starts_with(
+                "testpkg.noarch: E: pam-file-unauthorized /etc/pam.d/evil"
+            ),
+            "level/name/detail: {}",
+            unauthorized[0].1
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reference's `test_shell_digest_filter` (test_file_digest.py:293):
+    /// the shell digester is exercised through the check. The fixture has
+    /// comments, blank lines and a versioned shebang, so its raw sha256
+    /// differs from the shell-normalized one — a digester regression (raw
+    /// bytes) would false-positive `E: pam-file-digest-mismatch` here.
+    #[test]
+    fn shell_digester_normalizes_through_check() {
+        let dir = std::env::temp_dir().join("rpmcrab-fd-shell");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let content =
+            b"#!/usr/bin/python3.11\n# a comment\n\nsession required pam_unix.so\n# another\n";
+        let ondisk = write_temp(&dir, "login", content);
+
+        let expected =
+            Digester::digest(&ShellDigester, &ondisk, "sha256").expect("shell digest");
+        assert_ne!(
+            expected,
+            sha256_hex(content),
+            "test is vacuous unless normalization changes the hash"
+        );
+
+        let extra = format!(
+            r#"
+[[FileDigestGroup]]
+type = "pam"
+package = "testpkg"
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/login"
+algorithm = "sha256"
+digester = "shell"
+hash = "{expected}"
+"#
+        );
+        let config = test_config(&extra);
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![pkgfile("/etc/pam.d/login", &ondisk, 0o100644)];
+
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        assert!(
+            results.is_empty(),
+            "shell-normalized file must verify quietly: {results:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
