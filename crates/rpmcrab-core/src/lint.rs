@@ -383,3 +383,40 @@ mod panic_tests {
         assert_eq!(lint.exit_code(), 3);
     }
 }
+
+#[cfg(test)]
+mod exit_code_tests {
+    use super::*;
+    use crate::finding::Finding;
+    use crate::level::Level;
+
+    /// Two warnings + BadnessThreshold=1 + --strict → exit 66.
+    ///
+    /// The reference (filter.py:139-140) computes default badness AFTER strict
+    /// promotion, so each strict-promoted warning scores 1. With threshold 1,
+    /// score 2 > 1 triggers the badness abort (exit 66), not the permissive
+    /// error path (64/65). This pins the score > threshold → 66 interaction
+    /// that unit tests on Filter.score alone do not cover.
+    #[test]
+    fn strict_warnings_cross_badness_threshold() {
+        let config = Config {
+            strict: true,
+            badness_threshold: 1,
+            ..Default::default()
+        };
+        let mut lint = Lint::new(config, vec![], Color::for_tty(false), 80).unwrap();
+        for check in ["first-warning", "second-warning"] {
+            lint.filter.add_info(Finding {
+                level: Level::Warning,
+                check: check.to_string(),
+                details: vec![],
+                badness: 0,
+                pkg_name: "testpkg".to_string(),
+                arch: None,
+                line: None,
+            });
+        }
+        assert_eq!(lint.filter.score, 2);
+        assert_eq!(lint.exit_code(), 66);
+    }
+}

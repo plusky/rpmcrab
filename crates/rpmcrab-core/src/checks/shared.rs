@@ -7,21 +7,29 @@
 use fancy_regex::Regex;
 
 use crate::pkg::Pkg;
+use std::sync::OnceLock;
 
 /// `AbstractCheck.macro_regex`: `%+[{(]?[a-zA-Z_]\w{2,}[)}]?`.
-pub fn macro_regex() -> Regex {
-    Regex::new(r"%+[{(]?[a-zA-Z_]\w{2,}[)}]?").expect("static regex")
+static MACRO_REGEX: OnceLock<Regex> = OnceLock::new();
+pub fn macro_regex() -> &'static Regex {
+    MACRO_REGEX.get_or_init(|| Regex::new(r"%+[{(]?[a-zA-Z_]\w{2,}[)}]?").expect("static regex"))
 }
 
 /// `FilesCheck.devel_regex`: `(.*)-(debug(info|source)?|devel|headers|source|static|prof)$`.
-pub fn devel_regex() -> Regex {
-    Regex::new(r"(.*)-(debug(info|source)?|devel|headers|source|static|prof)$")
-        .expect("static regex")
+static DEVEL_REGEX: OnceLock<Regex> = OnceLock::new();
+pub fn devel_regex() -> &'static Regex {
+    DEVEL_REGEX.get_or_init(|| {
+        Regex::new(r"(.*)-(debug(info|source)?|devel|headers|source|static|prof)$")
+            .expect("static regex")
+    })
 }
 
 /// `lib_package_regex`: `(?:^(?:compat-)?lib.*?(\.so.*)?|libs?[\d-]*)$`, case-insensitive.
-pub fn lib_package_regex() -> Regex {
-    Regex::new(r"(?i)(?:^(?:compat-)?lib.*?(\.so.*)?|libs?[\d-]*)$").expect("static regex")
+static LIB_PACKAGE_REGEX: OnceLock<Regex> = OnceLock::new();
+pub fn lib_package_regex() -> &'static Regex {
+    LIB_PACKAGE_REGEX.get_or_init(|| {
+        Regex::new(r"(?i)(?:^(?:compat-)?lib.*?(\.so.*)?|libs?[\d-]*)$").expect("static regex")
+    })
 }
 
 /// The reference's `pkg[tag] or pkg.scriptprog(prog)`: the scriptlet body

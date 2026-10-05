@@ -15,6 +15,7 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
+use std::sync::OnceLock;
 
 pub struct SignatureCheck {
     rpm_bin: String,
@@ -64,16 +65,24 @@ impl SignatureCheck {
         (output.status.code().unwrap_or(-1), text)
     }
 
-    fn any_sig_regex() -> Regex {
-        Regex::new(r"[Ss]ignature|\(sha1\) dsa|\(sha1\) rsa").expect("signature regex")
+    fn any_sig_regex() -> &'static Regex {
+        static ANY_SIG_REGEX: OnceLock<Regex> = OnceLock::new();
+        ANY_SIG_REGEX.get_or_init(|| {
+            Regex::new(r"[Ss]ignature|\(sha1\) dsa|\(sha1\) rsa").expect("signature regex")
+        })
     }
 
-    fn nokey_sig_regex() -> Regex {
-        Regex::new(r"[Ss]ignature, key ID ([\w\d]*): NOKEY").expect("nokey regex")
+    fn nokey_sig_regex() -> &'static Regex {
+        static NOKEY_SIG_REGEX: OnceLock<Regex> = OnceLock::new();
+        NOKEY_SIG_REGEX.get_or_init(|| {
+            Regex::new(r"[Ss]ignature, key ID ([\w\d]*): NOKEY").expect("nokey regex")
+        })
     }
 
-    fn invalid_sig_regex() -> Regex {
-        Regex::new(r"invalid OpenPGP signature").expect("invalid sig regex")
+    fn invalid_sig_regex() -> &'static Regex {
+        static INVALID_SIG_REGEX: OnceLock<Regex> = OnceLock::new();
+        INVALID_SIG_REGEX
+            .get_or_init(|| Regex::new(r"invalid OpenPGP signature").expect("invalid sig regex"))
     }
 }
 
@@ -88,7 +97,7 @@ impl Check for SignatureCheck {
         // The reference runs all three sub-checks unconditionally
         // (SignatureCheck.py:36-40); each decides for itself whether to fire.
         // No signature at all.
-        if !is_match(&Self::any_sig_regex(), &output) {
+        if !is_match(Self::any_sig_regex(), &output) {
             add_info(out, Level::Error, pkg, "no-signature", &[]);
         }
 
@@ -96,12 +105,12 @@ impl Check for SignatureCheck {
         if retcode == 1 {
             if let Some(caps) = Self::nokey_sig_regex().captures(&output).ok().flatten() {
                 let key_id = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-                if !is_match(&Self::invalid_sig_regex(), &output) {
+                if !is_match(Self::invalid_sig_regex(), &output) {
                     add_info(out, Level::Error, pkg, "unknown-key", &[key_id]);
                 }
             }
             // Invalid signature.
-            if is_match(&Self::invalid_sig_regex(), &output) {
+            if is_match(Self::invalid_sig_regex(), &output) {
                 add_info(out, Level::Error, pkg, "invalid-signature", &[]);
             }
         }
@@ -234,11 +243,11 @@ mod tests {
     fn any_sig_matches() {
         let re = SignatureCheck::any_sig_regex();
         assert!(is_match(
-            &re,
+            re,
             "foo.rpm: RSA/SHA256 Signature, key ID abc123: OK"
         ));
-        assert!(is_match(&re, "foo.rpm: (sha1) dsa sha1 md5 gpg OK"));
-        assert!(!is_match(&re, "foo.rpm: digests OK"));
+        assert!(is_match(re, "foo.rpm: (sha1) dsa sha1 md5 gpg OK"));
+        assert!(!is_match(re, "foo.rpm: digests OK"));
     }
 
     #[test]
@@ -255,9 +264,9 @@ mod tests {
     #[test]
     fn invalid_sig_matches() {
         let re = SignatureCheck::invalid_sig_regex();
-        assert!(is_match(&re, "foo.rpm: invalid OpenPGP signature"));
+        assert!(is_match(re, "foo.rpm: invalid OpenPGP signature"));
         assert!(!is_match(
-            &re,
+            re,
             "foo.rpm: RSA/SHA256 Signature, key ID abc: OK"
         ));
     }
