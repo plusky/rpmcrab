@@ -245,6 +245,122 @@ fn no_owned_regex_factories() {
     );
 }
 
+/// Net `(` minus `)` on a line, ignoring delimiters inside string literals,
+/// character literals, and line comments. Regex patterns are full of
+/// parentheses (`r"^lib(.*?)([0-9.]+)"`); counting those would corrupt the
+/// depth tracking in [`in_get_or_init_closure`].
+fn net_parens_outside_strings(line: &str) -> i32 {
+    let b = line.as_bytes();
+    let n = b.len();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < n {
+        match b[i] {
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth -= 1;
+                i += 1;
+            }
+            // A line comment ends any depth contribution from the rest.
+            b'/' if b.get(i + 1) == Some(&b'/') => break,
+            // Character literal: '(' , ')' , '\''.
+            b'\'' => {
+                i += 1;
+                if b.get(i) == Some(&b'\\') {
+                    i += 1;
+                }
+                i += 1;
+                if b.get(i) == Some(&b'\'') {
+                    i += 1;
+                }
+            }
+            b'"' => {
+                // Raw string r#*"..."*# (the terminator is `"` followed by
+                // exactly the opening hash count). `br#"..."#` byte-string raw
+                // strings are NOT recognized: the `b` reads as an identifier
+                // char, so parens inside them would be miscounted. None exist
+                // in src/ today, so this is a documented limitation, not a bug.
+                let mut j = i;
+                while j > 0 && b[j - 1] == b'#' {
+                    j -= 1;
+                }
+                let raw = j > 0 && b[j - 1] == b'r' && (j < 2 || !is_ident_char(b[j - 2] as char));
+                if raw {
+                    let hashes = i - j;
+                    i += 1;
+                    while i < n {
+                        let terminator = b[i] == b'"'
+                            && (0..hashes).all(|k| b.get(i + 1 + k) == Some(&b'#'))
+                            && b.get(i + 1 + hashes) != Some(&b'#');
+                        if terminator {
+                            i += 1 + hashes;
+                            break;
+                        }
+                        i += 1;
+                    }
+                } else {
+                    // Ordinary string: honor `\"` and `\\` escapes.
+                    i += 1;
+                    while i < n {
+                        match b[i] {
+                            b'\\' => i += 2,
+                            b'"' => {
+                                i += 1;
+                                break;
+                            }
+                            _ => i += 1,
+                        }
+                    }
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    depth
+}
+
+/// Whether the `Regex::new` on `lines[i]` sits inside a `get_or_init`
+/// closure.
+///
+/// The nearest `get_or_init` at most 20 lines above opens the search; the
+/// line counts as inside only while that call's parentheses still enclose
+/// it. The closure is always the call's single argument, so the paren scope
+/// is exactly the closure's extent. This covers the `|| { ... }` bodies,
+/// the single-line `|| Regex::new(...)` form, and the split form with the
+/// closure on following lines (files.rs `start_private_key_regex`); a mere
+/// mention of `get_or_init` in a comment grants no skip.
+///
+/// The 20-line search window is itself a bound: a legitimate closure longer
+/// than 20 lines would make a `Regex::new` inside it a false positive. The
+/// longest real span is 15 lines (`python.rs:73-88`, `ERR_PATHS`), so the
+/// headroom is 5 — keep closures short, or widen the window and re-measure.
+fn in_get_or_init_closure(lines: &[&str], i: usize) -> bool {
+    let window_start = i.saturating_sub(20);
+    let opener = (window_start..=i)
+        .rev()
+        .find(|&j| lines[j].contains("get_or_init"));
+    let g = match opener {
+        Some(g) => g,
+        None => return false,
+    };
+    if g == i {
+        // `get_or_init(|| Regex::new(...))` on one line.
+        return true;
+    }
+    let mut depth = 0i32;
+    for line in &lines[g..=i] {
+        depth += net_parens_outside_strings(line);
+        if depth <= 0 {
+            // The get_or_init call closed before line i.
+            return false;
+        }
+    }
+    true
+}
+
 #[test]
 fn no_bare_regex_new() {
     let dir = checks_dir();
@@ -266,12 +382,10 @@ fn no_bare_regex_new() {
             if line.trim_start().starts_with("//") {
                 continue;
             }
-            // Allow get_or_init closures (check 20 lines above for multi-line).
-            let window_start = i.saturating_sub(20);
-            let in_static = lines[window_start..=i]
-                .iter()
-                .any(|l| l.contains("get_or_init"));
-            if in_static {
+            // Skip Regex::new inside a get_or_init closure (multi-line
+            // OnceLock bodies included); proximity to a get_or_init line
+            // alone is not membership.
+            if in_get_or_init_closure(&lines, i) {
                 continue;
             }
             if is_allowlisted(&fname, line) {
@@ -286,4 +400,69 @@ fn no_bare_regex_new() {
         "Regex::new outside get_or_init (add to ALLOWLIST with reason if legitimate):\n{}",
         violations.join("\n")
     );
+}
+
+#[test]
+fn get_or_init_skip_is_membership_not_proximity() {
+    // plusky's A/B from the #101 review: a genuine per-call compile below a
+    // *closed* closure but inside the 20-line window must be flagged, while
+    // the identical line 30 lines clear is flagged under any rule.
+    let closed: Vec<&str> = vec![
+        "static FOO_RE: OnceLock<Regex> = OnceLock::new();",
+        "fn foo_re() -> &'static Regex {",
+        "    FOO_RE.get_or_init(|| {",
+        "        Regex::new(r\"^foo\").expect(\"static regex\")",
+        "    })",
+        "}",
+    ];
+    // Legitimate closure bodies are still skipped: braced multi-line ...
+    assert!(in_get_or_init_closure(&closed, 3));
+    // ... single-line expression form ...
+    assert!(in_get_or_init_closure(
+        &["    FOO_RE.get_or_init(|| Regex::new(r\"^foo\").expect(\"static\"))"],
+        0
+    ));
+    // ... and the split form with the closure on following lines
+    // (files.rs `start_private_key_regex` shape).
+    let split = vec![
+        "    START_PRIVATE_KEY_REGEX.get_or_init(",
+        "        || // NB: comment between the call and its closure",
+        "        Regex::new(r\"^----BEGIN PRIVATE KEY-----\\n?$\").expect(\"static regex\"),",
+        "    )",
+    ];
+    assert!(in_get_or_init_closure(&split, 2));
+
+    // A: injected per-call compile 14 lines below the closed closure --
+    // inside the old proximity window, outside the closure.
+    let mut a = closed.clone();
+    a.extend(std::iter::repeat_n("    let _pad = 1;", 14));
+    a.push("    let re = fancy_regex::Regex::new(&format!(\"{a}{b}\"));");
+    let injected = a.len() - 1;
+    assert!(
+        !in_get_or_init_closure(&a, injected),
+        "per-call compile below a closed closure must be flagged"
+    );
+
+    // B: the identical injection 30 lines clear of any get_or_init.
+    let mut b = closed.clone();
+    b.extend(std::iter::repeat_n("    let _pad = 1;", 30));
+    b.push("    let re = fancy_regex::Regex::new(&format!(\"{a}{b}\"));");
+    assert!(!in_get_or_init_closure(&b, b.len() - 1));
+
+    // A comment merely mentioning get_or_init grants no skip.
+    let comment = vec![
+        "    // migrated to get_or_init elsewhere",
+        "    let re = Regex::new(r\"^foo$\");",
+    ];
+    assert!(!in_get_or_init_closure(&comment, 1));
+
+    // Delimiters inside strings and comments do not disturb depth tracking.
+    let tricky = vec![
+        "    FOO_RE.get_or_init(|| {",
+        "        // ) ( } comment delimiters must not count",
+        "        let pat = \"(\"; // unbalanced delimiter in a string",
+        "        Regex::new(&format!(\"{a}{b}\")).expect(\"static\")",
+        "    })",
+    ];
+    assert!(in_get_or_init_closure(&tricky, 3));
 }
