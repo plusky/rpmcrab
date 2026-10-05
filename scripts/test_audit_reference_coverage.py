@@ -894,18 +894,24 @@ def test_stale_check_catches_name_keyed_entry():
     }, names
     assert all(e.get("case") == "global" for e in missing), [
         (e.get("case"), e.get("check")) for e in missing]
-    # missing_modules exactly as main() builds it.
-    missing_modules = {e.get("check") for e in missing}
+    # missing_modules exactly as main() builds it (shared helper, so drift
+    # in either direction breaks this test).
+    missing_modules = mod.missing_check_names(ledger)
     for name in sorted(names):
         # A finding whose NAME matches a name-keyed missing entry, but whose
         # MODULE does not, IS stale (with exact pattern).
         assert mod.is_stale_entry(
             "SomeOtherCheck", name, missing_modules, {name}
         ), f"name-keyed match should be stale: {name}"
-        # Wildcard patterns do not count.
-        assert not mod.is_stale_entry(
-            "SomeOtherCheck", name, missing_modules, {name.split("-")[0] + "-*"}
-        ), f"wildcard should not mark stale: {name}"
+    # A wildcard template must not count even when it literally equals the
+    # finding name: only exact non-wildcard patterns mark an entry stale.
+    # This pins the "*" not in p guard -- deleting it makes this fail, while
+    # the old form (template "inaccessible-*" vs name "inaccessible-filename")
+    # passed vacuously since p == name was already false.
+    star_name = "inaccessible-filen*me"
+    assert not mod.is_stale_entry(
+        "SomeOtherCheck", star_name, missing_modules | {star_name}, {star_name}
+    ), f"wildcard template should not mark stale: {star_name}"
 
 
 def main():
