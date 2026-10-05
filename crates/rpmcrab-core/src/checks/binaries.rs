@@ -141,7 +141,11 @@ struct ReadelfInfo {
     sections: Vec<Vec<ElfSection>>,
     program_headers: Vec<ElfProgramHeader>,
 
-    symbols: Vec<String>,
+    /// FUNC-type symbol names from both `.symtab` and `.dynsym`, mirroring
+    /// the reference `readelf -s` scan (`SymbolTableInfo.functions`). The
+    /// dynamic table is where undefined imports of stripped binaries live,
+    /// so function-call checks must consult it.
+    functions: Vec<String>,
     is_shlib: bool,
     is_debug: bool,
     soname: Option<String>,
@@ -156,7 +160,7 @@ impl ReadelfInfo {
         let mut info = ReadelfInfo {
             sections: Vec::new(),
             program_headers: Vec::new(),
-            symbols: Vec::new(),
+            functions: Vec::new(),
             // The reference derives is_shlib and is_debug from the file name,
             // not the ELF content (readelfparser.py). A PIE executable or Go
             // binary is ET_DYN but is not a shared library for these checks.
@@ -228,11 +232,26 @@ impl ReadelfInfo {
             info.program_headers.push(ElfProgramHeader { name, flags });
         }
 
-        // Symbols
+        // Function symbols from both tables, mirroring the reference
+        // `readelf -s` scan over `.dynsym` and `.symtab`.
         for sym in elf.syms.iter() {
-            if let Some(name) = elf.strtab.get_at(sym.st_name) {
-                if !name.is_empty() {
-                    info.symbols.push(name.to_string());
+            if sym.st_type() == goblin::elf::sym::STT_FUNC {
+                if let Some(name) = elf.strtab.get_at(sym.st_name) {
+                    if !name.is_empty() {
+                        info.functions.push(name.to_string());
+                    }
+                }
+            }
+        }
+
+        // Dynamic symbols: undefined imports of stripped binaries only exist
+        // here, so the reference `readelf -s` scan (both tables) needs this.
+        for sym in elf.dynsyms.iter() {
+            if sym.st_type() == goblin::elf::sym::STT_FUNC {
+                if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
+                    if !name.is_empty() {
+                        info.functions.push(name.to_string());
+                    }
                 }
             }
         }
@@ -269,7 +288,7 @@ impl ReadelfInfo {
     }
 
     fn has_function_matching(&self, regex: &fancy_regex::Regex) -> bool {
-        self.symbols
+        self.functions
             .iter()
             .any(|s| regex.is_match(s).unwrap_or(false))
     }
@@ -1850,6 +1869,99 @@ mod tests {
         assert_lacks(&results, "missing-mandatory-optflags");
     }
 
+    fn warn_on_function_config() -> Config {
+        // Mirrors the reference test.config WarnOnFunction entries: the
+        // finding names are config-driven, so the port pins them the same way.
+        let mut config = test_config();
+        let parsed: toml::Table = toml::from_str(
+            r#"
+[WarnOnFunction.crypto-policy-non-compliance-openssl]
+f_name = "SSL_CTX_set_cipher_list"
+description = "explicit cipher list bypasses the system crypto policy"
+[WarnOnFunction.crypto-policy-non-compliance-gnutls-2]
+f_name = "gnutls_priority_init"
+good_param = "SYSLOG"
+description = "explicit priority string bypasses the system crypto policy"
+"#,
+        )
+        .expect("parse WarnOnFunction");
+        let warn = parsed
+            .get("WarnOnFunction")
+            .and_then(toml::Value::as_table)
+            .expect("WarnOnFunction table")
+            .clone();
+        config
+            .configuration
+            .insert("WarnOnFunction".to_string(), toml::Value::Table(warn));
+        config
+    }
+
+    fn run_binaries_check_with_config(
+        rpm: &str,
+        config: &Config,
+    ) -> (Vec<(String, String)>, Vec<Level>, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = Pkg::open(std::path::Path::new(rpm), dir.path(), true).expect("open fixture");
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        let mut check = BinariesCheck::with_tool_dir(config, None);
+        check.check_binary(&pkg, config, &mut out);
+        (out.results().to_vec(), out.result_levels().to_vec(), dir)
+    }
+
+    fn finding_level(
+        results: &[(String, String)],
+        levels: &[Level],
+        finding: &str,
+    ) -> Option<Level> {
+        results
+            .iter()
+            .position(|(n, _)| n == finding)
+            .map(|i| levels[i])
+    }
+
+    #[test]
+    fn forbidden_function_fires_for_dynsym_import() {
+        // libcryptobad.so is stripped: SSL_CTX_set_cipher_list exists only as
+        // an undefined import in .dynsym. The pre-fix scan of .symtab alone
+        // could never see it, so this test fails with the bug live.
+        let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
+        let config = warn_on_function_config();
+        let (results, levels, _dir) = run_binaries_check_with_config(&rpm_path, &config);
+
+        let lines = lines_for(&results, "crypto-policy-non-compliance-openssl");
+        assert_eq!(lines.len(), 1, "one openssl finding: {results:?}");
+        assert!(
+            lines[0].contains("/usr/lib64/libcryptobad.so"),
+            "finding names the offending file: {}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("SSL_CTX_set_cipher_list"),
+            "finding names the forbidden call: {}",
+            lines[0]
+        );
+        assert_eq!(
+            finding_level(&results, &levels, "crypto-policy-non-compliance-openssl"),
+            Some(Level::Warning),
+            "forbidden crypto calls are Warnings, like the reference"
+        );
+    }
+
+    #[test]
+    fn forbidden_function_waived_by_good_param() {
+        // libgnutlswaived.so calls gnutls_priority_init but its strings
+        // contain the SYSLOG waiver, so the finding is suppressed (reference
+        // test_waived_forbidden_c_calls).
+        let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
+        let config = warn_on_function_config();
+        let (results, _levels, _dir) = run_binaries_check_with_config(&rpm_path, &config);
+        assert_lacks(&results, "crypto-policy-non-compliance-gnutls-2");
+        // The waiver only covers the gnutls entry: the openssl finding for
+        // libcryptobad.so must still fire in the same run.
+        let lines = lines_for(&results, "crypto-policy-non-compliance-openssl");
+        assert_eq!(lines.len(), 1, "openssl finding survives: {results:?}");
+    }
+
     #[test]
     fn binaries_check_skips_tool_subchecks_when_tools_absent() {
         // Empty tool dir: `strings` and `ar` are absent, so their subchecks
@@ -1949,7 +2061,7 @@ mod tests {
             let info = ReadelfInfo {
                 sections,
                 program_headers: Vec::new(),
-                symbols: Vec::new(),
+                functions: Vec::new(),
                 is_shlib: true,
                 is_debug: false,
                 soname: None,
