@@ -74,7 +74,7 @@ time = { version = "0.3", default-features = false, features = ["local-offset"] 
 
 [dev-dependencies]
 serde_json = "1"
-criterion = "0.5"
+criterion = "0.8"
 # Tests build a header directly (e.g. `Pkg::installed`); the crate already uses
 # librpm, this makes it nameable from integration tests too.
 librpm = { version = "0.6", default-features = false }
