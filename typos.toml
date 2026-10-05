@@ -36,10 +36,10 @@ gir = "gir"
 tham = "tham"
 # Vai is the Vai script name (Unicode block Vai), not a typo for Via/Vie.
 vai = "vai"
-# iMatix is a genuine SPDX license ID in the spdx.rs suggestion pool
-# (the tokenizer splits it as i + Matix).
-matix = "matix"
-# ND is "No Derivatives" in CC license IDs in the spdx.rs suggestion pool.
-nd = "nd"
-# CAPEC-TOU is a genuine SPDX license ID in the spdx.rs suggestion pool.
-tou = "tou"
+
+# SPDX ID table tokens: "iMatix" tokenizes as i + Matix, ND is "No
+# Derivatives" in CC IDs, CAPEC-TOU is a genuine ID. Scoped to the table
+# so the allow-list does not silence these tokens repo-wide.
+[type.spdx]
+extend-glob = ["**/spdx.rs"]
+extend-words = { matix = "matix", nd = "nd", tou = "tou" }

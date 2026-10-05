@@ -1162,6 +1162,12 @@ impl TagsCheck {
             return;
         }
         let mut valid_license = true;
+        // Did-you-mean suggestions are the port's own Info finding, not the
+        // reference's: cap them per package so a pathological License tag
+        // with thousands of invalid ids cannot burn minutes in edit-distance
+        // computation. The invalid-license warnings themselves are untouched.
+        let mut spellchecks_emitted = 0;
+        const MAX_SPELLCHECK_SUGGESTIONS: usize = 10;
         if !self.valid_licenses.contains(&rpm_license.to_string()) {
             // Pieces are validated like the reference's nested loop: each
             // piece the split yields is checked, and a non-valid piece is
@@ -1192,14 +1198,19 @@ impl TagsCheck {
                 for l2 in Self::split_license(&lic) {
                     if !self.valid_licenses.contains(&l2) {
                         add_info(out, Level::Warning, pkg, "invalid-license", &[&l2]);
-                        let suggestions = suggest_licenses(&l2, 3).join(", ");
-                        add_info(
-                            out,
-                            Level::Info,
-                            pkg,
-                            "invalid-license-spellcheck",
-                            &[&format!("{l2}: {suggestions}")],
-                        );
+                        if spellchecks_emitted < MAX_SPELLCHECK_SUGGESTIONS {
+                            spellchecks_emitted += 1;
+                            let suggestions = suggest_licenses(&l2, 3);
+                            if !suggestions.is_empty() {
+                                add_info(
+                                    out,
+                                    Level::Info,
+                                    pkg,
+                                    "invalid-license-spellcheck",
+                                    &[&format!("{l2}: {}", suggestions.join(", "))],
+                                );
+                            }
+                        }
                         valid_license = false;
                     }
                 }
@@ -1866,7 +1877,15 @@ mod tests {
 
     fn invalid_license_warnings(results: Vec<(String, String)>) -> Vec<(String, String)> {
         // The `invalid-license-spellcheck` info finding accompanies every
-        // invalid-license warning; these tests pin the warning itself.
+        // invalid-license warning; these tests pin the warning itself. The
+        // total is asserted so an unexpected extra finding cannot slip past
+        // the filter unnoticed.
+        for (name, _) in &results {
+            assert!(
+                name == "invalid-license" || name == "invalid-license-spellcheck",
+                "unexpected finding: {name}"
+            );
+        }
         results
             .into_iter()
             .filter(|(n, _)| n == "invalid-license")

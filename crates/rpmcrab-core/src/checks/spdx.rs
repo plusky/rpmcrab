@@ -747,13 +747,52 @@ pub fn levenshtein(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
+/// Levenshtein edit distance over Unicode scalar values, or `None` when it
+/// exceeds `cap`. Bailing once the row minimum passes the cap keeps
+/// pathological queries cheap: unrelated candidates blow the cap within the
+/// first few rows instead of filling the whole matrix.
+fn levenshtein_capped(a: &str, b: &str, cap: usize) -> Option<usize> {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.len().abs_diff(b.len()) > cap {
+        return None;
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        let mut row_min = curr[0];
+        for (j, &cb) in b.iter().enumerate() {
+            curr[j + 1] = (prev[j] + usize::from(ca != cb))
+                .min(prev[j + 1] + 1)
+                .min(curr[j] + 1);
+            row_min = row_min.min(curr[j + 1]);
+        }
+        if row_min > cap {
+            return None;
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    let dist = prev[b.len()];
+    (dist <= cap).then_some(dist)
+}
+
+/// Maximum edit distance for a suggestion to count as did-you-mean: short
+/// queries get a tight bound, longer ones scale with their length.
+fn suggestion_distance_cap(query_len: usize) -> usize {
+    3.max(query_len / 2)
+}
+
 /// The `n` closest SPDX IDs to `query` by case-insensitive edit
-/// distance, ties broken alphabetically for determinism.
+/// distance, ties broken alphabetically for determinism. Candidates
+/// farther than the distance cap are noise, not did-you-mean, and are
+/// dropped; an empty vec means nothing was close enough to suggest.
 pub fn suggest_licenses(query: &str, n: usize) -> Vec<&'static str> {
     let q = query.to_lowercase();
+    let cap = suggestion_distance_cap(q.chars().count());
     let mut scored: Vec<(usize, &'static str)> = SPDX_LICENSE_IDS
         .iter()
-        .map(|id| (levenshtein(&q, &id.to_lowercase()), *id))
+        .filter_map(|id| levenshtein_capped(&q, &id.to_lowercase(), cap).map(|d| (d, *id)))
         .collect();
     scored.sort();
     scored.into_iter().take(n).map(|(_, id)| id).collect()
@@ -782,5 +821,31 @@ mod tests {
         assert_eq!(first[0], "GPL-2.0-or-later");
         // Case-insensitive: an all-lowercase query still resolves.
         assert_eq!(suggest_licenses("mit", 1), vec!["MIT"]);
+    }
+
+    #[test]
+    fn distant_queries_get_no_suggestions() {
+        // "Proprietary" is ~7-8 edits from anything real: noise, not
+        // did-you-mean. The cap scales with query length, so a near-miss
+        // still resolves.
+        assert!(suggest_licenses("Proprietary", 3).is_empty());
+        assert_eq!(
+            suggest_licenses("GPL-2.0-or-latr", 1),
+            vec!["GPL-2.0-or-later"]
+        );
+    }
+
+    #[test]
+    fn levenshtein_capped_agrees_with_levenshtein() {
+        for (a, b) in [
+            ("kitten", "sitting"),
+            ("GPL-2.0-or-latr", "GPL-2.0-or-later"),
+            ("", "abc"),
+        ] {
+            assert_eq!(levenshtein_capped(a, b, 100), Some(levenshtein(a, b)));
+        }
+        // Beyond the cap, and length difference alone blows it.
+        assert_eq!(levenshtein_capped("kitten", "sitting", 2), None);
+        assert_eq!(levenshtein_capped("a", "abcdefghij", 3), None);
     }
 }
