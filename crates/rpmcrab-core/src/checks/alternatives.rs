@@ -805,9 +805,14 @@ mod tests {
             ..Default::default()
         });
         let results = findings_for(&pkg);
-        assert!(
-            has(&results, "empty-libalternatives-directory"),
-            "expected empty-libalternatives-directory: {results:?}"
+        let empty: Vec<&(String, String)> = results
+            .iter()
+            .filter(|(n, _)| n == "empty-libalternatives-directory")
+            .collect();
+        assert_eq!(
+            empty.len(),
+            1,
+            "expected exactly one empty-libalternatives-directory: {results:?}"
         );
         assert!(
             !has(&results, "libalternatives-directory-not-exists"),
@@ -911,7 +916,8 @@ mod tests {
             "wrong-tag-found",
             "wrong-entry-format",
         ] {
-            assert!(has(&results, name), "expected {name}: {results:?}");
+            let count = results.iter().filter(|(n, _)| n == name).count();
+            assert_eq!(count, 1, "expected exactly one {name}: {results:?}");
         }
         let line = |name: &str| {
             results
