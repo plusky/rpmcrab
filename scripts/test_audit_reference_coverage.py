@@ -871,6 +871,72 @@ def test_renamed_systemd_producer_makes_the_site_unresolved():
     assert [u[2] for u in unresolved] == ["finding"], unresolved
 
 
+DUPLICATES_RS = """
+enum DuplicateFinding {
+    HardlinkAcrossPartition(String, String),
+    HardlinkAcrossConfigFiles(String, String),
+    FilesDuplicate(String, String),
+    FilesDuplicatedWaste(u64),
+}
+
+impl DuplicatesCheck {
+    fn describe(f: &DuplicateFinding) -> (Level, &'static str, Vec<String>) {
+        match f {
+            DuplicateFinding::HardlinkAcrossPartition(a, b) => (
+                Level::Error,
+                "hardlink-across-partition",
+                vec![a.clone(), b.clone()],
+            ),
+            DuplicateFinding::HardlinkAcrossConfigFiles(a, b) => (
+                Level::Error,
+                "hardlink-across-config-files",
+                vec![a.clone(), b.clone()],
+            ),
+            DuplicateFinding::FilesDuplicate(a, b) => {
+                (Level::Warning, "files-duplicate", vec![a.clone(), b.clone()])
+            }
+            DuplicateFinding::FilesDuplicatedWaste(n) => {
+                (Level::Error, "files-duplicated-waste", vec![n.to_string()])
+            }
+        }
+    }
+}
+"""
+
+DUPLICATES_CHECK = """
+    fn check(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
+        for f in &findings {
+            let (level, name, details) = Self::describe(f);
+            let detail_refs: Vec<&str> = details.iter().map(String::as_str).collect();
+            add_info(out, level, pkg, name, &detail_refs);
+        }
+    }
+"""
+
+
+def test_duplicates_dynamic_site_resolves_triple_names():
+    # End to end through audit_port: the (level, name, details) triple
+    # helper's names resolve, and the pairing stays the test's job.
+    by_module, unresolved = _port({"duplicates.rs":
+                                   DUPLICATES_RS + DUPLICATES_CHECK})
+    assert by_module["duplicates"] == {
+        "hardlink-across-partition",
+        "hardlink-across-config-files",
+        "files-duplicate",
+        "files-duplicated-waste"}, by_module["duplicates"]
+    assert unresolved == [], unresolved
+
+
+def test_renamed_describe_producer_makes_the_site_unresolved():
+    # No silent fallback: rename the triple helper and the name is NOT
+    # covered by anything -- it turns into an UNRESOLVED entry.
+    renamed = (DUPLICATES_RS + DUPLICATES_CHECK).replace("describe",
+                                                        "describe_v2")
+    by_module, unresolved = _port({"duplicates.rs": renamed})
+    assert by_module["duplicates"] == set(), by_module["duplicates"]
+    assert [u[2] for u in unresolved] == ["name"], unresolved
+
+
 def test_stale_check_catches_name_keyed_entry():
     # The staleness check must mark an entry stale when the port emits the
     # finding of a kind="missing" ledger entry. The corpus pins the shape:

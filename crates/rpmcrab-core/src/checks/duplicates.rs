@@ -207,21 +207,36 @@ impl DuplicatesCheck {
     }
 
     /// Output level and detail strings for one finding.
-    /// A named function rather than an inline `match` in `check` so tests
-    /// can pin the E/W mapping without constructing a full `Pkg`.
-    /// The finding names stay as literals on the emission path in `check`:
-    /// the reference-coverage auditor resolves them from `add_info` calls
-    /// and cannot see through a helper that returns them.
-    fn describe(f: &DuplicateFinding) -> (Level, Vec<String>) {
+    /// Output level, finding name and detail strings for one finding, in a
+    /// single `match` arm per variant.
+    ///
+    /// One match cannot mispair with itself: the name, the level and the
+    /// details for a variant are produced together, so there is no second,
+    /// independent name `match` that could drift out of agreement (that
+    /// shape let a swapped arm stay green). Tests pin the triple per
+    /// variant through the real emission path. The reference-coverage
+    /// auditor resolves the names from this helper (see `dynamic_sites`
+    /// in `scripts/audit-reference-coverage.py`).
+    fn describe(f: &DuplicateFinding) -> (Level, &'static str, Vec<String>) {
         match f {
-            DuplicateFinding::HardlinkAcrossPartition(a, b) => {
-                (Level::Error, vec![a.clone(), b.clone()])
+            DuplicateFinding::HardlinkAcrossPartition(a, b) => (
+                Level::Error,
+                "hardlink-across-partition",
+                vec![a.clone(), b.clone()],
+            ),
+            DuplicateFinding::HardlinkAcrossConfigFiles(a, b) => (
+                Level::Error,
+                "hardlink-across-config-files",
+                vec![a.clone(), b.clone()],
+            ),
+            DuplicateFinding::FilesDuplicate(a, b) => (
+                Level::Warning,
+                "files-duplicate",
+                vec![a.clone(), b.clone()],
+            ),
+            DuplicateFinding::FilesDuplicatedWaste(n) => {
+                (Level::Error, "files-duplicated-waste", vec![n.to_string()])
             }
-            DuplicateFinding::HardlinkAcrossConfigFiles(a, b) => {
-                (Level::Error, vec![a.clone(), b.clone()])
-            }
-            DuplicateFinding::FilesDuplicate(a, b) => (Level::Warning, vec![a.clone(), b.clone()]),
-            DuplicateFinding::FilesDuplicatedWaste(n) => (Level::Error, vec![n.to_string()]),
         }
     }
 }
@@ -243,14 +258,8 @@ impl Check for DuplicatesCheck {
             |n| pkg.ghost_files.contains(&n.to_string()),
         );
         for f in &findings {
-            let (level, details) = Self::describe(f);
+            let (level, name, details) = Self::describe(f);
             let detail_refs: Vec<&str> = details.iter().map(String::as_str).collect();
-            let name = match f {
-                DuplicateFinding::HardlinkAcrossPartition(..) => "hardlink-across-partition",
-                DuplicateFinding::HardlinkAcrossConfigFiles(..) => "hardlink-across-config-files",
-                DuplicateFinding::FilesDuplicate(..) => "files-duplicate",
-                DuplicateFinding::FilesDuplicatedWaste(..) => "files-duplicated-waste",
-            };
             add_info(out, level, pkg, name, &detail_refs);
         }
     }
@@ -466,32 +475,154 @@ mod tests {
         );
     }
 
+    fn fixture_path(name: &str) -> String {
+        format!(
+            "{}/../../tests/parity/pkg/inputs/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            name
+        )
+    }
+
+    /// A real `Pkg` whose file list the caller controls, driving the full
+    /// `check` -> `add_info` -> `Filter` emission path.
+    fn pkg_with_files(files: Vec<PkgFile>, config_files: Vec<String>) -> Pkg {
+        let mut pkg = Pkg::open_no_extract(std::path::Path::new(&fixture_path(
+            "filescheck-depmod-ok-1.0-1.noarch.rpm",
+        )))
+        .expect("open fixture");
+        pkg.files = files;
+        pkg.config_files = config_files;
+        pkg
+    }
+
+    /// `(finding name, level letter, rendered line)` per emitted finding.
+    fn emitted(
+        check: &mut DuplicatesCheck,
+        pkg: &Pkg,
+        config: &Config,
+    ) -> Vec<(String, char, String)> {
+        let mut out = Filter::new(config, crate::color::Color::for_tty(false)).expect("filter");
+        check.check(pkg, config, &mut out);
+        out.results()
+            .iter()
+            .zip(out.result_levels().iter())
+            .map(|((name, line), level)| (name.clone(), level.letter(), line.clone()))
+            .collect()
+    }
+
     #[test]
-    fn finding_output_levels_are_pinned() {
-        // The E/W mapping lives in `describe`, which `check` renders
-        // verbatim: flipping any level here must fail. `Level::letter`
-        // is the byte that appears in the output line. The finding names
-        // are pinned by the reference-coverage audit instead: they stay
-        // as literals on the emission path so the auditor can resolve
-        // them from the `add_info` calls.
-        let cases = [
-            (
-                DuplicateFinding::HardlinkAcrossPartition("a".into(), "b".into()),
+    fn finding_output_triple_is_pinned() {
+        // The whole (name, level, details) triple lives in one `describe`
+        // match arm: a single match cannot mispair with itself. Each case
+        // drives the real emission path and asserts the exact rendered
+        // line, so junking a name literal, swapping two arms, or flipping
+        // a detail order must fail.
+        let config = Config::default();
+        let mut check = DuplicatesCheck::new(&config);
+
+        // hardlink-across-partition: one inode spanning /usr and /var.
+        let pkg = pkg_with_files(
+            vec![
+                pkgfile("/usr/bin/a", "aaa", 100, 1),
+                pkgfile("/var/lib/b", "aaa", 100, 1),
+            ],
+            vec![],
+        );
+        let line = |letter: char, check: &str, details: &str| {
+            format!(
+                "{}.{pkg_arch}: {letter}: {check} {details}",
+                pkg.name,
+                pkg_arch = pkg.arch
+            )
+        };
+        assert_eq!(
+            emitted(&mut check, &pkg, &config),
+            [(
+                "hardlink-across-partition".to_string(),
                 'E',
-            ),
-            (
-                DuplicateFinding::HardlinkAcrossConfigFiles("a".into(), "b".into()),
+                line('E', "hardlink-across-partition", "/var/lib/b /usr/bin/a"),
+            )],
+        );
+
+        // hardlink-across-config-files: one inode, both ends config files.
+        let pkg = pkg_with_files(
+            vec![
+                pkgfile("/etc/a", "aaa", 100, 1),
+                pkgfile("/etc/b", "aaa", 100, 1),
+            ],
+            vec!["/etc/a".to_string(), "/etc/b".to_string()],
+        );
+        let line = |letter: char, check: &str, details: &str| {
+            format!(
+                "{}.{pkg_arch}: {letter}: {check} {details}",
+                pkg.name,
+                pkg_arch = pkg.arch
+            )
+        };
+        assert_eq!(
+            emitted(&mut check, &pkg, &config),
+            [(
+                "hardlink-across-config-files".to_string(),
                 'E',
-            ),
-            (
-                DuplicateFinding::FilesDuplicate("a".into(), "b".into()),
+                line('E', "hardlink-across-config-files", "/etc/b /etc/a"),
+            )],
+        );
+
+        // files-duplicate: same content on different inodes.
+        let pkg = pkg_with_files(
+            vec![
+                pkgfile("/usr/bin/a", "aaa", 100, 1),
+                pkgfile("/usr/bin/b", "aaa", 100, 2),
+            ],
+            vec![],
+        );
+        let line = |letter: char, check: &str, details: &str| {
+            format!(
+                "{}.{pkg_arch}: {letter}: {check} {details}",
+                pkg.name,
+                pkg_arch = pkg.arch
+            )
+        };
+        assert_eq!(
+            emitted(&mut check, &pkg, &config),
+            [(
+                "files-duplicate".to_string(),
                 'W',
-            ),
-            (DuplicateFinding::FilesDuplicatedWaste(120_000), 'E'),
-        ];
-        for (finding, letter) in cases {
-            let (level, _) = DuplicatesCheck::describe(&finding);
-            assert_eq!(level.letter(), letter, "{finding:?}");
-        }
+                line('W', "files-duplicate", "/usr/bin/b /usr/bin/a"),
+            )],
+        );
+
+        // files-duplicated-waste: the waste total rides along with the
+        // duplicate group that produced it.
+        let pkg = pkg_with_files(
+            vec![
+                pkgfile("/usr/bin/x", "aaa", 60_000, 1),
+                pkgfile("/usr/lib/y", "aaa", 60_000, 2),
+                pkgfile("/usr/share/z", "aaa", 60_000, 3),
+            ],
+            vec![],
+        );
+        let line = |letter: char, check: &str, details: &str| {
+            format!(
+                "{}.{pkg_arch}: {letter}: {check} {details}",
+                pkg.name,
+                pkg_arch = pkg.arch
+            )
+        };
+        assert_eq!(
+            emitted(&mut check, &pkg, &config),
+            [
+                (
+                    "files-duplicate".to_string(),
+                    'W',
+                    line('W', "files-duplicate", "/usr/share/z /usr/bin/x:/usr/lib/y"),
+                ),
+                (
+                    "files-duplicated-waste".to_string(),
+                    'E',
+                    line('E', "files-duplicated-waste", "120000"),
+                ),
+            ],
+        );
     }
 }

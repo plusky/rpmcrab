@@ -539,6 +539,37 @@ def fn_finding_literals(src, fn_name):
     return [l for l in _fn_body_literals(src, fn_name)
             if _FINDING_NAME_RE.match(l)]
 
+def fn_describe_tuple_literals(src, fn_name):
+    """String literals in the second position of ``(Level::*, "name", ...)``
+    tuple expressions within the named Rust function.
+
+    For helpers that return a ``(level, name, details)`` triple in one
+    match arm per variant, with the name flowing into ``add_info``
+    (``DuplicatesCheck::describe``). One match cannot mispair with
+    itself, so the auditor only needs the name set -- variant pairing is
+    pinned by the test. Fails safe: an unrecognized shape yields nothing
+    and the call site goes UNRESOLVED.
+    """
+    m = re.search(r"fn\s+" + re.escape(fn_name) + r"\s*\(", src)
+    if not m:
+        return []
+    brace = src.find("{", m.end())
+    if brace == -1:
+        return []
+    depth = 0
+    end = brace
+    for i in range(brace, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    body = src[brace:end + 1]
+    return re.findall(r"\(\s*Level::\w+\s*,\s*\"([^\"]+)\"", body)
+
+
 def script_tags(pkgdir):
     """The '%pre'/'%post'/... tags: third elements of Pkg.SCRIPT_TAGS.
 
@@ -2272,6 +2303,7 @@ def audit_port(checks_dir):
             dynamic_sites = {
                 ("alternatives.rs", "finding"): ("check_post_phase", fn_err_literals),
                 ("bashisms.rs", "warning"): ("classify_bashisms", fn_push_literals),
+                ("duplicates.rs", "name"): ("describe", fn_describe_tuple_literals),
                 ("menu_xdg.rs", "finding"): ("parse_desktop", fn_err_literals),
                 ("systemd_install.rs", "finding"): ("check_unit", fn_finding_literals),
             }
