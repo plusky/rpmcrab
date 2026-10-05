@@ -46,20 +46,48 @@ pub(crate) fn script_body_or_prog(pkg: &Pkg, tag: librpm::Tag, prog: librpm::Tag
     }
 }
 
-/// Python `str()` of a list of strings: `['a', 'b']`. The reference
-/// interpolates `str(list)` into finding details; Rust's `{:?}` would print
-/// `["a", "b"]` instead. (Python switches to double quotes for strings
-/// containing a quote; package and file names never do, so single quotes
-/// match for every realistic input.)
+/// Python `repr()` of a string: single quotes unless the string contains `'`
+/// (then double quotes, like Python), with backslashes, the active quote and
+/// control characters escaped. The reference interpolates `str(list)` into
+/// finding details; Rust's `{:?}` would print `["a", "b"]` instead, and a
+/// hand-rolled `'{s}'` breaks on quote/backslash paths (plusky/rpmcrab#107).
+pub fn python_str_repr(s: &str) -> String {
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push(quote);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            _ => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
+/// Python `str()` of a list of strings: `['a', 'b']`.
 pub fn python_str_list(items: &[&str]) -> String {
-    let inner: Vec<String> = items.iter().map(|s| format!("'{s}'")).collect();
+    let inner: Vec<String> = items.iter().map(|s| python_str_repr(s)).collect();
     format!("[{}]", inner.join(", "))
 }
 
-/// Python `str()` of a tuple of strings: `('a', 'b')`. Same caveat as
-/// [`python_str_list`].
+/// Python `str()` of a tuple of strings: `('a', 'b')`.
 pub fn python_str_tuple(items: &[&str]) -> String {
-    let inner: Vec<String> = items.iter().map(|s| format!("'{s}'")).collect();
+    let inner: Vec<String> = items.iter().map(|s| python_str_repr(s)).collect();
     format!("({})", inner.join(", "))
 }
 
@@ -140,6 +168,18 @@ mod tests {
         assert_eq!(python_str_list(&["a"]), "['a']");
         assert_eq!(python_str_list(&["a", "b"]), "['a', 'b']");
         assert_eq!(python_str_list(&[]), "[]");
+    }
+
+    #[test]
+    fn python_str_repr_matches_python() {
+        assert_eq!(python_str_repr("plain"), "'plain'");
+        assert_eq!(python_str_repr("/bin/it's"), r#""/bin/it's""#);
+        assert_eq!(python_str_repr("/bin/bs\\x"), r"'/bin/bs\\x'");
+        assert_eq!(python_str_repr("both'and\"q"), r#"'both\'and"q'"#);
+        assert_eq!(
+            python_str_list(&["/bin/it's", "/bin/bs\\x"]),
+            r#"["/bin/it's", '/bin/bs\\x']"#
+        );
     }
 
     #[test]
