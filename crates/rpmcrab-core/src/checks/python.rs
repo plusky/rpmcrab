@@ -1045,7 +1045,8 @@ mod tests {
             "shipped configdefaults.toml must leave PythonDefaultVersion empty"
         );
         let check = PythonCheck::new(&config);
-        assert_eq!(check.default_python, PythonCheck::DEFAULT_PYTHON);
+        // Literal, not the constant: changing DEFAULT_PYTHON must fail.
+        assert_eq!(check.default_python, "3.12");
     }
 
     #[test]
