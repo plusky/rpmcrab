@@ -196,8 +196,8 @@ since = "0.1.0"
 [[divergence]]
 case = "global"
 check = "missing-mandatory-optflags"
-kind = "behaviour"
-reason = "DWARF producer extraction is not yet implemented; the mandatory/forbidden optflags check degrades gracefully (no findings) until DWARF parsing lands."
+kind = "detail"
+reason = "DW_AT_producer is read with gimli instead of objdump: the reference keeps the text after the last ':' of the objdump DW_AT_producer line, truncating a producer value that itself contains a colon; the port keeps the full attribute string."
 since = "0.1.0"
 
 [[divergence]]

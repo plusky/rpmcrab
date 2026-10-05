@@ -58,6 +58,9 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 spellbook = "0.4.2"
 # ELF parsing for BinariesCheck (replaces readelf/ldd). Pure Rust, MIT.
 goblin = "0.10"
+# DWARF parsing for BinariesCheck DW_AT_producer extraction (the optflags
+# check). Pure Rust; replaces the reference objdump --dwarf=info subprocess.
+gimli = "0.34"
 # XML parsing for DBusPolicyCheck (D-Bus policy files). Pure Rust, MIT.
 # XML parsing for PolkitCheck (polkit policy files). Pure Rust, MIT.
 quick-xml = "0.42"

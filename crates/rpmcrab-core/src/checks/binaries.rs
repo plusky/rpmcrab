@@ -2,8 +2,8 @@
 //!
 //! Covers the reference's `add_info` call sites: ELF section/header analysis
 //! via `goblin`, dependency analysis via `goblin`, DWARF producer extraction
-//! (not yet implemented), forbidden functions via `strings`, and archive
-//! analysis via `ar`.
+//! via `gimli`, forbidden functions via `strings`, and archive analysis via
+//! `ar`.
 //!
 //! Deliberate gaps are ledgered in `tests/parity/divergences.toml`.
 
@@ -367,18 +367,83 @@ struct ObjdumpInfo {
 
 impl ObjdumpInfo {
     fn parse(path: &str) -> Self {
-        let info = ObjdumpInfo {
+        let mut info = ObjdumpInfo {
             producers: Vec::new(),
             failed: None,
         };
-        // TODO: DWARF producer extraction is not yet implemented.
-        // The goblin-based ELF parsing covers the main BinariesCheck
-        // functionality; DWARF compile-unit producers are a follow-up.
-        // For now, producers is empty which means the mandatory/forbidden
-        // optflags check degrades gracefully (no findings).
-        let _ = path;
+        let data = match std::fs::read(path) {
+            Ok(d) => d,
+            Err(e) => {
+                info.failed = Some(e.to_string());
+                return info;
+            }
+        };
+        let elf = match goblin::elf::Elf::parse(&data) {
+            Ok(e) => e,
+            Err(e) => {
+                info.failed = Some(e.to_string());
+                return info;
+            }
+        };
+        match dwarf_producers(&elf, &data) {
+            Ok(producers) => info.producers = producers,
+            Err(e) => info.failed = Some(e.to_string()),
+        }
         info
     }
+}
+
+/// `DW_AT_producer` of every DWARF compilation unit, in section order.
+/// Pure-Rust replacement for the reference's `objdump --dwarf=info` parse.
+/// One deliberate departure: the reference keeps the text after the last `:`
+/// of the `DW_AT_producer` line, truncating a producer that itself contains a
+/// colon; the port keeps the full attribute string (ledgered).
+fn dwarf_producers(elf: &goblin::elf::Elf<'_>, data: &[u8]) -> Result<Vec<String>, gimli::Error> {
+    use std::borrow::Cow;
+
+    use gimli::{DwarfSections, EndianSlice, RunTimeEndian, SectionId};
+
+    let section = |name: &str| -> &[u8] {
+        elf.section_headers
+            .iter()
+            .find_map(|sh| {
+                (elf.shdr_strtab.get_at(sh.sh_name) == Some(name)).then(|| {
+                    let start = sh.sh_offset as usize;
+                    let end = start.saturating_add(sh.sh_size as usize);
+                    data.get(start..end).unwrap_or(&[])
+                })
+            })
+            .unwrap_or(&[])
+    };
+    let endian = if elf.little_endian {
+        RunTimeEndian::Little
+    } else {
+        RunTimeEndian::Big
+    };
+    let dwarf_sections =
+        DwarfSections::load(|id: SectionId| -> Result<Cow<'_, [u8]>, gimli::Error> {
+            Ok(Cow::Borrowed(section(id.name())))
+        })?;
+    let borrow_section: &dyn for<'a> Fn(&'a Cow<[u8]>) -> EndianSlice<'a, RunTimeEndian> =
+        &|s| EndianSlice::new(s, endian);
+    let dwarf = dwarf_sections.borrow(borrow_section);
+
+    let mut producers = Vec::new();
+    let mut units = dwarf.units();
+    while let Some(header) = units.next()? {
+        let unit = dwarf.unit(header)?;
+        let mut entries = unit.entries();
+        let Some(entry) = entries.next_dfs()? else {
+            continue;
+        };
+        let Some(attr) = entry.attr(gimli::DW_AT_producer) else {
+            continue;
+        };
+        if let Ok(producer) = dwarf.attr_string(&unit, attr.value()) {
+            producers.push(String::from_utf8_lossy(producer.slice()).into_owned());
+        }
+    }
+    Ok(producers)
 }
 
 struct StringsInfo {
@@ -1862,9 +1927,274 @@ mod tests {
             "readelf-failed should fire for truncated: {results:?}"
         );
 
-        // Ledgered absences: these findings are never emitted
+        // Absent under the default config: the optflags lists are empty there,
+        // so the check returns before touching DWARF.
         assert_lacks(&results, "unused-direct-shlib-dependency");
         assert_lacks(&results, "missing-mandatory-optflags");
+    }
+    /// Hand-built minimal ELF64 with crafted DWARF for the optflags tests.
+    /// Each `(producer, inline)` pair becomes one compilation unit: `inline`
+    /// uses `DW_FORM_string`, otherwise the producer is referenced with
+    /// `DW_FORM_strp` from `.debug_str`.
+    fn dwarf_test_elf(cus: &[(&str, bool)]) -> Vec<u8> {
+        let mut debug_str = Vec::new();
+        let mut str_offsets: Vec<Option<u32>> = Vec::new();
+        for (producer, inline) in cus {
+            if *inline {
+                str_offsets.push(None);
+            } else {
+                str_offsets.push(Some(debug_str.len() as u32));
+                debug_str.extend_from_slice(producer.as_bytes());
+                debug_str.push(0);
+            }
+        }
+        // Abbrev codes: 1 = CU with strp producer, 2 = CU with inline producer.
+        let debug_abbrev: &[u8] = &[
+            0x01, 0x11, 0x00, 0x25, 0x0e, 0x00, 0x00, //
+            0x02, 0x11, 0x00, 0x25, 0x08, 0x00, 0x00, //
+            0x00,
+        ];
+        let mut debug_info = Vec::new();
+        for (i, (producer, inline)) in cus.iter().enumerate() {
+            let mut unit = Vec::new();
+            unit.extend_from_slice(&2u16.to_le_bytes());
+            unit.extend_from_slice(&0u32.to_le_bytes());
+            unit.push(8);
+            if *inline {
+                unit.push(2);
+                unit.extend_from_slice(producer.as_bytes());
+                unit.push(0);
+            } else {
+                unit.push(1);
+                unit.extend_from_slice(&str_offsets[i].expect("strp offset").to_le_bytes());
+            }
+            let len = unit.len() as u32;
+            debug_info.extend_from_slice(&len.to_le_bytes());
+            debug_info.extend_from_slice(&unit);
+        }
+
+        let shstrtab = b"\0.debug_abbrev\0.debug_info\0.debug_str\0.shstrtab\0";
+        let sections: [&[u8]; 4] = [debug_abbrev, &debug_info, &debug_str, &shstrtab[..]];
+        let sh_names = [1u32, 15, 27, 38];
+        let sh_types = [1u32, 1, 1, 3];
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]);
+        out.extend_from_slice(&[0u8; 8]);
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&62u16.to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&0x400000u64.to_le_bytes());
+        out.extend_from_slice(&0u64.to_le_bytes());
+        let shoff_pos = out.len();
+        out.extend_from_slice(&0u64.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&64u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&64u16.to_le_bytes());
+        out.extend_from_slice(&5u16.to_le_bytes());
+        out.extend_from_slice(&4u16.to_le_bytes());
+        assert_eq!(out.len(), 64);
+
+        let mut sh_offsets = Vec::new();
+        for s in &sections {
+            sh_offsets.push(out.len() as u64);
+            out.extend_from_slice(s);
+        }
+        let shoff = out.len() as u64;
+        out[shoff_pos..shoff_pos + 8].copy_from_slice(&shoff.to_le_bytes());
+
+        out.extend_from_slice(&[0u8; 64]);
+        for (i, s) in sections.iter().enumerate() {
+            out.extend_from_slice(&sh_names[i].to_le_bytes());
+            out.extend_from_slice(&sh_types[i].to_le_bytes());
+            out.extend_from_slice(&0u64.to_le_bytes());
+            out.extend_from_slice(&0u64.to_le_bytes());
+            out.extend_from_slice(&sh_offsets[i].to_le_bytes());
+            out.extend_from_slice(&(s.len() as u64).to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&1u64.to_le_bytes());
+            out.extend_from_slice(&0u64.to_le_bytes());
+        }
+        out
+    }
+
+    fn write_dwarf_elf(dir: &tempfile::TempDir, name: &str, cus: &[(&str, bool)]) -> String {
+        let path = dir.path().join(name);
+        std::fs::write(&path, dwarf_test_elf(cus)).expect("write test ELF");
+        path.to_string_lossy().into_owned()
+    }
+
+    fn optflags_config(mandatory: &[&str], forbidden: &[&str]) -> Config {
+        let mut config = test_config();
+        let arr = |ss: &[&str]| {
+            toml::Value::Array(
+                ss.iter()
+                    .map(|s| toml::Value::String((*s).to_string()))
+                    .collect(),
+            )
+        };
+        config.configuration["MandatoryOptflags"] = arr(mandatory);
+        config.configuration["ForbiddenOptflags"] = arr(forbidden);
+        config
+    }
+
+    /// A `Pkg` shell for the optflags emission tests: the check only reads
+    /// the package name and arch for rendering.
+    fn optflags_test_pkg(dir: &tempfile::TempDir) -> Pkg {
+        let rpm = format!(
+            "{}/../../tests/fixtures/binaries-check/input/rpmcrab-binaries-fixture-1.0-1.aarch64.rpm",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture pkg")
+    }
+
+    fn run_optflags(pkg: &Pkg, elf_path: &str, config: &Config) -> Vec<(String, String)> {
+        let pkgfile = PkgFile {
+            name: "/usr/bin/dwarfprog".to_string(),
+            path: elf_path.to_string(),
+            ..Default::default()
+        };
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        let check = BinariesCheck::new(config);
+        check.check_optflags(pkg, &pkgfile, config, &mut out);
+        out.results().to_vec()
+    }
+
+    #[test]
+    fn dwarf_producer_extraction() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let path = write_dwarf_elf(
+            &dir,
+            "prog",
+            &[
+                ("GNU C17 12.3.1 -O2 -D_FORTIFY_SOURCE=2", false),
+                ("GNU AS 2.33.1", true),
+            ],
+        );
+        let info = ObjdumpInfo::parse(&path);
+        assert!(
+            info.failed.is_none(),
+            "unexpected failure: {:?}",
+            info.failed
+        );
+        assert_eq!(
+            info.producers,
+            vec!["GNU C17 12.3.1 -O2 -D_FORTIFY_SOURCE=2", "GNU AS 2.33.1"]
+        );
+    }
+
+    #[test]
+    fn dwarf_producer_absent_without_debug_sections() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let path = write_dwarf_elf(&dir, "stripped", &[]);
+        let info = ObjdumpInfo::parse(&path);
+        assert!(
+            info.failed.is_none(),
+            "unexpected failure: {:?}",
+            info.failed
+        );
+        assert!(info.producers.is_empty());
+    }
+
+    #[test]
+    fn dwarf_producer_unparsable_file_fails() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let path = dir.path().join("bogus");
+        std::fs::write(&path, b"not an ELF file").expect("write bogus");
+        let info = ObjdumpInfo::parse(path.to_str().unwrap());
+        assert!(info.failed.is_some(), "goblin failure should surface");
+        assert!(info.producers.is_empty());
+    }
+
+    #[test]
+    fn optflags_missing_mandatory() {
+        let pkg_dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = optflags_test_pkg(&pkg_dir);
+        let elf_dir = tempfile::TempDir::new().expect("tmpdir");
+        let path = write_dwarf_elf(&elf_dir, "prog", &[("GNU C17 12.3.1 -O2", false)]);
+        let config = optflags_config(&["-O2", "-D_FORTIFY_SOURCE=2"], &[]);
+        let results = run_optflags(&pkg, &path, &config);
+        let lines = lines_for(&results, "missing-mandatory-optflags");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(lines[0].contains(" W: "), "must be Warning: {}", lines[0]);
+        assert!(
+            lines[0].contains("-D_FORTIFY_SOURCE=2"),
+            "detail lists the missing flag: {}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("-O2"),
+            "present flags are not missing: {}",
+            lines[0]
+        );
+        assert_lacks(&results, "forbidden-optflags");
+    }
+
+    #[test]
+    fn optflags_forbidden() {
+        let pkg_dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = optflags_test_pkg(&pkg_dir);
+        let elf_dir = tempfile::TempDir::new().expect("tmpdir");
+        let path = write_dwarf_elf(
+            &elf_dir,
+            "prog",
+            &[("GNU C17 12.3.1 -O2 -fno-stack-protector", false)],
+        );
+        let config = optflags_config(&[], &["-fno-stack-protector"]);
+        let results = run_optflags(&pkg, &path, &config);
+        let lines = lines_for(&results, "forbidden-optflags");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(lines[0].contains(" E: "), "must be Error: {}", lines[0]);
+        assert!(
+            lines[0].contains("-fno-stack-protector"),
+            "detail lists the forbidden flag: {}",
+            lines[0]
+        );
+        assert_lacks(&results, "missing-mandatory-optflags");
+    }
+
+    #[test]
+    fn optflags_clean_producer_no_findings() {
+        let pkg_dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = optflags_test_pkg(&pkg_dir);
+        let elf_dir = tempfile::TempDir::new().expect("tmpdir");
+        let path = write_dwarf_elf(
+            &elf_dir,
+            "prog",
+            &[("GNU C17 12.3.1 -O2 -D_FORTIFY_SOURCE=2", false)],
+        );
+        let config = optflags_config(&["-O2", "-D_FORTIFY_SOURCE=2"], &["-fno-stack-protector"]);
+        let results = run_optflags(&pkg, &path, &config);
+        assert_lacks(&results, "missing-mandatory-optflags");
+        assert_lacks(&results, "forbidden-optflags");
+    }
+
+    #[test]
+    fn optflags_evaluated_per_compilation_unit() {
+        let pkg_dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = optflags_test_pkg(&pkg_dir);
+        let elf_dir = tempfile::TempDir::new().expect("tmpdir");
+        let path = write_dwarf_elf(
+            &elf_dir,
+            "prog",
+            &[
+                ("GNU C17 12.3.1 -O2 -D_FORTIFY_SOURCE=2", false),
+                ("GNU AS 2.33.1", true),
+            ],
+        );
+        let config = optflags_config(&["-D_FORTIFY_SOURCE=2"], &[]);
+        let results = run_optflags(&pkg, &path, &config);
+        // Only the assembler unit is missing the flag: exactly one finding.
+        let lines = lines_for(&results, "missing-mandatory-optflags");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("-D_FORTIFY_SOURCE=2"),
+            "detail: {}",
+            lines[0]
+        );
     }
 
     fn warn_on_function_config() -> Config {
