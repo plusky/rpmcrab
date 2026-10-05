@@ -38,6 +38,8 @@ indexmap = "2"
 # fancy-regex wraps `regex` for the fast path and stays unsafe-free.
 fancy-regex = "0.19"
 log = "0.4"
+# Machine-readable `--format json` report (upstream rpmlint#1156).
+serde_json = "1"
 # Terminal width for the centered banners/footer: shutil.get_terminal_size
 # honours $COLUMNS, then the tty winsize, then 80. terminal_size gives the
 # winsize via a safe API (unsafe_code is forbidden in this crate).
@@ -73,7 +75,6 @@ sha2 = "0.11"
 time = { version = "0.3", default-features = false, features = ["local-offset"] }
 
 [dev-dependencies]
-serde_json = "1"
 criterion = "0.8"
 # Tests build a header directly (e.g. `Pkg::installed`); the crate already uses
 # librpm, this makes it nameable from integration tests too.

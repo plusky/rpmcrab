@@ -115,6 +115,12 @@ struct Cli {
     /// Called from the rpmlint-mini wrapper (SUSE-only).
     #[arg(short = 'm', long = "mini-mode", action = clap::ArgAction::SetTrue)]
     mini_mode: bool,
+
+    /// Report output format: human-readable text (default) or
+    /// machine-readable JSON (upstream rpmlint#1156). Overrides the
+    /// `OutputFormat` config key.
+    #[arg(long = "format", value_name = "format", value_parser = ["text", "json"])]
+    format: Option<String>,
 }
 
 /// `-j/--jobs` default: the reference uses `os.cpu_count() or 1`
@@ -135,6 +141,12 @@ fn default_jobs() -> i32 {
 /// unit tests here.
 fn resolve_permissive(cli_permissive: bool, cli_strict: bool, permissive_by_default: bool) -> bool {
     cli_permissive || (!cli_strict && permissive_by_default)
+}
+
+/// Resolve the effective output format: the CLI `--format` wins outright,
+/// otherwise the `OutputFormat` config key decides (`"text"` default).
+fn resolve_output_format(cli_format: Option<&str>, config_format: &str) -> String {
+    cli_format.unwrap_or(config_format).to_string()
 }
 
 /// The clap `Command` for the `rpmcrab` binary, shared by `main.rs` and the
@@ -380,7 +392,14 @@ pub fn run() -> ExitCode {
                 .map(|s| s.to_string_lossy().into_owned())
         })
         .unwrap_or_else(|| "rpmlint".to_string());
-    let out = lint.render(&prog, RPMLINT_VERSION, arg_count, cli.time_report, duration);
+    let format = resolve_output_format(cli.format.as_deref(), &lint.config().output_format);
+    // `--format json` is new surface: the text wire format is untouched,
+    // and `--time-report` stays a text-mode section.
+    let out = if format == "json" {
+        lint.render_json(&prog, RPMLINT_VERSION, arg_count, duration)
+    } else {
+        lint.render(&prog, RPMLINT_VERSION, arg_count, cli.time_report, duration)
+    };
     print!("{out}");
     ExitCode::from(u8::try_from(lint.exit_code()).unwrap_or(1))
 }
@@ -521,6 +540,15 @@ mod tests {
         std::fs::write(&rc, "addFilter('x')\n").unwrap();
         let found = discover_rpmlintrc_files(&[], &[], &[pkg]);
         assert_eq!(found, vec![rc]);
+    }
+
+    #[test]
+    fn resolve_output_format_matrix() {
+        // The CLI flag wins outright; otherwise the config key decides.
+        assert_eq!(resolve_output_format(Some("json"), "text"), "json");
+        assert_eq!(resolve_output_format(Some("text"), "json"), "text");
+        assert_eq!(resolve_output_format(None, "json"), "json");
+        assert_eq!(resolve_output_format(None, "text"), "text");
     }
 
     #[test]

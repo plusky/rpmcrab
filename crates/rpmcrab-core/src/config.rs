@@ -71,6 +71,9 @@ pub struct Config {
     pub rpmlintrc_search_paths: Vec<String>,
     /// `SuppressExtractionStderr` (rpmlint#1592).
     pub suppress_extraction_stderr: bool,
+    /// `OutputFormat` (`"text"` default, `"json"` for machine-readable
+    /// output; upstream rpmlint#1156). The CLI `--format` overrides this.
+    pub output_format: String,
 }
 
 /// Human-readable TOML value kind for configuration diagnostics.
@@ -124,6 +127,21 @@ impl Config {
         self.skip_package_patterns = self.get_strings("SkipPackagePatterns")?;
         self.rpmlintrc_search_paths = self.get_strings("RpmlintrcSearchPaths")?;
         self.suppress_extraction_stderr = self.get_bool("SuppressExtractionStderr")?;
+        let output_format = self
+            .configuration
+            .get("OutputFormat")
+            .and_then(toml::Value::as_str)
+            .unwrap_or("text")
+            .to_ascii_lowercase();
+        // Fail closed like Flavor: warn and fall back to text rather than
+        // guessing at an unknown format.
+        self.output_format = match output_format.as_str() {
+            "text" | "json" => output_format,
+            other => {
+                eprintln!("warning: unknown OutputFormat {other:?}, falling back to \"text\"");
+                "text".to_string()
+            }
+        };
         Ok(())
     }
 

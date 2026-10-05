@@ -73,6 +73,26 @@ impl Finding {
         )
     }
 
+    /// The machine-readable form for `--format json` (upstream
+    /// rpmlint#1156): one object per finding. The level is the frozen wire
+    /// letter (`E`/`W`/`I`); empty details are dropped like in the text
+    /// form; a line number of 0 renders as null like in the text prefix.
+    pub fn json_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "level": self.level.letter().to_string(),
+            "check": self.check,
+            "package": self.pkg_name,
+            "arch": self.arch,
+            "line": self.line.filter(|&n| n != 0),
+            "details": self
+                .details
+                .iter()
+                .filter(|d| !d.is_empty())
+                .collect::<Vec<_>>(),
+            "badness": self.badness,
+        })
+    }
+
     /// The printed line. Coloured iff `color` is the tty table.
     pub fn line(&self, color: &Color) -> String {
         let bad_output = if self.badness > 1 {
@@ -108,6 +128,36 @@ mod tests {
             arch: Some("aarch64".to_string()),
             line: None,
         }
+    }
+
+    #[test]
+    fn json_shape() {
+        let mut f = pkg("suse-zypp-packageand", Level::Error);
+        f.details = vec!["packageand(clang21:binutils)".to_string(), String::new()];
+        f.badness = 2;
+        f.line = Some(42);
+        let v = f.json_value();
+        assert_eq!(v["level"], "E");
+        assert_eq!(v["check"], "suse-zypp-packageand");
+        assert_eq!(v["package"], "llvm21-gold");
+        assert_eq!(v["arch"], "aarch64");
+        assert_eq!(v["line"], 42);
+        // Empty details are dropped, like in the text form.
+        assert_eq!(
+            v["details"],
+            serde_json::json!(["packageand(clang21:binutils)"])
+        );
+        assert_eq!(v["badness"], 2);
+    }
+
+    #[test]
+    fn json_absent_arch_and_line_are_null() {
+        let mut f = pkg("no-changelogname-tag", Level::Warning);
+        f.arch = None;
+        let v = f.json_value();
+        assert!(v["arch"].is_null());
+        assert!(v["line"].is_null());
+        assert_eq!(v["level"], "W");
     }
 
     #[test]

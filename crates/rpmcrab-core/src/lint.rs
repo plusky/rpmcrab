@@ -321,6 +321,43 @@ impl Lint {
         out
     }
 
+    /// The `--format json` report (upstream rpmlint#1156): the same
+    /// findings as [`Lint::render`], as a machine-readable JSON document.
+    /// New surface — the text format is untouched.
+    ///
+    /// Findings are sorted by `(check, level)` descending, mirroring the
+    /// text report's order; the summary carries the footer's counters and
+    /// the process exit code.
+    pub fn render_json(
+        &self,
+        prog: &str,
+        version: &str,
+        header_packages: usize,
+        duration_secs: f64,
+    ) -> String {
+        let mut findings: Vec<&Finding> = self.filter.findings().iter().collect();
+        findings.sort_by_key(|f| std::cmp::Reverse((f.check.clone(), f.level.letter())));
+        let doc = serde_json::json!({
+            "program": prog,
+            "version": version,
+            "packages": header_packages,
+            "checks": self.config.checks.len(),
+            "duration_secs": duration_secs,
+            "findings": findings.iter().map(|f| f.json_value()).collect::<Vec<_>>(),
+            "summary": {
+                "errors": self.filter.printed(Level::Error),
+                "warnings": self.filter.printed(Level::Warning),
+                "filtered": self.filter.filtered_out,
+                "score": self.filter.score,
+                "aborted": self.aborted(),
+                "exit_code": self.exit_code(),
+            },
+        });
+        let mut out = serde_json::to_string_pretty(&doc).expect("findings are JSON-serializable");
+        out.push('\n');
+        out
+    }
+
     /// Access the filter (tests inspect counters).
     pub fn filter(&self) -> &Filter {
         &self.filter
@@ -418,5 +455,41 @@ mod exit_code_tests {
         }
         assert_eq!(lint.filter.score, 2);
         assert_eq!(lint.exit_code(), 66);
+    }
+
+    #[test]
+    fn render_json_sorts_findings_like_text_and_reports_summary() {
+        let config = Config::default();
+        let mut lint = Lint::new(config, vec![], Color::for_tty(false), 80).unwrap();
+        for (check, level) in [
+            ("aaa", Level::Warning),
+            ("zzz", Level::Error),
+            ("mmm", Level::Warning),
+        ] {
+            lint.filter.add_info(Finding {
+                level,
+                check: check.to_string(),
+                details: vec!["d".to_string()],
+                badness: 0,
+                pkg_name: "testpkg".to_string(),
+                arch: None,
+                line: None,
+            });
+        }
+        let doc: serde_json::Value =
+            serde_json::from_str(&lint.render_json("rpmcrab", "2.10.0", 1, 0.5)).expect("JSON");
+        let checks: Vec<&str> = doc["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .map(|f| f["check"].as_str().expect("check"))
+            .collect();
+        // (check, level) descending, mirroring the text report's order.
+        assert_eq!(checks, vec!["zzz", "mmm", "aaa"]);
+        assert_eq!(doc["program"], "rpmcrab");
+        assert_eq!(doc["packages"], 1);
+        assert_eq!(doc["summary"]["errors"], 1);
+        assert_eq!(doc["summary"]["warnings"], 2);
+        assert_eq!(doc["summary"]["exit_code"], lint.exit_code());
     }
 }

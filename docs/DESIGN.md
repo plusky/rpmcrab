@@ -425,9 +425,10 @@ plus, where one exists, a linked upstream issue.
 
 - **Which checks fire, and at what severity.** False positives are removed;
   false negatives are added. New findings count as divergence, not regression.
-- **`--json`** — the single most valuable *additive* feature. rpmlint has no
-  machine-readable output (long-open RFEs), so every consumer greps human text.
-  A stable JSON stream is new surface, added without touching the text format.
+- **`--format json`** — the single most valuable *additive* feature. rpmlint has no
+  machine-readable output (upstream rpmlint#1156), so every consumer greps human text.
+  A stable JSON stream is new surface, added without touching the text format
+  (the `OutputFormat` config key selects it when the flag is absent).
 - **A real man page.** rpmlint has none (upstream #1077, open since 2023);
   rpmcrab ships one, generated from the CLI definition by `rpmcrab-gen`
   and drift-checked in CI.

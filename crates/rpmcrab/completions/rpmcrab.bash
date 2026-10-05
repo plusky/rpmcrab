@@ -23,7 +23,7 @@ _rpmcrab() {
 
     case "${cmd}" in
         rpmcrab)
-            opts="-V -c -e -r -v -p -i -t -j -s -P -m -h --version --config --explain --rpmlintrc --verbose --print-config --installed --time-report --jobs --ignore-unused-rpmlintrc --checks --strict --permissive --mini-mode --help"
+            opts="-V -c -e -r -v -p -i -t -j -s -P -m -h --version --config --explain --rpmlintrc --verbose --print-config --installed --time-report --jobs --ignore-unused-rpmlintrc --checks --strict --permissive --mini-mode --format --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -71,6 +71,10 @@ _rpmcrab() {
                     ;;
                 --checks)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --format)
+                    COMPREPLY=($(compgen -W "text json" -- "${cur}"))
                     return 0
                     ;;
                 *)

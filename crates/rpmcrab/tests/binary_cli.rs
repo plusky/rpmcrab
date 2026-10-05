@@ -441,3 +441,100 @@ fn permissive_by_default_string_true_is_a_fatal_config_error() {
     assert!(stderr.contains("PermissiveByDefault"), "got {stderr}");
     assert!(stderr.contains("must be a bool"), "got {stderr}");
 }
+
+/// `--format json` (upstream rpmlint#1156): the run emits a JSON document
+/// with the findings and a summary, parseable by machines.
+#[test]
+fn format_json_emits_parseable_report() {
+    let out = rpmcrab(&[
+        "--format",
+        "json",
+        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let doc: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout must be a JSON document");
+    assert_eq!(doc["program"], "rpmcrab");
+    let findings = doc["findings"].as_array().expect("findings array");
+    assert!(!findings.is_empty(), "expected findings");
+    for f in findings {
+        assert!(
+            f["level"]
+                .as_str()
+                .is_some_and(|l| ["E", "W", "I"].contains(&l))
+        );
+        assert!(f["check"].as_str().is_some());
+        assert!(f["package"].as_str().is_some());
+    }
+    let summary = &doc["summary"];
+    assert!(summary["errors"].as_u64().is_some());
+    assert!(summary["warnings"].as_u64().is_some());
+    assert_eq!(
+        summary["exit_code"].as_i64(),
+        Some(0),
+        "summary exit code matches the process"
+    );
+}
+
+/// The findings in JSON mode are the same set as in text mode.
+#[test]
+fn format_json_matches_text_findings() {
+    let rpm = "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm";
+    let json_out = rpmcrab(&["--format", "json", rpm]);
+    let text_out = rpmcrab(&["--format", "text", rpm]);
+    assert_eq!(json_out.status.code(), text_out.status.code());
+    let doc: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&json_out.stdout)).expect("JSON");
+    let json_checks: Vec<&str> = doc["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .map(|f| f["check"].as_str().expect("check"))
+        .collect();
+    let text = String::from_utf8_lossy(&text_out.stdout);
+    for check in &json_checks {
+        assert!(
+            text.contains(check),
+            "text report is missing JSON-reported finding {check}"
+        );
+    }
+}
+
+/// An unknown --format value is a CLI usage error, like any other bad
+/// clap value.
+#[test]
+fn format_unknown_value_exits_two() {
+    let out = rpmcrab(&[
+        "--format",
+        "yaml",
+        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("invalid value"), "got: {stderr}");
+}
+
+/// `OutputFormat = "json"` in config selects JSON without the flag; the
+/// flag still wins when both are given.
+#[test]
+fn output_format_config_selects_json() {
+    let dir = std::env::temp_dir().join("rpmcrab-format-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("format.toml");
+    std::fs::write(&cfg, "OutputFormat = \"json\"\n").unwrap();
+    let rpm = "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm";
+    let out = rpmcrab(&["-c", cfg.to_str().unwrap(), rpm]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&stdout).is_ok(),
+        "config OutputFormat=json must emit JSON, got: {stdout:.200}"
+    );
+    // The CLI flag overrides the config key.
+    let out = rpmcrab(&["-c", cfg.to_str().unwrap(), "--format", "text", rpm]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.trim_start().starts_with('{'),
+        "CLI --format text must win over config, got: {stdout:.200}"
+    );
+}

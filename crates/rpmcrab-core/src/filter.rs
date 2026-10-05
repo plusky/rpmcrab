@@ -31,6 +31,9 @@ pub struct Filter {
     results: Vec<(String, String)>,
     /// Levels parallel to `results`, in emission order.
     levels: Vec<Level>,
+    /// The structured findings parallel to `results`, in emission order.
+    /// Retained for `--format json` (upstream rpmlint#1156).
+    findings: Vec<Finding>,
     /// `check` -> long explanation, for `-v`.
     error_details: HashMap<String, String>,
 
@@ -83,6 +86,7 @@ impl Filter {
             color,
             results: Vec::new(),
             levels: Vec::new(),
+            findings: Vec::new(),
             error_details: HashMap::new(),
             score: 0,
             filtered_out: 0,
@@ -163,6 +167,7 @@ impl Filter {
         self.results
             .push((finding.check.clone(), finding.line(&self.color)));
         self.levels.push(finding.level);
+        self.findings.push(finding);
     }
 
     /// Register a long explanation for `-v` (from `descriptions/*.toml`,
@@ -182,6 +187,12 @@ impl Filter {
     /// format.
     pub fn result_levels(&self) -> &[Level] {
         &self.levels
+    }
+
+    /// The structured findings that survived suppression, in emission
+    /// order, parallel to `results()`. Feeds `--format json`.
+    pub fn findings(&self) -> &[Finding] {
+        &self.findings
     }
 
     /// The description for a check (`-v` explanations), textwrap-filled to 78
@@ -224,6 +235,7 @@ impl Filter {
     pub fn merge_from(&mut self, other: Filter) {
         self.results.extend(other.results);
         self.levels.extend(other.levels);
+        self.findings.extend(other.findings);
         self.score += other.score;
         self.filtered_out += other.filtered_out;
         self.promoted_to_error += other.promoted_to_error;
