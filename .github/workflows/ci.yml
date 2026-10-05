@@ -33,7 +33,7 @@ jobs:
       # development headers (pkg-config `rpm.pc`); the tests also need the RPM
       # runtime tools (rpm2archive/rpm2cpio), cpio and file (libmagic).
       - name: Install RPM toolchain (headers + tools)
-        run: sudo apt-get update && sudo apt-get install -y librpm-dev rpm cpio file devscripts dash
+        run: sudo apt-get update && sudo apt-get install -y librpm-dev rpm cpio file devscripts dash desktop-file-utils appstream-util
       # Spellcheck tests need real hunspell dictionaries; grab the LibreOffice
       # en_US pair (the same source openSUSE packages from).
       - name: Install hunspell dictionaries
@@ -72,9 +72,14 @@ jobs:
       # export the locations for the cargo steps below.
       - name: Install RPM via Homebrew
         run: |
-          brew install rpm popt dash
-          # checkbashisms has no Homebrew formula (Debian devscripts only);
-          # the w6-bashisms parity case skips via [tools].present on macOS.
+          brew install rpm popt dash desktop-file-utils appstream-glib
+          # checkbashisms has no Homebrew formula (Debian devscripts only),
+          # so on macOS BashismsCheck degrades through have_tools()
+          # (bashisms.rs:68-70: dash.is_present() && checkbashisms.is_present()):
+          # check_binary returns early, so the findings are simply absent.
+          # `[tools].present` in tests/parity/cases/*/meta.toml is recorded
+          # at capture time (scripts/capture-parity.sh) for provenance;
+          # nothing reads it yet and no parity runner gates on it.
           echo "LIBRARY_PATH=$(brew --prefix rpm)/lib" >> "$GITHUB_ENV"
           echo "BINDGEN_EXTRA_CLANG_ARGS=-I$(brew --prefix rpm)/include -I$(brew --prefix popt)/include" >> "$GITHUB_ENV"
       # Spellcheck tests need real hunspell dictionaries; the spellchecker
@@ -113,7 +118,7 @@ jobs:
           # writer, a beta break would otherwise freeze the cache.
           cache-on-failure: true
       - name: Install RPM toolchain (headers + tools)
-        run: sudo apt-get update && sudo apt-get install -y librpm-dev rpm cpio file devscripts dash
+        run: sudo apt-get update && sudo apt-get install -y librpm-dev rpm cpio file devscripts dash desktop-file-utils appstream-util
       - name: Assert beta toolchain
         run: |
           rustc --version
@@ -129,7 +134,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install RPM toolchain (headers + tools)
-        run: sudo apt-get update && sudo apt-get install -y librpm-dev rpm cpio file devscripts dash
+        run: sudo apt-get update && sudo apt-get install -y librpm-dev rpm cpio file devscripts dash desktop-file-utils appstream-util
       - name: Read MSRV from Cargo.toml
         id: msrv
         run: |
@@ -186,7 +191,7 @@ jobs:
       # Building rpmcrab-gen links the rpmcrab lib, so this needs the same RPM
       # development headers as the main build.
       - name: Install RPM toolchain (headers + tools)
-        run: sudo apt-get update && sudo apt-get install -y librpm-dev rpm cpio file pkg-config devscripts dash
+        run: sudo apt-get update && sudo apt-get install -y librpm-dev rpm cpio file pkg-config devscripts dash desktop-file-utils appstream-util
       - run: cargo run -p rpmcrab --features gen --locked --bin rpmcrab-gen -- /tmp/rpmcrab-gen-assets
       - run: diff -r /tmp/rpmcrab-gen-assets/man crates/rpmcrab/man
       - run: diff -r /tmp/rpmcrab-gen-assets/completions crates/rpmcrab/completions

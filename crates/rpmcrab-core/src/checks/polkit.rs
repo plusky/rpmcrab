@@ -614,4 +614,68 @@ mod tests {
             results[1].1
         );
     }
+
+    #[test]
+    fn nested_defaults_do_not_inherit() {
+        // plusky's #207 review: the strengthened order test above ships
+        // beside the nested-defaults divergence entry, but its fixture had
+        // no `<defaults>` anywhere, so its `no:no:no` assertions were fed by
+        // the absent-defaults default rather than by per-action scoping —        // the ledgered divergence could be silently fixed or introduced with
+        // nothing failing. Here the inner action carries its own `<defaults>`
+        // with `allow_any=yes` while the outer has none: the port scopes
+        // each action to its own `<defaults>`, so the outer stays
+        // `polkit-untracked-privilege (no:no:no)` even though the document
+        // contains a `<defaults>` the reference's descendant search
+        // (`PolkitCheck.py:70`) would inherit into it. Slotting the inner
+        // `<defaults>` into the outer action fails this with
+        // `polkit-user-privilege (yes:no:no)` on the outer action.
+        let dir = std::env::temp_dir();
+        let path = dir.join("rpmcrab-polkit-nested-defaults.policy");
+        std::fs::write(
+            &path,
+            "<policyconfig><action id=\"org.foo.outer\"><action id=\"org.foo.inner\"><defaults><allow_any>yes</allow_any><allow_inactive>no</allow_inactive><allow_active>no</allow_active></defaults></action></action></policyconfig>",
+        )
+        .unwrap();
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        // Header only, no extraction: `files` is overwritten wholesale below.
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        let name = "/usr/share/polkit-1/actions/org.foo.policy";
+        pkg.files = vec![PkgFile {
+            name: name.to_string(),
+            path: path.to_str().unwrap().to_string(),
+            ..Default::default()
+        }];
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = check();
+        check.check_binary(&pkg, &config, &mut out);
+        std::fs::remove_file(&path).ok();
+        let results = out.results().to_vec();
+        assert_eq!(results.len(), 2, "unexpected results: {results:?}");
+        assert_eq!(results[0].0, "polkit-untracked-privilege");
+        assert!(results[0].1.contains(": E: "), "level: {}", results[0].1);
+        assert!(
+            results[0].1.contains("org.foo.outer"),
+            "outer: {}",
+            results[0].1
+        );
+        assert!(
+            results[0].1.contains("no:no:no"),
+            "outer detail: {}",
+            results[0].1
+        );
+        assert_eq!(results[1].0, "polkit-user-privilege");
+        assert!(results[1].1.contains(": E: "), "level: {}", results[1].1);
+        assert!(
+            results[1].1.contains("org.foo.inner"),
+            "inner: {}",
+            results[1].1
+        );
+        assert!(
+            results[1].1.contains("yes:no:no"),
+            "inner detail: {}",
+            results[1].1
+        );
+    }
 }

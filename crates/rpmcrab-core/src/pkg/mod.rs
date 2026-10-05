@@ -5,7 +5,9 @@
 //! **spec file** ([`Package::Spec`], `SpecPkg` — the former `FakePkg`, now
 //! shipped). The binary kind exposes the header, the nine dependency lists,
 //! the file map, and the derived `config/doc/ghost/noreplace/missingok`
-//! name lists.
+//! name lists. A third way in is an **installed package** ([`Pkg::installed`],
+//! the reference's `InstalledPkg`): a package read from the rpmdb with no
+//! extraction, whose reads resolve against the live filesystem.
 
 pub mod dep;
 pub mod extract;
