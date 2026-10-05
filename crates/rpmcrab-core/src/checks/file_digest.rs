@@ -2327,8 +2327,11 @@ hash = "{}"
         let content = b"session required pam_unix.so\n";
         let ondisk = write_temp(&dir, "login", content);
 
-        let config =
-            test_config(&group_toml_for_package("testpkg", "/etc/pam.d/login", content));
+        let config = test_config(&group_toml_for_package(
+            "testpkg",
+            "/etc/pam.d/login",
+            content,
+        ));
         let mut pkg = fixture_pkg();
         pkg.name = "otherpkg".to_string();
         pkg.files = vec![pkgfile("/etc/pam.d/login", &ondisk, 0o100644)];
@@ -2392,9 +2395,7 @@ hash = "{}"
                 );
             } else {
                 assert!(
-                    results
-                        .iter()
-                        .any(|(n, _)| *n == "pam-file-unauthorized"),
+                    results.iter().any(|(n, _)| *n == "pam-file-unauthorized"),
                     "{pkg_name}: unlisted package must be rejected, got {results:?}"
                 );
             }
@@ -2450,9 +2451,9 @@ nodigests = ["/etc/pam.d/skipped"]
             "extra file must be flagged: {results:?}"
         );
         assert!(
-            unauthorized[0].1.starts_with(
-                "testpkg.noarch: E: pam-file-unauthorized /etc/pam.d/evil"
-            ),
+            unauthorized[0]
+                .1
+                .starts_with("testpkg.noarch: E: pam-file-unauthorized /etc/pam.d/evil"),
             "level/name/detail: {}",
             unauthorized[0].1
         );
@@ -2473,8 +2474,7 @@ nodigests = ["/etc/pam.d/skipped"]
             b"#!/usr/bin/python3.11\n# a comment\n\nsession required pam_unix.so\n# another\n";
         let ondisk = write_temp(&dir, "login", content);
 
-        let expected =
-            Digester::digest(&ShellDigester, &ondisk, "sha256").expect("shell digest");
+        let expected = Digester::digest(&ShellDigester, &ondisk, "sha256").expect("shell digest");
         assert_ne!(
             expected,
             sha256_hex(content),

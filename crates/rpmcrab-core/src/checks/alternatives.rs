@@ -733,8 +733,7 @@ mod tests {
     #[test]
     fn alts_requirement_missed_fires_without_alts_require() {
         let dir = tempfile::tempdir().expect("tmpdir");
-        let pkg =
-            libalternatives_pkg(dir.path(), &[("foo.conf", "binary = /usr/bin/foo\n")]);
+        let pkg = libalternatives_pkg(dir.path(), &[("foo.conf", "binary = /usr/bin/foo\n")]);
         let results = findings_for(&pkg);
         let missed: Vec<&(String, String)> = results
             .iter()
@@ -928,8 +927,7 @@ mod tests {
             line("binary-entry-value-not-found")
         );
         assert!(
-            line("wrong-tag-found")
-                .starts_with("alternatives-test.noarch: W: wrong-tag-found"),
+            line("wrong-tag-found").starts_with("alternatives-test.noarch: W: wrong-tag-found"),
             "warning level: {}",
             line("wrong-tag-found")
         );
