@@ -183,7 +183,7 @@ since = "0.1.0"
 case = "global"
 check = "missing-mandatory-optflags"
 kind = "behaviour"
-reason = "DWARF producer extraction via gimli is not yet implemented; the mandatory/forbidden optflags check degrades gracefully (no findings) until DWARF parsing lands."
+reason = "DWARF producer extraction is not yet implemented; the mandatory/forbidden optflags check degrades gracefully (no findings) until DWARF parsing lands."
 since = "0.1.0"
 
 [[divergence]]
@@ -710,3 +710,19 @@ check = "TagsCheck"
 kind = "behaviour"
 reason = "Rich `(a or b)` expressions (RPM >= 4.13) are parsed into their leaves and the name/version analyses run against each leaf, so `Requires: (any or goodpkg)` emits `E: invalid-dependency any` where the reference emits nothing: its `parse_deps` (pkg.py:294, `re.split(r'[\\s,]+')`) shreds the expression into `(any`, `or`, `goodpkg)` and the `^any$` invalid-requires pattern never matches a fragment. Flagging the real leaf is the intended analysis, not shredded-string noise; treating the expression as one opaque token would hide genuinely invalid dependencies. Pinned by emission-path tests in tags.rs."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "read-error"
+kind = "detail"
+reason = "InitScriptCheck's read-error detail: both reference sites raise from open(path,'rb'), and Filter.add_info renders the exception with f-string interpolation, so the reference emits Python's str(OSError) including the filename -- e.g. [Errno 13] Permission denied: '/etc/init.d/probe' (InitScriptCheck.py:108, via helpers.readlines). The port reformats through os_error_detail() to [Errno 13] Permission denied, matching the reference's prefix form but dropping the filename."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/72"
+
+[[divergence]]
+case = "global"
+check = "read-error"
+kind = "detail"
+reason = "FilesCheck.peek's read-error detail: the reference emits Python's str(OSError) including the filename -- e.g. [Errno 13] Permission denied: '/p' (FilesCheck.py:430, from open(path,'rb')). The port passes std::io::Error's Display (Permission denied (os error 13)), dropping both the [Errno N] prefix and the filename."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/72"
