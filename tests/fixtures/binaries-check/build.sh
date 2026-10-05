@@ -14,7 +14,7 @@
 #   strings contain the waiver ("SYSLOG"), so the finding is suppressed
 #
 # Usage: bash tests/fixtures/binaries-check/build.sh
-# Needs: podman (or docker)
+# Needs: podman (or PODMAN=/path/to/podman)
 # Output: input/rpmcrab-binaries-fixture-1.0-1.<arch>.rpm
 #
 # Everything (compilation and rpmbuild) runs in an openSUSE container: it
@@ -28,6 +28,8 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 mkdir -p "$work/src" "$work/rpmbuild"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+
+podman_bin="${PODMAN:-podman}"
 
 cat >"$work/src/libbad.c" <<'EOF'
 int bad_function(void) { return 42; }
@@ -92,7 +94,7 @@ chmod 755 %{buildroot}/usr/bin/truncated
 /usr/bin/truncated
 EOF
 
-podman run --rm -v "$work:/work:z" registry.opensuse.org/opensuse/tumbleweed:latest bash -c "
+"$podman_bin" run --rm -v "$work:/work:z" registry.opensuse.org/opensuse/tumbleweed:latest bash -c "
     set -e
     zypper -n in -y gcc binutils rpm-build >/dev/null 2>&1
     cd /work/src
