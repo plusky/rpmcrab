@@ -873,26 +873,39 @@ def test_renamed_systemd_producer_makes_the_site_unresolved():
 
 def test_stale_check_catches_name_keyed_entry():
     # The staleness check must mark an entry stale when the port emits the
-    # finding of a kind="missing" ledger entry -- whether that entry is keyed
-    # by finding name (all 6 current missing entries) or by module.
+    # finding of a kind="missing" ledger entry. The corpus pins the shape:
+    # all 6 current missing entries are keyed by finding name (case
+    # "global") -- there is no module-keyed missing entry, so the test
+    # drives the mechanism with the real ledger rather than a synthetic
+    # module set. (The module arm of the disjunction has no live data
+    # behind it; nothing here pretends otherwise.)
     mod = _load()
-    # A finding whose NAME matches a name-keyed missing entry, but whose
-    # MODULE does not, IS stale (with exact pattern).
-    assert mod.is_stale_entry(
-        "SomeOtherCheck", "inaccessible-filename", {"inaccessible-filename"},
-        {"inaccessible-filename"}
-    ), "name-keyed match should be stale"
-    # A finding whose MODULE matches a module-keyed missing entry IS stale
-    # (with exact pattern).
-    assert mod.is_stale_entry(
-        "BuildRootAndDateCheck", "some-finding", {"BuildRootAndDateCheck"},
-        {"some-finding"}
-    ), "module match should be stale"
-    # Wildcard patterns do not count.
-    assert not mod.is_stale_entry(
-        "BuildRootAndDateCheck", "some-finding", {"BuildRootAndDateCheck"},
-        {"some-*"}
-    ), "wildcard should not mark stale"
+    ledger = mod.load_ledger(os.path.join(
+        os.path.dirname(HERE), "tests", "parity", "divergences.toml"))
+    missing = [e for e in ledger if e.get("kind") == "missing"]
+    names = {e.get("check") for e in missing}
+    assert names == {
+        "inaccessible-filename",
+        "lengthy-symlink",
+        "info-files-without-install-info-postin",
+        "info-files-without-install-info-postun",
+        "sourced-script-with-shebang",
+        "symlink-contains-up-and-down-segments",
+    }, names
+    assert all(e.get("case") == "global" for e in missing), [
+        (e.get("case"), e.get("check")) for e in missing]
+    # missing_modules exactly as main() builds it.
+    missing_modules = {e.get("check") for e in missing}
+    for name in sorted(names):
+        # A finding whose NAME matches a name-keyed missing entry, but whose
+        # MODULE does not, IS stale (with exact pattern).
+        assert mod.is_stale_entry(
+            "SomeOtherCheck", name, missing_modules, {name}
+        ), f"name-keyed match should be stale: {name}"
+        # Wildcard patterns do not count.
+        assert not mod.is_stale_entry(
+            "SomeOtherCheck", name, missing_modules, {name.split("-")[0] + "-*"}
+        ), f"wildcard should not mark stale: {name}"
 
 
 def main():
