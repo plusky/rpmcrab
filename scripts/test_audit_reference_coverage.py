@@ -874,7 +874,7 @@ def test_renamed_systemd_producer_makes_the_site_unresolved():
 def test_stale_check_catches_name_keyed_entry():
     # The staleness check must mark an entry stale when the port emits the
     # finding of a kind="missing" ledger entry -- whether that entry is keyed
-    # by finding name (the majority: 6 of 7 missing entries) or by module.
+    # by finding name (all 6 current missing entries) or by module.
     mod = _load()
     # A finding whose NAME matches a name-keyed missing entry, but whose
     # MODULE does not, IS stale (with exact pattern).
