@@ -16,6 +16,7 @@ use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::pkg::tags;
+use std::sync::OnceLock;
 
 #[path = "i18n_codes.rs"]
 mod codes;
@@ -62,20 +63,30 @@ const EXCEPTION_DIRS: &[&str] = &[
     "default",
 ];
 
-fn locale_regex() -> Regex {
-    Regex::new(r"^(/usr/share/locale/([^/]+))/").expect("static regex")
+static LOCALE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn locale_regex() -> &'static Regex {
+    LOCALE_REGEX.get_or_init(|| Regex::new(r"^(/usr/share/locale/([^/]+))/").expect("static regex"))
 }
 
-fn correct_subdir_regex() -> Regex {
-    Regex::new(r"^(([a-z][a-z]([a-z])?(_[A-Z][A-Z])?)([.@].*$)?)$").expect("static regex")
+static CORRECT_SUBDIR_REGEX: OnceLock<Regex> = OnceLock::new();
+fn correct_subdir_regex() -> &'static Regex {
+    CORRECT_SUBDIR_REGEX.get_or_init(|| {
+        Regex::new(r"^(([a-z][a-z]([a-z])?(_[A-Z][A-Z])?)([.@].*$)?)$").expect("static regex")
+    })
 }
 
-fn lc_messages_regex() -> Regex {
-    Regex::new(r"/usr/share/locale/([^/]+)/LC_MESSAGES/.*(mo|po)$").expect("static regex")
+static LC_MESSAGES_REGEX: OnceLock<Regex> = OnceLock::new();
+fn lc_messages_regex() -> &'static Regex {
+    LC_MESSAGES_REGEX.get_or_init(|| {
+        Regex::new(r"/usr/share/locale/([^/]+)/LC_MESSAGES/.*(mo|po)$").expect("static regex")
+    })
 }
 
-fn man_regex() -> Regex {
-    Regex::new(r"/usr(?:/share)?/man/([^/]+)/man[0-9n][^/]*/[^/]+$").expect("static regex")
+static MAN_REGEX: OnceLock<Regex> = OnceLock::new();
+fn man_regex() -> &'static Regex {
+    MAN_REGEX.get_or_init(|| {
+        Regex::new(r"/usr(?:/share)?/man/([^/]+)/man[0-9n][^/]*/[^/]+$").expect("static regex")
+    })
 }
 
 fn is_language(code: &str) -> bool {
@@ -218,11 +229,11 @@ impl I18NCheck {
         // Each locale subdir is checked only once.
         let mut seen_locales: Vec<&str> = Vec::new();
         for (file, lang) in &ordered {
-            if let Some(locale) = capture(&locale_re, file, 2)
+            if let Some(locale) = capture(locale_re, file, 2)
                 && !seen_locales.contains(&locale)
             {
                 seen_locales.push(locale);
-                match capture(&subdir_re, locale, 2) {
+                match capture(subdir_re, locale, 2) {
                     None if !EXCEPTION_DIRS.contains(&locale) => out.push((
                         Level::Error,
                         "incorrect-locale-subdir".to_string(),
@@ -241,7 +252,7 @@ impl I18NCheck {
                 }
             }
 
-            let probe = probe_locale_file(&lc_re, &man_re, file);
+            let probe = probe_locale_file(lc_re, man_re, file);
             if let Some(finding) = probe.invalid {
                 out.push((Level::Error, finding.to_string(), vec![(*file).to_string()]));
             }

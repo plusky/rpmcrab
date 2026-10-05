@@ -1,8 +1,9 @@
 //! `BinariesCheck`: ELF binary validation, ported from rpmlint's `BinariesCheck.py`.
 //!
 //! Covers the reference's `add_info` call sites: ELF section/header analysis
-//! via `goblin`, dependency analysis via `goblin`, DWARF via `gimli`,
-//! forbidden functions via `strings`, and archive analysis via `ar`.
+//! via `goblin`, dependency analysis via `goblin`, DWARF producer extraction
+//! (not yet implemented), forbidden functions via `strings`, and archive
+//! analysis via `ar`.
 //!
 //! Deliberate gaps are ledgered in `tests/parity/divergences.toml`.
 
@@ -19,75 +20,101 @@ use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::pkg::pkgfile::{self, PkgFile};
 use crate::tools::{Tool, ToolSource, test_source};
+use std::sync::OnceLock;
 
-fn validso_regex() -> Regex {
-    Regex::new(r"(\.so\.\d+(\.\d+)*|\d\.so)$").expect("static regex")
+static VALIDSO_REGEX: OnceLock<Regex> = OnceLock::new();
+fn validso_regex() -> &'static Regex {
+    VALIDSO_REGEX.get_or_init(|| Regex::new(r"(\.so\.\d+(\.\d+)*|\d\.so)$").expect("static regex"))
 }
 
-fn soversion_regex() -> Regex {
-    Regex::new(r".*(-(?P<pkgversion>[0-9][.0-9]*))?\.so(\.(?P<soversion>[0-9][.0-9]*))?")
+static SOVERSION_REGEX: OnceLock<Regex> = OnceLock::new();
+fn soversion_regex() -> &'static Regex {
+    SOVERSION_REGEX.get_or_init(|| {
+        Regex::new(r".*(-(?P<pkgversion>[0-9][.0-9]*))?\.so(\.(?P<soversion>[0-9][.0-9]*))?")
+            .expect("static regex")
+    })
+}
+
+static USR_LIB_REGEX: OnceLock<Regex> = OnceLock::new();
+fn usr_lib_regex() -> &'static Regex {
+    USR_LIB_REGEX.get_or_init(|| Regex::new(r"^/usr/lib(64)?/").expect("static regex"))
+}
+
+static LDSO_SONAME_REGEX: OnceLock<Regex> = OnceLock::new();
+fn ldso_soname_regex() -> &'static Regex {
+    LDSO_SONAME_REGEX
+        .get_or_init(|| Regex::new(r"^ld(-linux(-(ia|x86_)64))?\.so").expect("static regex"))
+}
+
+static NUMERIC_DIR_REGEX: OnceLock<Regex> = OnceLock::new();
+fn numeric_dir_regex() -> &'static Regex {
+    NUMERIC_DIR_REGEX.get_or_init(|| {
+        Regex::new(r"/usr(?:/share)/man/man./(.*)\.[0-9](?:\.gz|\.bz2)").expect("static regex")
+    })
+}
+
+static VERSIONED_DIR_REGEX: OnceLock<Regex> = OnceLock::new();
+fn versioned_dir_regex() -> &'static Regex {
+    VERSIONED_DIR_REGEX.get_or_init(|| Regex::new(r"[^.][0-9]").expect("static regex"))
+}
+
+static SO_REGEX: OnceLock<Regex> = OnceLock::new();
+fn so_regex() -> &'static Regex {
+    SO_REGEX.get_or_init(|| Regex::new(r"/lib(64)?/[^/]+\.so(\.[0-9]+)*$").expect("static regex"))
+}
+
+static BIN_REGEX: OnceLock<Regex> = OnceLock::new();
+fn bin_regex() -> &'static Regex {
+    BIN_REGEX.get_or_init(|| Regex::new(r"^(/usr(/X11R6)?)?/s?bin/").expect("static regex"))
+}
+
+static LA_FILE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn la_file_regex() -> &'static Regex {
+    LA_FILE_REGEX.get_or_init(|| Regex::new(r"\.la$").expect("static regex"))
+}
+
+static INVALID_DIR_REF_REGEX: OnceLock<Regex> = OnceLock::new();
+fn invalid_dir_ref_regex() -> &'static Regex {
+    INVALID_DIR_REF_REGEX.get_or_init(|| Regex::new(r"/(home|tmp)(\W|$)").expect("static regex"))
+}
+
+static USR_ARCH_SHARE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn usr_arch_share_regex() -> &'static Regex {
+    USR_ARCH_SHARE_REGEX.get_or_init(|| {
+        Regex::new(
+            r"/share/.*/(?:x86|i.86|x86_64|ppc|ppc64|s390|s390x|ia64|m68k|arm|aarch64|mips|riscv)",
+        )
         .expect("static regex")
+    })
 }
 
-fn usr_lib_regex() -> Regex {
-    Regex::new(r"^/usr/lib(64)?/").expect("static regex")
+static PYTHON_MODULE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn python_module_regex() -> &'static Regex {
+    PYTHON_MODULE_REGEX.get_or_init(|| {
+        Regex::new(r".*\.(\w*(python|pypy)\w*(-\w+){4}|abi3)\.so").expect("static regex")
+    })
 }
 
-fn ldso_soname_regex() -> Regex {
-    Regex::new(r"^ld(-linux(-(ia|x86_)64))?\.so").expect("static regex")
+static ELF_REGEX: OnceLock<Regex> = OnceLock::new();
+fn elf_regex() -> &'static Regex {
+    ELF_REGEX.get_or_init(|| Regex::new(r"^(\w+ )?ELF ").expect("static regex"))
 }
 
-fn numeric_dir_regex() -> Regex {
-    Regex::new(r"/usr(?:/share)/man/man./(.*)\.[0-9](?:\.gz|\.bz2)").expect("static regex")
-}
-
-fn versioned_dir_regex() -> Regex {
-    Regex::new(r"[^.][0-9]").expect("static regex")
-}
-
-fn so_regex() -> Regex {
-    Regex::new(r"/lib(64)?/[^/]+\.so(\.[0-9]+)*$").expect("static regex")
-}
-
-fn bin_regex() -> Regex {
-    Regex::new(r"^(/usr(/X11R6)?)?/s?bin/").expect("static regex")
-}
-
-fn la_file_regex() -> Regex {
-    Regex::new(r"\.la$").expect("static regex")
-}
-
-fn invalid_dir_ref_regex() -> Regex {
-    Regex::new(r"/(home|tmp)(\W|$)").expect("static regex")
-}
-
-fn usr_arch_share_regex() -> Regex {
-    Regex::new(
-        r"/share/.*/(?:x86|i.86|x86_64|ppc|ppc64|s390|s390x|ia64|m68k|arm|aarch64|mips|riscv)",
-    )
-    .expect("static regex")
-}
-
-fn python_module_regex() -> Regex {
-    Regex::new(r".*\.(\w*(python|pypy)\w*(-\w+){4}|abi3)\.so").expect("static regex")
-}
-
-fn elf_regex() -> Regex {
-    Regex::new(r"^(\w+ )?ELF ").expect("static regex")
-}
-
-fn default_executable_stack_archs() -> Regex {
-    Regex::new(r"aarch64|alpha|arm.*|hppa|i.86|m68k|microblaze|mips|ppc|s390|s390x|sh|sparc|x86_64")
+static DEFAULT_EXECUTABLE_STACK_ARCHS: OnceLock<Regex> = OnceLock::new();
+fn default_executable_stack_archs() -> &'static Regex {
+    DEFAULT_EXECUTABLE_STACK_ARCHS.get_or_init(|| {
+        Regex::new(
+            r"aarch64|alpha|arm.*|hppa|i.86|m68k|microblaze|mips|ppc|s390|s390x|sh|sparc|x86_64",
+        )
         .expect("static regex")
+    })
 }
 
-fn create_regexp_call(call: &str) -> Regex {
-    Regex::new(&format!(r"({}(?:@GLIBC\S+)?)(?:\s|$)", call)).expect("static regex")
-}
-
-fn create_nonlibc_regexp_call(call: &str) -> Regex {
-    Regex::new(&format!(r"({})\s?.*$", call)).expect("static regex")
-}
+static SETGID_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static SETUID_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static SETGROUPS_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static MKTEMP_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static GETHOSTBYNAME_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 
 const KERNEL_MODULES_PATHS: &[&str] = &["/lib/modules/", "/usr/lib/modules/"];
 const GLIBC_EMPTY_ARCHIVES: &[&str] = &["libanl", "libdl", "libpthread", "librt", "libutil"];
@@ -325,7 +352,7 @@ impl ObjdumpInfo {
             producers: Vec::new(),
             failed: None,
         };
-        // TODO: DWARF producer extraction via gimli needs API refinement.
+        // TODO: DWARF producer extraction is not yet implemented.
         // The goblin-based ELF parsing covers the main BinariesCheck
         // functionality; DWARF compile-unit producers are a follow-up.
         // For now, producers is empty which means the mandatory/forbidden
@@ -454,13 +481,36 @@ impl BinariesCheck {
             pie_exec_regexes,
             usr_lib_exception_regex: Regex::new(usr_lib_exception)
                 .unwrap_or_else(|_| Regex::new("$^").expect("static regex")),
-            setgid_call_regex: create_regexp_call(r"set(?:res|e)?gid"),
-            setuid_call_regex: create_regexp_call(r"set(?:res|e)?uid"),
-            setgroups_call_regex: create_regexp_call(r"(?:ini|se)tgroups"),
-            mktemp_call_regex: create_regexp_call("mktemp"),
-            gethostbyname_call_regex: create_regexp_call(
-                r"(gethostbyname|gethostbyname2|gethostbyaddr|gethostbyname_r|gethostbyname2_r|gethostbyaddr_r)",
-            ),
+            setgid_call_regex: SETGID_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(r"(set(?:res|e)?gid(?:@GLIBC\S+)?)(?:\s|$)")
+                        .expect("static regex")
+                })
+                .clone(),
+            setuid_call_regex: SETUID_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(r"(set(?:res|e)?uid(?:@GLIBC\S+)?)(?:\s|$)")
+                        .expect("static regex")
+                })
+                .clone(),
+            setgroups_call_regex: SETGROUPS_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(r"((?:ini|se)tgroups(?:@GLIBC\S+)?)(?:\s|$)")
+                        .expect("static regex")
+                })
+                .clone(),
+            mktemp_call_regex: MKTEMP_CALL_REGEX
+                .get_or_init(|| Regex::new(r"(mktemp(?:@GLIBC\S+)?)(?:\s|$)")
+                    .expect("static regex"))
+                .clone(),
+            gethostbyname_call_regex: GETHOSTBYNAME_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(
+                        r"((gethostbyname|gethostbyname2|gethostbyaddr|gethostbyname_r|gethostbyname2_r|gethostbyaddr_r)(?:@GLIBC\S+)?)(?:\s|$)",
+                    )
+                    .expect("static regex")
+                })
+                .clone(),
             is_exec: false,
             is_shobj: false,
             is_archive: false,
@@ -1236,16 +1286,17 @@ impl BinariesCheck {
             .configuration
             .get("WarnOnFunction")
             .and_then(toml::Value::as_table);
-        let forbidden: Vec<(String, String, Option<String>)> = forbidden_tbl
+        let forbidden: Vec<(String, String, Regex, Option<Regex>)> = forbidden_tbl
             .map(|t| {
                 t.iter()
                     .filter_map(|(k, v)| {
-                        let f_name = v.get("f_name")?.as_str()?.to_string();
+                        let f_name = v.get("f_name")?.as_str()?;
+                        let f_regex = Regex::new(&format!(r"({})\s?.*$", f_name)).ok()?;
                         let good_param = v
                             .get("good_param")
                             .and_then(|g| g.as_str())
-                            .map(str::to_string);
-                        Some((k.clone(), f_name, good_param))
+                            .and_then(|gp| Regex::new(gp).ok());
+                        Some((k.clone(), f_name.to_string(), f_regex, good_param))
                     })
                     .collect()
             })
@@ -1254,9 +1305,8 @@ impl BinariesCheck {
             return;
         }
         let mut forbidden_calls = Vec::new();
-        for (r_name, f_name, good_param) in &forbidden {
-            let f_regex = create_nonlibc_regexp_call(f_name);
-            if info.has_function_matching(&f_regex) {
+        for (r_name, f_name, f_regex, good_param) in &forbidden {
+            if info.has_function_matching(f_regex) {
                 forbidden_calls.push((r_name.clone(), f_name.clone(), good_param.clone()));
             }
         }
@@ -1280,13 +1330,11 @@ impl BinariesCheck {
         }
         for (r_name, f_name, good_param) in forbidden_calls {
             let mut waived = false;
-            if let Some(gp) = good_param {
-                if let Ok(re) = Regex::new(&gp) {
-                    waived = strings
-                        .strings
-                        .iter()
-                        .any(|s| re.is_match(s).unwrap_or(false));
-                }
+            if let Some(re) = good_param {
+                waived = strings
+                    .strings
+                    .iter()
+                    .any(|s| re.is_match(s).unwrap_or(false));
             }
             if !waived {
                 add_info(out, Level::Warning, pkg, &r_name, &[&pkgfile.name, &f_name]);
@@ -1386,34 +1434,42 @@ impl BinariesCheck {
         if !info.is_shlib {
             return;
         }
-        for elf_file in &info.sections {
-            let needle = [".hash", ".gnu.hash"];
-            let mut remaining: Vec<&&str> = needle.iter().collect();
+        // The reference scans the whole section list of the ELF file once
+        // (readelfparser.py ElfSectionInfo.elf_files) and emits at most one
+        // finding of each kind. The missing set must not reset per section:
+        // ReadelfInfo stores one section per inner vec, so the old loop
+        // re-emitted both findings for every non-hash section (#218).
+        let mut missing_hash = true;
+        let mut missing_gnu_hash = true;
+        'sections: for elf_file in &info.sections {
             for section in elf_file {
-                remaining.retain(|n| ***n != section.name);
-                if remaining.is_empty() {
-                    break;
+                if section.name == ".hash" {
+                    missing_hash = false;
+                } else if section.name == ".gnu.hash" {
+                    missing_gnu_hash = false;
+                }
+                if !missing_hash && !missing_gnu_hash {
+                    break 'sections;
                 }
             }
-            let missing: Vec<String> = remaining.iter().map(|s| s.to_string()).collect();
-            if missing.contains(&".hash".to_string()) {
-                add_info(
-                    out,
-                    Level::Error,
-                    pkg,
-                    "missing-hash-section",
-                    &[&pkgfile.name],
-                );
-            }
-            if missing.contains(&".gnu.hash".to_string()) {
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "missing-gnu-hash-section",
-                    &[&pkgfile.name],
-                );
-            }
+        }
+        if missing_hash {
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "missing-hash-section",
+                &[&pkgfile.name],
+            );
+        }
+        if missing_gnu_hash {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "missing-gnu-hash-section",
+                &[&pkgfile.name],
+            );
         }
     }
 
@@ -1619,6 +1675,32 @@ mod tests {
     }
 
     #[test]
+    fn regex_factories_are_cached() {
+        // Profiling showed Regex::new per call was ~18% of runtime.
+        // The factories must return the same static, not recompile.
+        assert!(std::ptr::eq(usr_lib_regex(), usr_lib_regex()));
+        assert!(std::ptr::eq(so_regex(), so_regex()));
+        assert!(std::ptr::eq(bin_regex(), bin_regex()));
+    }
+
+    #[test]
+    fn regex_factories_are_fast() {
+        // 10k calls must complete in well under a second. Recompiling
+        // fancy_regex on each call would take several seconds.
+        let start = std::time::Instant::now();
+        for _ in 0..10_000 {
+            let _ = usr_lib_regex().is_match("/usr/lib64/foo.so");
+            let _ = so_regex().is_match("/usr/lib64/foo.so.1");
+            let _ = bin_regex().is_match("/usr/bin/foo");
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "regex factories too slow: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
     fn is_shlib_and_is_debug_are_filename_based() {
         // Minimal ELF64 header with e_type = ET_DYN, as a PIE executable or
         // Go binary would have. The reference derives is_shlib/is_debug from
@@ -1812,5 +1894,136 @@ mod tests {
             "no findings invented: {:?}",
             out.results()
         );
+    }
+
+    #[test]
+    fn hash_sections_fire_at_most_once_per_file() {
+        // #218: the missing-section needle used to reset for every section
+        // (ReadelfInfo stores one section per inner vec), so each non-hash
+        // section re-emitted both findings. The reference scans the whole
+        // section list once and emits at most one finding of each kind.
+        let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
+        let (results, _dir) = run_binaries_check(&rpm_path);
+        // Both fixture libraries carry .hash and .gnu.hash, and the pinned
+        // reference is quiet on them: neither finding may fire.
+        assert_lacks(&results, "missing-hash-section");
+        assert_lacks(&results, "missing-gnu-hash-section");
+    }
+
+    #[test]
+    fn hash_sections_match_reference_on_corpus_cases() {
+        // #218 oracle: the pinned reference emits neither missing-hash-section
+        // nor missing-gnu-hash-section on the liblto21 / llvm21-gold corpus
+        // cases (both libraries carry .hash and .gnu.hash); the port emitted
+        // one finding per ELF section.
+        let cases = [
+            "../../tests/parity/cases/liblto21/input/libLTO21-21.1.8-9.2.aarch64.rpm",
+            "../../tests/parity/cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm",
+        ];
+        for case in cases {
+            let rpm_path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), case);
+            let (results, _dir) = run_binaries_check(&rpm_path);
+            assert_lacks(&results, "missing-hash-section");
+            assert_lacks(&results, "missing-gnu-hash-section");
+        }
+    }
+
+    #[test]
+    fn hash_sections_pin_positive_cases() {
+        // Reference semantics for the remaining combinations, driven through
+        // check_hash_sections with the real one-section-per-vec ReadelfInfo
+        // shape: .gnu.hash-only gets exactly one missing-hash-section (E);
+        // neither section gets exactly one of each; both stay quiet.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg =
+            Pkg::open(std::path::Path::new(&rpm_path), dir.path(), true).expect("open fixture");
+        let pkgfile = PkgFile {
+            name: "/usr/lib64/libprobe.so.1".to_string(),
+            ..Default::default()
+        };
+
+        let run = |sections: Vec<Vec<ElfSection>>| {
+            let info = ReadelfInfo {
+                sections,
+                program_headers: Vec::new(),
+                symbols: Vec::new(),
+                is_shlib: true,
+                is_debug: false,
+                soname: None,
+                needed: Vec::new(),
+                runpaths: Vec::new(),
+                has_textrel: false,
+                failed: None,
+            };
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_hash_sections(&pkg, &pkgfile, &info, &mut out);
+            out.results().to_vec()
+        };
+        let sec = |name: &str| ElfSection {
+            name: name.to_string(),
+            size: 100,
+        };
+
+        let results = run(vec![
+            vec![sec(".text")],
+            vec![sec(".gnu.hash")],
+            vec![sec(".data")],
+        ]);
+        let hash_lines = lines_for(&results, "missing-hash-section");
+        assert_eq!(hash_lines.len(), 1, "one missing-hash-section: {results:?}");
+        assert!(
+            hash_lines[0].contains(" E: "),
+            "missing-hash-section is Error: {}",
+            hash_lines[0]
+        );
+        assert!(
+            hash_lines[0].contains("/usr/lib64/libprobe.so.1"),
+            "missing-hash-section names the library: {}",
+            hash_lines[0]
+        );
+        assert_lacks(&results, "missing-gnu-hash-section");
+
+        let results = run(vec![vec![sec(".text")], vec![sec(".data")]]);
+        let hash_lines = lines_for(&results, "missing-hash-section");
+        assert_eq!(hash_lines.len(), 1, "one missing-hash-section: {results:?}");
+        assert!(
+            hash_lines[0].contains("/usr/lib64/libprobe.so.1"),
+            "missing-hash-section names the library: {}",
+            hash_lines[0]
+        );
+        let gnu_lines = lines_for(&results, "missing-gnu-hash-section");
+        assert_eq!(
+            gnu_lines.len(),
+            1,
+            "one missing-gnu-hash-section: {results:?}"
+        );
+        assert!(
+            gnu_lines[0].contains(" W: "),
+            "missing-gnu-hash-section is Warning: {}",
+            gnu_lines[0]
+        );
+        assert!(
+            gnu_lines[0].contains("/usr/lib64/libprobe.so.1"),
+            "missing-gnu-hash-section names the library: {}",
+            gnu_lines[0]
+        );
+        // Name, detail, severity, ORDER byte-identical: E fires before W.
+        let hash_pos = results
+            .iter()
+            .position(|(n, _)| n == "missing-hash-section");
+        let gnu_pos = results
+            .iter()
+            .position(|(n, _)| n == "missing-gnu-hash-section");
+        assert!(
+            hash_pos < gnu_pos,
+            "missing-hash-section (E) before missing-gnu-hash-section (W): {hash_pos:?} vs {gnu_pos:?}"
+        );
+
+        let results = run(vec![vec![sec(".hash")], vec![sec(".gnu.hash")]]);
+        assert_lacks(&results, "missing-hash-section");
+        assert_lacks(&results, "missing-gnu-hash-section");
     }
 }

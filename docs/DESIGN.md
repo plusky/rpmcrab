@@ -59,10 +59,9 @@ produces is not.
 | 4 | Parity rule | Freeze output, diverge findings | External consumers grep the output. |
 | 5 | Licence | GPL-2.0-or-later | Matches rpmlint; config/description data carries over unambiguously. |
 | 6 | Package source | Sum type (`PkgSource`), not flag fields | §7.5 — illegal source states unrepresentable. |
-| 7 | Spec model | Separate `SpecPkg`; `check_spec` arrives with it | §7.5 — the reference dispatches on `FakePkg`, not `is_source`. |
-| 8 | Named durations | One insertion-ordered type | §7.5 — `Pkg.timers` and the lint accumulator share it. |
-| 9 | Check execution | Parallel by package (`-j`), deterministic reassembly | §8 — the unit of parallelism is the package; findings reassemble into the frozen order. |
-| 10 | Precision measurement | Distro-scale set; procedure defined before Wave 1's first promotion | §5.1 — hand cases pin the surface, they cannot measure FP rates. |
+| 7 | Named durations | One insertion-ordered type | §7.5 — `Pkg.timers` and the lint accumulator share it. |
+| 8 | Check execution | Parallel by package (`-j`), deterministic reassembly | §8 — the unit of parallelism is the package; findings reassemble into the frozen order. |
+| 9 | Precision measurement | Distro-scale set; procedure defined before Wave 1's first promotion | §5.1 — hand cases pin the surface, they cannot measure FP rates. |
 
 ### 3.1 RPM backend
 
@@ -345,8 +344,8 @@ There is no severity→badness table. Per-check via `[Scoring]`
 int(Scoring[check])`, and the level is **remapped in both directions** — to `E`
 when badness > 0, **and downgraded from `E` to `W` when the configured badness
 is 0**. If the check is not in `Scoring`: `E` → badness 1, `W`/`I` → badness 0.
-`--strict` then forces the level to `E` and increments the promoted counter but
-does **not** add badness. `BadnessThreshold` default is `-1` (abort branch
+`--strict` then forces the level to `E` and increments the promoted counter.
+The default badness is computed **after** promotion (`filter.py:139-140`), so a strict-promoted warning scores the default error badness of 1. `BadnessThreshold` default is `-1` (abort branch
 dead); openSUSE sets `999`.
 
 ### 4.10 CLI flags
@@ -646,49 +645,49 @@ against the openSUSE:Factory 2.10.0 tarball. The run header prints
 
 | Check | rpmcrab status |
 |---|---|
-| `AlternativesCheck` | not yet |
-| `AppDataCheck` | not yet |
+| `AlternativesCheck` | **ported** |
+| `AppDataCheck` | **ported** |
 | `BinariesCheck` | **ported** |
-| `BuildRootAndDateCheck` | not yet |
+| `BuildRootAndDateCheck` | **ported** |
 | `ConfigFilesCheck` | **ported** |
-| `DBusPolicyCheck` | not yet |
+| `DBusPolicyCheck` | **ported** |
 | `DuplicatesCheck` | **ported** |
 | `DocCheck` | **ported** |
-| `ErlangCheck` | not yet |
+| `ErlangCheck` | **ported** |
 | `FHSCheck` | **ported** |
 | `FilesCheck` | **ported** |
 | `IconSizesCheck` | **ported** |
 | `I18NCheck` | **ported** |
-| `LibraryDependencyCheck` | not yet |
-| `LogrotateCheck` | not yet |
-| `MenuCheck` | not yet |
-| `MenuXDGCheck` | not yet |
+| `LibraryDependencyCheck` | **ported** |
+| `LogrotateCheck` | **ported** |
+| `MenuCheck` | **ported** |
+| `MenuXDGCheck` | **ported** |
 | `MixedOwnershipCheck` | **ported** |
 | `PkgConfigCheck` | **ported** |
-| `PostCheck` | not yet |
-| `PythonCheck` | not yet |
-| `SELinuxIndependentModuleCheck` | not yet |
-| `SignatureCheck` | not yet |
-| `SourceCheck` | not yet |
+| `PostCheck` | **ported** |
+| `PythonCheck` | **ported** |
+| `SELinuxIndependentModuleCheck` | **ported** |
+| `SignatureCheck` | **ported** |
+| `SourceCheck` | **ported** |
 | `SpecCheck` | **ported** |
 | `TagsCheck` | **ported** |
 | `ZipCheck` | **ported** |
 | `ZyppSyntaxCheck` | **ported** |
-| `BashismsCheck` | not yet |
-| `TmpFilesCheck` | not yet |
-| `SysVInitOnSystemdCheck` | not yet |
-| `SharedLibraryPolicyCheck` | not yet |
-| `BrandingPolicyCheck` | not yet |
-| `DeviceFilesCheck` | not yet |
-| `FileDigestCheck` | not yet |
-| `FilelistCheck` | not yet |
-| `KMPPolicyCheck` | not yet |
-| `PolkitCheck` | not yet |
-| `SystemdInstallCheck` | not yet |
-| `SystemdTmpfilesCheck` | not yet |
-| `SUIDPermissionsCheck` | not yet |
-| `WorldWritableCheck` | not yet |
-| `AtomicUpdateCheck` | not yet |
+| `BashismsCheck` | **ported** |
+| `TmpFilesCheck` | **ported** |
+| `SysVInitOnSystemdCheck` | **ported** |
+| `SharedLibraryPolicyCheck` | **ported** |
+| `BrandingPolicyCheck` | **ported** |
+| `DeviceFilesCheck` | **ported** |
+| `FileDigestCheck` | **ported** |
+| `FilelistCheck` | **ported** |
+| `KMPPolicyCheck` | **ported** |
+| `PolkitCheck` | **ported** |
+| `SystemdInstallCheck` | **ported** |
+| `SystemdTmpfilesCheck` | **ported** |
+| `SUIDPermissionsCheck` | **ported** |
+| `WorldWritableCheck` | **ported** |
+| `AtomicUpdateCheck` | **ported** |
 
 Three more reference modules are **ported** but sit outside the 43: the
 reference ships `LSBCheck`, `PAMModulesCheck` and `XinetdDepCheck` as
@@ -705,11 +704,7 @@ audit round (tooling workstream) derives the same rows from the tree on
 every run and is the source of truth going forward.
 
 `add_info` has 475 call sites / 417 distinct tag names upstream; the port
-tracks tag-name parity per check. `SpecCheck` also needs `FakePkg`, the
-`.spec` model, which is deferred to its own milestone; until then a `.spec`
-input is refused with exit 3 rather than silently ignored (ledgered). The
-`Check` trait's `check_spec` hook arrives with it, because the reference
-dispatches it on holding a `FakePkg` rather than on `is_source`.
+tracks tag-name parity per check.
 
 A check that panics is contained per package: the package becomes a fatal
 result (reported, exit 3 after the batch) and the run continues with the

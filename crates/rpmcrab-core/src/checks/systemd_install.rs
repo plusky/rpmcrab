@@ -21,7 +21,7 @@ use super::shared::script_body_or_prog;
 use librpm::Tag;
 
 pub struct SystemdInstallCheck {
-    unit_dir: String,
+    unit_regex: Regex,
 }
 
 impl SystemdInstallCheck {
@@ -34,16 +34,18 @@ impl SystemdInstallCheck {
             .and_then(|v| v.as_str())
             .unwrap_or("/usr/lib/systemd/system")
             .to_string();
-        Self { unit_dir }
+        let unit_regex = Regex::new(&format!(
+            r"^{}.+[^@]\.(service|socket|target|path)$",
+            fancy_regex::escape(&unit_dir)
+        ))
+        .expect("unit regex");
+        Self { unit_regex }
     }
 
-    /// The unit types the reference checks.
-    fn unit_regex(&self) -> Regex {
-        Regex::new(&format!(
-            r"^{}.+[^@]\.(service|socket|target|path)$",
-            fancy_regex::escape(&self.unit_dir)
-        ))
-        .expect("static regex")
+    /// The unit types the reference checks (compiled once in [`Self::new`];
+    /// the directory comes from configuration, so this cannot be a static).
+    fn unit_regex(&self) -> &Regex {
+        &self.unit_regex
     }
 
     /// `(finding, ok)` for one unit file against the four scriptlets.
@@ -117,7 +119,7 @@ impl Check for SystemdInstallCheck {
             .files
             .iter()
             .map(|f| f.name.as_str())
-            .filter(|n| is_match(&unit_re, n))
+            .filter(|n| is_match(unit_re, n))
             .map(|n| {
                 Path::new(n)
                     .file_name()
@@ -167,8 +169,8 @@ mod tests {
     fn socket_unit_is_ignored_by_regex() {
         let check = SystemdInstallCheck::new(&Config::default());
         let re = check.unit_regex();
-        assert!(!is_match(&re, "/usr/lib/systemd/system/foo@.service"));
-        assert!(is_match(&re, "/usr/lib/systemd/system/foo.service"));
+        assert!(!is_match(re, "/usr/lib/systemd/system/foo@.service"));
+        assert!(is_match(re, "/usr/lib/systemd/system/foo.service"));
     }
 
     #[test]
@@ -184,7 +186,7 @@ mod tests {
         };
         let check = SystemdInstallCheck::new(&config);
         let re = check.unit_regex();
-        assert!(is_match(&re, "/run/systemd/system/foo.service"));
-        assert!(!is_match(&re, "/usr/lib/systemd/system/foo.service"));
+        assert!(is_match(re, "/run/systemd/system/foo.service"));
+        assert!(!is_match(re, "/usr/lib/systemd/system/foo.service"));
     }
 }

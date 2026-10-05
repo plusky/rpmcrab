@@ -305,11 +305,11 @@ impl DepLeaf {
 /// overflows the stack and aborts the process. Real-world rich dependencies
 /// nest only a handful of levels; 64 is an order of magnitude beyond anything
 /// legitimate and comfortably below the ~400-level overflow threshold measured
-/// in a test thread. Past the budget the input falls back to `Simple` holding
+/// in a test thread. Past the budget the input falls back to `DepExpr::Simple { .. }` holding
 /// the raw string.
 ///
 /// At depth 65+ even a well-formed expression reads exactly like a parse error:
-/// one opaque `Simple` leaf, and every leaf analysis goes dark.
+/// one opaque `DepExpr::Simple { .. }` leaf, and every leaf analysis goes dark.
 ///
 /// The bound also caps the `Box` tree depth, so the drop glue
 /// can never recurse into an overflow either.
@@ -318,7 +318,7 @@ const MAX_RICH_DEP_DEPTH: usize = 64;
 /// A parsed RPM rich (boolean) dependency expression (rpm.org, RPM >= 4.13),
 /// including RPM >= 4.16 dependency qualifiers (`foo(meta)`).
 ///
-/// Malformed input parses to `Simple` holding the raw string, so a
+/// Malformed input parses to `DepExpr::Simple { .. }` holding the raw string, so a
 /// parenthesized expression is never silently shredded into plain-name
 /// tokens the way the reference's `parse_deps` shreds it.
 ///
@@ -541,7 +541,7 @@ impl RichParser {
                 // One recursion per nesting level over package-controlled
                 // input: cap the depth so a malicious header string cannot
                 // overflow the stack. Past the budget the whole input
-                // falls back to `Simple` holding the raw string.
+                // falls back to `DepExpr::Simple { .. }` holding the raw string.
                 if self.depth >= MAX_RICH_DEP_DEPTH {
                     return Err(());
                 }
@@ -604,8 +604,8 @@ impl RichParser {
 /// Parse a dependency name into a rich-expression tree.
 ///
 /// `(a or b)` and friends become structured nodes; a plain name (with an
-/// optional RPM 4.16 `(qualifier)`) becomes `Simple`. Anything malformed
-/// becomes `Simple` holding the raw string.
+/// optional RPM 4.16 `(qualifier)`) becomes `DepExpr::Simple { .. }`. Anything malformed
+/// becomes `DepExpr::Simple { .. }` holding the raw string.
 pub fn parse_dep_expr(s: &str) -> DepExpr {
     let raw = || DepExpr::Simple {
         name: s.to_string(),
@@ -638,8 +638,17 @@ pub fn parse_dep_expr(s: &str) -> DepExpr {
 }
 
 /// True when `s` is a well-formed rich dependency expression.
+///
+/// Skips the tokenizing parse for strings without parens: the expression
+/// grammar is only entered on a leading `(`, and `parse_simple` always
+/// yields `Simple`, so a paren-less string can never be rich. The
+/// load-bearing invariant is that `is_rich()` is `!matches!(self, DepExpr::Simple { .. })`
+/// and parens around a single term collapse to `DepExpr::Simple { .. }`, so `(a)` and
+/// `((((a))))` are not rich on either path -- which is what makes any
+/// `(`-based guard safe. This lets the per-token guards in SpecCheck
+/// skip the tokenizing parse for plain dependency names.
 pub fn is_rich_dep_expr(s: &str) -> bool {
-    parse_dep_expr(s).is_rich()
+    s.contains('(') && parse_dep_expr(s).is_rich()
 }
 
 #[cfg(test)]
@@ -727,7 +736,7 @@ mod rich_dep_depth_tests {
     fn deep_nesting_falls_back_to_raw_without_crashing() {
         // Regression: a package-controlled header string with thousands of
         // nested parens overflowed the parser stack and aborted the process
-        // (SIGABRT). Past the depth budget the input degrades to `Simple`
+        // (SIGABRT). Past the depth budget the input degrades to `DepExpr::Simple { .. }`
         // holding the raw string.
         let s = nested_parens(2000);
         let parsed = parse_dep_expr(&s);
@@ -860,6 +869,32 @@ mod rich_dep_tests {
         assert_eq!(parse_dep_expr("foo"), simple("foo"));
         assert_eq!(parse_dep_expr("foo-1.2"), simple("foo-1.2"));
         assert!(!is_rich_dep_expr("foo"));
+    }
+
+    #[test]
+    fn rich_check_agrees_with_full_parse() {
+        // The paren short-circuit in `is_rich_dep_expr` must never
+        // diverge from the tokenizing parse it skips.
+        for s in [
+            "",
+            " ",
+            "   ",
+            ",,,",
+            "a, b, c",
+            "foo",
+            "foo >= 1.0",
+            "foo(bar)",
+            "libc.so.6()(64bit)",
+            "(foo)",
+            "(a or b)",
+            "(a >= 1.0 with b < 2.0)",
+            "((a))",
+            "(a",
+            "a)",
+            "()",
+        ] {
+            assert_eq!(is_rich_dep_expr(s), parse_dep_expr(s).is_rich(), "{s:?}");
+        }
     }
 
     #[test]

@@ -20,28 +20,29 @@ pub struct BuildRootAndDateCheck {
     lookslikebuildroot: Regex,
 }
 
-/// Today's date in the reference's `time.strftime('%b %e %Y')` shape,
-/// e.g. `Oct  2 2026` (day space-padded to width 2).
-fn today_string() -> String {
+/// The reference's `time.strftime('%b %e %Y')` shape, e.g. `Oct  2 2026`
+/// (day space-padded to width 2). Pure: takes the datetime so tests can pin
+/// fixed dates without depending on the machine clock. `%b` under the C
+/// locale is the English abbreviations (verified against the reference), so
+/// the names are hardcoded rather than locale-derived.
+fn format_date(dt: time::OffsetDateTime) -> String {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
-    // Days since the Unix epoch -> civil date (Howard Hinnant's algorithm).
-    let days = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() / 86400)
-        .unwrap_or(0) as i64;
-    let z = days + 719468;
-    let era = z.div_euclid(146097);
-    let doe = z.rem_euclid(146097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{} {:2} {}", MONTHS[(m - 1) as usize], d, y)
+    format!(
+        "{} {:2} {}",
+        MONTHS[dt.month() as usize - 1],
+        dt.day(),
+        dt.year()
+    )
+}
+
+/// Today's date as the reference sees it: local time, like `time.strftime`.
+/// Falls back to UTC when the local offset cannot be determined, mirroring
+/// glibc `localtime` with no usable TZ. In-process via libc — no subprocess.
+fn today_string() -> String {
+    let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+    format_date(now)
 }
 
 /// The reference's `prepare_regex`: `%{name}`/`%{version}`/`%{release}`
@@ -143,6 +144,100 @@ mod tests {
         let today = today_string();
         let re = Regex::new(r"^[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{4}$").unwrap();
         assert!(is_match(&re, &today), "{today}");
+    }
+
+    #[test]
+    fn format_date_pins_strftime_shape() {
+        use time::{Date, Month, OffsetDateTime, Time, UtcOffset};
+        let dt = |y: i32, m: Month, d: u8| {
+            OffsetDateTime::new_utc(Date::from_calendar_date(y, m, d).unwrap(), Time::MIDNIGHT)
+        };
+        // `%e`: single-digit day is space-padded, not zero-padded.
+        assert_eq!(format_date(dt(2026, Month::October, 3)), "Oct  3 2026");
+        assert_eq!(format_date(dt(2026, Month::October, 26)), "Oct 26 2026");
+        // `%b` under the C locale: all twelve English abbreviations.
+        let months = [
+            (Month::January, "Jan"),
+            (Month::February, "Feb"),
+            (Month::March, "Mar"),
+            (Month::April, "Apr"),
+            (Month::May, "May"),
+            (Month::June, "Jun"),
+            (Month::July, "Jul"),
+            (Month::August, "Aug"),
+            (Month::September, "Sep"),
+            (Month::October, "Oct"),
+            (Month::November, "Nov"),
+            (Month::December, "Dec"),
+        ];
+        for (m, abbrev) in months {
+            assert_eq!(format_date(dt(2026, m, 15)), format!("{abbrev} 15 2026"));
+        }
+        // A day-crossing offset shifts the rendered civil date: 01:00 UTC is
+        // still Oct 4 in UTC but already Oct 3 at UTC-2. This pins that
+        // `format_date` renders the offset's civil date, not UTC's.
+        let instant = OffsetDateTime::new_utc(
+            Date::from_calendar_date(2026, Month::October, 4).unwrap(),
+            Time::from_hms(1, 0, 0).unwrap(),
+        );
+        let minus2 = UtcOffset::from_hms(-2, 0, 0).unwrap();
+        assert_eq!(format_date(instant), "Oct  4 2026");
+        assert_eq!(format_date(instant.to_offset(minus2)), "Oct  3 2026");
+    }
+
+    /// `today_string()` follows the local timezone, not UTC. At any instant,
+    /// at least one of UTC+14 / UTC-12 lands on a different civil date than
+    /// UTC, so probing under the offset that straddles midnight *right now*
+    /// deterministically discriminates `now_local()` from `now_utc()`:
+    /// reverting to UTC fails this test at any time of day. The probe
+    /// re-executes this test binary in a child process with a controlled `TZ`
+    /// because `TZ` is process-global and in-process mutation is unavailable
+    /// (`std::env::set_var` is `unsafe` in edition 2024; this crate forbids
+    /// `unsafe` outright).
+    #[test]
+    fn today_string_follows_local_timezone() {
+        use std::process::Command;
+        use time::{OffsetDateTime, UtcOffset};
+
+        // Child mode: print `today_string()` for the parent to read.
+        if std::env::var("RPMCRAB_TZ_PROBE_CHILD").is_ok() {
+            println!("RPMCRAB-TODAY: {}", today_string());
+            return;
+        }
+
+        let now = OffsetDateTime::now_utc();
+        // NB: POSIX inverts the sign — `Etc/GMT-14` is UTC+14.
+        let (tz_name, offset) =
+            if now.to_offset(UtcOffset::from_hms(14, 0, 0).unwrap()).date() != now.date() {
+                ("Etc/GMT-14", UtcOffset::from_hms(14, 0, 0).unwrap())
+            } else {
+                ("Etc/GMT+12", UtcOffset::from_hms(-12, 0, 0).unwrap())
+            };
+        let out = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("checks::buildroot_and_date::tests::today_string_follows_local_timezone")
+            .arg("--nocapture")
+            .env("RPMCRAB_TZ_PROBE_CHILD", "1")
+            .env("TZ", tz_name)
+            .output()
+            .expect("spawn tz probe");
+        assert!(out.status.success(), "tz probe failed: {out:?}");
+        let actual = String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("RPMCRAB-TODAY: "))
+            .expect("probe printed no date line")
+            .trim()
+            .to_string();
+        let expected = format_date(OffsetDateTime::now_utc().to_offset(offset));
+        // The chosen offset genuinely crosses a day boundary right now, so the
+        // expectation differs from the UTC date by construction.
+        assert_ne!(
+            format_date(now),
+            expected,
+            "test setup must straddle midnight"
+        );
+        assert_eq!(actual, expected, "today_string() under TZ={tz_name}");
     }
 
     #[test]
