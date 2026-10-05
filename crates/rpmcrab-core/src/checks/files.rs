@@ -2073,7 +2073,15 @@ impl FilesCheck {
         if !fname.starts_with("/usr/share/info/") {
             return;
         }
-        if !st.postin.is_empty() && !is_match(&self.install_info_re, &st.postin) {
+        if st.postin.is_empty() {
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "info-files-without-install-info-postin",
+                &[fname],
+            );
+        } else if !is_match(&self.install_info_re, &st.postin) {
             add_info(
                 out,
                 Level::Error,
@@ -2084,9 +2092,17 @@ impl FilesCheck {
         }
         let postun_ok = !st.postun.is_empty() && is_match(&self.install_info_re, &st.postun);
         let preun_ok = !st.preun.is_empty() && is_match(&self.install_info_re, &st.preun);
-        // NB: the reference checks postun/preun here yet still reports
-        // 'postin-without-install-info'.
-        if !postun_ok && !preun_ok && (!st.postun.is_empty() || !st.preun.is_empty()) {
+        if st.postun.is_empty() && st.preun.is_empty() {
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "info-files-without-install-info-postun",
+                &[fname],
+            );
+        } else if !postun_ok && !preun_ok {
+            // NB: the reference reports 'postin-without-install-info' for the
+            // postun/preun case too.
             add_info(
                 out,
                 Level::Error,
@@ -2877,6 +2893,27 @@ mod tests {
         );
     }
 
+    /// Like `run_files_check` but keeps each finding's level and rendered
+    /// line, so tests can pin name + level + detail structurally.
+    fn run_files_check_detailed(
+        rpm: &str,
+        config: &Config,
+    ) -> (Vec<(String, Level, String)>, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = Pkg::open(std::path::Path::new(rpm), dir.path(), true).expect("open fixture");
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(config);
+        check.check(&pkg, config, &mut out);
+        let levels = out.result_levels().to_vec();
+        let triples = out
+            .results()
+            .iter()
+            .zip(levels)
+            .map(|((name, line), level)| (name.clone(), level, line.clone()))
+            .collect();
+        (triples, dir)
+    }
+
     #[test]
     fn files_check_scripts_kitchen_sink() {
         let config = test_config();
@@ -3148,6 +3185,52 @@ mod tests {
         // NB: the reference reports postin-without-install-info for the
         // postun case too.
         assert_has(&postun_names, "postin-without-install-info");
+    }
+
+    #[test]
+    fn files_check_install_info_missing_scriptlets() {
+        let config = test_config();
+        // /usr/share/info file, no %post at all: the reference fires
+        // info-files-without-install-info-postin. The fixture's %postun
+        // carries an install-info call so the postun finding stays silent.
+        let (triples, _d1) = run_files_check_detailed(
+            &fixture_path("filescheck-installinfo-nopostin-1.0-1.noarch.rpm"),
+            &config,
+        );
+        let (name, level, line) = triples
+            .iter()
+            .find(|(n, _, _)| n == "info-files-without-install-info-postin")
+            .expect("info-files-without-install-info-postin");
+        assert_eq!(name, "info-files-without-install-info-postin");
+        assert_eq!(*level, Level::Error);
+        assert!(
+            line.contains("/usr/share/info/foo.info"),
+            "detail must name the info file, got: {line}"
+        );
+        let names: Vec<String> = triples.iter().map(|(n, _, _)| n.clone()).collect();
+        assert_lacks(&names, "info-files-without-install-info-postun");
+        assert_lacks(&names, "postin-without-install-info");
+
+        // /usr/share/info file, %post with an install-info call but neither
+        // %postun nor %preun: the reference fires
+        // info-files-without-install-info-postun.
+        let (triples, _d2) = run_files_check_detailed(
+            &fixture_path("filescheck-installinfo-nopostun-1.0-1.noarch.rpm"),
+            &config,
+        );
+        let (name, level, line) = triples
+            .iter()
+            .find(|(n, _, _)| n == "info-files-without-install-info-postun")
+            .expect("info-files-without-install-info-postun");
+        assert_eq!(name, "info-files-without-install-info-postun");
+        assert_eq!(*level, Level::Error);
+        assert!(
+            line.contains("/usr/share/info/foo.info"),
+            "detail must name the info file, got: {line}"
+        );
+        let names: Vec<String> = triples.iter().map(|(n, _, _)| n.clone()).collect();
+        assert_lacks(&names, "info-files-without-install-info-postin");
+        assert_lacks(&names, "postin-without-install-info");
     }
 
     #[test]

@@ -874,7 +874,7 @@ def test_renamed_systemd_producer_makes_the_site_unresolved():
 def test_stale_check_catches_name_keyed_entry():
     # The staleness check must mark an entry stale when the port emits the
     # finding of a kind="missing" ledger entry. The corpus pins the shape:
-    # all 4 current missing entries are keyed by finding name (case
+    # all 2 current missing entries are keyed by finding name (case
     # "global") -- there is no module-keyed missing entry, so the test
     # drives the mechanism with the real ledger rather than a synthetic
     # module set. (The module arm of the disjunction has no live data
@@ -887,8 +887,6 @@ def test_stale_check_catches_name_keyed_entry():
     assert names == {
         "inaccessible-filename",
         "lengthy-symlink",
-        "info-files-without-install-info-postin",
-        "info-files-without-install-info-postun",
     }, names
     assert all(e.get("case") == "global" for e in missing), [
         (e.get("case"), e.get("check")) for e in missing]

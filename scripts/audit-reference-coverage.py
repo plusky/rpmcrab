@@ -2339,10 +2339,8 @@ def is_stale_entry(module, name, missing_modules, port_templates):
     finding.
 
     Both the module AND the finding name are checked against missing_modules:
-    all 5 kind="missing" entries are currently keyed by finding name
-    (inaccessible-filename, lengthy-symlink,
-    info-files-without-install-info-postin/-postun,
-    symlink-contains-up-and-down-segments). Dropping the name half of the
+    all 2 kind="missing" entries are currently keyed by finding name
+    (inaccessible-filename, lengthy-symlink). Dropping the name half of the
     disjunction would let a name-keyed entry whose finding the port now emits
     go undetected.
     """
