@@ -12,6 +12,7 @@ complete -c rpmcrab -s p -l print-config -d 'Dump the merged configuration as TO
 complete -c rpmcrab -s t -l time-report -d 'Per-check timing report'
 complete -c rpmcrab -l ignore-unused-rpmlintrc -d 'Suppress the `unused-rpmlintrc-filter` audit'
 complete -c rpmcrab -s s -l strict -d 'Treat all messages as errors'
+complete -c rpmcrab -l errors-only -d 'Skip warning-only checks entirely (upstream rpmlint#134)'
 complete -c rpmcrab -s P -l permissive -d 'Treat individual errors as non-fatal'
 complete -c rpmcrab -s m -l mini-mode -d 'Called from the rpmlint-mini wrapper (SUSE-only)'
 complete -c rpmcrab -s h -l help -d 'Print help'

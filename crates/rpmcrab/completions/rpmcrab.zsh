@@ -38,6 +38,7 @@ _rpmcrab() {
 '--ignore-unused-rpmlintrc[Suppress the \`unused-rpmlintrc-filter\` audit]' \
 '(-P --permissive)-s[Treat all messages as errors]' \
 '(-P --permissive)--strict[Treat all messages as errors]' \
+'--errors-only[Skip warning-only checks entirely (upstream rpmlint#134)]' \
 '(-s --strict)-P[Treat individual errors as non-fatal]' \
 '(-s --strict)--permissive[Treat individual errors as non-fatal]' \
 '-m[Called from the rpmlint-mini wrapper (SUSE-only)]' \

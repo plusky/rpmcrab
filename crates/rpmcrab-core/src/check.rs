@@ -112,6 +112,16 @@ pub trait Check: Send {
     /// The check's registry name (the Python module name, e.g. `FilesCheck`).
     fn name(&self) -> &'static str;
 
+    /// The highest severity this check can emit. `--errors-only` drops every
+    /// check whose maximum is below `Error`, so post-build runs skip
+    /// warning-only checks entirely (upstream rpmlint#134). The default is
+    /// `Error` (always run); warning-only checks override this. The bound is
+    /// an upper bound over the check's `add_info` call sites — a check that
+    /// can never emit an error must not claim otherwise.
+    fn max_severity(&self) -> Level {
+        Level::Error
+    }
+
     /// `AbstractCheck.check`: dispatch on whether the package is a source
     /// package. Both hooks default to doing nothing, like the reference.
     fn check(&mut self, pkg: &Pkg, config: &Config, out: &mut Filter) {
@@ -315,6 +325,11 @@ pub fn load_with(
             continue;
         }
         if let Some(check) = make(name) {
+            // `--errors-only` (upstream rpmlint#134): drop warning-only
+            // checks so they never run.
+            if config.errors_only && check.max_severity() != Level::Error {
+                continue;
+            }
             built.push(check);
         }
     }
@@ -351,6 +366,17 @@ impl Check for SyntheticCheck {
         self.name
     }
 
+    fn max_severity(&self) -> Level {
+        // Conservative on empty: a check with no known findings still runs.
+        if self.findings.is_empty() || self.findings.iter().any(|(l, _, _)| *l == Level::Error) {
+            Level::Error
+        } else if self.findings.iter().any(|(l, _, _)| *l == Level::Warning) {
+            Level::Warning
+        } else {
+            Level::Info
+        }
+    }
+
     fn check_binary(&mut self, _pkg: &Pkg, _config: &Config, out: &mut Filter) {
         for (level, check, details) in &self.findings {
             out.add_info(Finding {
@@ -379,6 +405,106 @@ mod tests {
 
     fn always(_name: &str) -> Option<Box<dyn Check>> {
         None
+    }
+
+    #[test]
+    fn warning_only_checks_report_warning_max_severity() {
+        // Every `add_info` call site in these four passes `Level::Warning`
+        // (verified by audit); the annotation must match or `--errors-only`
+        // would wrongly keep them.
+        let config = Config::default();
+        assert_eq!(
+            crate::checks::bashisms::BashismsCheck::new(&config).max_severity(),
+            Level::Warning
+        );
+        assert_eq!(
+            crate::checks::config_files::ConfigFilesCheck::new(&config).max_severity(),
+            Level::Warning
+        );
+        assert_eq!(
+            crate::checks::fhs::FHSCheck::new(&config).max_severity(),
+            Level::Warning
+        );
+        assert_eq!(
+            crate::checks::tmpfiles::TmpFilesCheck::new(&config).max_severity(),
+            Level::Warning
+        );
+    }
+
+    #[test]
+    fn max_severity_defaults_to_error() {
+        let c = SyntheticCheck::new("x", "p", None, vec![]);
+        // empty findings: conservative default, the check still runs.
+        assert_eq!(c.max_severity(), Level::Error);
+    }
+
+    #[test]
+    fn synthetic_max_severity_follows_findings() {
+        let w = SyntheticCheck::new("w", "p", None, vec![(Level::Warning, "w-check", vec![])]);
+        assert_eq!(w.max_severity(), Level::Warning);
+        let i = SyntheticCheck::new("i", "p", None, vec![(Level::Info, "i-check", vec![])]);
+        assert_eq!(i.max_severity(), Level::Info);
+        let mixed = SyntheticCheck::new(
+            "m",
+            "p",
+            None,
+            vec![
+                (Level::Info, "i-check", vec![]),
+                (Level::Warning, "w-check", vec![]),
+            ],
+        );
+        assert_eq!(mixed.max_severity(), Level::Warning);
+    }
+
+    #[test]
+    fn errors_only_drops_warning_only_checks() {
+        let mut config = cfg_with(&["ErrCheck", "WarnCheck", "InfoCheck"]);
+        config.errors_only = true;
+        let built = load_with(&config, None, |name| match name {
+            "ErrCheck" => Some(Box::new(SyntheticCheck::new(
+                "ErrCheck",
+                "p",
+                None,
+                vec![(Level::Error, "e-check", vec![])],
+            )) as Box<dyn Check>),
+            "WarnCheck" => Some(Box::new(SyntheticCheck::new(
+                "WarnCheck",
+                "p",
+                None,
+                vec![(Level::Warning, "w-check", vec![])],
+            )) as Box<dyn Check>),
+            "InfoCheck" => Some(Box::new(SyntheticCheck::new(
+                "InfoCheck",
+                "p",
+                None,
+                vec![(Level::Info, "i-check", vec![])],
+            )) as Box<dyn Check>),
+            _ => None,
+        });
+        let names: Vec<&str> = built.iter().map(|c| c.name()).collect();
+        assert_eq!(names, vec!["ErrCheck"]);
+    }
+
+    #[test]
+    fn errors_only_off_keeps_everything() {
+        let config = cfg_with(&["ErrCheck", "WarnCheck"]);
+        assert!(!config.errors_only);
+        let built = load_with(&config, None, |name| match name {
+            "ErrCheck" => Some(Box::new(SyntheticCheck::new(
+                "ErrCheck",
+                "p",
+                None,
+                vec![(Level::Error, "e-check", vec![])],
+            )) as Box<dyn Check>),
+            "WarnCheck" => Some(Box::new(SyntheticCheck::new(
+                "WarnCheck",
+                "p",
+                None,
+                vec![(Level::Warning, "w-check", vec![])],
+            )) as Box<dyn Check>),
+            _ => None,
+        });
+        assert_eq!(built.len(), 2);
     }
 
     #[test]

@@ -116,6 +116,12 @@ impl Check for BashismsCheck {
         "BashismsCheck"
     }
 
+    /// This check only ever emits warnings (every `add_info` call site
+    /// passes `Level::Warning`), so `--errors-only` skips it.
+    fn max_severity(&self) -> Level {
+        Level::Warning
+    }
+
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
         if !self.have_tools() {
             log::debug!("BashismsCheck: dash/checkbashisms not found, skipping");

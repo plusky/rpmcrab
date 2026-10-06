@@ -37,6 +37,12 @@ impl Check for ConfigFilesCheck {
         "ConfigFilesCheck"
     }
 
+    /// This check only ever emits warnings (every `add_info` call site
+    /// passes `Level::Warning`), so `--errors-only` skips it.
+    fn max_severity(&self) -> Level {
+        Level::Warning
+    }
+
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
         // `pkg.config_files` lists the paths; `noreplace_files` lists those
         // with the flag. Mirror the reference's two loops over the same list.

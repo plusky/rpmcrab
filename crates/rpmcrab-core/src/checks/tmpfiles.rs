@@ -74,6 +74,12 @@ impl Check for TmpFilesCheck {
         "TmpFilesCheck"
     }
 
+    /// This check only ever emits warnings (every `add_info` call site
+    /// passes `Level::Warning`), so `--errors-only` skips it.
+    fn max_severity(&self) -> Level {
+        Level::Warning
+    }
+
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
         let pre = pkg.tag_str(Tag::PREIN).unwrap_or_default();
         let file_names: Vec<String> = pkg.files.iter().map(|f| f.name.clone()).collect();

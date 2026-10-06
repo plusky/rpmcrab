@@ -108,6 +108,10 @@ struct Cli {
     #[arg(short = 's', long = "strict", action = clap::ArgAction::SetTrue, conflicts_with = "permissive")]
     strict: bool,
 
+    /// Skip warning-only checks entirely (upstream rpmlint#134).
+    #[arg(long = "errors-only", action = clap::ArgAction::SetTrue)]
+    errors_only: bool,
+
     /// Treat individual errors as non-fatal.
     #[arg(short = 'P', long = "permissive", action = clap::ArgAction::SetTrue, conflicts_with = "strict")]
     permissive: bool,
@@ -192,6 +196,7 @@ pub fn run() -> ExitCode {
     // Apply mode flags.
     cfg.strict = cli.strict;
     cfg.info = cli.verbose;
+    cfg.errors_only = cli.errors_only;
     // rpmlint#1592: `--permissive` only when asked; otherwise the
     // `PermissiveByDefault` config key decides (openSUSE runs permissive).
     cfg.permissive = resolve_permissive(cli.permissive, cli.strict, cfg.permissive_by_default);

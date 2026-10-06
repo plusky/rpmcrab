@@ -66,6 +66,12 @@ impl Check for FHSCheck {
         "FHSCheck"
     }
 
+    /// This check only ever emits warnings (every `add_info` call site
+    /// passes `Level::Warning`), so `--errors-only` skips it.
+    fn max_severity(&self) -> Level {
+        Level::Warning
+    }
+
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
         // `-v`/`--explain` descriptions, mirroring the reference's
         // `fhs_details_dict` which `__init__` installs unconditionally.

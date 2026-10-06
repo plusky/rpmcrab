@@ -35,6 +35,9 @@ pub struct Config {
     pub rpmlintrc_display: Vec<String>,
     /// `-s/--strict`.
     pub strict: bool,
+    /// `--errors-only`: skip warning-only checks entirely (upstream
+    /// rpmlint#134). Applied in [`crate::check::load`].
+    pub errors_only: bool,
     /// `-v/--verbose`/`--info`.
     pub info: bool,
     /// `-P/--permissive`. On openSUSE forced on unless `--strict`.

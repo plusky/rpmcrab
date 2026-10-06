@@ -4,7 +4,7 @@
 .SH NAME
 rpmcrab \- Check for common problems in rpm packages
 .SH SYNOPSIS
-\fBrpmcrab\fR [\fB\-V\fR|\fB\-\-version\fR] [\fB\-c\fR|\fB\-\-config\fR] [\fB\-e\fR|\fB\-\-explain\fR] [\fB\-r\fR|\fB\-\-rpmlintrc\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-p\fR|\fB\-\-print\-config\fR] [\fB\-i\fR|\fB\-\-installed\fR] [\fB\-t\fR|\fB\-\-time\-report\fR] [\fB\-j\fR|\fB\-\-jobs\fR] [\fB\-\-ignore\-unused\-rpmlintrc\fR] [\fB\-\-checks\fR] [\fB\-s\fR|\fB\-\-strict\fR] [\fB\-P\fR|\fB\-\-permissive\fR] [\fB\-m\fR|\fB\-\-mini\-mode\fR] [\fB\-\-format\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIrpmfile\fR] 
+\fBrpmcrab\fR [\fB\-V\fR|\fB\-\-version\fR] [\fB\-c\fR|\fB\-\-config\fR] [\fB\-e\fR|\fB\-\-explain\fR] [\fB\-r\fR|\fB\-\-rpmlintrc\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-p\fR|\fB\-\-print\-config\fR] [\fB\-i\fR|\fB\-\-installed\fR] [\fB\-t\fR|\fB\-\-time\-report\fR] [\fB\-j\fR|\fB\-\-jobs\fR] [\fB\-\-ignore\-unused\-rpmlintrc\fR] [\fB\-\-checks\fR] [\fB\-s\fR|\fB\-\-strict\fR] [\fB\-\-errors\-only\fR] [\fB\-P\fR|\fB\-\-permissive\fR] [\fB\-m\fR|\fB\-\-mini\-mode\fR] [\fB\-\-format\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIrpmfile\fR] 
 .SH DESCRIPTION
 Check for common problems in rpm packages
 .SH OPTIONS
@@ -44,6 +44,9 @@ Run only these checks (debug)
 .TP
 \fB\-s\fR, \fB\-\-strict\fR
 Treat all messages as errors
+.TP
+\fB\-\-errors\-only\fR
+Skip warning\-only checks entirely (upstream rpmlint#134)
 .TP
 \fB\-P\fR, \fB\-\-permissive\fR
 Treat individual errors as non\-fatal
