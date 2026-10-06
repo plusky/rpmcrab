@@ -1,48 +1,76 @@
 ---
-# Release: build binaries, create the GitHub release, publish to crates.io.
-# Triggered by a bare X.Y.Z tag that must equal [workspace.package] version.
-# NOTE: a `v`-prefixed tag (v1.2.3) matches NO pattern below, so the workflow
-# silently does nothing — always tag the bare version, never with a `v`.
-# Modelled on bugwarden's release process; OBS packaging is separate (M4).
+# Release: build binaries, sign them, create the GitHub release.
+#
+# Triggered by a `v`-prefixed tag (v0.9.0). The version is the tag minus the
+# `v` and must equal [workspace.package] version in Cargo.toml, or the run
+# fails before building anything. A manual workflow_dispatch run only builds
+# (dry-run): artifacts land on the run, no release is created.
+#
+# Signing: when the `GPG_PRIVATE_KEY` secret holds the dedicated signing
+# SUBKEY (ASCII-armored; never the primary key), every tarball and the
+# checksums file get a detached `.asc` signature. Without the secret the
+# release still goes out, unsigned, with a loud warning.
+#
+# Deliberately not here: crates.io publish (registry versions burn the
+# version number; re-add once the release cadence is settled) and OBS
+# submission (separate packaging track, M4).
 name: release
 on:
   push:
     tags:
-      - '[0-9]+.[0-9]+.[0-9]+'
-      - '[0-9]+.[0-9]+.[0-9]+*'   # admit a pre-release suffix
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g. 0.9.0). Dry-run only: no release is created.'
+        required: true
 
 permissions:
   contents: read
 
 jobs:
-  # Refuse a tag that disagrees with the manifest version.
-  check-tag:
+  # Derive the release version and refuse anything that disagrees with the
+  # manifest, so a mistyped tag can never ship the wrong version string.
+  check-version:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Tag must equal [workspace.package] version
+      - name: Derive and check the version
+        id: version
         run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          else
+            # Strip the leading `v`: v0.9.0 -> 0.9.0.
+            version="${GITHUB_REF_NAME#v}"
+          fi
           # Scope to the [workspace.package] table and anchor at the closing
           # quote, so a `version =` in any earlier table cannot win and a
           # trailing comment cannot leak into the value.
           manifest=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
           test -n "$manifest" || { echo "no [workspace.package] version found" >&2; exit 1; }
-          if [ "$GITHUB_REF_NAME" != "$manifest" ]; then
-            echo "tag $GITHUB_REF_NAME != manifest version $manifest" >&2
+          if [ "$version" != "$manifest" ]; then
+            echo "version $version != manifest version $manifest" >&2
             exit 1
           fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build:
-    needs: check-tag
+    needs: check-version
     strategy:
       fail-fast: false
       matrix:
         include:
           # librpm is Linux-only; there is no macOS build.
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          # Native arm64 runner: no cross toolchain to maintain.
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -51,7 +79,9 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
         with:
-          toolchain: stable
+          # Pinned, not floating stable: release artifacts must be
+          # reproducible; bump deliberately.
+          toolchain: 1.99.0
       # Releases are built hermetically — no cargo cache, so restored build
       # state can never influence published artifacts.
       - name: Install RPM development headers
@@ -59,19 +89,20 @@ jobs:
       - name: Build
         run: cargo build --release --locked -p rpmcrab --target ${{ matrix.target }}
       - name: Package
+        id: package
         shell: bash
         run: |
           set -euo pipefail
+          version="${{ needs.check-version.outputs.version }}"
           target="${{ matrix.target }}"
           stage="dist-$target"
           mkdir -p "$stage"
           cp "target/$target/release/rpmcrab" "$stage/"
           cp LICENSE README.md "$stage/"
-          out="rpmcrab-${GITHUB_REF_NAME}-${target}.tar.gz"
+          out="rpmcrab-${version}-${target}.tar.gz"
           tar -czf "$out" -C "$stage" rpmcrab LICENSE README.md
           shasum -a 256 "$out" > "$out.sha256"
           echo "asset=$out" >> "$GITHUB_OUTPUT"
-        id: package
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist-${{ matrix.target }}
@@ -81,7 +112,9 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: build
+    # Tag pushes only: a dispatch run is a dry-run and stops after build.
+    if: github.event_name == 'push'
+    needs: [check-version, build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -97,85 +130,62 @@ jobs:
           merge-multiple: true
           if-no-files-found: error
 
+      - name: Write combined checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          cat *.sha256 > SHA256SUMS
+          shasum -a 256 -c SHA256SUMS
+
+      - name: Sign artifacts
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          # Signing is optional: without the secret the release still goes
+          # out, unsigned, with a loud warning. The secret must hold only the
+          # dedicated signing SUBKEY (ASCII-armored), never the primary key.
+          if [ -z "${GPG_PRIVATE_KEY:-}" ]; then
+            echo "::warning::GPG_PRIVATE_KEY is not set; publishing unsigned artifacts"
+            exit 0
+          fi
+          export GNUPGHOME="$(mktemp -d)"
+          trap 'rm -rf "$GNUPGHOME"' EXIT
+          printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "signing with key: $(gpg --batch --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')"
+          sign_args=(--batch --yes --pinentry-mode loopback --detach-sign --armor)
+          if [ -n "${GPG_PASSPHRASE:-}" ]; then
+            sign_args+=(--passphrase "$GPG_PASSPHRASE")
+          fi
+          cd dist
+          for f in rpmcrab-*.tar.gz SHA256SUMS; do
+            gpg "${sign_args[@]}" -o "$f.asc" "$f"
+          done
+
       # Attest the tarballs' build provenance between download and release, so
-      # a provenance failure costs the tag and leaves nothing published. The
-      # binary is heading for OBS build gates, so provenance matters.
+      # a provenance failure costs the tag and leaves nothing published.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             dist/*
             !dist/*.sha256
+            !dist/*.asc
 
       - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          tag="$GITHUB_REF_NAME"
           # A non-bare-X.Y.Z tag is a pre-release and never becomes Latest.
           pre=""
-          if ! [[ "$GITHUB_REF_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             pre="--prerelease --latest=false"
           fi
           # Idempotent: a re-run after a partial failure (release created, an
           # asset upload flaked) recovers instead of dying on "already exists".
           # shellcheck disable=SC2086
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes $pre
-          gh release upload "$GITHUB_REF_NAME" --clobber dist/*
-
-  publish:
-    # crates.io last: a version can be yanked but never replaced, so it only
-    # goes out once every platform built and the GitHub release exists.
-    needs: release
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      # Trusted Publishing exchanges this OIDC token for a short-lived
-      # crates.io token, so no registry credential is stored in the repo.
-      id-token: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
-        with:
-          toolchain: stable
-
-      - name: Install RPM development headers
-        run: sudo apt-get update && sudo apt-get install -y librpm-dev
-      - name: Authenticate to crates.io
-        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
-        id: auth
-
-      - name: Publish crates
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="$GITHUB_REF_NAME"
-          # rpmcrab-core first: the binary crate resolves its dependency from
-          # the index and cannot even be packaged before core is there.
-          for crate in rpmcrab-core rpmcrab; do
-            # Re-running a release must not fail on a version already up.
-            if curl -sSf -H 'User-Agent: rpmcrab-release' \
-                 "https://crates.io/api/v1/crates/${crate}/${version}" >/dev/null 2>&1; then
-              echo "::notice::${crate} ${version} is already published, skipping"
-              continue
-            fi
-            cargo publish --locked -p "$crate"
-            # The sparse index can lag the registry: a dependent crate's
-            # resolution would 404 until the just-published version is visible.
-            # Poll until it is, before publishing the crate that depends on it.
-            seen=0
-            for _ in $(seq 1 60); do
-              if curl -sSf -H 'User-Agent: rpmcrab-release' \
-                   "https://crates.io/api/v1/crates/${crate}/${version}" >/dev/null 2>&1; then
-                seen=1
-                break
-              fi
-              sleep 5
-            done
-            [ "$seen" -eq 1 ] || { echo "index never caught up for ${crate} ${version}" >&2; exit 1; }
-          done
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --title "$tag" --generate-notes $pre
+          gh release upload "$tag" --clobber dist/*
