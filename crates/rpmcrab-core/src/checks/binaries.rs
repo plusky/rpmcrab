@@ -393,7 +393,7 @@ impl ObjdumpInfo {
                 return info;
             }
         };
-        let elf = match goblin::elf::Elf::parse(&data) {
+        let elf = match parse_elf(&data) {
             Ok(e) => e,
             Err(e) => {
                 info.failed = Some(e.to_string());
