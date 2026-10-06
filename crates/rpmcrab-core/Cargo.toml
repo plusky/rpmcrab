@@ -66,7 +66,7 @@ gimli = "0.34"
 # cannot read (gimli-rs/gimli#195). flate2 is pure Rust (miniz_oxide); zstd
 # links the C library.
 flate2 = "1"
-zstd = "0.13"
+zstd = "0.14"
 # XML parsing for DBusPolicyCheck (D-Bus policy files). Pure Rust, MIT.
 # XML parsing for PolkitCheck (polkit policy files). Pure Rust, MIT.
 quick-xml = "0.42"
