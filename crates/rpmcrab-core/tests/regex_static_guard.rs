@@ -218,6 +218,21 @@ fn allowlist_matching_is_token_anchored() {
     ));
 }
 
+// Shared liveness predicate for the allowlist: a fragment keeps an entry
+// alive only if it matches on a line the guards actually consult — a
+// `Regex::new` line (comments and `get_or_init`-closure lines excluded, as
+// in `no_bare_regex_new`) or an owned-`Regex` factory line (as in
+// `no_owned_regex_factories`). One copy, called from both the guard test
+// and the pinning test below, so a guard change cannot desync them.
+fn allowlist_entry_is_live(lines: &[&str], i: usize, pat: &str) -> bool {
+    let line = lines[i];
+    fragment_matches_token_anchored(line, pat)
+        && ((line.contains("Regex::new")
+            && !line.trim_start().starts_with("//")
+            && !in_get_or_init_closure(lines, i))
+            || is_owned_regex_factory(line))
+}
+
 #[test]
 fn every_allowlist_entry_matches_a_guarded_line() {
     // Dead entries rot silently: without this test nothing reports an entry
@@ -235,18 +250,10 @@ fn every_allowlist_entry_matches_a_guarded_line() {
     for (file, pat, _) in ALLOWLIST {
         let src = std::fs::read_to_string(dir.join(file)).unwrap();
         let lines: Vec<&str> = src.lines().collect();
-        let live = lines.iter().enumerate().any(|(i, line)| {
-            // Mirror the guards: `no_bare_regex_new` skips `Regex::new`
-            // inside `get_or_init` closures before consulting the
-            // allowlist, so such a line cannot keep an entry alive.
-            // `no_owned_regex_factories` has no such skip, so the factory
-            // arm stays as-is.
-            fragment_matches_token_anchored(line, pat)
-                && ((line.contains("Regex::new")
-                    && !line.trim_start().starts_with("//")
-                    && !in_get_or_init_closure(&lines, i))
-                    || is_owned_regex_factory(line))
-        });
+        let live = lines
+            .iter()
+            .enumerate()
+            .any(|(i, _)| allowlist_entry_is_live(&lines, i, pat));
         if !live {
             dead.push(format!("{file}: {pat}"));
         }
@@ -541,18 +548,14 @@ fn net_parens_ignores_raw_and_byte_raw_strings() {
 #[test]
 fn allowlist_liveness_get_or_init_closure_skip() {
     // plusky's #225 nit: the get_or_init-closure skip in the allowlist
-    // liveness check must be non-inert. Mirror the liveness predicate from
-    // `every_allowlist_entry_matches_a_guarded_line` over synthetic lines
-    // (shape borrowed from `get_or_init_skip_is_membership_not_proximity`
-    // below).
+    // liveness check must be non-inert. Exercise the shared liveness
+    // predicate over synthetic lines (shape borrowed from
+    // `get_or_init_skip_is_membership_not_proximity` below).
     fn is_live(lines: &[&str], pat: &str) -> bool {
-        lines.iter().enumerate().any(|(i, line)| {
-            fragment_matches_token_anchored(line, pat)
-                && ((line.contains("Regex::new")
-                    && !line.trim_start().starts_with("//")
-                    && !in_get_or_init_closure(lines, i))
-                    || is_owned_regex_factory(line))
-        })
+        lines
+            .iter()
+            .enumerate()
+            .any(|(i, _)| allowlist_entry_is_live(lines, i, pat))
     }
 
     // The sole `Regex::new` match sits inside a get_or_init closure: the
