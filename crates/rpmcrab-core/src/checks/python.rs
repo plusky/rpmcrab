@@ -1011,7 +1011,8 @@ mod tests {
     fn marker_python_version_defaults() {
         let check = PythonCheck::new(&Config::default());
         let version = check.marker_python_version(&[], "/somewhere/foo-1.0.dist-info/METADATA");
-        assert_eq!(version, PythonCheck::DEFAULT_PYTHON);
+        // Literal, not the constant: changing DEFAULT_PYTHON must fail.
+        assert_eq!(version, "3.12");
     }
 
     #[test]
@@ -1083,20 +1084,25 @@ mod tests {
 
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
             check.check_binary(&pkg, &config, &mut out);
-            let missing: Vec<_> = out
+            let levels = out.result_levels().to_vec();
+            let findings: Vec<_> = out
                 .results()
                 .iter()
-                .filter(|(name, _)| name == "python-missing-require")
+                .zip(levels)
+                .filter(|((name, _), _)| name == "python-missing-require")
+                .map(|((name, line), level)| (name.clone(), level, line.clone()))
                 .collect();
             if expect_finding {
-                assert_eq!(missing.len(), 1, "results: {:?}", out.results());
-                assert!(
-                    missing[0].1.contains("W:") && missing[0].1.contains("unavailable-dep"),
-                    "line: {}",
-                    missing[0].1
+                assert_eq!(findings.len(), 1, "results: {:?}", out.results());
+                let (name, level, line) = &findings[0];
+                assert_eq!(name, "python-missing-require");
+                assert_eq!(*level, Level::Warning);
+                assert_eq!(
+                    line,
+                    "python-test.noarch: W: python-missing-require unavailable-dep"
                 );
             } else {
-                assert!(missing.is_empty(), "results: {:?}", out.results());
+                assert!(findings.is_empty(), "results: {:?}", out.results());
             }
             std::fs::remove_dir_all(pkg.dir_name().join(format!("cfgtest-{n}"))).ok();
         }
