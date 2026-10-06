@@ -30,10 +30,11 @@ jobs:
         with:
           workspaces: . -> target
       # librpm-sys generates bindings with bindgen, so the build needs the RPM
-      # development headers (pkg-config `rpm.pc`); the tests also need the RPM
-      # runtime tools (rpm2archive/rpm2cpio), cpio and file (libmagic).
+      # development headers (pkg-config `rpm.pc`); the tests also need the
+      # `rpm` CLI (signature check) and `file` (libmagic). Extraction is
+      # native now: no rpm2archive/rpm2cpio or cpio needed.
       - name: Install RPM toolchain (headers + tools)
-        run: sudo apt-get update && sudo apt-get install -y librpm-dev rpm cpio file devscripts dash desktop-file-utils appstream-util
+        run: sudo apt-get update && sudo apt-get install -y librpm-dev rpm file devscripts dash desktop-file-utils appstream-util
       # Spellcheck tests need real hunspell dictionaries; grab the LibreOffice
       # en_US pair (the same source openSUSE packages from).
       - name: Install hunspell dictionaries
@@ -67,7 +68,7 @@ jobs:
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         with:
           workspaces: . -> target
-      # Homebrew's rpm formula provides librpm, the headers, and rpm2archive.
+      # Homebrew's rpm formula provides librpm and the headers.
       # librpm-sys links bare -lrpm/-lrpmio and bindgen needs the headers, so
       # export the locations for the cargo steps below.
       - name: Install RPM via Homebrew

@@ -48,7 +48,8 @@ Without it rpmcrab's builtin `Filters = []` applies and it reports ~49k
 findings the reference filters out — the comparison is meaningless
 unless both sides use the same config.
 
-rpmcrab also needs `rpm2archive`/`rpm2cpio` on PATH.
+rpmcrab needs `rpm` and `file` on PATH (payload extraction is native since
+#276; no `rpm2archive`/`rpm2cpio` needed).
 
 ## Methodology caveat (not parity evidence)
 

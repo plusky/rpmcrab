@@ -135,8 +135,9 @@ existing checks:
   `KeyError`, and a circular reference raises `ValueError` — both **crash the
   linter**, and rpmcrab reproduces the crash (no divergence entry).
 - **Extraction stderr always suppressed** (`pkg.py`) — now the
-  `SuppressExtractionStderr` config key (default `true`): the
-  `rpm2archive`/cpio extraction stderr is `DEVNULL` even in verbose mode.
+  `SuppressExtractionStderr` config key (default `true`), kept for config
+  compatibility but a no-op: native extraction spawns no child whose stderr
+  could leak, even in verbose mode.
 
 **Check-internal patches** (these change *findings*, so each wants a corpus
 case or an explicit ledger entry):

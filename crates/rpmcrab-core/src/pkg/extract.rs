@@ -72,12 +72,14 @@ fn hex_field(hdr: &[u8], from: usize) -> Result<u32, ExtractError> {
 }
 
 /// One parsed newc entry header; `name` is the raw (NUL-stripped) bytes.
+/// `size` is u64: the stripped-cpio path exists exactly for >4GB entries,
+// which a u32 would truncate (desyncing the stream).
 struct CpioEntry {
     ino: u32,
     mode: u32,
     nlink: u32,
     mtime: u32,
-    size: u32,
+    size: u64,
     dev_major: u32,
     dev_minor: u32,
     name: Vec<u8>,
@@ -124,7 +126,8 @@ fn read_entry<R: Read>(
         name.pop();
     }
     skip_pad(r, NEWC_HEADER_LEN + name_len)?;
-    if name == TRAILER_NAME {
+    // `./`-prefixed trailer: some writers keep the prefix tar would strip.
+    if name == TRAILER_NAME || name == b"./TRAILER!!!" {
         return Ok(None);
     }
     Ok(Some(CpioEntry {
@@ -132,7 +135,7 @@ fn read_entry<R: Read>(
         mode: hex_field(hdr, 14)?,
         nlink: hex_field(hdr, 38)?,
         mtime: hex_field(hdr, 46)?,
-        size: hex_field(hdr, 54)?,
+        size: u64::from(hex_field(hdr, 54)?),
         dev_major: hex_field(hdr, 62)?,
         dev_minor: hex_field(hdr, 70)?,
         name,
@@ -155,10 +158,11 @@ fn read_stripped_entry<R: Read>(
         .ok_or_else(|| entry_error(format!("stripped cpio file index {index} out of range")))?;
     let mode = fe.mode().raw_mode() as u32;
     // Directories carry a bogus size in the header; they have no data.
+    // No u32 truncation: the stripped path exists exactly for >4GB entries.
     let size = if fe.file_type() == FileType::Dir {
         0
     } else {
-        fe.size() as u32
+        fe.size() as u64
     };
     let name = fe.path().as_os_str().as_bytes().to_vec();
     Ok(Some(CpioEntry {
@@ -186,14 +190,16 @@ fn skip_pad<R: Read>(r: &mut R, len: usize) -> Result<(), ExtractError> {
 }
 
 /// Discard `size` bytes of entry data plus its padding.
-fn skip_data<R: Read>(r: &mut R, size: u32) -> Result<(), ExtractError> {
-    std::io::copy(&mut r.by_ref().take(size as u64), &mut std::io::sink())?;
+fn skip_data<R: Read>(r: &mut R, size: u64) -> Result<(), ExtractError> {
+    std::io::copy(&mut r.by_ref().take(size), &mut std::io::sink())?;
     skip_pad(r, size as usize)
 }
 
 /// Strip the cpio `./` prefix and any leading `/` (as tar does); refuse `..`
 /// — GNU tar fails the whole extraction there, so this is an error, not a
-/// skip. Names are raw bytes: RPM filenames need not be UTF-8.
+/// skip. `a/b/../c` is rejected too though it stays inside: fail-closed is
+/// safe (tar normalizes-then-checks; no legitimate archive needs `..`).
+/// Names are raw bytes: RPM filenames need not be UTF-8.
 fn sanitize(name: &[u8]) -> Result<PathBuf, ExtractError> {
     let mut out = PathBuf::new();
     for comp in Path::new(OsStr::from_bytes(name)).components() {
@@ -268,7 +274,8 @@ impl<'a> Extractor<'a> {
     /// `mkdir -p`, recording implicitly created dirs for the fixup pass.
     /// Created 0o755: traversable during extraction; the archived mode is
     /// applied afterwards. (tar creates these 0o777 & ~umask; 0o755 matches the
-    /// universal umask-022 case.)
+    /// umask-022 case exactly, and reading the live umask would need unsafe.
+    /// Only stat differs — checks read the archived header modes, so benign.)
     fn ensure_dir_all(&mut self, dir: &Path) -> Result<(), ExtractError> {
         let mut missing: Vec<PathBuf> = Vec::new();
         let mut cur = dir;
@@ -336,7 +343,7 @@ impl<'a> Extractor<'a> {
                     self.materialize_hardlink(r, e, &path)?;
                 } else {
                     let mut f = File::create(&path).map_err(|e| io_error(&path, e))?;
-                    std::io::copy(&mut r.by_ref().take(e.size as u64), &mut f)
+                    std::io::copy(&mut r.by_ref().take(e.size), &mut f)
                         .map_err(|e| io_error(&path, e))?;
                     f.flush().map_err(|e| io_error(&path, e))?;
                     skip_pad(r, e.size as usize)?;
@@ -345,6 +352,14 @@ impl<'a> Extractor<'a> {
             }
             S_IFLNK => {
                 self.ensure_parent(&path)?;
+                // `e.size` is attacker-controlled: cap before allocating
+                // (a 4GB `vec!` would OOM/abort; PATH_MAX bounds any real target).
+                if e.size > 4096 {
+                    return Err(entry_error(format!(
+                        "symlink target too large: {} bytes",
+                        e.size
+                    )));
+                }
                 let mut target = vec![0u8; e.size as usize];
                 r.read_exact(&mut target)
                     .map_err(|e| entry_error(format!("truncated symlink target: {e}")))?;
@@ -364,8 +379,10 @@ impl<'a> Extractor<'a> {
             }
             S_IFCHR | S_IFBLK => {
                 // Device nodes are skipped: creating them needs privilege the
-                // extractor does not have, and tar-as-non-root skips them too
-                // (exit 0). Running the linter as root is out of scope.
+                // extractor does not have. The old tar path actually failed
+                // here with exit 2; skipping cleanly is more correct — the
+                // linter only needs the file list, not the nodes themselves.
+                // Running the linter as root is out of scope.
                 skip_data(r, e.size)?;
             }
             // tar does not materialize sockets either.
@@ -390,9 +407,16 @@ impl<'a> Extractor<'a> {
         let key = (e.dev_major, e.dev_minor, e.ino);
         let group = self.hardlinks.entry(key).or_default();
         if e.size > 0 {
+            // Exactly one entry per group carries data; a second one means a
+            // corrupt archive, not a second copy.
+            if group.data_path.is_some() {
+                return Err(entry_error(format!(
+                    "duplicate data carrier for hardlink group {:?}",
+                    String::from_utf8_lossy(&e.name)
+                )));
+            }
             let mut f = File::create(path).map_err(|e| io_error(path, e))?;
-            std::io::copy(&mut r.by_ref().take(e.size as u64), &mut f)
-                .map_err(|e| io_error(path, e))?;
+            std::io::copy(&mut r.by_ref().take(e.size), &mut f).map_err(|e| io_error(path, e))?;
             f.flush().map_err(|e| io_error(path, e))?;
             skip_pad(r, e.size as usize)?;
             // Re-link earlier placeholders (size-0 entries) to the data carrier.
@@ -421,6 +445,20 @@ impl<'a> Extractor<'a> {
         Ok(())
     }
 
+    /// Every hardlink group needs exactly one data carrier: a group whose
+    /// entries all carried size 0 would otherwise leave empty placeholders
+    /// behind, silently.
+    fn check_hardlinks(&self) -> Result<(), ExtractError> {
+        for (key, group) in &self.hardlinks {
+            if group.data_path.is_none() {
+                return Err(entry_error(format!(
+                    "hardlink group {key:?} has no data carrier"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Second pass: archived modes (+rX, as the reference's `chmod -R +rX .`)
     /// and mtimes. Unlike the old BSD-tar path this preserves setuid/setgid/
     /// sticky bits everywhere, matching the reference (GNU tar) on Linux.
@@ -442,8 +480,10 @@ impl<'a> Extractor<'a> {
                         .set_modified(time)
                         .map_err(|e| io_error(&f.path, e))?;
                 } else {
+                    // `.read(true)`: the file may be 0444 — opening for write
+                    // would EACCES where read-open + set_modified succeeds.
                     OpenOptions::new()
-                        .write(true)
+                        .read(true)
                         .open(&f.path)
                         .map_err(|e| io_error(&f.path, e))?
                         .set_modified(time)
@@ -520,11 +560,21 @@ pub fn extract(rpm: &Path, dir: &Path, _suppress_stderr: bool) -> Result<(), Ext
     while let Some(entry) = read_entry(&mut payload, &file_entries)? {
         extractor.materialize(&mut payload, &entry)?;
     }
+    extractor.check_hardlinks()?;
     extractor.fixup()?;
     // Flush the decoder so truncated-payload errors surface here, not silently.
     let mut sink = std::io::sink();
     std::io::copy(&mut payload, &mut sink)?;
     Ok(())
+}
+
+/// Big-endian u32 from a 4-byte slice, as a typed error — no unwrap on the
+/// production path even where the slice length is statically known.
+fn u32_be(bytes: &[u8]) -> Result<u32, ExtractError> {
+    bytes
+        .try_into()
+        .map(u32::from_be_bytes)
+        .map_err(|_| container_error("truncated rpm header intro"))
 }
 
 /// Byte offset of the payload in an RPM file: 96-byte lead, then the
@@ -549,8 +599,8 @@ fn payload_offset(stream: &mut BufReader<File>) -> Result<u64, ExtractError> {
         if &intro[..3] != b"\x8e\xad\xe8" {
             return Err(container_error(format!("bad rpm {name} header magic")));
         }
-        let entries = u32::from_be_bytes(intro[8..12].try_into().unwrap());
-        let data_len = u32::from_be_bytes(intro[12..16].try_into().unwrap());
+        let entries = u32_be(&intro[8..12])?;
+        let data_len = u32_be(&intro[12..16])?;
         let mut size = 16u64 + u64::from(entries) * 16 + u64::from(data_len);
         if padded {
             size += (8 - size % 8) % 8;
@@ -752,6 +802,142 @@ mod tests {
         // Implicit parent dirs get "now", as with tar.
         assert!(mtime("usr") > ts);
         assert!(mtime("etc") > ts);
+    }
+
+    /// Regression: the mtime fixup must not open files for writing — a 0444
+    /// payload file (docs, licenses, man pages) EACCESes on `.write(true)`.
+    #[test]
+    fn extract_mtime_fixup_works_on_readonly_files() {
+        use rpm::{BuildConfig, FileMode, FileOptions, PackageBuilder, Timestamp};
+
+        let src = tempfile::tempdir().unwrap();
+        let rpm_path = src.path().join("readonly.rpm");
+        let mut b = PackageBuilder::new("roprobe", "1.0", "MIT", "x86_64", "probe");
+        b.using_config(BuildConfig::default().source_date(Timestamp(1_577_922_245)));
+        b.with_file_contents(
+            b"read me\n".to_vec(),
+            FileOptions::new("/usr/share/doc/readme").mode(FileMode::regular(0o444)),
+        )
+        .unwrap();
+        let pkg = b.build().unwrap();
+        pkg.write(&mut File::create(&rpm_path).unwrap()).unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        // Used to fail here: Io(PermissionDenied) from the mtime fixup.
+        extract(&rpm_path, out.path(), true).unwrap();
+
+        let ts = UNIX_EPOCH + Duration::from_secs(1_577_922_245);
+        assert_eq!(
+            std::fs::metadata(out.path().join("usr/share/doc/readme"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            ts
+        );
+        // +rX adds read bits; the archived 0444 stays 0444.
+        assert_eq!(
+            std::fs::symlink_metadata(out.path().join("usr/share/doc/readme"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o444
+        );
+    }
+
+    /// Symlink target sizes are attacker-controlled: cap before allocating.
+    #[test]
+    fn symlink_target_size_is_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ex = Extractor {
+            dir: dir.path(),
+            hardlinks: HashMap::new(),
+            fixups: Vec::new(),
+        };
+        let entry = CpioEntry {
+            ino: 1,
+            mode: S_IFLNK | 0o777,
+            nlink: 1,
+            mtime: 0,
+            size: 5000,
+            dev_major: 0,
+            dev_minor: 0,
+            name: b"link".to_vec(),
+        };
+        let mut data = &b"x"[..];
+        let err = ex.materialize(&mut data, &entry).unwrap_err();
+        assert!(
+            matches!(err, ExtractError::Entry(_)),
+            "oversized symlink target must be an Entry error, got {err:?}"
+        );
+    }
+
+    /// A `./`-prefixed trailer still ends the payload.
+    #[test]
+    fn dot_slash_trailer_ends_payload() {
+        let mut buf = b"070701".to_vec();
+        for _ in 0..11 {
+            buf.extend_from_slice(b"00000000");
+        }
+        buf.extend_from_slice(b"0000000D"); // namesize: "./TRAILER!!!" + NUL
+        buf.extend_from_slice(b"00000000"); // check
+        buf.extend_from_slice(b"./TRAILER!!!\0");
+        buf.push(0); // pad 110 + 13 = 123 up to 124
+        let mut cursor = &buf[..];
+        assert!(read_entry(&mut cursor, &[]).unwrap().is_none());
+    }
+
+    /// Two data carriers for one (dev, ino) is corruption, not a second copy.
+    #[test]
+    fn duplicate_hardlink_carrier_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ex = Extractor {
+            dir: dir.path(),
+            hardlinks: HashMap::new(),
+            fixups: Vec::new(),
+        };
+        let entry = CpioEntry {
+            ino: 7,
+            mode: S_IFREG | 0o644,
+            nlink: 2,
+            mtime: 0,
+            size: 5,
+            dev_major: 0,
+            dev_minor: 0,
+            name: b"f".to_vec(),
+        };
+        // 5 data bytes + 3 pad bytes.
+        let mut data = &b"hello\0\0\0"[..];
+        ex.materialize(&mut data, &entry).unwrap();
+        let mut data2 = &b"world\0\0\0"[..];
+        let err = ex.materialize(&mut data2, &entry).unwrap_err();
+        assert!(matches!(err, ExtractError::Entry(_)));
+    }
+
+    /// A hardlink group with no data carrier must fail loudly, not leave
+    /// empty placeholders behind.
+    #[test]
+    fn carrierless_hardlink_group_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ex = Extractor {
+            dir: dir.path(),
+            hardlinks: HashMap::new(),
+            fixups: Vec::new(),
+        };
+        let entry = CpioEntry {
+            ino: 9,
+            mode: S_IFREG | 0o644,
+            nlink: 2,
+            mtime: 0,
+            size: 0,
+            dev_major: 0,
+            dev_minor: 0,
+            name: b"g".to_vec(),
+        };
+        let mut data = &b""[..];
+        ex.materialize(&mut data, &entry).unwrap();
+        let err = ex.check_hardlinks().unwrap_err();
+        assert!(matches!(err, ExtractError::Entry(_)));
     }
 
     /// bzip2 payloads have no pure-Rust decoder: the failure names the

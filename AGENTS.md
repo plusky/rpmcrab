@@ -30,9 +30,9 @@ whose bindgen step needs `popt.h`: install `popt-devel` (openSUSE) or
 popt in; on openSUSE it does not, so a build-root build with the `build`
 feature fails with an opaque `'popt.h' file not found` bindgen error. (On
 macOS: `brew install popt` plus its include dir in `BINDGEN_EXTRA_CLANG_ARGS`.)
-The tests additionally need the RPM runtime tools
-(`rpm2archive`/`rpm2cpio`), `cpio` and `file` (libmagic), which the parity
-harness and the payload-extraction tests invoke.
+The tests additionally need the `rpm` CLI (signature check) and `file`
+(libmagic); payload extraction is native, so no `rpm2archive`/`rpm2cpio` or
+`cpio` is needed.
 
 The toolchain lives in `rust-toolchain.toml`; the MSRV is declared once in the
 root `Cargo.toml` (`rust-version`) and enforced by a dedicated CI job. Use
