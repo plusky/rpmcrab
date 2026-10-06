@@ -26,3 +26,4 @@ each exercising a particular check behavior.
 | `unexpandedmacro-test-1.0-1.noarch.rpm` | Unexpanded macros in filenames |
 | `richdep-fixture-1.0-1.noarch.rpm` | Rich deps `(foo or bar)`, `(baz >= 1.0 with baz < 2.0)`, nested, `qux(meta)` (#49/#429) |
 | `fsf-address-fixture-1.0-1.noarch.rpm` | incorrect-fsf-address whole-file scan (upstream rpmlint#40): wrong address inside/past the 2048-byte window, plus a silent control |
+| `i18n-two-locale-1.0-1.noarch.rpm` | SUMMARY/DESCRIPTION in C and de: two-entry HEADERI18NTABLE for Pkg::tag_i18n_str (follow-up to #248) |
