@@ -7,7 +7,10 @@
 //! pluggable so a second machine format (SARIF, not JUnit) can be added
 //! later as a new impl without touching the dispatch.
 
+use crate::finding::Finding;
+use crate::level::Level;
 use crate::lint::Lint;
+use crate::report;
 
 /// Everything a renderer needs, borrowed from the finished [`Lint`] run.
 pub struct RenderContext<'a> {
@@ -27,11 +30,26 @@ pub trait Renderer {
     fn render(&self, ctx: &RenderContext) -> String;
 }
 
-/// Human-readable text report (default). Byte shape is frozen; see
-/// [`Lint::render`].
+/// Human-readable text report (default). Byte shape is frozen, pinned by
+/// the `report` golden tests.
+///
+/// The order is the reference's: results, banner, reports, footer
+/// (`lint.py:94-118`). The header and footer count different things:
+/// `header_packages` is the CLI *argument* count (`len(installed) +
+/// len(rpmfile)`, `lint.py:242`), while the footer counts the packages
+/// actually validated.
 pub struct TextRenderer;
 
-/// Machine-readable JSON report; see [`Lint::render_json`].
+/// Machine-readable JSON report (upstream rpmlint#1156): the same
+/// findings as the text report, as a JSON document.
+///
+/// Findings are sorted by `(check, level)` descending, mirroring the
+/// text report's order; the summary carries the footer's counters and
+/// the process exit code.
+///
+/// `duration_secs` is wall-clock time and varies between runs; golden
+/// tests should ignore or redact it. Fatal per-package diagnostics are
+/// printed to stderr (exit code 3) and never appear in the document.
 pub struct JsonRenderer;
 
 /// The renderer for a `--format`/`OutputFormat` value, or `None` for an
@@ -50,13 +68,43 @@ impl Renderer for TextRenderer {
     }
 
     fn render(&self, ctx: &RenderContext) -> String {
-        ctx.lint.render(
-            ctx.prog,
-            ctx.version,
-            ctx.header_packages,
-            ctx.time_report,
-            ctx.duration_secs,
-        )
+        let lint = ctx.lint;
+        let mut out = String::new();
+        out.push_str(&report::header(&report::HeaderParams {
+            prog: ctx.prog,
+            version: ctx.version,
+            conf_files: &lint.config().conf_files,
+            rpmlintrc: &lint.config().rpmlintrc_display,
+            no_checks: lint.config().checks.len(),
+            no_packages: ctx.header_packages,
+            color: &lint.color,
+            width: lint.width,
+        }));
+        out.push_str(&lint.filter().render_results(lint.config()));
+        if lint.aborted() {
+            out.push_str(&report::abort_banner(
+                lint.filter().score,
+                lint.config().badness_threshold,
+                &lint.color,
+                lint.width,
+            ));
+        }
+        if ctx.time_report {
+            out.push_str(&lint.time_report());
+        }
+        out.push_str(&report::footer(&report::FooterParams {
+            packages: lint.packages_checked(),
+            specfiles: lint.specfiles_checked,
+            errors: lint.filter().printed(Level::Error),
+            warnings: lint.filter().printed(Level::Warning),
+            filtered: lint.filter().filtered_out,
+            score: lint.filter().score,
+            duration_secs: ctx.duration_secs,
+            aborted: lint.aborted(),
+            color: &lint.color,
+            width: lint.width,
+        }));
+        out
     }
 }
 
@@ -66,53 +114,39 @@ impl Renderer for JsonRenderer {
     }
 
     fn render(&self, ctx: &RenderContext) -> String {
-        ctx.lint.render_json(
-            ctx.prog,
-            ctx.version,
-            ctx.header_packages,
-            ctx.duration_secs,
-        )
+        let lint = ctx.lint;
+        let mut findings: Vec<&Finding> = lint.filter().findings().iter().collect();
+        findings.sort_by_key(|f| std::cmp::Reverse((f.check.clone(), f.level.letter())));
+        let doc = serde_json::json!({
+            "program": ctx.prog,
+            "version": ctx.version,
+            "packages": ctx.header_packages,
+            "checks": lint.config().checks.len(),
+            "duration_secs": ctx.duration_secs,
+            "findings": findings.iter().map(|f| f.json_value()).collect::<Vec<_>>(),
+            "summary": {
+                "errors": lint.filter().printed(Level::Error),
+                "warnings": lint.filter().printed(Level::Warning),
+                "filtered": lint.filter().filtered_out,
+                "score": lint.filter().score,
+                "aborted": lint.aborted(),
+                "exit_code": lint.exit_code(),
+            },
+        });
+        let mut out = serde_json::to_string_pretty(&doc).expect("findings are JSON-serializable");
+        out.push('\n');
+        out
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::color::Color;
-    use crate::config::Config;
-
-    fn empty_ctx<'a>(lint: &'a Lint) -> RenderContext<'a> {
-        RenderContext {
-            lint,
-            prog: "rpmcrab",
-            version: "2.10.0",
-            header_packages: 1,
-            time_report: false,
-            duration_secs: 0.5,
-        }
-    }
 
     #[test]
     fn renderer_for_resolves_all_formats() {
         assert_eq!(renderer_for("text").unwrap().name(), "text");
         assert_eq!(renderer_for("json").unwrap().name(), "json");
         assert!(renderer_for("yaml").is_none());
-    }
-
-    #[test]
-    fn text_and_json_renderers_match_lint_methods() {
-        // The pluggable layer must not change the two existing formats:
-        // text stays byte-frozen, json stays as #133 shipped it.
-        let config = Config::default();
-        let lint = Lint::new(config, Vec::new(), Color::for_tty(false), 80).unwrap();
-        let ctx = empty_ctx(&lint);
-        assert_eq!(
-            TextRenderer.render(&ctx),
-            lint.render("rpmcrab", "2.10.0", 1, false, 0.5),
-        );
-        assert_eq!(
-            JsonRenderer.render(&ctx),
-            lint.render_json("rpmcrab", "2.10.0", 1, 0.5),
-        );
     }
 }

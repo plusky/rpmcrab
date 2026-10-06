@@ -181,7 +181,7 @@ fn the_footer_counts_every_validated_package() {
     assert_eq!(lint.packages_checked(), 4);
     // One warning per package.
     assert_eq!(lint.filter().printed(Level::Warning), 4);
-    let out = lint.render("rpmlint", "2.10.0", 4, false, 0.1);
+    let out = lint.render_report("text", "rpmlint", "2.10.0", 4, false, 0.1);
     assert!(
         out.contains("4 packages and 0 specfiles checked"),
         "footer: {out}"
@@ -206,7 +206,7 @@ fn after_checks_findings_are_reported() {
         Config::default(),
     );
     lint.check_batch(tasks(2), 1, &make_checks, true);
-    let out = lint.render("rpmlint", "2.10.0", 2, false, 0.1);
+    let out = lint.render_report("text", "rpmlint", "2.10.0", 2, false, 0.1);
     assert!(
         out.contains("(none): I: recorder-after-checks"),
         "stdout: {out}"
@@ -245,7 +245,7 @@ fn unused_rpmlintrc_filters_are_reported_once_on_the_last_package() {
     lint.check_batch(tasks(2), 1, &make_checks, true);
     lint.audit_unused_filters();
 
-    let out = lint.render("rpmlint", "2.10.0", 2, false, 0.1);
+    let out = lint.render_report("text", "rpmlint", "2.10.0", 2, false, 0.1);
     let count = out.matches("unused-rpmlintrc-filter").count();
     assert_eq!(count, 1, "audited once, on the last package: {out}");
     assert!(
@@ -272,7 +272,7 @@ fn ignore_unused_rpmlintrc_suppresses_the_audit() {
     lint.set_audit_rpmlintrc(false);
     lint.check_batch(tasks(2), 1, &make_checks, true);
     lint.audit_unused_filters();
-    let out = lint.render("rpmlint", "2.10.0", 2, false, 0.1);
+    let out = lint.render_report("text", "rpmlint", "2.10.0", 2, false, 0.1);
     assert!(!out.contains("unused-rpmlintrc-filter"), "stdout: {out}");
 }
 
@@ -294,7 +294,7 @@ fn a_used_rpmlintrc_filter_is_not_reported() {
     );
     lint.check_batch(tasks(1), 1, &make_checks, true);
     lint.audit_unused_filters();
-    let out = lint.render("rpmlint", "2.10.0", 1, false, 0.1);
+    let out = lint.render_report("text", "rpmlint", "2.10.0", 1, false, 0.1);
     // The finding matched the pattern, so it is suppressed ...
     assert!(
         !out.contains("W: recorder-found-something"),
@@ -410,7 +410,7 @@ fn spec_inputs_dispatch_to_check_spec() {
 
     assert_eq!(log.lock().unwrap().checked, vec!["spec"]);
     assert_eq!(lint.packages_checked(), 0);
-    let out = lint.render("rpmlint", "2.10.0", 1, false, 0.1);
+    let out = lint.render_report("text", "rpmlint", "2.10.0", 1, false, 0.1);
     assert!(
         out.contains("0 packages and 1 specfiles checked"),
         "footer: {out}"

@@ -62,13 +62,13 @@ pub struct Lint {
     config: Config,
     filter: Filter,
     checks: Vec<Box<dyn Check>>,
-    color: Color,
-    width: usize,
+    pub(crate) color: Color,
+    pub(crate) width: usize,
     check_duration: Durations,
     packages_checked: usize,
     /// How many `.spec` inputs have been validated. The footer's `specfiles`
     /// column is part of the frozen output (`lint.py:114`).
-    specfiles_checked: usize,
+    pub(crate) specfiles_checked: usize,
     /// `Filter.validate_filters` is skipped with `--ignore-unused-rpmlintrc`.
     audit_rpmlintrc: bool,
     /// Set when any package hit a fatal error; the run continues but still
@@ -247,7 +247,7 @@ impl Lint {
     }
 
     /// The abort condition: badness score over a positive threshold.
-    fn aborted(&self) -> bool {
+    pub(crate) fn aborted(&self) -> bool {
         self.config.badness_threshold > 0 && self.filter.score > self.config.badness_threshold
     }
 
@@ -280,101 +280,6 @@ impl Lint {
             .filter(|(_, n)| *n > 0)
             .collect();
         report::time_report(self.check_duration.as_slice(), &files, &self.color)
-    }
-
-    /// The report: header, sorted findings, abort banner (if over threshold),
-    /// and — when requested — the time report, then the footer.
-    ///
-    /// The order is the reference's: results, banner, reports, footer
-    /// (`lint.py:94-118`). The header and footer count different things:
-    /// `header_packages` is the CLI *argument* count (`len(installed) +
-    /// len(rpmfile)`, `lint.py:242`), while the footer counts the packages
-    /// actually validated.
-    pub fn render(
-        &self,
-        prog: &str,
-        version: &str,
-        header_packages: usize,
-        time_report: bool,
-        duration_secs: f64,
-    ) -> String {
-        let mut out = String::new();
-        out.push_str(&report::header(&report::HeaderParams {
-            prog,
-            version,
-            conf_files: &self.config.conf_files,
-            rpmlintrc: &self.config.rpmlintrc_display,
-            no_checks: self.config.checks.len(),
-            no_packages: header_packages,
-            color: &self.color,
-            width: self.width,
-        }));
-        out.push_str(&self.filter.render_results(&self.config));
-        if self.aborted() {
-            out.push_str(&report::abort_banner(
-                self.filter.score,
-                self.config.badness_threshold,
-                &self.color,
-                self.width,
-            ));
-        }
-        if time_report {
-            out.push_str(&self.time_report());
-        }
-        out.push_str(&report::footer(&report::FooterParams {
-            packages: self.packages_checked,
-            specfiles: self.specfiles_checked,
-            errors: self.filter.printed(Level::Error),
-            warnings: self.filter.printed(Level::Warning),
-            filtered: self.filter.filtered_out,
-            score: self.filter.score,
-            duration_secs,
-            aborted: self.aborted(),
-            color: &self.color,
-            width: self.width,
-        }));
-        out
-    }
-
-    /// The `--format json` report (upstream rpmlint#1156): the same
-    /// findings as [`Lint::render`], as a machine-readable JSON document.
-    /// New surface — the text format is untouched.
-    ///
-    /// Findings are sorted by `(check, level)` descending, mirroring the
-    /// text report's order; the summary carries the footer's counters and
-    /// the process exit code.
-    ///
-    /// `duration_secs` is wall-clock time and varies between runs; golden
-    /// tests should ignore or redact it. Fatal per-package diagnostics are
-    /// printed to stderr (exit code 3) and never appear in the document.
-    pub fn render_json(
-        &self,
-        prog: &str,
-        version: &str,
-        header_packages: usize,
-        duration_secs: f64,
-    ) -> String {
-        let mut findings: Vec<&Finding> = self.filter.findings().iter().collect();
-        findings.sort_by_key(|f| std::cmp::Reverse((f.check.clone(), f.level.letter())));
-        let doc = serde_json::json!({
-            "program": prog,
-            "version": version,
-            "packages": header_packages,
-            "checks": self.config.checks.len(),
-            "duration_secs": duration_secs,
-            "findings": findings.iter().map(|f| f.json_value()).collect::<Vec<_>>(),
-            "summary": {
-                "errors": self.filter.printed(Level::Error),
-                "warnings": self.filter.printed(Level::Warning),
-                "filtered": self.filter.filtered_out,
-                "score": self.filter.score,
-                "aborted": self.aborted(),
-                "exit_code": self.exit_code(),
-            },
-        });
-        let mut out = serde_json::to_string_pretty(&doc).expect("findings are JSON-serializable");
-        out.push('\n');
-        out
     }
 
     /// Render the finished run in the requested `--format` (upstream
@@ -621,25 +526,35 @@ mod exit_code_tests {
 
     #[test]
     fn render_report_dispatches_to_json_and_falls_back_to_text() {
+        use crate::render::{RenderContext, Renderer, TextRenderer, renderer_for};
         let config = Config::default();
         let lint = Lint::new(config, vec![], Color::for_tty(false), 80).unwrap();
+        let ctx = RenderContext {
+            lint: &lint,
+            prog: "rpmcrab",
+            version: "2.10.0",
+            header_packages: 1,
+            time_report: false,
+            duration_secs: 0.5,
+        };
         assert_eq!(
             lint.render_report("json", "rpmcrab", "2.10.0", 1, false, 0.5),
-            lint.render_json("rpmcrab", "2.10.0", 1, 0.5),
+            renderer_for("json").unwrap().render(&ctx),
         );
         assert_eq!(
             lint.render_report("text", "rpmcrab", "2.10.0", 1, false, 0.5),
-            lint.render("rpmcrab", "2.10.0", 1, false, 0.5),
+            TextRenderer.render(&ctx),
         );
         assert_eq!(
             lint.render_report("yaml", "rpmcrab", "2.10.0", 1, false, 0.5),
-            lint.render("rpmcrab", "2.10.0", 1, false, 0.5),
+            TextRenderer.render(&ctx),
             "unknown format falls back to text"
         );
     }
 
     #[test]
     fn render_json_sorts_findings_like_text_and_reports_summary() {
+        use crate::render::{JsonRenderer, RenderContext, Renderer};
         let config = Config::default();
         let mut lint = Lint::new(config, vec![], Color::for_tty(false), 80).unwrap();
         for (check, level) in [
@@ -657,8 +572,16 @@ mod exit_code_tests {
                 line: None,
             });
         }
+        let ctx = RenderContext {
+            lint: &lint,
+            prog: "rpmcrab",
+            version: "2.10.0",
+            header_packages: 1,
+            time_report: false,
+            duration_secs: 0.5,
+        };
         let doc: serde_json::Value =
-            serde_json::from_str(&lint.render_json("rpmcrab", "2.10.0", 1, 0.5)).expect("JSON");
+            serde_json::from_str(&JsonRenderer.render(&ctx)).expect("JSON");
         let checks: Vec<&str> = doc["findings"]
             .as_array()
             .expect("findings")

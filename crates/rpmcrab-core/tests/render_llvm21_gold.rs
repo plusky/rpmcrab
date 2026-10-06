@@ -89,7 +89,7 @@ fn reproduces_llvm21_gold_byte_for_byte() {
     let mut lint = Lint::new(config, make_checks(), Color::for_tty(false), 80).unwrap();
     lint.check_batch(vec![Task::File(rpm)], 1, &make_checks, true);
     // version, header arg count, no -t, no -T, duration.
-    let out = lint.render("rpmlint", "2.10.0", 1, false, 0.1);
+    let out = lint.render_report("text", "rpmlint", "2.10.0", 1, false, 0.1);
 
     let expected = "\
 ============================ rpmlint session starts ============================
