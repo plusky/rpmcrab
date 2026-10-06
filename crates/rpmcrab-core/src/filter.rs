@@ -20,6 +20,7 @@ use crate::level::Level;
 pub struct Filter {
     strict: bool,
     scoring: HashMap<String, toml::Value>,
+    severity_overrides: HashMap<String, Level>,
     filter_titles: HashSet<String>,
     blocked_filters: HashSet<String>,
     filters: Vec<Regex>,
@@ -79,6 +80,7 @@ impl Filter {
         Ok(Self {
             strict: config.strict,
             scoring: config.scoring.clone(),
+            severity_overrides: config.severity_overrides.clone(),
             filter_titles: config.filter_titles.iter().cloned().collect(),
             blocked_filters: config.blocked_filters.iter().cloned().collect(),
             filters,
@@ -139,6 +141,13 @@ impl Filter {
                 self.promoted_to_error += 1;
             }
             finding.level = Level::Error;
+        }
+        // Per-finding severity overrides (upstream rpmlint#1335): explicit
+        // user policy, applied after scoring and strict promotion — the
+        // override is the final word on the finding's level. Badness still
+        // follows the scoring table when set, else the level default below.
+        if let Some(level) = self.severity_overrides.get(&finding.check) {
+            finding.level = *level;
         }
         let badness = badness.unwrap_or(if finding.level == Level::Error { 1 } else { 0 });
         finding.badness = badness;
@@ -390,6 +399,61 @@ mod tests {
         assert_eq!(f.printed(Level::Error), 1);
         assert_eq!(f.promoted_to_error, 1);
         assert_eq!(f.score, 1); // E default badness 1 after promotion
+    }
+
+    #[test]
+    fn severity_override_downgrades_error_to_warning() {
+        let mut c = cfg();
+        c.severity_overrides
+            .insert("spelling-error".to_string(), Level::Warning);
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        f.add_info(finding("spelling-error", Level::Error, 0));
+        assert_eq!(f.printed(Level::Warning), 1);
+        assert_eq!(f.printed(Level::Error), 0);
+        assert_eq!(f.score, 0); // W default badness 0
+        assert!(f.results()[0].1.starts_with("pkg.src: W: spelling-error"));
+    }
+
+    #[test]
+    fn severity_override_upgrades_warning_to_error() {
+        let mut c = cfg();
+        c.severity_overrides
+            .insert("no-soname".to_string(), Level::Error);
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        f.add_info(finding("no-soname", Level::Warning, 0));
+        assert_eq!(f.printed(Level::Error), 1);
+        assert_eq!(f.score, 1); // E default badness 1
+        assert!(f.results()[0].1.starts_with("pkg.src: E: no-soname"));
+    }
+
+    #[test]
+    fn severity_override_beats_strict_promotion() {
+        let mut c = cfg();
+        c.strict = true;
+        c.severity_overrides
+            .insert("spelling-error".to_string(), Level::Warning);
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        f.add_info(finding("spelling-error", Level::Warning, 0));
+        // strict promotes (counted), then the override downgrades back: the
+        // table is the final word on the finding's level.
+        assert_eq!(f.promoted_to_error, 1);
+        assert_eq!(f.printed(Level::Warning), 1);
+        assert_eq!(f.printed(Level::Error), 0);
+    }
+
+    #[test]
+    fn severity_override_keeps_explicit_scoring_badness() {
+        let mut c = cfg();
+        c.scoring
+            .insert("some-check".to_string(), toml::Value::Integer(50));
+        c.severity_overrides
+            .insert("some-check".to_string(), Level::Warning);
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        f.add_info(finding("some-check", Level::Warning, 0));
+        // scoring forces E, the override returns it to W, explicit badness
+        // 50 stays (scoring still drives the score).
+        assert_eq!(f.printed(Level::Warning), 1);
+        assert_eq!(f.score, 50);
     }
 
     #[test]

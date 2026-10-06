@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 
 use fancy_regex::Regex;
 
+use crate::level::Level;
+
 /// The bundled base config (rpmlint's `configdefaults.toml`, same GPL-2.0
 /// licence). It is always the lowest-precedence config (sort key 0). Recorded
 /// in `conf_files` as `<builtin>`: rpmlint prints its real installed path, but
@@ -50,6 +52,10 @@ pub struct Config {
     /// (`filter.py` `int()`), so negatives/floats/bools/garbage behave
     /// per-finding. Coerced in `filter.rs`.
     pub scoring: HashMap<String, toml::Value>,
+    /// `[severity-overrides]` — finding name → forced level (upstream
+    /// rpmlint#1335). Applied at the filter layer after scoring and strict
+    /// promotion; the override is the final word on the finding's level.
+    pub severity_overrides: HashMap<String, Level>,
     /// `Filters`.
     pub filters: Vec<String>,
     /// `FilterErrorTitles`.
@@ -107,6 +113,32 @@ impl Config {
             .get("Scoring")
             .and_then(toml::Value::as_table)
             .map(|t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        self.severity_overrides = self
+            .configuration
+            .get("severity-overrides")
+            .and_then(toml::Value::as_table)
+            .map(|t| {
+                t.iter()
+                    .map(|(k, v)| {
+                        let raw = v.as_str().ok_or_else(|| {
+                            format!(
+                                "'[severity-overrides] {k:?} must be a level string, found {}",
+                                value_kind(v)
+                            )
+                        })?;
+                        Level::parse(raw)
+                            .ok_or_else(|| {
+                                format!(
+                                    "'[severity-overrides] {k:?} has unknown level {raw:?} \
+                                     (want E/W/I or error/warning/info)"
+                                )
+                            })
+                            .map(|level| (k.clone(), level))
+                    })
+                    .collect::<Result<HashMap<_, _>, String>>()
+            })
+            .transpose()?
             .unwrap_or_default();
         let flavor = self
             .configuration
@@ -737,6 +769,59 @@ mod tests {
         let err = cfg.finalize().expect_err("string bool must fail");
         assert!(err.contains("PermissiveByDefault"), "got {err}");
         assert!(err.contains("bool"), "got {err}");
+    }
+
+    fn table_with(pairs: &[(&str, &str)]) -> toml::Value {
+        toml::Value::Table(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), toml::Value::String(v.to_string())))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn severity_overrides_parse_letters_and_names() {
+        let mut cfg = Config::default();
+        cfg.configuration.insert(
+            "severity-overrides".to_string(),
+            table_with(&[("a", "E"), ("b", "warning"), ("c", "I")]),
+        );
+        cfg.finalize().unwrap();
+        assert_eq!(cfg.severity_overrides["a"], Level::Error);
+        assert_eq!(cfg.severity_overrides["b"], Level::Warning);
+        assert_eq!(cfg.severity_overrides["c"], Level::Info);
+    }
+
+    #[test]
+    fn severity_overrides_absent_is_empty() {
+        let mut cfg = Config::default();
+        cfg.finalize().unwrap();
+        assert!(cfg.severity_overrides.is_empty());
+    }
+
+    #[test]
+    fn severity_overrides_reject_unknown_level() {
+        let mut cfg = Config::default();
+        cfg.configuration.insert(
+            "severity-overrides".to_string(),
+            table_with(&[("a", "critical")]),
+        );
+        assert!(cfg.finalize().is_err());
+    }
+
+    #[test]
+    fn severity_overrides_reject_non_string() {
+        let mut cfg = Config::default();
+        cfg.configuration.insert(
+            "severity-overrides".to_string(),
+            toml::Value::Table(
+                [("a".to_string(), toml::Value::Integer(1))]
+                    .into_iter()
+                    .collect(),
+            ),
+        );
+        assert!(cfg.finalize().is_err());
     }
 
     #[test]
