@@ -1525,24 +1525,6 @@ impl BinariesCheck {
         }
     }
 
-    fn check_executable_shlib(
-        &self,
-        pkg: &Pkg,
-        pkgfile: &PkgFile,
-        info: &ReadelfInfo,
-        out: &mut Filter,
-    ) {
-        if pkgfile.mode & 0o111 == 0 && info.is_shlib {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "shared-library-not-executable",
-                &[&pkgfile.name],
-            );
-        }
-    }
-
     fn check_optflags(&self, pkg: &Pkg, pkgfile: &PkgFile, config: &Config, out: &mut Filter) {
         if self.is_archive {
             return;
@@ -1705,7 +1687,6 @@ impl BinariesCheck {
         self.check_rpath(pkg, pkgfile, &info, out);
         self.check_library_dependency(pkg, pkgfile, &info, out);
         self.check_forbidden_functions(pkg, pkgfile, &info, config, out);
-        self.check_executable_shlib(pkg, pkgfile, &info, out);
         self.check_optflags(pkg, pkgfile, config, out);
         self.check_hash_sections(pkg, pkgfile, &info, out);
         self.check_no_patchable_function_entries_in_archive(pkg, pkgfile, &info, out);
@@ -3324,37 +3305,6 @@ description = "explicit priority string bypasses the system crypto policy"
         );
         assert_lacks(&results, "no-ldconfig-symlink");
         assert_lacks(&results, "invalid-ldconfig-symlink");
-    }
-
-    #[test]
-    fn shared_library_not_executable() {
-        let config = test_config();
-        let check = BinariesCheck::with_tool_dir(&config, None);
-        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
-        let mut info = syn_info();
-        info.is_shlib = true;
-        let mut pkgfile = syn_file("/usr/lib64/libfoo.so.1", "ELF 64-bit LSB shared object");
-        pkgfile.mode = 0o100644;
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_executable_shlib(&pkg, &pkgfile, &info, &mut out);
-        let results = out.results().to_vec();
-        let lines = lines_for(&results, "shared-library-not-executable");
-        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
-        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
-        assert!(
-            lines[0].contains("/usr/lib64/libfoo.so.1"),
-            "detail: {}",
-            lines[0]
-        );
-
-        pkgfile.mode = 0o100755;
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_executable_shlib(&pkg, &pkgfile, &info, &mut out);
-        assert!(
-            out.results().is_empty(),
-            "executable shlib must be quiet: {:?}",
-            out.results()
-        );
     }
 
     #[test]
