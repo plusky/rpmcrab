@@ -125,7 +125,7 @@ fn read_entry<R: Read>(
     while name.last() == Some(&0) {
         name.pop();
     }
-    skip_pad(r, NEWC_HEADER_LEN + name_len)?;
+    skip_pad(r, (NEWC_HEADER_LEN + name_len) as u64)?;
     // `./`-prefixed trailer: some writers keep the prefix tar would strip.
     if name == TRAILER_NAME || name == b"./TRAILER!!!" {
         return Ok(None);
@@ -179,11 +179,13 @@ fn read_stripped_entry<R: Read>(
 }
 
 /// Skip the newc 4-byte alignment padding after `len` bytes.
-fn skip_pad<R: Read>(r: &mut R, len: usize) -> Result<(), ExtractError> {
+/// `len` is u64: callers pass entry sizes, which exceed u32 on 32-bit
+/// targets; only `len % 4` matters here, so no truncation is possible.
+fn skip_pad<R: Read>(r: &mut R, len: u64) -> Result<(), ExtractError> {
     let pad = (4 - len % 4) % 4;
     if pad > 0 {
         let mut buf = [0u8; 3];
-        r.read_exact(&mut buf[..pad])
+        r.read_exact(&mut buf[..pad as usize])
             .map_err(|e| entry_error(format!("truncated cpio padding: {e}")))?;
     }
     Ok(())
@@ -192,7 +194,7 @@ fn skip_pad<R: Read>(r: &mut R, len: usize) -> Result<(), ExtractError> {
 /// Discard `size` bytes of entry data plus its padding.
 fn skip_data<R: Read>(r: &mut R, size: u64) -> Result<(), ExtractError> {
     std::io::copy(&mut r.by_ref().take(size), &mut std::io::sink())?;
-    skip_pad(r, size as usize)
+    skip_pad(r, size)
 }
 
 /// Strip the cpio `./` prefix and any leading `/` (as tar does); refuse `..`
@@ -346,7 +348,7 @@ impl<'a> Extractor<'a> {
                     std::io::copy(&mut r.by_ref().take(e.size), &mut f)
                         .map_err(|e| io_error(&path, e))?;
                     f.flush().map_err(|e| io_error(&path, e))?;
-                    skip_pad(r, e.size as usize)?;
+                    skip_pad(r, e.size)?;
                 }
                 self.record(path, e.mode & 0o7777, Some(e.mtime), false);
             }
@@ -363,7 +365,7 @@ impl<'a> Extractor<'a> {
                 let mut target = vec![0u8; e.size as usize];
                 r.read_exact(&mut target)
                     .map_err(|e| entry_error(format!("truncated symlink target: {e}")))?;
-                skip_pad(r, e.size as usize)?;
+                skip_pad(r, e.size)?;
                 let _ = fs::remove_file(&path);
                 symlink(OsStr::from_bytes(&target), &path).map_err(|e| io_error(&path, e))?;
                 // Symlink modes/mtimes are OS-determined; tar leaves them too.
@@ -418,7 +420,7 @@ impl<'a> Extractor<'a> {
             let mut f = File::create(path).map_err(|e| io_error(path, e))?;
             std::io::copy(&mut r.by_ref().take(e.size), &mut f).map_err(|e| io_error(path, e))?;
             f.flush().map_err(|e| io_error(path, e))?;
-            skip_pad(r, e.size as usize)?;
+            skip_pad(r, e.size)?;
             // Re-link earlier placeholders (size-0 entries) to the data carrier.
             for other in group.paths.drain(..) {
                 if other != path {
@@ -846,6 +848,8 @@ mod tests {
     }
 
     /// Symlink target sizes are attacker-controlled: cap before allocating.
+    /// The data holds the full 5000 bytes and the message is asserted, so
+    /// without the cap the target would materialize and the test would fail.
     #[test]
     fn symlink_target_size_is_capped() {
         let dir = tempfile::tempdir().unwrap();
@@ -864,11 +868,74 @@ mod tests {
             dev_minor: 0,
             name: b"link".to_vec(),
         };
-        let mut data = &b"x"[..];
+        let full = vec![0x78; 5000];
+        let mut data = &full[..];
         let err = ex.materialize(&mut data, &entry).unwrap_err();
-        assert!(
-            matches!(err, ExtractError::Entry(_)),
-            "oversized symlink target must be an Entry error, got {err:?}"
+        match err {
+            ExtractError::Entry(msg) => assert!(
+                msg.contains("too large"),
+                "oversized symlink target must hit the size cap, got: {msg}"
+            ),
+            other => panic!("oversized symlink target must be an Entry error, got {other:?}"),
+        }
+    }
+
+    /// The stripped-cpio path exists exactly for >4GB entries: a large
+    /// LONGFILESIZES size must survive as u64, never truncate to u32.
+    /// The header is built tiny and fast, then surgically given a
+    /// LONGFILESIZES entry — no 4GB file is needed for the guard.
+    #[test]
+    fn stripped_entry_preserves_size_above_u32_max() {
+        use rpm::{
+            BuildConfig, FileMode, FileOptions, Header, HeaderEntry, IndexData, IndexTag,
+            PackageBuilder, Timestamp,
+        };
+
+        const BIG: u64 = u32::MAX as u64 + 0x1_2345;
+        let mut b = PackageBuilder::new("bigprobe", "1.0", "MIT", "x86_64", "probe");
+        b.using_config(BuildConfig::default().source_date(Timestamp(1_577_922_245)));
+        b.with_file_contents(
+            b"tiny\n".to_vec(),
+            FileOptions::new("/usr/share/big.bin").mode(FileMode::regular(0o644)),
+        )
+        .unwrap();
+        let pkg = b.build().unwrap();
+        let mut meta = pkg.metadata.clone();
+
+        // Swap FILESIZES for LONGFILESIZES carrying a >u32::MAX size.
+        let mut rebuilt: Vec<HeaderEntry> = meta
+            .header
+            .get_all_entries()
+            .unwrap()
+            .into_iter()
+            .filter(|(tag, _)| {
+                *tag != IndexTag::RPMTAG_FILESIZES as u32
+                    && *tag != IndexTag::RPMTAG_HEADERIMMUTABLE as u32
+            })
+            .map(|(tag, data)| HeaderEntry::new(tag, data))
+            .collect();
+        rebuilt.push(HeaderEntry::new(
+            IndexTag::RPMTAG_LONGFILESIZES as u32,
+            IndexData::Int64(vec![BIG]),
+        ));
+        meta.header = Header::from_entries(rebuilt, IndexTag::RPMTAG_HEADERIMMUTABLE);
+
+        // Sanity: the large size really made it into the file entries.
+        let file_entries = meta.get_file_entries().unwrap();
+        assert_eq!(file_entries.len(), 1);
+        assert_eq!(file_entries[0].size() as u64, BIG);
+
+        // 8 hex chars of file index 0 (the 07070X magic is consumed by
+        // `read_entry` before dispatch) + 2 bytes padding to 16.
+        let mut hdr = b"00000000".to_vec();
+        hdr.extend_from_slice(&[0u8; 2]);
+        let mut cur = &hdr[..];
+        let entry = read_stripped_entry(&mut cur, &file_entries)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            entry.size, BIG,
+            "stripped entry size must not truncate above u32::MAX"
         );
     }
 
