@@ -2140,4 +2140,478 @@ make install
             filter.results()
         );
     }
+    // ---- Cannibalized reference emission tests (test_speccheck.py) ----
+    //
+    // Each pins a per-finding emission the reference tests but the port
+    // left unpinned, with hand-built specs. The `refNNN` suffix is the
+    // test_speccheck.py line number at pinned 84848c05.
+
+    /// Write raw `bytes` as `test.spec` and run `SpecCheck` over it, for
+    /// inputs that are not valid UTF-8.
+    fn run_mini_bytes(bytes: &[u8]) -> Vec<(String, String)> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.spec");
+        std::fs::write(&path, bytes).unwrap();
+        let config = config_mini();
+        let pkg = SpecPkg::open(&path).unwrap();
+        let mut check = SpecCheck::new(&config);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_spec(&pkg, &config, &mut out);
+        out.results().to_vec()
+    }
+
+    /// Drive `check_source` over a synthetic source package: the header of
+    /// a real fixture RPM with the file list replaced by `files`.
+    fn run_source(files: Vec<crate::pkg::pkgfile::PkgFile>) -> Vec<(String, String)> {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/w6-tmpfiles-1.0-1.noarch.rpm");
+        let config = config_mini();
+        let mut pkg = Pkg::open_no_extract(&fixture).expect("open fixture header");
+        pkg.files = files;
+        let mut check = SpecCheck::new(&config);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_source(&pkg, &config, &mut out);
+        out.results().to_vec()
+    }
+
+    #[test]
+    fn no_spec_file_fires_error_ref88() {
+        let results = run_source(vec![]);
+        let lines = lines_for(&results, "no-spec-file");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(lines[0].contains("E: no-spec-file"), "line: {}", lines[0]);
+    }
+
+    #[test]
+    fn invalid_spec_name_fires_error_ref106() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mismatched.spec");
+        std::fs::write(&path, "Name: foo\n").unwrap();
+        let results = run_source(vec![crate::pkg::pkgfile::PkgFile {
+            name: "mismatched.spec".to_string(),
+            path: path.to_string_lossy().to_string(),
+            ..Default::default()
+        }]);
+        let lines = lines_for(&results, "invalid-spec-name");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("E: invalid-spec-name"),
+            "line: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn non_utf8_spec_file_fires_error_ref126() {
+        let results = run_mini_bytes(b"Name: foo\nSummary: na\xefve\n");
+        let lines = lines_for(&results, "non-utf8-spec-file");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("E: non-utf8-spec-file"),
+            "line: {}",
+            lines[0]
+        );
+        // A clean spec stays quiet.
+        let clean = run_mini("Name: foo\n");
+        assert!(!has(&clean, "non-utf8-spec-file"), "results: {clean:?}");
+    }
+
+    #[test]
+    fn non_break_space_fires_warning_ref144() {
+        let results = run_mini("Name: foo\nSummary: bar\u{a0}baz\n");
+        let lines = lines_for(&results, "non-break-space");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: non-break-space line 2, char 12"),
+            "line: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn no_buildroot_tag_fires_warning_ref868() {
+        let results = run_mini("Name: foo\n");
+        let lines = lines_for(&results, "no-buildroot-tag");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: no-buildroot-tag"),
+            "line: {}",
+            lines[0]
+        );
+        let with = run_mini("Name: foo\nBuildRoot: %{_tmppath}/foo\n");
+        assert!(!has(&with, "no-buildroot-tag"), "results: {with:?}");
+    }
+
+    #[test]
+    fn deprecated_grep_fires_warning_ref803() {
+        let results = run_mini("Name: foo\n%build\negrep foo\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['egrep']"),
+            "line: {}",
+            lines[0]
+        );
+        // `grep -E` is the sanctioned spelling.
+        let clean = run_mini("Name: foo\n%build\ngrep -E foo\n");
+        assert!(!has(&clean, "deprecated-grep"), "results: {clean:?}");
+    }
+
+    #[test]
+    fn libdir_macro_in_noarch_package_fires_warning_ref781() {
+        let results = run_mini("Name: foo\nBuildArch: noarch\n%files\n%{_libdir}/foo\n");
+        let lines = lines_for(&results, "libdir-macro-in-noarch-package");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: libdir-macro-in-noarch-package (main package) %{_libdir}/foo"),
+            "line: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn mixed_use_of_spaces_and_tabs_fires_warning_ref1043() {
+        // Mirrors the reference fixture: tabs after the colon, spaces
+        // aligning the Version value.
+        let results = run_mini("Name:\tfoo\nVersion:        1.0\n");
+        let lines = lines_for(&results, "mixed-use-of-spaces-and-tabs");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: mixed-use-of-spaces-and-tabs (spaces: line 2, tab: line 1)"),
+            "line: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn ifarch_applied_patch_fires_warning_ref1063() {
+        let results = run_mini(
+            "Name: foo\nPatch1: Patch1.patch\n%prep\n%build\n%install\n%ifarch\n%patch1 -P 1\n%endif\n",
+        );
+        let lines = lines_for(&results, "%ifarch-applied-patch");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: %ifarch-applied-patch Patch1: Patch1.patch"),
+            "line: {}",
+            lines[0]
+        );
+        // The patch is applied, just conditionally: not "not applied".
+        assert!(!has(&results, "patch-not-applied"), "results: {results:?}");
+    }
+
+    #[test]
+    fn patch_macro_old_format_fires_error_ref1098() {
+        let results = run_mini("Name: foo\n%prep\n%patch1\n");
+        let lines = lines_for(&results, "patch-macro-old-format");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("E: patch-macro-old-format"),
+            "line: {}",
+            lines[0]
+        );
+        // The modern `%patch -P N` spelling stays quiet.
+        let modern = run_mini("Name: foo\nPatch1: Patch1.patch\n%prep\n%patch -P 1\n");
+        assert!(
+            !has(&modern, "patch-macro-old-format"),
+            "results: {modern:?}"
+        );
+    }
+
+    #[test]
+    fn macro_in_changelog_fires_warning_ref739() {
+        let results = run_mini("Name: foo\n%changelog\nYou have a %buildroot macro\n");
+        let lines = lines_for(&results, "macro-in-%changelog");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: macro-in-%changelog %buildroot"),
+            "line: {}",
+            lines[0]
+        );
+        // `%autochangelog` is explicitly exempt.
+        let auto = run_mini("Name: foo\n%changelog\n%autochangelog\n");
+        assert!(!has(&auto, "macro-in-%changelog"), "results: {auto:?}");
+    }
+
+    #[test]
+    fn more_than_one_changelog_section_fires_warning_ref937() {
+        let results = run_mini(
+            "Name: foo\n%changelog\n* Tue Jan 1 2020 A\n- x\n%changelog\n* Wed Jan 2 2020 B\n- y\n",
+        );
+        let lines = lines_for(&results, "more-than-one-%changelog-section");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: more-than-one-%changelog-section"),
+            "line: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn lib_package_without_mklibname_fires_error_ref959() {
+        let results = run_mini("Name: foo\n%package -n libfoo\n%description\nfoo\n");
+        let lines = lines_for(&results, "lib-package-without-%mklibname");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("E: lib-package-without-%mklibname"),
+            "line: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn depscript_without_disabling_depgen_fires_warning_ref980() {
+        let results = run_mini("Name: foo\n%define __find_provides /bin/true\n");
+        let lines = lines_for(&results, "depscript-without-disabling-depgen");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: depscript-without-disabling-depgen"),
+            "line: {}",
+            lines[0]
+        );
+        let disabled = run_mini(
+            "Name: foo\n%define _use_internal_dependency_generator 0\n%define __find_provides /bin/true\n",
+        );
+        assert!(
+            !has(&disabled, "depscript-without-disabling-depgen"),
+            "results: {disabled:?}"
+        );
+    }
+
+    #[test]
+    fn patch_fuzz_is_changed_fires_warning_ref1013() {
+        let results = run_mini("Name: foo\n%define _default_patch_fuzz 2\n");
+        let lines = lines_for(&results, "patch-fuzz-is-changed");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: patch-fuzz-is-changed"),
+            "line: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn python_setup_test_fires_warning_ref1164() {
+        let results = run_mini("Name: foo\n%check\n%python_exec setup.py test\n");
+        let lines = lines_for(&results, "python-setup-test");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: python-setup-test %python_exec setup.py test"),
+            "line: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn python_setup_install_fires_warning_ref1177() {
+        // Mirrors the reference fixtures: `setup.py install` and the
+        // `%py*_install` macro spellings.
+        for cmd in [
+            "python3 setup.py install",
+            "%python_install",
+            "%python3_install",
+            "%python312_install",
+            "%py3_install",
+        ] {
+            let results = run_mini(&format!("Name: foo\n%install\n{cmd}\n"));
+            let lines = lines_for(&results, "python-setup-install");
+            assert_eq!(lines.len(), 1, "for {cmd}: {results:?}");
+            assert!(
+                lines[0].contains(&format!("W: python-setup-install {cmd}")),
+                "line: {}",
+                lines[0]
+            );
+        }
+    }
+
+    #[test]
+    fn python_module_def_fires_warning_ref1189() {
+        let results =
+            run_mini("Name: foo\n%{?!python_module:%define python_module() python-%{**}}\n");
+        let lines = lines_for(&results, "python-module-def");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: python-module-def"),
+            "line: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn python_sitelib_glob_in_files_fires_warning_ref1216() {
+        let results = run_mini("Name: foo\n%files\n%{python_sitelib}/*\n");
+        let lines = lines_for(&results, "python-sitelib-glob-in-files");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: python-sitelib-glob-in-files"),
+            "line: {}",
+            lines[0]
+        );
+        // The bare macro (no glob) stays quiet.
+        let plain = run_mini("Name: foo\n%files\n%{python_sitelib}\n");
+        assert!(
+            !has(&plain, "python-sitelib-glob-in-files"),
+            "results: {plain:?}"
+        );
+    }
+
+    #[test]
+    fn make_check_outside_check_section_ref205() {
+        // Fires in %build...
+        let outside = run_mini("Name: foo\n%build\nmake check\n");
+        let lines = lines_for(&outside, "make-check-outside-check-section");
+        assert_eq!(lines.len(), 1, "results: {outside:?}");
+        assert!(
+            lines[0].contains("W: make-check-outside-check-section"),
+            "line: {}",
+            lines[0]
+        );
+        // ...but not inside %check, and not when absent.
+        let inside = run_mini("Name: foo\n%check\nmake check\n");
+        assert!(
+            !has(&inside, "make-check-outside-check-section"),
+            "results: {inside:?}"
+        );
+        let absent = run_mini("Name: foo\n%build\nmake\n");
+        assert!(
+            !has(&absent, "make-check-outside-check-section"),
+            "results: {absent:?}"
+        );
+    }
+
+    #[test]
+    fn use_of_rpm_source_dir_fires_error_ref357() {
+        let results = run_mini("Name: foo\n%build\necho $RPM_SOURCE_DIR\n");
+        let lines = lines_for(&results, "use-of-RPM_SOURCE_DIR");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("E: use-of-RPM_SOURCE_DIR"),
+            "line: {}",
+            lines[0]
+        );
+        // The macro form is the same finding.
+        let macro_form = run_mini("Name: foo\n%build\necho %{_sourcedir}\n");
+        assert!(
+            has(&macro_form, "use-of-RPM_SOURCE_DIR"),
+            "results: {macro_form:?}"
+        );
+    }
+
+    #[test]
+    fn hardcoded_library_path_fires_error_ref401() {
+        let results = run_mini("Name: foo\n%description\n/usr/lib\n");
+        let lines = lines_for(&results, "hardcoded-library-path");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("E: hardcoded-library-path in /usr/lib"),
+            "line: {}",
+            lines[0]
+        );
+        // The macro form stays quiet.
+        let ok = run_mini("Name: foo\n%description\n%{_libdir}/foo\n");
+        assert!(!has(&ok, "hardcoded-library-path"), "results: {ok:?}");
+    }
+
+    #[test]
+    fn obsolete_tag_fires_warning_ref423() {
+        let results = run_mini("Name: foo\nSerial: 2\nCopyright: Something\n");
+        let lines = lines_for(&results, "obsolete-tag");
+        assert_eq!(lines.len(), 2, "results: {results:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("W: obsolete-tag 2")),
+            "lines: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("W: obsolete-tag Something")),
+            "lines: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn prereq_use_fires_error_ref529() {
+        let results = run_mini("Name: foo\nPreReq(pre): none\nPreReq(post): none_other\n");
+        let lines = lines_for(&results, "prereq-use");
+        assert_eq!(lines.len(), 2, "results: {results:?}");
+        assert!(
+            lines[0].contains("E: prereq-use none"),
+            "line: {}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("E: prereq-use none_other"),
+            "line: {}",
+            lines[1]
+        );
+    }
+
+    #[test]
+    fn buildprereq_use_fires_error_ref562() {
+        let results = run_mini("Name: foo\nBuildPreReq: Something\n");
+        let lines = lines_for(&results, "buildprereq-use");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("E: buildprereq-use Something"),
+            "line: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn unversioned_explicit_obsoletes_fires_warning_ref704() {
+        let results = run_mini("Name: foo\nObsoletes: Something\n");
+        let lines = lines_for(&results, "unversioned-explicit-obsoletes");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: unversioned-explicit-obsoletes Something"),
+            "line: {}",
+            lines[0]
+        );
+        // A versioned Obsoletes stays quiet, even with an odd range.
+        let versioned = run_mini("Name: foo\nObsoletes: %{name} <= %{version}\n");
+        assert!(
+            !has(&versioned, "unversioned-explicit-obsoletes"),
+            "results: {versioned:?}"
+        );
+    }
+
+    #[test]
+    fn rpm_buildroot_usage_fires_error_ref164() {
+        let results = run_mini("Name: foo\n%prep\necho $RPM_BUILD_ROOT\n");
+        let lines = lines_for(&results, "rpm-buildroot-usage");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("E: rpm-buildroot-usage %prep echo $RPM_BUILD_ROOT"),
+            "line: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn rpm_buildroot_usage_shell_var_escapes_stay_quiet_ref194() {
+        // Mirrors test_speccheck.py:194: escaped, double-escaped and
+        // commented references in %prep are not real uses; the two in
+        // %build are.
+        let spec = "Name: foo\n\
+            %description\n\
+            $RPM_BUILD_ROOT should not be touched during %build or %prep stage, as it\n\
+            may break short circuit builds.\n\
+            \n\
+            %prep\n\
+            # None of these actually refer to the build root\n\
+            \\$RPM_BUILD_ROOT\n\
+            \\\\\\$RPM_BUILD_ROOT\n\
+            # $RPM_BUILD_ROOT\n\
+            \n\
+            %build\n\
+            \\\\$RPM_BUILD_ROOT\n\
+            echo ${RPM_BUILD_ROOT} # comment\n";
+        let results = run_mini(spec);
+        let lines = lines_for(&results, "rpm-buildroot-usage");
+        assert_eq!(lines.len(), 2, "results: {results:?}");
+        assert!(
+            lines.iter().all(|l| l.contains("%build")),
+            "lines: {lines:?}"
+        );
+    }
 }
