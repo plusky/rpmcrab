@@ -1,5 +1,12 @@
 [[divergence]]
 case = "global"
+check = "TagsCheck"
+kind = "detail"
+reason = "useless-provides carries the upstream rpmlint#427 reword ahead of the pinned reference, per the fix-in-port rule: the reference text claims versioned and unversioned symbols are provided at once, which is not always accurate (duplicate versioned provides trigger the check too). The check behaviour and level are unchanged. Provenance: crates/rpmcrab-core/data/descriptions/README.md."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "ConfigFilesCheck"
 kind = "detail"
 reason = "`non-etc-or-var-file-marked-as-conffile` carries the upstream rpmlint#1606 reword (drop `%config` named as an option, not just moving files) ahead of the pinned reference, per the fix-in-port rule; the check behaviour is unchanged. Provenance: `crates/rpmcrab-core/data/descriptions/README.md`."

@@ -609,6 +609,29 @@ fn explain_known_id() {
     assert!(out.stderr.is_empty());
 }
 
+/// --explain for useless-provides: the staged description carries the
+/// upstream rpmlint#427 reword ahead of the reference (the reference
+/// versioned-and-unversioned claim is not always accurate).
+#[test]
+fn explain_useless_provides_reworded() {
+    let out = rpmcrab(&["-e", "useless-provides"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "useless-provides:
+This package provides multiple times the same capacity. Identical automated
+and manual provides exist, so the redundant manual provide is useless: the
+same provide name is listed more than once (e.g. 'foo' together with 'foo =
+1.0').
+
+
+",
+        "exact --explain stdout"
+    );
+    assert!(out.stderr.is_empty());
+}
+
 /// `--explain`: port of `test_lint.py::test_explain_with_unknown`.
 #[test]
 fn explain_known_and_unknown_ids() {

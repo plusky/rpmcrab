@@ -29,6 +29,11 @@ Provenance, verified against the pinned reference (`84848c0`):
   the reference's `descriptions/FileMetadataCheck.toml` (the port stages the
   device/world-writable descriptions separately, but the `#SUFFIX#`
   references stay).
+- `TagsCheck.toml` — the pinned reference file, with the `useless-provides`
+  entry reworded per upstream rpmlint#427 (the versioned and unversioned
+  symbols are provided at once claim is not always accurate: duplicate
+  versioned provides trigger the check too), staged ahead of the reference
+  per the fix-in-port rule. Ledgered in `tests/parity/divergences.toml`.
 
 Checks whose description file is not staged yet have no wired description:
 `--explain` and `-v` report "Unknown message" for their ids, the same text
