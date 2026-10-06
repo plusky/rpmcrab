@@ -59,28 +59,49 @@ pub fn staged_descriptions() -> HashMap<String, String> {
 
 /// `filter.py::_replace_description_variables`: `#VAR#` resolves against the
 /// merged table itself, recursively (e.g. `REVIEW_NEEDED_TEXT` embeds
-/// `#AUDIT_BUG_URL#`). Iterates to a fixed point per entry.
+/// `#AUDIT_BUG_URL#`).
+///
+/// Resolution is depth-first with cycle detection (upstream rpmlint#1589):
+/// a self-referential or cyclic `#VAR#` fails loudly naming the chain
+/// instead of spinning, and an unknown variable fails naming the referencing
+/// entry — the way the reference's `KeyError` surfaces a broken corpus at
+/// startup.
 fn replace_description_variables(merged: &mut HashMap<String, String>) {
-    // Borrow dance: resolve each entry against an immutable snapshot so the
-    // loop sees the same table the reference's `self.error_details[...]` does.
-    loop {
-        let snapshot = merged.clone();
-        let mut changed = false;
-        for value in merged.values_mut() {
-            let resolved = resolve_vars(value, &snapshot);
-            if resolved != *value {
-                *value = resolved;
-                changed = true;
-            }
-        }
-        if !changed {
-            return;
-        }
+    let keys: Vec<String> = merged.keys().cloned().collect();
+    for key in keys {
+        let mut visiting = Vec::new();
+        let resolved = resolve_entry(&key, merged, &mut visiting);
+        merged.insert(key, resolved);
     }
 }
 
-/// Single pass of `#VAR#` substitution over one entry.
-fn resolve_vars(text: &str, table: &HashMap<String, String>) -> String {
+/// Fully resolve one entry, following `#VAR#` references depth-first.
+/// `visiting` is the current resolution stack, for cycle detection.
+fn resolve_entry(key: &str, table: &HashMap<String, String>, visiting: &mut Vec<String>) -> String {
+    if visiting.iter().any(|k| k == key) {
+        let mut chain = visiting.clone();
+        chain.push(key.to_string());
+        panic!(
+            "cyclic #VAR# reference in staged descriptions: {}",
+            chain.join(" -> ")
+        );
+    }
+    visiting.push(key.to_string());
+    let text = table.get(key).cloned().unwrap_or_default();
+    let out = substitute_vars(&text, table, visiting);
+    visiting.pop();
+    out
+}
+
+/// Single pass of `#VAR#` substitution over one entry's text, resolving each
+/// placeholder recursively. A `#` without a closing `#`, or one whose
+/// content is not a variable name, is literal (e.g. the `#audit_bugs` URL
+/// fragment).
+fn substitute_vars(
+    text: &str,
+    table: &HashMap<String, String>,
+    visiting: &mut Vec<String>,
+) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find('#') {
@@ -88,12 +109,13 @@ fn resolve_vars(text: &str, table: &HashMap<String, String>) -> String {
         match after.find('#') {
             Some(end) => {
                 let var = &after[..end];
-                if var.chars().all(|c| c.is_alphanumeric() || c == '_') && !var.is_empty() {
-                    let replacement = table
-                        .get(var)
-                        .unwrap_or_else(|| panic!("staged description references unknown #{var}#"));
+                if !var.is_empty() && var.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    let referrer = visiting.last().cloned().unwrap_or_default();
+                    if !table.contains_key(var) {
+                        panic!("staged description {referrer:?} references unknown #{var}#");
+                    }
                     out.push_str(&rest[..start]);
-                    out.push_str(replacement);
+                    out.push_str(&resolve_entry(var, table, visiting));
                     rest = &after[end + 1..];
                 } else {
                     out.push_str(&rest[..=start]);
@@ -129,6 +151,72 @@ mod tests {
             }
         }
         false
+    }
+
+    fn panic_message(r: std::thread::Result<()>) -> String {
+        let payload = r.unwrap_err();
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn self_referential_variable_fails_loudly() {
+        let mut table = HashMap::from([("A".to_string(), "#A#".to_string())]);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            replace_description_variables(&mut table);
+        }));
+        assert!(r.is_err(), "self-reference must not resolve silently");
+        let msg = panic_message(r);
+        assert!(msg.contains("cyclic"), "unexpected panic: {msg}");
+        assert!(msg.contains("A -> A"), "chain not named: {msg}");
+    }
+
+    #[test]
+    fn two_cycle_with_surrounding_text_fails_loudly() {
+        // The old fixed-point loop spun forever here: every pass grew the
+        // strings, so `changed` never settled.
+        let mut table = HashMap::from([
+            ("A".to_string(), "x #B#".to_string()),
+            ("B".to_string(), "y #A#".to_string()),
+        ]);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            replace_description_variables(&mut table);
+        }));
+        assert!(r.is_err(), "cycle must not spin forever");
+        let msg = panic_message(r);
+        assert!(msg.contains("cyclic"), "unexpected panic: {msg}");
+        assert!(
+            msg.contains('A') && msg.contains('B'),
+            "chain not named: {msg}"
+        );
+    }
+
+    #[test]
+    fn unknown_variable_names_the_referring_entry() {
+        let mut table = HashMap::from([("ENTRY".to_string(), "see #NOPE# here".to_string())]);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            replace_description_variables(&mut table);
+        }));
+        assert!(r.is_err(), "unknown variable must fail loudly");
+        let msg = panic_message(r);
+        assert!(msg.contains("ENTRY"), "referrer not named: {msg}");
+        assert!(msg.contains("#NOPE#"), "variable not named: {msg}");
+    }
+
+    #[test]
+    fn nested_acyclic_variables_resolve_fully() {
+        let mut table = HashMap::from([
+            ("A".to_string(), "a #B# #C#".to_string()),
+            ("B".to_string(), "b #D#".to_string()),
+            ("C".to_string(), "c".to_string()),
+            ("D".to_string(), "d".to_string()),
+        ]);
+        replace_description_variables(&mut table);
+        assert_eq!(table["A"], "a b d c");
+        assert_eq!(table["B"], "b d");
     }
 
     #[test]
