@@ -4408,7 +4408,7 @@ mod tests {
         );
         assert!(
             hits.iter().any(|d| d.contains(
-                "W: zero-perms-ghost Suggestion: \"%ghost %attr(0755,root,group) /run/netconfig\"")
+                "W: zero-perms-ghost Suggestion: \"%ghost %attr(0755,root,group) /run/netconfig\""
             )),
             "suggestion must use tmpfiles.d perms: {hits:?}"
         );
@@ -4478,8 +4478,16 @@ mod tests {
             .find(|(n, _)| n == "zero-perms-ghost")
             .map(|(_, d)| d.clone())
             .expect("zero-perms-ghost must fire");
+        assert_eq!(
+            out.results()
+                .iter()
+                .filter(|(n, _)| n == "zero-perms-ghost")
+                .count(),
+            1,
+            "exactly one zero-perms-ghost finding: {line}"
+        );
         assert!(
-            line.contains("W: zero-perms-ghost Suggestion: \"%ghost %attr(0644,root,root) /var/cache/ghost.dat"),
+            line.contains("W: zero-perms-ghost Suggestion: \"%ghost %attr(0644,root,root) /var/cache/ghost.dat\""),
             "suggestion must use defaults: {line}"
         );
     }
