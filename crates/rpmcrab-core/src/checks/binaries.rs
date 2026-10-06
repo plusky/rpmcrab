@@ -2233,6 +2233,23 @@ mod tests {
     }
 
     #[test]
+    fn dwarf_producer_keeps_colon_in_producer() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let path = write_dwarf_elf(
+            &dir,
+            "colon",
+            &[("GNU C17 12.3.1: custom-tune=x86-64", false)],
+        );
+        let info = ObjdumpInfo::parse(&path);
+        assert!(
+            info.failed.is_none(),
+            "unexpected failure: {:?}",
+            info.failed
+        );
+        assert_eq!(info.producers, vec!["GNU C17 12.3.1: custom-tune=x86-64"]);
+    }
+
+    #[test]
     fn dwarf_producer_absent_without_debug_sections() {
         let dir = tempfile::TempDir::new().expect("tmpdir");
         let path = write_dwarf_elf(&dir, "stripped", &[]);
