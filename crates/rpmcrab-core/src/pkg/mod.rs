@@ -1107,4 +1107,42 @@ mod rich_dep_fixture_tests {
             vec!["rpmlib(RichDependencies)".to_string()]
         );
     }
+
+    #[test]
+    fn tag_i18n_str_two_locale_fixture() {
+        // plusky's #248 review: the corpus never exercises a multi-locale
+        // package, so pin the lang != "C" branch and the index mapping from
+        // HEADERI18NTABLE into the raw I18NSTRING array against the
+        // hand-built two-locale fixture (locales "C" and "de").
+        let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../tests/fixtures/i18n-two-locale/input/rpmcrab-i18n-two-locale-1.0-1.noarch.rpm",
+        );
+        let pkg = Pkg::installed_from_file(&rpm);
+        // The "C" branch reads the header default (and "C.UTF-8" with it).
+        assert_eq!(
+            pkg.tag_i18n_str(librpm::Tag::SUMMARY, "C"),
+            "English summary of the two-locale fixture"
+        );
+        assert_eq!(
+            pkg.tag_i18n_str(librpm::Tag::SUMMARY, "C.UTF-8"),
+            "English summary of the two-locale fixture"
+        );
+        assert_eq!(
+            pkg.tag_i18n_str(librpm::Tag::DESCRIPTION, "C"),
+            "English description of the two-locale fixture."
+        );
+        // Other locales index into the raw I18NSTRING array via the locale
+        // table: position("de") == 1 must yield the German entry, not the
+        // English one at index 0.
+        assert_eq!(
+            pkg.tag_i18n_str(librpm::Tag::SUMMARY, "de"),
+            "Deutsche Zusammenfassung des Zwei-Sprachen-Fixtures"
+        );
+        assert_eq!(
+            pkg.tag_i18n_str(librpm::Tag::DESCRIPTION, "de"),
+            "Deutsche Beschreibung des Zwei-Sprachen-Fixtures."
+        );
+        // An unknown locale is empty, never the "C" fallback.
+        assert_eq!(pkg.tag_i18n_str(librpm::Tag::SUMMARY, "fr"), "");
+    }
 }
