@@ -2453,7 +2453,7 @@ description = "explicit priority string bypasses the system crypto policy"
             .dynsyms
             .iter()
             .find(|s| elf.dynstrtab.get_at(s.st_name) == Some(sym_name))
-            .unwrap_or_else(|| panic!("{sym_name} present in {so}"));
+            .unwrap_or_else(|| panic!("{sym_name} missing from {so}"));
         assert_eq!(
             sym.st_type(),
             goblin::elf::sym::STT_FUNC,
