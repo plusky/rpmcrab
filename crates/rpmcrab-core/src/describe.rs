@@ -163,7 +163,7 @@ mod tests {
             ),
             (
                 "BinariesCheck.toml",
-                "f7bb27d0255afce6be5c2ba5a4cf18247f828c846da4d415ace284999d3325fd",
+                "c641607ac210f5820d81956c70147cbd6610edcfb9037bddef9d4e97d8b026a7",
             ),
             (
                 "ConfigFilesCheck.toml",

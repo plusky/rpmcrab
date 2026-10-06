@@ -9,10 +9,14 @@ like `filter.py::_replace_description_variables`.
 
 Provenance, verified against the pinned reference (`84848c0`):
 
-- `BinariesCheck.toml`, `IconSizesCheck.toml`, `MixedOwnershipCheck.toml`,
-  `PAMModulesCheck.toml`, `ZipCheck.toml`, `ZyppSyntaxCheck.toml` —
-  byte-identical to the reference `rpmlint/descriptions/` files of the same
-  name.
+- `BinariesCheck.toml` — the pinned reference file, minus the
+  `shared-library-not-executable` entry dropped with the check in #267, plus
+  the restored `shared-library-without-dependency-information` entry (copied
+  verbatim from the pre-deletion upstream file; upstream removed entry and
+  check in `cf619f717bc3`).
+- `IconSizesCheck.toml`, `MixedOwnershipCheck.toml`, `PAMModulesCheck.toml`,
+  `ZipCheck.toml`, `ZyppSyntaxCheck.toml` — byte-identical to the reference
+  `rpmlint/descriptions/` files of the same name.
 - `XinetdDepCheck.toml` — byte-identical to the reference's
   `descriptions/CheckForXinetd.toml`, renamed to the module name.
 - `I18NCheck.toml` — the reference file plus the `incorrect-locale-subdir`

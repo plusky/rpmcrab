@@ -160,6 +160,10 @@ this static library can't be properly debugged.
 program-not-linked-against-libc="""
 The binary is not dynamically linked against libc.
 """
+shared-library-without-dependency-information="""
+The listed shared library doesn't include information about which other
+libraries the library was linked against.
+"""
 missing-mandatory-optflags="""
 This executable was not compiled with expected flags.
 """
