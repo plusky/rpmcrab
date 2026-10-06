@@ -24,7 +24,7 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
-use crate::pkg::pkgfile::{self, PkgFile};
+use crate::pkg::pkgfile::{self, PkgFile, is_reg};
 use crate::tools::{Tool, ToolSource, test_source};
 use std::sync::OnceLock;
 
@@ -630,6 +630,7 @@ impl Check for FilesCheck {
         Self::register_error_details(config, out);
         let mut st = PkgState::default();
         self.check_utf8(pkg, out);
+        self.check_bidi_controls(pkg, out);
         if pkg.is_source {
             return;
         }
@@ -683,6 +684,58 @@ impl Check for FilesCheck {
     }
 }
 
+/// The nine Unicode bidirectional control characters behind trojan-source
+/// (CVE-2021-42574), as UTF-8 byte triples with their codepoint names.
+const BIDI_CONTROLS: [([u8; 3], &str); 9] = [
+    ([0xE2, 0x80, 0xAA], "U+202A LEFT-TO-RIGHT EMBEDDING"),
+    ([0xE2, 0x80, 0xAB], "U+202B RIGHT-TO-LEFT EMBEDDING"),
+    ([0xE2, 0x80, 0xAC], "U+202C POP DIRECTIONAL FORMATTING"),
+    ([0xE2, 0x80, 0xAD], "U+202D LEFT-TO-RIGHT OVERRIDE"),
+    ([0xE2, 0x80, 0xAE], "U+202E RIGHT-TO-LEFT OVERRIDE"),
+    ([0xE2, 0x81, 0xA6], "U+2066 LEFT-TO-RIGHT ISOLATE"),
+    ([0xE2, 0x81, 0xA7], "U+2067 RIGHT-TO-LEFT ISOLATE"),
+    ([0xE2, 0x81, 0xA8], "U+2068 FIRST STRONG ISOLATE"),
+    ([0xE2, 0x81, 0xA9], "U+2069 POP DIRECTIONAL ISOLATE"),
+];
+
+/// Scan `path` in windows for the first bidi control character. Windows
+/// overlap by 2 bytes (the longest control is 3 bytes) so a control split
+/// across a boundary is still matched whole. Unreadable files are skipped
+/// silently here; `read-error` is the FSF scanner's job.
+fn first_bidi_control_in_file(path: &Path) -> Option<&'static str> {
+    const WINDOW: usize = 8192;
+    const OVERLAP: usize = 2;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut window = vec![0u8; WINDOW + OVERLAP];
+    let mut carry = 0usize;
+    loop {
+        let n = std::io::Read::read(&mut file, &mut window[carry..WINDOW + carry]).ok()?;
+        if n == 0 {
+            return None;
+        }
+        let len = carry + n;
+        if let Some(found) = first_bidi_control(&window[..len]) {
+            return Some(found);
+        }
+        carry = OVERLAP.min(len);
+        window.copy_within(len - carry..len, 0);
+    }
+}
+
+/// First bidi control in `bytes`, or `None`.
+fn first_bidi_control(bytes: &[u8]) -> Option<&'static str> {
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        for (seq, name) in BIDI_CONTROLS {
+            if bytes[i..i + 3] == seq {
+                return Some(name);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Whether `path` is one of the two debug trees itself or below it:
 /// `/usr/lib/debug` or `/usr/src/debug`. Tree-prefix equality (not substring
 /// or segment matching) keeps lookalikes like `/usr/lib64/debug` and
@@ -704,6 +757,39 @@ impl FilesCheck {
         for name in pkg.tag_str_array(Tag::FILENAMES) {
             if !is_utf8(name.as_bytes()) {
                 add_info(out, Level::Error, pkg, "filename-not-utf8", &[&name]);
+            }
+        }
+    }
+
+    /// Upstream rpmlint#776: scan text files for Unicode bidirectional
+    /// control characters (trojan-source, CVE-2021-42574), which can make
+    /// source code render differently from how it executes.
+    ///
+    /// Byte-level scan: the nine controls are 3-byte UTF-8 sequences, so
+    /// they are found whatever the surrounding encoding is; windows overlap
+    /// by 2 bytes so a control split across a window boundary is still seen
+    /// whole. One finding per file, naming the first control found. Only
+    /// libmagic-described text files are scanned, per the issue's scope.
+    fn check_bidi_controls(&self, pkg: &Pkg, out: &mut Filter) {
+        for pkgfile in &pkg.files {
+            if !is_reg(pkgfile.mode) {
+                continue;
+            }
+            if !pkgfile.magic.to_lowercase().contains("text") {
+                continue;
+            }
+            let path = Path::new(&pkgfile.path);
+            if !path.is_file() {
+                continue;
+            }
+            if let Some(found) = first_bidi_control_in_file(path) {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "bidi-control-character",
+                    &[&pkgfile.name, found],
+                );
             }
         }
     }
@@ -2971,6 +3057,10 @@ impl FilesCheck {
                 get_strings("StandardGroups").join(", ")
             ),
         );
+        out.set_error_detail(
+            "bidi-control-character",
+            "The file contains Unicode bidirectional control characters.\nThese can be abused to make source code render differently from how\nit executes (trojan-source, CVE-2021-42574). Remove them unless\nthey are intentional (e.g. a test demonstrating the attack).".to_string(),
+        );
         for (id, kind) in [
             ("manpage-not-compressed", "manual page"),
             ("infopage-not-compressed", "info page"),
@@ -3207,6 +3297,124 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn bidi_pkg(dir: &tempfile::TempDir, files: Vec<(&str, &str, Vec<u8>)>) -> Pkg {
+        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
+        let mut pkg =
+            Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        pkg.files = files
+            .into_iter()
+            .map(|(name, magic, content)| {
+                let path = dir.path().join(name.trim_start_matches('/'));
+                std::fs::write(&path, &content).expect("write temp file");
+                PkgFile {
+                    name: name.to_string(),
+                    path: path.to_string_lossy().into_owned(),
+                    mode: 0o100644,
+                    magic: magic.to_string(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        pkg
+    }
+
+    fn bidi_findings(out: &Filter) -> Vec<(Level, String)> {
+        out.results()
+            .iter()
+            .zip(out.result_levels().iter())
+            .filter(|((name, _), _)| *name == "bidi-control-character")
+            .map(|((_, line), level)| (*level, line.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn bidi_control_character_detected_and_named() {
+        // Trojan-source shape: U+202E flips the rendered order of what follows.
+        let evil = "if admin /* \u{202E} */ { return true; }\n";
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = bidi_pkg(
+            &dir,
+            vec![("/evil.c", "ASCII text", evil.as_bytes().to_vec())],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        FilesCheck::new(&config).check_bidi_controls(&pkg, &mut out);
+        let findings = bidi_findings(&out);
+        assert_eq!(findings.len(), 1, "one finding: {findings:?}");
+        assert_eq!(findings[0].0, Level::Warning, "warning, not error");
+        assert!(
+            findings[0].1.contains("U+202E"),
+            "names the control: {}",
+            findings[0].1
+        );
+        assert!(findings[0].1.contains("/evil.c"), "names the file");
+    }
+
+    #[test]
+    fn bidi_clean_text_file_stays_silent() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = bidi_pkg(
+            &dir,
+            vec![(
+                "/clean.c",
+                "ASCII text",
+                b"int main(void) { return 0; }\n".to_vec(),
+            )],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        FilesCheck::new(&config).check_bidi_controls(&pkg, &mut out);
+        assert!(bidi_findings(&out).is_empty(), "no findings");
+    }
+
+    #[test]
+    fn bidi_binary_file_not_scanned() {
+        // Byte-identical payload, but libmagic says ELF: out of scope for a
+        // text-file check, even though the bytes are present.
+        let mut content = b"\x7fELF".to_vec();
+        content.extend_from_slice("/* \u{202E} */".as_bytes());
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = bidi_pkg(&dir, vec![("/a.out", "ELF 64-bit LSB executable", content)]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        FilesCheck::new(&config).check_bidi_controls(&pkg, &mut out);
+        assert!(bidi_findings(&out).is_empty(), "binaries out of scope");
+    }
+
+    #[test]
+    fn bidi_control_split_across_window_boundary_found() {
+        // U+202E is E2 80 AE: place E2 80 at the very end of the first
+        // 8192-byte window and AE at the start of the next.
+        let mut content = vec![b'x'; 8192 - 2];
+        content.extend_from_slice(&[0xE2, 0x80, 0xAE]);
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = bidi_pkg(&dir, vec![("/boundary.txt", "ASCII text", content)]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        FilesCheck::new(&config).check_bidi_controls(&pkg, &mut out);
+        let findings = bidi_findings(&out);
+        assert_eq!(
+            findings.len(),
+            1,
+            "boundary split still found: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn bidi_all_nine_controls_recognized() {
+        for (seq, name) in BIDI_CONTROLS {
+            assert_eq!(
+                first_bidi_control(&seq),
+                Some(name),
+                "{} not recognized",
+                name
+            );
+        }
+        assert_eq!(first_bidi_control(b"plain ascii"), None);
+        // Trailing partial sequence is not a match.
+        assert_eq!(first_bidi_control(&[0xE2, 0x80]), None);
     }
 
     #[test]
