@@ -393,6 +393,104 @@ impl ObjdumpInfo {
     }
 }
 
+/// Raw bytes of a DWARF section, with linker compression undone.
+///
+/// gimli never decompresses debug sections: the crate contains no inflate,
+/// zlib, zstd or SHF_COMPRESSED handling, and upstream gimli-rs/gimli#195
+/// (open since 2017) shows no intent to add any -- gimli stays no_std and
+/// dependency-light by design, so the caller owns decompression. gcc/binutils
+/// emit three compressed forms, all unwrapped here so the gimli loader stays
+/// untouched:
+/// * `SHF_COMPRESSED` sections with `ELFCOMPRESS_ZLIB`: an `Elf_Chdr` header
+///   followed by the zlib stream;
+/// * `SHF_COMPRESSED` sections with `ELFCOMPRESS_ZSTD`: same header, zstd
+///   stream;
+/// * legacy GNU `.zdebug_*` sections (looked up when `<name>` is absent):
+///   "ZLIB\0" magic, 8-byte big-endian uncompressed size, zlib stream.
+///
+/// Uncompressed sections pass through unchanged.
+fn dwarf_section_bytes(
+    elf: &goblin::elf::Elf<'_>,
+    data: &[u8],
+    name: &str,
+) -> Result<Vec<u8>, gimli::Error> {
+    use goblin::elf::compression_header::{ELFCOMPRESS_ZLIB, ELFCOMPRESS_ZSTD};
+    use goblin::elf::section_header::SHF_COMPRESSED;
+
+    // Legacy GNU zlib sections rename `.debug_*` to `.zdebug_*`.
+    let gnu_name = name
+        .strip_prefix(".debug")
+        .map(|rest| format!(".zdebug{rest}"));
+    let sh = elf
+        .section_headers
+        .iter()
+        .find(|sh| elf.shdr_strtab.get_at(sh.sh_name) == Some(name))
+        .or_else(|| {
+            gnu_name.as_deref().and_then(|gnu| {
+                elf.section_headers
+                    .iter()
+                    .find(|sh| elf.shdr_strtab.get_at(sh.sh_name) == Some(gnu))
+            })
+        });
+    let Some(sh) = sh else {
+        return Ok(Vec::new());
+    };
+    let start = sh.sh_offset as usize;
+    let end = start.saturating_add(sh.sh_size as usize);
+    let raw = data.get(start..end).unwrap_or(&[]);
+
+    let int = |bytes: &[u8]| -> Result<u32, gimli::Error> {
+        bytes
+            .try_into()
+            .map(|w: [u8; 4]| {
+                if elf.little_endian {
+                    u32::from_le_bytes(w)
+                } else {
+                    u32::from_be_bytes(w)
+                }
+            })
+            .map_err(|_| gimli::Error::Io)
+    };
+
+    if sh.sh_flags & u64::from(SHF_COMPRESSED) != 0 {
+        // Elf_Chdr is ch_type u32, then ch_size/ch_addralign as u32 (32-bit)
+        // or u32 padding + u64/u64 (64-bit), all in the file's endianness.
+        let chdr_len = if elf.is_64 { 24 } else { 12 };
+        let (hdr, stream) = raw.split_at_checked(chdr_len).ok_or(gimli::Error::Io)?;
+        return match int(&hdr[..4])? {
+            ELFCOMPRESS_ZLIB => {
+                use std::io::Read;
+                let mut out = Vec::new();
+                flate2::read::ZlibDecoder::new(stream)
+                    .read_to_end(&mut out)
+                    .map_err(|_| gimli::Error::Io)?;
+                Ok(out)
+            }
+            ELFCOMPRESS_ZSTD => zstd::decode_all(stream).map_err(|_| gimli::Error::Io),
+            // Unknown to us is unknown to objdump too: surface the failure
+            // instead of guessing at the bytes.
+            _ => Err(gimli::Error::Io),
+        };
+    }
+    if elf
+        .shdr_strtab
+        .get_at(sh.sh_name)
+        .is_some_and(|n| n.starts_with(".zdebug_"))
+    {
+        let (hdr, stream) = raw.split_at_checked(13).ok_or(gimli::Error::Io)?;
+        if &hdr[..5] != b"ZLIB\0".as_slice() {
+            return Err(gimli::Error::Io);
+        }
+        use std::io::Read;
+        let mut out = Vec::new();
+        flate2::read::ZlibDecoder::new(stream)
+            .read_to_end(&mut out)
+            .map_err(|_| gimli::Error::Io)?;
+        return Ok(out);
+    }
+    Ok(raw.to_vec())
+}
+
 /// `DW_AT_producer` of every DWARF compilation unit, in section order.
 /// Pure-Rust replacement for the reference's `objdump --dwarf=info` parse.
 /// One deliberate departure: the reference keeps the text after the last `:`
@@ -403,18 +501,6 @@ fn dwarf_producers(elf: &goblin::elf::Elf<'_>, data: &[u8]) -> Result<Vec<String
 
     use gimli::{DwarfSections, EndianSlice, RunTimeEndian, SectionId};
 
-    let section = |name: &str| -> &[u8] {
-        elf.section_headers
-            .iter()
-            .find_map(|sh| {
-                (elf.shdr_strtab.get_at(sh.sh_name) == Some(name)).then(|| {
-                    let start = sh.sh_offset as usize;
-                    let end = start.saturating_add(sh.sh_size as usize);
-                    data.get(start..end).unwrap_or(&[])
-                })
-            })
-            .unwrap_or(&[])
-    };
     let endian = if elf.little_endian {
         RunTimeEndian::Little
     } else {
@@ -422,7 +508,7 @@ fn dwarf_producers(elf: &goblin::elf::Elf<'_>, data: &[u8]) -> Result<Vec<String
     };
     let dwarf_sections =
         DwarfSections::load(|id: SectionId| -> Result<Cow<'_, [u8]>, gimli::Error> {
-            Ok(Cow::Borrowed(section(id.name())))
+            Ok(Cow::Owned(dwarf_section_bytes(elf, data, id.name())?))
         })?;
     let borrow_section: &dyn for<'a> Fn(&'a Cow<[u8]>) -> EndianSlice<'a, RunTimeEndian> =
         &|s| EndianSlice::new(s, endian);
@@ -1937,6 +2023,59 @@ mod tests {
     /// uses `DW_FORM_string`, otherwise the producer is referenced with
     /// `DW_FORM_strp` from `.debug_str`.
     fn dwarf_test_elf(cus: &[(&str, bool)]) -> Vec<u8> {
+        dwarf_test_elf_impl(cus, None)
+    }
+
+    /// Compression applied to the `.debug_info` section of the test ELF,
+    /// mirroring what gcc/binutils emit.
+    #[derive(Clone, Copy, Debug)]
+    enum DwarfCompress {
+        /// `SHF_COMPRESSED` + `ELFCOMPRESS_ZLIB` (modern `-gz=zlib`).
+        ZlibShf,
+        /// `SHF_COMPRESSED` + `ELFCOMPRESS_ZSTD` (modern `-gz=zstd`).
+        ZstdShf,
+        /// Legacy GNU `.zdebug_info`: "ZLIB\0" magic, 8-byte big-endian
+        /// uncompressed size, zlib stream.
+        GnuZdebug,
+    }
+
+    /// `Elf_Chdr` + compressed stream for the `SHF_COMPRESSED` fixture.
+    fn shf_compressed(raw: &[u8], ch_type: u32) -> Vec<u8> {
+        let stream = match ch_type {
+            1 => {
+                use std::io::Write;
+                let mut enc =
+                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                enc.write_all(raw).expect("zlib compress");
+                enc.finish().expect("zlib finish")
+            }
+            _ => zstd::encode_all(raw, 0).expect("zstd compress"),
+        };
+        let mut out = Vec::new();
+        // 64-bit Elf_Chdr: ch_type u32, padding u32, ch_size u64,
+        // ch_addralign u64 (the fixture ELF is 64-bit).
+        out.extend_from_slice(&ch_type.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+        out.extend_from_slice(&1u64.to_le_bytes());
+        out.extend_from_slice(&stream);
+        out
+    }
+
+    /// Legacy GNU `.zdebug_*` payload: "ZLIB\0", BE size, zlib stream.
+    fn gnu_zdebug(raw: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(raw).expect("zlib compress");
+        let stream = enc.finish().expect("zlib finish");
+        let mut out = Vec::new();
+        out.extend_from_slice(b"ZLIB\0");
+        out.extend_from_slice(&(raw.len() as u64).to_be_bytes());
+        out.extend_from_slice(&stream);
+        out
+    }
+
+    fn dwarf_test_elf_impl(cus: &[(&str, bool)], compress: Option<DwarfCompress>) -> Vec<u8> {
         let mut debug_str = Vec::new();
         let mut str_offsets: Vec<Option<u32>> = Vec::new();
         for (producer, inline) in cus {
@@ -1973,10 +2112,17 @@ mod tests {
             debug_info.extend_from_slice(&unit);
         }
 
-        let shstrtab = b"\0.debug_abbrev\0.debug_info\0.debug_str\0.shstrtab\0";
-        let sections: [&[u8]; 4] = [debug_abbrev, &debug_info, &debug_str, &shstrtab[..]];
-        let sh_names = [1u32, 15, 27, 38];
+        let shstrtab = b"\0.debug_abbrev\0.debug_info\0.debug_str\0.shstrtab\0.zdebug_info\0";
+        let (info_bytes, info_name, info_flags) = match compress {
+            None => (debug_info, 15u32, 0u64),
+            Some(DwarfCompress::ZlibShf) => (shf_compressed(&debug_info, 1), 15, 0x800),
+            Some(DwarfCompress::ZstdShf) => (shf_compressed(&debug_info, 2), 15, 0x800),
+            Some(DwarfCompress::GnuZdebug) => (gnu_zdebug(&debug_info), 48, 0),
+        };
+        let sections: [&[u8]; 4] = [debug_abbrev, &info_bytes, &debug_str, &shstrtab[..]];
+        let sh_names = [1u32, info_name, 27, 38];
         let sh_types = [1u32, 1, 1, 3];
+        let sh_flags = [0u64, info_flags, 0, 0];
 
         let mut out = Vec::new();
         out.extend_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]);
@@ -2009,7 +2155,7 @@ mod tests {
         for (i, s) in sections.iter().enumerate() {
             out.extend_from_slice(&sh_names[i].to_le_bytes());
             out.extend_from_slice(&sh_types[i].to_le_bytes());
-            out.extend_from_slice(&0u64.to_le_bytes());
+            out.extend_from_slice(&sh_flags[i].to_le_bytes());
             out.extend_from_slice(&0u64.to_le_bytes());
             out.extend_from_slice(&sh_offsets[i].to_le_bytes());
             out.extend_from_slice(&(s.len() as u64).to_le_bytes());
@@ -2107,6 +2253,31 @@ mod tests {
         let info = ObjdumpInfo::parse(path.to_str().unwrap());
         assert!(info.failed.is_some(), "goblin failure should surface");
         assert!(info.producers.is_empty());
+    }
+
+    #[test]
+    fn dwarf_producer_extraction_compressed_sections() {
+        let cus = [("GNU C17 12.3.1 -O2 -D_FORTIFY_SOURCE=2", false)];
+        for kind in [
+            DwarfCompress::ZlibShf,
+            DwarfCompress::ZstdShf,
+            DwarfCompress::GnuZdebug,
+        ] {
+            let dir = tempfile::TempDir::new().expect("tmpdir");
+            let path = dir.path().join("prog");
+            std::fs::write(&path, dwarf_test_elf_impl(&cus, Some(kind))).expect("write test ELF");
+            let info = ObjdumpInfo::parse(path.to_str().unwrap());
+            assert!(
+                info.failed.is_none(),
+                "unexpected failure for {kind:?}: {:?}",
+                info.failed
+            );
+            assert_eq!(
+                info.producers,
+                vec!["GNU C17 12.3.1 -O2 -D_FORTIFY_SOURCE=2"],
+                "producer lost for {kind:?}"
+            );
+        }
     }
 
     #[test]

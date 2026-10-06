@@ -61,6 +61,12 @@ goblin = "0.10"
 # DWARF parsing for BinariesCheck DW_AT_producer extraction (the optflags
 # check). Pure Rust; replaces the reference objdump --dwarf=info subprocess.
 gimli = "0.34"
+# Debug-section decompression for the gimli DWARF harness: gcc/binutils emit
+# SHF_COMPRESSED (zlib/zstd) and legacy .zdebug_* (zlib) sections, which gimli
+# cannot read (gimli-rs/gimli#195). flate2 is pure Rust (miniz_oxide); zstd
+# links the C library.
+flate2 = "1"
+zstd = "0.13"
 # XML parsing for DBusPolicyCheck (D-Bus policy files). Pure Rust, MIT.
 # XML parsing for PolkitCheck (polkit policy files). Pure Rust, MIT.
 quick-xml = "0.42"
