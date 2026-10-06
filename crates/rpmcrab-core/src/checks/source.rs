@@ -15,13 +15,32 @@ use crate::pkg::Pkg;
 
 pub struct SourceCheck {
     compress_ext: String,
-    not_compressed_detail: String,
     valid_src_perms: Vec<u128>,
     ext_magic: Vec<(String, String, Regex)>,
     spec_file: Option<String>,
 }
 
 impl SourceCheck {
+    /// `error_details` for `--explain`, mirroring `source_details_dict`
+    /// (`SourceCheck.py:28-33`) installed in `__init__`.
+    pub fn register_error_details(config: &Config, out: &mut Filter) {
+        let compress_ext = config
+            .configuration
+            .get("CompressExtension")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_else(|| panic!("SourceCheck: CompressExtension must be a string"));
+        out.set_error_detail(
+            "source-not-compressed",
+            Self::not_compressed_detail(compress_ext),
+        );
+    }
+
+    fn not_compressed_detail(compress_ext: &str) -> String {
+        format!(
+            "A source archive or file in your package is not compressed using the {compress_ext}\ncompression method (doesn't have the {compress_ext} extension)."
+        )
+    }
+
     pub fn new(config: &Config) -> Self {
         // The reference reads `config.configuration['CompressExtension']`
         // and raises `KeyError` when it is absent; defaulting to `""` would
@@ -32,12 +51,6 @@ impl SourceCheck {
             .and_then(toml::Value::as_str)
             .unwrap_or_else(|| panic!("SourceCheck: CompressExtension must be a string"))
             .to_string();
-        // The reference registers this description with the configured
-        // compression interpolated in (`__init__`, not per package).
-        let not_compressed_detail = format!(
-            "A source archive or file in your package is not compressed using the {}\n            compression method (doesn't have the {} extension).",
-            compress_ext, compress_ext
-        );
         // The reference runs `[int(value, 8) for value in
         // config.configuration['ValidSrcPerms']]` and dies on a missing key
         // or a bad entry. Substituting an empty list instead would emit
@@ -73,7 +86,6 @@ impl SourceCheck {
         .collect();
         Self {
             compress_ext,
-            not_compressed_detail,
             valid_src_perms,
             ext_magic,
             spec_file: None,
@@ -336,8 +348,8 @@ impl Check for SourceCheck {
         "SourceCheck"
     }
 
-    fn check_source(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
-        out.set_error_detail("source-not-compressed", self.not_compressed_detail.clone());
+    fn check_source(&mut self, pkg: &Pkg, config: &Config, out: &mut Filter) {
+        Self::register_error_details(config, out);
         for f in &pkg.files {
             for (level, check, details) in self.file_findings(&f.name, f.mode, &f.magic) {
                 let refs: Vec<&str> = details.iter().map(String::as_str).collect();

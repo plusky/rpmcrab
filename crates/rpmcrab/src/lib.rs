@@ -204,8 +204,18 @@ pub fn run() -> ExitCode {
         );
         return ExitCode::SUCCESS;
     }
+    // `--explain`: print the description for each message id and exit 0
+    // without linting anything. The reference loads its checks before
+    // explaining, so the check `__init__` descriptions are installed first.
     if !cli.explain.is_empty() {
-        // TODO(M2): print the explanation from the description corpus.
+        let mut filter =
+            rpmcrab_core::filter::Filter::new(&cfg, color).expect("filter regexes are valid");
+        rpmcrab_core::check::register_error_details(&cfg, &mut filter);
+        for id in &cli.explain {
+            // The reference `print(f'{message}:\n{explanation}')` appends one
+            // trailing newline after the block.
+            println!("{}", filter.explanation(id, &cfg));
+        }
         return ExitCode::SUCCESS;
     }
 

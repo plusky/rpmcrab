@@ -575,3 +575,133 @@ fn output_format_config_selects_json() {
         "CLI --format text must win over config, got: {stdout:.200}"
     );
 }
+
+/// `--explain`: port of `test_lint.py::test_explain_unknown` — an unknown id
+/// prints the reference's `Unknown message` text and exits 0.
+#[test]
+fn explain_unknown_id() {
+    let out = rpmcrab(&["-e", "bullcrap"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "bullcrap:\nUnknown message, please report a bug if the description should be present.\n\n\n",
+        "exact --explain stdout"
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `--explain`: port of `test_lint.py::test_explain_known`.
+#[test]
+fn explain_known_id() {
+    let out = rpmcrab(&["-e", "infopage-not-compressed"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "infopage-not-compressed:\nThis info page is not compressed with the bz2 compression method (does not\nhave the bz2 extension). If the compression does not happen automatically when\nthe package is rebuilt, make sure that you have the appropriate rpm helper\nand/or config packages for your target distribution installed and try\nrebuilding again; if it still does not happen automatically, you can compress\nthis file in the %install section of the spec file.\n\n\n",
+        "exact --explain stdout"
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: port of `test_lint.py::test_explain_with_unknown`.
+#[test]
+fn explain_known_and_unknown_ids() {
+    let out = rpmcrab(&["-e", "infopage-not-compressed", "blablablabla"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "infopage-not-compressed:\nThis info page is not compressed with the bz2 compression method (does not\nhave the bz2 extension). If the compression does not happen automatically when\nthe package is rebuilt, make sure that you have the appropriate rpm helper\nand/or config packages for your target distribution installed and try\nrebuilding again; if it still does not happen automatically, you can compress\nthis file in the %install section of the spec file.\n\n\nblablablabla:\nUnknown message, please report a bug if the description should be present.\n\n\n",
+        "exact --explain stdout"
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: port of `test_lint.py::test_explain_known_warn_on_function`.
+/// The `WarnOnFunction` description resolves the id; without that config the
+/// same id is unknown.
+#[test]
+fn explain_warn_on_function_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("warn-on-functions.toml");
+    std::fs::write(
+        &cfg,
+        "[WarnOnFunction.crypto-policy-non-compliance-openssl]\n\
+         f_name = \"SSL_CTX_set_cipher_list\"\n\
+         good_param = \"PROFILE=SYSTEM\"\n\
+         description = \"\"\"\n\
+         This application package calls a function to explicitly set crypto ciphers.\n\
+         \"\"\"\n",
+    )
+    .unwrap();
+    let out = rpmcrab(&[
+        "-c",
+        cfg.to_str().unwrap(),
+        "-e",
+        "crypto-policy-non-compliance-openssl",
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "crypto-policy-non-compliance-openssl:\nThis application package calls a function to explicitly set crypto ciphers.\n\n",
+        "exact --explain stdout"
+    );
+
+    let out = rpmcrab(&["-e", "crypto-policy-non-compliance-openssl"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "crypto-policy-non-compliance-openssl:\nUnknown message, please report a bug if the description should be present.\n\n\n",
+        "exact --explain stdout"
+    );
+}
+
+/// `--explain`: port of `test_lint.py::test_explain_no_binary_from_cfg` — a
+/// `[Descriptions]` entry overrides the staged text.
+#[test]
+fn explain_description_override_from_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("descriptions.toml");
+    std::fs::write(
+        &cfg,
+        "[Descriptions]\nno-binary = \"\"\"\nA new text for no-binary error.\n\"\"\"\n",
+    )
+    .unwrap();
+    let out = rpmcrab(&["-c", cfg.to_str().unwrap(), "-e", "no-binary"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout, "no-binary:\nA new text for no-binary error.\n\n\n",
+        "exact --explain stdout"
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: port of `test_lint.py::test_explain_non_standard_dir_from_cfg`.
+/// `non-standard-dir-in-usr` is special: its base description is built by
+/// `FHSCheck`, not staged, and the config override replaces it.
+#[test]
+fn explain_fhs_description_override_from_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("descriptions.toml");
+    std::fs::write(
+        &cfg,
+        "[Descriptions]\nnon-standard-dir-in-usr = \"\"\"\nA new text for non-standard-dir-in-usr error.\n\"\"\"\n",
+    )
+    .unwrap();
+    let out = rpmcrab(&["-c", cfg.to_str().unwrap(), "-e", "non-standard-dir-in-usr"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout, "non-standard-dir-in-usr:\nA new text for non-standard-dir-in-usr error.\n\n\n",
+        "exact --explain stdout"
+    );
+    assert!(out.stderr.is_empty());
+}

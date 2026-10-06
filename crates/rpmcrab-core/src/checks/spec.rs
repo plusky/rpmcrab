@@ -762,16 +762,10 @@ impl Check for SpecCheck {
     }
 
     /// `check_spec`: run the spec checks over a `.spec` input.
-    fn check_spec(&mut self, pkg: &SpecPkg, _config: &Config, out: &mut Filter) {
-        // `error_details` for `-i/--explain`, set in `__init__` in the
+    fn check_spec(&mut self, pkg: &SpecPkg, config: &Config, out: &mut Filter) {
+        // `error_details` for `-v`/`--explain`, set in `__init__` in the
         // reference.
-        out.set_error_detail(
-            "non-standard-group",
-            format!(
-                "The value of the Group tag in the package is not valid.  Valid groups are:\n'{}'.",
-                self.valid_groups.join(", ")
-            ),
-        );
+        Self::register_error_details(config, out);
 
         self.spec_file = Some(pkg.name.clone());
 
@@ -1824,6 +1818,30 @@ impl SpecCheck {
                 &["%suse_update_desktop_file is deprecated"],
             );
         }
+    }
+}
+
+impl SpecCheck {
+    /// `error_details` for `--explain`, mirroring the `__init__` entry
+    /// (`SpecCheck.py:124-126`).
+    pub fn register_error_details(config: &Config, out: &mut Filter) {
+        let valid_groups = config
+            .configuration
+            .get("ValidGroups")
+            .and_then(toml::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        out.set_error_detail(
+            "non-standard-group",
+            format!(
+                "The value of the Group tag in the package is not valid.  Valid groups are:\n'{}'.",
+                valid_groups.join(", ")
+            ),
+        );
     }
 }
 

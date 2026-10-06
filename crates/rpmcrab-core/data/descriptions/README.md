@@ -1,27 +1,31 @@
-# Staged error descriptions — not yet wired
+# Error descriptions
 
-The 12 `*.toml` files in this directory are **staged, not live**. They hold
-the reference's per-check error descriptions, captured whole so that the
-M2 `--explain` work (`TODO(M2)` in `crates/rpmcrab/src/lib.rs`) has
-byte-verified source material to wire up instead of re-capturing it. Their
-presence here does **not** mean descriptions are implemented.
+The `*.toml` files in this directory hold the reference's per-check error
+descriptions, wired into `Filter::error_details` by
+`rpmcrab_core::describe::staged_descriptions` (mirroring
+`filter.py::_load_descriptions`): the files merge in sorted-name order and
+`#VAR#` placeholders resolve recursively against the merged table, exactly
+like `filter.py::_replace_description_variables`.
 
 Provenance, verified against the pinned reference (`84848c0`):
 
-- `IconSizesCheck.toml`, `MixedOwnershipCheck.toml`, `PAMModulesCheck.toml`,
-  `ZyppSyntaxCheck.toml` — byte-identical to the reference
-  `rpmlint/descriptions/` files of the same name.
+- `BinariesCheck.toml`, `IconSizesCheck.toml`, `MixedOwnershipCheck.toml`,
+  `PAMModulesCheck.toml`, `ZipCheck.toml`, `ZyppSyntaxCheck.toml` —
+  byte-identical to the reference `rpmlint/descriptions/` files of the same
+  name.
 - `XinetdDepCheck.toml` — byte-identical to the reference's
   `descriptions/CheckForXinetd.toml`, renamed to the module name.
 - `I18NCheck.toml` — the reference file plus the `incorrect-locale-subdir`
   block that `checks/i18n.rs` emits.
-- `ConfigFilesCheck.toml` — the reference file, except `non-etc-or-var-file-marked-as-conffile`
-  carries the reword from upstream #1606 (drop `%config` named as an option),
-  staged ahead of the reference per the fix-in-port rule.
+- `ConfigFilesCheck.toml` — the reference file, except
+  `non-etc-or-var-file-marked-as-conffile` carries the reword from upstream
+  #1606 (drop `%config` named as an option), staged ahead of the reference
+  per the fix-in-port rule. Ledgered in `tests/parity/divergences.toml`.
+- `Variables.toml` — the reference file, plus the `SUFFIX` entry lifted from
+  the reference's `descriptions/FileMetadataCheck.toml` (the port stages the
+  device/world-writable descriptions separately, but the `#SUFFIX#`
+  references stay).
 
-Nothing reads these files at runtime: the only `include_str!` into this
-directory is the byte-pinning test in `src/checks/config_files.rs`, which
-would fail rather than change behaviour, and `[Descriptions]` in
-`crates/rpmcrab-core/data/configdefaults.toml` is still the empty upstream
-stub. Descriptions currently reach the renderer
-only via `set_error_detail` (e.g. `SpecCheck`).
+Checks whose description file is not staged yet have no wired description:
+`--explain` and `-v` report "Unknown message" for their ids, the same text
+the reference prints when a description is genuinely missing.

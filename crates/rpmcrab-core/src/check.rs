@@ -166,6 +166,18 @@ pub trait Check: Send {
     fn add_checked_files(&mut self, _n: usize) {}
 }
 
+/// Install every check's `__init__`-time `error_details` into the filter, so
+/// `--explain` sees the same descriptions the reference has after
+/// `load_checks()` — `lint.py:72` runs before `print_explanation` in `_run`.
+pub fn register_error_details(config: &Config, out: &mut Filter) {
+    crate::checks::fhs::FHSCheck::register_error_details(out);
+    crate::checks::files::FilesCheck::register_error_details(config, out);
+    crate::checks::post::register_error_details(out);
+    crate::checks::source::SourceCheck::register_error_details(config, out);
+    crate::checks::spec::SpecCheck::register_error_details(config, out);
+    crate::checks::tags::TagsCheck::register_error_details(config, out);
+}
+
 /// Build a check from its exact Python module name, or `None` when it is not
 /// implemented yet. The waves in `docs/DESIGN.md` §8 add their arms here.
 pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {

@@ -306,7 +306,7 @@ const SPURIOUS_BRACKET_DETAIL: &str =
 const FORBIDDEN_SELINUX_DETAIL: &str = "A command which requires intimate knowledge about a specific SELinux\n        policy type was found in the scriptlet. These types are subject to change\n        on a policy version upgrade. Use the restorecon command which queries the\n        currently loaded policy for the correct type instead.";
 /// `non-empty-<scriptlet>`:
 const NON_EMPTY_DETAIL: &str = "Scriptlets for the interpreter mentioned in the message should be empty.\n        One common case where they are unintentionally not is when the specfile\n        contains comments after the scriptlet and before the next section. Review\n        and clean up the scriptlet contents if appropriate.";
-fn register_error_details(out: &mut Filter) {
+pub fn register_error_details(out: &mut Filter) {
     out.set_error_detail(
         "pretrans-not-lua",
         "The %pretrans scriptlet must be written in Lua: it runs before any package payload is installed, so the internal Lua interpreter is the only one guaranteed to exist.".to_string(),
@@ -737,7 +737,7 @@ mod tests {
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = PostCheck::new(&config);
         check.check(&pkg, &config, &mut out);
-        let rendered = out.render_results();
+        let rendered = out.render_results(&config);
         // Only finding names present in the results get their description;
         // the fixture trips percent-in-* and the ghost-file finding.
         assert!(rendered.contains("macro/variable"));

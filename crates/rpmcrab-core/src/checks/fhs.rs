@@ -67,11 +67,35 @@ impl Check for FHSCheck {
     }
 
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
+        // `-v`/`--explain` descriptions, mirroring the reference's
+        // `fhs_details_dict` which `__init__` installs unconditionally.
+        Self::register_error_details(out);
         let names: Vec<&str> = pkg.files.iter().map(|f| f.name.as_str()).collect();
         for (dir_type, subdir) in Self::non_standard_dirs(names.into_iter()) {
             let check = format!("non-standard-dir-in-{dir_type}");
             add_info(out, Level::Warning, pkg, &check, &[&subdir]);
         }
+    }
+}
+
+impl FHSCheck {
+    /// `error_details` for `--explain`, mirroring the reference's
+    /// `fhs_details_dict` (`FHSCheck.py:79-88`) installed in `__init__`.
+    pub fn register_error_details(out: &mut Filter) {
+        out.set_error_detail(
+            "non-standard-dir-in-usr",
+            format!(
+                "Your package is creating a non-standard subdirectory in /usr. The standard\ndirectories are:\n{}.",
+                FHS_USR_SUBDIRS.join(", ")
+            ),
+        );
+        out.set_error_detail(
+            "non-standard-dir-in-var",
+            format!(
+                "Your package is creating a non-standard subdirectory in /var. The standard\ndirectories are:\n{}.",
+                FHS_VAR_SUBDIRS.join(", ")
+            ),
+        );
     }
 }
 

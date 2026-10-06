@@ -11,6 +11,7 @@ use fancy_regex::Regex;
 
 use crate::color::Color;
 use crate::config::Config;
+use crate::describe;
 use crate::finding::Finding;
 use crate::level::Level;
 
@@ -87,7 +88,9 @@ impl Filter {
             results: Vec::new(),
             levels: Vec::new(),
             findings: Vec::new(),
-            error_details: HashMap::new(),
+            // The staged `data/descriptions/*.toml` corpus, exactly as
+            // `filter.py` loads `descriptions/*.toml` in `Filter.__init__`.
+            error_details: describe::staged_descriptions(),
             score: 0,
             filtered_out: 0,
             promoted_to_error: 0,
@@ -170,8 +173,10 @@ impl Filter {
         self.findings.push(finding);
     }
 
-    /// Register a long explanation for `-v` (from `descriptions/*.toml`,
-    /// config `[Descriptions]`, or a check mutating it at runtime).
+    /// Register a long explanation for `-v`/`--explain`, for the checks that
+    /// compute theirs at runtime instead of shipping a staged description
+    /// (`FHSCheck`, `FilesCheck`, `PostCheck`, `SourceCheck`, `SpecCheck`,
+    /// `TagsCheck` — the reference installs these in each check's `__init__`).
     pub fn set_error_detail(&mut self, check: &str, text: String) {
         self.error_details.insert(check.to_string(), text);
     }
@@ -195,19 +200,63 @@ impl Filter {
         &self.findings
     }
 
-    /// The description for a check (`-v` explanations), textwrap-filled to 78
-    /// and followed by a blank line. Empty when there is no description.
-    fn get_description(&self, check: &str) -> String {
-        match self.error_details.get(check) {
-            Some(text) => format!("{}\n\n", crate::term::textwrap_fill(text, 78)),
+    /// The description for a check (`-v`/`--explain`), textwrap-filled to 78
+    /// and followed by a blank line. A config `[Descriptions]` entry overrides
+    /// the staged text, but only for an id that has one — the reference
+    /// applies the override inside `if rpmlint_issue in self.error_details`.
+    /// Empty when there is no description.
+    pub fn get_description(&self, check: &str, config: &Config) -> String {
+        let mut text = self.error_details.get(check).cloned();
+        if text.is_some()
+            && let Some(overridden) = config
+                .configuration
+                .get("Descriptions")
+                .and_then(|t| t.get(check))
+                .and_then(toml::Value::as_str)
+            && !overridden.is_empty()
+        {
+            text = Some(overridden.to_string());
+        }
+        match text {
+            Some(text) => format!("{}\n\n", crate::term::textwrap_fill(&text, 78)),
+
             None => String::new(),
         }
     }
 
+    /// One `--explain` block (`lint.py:326 print_explanation`): `{id}:\n` plus
+    /// the description, the `WarnOnFunction` description for configured
+    /// forbidden functions, or `Unknown message` — the reference's exact
+    /// wording — when neither exists. The caller prints it with a trailing
+    /// newline, matching the reference's `print(f'{message}:\n{explanation}')`.
+    pub fn explanation(&self, message: &str, config: &Config) -> String {
+        let mut explanation = self.get_description(message, config);
+        if explanation.is_empty() {
+            // `lint.py:333-336`: the WarnOnFunction description is printed
+            // raw, without the textwrap fill the corpus descriptions get.
+            explanation = config
+                .configuration
+                .get("WarnOnFunction")
+                .and_then(|t| t.get(message))
+                .and_then(|v| v.get("description"))
+                .and_then(toml::Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_default();
+        }
+        if explanation.is_empty() {
+            explanation =
+                "Unknown message, please report a bug if the description should be present.\n\n"
+                    .to_string();
+        }
+        format!("{message}:\n{explanation}")
+    }
+
     /// Sort and render the result block, exactly as `filter.py` `print_results`:
     /// sorted by `(check, level_token)` descending (stable), and under `-v` each
-    /// check's description is emitted after that check's findings block.
-    pub fn render_results(&self) -> String {
+    /// check's description is emitted after that check's findings block. The
+    /// config carries `[Descriptions]` overrides, which the reference applies
+    /// in `-v` output too (`print_results` -> `get_description(..., config)`).
+    pub fn render_results(&self, config: &Config) -> String {
         let mut results = self.results.clone();
         sort_results(&mut results);
         let mut output = String::new();
@@ -215,7 +264,7 @@ impl Filter {
         for (check, line) in &results {
             if self.info && *check != last_issue {
                 if !last_issue.is_empty() {
-                    output += &self.get_description(&last_issue);
+                    output += &self.get_description(&last_issue, config);
                 }
                 last_issue = check.clone();
             }
@@ -223,7 +272,7 @@ impl Filter {
             output.push('\n');
         }
         if self.info && !last_issue.is_empty() {
-            output += &self.get_description(&last_issue);
+            output += &self.get_description(&last_issue, config);
         }
         output
     }
@@ -357,7 +406,8 @@ mod tests {
     #[test]
     fn verbose_interleaves_description_after_check_block() {
         // Mirrors the captured `-v` run: the two suse-zypp-packageand findings,
-        // then that check's description, then a blank line, then no-soname.
+        // then that check's description, then a blank line, then no-soname
+        // with its staged `BinariesCheck.toml` description.
         let mut c = cfg();
         c.info = true;
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
@@ -379,9 +429,47 @@ mod tests {
             d.details = vec!["/usr/lib64/LLVMgold.so".to_string()];
             d
         });
-        let out = f.render_results();
-        let expected = "llvm21-gold.aarch64: E: suse-zypp-packageand packageand(clang21:binutils)\nThe 'packageand(package1:package2)' syntax is obsolete, please use boolean\ndependencies like: 'Supplements: (package1 and package2)'\n\nllvm21-gold.aarch64: W: no-soname /usr/lib64/LLVMgold.so\n";
+        let out = f.render_results(&c);
+        let expected = "llvm21-gold.aarch64: E: suse-zypp-packageand packageand(clang21:binutils)\nThe 'packageand(package1:package2)' syntax is obsolete, please use boolean\ndependencies like: 'Supplements: (package1 and package2)'\n\nllvm21-gold.aarch64: W: no-soname /usr/lib64/LLVMgold.so\nThe library has no soname.\n\n";
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn description_from_toml() {
+        // `test_filter.py:83 test_description_from_toml`: a staged
+        // description resolves to the filled text plus a blank line.
+        let c = cfg();
+        let f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        assert_eq!(
+            f.get_description("uncompressed-zip", &c),
+            "The zip file is not compressed.\n\n"
+        );
+        assert_eq!(f.get_description("suse-other-error", &c), "");
+    }
+
+    #[test]
+    fn description_from_config() {
+        // `test_filter.py:93 test_description_from_conf`: `[Descriptions]`
+        // overrides the staged text; an override for an id with no staged
+        // description is ignored, exactly like the reference.
+        let mut c = cfg();
+        let mut descriptions = toml::map::Map::new();
+        descriptions.insert(
+            "no-binary".to_string(),
+            toml::Value::String("A new text for no-binary error.\n".to_string()),
+        );
+        descriptions.insert(
+            "suse-other-error".to_string(),
+            toml::Value::String("No staged base, override must not apply.\n".to_string()),
+        );
+        c.configuration
+            .insert("Descriptions".to_string(), toml::Value::Table(descriptions));
+        let f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        assert_eq!(
+            f.get_description("no-binary", &c),
+            "A new text for no-binary error.\n\n"
+        );
+        assert_eq!(f.get_description("suse-other-error", &c), "");
     }
 
     #[test]
@@ -446,6 +534,47 @@ mod tests {
                 "pkg.src: E: zeta-check",
                 "pkg.src: W: alpha-check",
             ]
+        );
+    }
+
+    #[test]
+    fn descriptions_from_config_appear_in_verbose_output() {
+        // Port of `test_lint.py::test_descriptions_from_config`: the
+        // "parametrized" FHS descriptions are overridden from configuration
+        // and the `-v` rendering shows the new texts, not the built ones.
+        let mut c = cfg();
+        c.info = true;
+        let mut descriptions = toml::map::Map::new();
+        descriptions.insert(
+            "non-standard-dir-in-usr".to_string(),
+            toml::Value::String("A new text for non-standard-dir-in-usr error.\n".to_string()),
+        );
+        descriptions.insert(
+            "non-standard-dir-in-var".to_string(),
+            toml::Value::String("A new text for non-standard-dir-in-var error.\n".to_string()),
+        );
+        c.configuration
+            .insert("Descriptions".to_string(), toml::Value::Table(descriptions));
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        crate::checks::fhs::FHSCheck::register_error_details(&mut f);
+        f.add_info(finding("non-standard-dir-in-usr", Level::Warning, 0));
+        f.add_info(finding("non-standard-dir-in-var", Level::Warning, 0));
+        let out = f.render_results(&c);
+        assert!(
+            out.contains("A new text for non-standard-dir-in-usr error."),
+            "got {out}"
+        );
+        assert!(
+            out.contains("A new text for non-standard-dir-in-var error."),
+            "got {out}"
+        );
+        assert!(
+            !out.contains("Your package is creating a non-standard subdirectory in /usr"),
+            "got {out}"
+        );
+        assert!(
+            !out.contains("Your package is creating a non-standard subdirectory in /var"),
+            "got {out}"
         );
     }
 }

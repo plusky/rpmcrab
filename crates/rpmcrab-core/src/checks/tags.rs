@@ -1397,8 +1397,65 @@ impl Check for TagsCheck {
 
     /// The reference defines only `check()`, so it runs for source and binary
     /// packages alike; no `check_binary`/`check_source` split.
-    fn check(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
+    fn check(&mut self, pkg: &Pkg, config: &Config, out: &mut Filter) {
+        // `-v`/`--explain` descriptions, mirroring the reference's
+        // `__init__` dict which installs them unconditionally.
+        Self::register_error_details(config, out);
         self.run(pkg, out);
+    }
+}
+
+impl TagsCheck {
+    /// `error_details` for `--explain`, mirroring the `__init__` dict
+    /// (`TagsCheck.py:54-62`).
+    pub fn register_error_details(config: &Config, out: &mut Filter) {
+        let tbl = &config.configuration;
+        let get_str = |k: &str| {
+            tbl.get(k)
+                .and_then(toml::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let get_strings = |k: &str| {
+            tbl.get(k)
+                .and_then(toml::Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        for tag in [
+            "obsoletes",
+            "conflicts",
+            "provides",
+            "recommends",
+            "suggests",
+            "enhances",
+            "supplements",
+        ] {
+            // Python `str.capitalize()` on these lowercase tags.
+            let capitalized = tag[..1].to_uppercase() + &tag[1..];
+            out.set_error_detail(
+                &format!("no-epoch-in-{tag}"),
+                format!("Your package contains a versioned {capitalized} entry without an Epoch."),
+            );
+        }
+        out.set_error_detail(
+            "non-standard-group",
+            format!(
+                "The value of the Group tag in the package is not valid.  Valid groups are:\n'{}'.",
+                get_strings("ValidGroups").join(", ")
+            ),
+        );
+        out.set_error_detail(
+            "not-standard-release-extension",
+            format!(
+                "Your release tag must match the regular expression {}.",
+                get_str("ReleaseExtension")
+            ),
+        );
     }
 }
 

@@ -294,7 +294,7 @@ impl Lint {
             color: &self.color,
             width: self.width,
         }));
-        out.push_str(&self.filter.render_results());
+        out.push_str(&self.filter.render_results(&self.config));
         if self.aborted() {
             out.push_str(&report::abort_banner(
                 self.filter.score,

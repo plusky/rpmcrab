@@ -621,7 +621,10 @@ impl Check for FilesCheck {
         "FilesCheck"
     }
 
-    fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
+    fn check_binary(&mut self, pkg: &Pkg, config: &Config, out: &mut Filter) {
+        // `-v`/`--explain` descriptions, mirroring the reference's
+        // `__init__` dict which installs them unconditionally.
+        Self::register_error_details(config, out);
         let mut st = PkgState::default();
         self.check_utf8(pkg, out);
         if pkg.is_source {
@@ -2891,6 +2894,65 @@ impl FilesCheck {
 // - #551: logrotate-log-dir-not-packaged — NOT PORTED (LogrotateCheck not yet
 //   ported; the /var/log exclusion from rpmlint#551 defers to that port).
 // - #771: hardlink catch-22 — ABANDONED by Tom, replicate reference exactly.
+
+impl FilesCheck {
+    /// `error_details` for `--explain`, mirroring the `__init__` dict
+    /// (`FilesCheck.py:386-418`): uid/gid/compression texts, plus one
+    /// `dir-or-file-in-*` entry per `DisallowedDirs`.
+    pub fn register_error_details(config: &Config, out: &mut Filter) {
+        let tbl = &config.configuration;
+        let get_str = |k: &str| {
+            tbl.get(k)
+                .and_then(toml::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let get_strings = |k: &str| {
+            tbl.get(k)
+                .and_then(toml::Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        let compress_ext = get_str("CompressExtension");
+        out.set_error_detail(
+            "non-standard-uid",
+            format!(
+                "A file in this package is owned by a non standard user.\nStandard users are:\n{}.",
+                get_strings("StandardUsers").join(", ")
+            ),
+        );
+        out.set_error_detail(
+            "non-standard-gid",
+            format!(
+                "A file in this package is owned by a non standard group.\nStandard groups are:\n{}.",
+                get_strings("StandardGroups").join(", ")
+            ),
+        );
+        for (id, kind) in [
+            ("manpage-not-compressed", "manual page"),
+            ("infopage-not-compressed", "info page"),
+        ] {
+            out.set_error_detail(
+                id,
+                format!(
+                    "This {kind} is not compressed with the {compress_ext} compression method\n(does not have the {compress_ext} extension). If the compression does not happen\nautomatically when the package is rebuilt, make sure that you have the\nappropriate rpm helper and/or config packages for your target distribution\ninstalled and try rebuilding again; if it still does not happen automatically,\nyou can compress this file in the %install section of the spec file."
+                ),
+            );
+        }
+        for d in get_strings("DisallowedDirs") {
+            out.set_error_detail(
+                &format!("dir-or-file-in-{}", d.trim_start_matches('/').replace('/', "-")),
+                format!(
+                    "A file in the package is located in {d}. It's not permitted\nfor packages to install files in this directory."
+                ),
+            );
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

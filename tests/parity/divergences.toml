@@ -1,12 +1,9 @@
-# INTENT — not a live divergence; do not convert to [[divergence]] until wired.
-# `crates/rpmcrab-core/data/descriptions/ConfigFilesCheck.toml` stages the
-# upstream rpmlint#1606 reword of `non-etc-or-var-file-marked-as-conffile`
-# ahead of the reference (provenance: `crates/rpmcrab-core/data/descriptions/README.md`).
-# Nothing reads those staged files at runtime yet, so there is no emitted
-# difference from the reference to ledger. When the M2 `--explain` work wires
-# the staged descriptions up, replace this note with a real [[divergence]]
-# entry for the reword (kind = "detail": the wording differs from the pinned
-# reference while the check behaviour does not). Refs: plusky/rpmcrab#171.
+[[divergence]]
+case = "global"
+check = "ConfigFilesCheck"
+kind = "detail"
+reason = "`non-etc-or-var-file-marked-as-conffile` carries the upstream rpmlint#1606 reword (drop `%config` named as an option, not just moving files) ahead of the pinned reference, per the fix-in-port rule; the check behaviour is unchanged. Provenance: `crates/rpmcrab-core/data/descriptions/README.md`."
+since = "0.1.0"
 
 [[divergence]]
 case = "global"
