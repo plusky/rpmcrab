@@ -620,7 +620,7 @@ impl TagsCheck {
             if has_so {
                 let base_or_libs = format!("{base}*/{base}-libs/lib{base}*");
                 let re_str = format!(
-                    r"^(lib)?{}(\\-libs)?[\\d_-]*(\\(\\w+-\\d+\\))?$",
+                    r"^(lib)?{}(\-libs)?[\d_-]*(\(\w+\-\d+\))?$",
                     regex_escape(&base)
                 );
                 let base_or_libs_re = Regex::new(&re_str).expect("static regex");
