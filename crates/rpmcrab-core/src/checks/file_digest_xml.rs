@@ -257,7 +257,7 @@ impl Canonicalizer {
         let preserve = regular
             .iter()
             .find(|(key, _)| *key == "xml:space")
-            .map(|(_, value)| value.trim() == "preserve")
+            .map(|(_, value)| value == "preserve")
             .unwrap_or_else(|| self.space_preserve.last().copied().unwrap_or(false));
         self.space_preserve.push(preserve);
         let result = self.emit_element(qname, &regular, empty);

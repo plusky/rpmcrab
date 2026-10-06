@@ -1976,6 +1976,15 @@ last</e></root>"#,
                 r#"<r xml:space="preserve"><a>   </a></r>"#,
                 "96ac5c4f43cac37b670697755203a8b1c86634f2dd3222cc1257e9acffa91678",
             ),
+            // Only the exact value `preserve` preserves: a padded
+            // `xml:space=" preserve "` strips like the reference
+            // (`ET.canonicalize(strip_text=True)`); the digest below is the
+            // stripped canonical form. Follow-up to #261.
+            (
+                "xml-space-padded-value-strips.xml",
+                r#"<r xml:space=" preserve ">  x  </r>"#,
+                "596d950256fbed318623072ab96e588ad449ec88b8a471a78e261fde5b84c0ad",
+            ),
             (
                 "v_sortxml.xml",
                 r#"<r xmlns:a="http://a"><e z="1" xml:lang="en" a:b="2"/></r>"#,
