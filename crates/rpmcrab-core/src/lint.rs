@@ -231,6 +231,21 @@ impl Lint {
         }
     }
 
+    /// `[SeverityOverrides]` names that never matched an emitted finding.
+    /// No static registry of finding tags exists (checks emit tags ad hoc,
+    /// and the staged descriptions corpus lacks runtime-registered ones), so
+    /// a name that matches nothing is the only honest typo signal. Warned
+    /// on stderr by the caller, not as a finding, so a typo cannot perturb
+    /// the exit code.
+    pub fn unused_severity_overrides(&self) -> Vec<String> {
+        self.config
+            .severity_overrides
+            .keys()
+            .filter(|k| !self.filter.used_overrides().contains(*k))
+            .cloned()
+            .collect()
+    }
+
     /// The abort condition: badness score over a positive threshold.
     fn aborted(&self) -> bool {
         self.config.badness_threshold > 0 && self.filter.score > self.config.badness_threshold
@@ -459,6 +474,89 @@ mod exit_code_tests {
         }
         assert_eq!(lint.filter.score, 2);
         assert_eq!(lint.exit_code(), 66);
+    }
+
+    /// The exit-code bug: 2 strict-promoted warnings with one overridden
+    /// back. The overridden finding must not count as strict-promoted, so
+    /// printed(E) == promoted_to_error (1 == 1) and the run exits 65 (all
+    /// errors are strict promotions), not 64 (DESIGN §4.6).
+    #[test]
+    fn strict_promotion_with_override_back_exits_65() {
+        let config = Config {
+            strict: true,
+            permissive: false,
+            severity_overrides: [("second-warning".to_string(), Level::Warning)]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let mut lint = Lint::new(config, vec![], Color::for_tty(false), 80).unwrap();
+        for check in ["first-warning", "second-warning"] {
+            lint.filter.add_info(Finding {
+                level: Level::Warning,
+                check: check.to_string(),
+                details: vec![],
+                badness: 0,
+                pkg_name: "testpkg".to_string(),
+                arch: None,
+                line: None,
+            });
+        }
+        assert_eq!(lint.filter.printed(Level::Error), 1);
+        assert_eq!(lint.filter.printed(Level::Warning), 1);
+        assert_eq!(lint.filter.promoted_to_error, 1);
+        assert_eq!(lint.exit_code(), 65);
+        // The typo audit sees the used name and stays silent.
+        assert!(lint.unused_severity_overrides().is_empty());
+    }
+
+    /// An override name that never matched a finding is reported by the
+    /// post-run audit (the only honest typo signal: no static registry of
+    /// finding tags exists).
+    #[test]
+    fn unused_severity_override_is_reported() {
+        let config = Config {
+            severity_overrides: [("no-such-finding".to_string(), Level::Error)]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let lint = Lint::new(config, vec![], Color::for_tty(false), 80).unwrap();
+        assert_eq!(
+            lint.unused_severity_overrides(),
+            vec!["no-such-finding".to_string()]
+        );
+    }
+
+    /// JSON carries the overridden level: the override rewrites the finding
+    /// before it is retained, so `--format json` reports the final level.
+    #[test]
+    fn json_reports_the_overridden_level() {
+        let config = Config {
+            severity_overrides: [("downgraded".to_string(), Level::Warning)]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let mut lint = Lint::new(config, vec![], Color::for_tty(false), 80).unwrap();
+        lint.filter.add_info(Finding {
+            level: Level::Error,
+            check: "downgraded".to_string(),
+            details: vec![],
+            badness: 0,
+            pkg_name: "testpkg".to_string(),
+            arch: None,
+            line: None,
+        });
+        let doc: serde_json::Value =
+            serde_json::from_str(&lint.render_json("rpmcrab", "2.10.0", 1, 0.5)).expect("JSON");
+        let levels: Vec<&str> = doc["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .map(|f| f["level"].as_str().expect("level"))
+            .collect();
+        assert_eq!(levels, vec!["W"]);
     }
 
     #[test]

@@ -378,6 +378,16 @@ pub fn run() -> ExitCode {
     // last processed package.
     lint.audit_unused_filters();
 
+    // A `[SeverityOverrides]` name that never matched an emitted finding is
+    // almost certainly a typo. Warned on stderr, not as a finding, so a typo
+    // cannot perturb the findings or the exit code.
+    for name in lint.unused_severity_overrides() {
+        warn!(
+            color,
+            "warning: unused [SeverityOverrides] entry {name:?}: no finding with that name was emitted"
+        );
+    }
+
     // `Lint.validate_files`: with no file arguments and nothing validated from
     // `-i`, there is nothing to do (`lint.py:257-262`).
     if files.is_empty() && lint.packages_checked() == 0 {

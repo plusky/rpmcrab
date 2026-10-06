@@ -25,6 +25,8 @@ pub struct Filter {
     blocked_filters: HashSet<String>,
     filters: Vec<Regex>,
     used_filters: HashSet<String>,
+    /// `[SeverityOverrides]` names that matched at least one emitted finding.
+    used_overrides: HashSet<String>,
     info: bool,
     color: Color,
     /// `(check_name, rendered line)` pairs in emission order. The check name is
@@ -85,6 +87,7 @@ impl Filter {
             blocked_filters: config.blocked_filters.iter().cloned().collect(),
             filters,
             used_filters: HashSet::new(),
+            used_overrides: HashSet::new(),
             info: config.info,
             color,
             results: Vec::new(),
@@ -136,8 +139,15 @@ impl Filter {
         // Strict promotes everything to error (and counts the promotions);
         // default badness is computed after promotion, so promoted
         // findings get the E default of 1.
+        //
+        // An overridden finding is not counted as strict-promoted: the
+        // override below is the final word on its level, and counting it
+        // would break the DESIGN §4.6 `printed(E) == promoted` split (a
+        // finding overridden back to W is not a strict error, so the run
+        // exits 65, not 64).
+        let overridden = self.severity_overrides.contains_key(&finding.check);
         if self.strict {
-            if finding.level != Level::Error {
+            if finding.level != Level::Error && !overridden {
                 self.promoted_to_error += 1;
             }
             finding.level = Level::Error;
@@ -147,6 +157,7 @@ impl Filter {
         // override is the final word on the finding's level. Badness still
         // follows the scoring table when set, else the level default below.
         if let Some(level) = self.severity_overrides.get(&finding.check) {
+            self.used_overrides.insert(finding.check.clone());
             finding.level = *level;
         }
         let badness = badness.unwrap_or(if finding.level == Level::Error { 1 } else { 0 });
@@ -301,7 +312,14 @@ impl Filter {
         self.printed_warnings += other.printed_warnings;
         self.printed_infos += other.printed_infos;
         self.used_filters.extend(other.used_filters);
+        self.used_overrides.extend(other.used_overrides);
         self.error_details.extend(other.error_details);
+    }
+
+    /// The `[SeverityOverrides]` names that matched at least one emitted
+    /// finding, for the post-run typo audit.
+    pub fn used_overrides(&self) -> &HashSet<String> {
+        &self.used_overrides
     }
 
     /// The rpmlintrc filter patterns that never matched (for the
@@ -434,11 +452,31 @@ mod tests {
             .insert("spelling-error".to_string(), Level::Warning);
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
         f.add_info(finding("spelling-error", Level::Warning, 0));
-        // strict promotes (counted), then the override downgrades back: the
-        // table is the final word on the finding's level.
-        assert_eq!(f.promoted_to_error, 1);
+        // Strict promotes, then the override downgrades back: the table is
+        // the final word on the finding's level, and the finding is not
+        // counted as strict-promoted (DESIGN §4.6 exit-code split).
+        assert_eq!(f.promoted_to_error, 0);
         assert_eq!(f.printed(Level::Warning), 1);
         assert_eq!(f.printed(Level::Error), 0);
+    }
+
+    #[test]
+    fn strict_promotion_count_skips_overridden_findings() {
+        // The exit-code bug: 2 strict-promoted warnings with one overridden
+        // back must keep printed(E) == promoted_to_error (1 == 1); counting
+        // the overridden finding gave 1 != 2 and the wrong exit code.
+        let mut c = cfg();
+        c.strict = true;
+        c.severity_overrides
+            .insert("second-warning".to_string(), Level::Warning);
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        f.add_info(finding("first-warning", Level::Warning, 0));
+        f.add_info(finding("second-warning", Level::Warning, 0));
+        assert_eq!(f.printed(Level::Error), 1);
+        assert_eq!(f.printed(Level::Warning), 1);
+        assert_eq!(f.promoted_to_error, 1);
+        assert_eq!(f.used_overrides().len(), 1);
+        assert!(f.used_overrides().contains("second-warning"));
     }
 
     #[test]
