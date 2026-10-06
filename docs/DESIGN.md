@@ -348,6 +348,12 @@ is 0**. If the check is not in `Scoring`: `E` → badness 1, `W`/`I` → badness
 The default badness is computed **after** promotion (`filter.py:139-140`), so a strict-promoted warning scores the default error badness of 1. `BadnessThreshold` default is `-1` (abort branch
 dead); openSUSE sets `999`.
 
+**`[SeverityOverrides]`** (finding name → `E`/`W`/`I` or long form, case-insensitive; upstream rpmlint#1335, no 2.10.0 counterpart) is the final word on a finding's level, applied **after** scoring and strict promotion:
+- An overridden finding is **not** counted as strict-promoted, so the §4.6 `printed(E) == promoted` split survives the override: two strict-promoted warnings with one overridden back to `W` exit 65 (all remaining errors are promotions), not 64.
+- The override rewrites the level only; **badness still follows `[Scoring]`** when set. A warning with `Scoring(50)` overridden back to `W` prints as `W` but keeps badness 50, so it aborts with 66 (and 0 printed errors) once over the threshold. Conversely `Scoring(0)` + override to `E` prints `E` with badness 0 — a genuine error for the §4.6 split, scored at nothing.
+- `Filters` regexes and `--format json` see the overridden level: suppression matches on the post-override `level.letter()`, and JSON `level` is rendered from the rewritten finding.
+- There is no static registry of finding tags (checks emit them ad hoc), so a name that never matches an emitted finding is warned on stderr after the run — the typo signal — rather than rejected at load. A non-table `SeverityOverrides` value is a fatal configuration error, like every other table key.
+
 ### 4.10 CLI flags
 
 The CLI is the deliberate exception to §3.2's contract rule: it follows
