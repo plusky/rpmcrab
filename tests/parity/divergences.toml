@@ -777,7 +777,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/issues/435"
 case = "global"
 check = "MenuXDGCheck"
 kind = "behaviour"
-reason = "Upstream rpmlint#19: a new `unexpanded-macro-in-desktop-file` warning fires when a desktop entry's Name/Comment/Icon contains `%{...}`, i.e. an RPM macro that was never expanded at build time. The frozen 2.10.0 reference has no such check. Exec= is not scanned: its %-codes (%f, %U) are desktop field codes, not macros."
+reason = "Upstream rpmlint#19: a new `unexpanded-macro-in-desktop-file` warning fires when a desktop entry's Name/Comment/Icon contains `%{...}`, i.e. an RPM macro that was never expanded at build time. The frozen 2.10.0 reference has no such check. Exec= is not scanned: its %-codes (%f, %U) are desktop field codes, not macros. GenericName= and Keywords= are deliberately not scanned either: only the display fields Name/Comment/Icon are covered, and extending coverage would be a new-check design decision."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/19"
 

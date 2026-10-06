@@ -446,7 +446,11 @@ mod tests {
         // The trailing slash is trimmed (still matches); the empty entry
         // is dropped (matches nothing, not even /usr/bin/foo).
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("/opt/obsolete"), "detail: {}", lines[0]);
+        assert!(
+            lines[0].contains("W: obsolete-mime-format-dir /opt/obsolete"),
+            "name, level and detail: {}",
+            lines[0]
+        );
     }
 
     #[test]

@@ -519,6 +519,11 @@ mod tests {
             .collect();
         assert_eq!(lines.len(), 1, "unexpected: {results:?}");
         assert!(
+            lines[0].contains("W: unexpanded-macro-in-desktop-file"),
+            "level: {}",
+            lines[0]
+        );
+        assert!(
             lines[0].contains("Name[de]=%{title}"),
             "localized detail: {}",
             lines[0]
