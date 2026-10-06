@@ -19,6 +19,10 @@
 //! `obsolete-suse-version-check` / `invalid-suse-version-check` are part of
 //! the reference flavour and are implemented. Deliberate divergences are
 //! ledgered in `tests/parity/divergences.toml`.
+//!
+//! One finding has no reference counterpart: `translated-description` for
+//! `%description -l <lang>` (upstream feature request
+//! rpm-software-management/rpmlint#2).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -189,6 +193,15 @@ fn biarch_package_re() -> &'static Regex {
 static LIBDIR_RE: OnceLock<Regex> = OnceLock::new();
 fn libdir_re() -> &'static Regex {
     LIBDIR_RE.get_or_init(|| Regex::new(r"%{?_lib(?:dir)?\}?\b").expect("static regex"))
+}
+
+/// `%description -l <lang>`: the `-l` flag with its language (upstream
+/// rpm-software-management/rpmlint#2). `-l` glued to the language (`-lfi`)
+/// is not the flag form and stays quiet.
+static DESCRIPTION_LANG_RE: OnceLock<Regex> = OnceLock::new();
+fn description_lang_re() -> &'static Regex {
+    DESCRIPTION_LANG_RE
+        .get_or_init(|| Regex::new(r"^%description\b.*\s-l\s+(\S+)").expect("static regex"))
 }
 
 /// `section_regexs`: `^%<name>(?:\s|$)` for the script sections plus
@@ -527,6 +540,7 @@ pub struct SpecCheck {
     endif_re: Regex,
     biarch_package_re: Regex,
     libdir_re: Regex,
+    description_lang_re: Regex,
     section_res: Vec<(String, Regex)>,
     deprecated_grep_re: Regex,
     hardcoded_library_path_re: Regex,
@@ -647,6 +661,7 @@ impl SpecCheck {
             endif_re: endif_re().clone(),
             biarch_package_re: biarch_package_re().clone(),
             libdir_re: libdir_re().clone(),
+            description_lang_re: description_lang_re().clone(),
             section_res: section_res(),
             deprecated_grep_re: deprecated_grep_re().clone(),
             hardcoded_library_path_re: hardcoded_library_path_re().clone(),
@@ -1013,7 +1028,7 @@ impl SpecCheck {
     fn check_line(&mut self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
         self.checkline_declarative(line);
         self.checkline_break_space(pkg, out, line);
-        if self.checkline_section(line) {
+        if self.checkline_section(pkg, out, line) {
             return;
         }
         self.checkline_buildroot_usage(pkg, out, line);
@@ -1111,7 +1126,7 @@ impl SpecCheck {
         );
     }
 
-    fn checkline_section(&mut self, line: &str) -> bool {
+    fn checkline_section(&mut self, pkg: &SpecPkg, out: &mut Filter, line: &str) -> bool {
         let mut found = None;
         for (sec, re) in &self.section_res {
             if let Ok(Some(m)) = re.find(line) {
@@ -1123,6 +1138,9 @@ impl SpecCheck {
             return false;
         };
         self.current_section = sec.clone();
+        if sec == "description" {
+            self.checkline_translated_description(pkg, out, line);
+        }
         *self.section.entry(sec.clone()).or_insert(0) += 1;
         if sec == "package" || sec == "files" {
             let rest = self
@@ -1140,6 +1158,15 @@ impl SpecCheck {
             self.is_lib_pkg = true;
         }
         true
+    }
+
+    /// Upstream rpmlint#2: a `%description -l <lang>` section carries a
+    /// translated description, which some distros don't want to ship.
+    fn checkline_translated_description(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
+        if let Ok(Some(caps)) = self.description_lang_re.captures(line) {
+            let lang = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            self.info(out, pkg, Level::Warning, "translated-description", &[lang]);
+        }
     }
 
     fn checkline_buildroot_usage(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
@@ -2693,6 +2720,31 @@ make install
     }
 
     #[test]
+    fn translated_description_section_warns_2() {
+        // Upstream rpmlint#2: real emission path (check_spec -> add_info);
+        // the rendered line pins name, level and detail together.
+        let text = "Name: foo\nVersion: 1\nRelease: 1\nSummary: foo\nLicense: MIT\n\n%description -l fi\nKuvaus.\n\n%description\nPlain.\n";
+        let results = run_mini(text);
+        let line = results
+            .iter()
+            .find(|(c, _)| c == "translated-description")
+            .map(|(_, l)| l.clone())
+            .expect("translated-description should fire");
+        assert!(
+            line.contains("W: translated-description fi"),
+            "name, level and detail must render, got: {line}"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|(c, _)| c == "translated-description")
+                .count(),
+            1,
+            "only the -l section warns: {results:?}"
+        );
+    }
+
+    #[test]
     fn prereq_use_fires_error_ref529() {
         let results = run_mini("Name: foo\nPreReq(pre): none\nPreReq(post): none_other\n");
         let lines = lines_for(&results, "prereq-use");
@@ -2706,6 +2758,16 @@ make install
             lines[1].contains("E: prereq-use none_other"),
             "line: {}",
             lines[1]
+        );
+    }
+
+    #[test]
+    fn plain_description_section_is_quiet_2() {
+        let text = "Name: foo\nVersion: 1\nRelease: 1\nSummary: foo\nLicense: MIT\n\n%description\nPlain.\n";
+        let results = run_mini(text);
+        assert!(
+            !has(&results, "translated-description"),
+            "unexpected: {results:?}"
         );
     }
 
@@ -2776,6 +2838,17 @@ make install
         assert!(
             lines.iter().all(|l| l.contains("%build")),
             "lines: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn description_lang_glued_to_dash_l_is_quiet_2() {
+        // `%description -lfi` is not the `-l <lang>` flag form.
+        let text = "Name: foo\nVersion: 1\nRelease: 1\nSummary: foo\nLicense: MIT\n\n%description -lfi\nKuvaus.\n";
+        let results = run_mini(text);
+        assert!(
+            !has(&results, "translated-description"),
+            "unexpected: {results:?}"
         );
     }
 }

@@ -5,6 +5,9 @@
 //! type dispatches (normal file, directory, symlink).
 //!
 //! Deliberate gaps are ledgered in `tests/parity/divergences.toml`.
+//!
+//! One finding has no reference counterpart: `debug-files-in-non-debug-package`
+//! (upstream feature request rpm-software-management/rpmlint#11).
 
 #![allow(clippy::collapsible_if, clippy::bool_comparison)]
 
@@ -672,11 +675,23 @@ impl Check for FilesCheck {
         for f in &pkg.files {
             self.check_file(pkg, &f.name, f, &mut st, out);
         }
+        self.check_debug_files_in_non_debug_package(pkg, &st, out);
         self.check_log_files_without_logrotate(pkg, &st, out);
         self.check_outside_libdir_files(pkg, &st, out);
         self.check_debuginfo_without_sources(pkg, &st, out);
         self.check_bindir_exes(pkg, &st, out);
     }
+}
+
+/// Whether `path` is one of the two debug trees itself or below it:
+/// `/usr/lib/debug` or `/usr/src/debug`. Tree-prefix equality (not substring
+/// or segment matching) keeps lookalikes like `/usr/lib64/debug` and
+/// `/usr/share/debugfoo` quiet.
+fn is_debug_path(path: &str) -> bool {
+    path == "/usr/lib/debug"
+        || path.starts_with("/usr/lib/debug/")
+        || path == "/usr/src/debug"
+        || path.starts_with("/usr/src/debug/")
 }
 
 fn strip_quotes(re: &Regex, s: &str) -> String {
@@ -741,6 +756,30 @@ impl FilesCheck {
             && !st.debuginfo_srcs
         {
             add_info(out, Level::Error, pkg, "debuginfo-without-sources", &[]);
+        }
+    }
+
+    /// Upstream rpmlint#11: a `%{_libdir}` glob in `%files` also matches
+    /// `%{_libdir}/debug`, landing debug files in a non-debug package.
+    fn check_debug_files_in_non_debug_package(&self, pkg: &Pkg, st: &PkgState, out: &mut Filter) {
+        if st.debuginfo_package || st.debugsource_package {
+            return;
+        }
+        for f in &pkg.files {
+            // A %ghost entry has no payload on disk: nothing debug lands
+            // in the package.
+            if pkg.ghost_files.iter().any(|g| g == &f.name) {
+                continue;
+            }
+            if is_debug_path(&f.name) {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "debug-files-in-non-debug-package",
+                    &[f.name.as_str()],
+                );
+            }
         }
     }
 
@@ -4375,6 +4414,48 @@ mod tests {
     }
 
     #[test]
+    fn debug_path_segment_match_11() {
+        assert!(is_debug_path("/usr/lib/debug/foo.debug"));
+        assert!(is_debug_path("/usr/lib/debug"));
+        assert!(is_debug_path("/usr/src/debug/foo.c"));
+        assert!(is_debug_path("/usr/src/debug"));
+        assert!(!is_debug_path("/usr/lib64/debug"));
+        assert!(!is_debug_path("/usr/bin/foo"));
+        assert!(!is_debug_path("/usr/share/debugfoo/bar"));
+        assert!(!is_debug_path("/usr/lib/debugfoo/x"));
+        // Coincidental `debug` segments elsewhere are not debug payload.
+        assert!(!is_debug_path("/usr/share/doc/debug/notes"));
+    }
+
+    #[test]
+    fn debug_files_in_non_debug_package_warns_11() {
+        // Real emission path (check_binary -> add_info); the rendered line
+        // pins name, level and detail together.
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/lib/debug/foo.debug", 0o100644, 21),
+            mkfile("/usr/bin/foo", 0o100755, 22),
+        ]);
+        let results = run_check_binary(&pkg);
+        let line = results
+            .iter()
+            .find(|(n, _)| n == "debug-files-in-non-debug-package")
+            .map(|(_, l)| l.clone())
+            .expect("debug-files-in-non-debug-package should fire");
+        assert!(
+            line.contains(": W: debug-files-in-non-debug-package /usr/lib/debug/foo.debug"),
+            "name, level and detail must render, got: {line}"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|(n, _)| n == "debug-files-in-non-debug-package")
+                .count(),
+            1,
+            "only the debug path warns: {results:?}"
+        );
+    }
+
+    #[test]
     fn zero_perms_ghost_falls_back_without_tmpfiles() {
         // No tmpfiles.d config declaring the path: defaults 0644/root/root.
         let config = test_config();
@@ -4399,6 +4480,51 @@ mod tests {
         assert!(
             line.contains("%ghost %attr(0644,root,root) /var/cache/ghost.dat"),
             "suggestion must use defaults: {line}"
+        );
+    }
+
+    #[test]
+    fn debug_files_in_debuginfo_package_are_quiet_11() {
+        let (mut pkg, _dir) =
+            pkg_with_files(vec![mkfile("/usr/lib/debug/foo.debug", 0o100644, 21)]);
+        pkg.name = "foo-debuginfo".to_string();
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, _)| n == "debug-files-in-non-debug-package"),
+            "debuginfo packages must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn debug_files_ghost_is_quiet_11() {
+        // A %ghost debug path has no payload on disk: nothing lands in
+        // the package, so the warning must stay quiet.
+        let (mut pkg, _dir) =
+            pkg_with_files(vec![mkfile("/usr/lib/debug/foo.debug", 0o100644, 21)]);
+        pkg.ghost_files.push("/usr/lib/debug/foo.debug".to_string());
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, _)| n == "debug-files-in-non-debug-package"),
+            "ghost debug paths must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn debug_lookalike_paths_are_quiet_11() {
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/share/debugfoo/bar", 0o100644, 21),
+            mkfile("/usr/bin/foo", 0o100755, 22),
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, _)| n == "debug-files-in-non-debug-package"),
+            "segment equality must not match debugfoo: {results:?}"
         );
     }
 }
