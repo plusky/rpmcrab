@@ -513,8 +513,17 @@ mod exit_code_tests {
             arch: None,
             line: None,
         });
+        use crate::render::{JsonRenderer, RenderContext, Renderer};
+        let ctx = RenderContext {
+            lint: &lint,
+            prog: "rpmcrab",
+            version: "2.10.0",
+            header_packages: 1,
+            time_report: false,
+            duration_secs: 0.5,
+        };
         let doc: serde_json::Value =
-            serde_json::from_str(&lint.render_json("rpmcrab", "2.10.0", 1, 0.5)).expect("JSON");
+            serde_json::from_str(&JsonRenderer.render(&ctx)).expect("JSON");
         let levels: Vec<&str> = doc["findings"]
             .as_array()
             .expect("findings")
