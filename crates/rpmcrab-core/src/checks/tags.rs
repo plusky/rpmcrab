@@ -2232,6 +2232,7 @@ mod rich_dep_emission_tests {
         let pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
         let config = rich_test_config(&[], false);
         let results = run(&pkg, &config);
+        eprintln!("DEBUG-258 results: {results:?}");
         let names: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
             names,
