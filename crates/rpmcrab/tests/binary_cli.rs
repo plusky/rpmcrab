@@ -705,3 +705,73 @@ fn explain_fhs_description_override_from_config() {
     );
     assert!(out.stderr.is_empty());
 }
+
+fn binaries_fixture_rpm() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(
+            "../../tests/fixtures/binaries-check/input/rpmcrab-binaries-fixture-1.0-1.aarch64.rpm",
+        )
+        .canonicalize()
+        .expect("binaries fixture is committed")
+}
+
+/// End-to-end `[SeverityOverrides]` through the real binary: the fixture RPM
+/// fires `executable-stack` at Error; the override rewrites it to Warning on
+/// stdout, proving the TOML key flows through config load into the filter.
+#[test]
+fn severity_override_rewrites_finding_level_end_to_end() {
+    let rpm = binaries_fixture_rpm();
+    let baseline = rpmcrab(&[rpm.to_str().unwrap()]);
+    let baseline_out = String::from_utf8_lossy(&baseline.stdout);
+    assert!(
+        baseline_out.contains("E: executable-stack"),
+        "baseline must fire executable-stack at E: {baseline_out}"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("overrides.toml");
+    std::fs::write(&cfg, "[SeverityOverrides]\nexecutable-stack = \"W\"\n").unwrap();
+    let out = rpmcrab(&["-c", cfg.to_str().unwrap(), rpm.to_str().unwrap()]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("W: executable-stack"),
+        "override must rewrite the level: {stdout}"
+    );
+    assert!(
+        !stdout.contains("E: executable-stack"),
+        "no E: executable-stack may remain: {stdout}"
+    );
+}
+
+/// An override name that never matches a finding warns on stderr (not as a
+/// finding): no static registry of finding tags exists, so a never-matched
+/// name is the typo signal.
+#[test]
+fn unused_severity_override_warns_on_stderr() {
+    let rpm = binaries_fixture_rpm();
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("overrides.toml");
+    std::fs::write(&cfg, "[SeverityOverrides]\nno-such-finding = \"E\"\n").unwrap();
+    let out = rpmcrab(&["-c", cfg.to_str().unwrap(), rpm.to_str().unwrap()]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unused [SeverityOverrides] entry \"no-such-finding\""),
+        "stderr: {stderr}"
+    );
+}
+
+/// A non-table `SeverityOverrides` is a fatal configuration error (exit 1),
+/// not a silent empty map.
+#[test]
+fn non_table_severity_overrides_is_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("bad.toml");
+    std::fs::write(&cfg, "SeverityOverrides = \"nope\"\n").unwrap();
+    let out = rpmcrab(&["-c", cfg.to_str().unwrap(), "-p"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("fatal error in configuration"),
+        "stderr: {stderr}"
+    );
+}
