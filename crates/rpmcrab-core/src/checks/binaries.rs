@@ -3800,11 +3800,17 @@ description = "explicit priority string bypasses the system crypto policy"
         let rpm_path = fixture_path("rpmcrab-binaries-dangling-gnuhash-1.0-1.aarch64.rpm");
         let (results, _dir) = run_binaries_check(&rpm_path);
         assert_lacks(&results, "readelf-failed");
+        assert_lacks(&results, "ldd-failed");
         let hash_lines = lines_for(&results, "missing-hash-section");
         assert_eq!(hash_lines.len(), 1, "one missing-hash-section: {results:?}");
         assert!(
             hash_lines[0].contains(" E: "),
             "missing-hash-section is Error: {}",
+            hash_lines[0]
+        );
+        assert!(
+            hash_lines[0].contains("/usr/lib64/libdangling-stripped.so.1"),
+            "missing-hash-section names the stripped library: {}",
             hash_lines[0]
         );
         let gnu_lines = lines_for(&results, "missing-gnu-hash-section");

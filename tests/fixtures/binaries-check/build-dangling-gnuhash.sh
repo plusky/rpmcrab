@@ -8,7 +8,7 @@
 # hash-section findings are emitted, like the reference.
 #
 # Usage: bash tests/fixtures/binaries-check/build-dangling-gnuhash.sh
-# Needs: podman (or docker)
+# Needs: podman (or PODMAN=/path/to/podman)
 # Output: input/rpmcrab-binaries-dangling-gnuhash-1.0-1.<arch>.rpm
 #
 # Everything (compile, strip, package) happens in an openSUSE Tumbleweed
@@ -21,6 +21,8 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
+
+podman_bin="${PODMAN:-podman}"
 
 # The container-side build runs from a file to avoid nested shell quoting.
 cat >"$work/inner.sh" <<'INNER_EOF'
@@ -55,7 +57,7 @@ EOF
 rpmbuild --define "_topdir /work/rpmbuild" --nosignature -bb /work/rpmbuild/SPECS/fixture.spec >/dev/null
 INNER_EOF
 
-podman run --rm -v "$work:/work:z" registry.opensuse.org/opensuse/tumbleweed:latest bash /work/inner.sh
+"$podman_bin" run --rm -v "$work:/work:z" registry.opensuse.org/opensuse/tumbleweed:latest bash /work/inner.sh
 
 built="$(find "$work/rpmbuild/RPMS" -name 'rpmcrab-binaries-dangling-gnuhash-*.rpm' -print -quit)"
 [ -n "$built" ] || { echo "rpmbuild produced no package" >&2; exit 1; }
