@@ -880,3 +880,11 @@ kind = "missing"
 reason = "Deliberate: the port does not emit E: shared-library-not-executable (upstream rpmlint#596). Shared libraries need no exec bit: the loader maps them PROT_EXEC regardless, Debian ships .so files as 0644, and an executable .so just segfaults when run. The reference still flags non-executable shared libraries."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/596"
+
+[[divergence]]
+case = "global"
+check = "shared-library-without-dependency-information"
+kind = "behaviour"
+reason = "Upstream rpmlint#598: the pinned reference deleted the `shared-library-without-dependency-information` error after Go PIE false positives (Go executables are ET_DYN with no DT_NEEDED); the port restores the check scoped to non-Go shared objects, exempting ELFs that carry a `.note.go.buildid` section."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/598"

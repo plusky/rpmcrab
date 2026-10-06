@@ -307,6 +307,16 @@ impl ReadelfInfo {
             .iter()
             .any(|s| regex.is_match(s).unwrap_or(false))
     }
+
+    /// Go toolchain output carries a `.note.go.buildid` section. Go
+    /// binaries are ET_DYN with no DT_NEEDED, but they are not shared
+    /// objects missing dependency information.
+    fn is_go_binary(&self) -> bool {
+        self.sections
+            .iter()
+            .flatten()
+            .any(|s| s.name == ".note.go.buildid")
+    }
 }
 
 struct LddInfo {
@@ -1433,6 +1443,16 @@ impl BinariesCheck {
                     "statically-linked-binary",
                     &[&pkgfile.name],
                 );
+            } else if !info.is_go_binary() {
+                // Go binaries are ET_DYN with no DT_NEEDED; only genuine
+                // shared objects are missing dependency information here.
+                add_info(
+                    out,
+                    Level::Error,
+                    pkg,
+                    "shared-library-without-dependency-information",
+                    &[&pkgfile.name],
+                );
             }
         } else {
             let runpath_has_libc = info.runpaths.iter().any(|r| r.contains("libc."));
@@ -1900,6 +1920,249 @@ mod tests {
         assert!(!info.is_shlib);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    /// Craft a minimal ET_DYN ELF64 for `ReadelfInfo::parse`.
+    ///
+    /// `go_note` adds a `.note.go.buildid` section (the Go toolchain
+    /// marker). `needed` adds a PT_LOAD + PT_DYNAMIC pair exposing one
+    /// DT_NEEDED entry, so `ReadelfInfo.needed` fills the way goblin
+    /// fills it for real linked libraries.
+    fn craft_shlib_elf(go_note: bool, needed: Option<&str>) -> Vec<u8> {
+        const SHSTRTAB: &[u8] = b"\0.shstrtab\0.dynamic\0.dynstr\0.note.go.buildid\0";
+        // SHSTRTAB name offsets: .shstrtab=1, .dynamic=11, .dynstr=20,
+        // .note.go.buildid=28.
+        struct Sec {
+            name_off: u32,
+            stype: u32,
+            flags: u64,
+            data: Vec<u8>,
+            align: u64,
+            link: u32,
+        }
+        let mut secs: Vec<Sec> = vec![Sec {
+            name_off: 1,
+            stype: 3, // SHT_STRTAB
+            flags: 0,
+            data: SHSTRTAB.to_vec(),
+            align: 1,
+            link: 0,
+        }];
+        if let Some(lib) = needed {
+            let mut dynstr = vec![0u8];
+            dynstr.extend_from_slice(lib.as_bytes());
+            dynstr.push(0);
+            secs.push(Sec {
+                name_off: 20,
+                stype: 3,
+                flags: 0,
+                data: dynstr,
+                align: 1,
+                link: 0,
+            });
+            // Section-header index of .dynstr (NULL entry is index 0).
+            let dynstr_idx = secs.len() as u32;
+            secs.push(Sec {
+                name_off: 11,
+                stype: 6, // SHT_DYNAMIC
+                flags: 2, // SHF_ALLOC
+                data: vec![0u8; 64],
+                align: 8,
+                link: dynstr_idx,
+            });
+        }
+        if go_note {
+            // Minimal SHT_NOTE payload; only the section name matters.
+            let mut note = Vec::new();
+            note.extend_from_slice(&4u32.to_le_bytes());
+            note.extend_from_slice(&0u32.to_le_bytes());
+            note.extend_from_slice(&1u32.to_le_bytes());
+            note.extend_from_slice(b"Go\0\0");
+            secs.push(Sec {
+                name_off: 28,
+                stype: 7, // SHT_NOTE
+                flags: 2, // SHF_ALLOC
+                data: note,
+                align: 4,
+                link: 0,
+            });
+        }
+
+        let mut buf: Vec<u8> = vec![0; 64]; // ELF header placeholder
+        let phnum: u16 = if needed.is_some() { 2 } else { 0 };
+        let phoff = buf.len() as u64;
+        buf.extend(vec![0u8; 56 * phnum as usize]);
+
+        // Section data blobs, in section order.
+        let mut offs: Vec<u64> = Vec::new();
+        for s in &secs {
+            offs.push(buf.len() as u64);
+            buf.extend(&s.data);
+        }
+
+        // Patch .dynamic now that the .dynstr file offset is known.
+        if needed.is_some() {
+            let dyn_i = secs.iter().position(|s| s.name_off == 11).unwrap();
+            let str_i = secs.iter().position(|s| s.name_off == 20).unwrap();
+            let mut dyns: Vec<u8> = Vec::new();
+            let mut entry = |tag: i64, val: u64| {
+                dyns.extend_from_slice(&tag.to_le_bytes());
+                dyns.extend_from_slice(&val.to_le_bytes());
+            };
+            entry(1, 1); // DT_NEEDED -> dynstr[1]
+            entry(5, offs[str_i]); // DT_STRTAB
+            entry(10, secs[str_i].data.len() as u64); // DT_STRSZ
+            entry(0, 0); // DT_NULL
+            let at = offs[dyn_i] as usize;
+            buf[at..at + 64].copy_from_slice(&dyns);
+        }
+
+        while !buf.len().is_multiple_of(8) {
+            buf.push(0);
+        }
+        let shoff = buf.len() as u64;
+        let shnum = secs.len() + 1;
+        let total = shoff + 64 * shnum as u64;
+
+        // Program headers. PT_LOAD covers the whole file so goblin's
+        // vm_to_offset resolves DT_STRTAB to a file offset.
+        if needed.is_some() {
+            let ph = |ptype: u32, flags: u32, off: u64, filesz: u64| {
+                let mut h = Vec::new();
+                h.extend_from_slice(&ptype.to_le_bytes());
+                h.extend_from_slice(&flags.to_le_bytes());
+                h.extend_from_slice(&off.to_le_bytes()); // p_offset
+                h.extend_from_slice(&off.to_le_bytes()); // p_vaddr
+                h.extend_from_slice(&0u64.to_le_bytes()); // p_paddr
+                h.extend_from_slice(&filesz.to_le_bytes());
+                h.extend_from_slice(&filesz.to_le_bytes()); // p_memsz
+                h.extend_from_slice(&0x1000u64.to_le_bytes());
+                h
+            };
+            let dyn_i = secs.iter().position(|s| s.name_off == 11).unwrap();
+            let load = ph(1, 5, 0, total);
+            let dynamic = ph(2, 6, offs[dyn_i], 64);
+            let at = phoff as usize;
+            buf[at..at + 56].copy_from_slice(&load);
+            buf[at + 56..at + 112].copy_from_slice(&dynamic);
+        }
+
+        // Section headers; entry 0 is NULL.
+        let mut shdrs: Vec<u8> = vec![0; 64];
+        for (i, s) in secs.iter().enumerate() {
+            let mut h = vec![0u8; 64];
+            h[0..4].copy_from_slice(&s.name_off.to_le_bytes());
+            h[4..8].copy_from_slice(&s.stype.to_le_bytes());
+            h[8..16].copy_from_slice(&s.flags.to_le_bytes());
+            h[24..32].copy_from_slice(&offs[i].to_le_bytes());
+            h[32..40].copy_from_slice(&(s.data.len() as u64).to_le_bytes());
+            h[40..44].copy_from_slice(&s.link.to_le_bytes());
+            h[48..56].copy_from_slice(&s.align.to_le_bytes());
+            if s.stype == 6 {
+                h[56..64].copy_from_slice(&16u64.to_le_bytes());
+            }
+            shdrs.extend(h);
+        }
+        buf.extend(shdrs);
+
+        // ELF header.
+        let mut ehdr = vec![0u8; 64];
+        ehdr[0..4].copy_from_slice(b"\x7fELF");
+        ehdr[4] = 2; // ELFCLASS64
+        ehdr[5] = 1; // ELFDATA2LSB
+        ehdr[6] = 1; // EV_CURRENT
+        ehdr[16..18].copy_from_slice(&3u16.to_le_bytes()); // ET_DYN
+        ehdr[18..20].copy_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+        ehdr[20..24].copy_from_slice(&1u32.to_le_bytes());
+        ehdr[32..40].copy_from_slice(&phoff.to_le_bytes());
+        ehdr[40..48].copy_from_slice(&shoff.to_le_bytes());
+        ehdr[52..54].copy_from_slice(&64u16.to_le_bytes());
+        ehdr[54..56].copy_from_slice(&56u16.to_le_bytes());
+        ehdr[56..58].copy_from_slice(&phnum.to_le_bytes());
+        ehdr[58..60].copy_from_slice(&64u16.to_le_bytes());
+        ehdr[60..62].copy_from_slice(&(shnum as u16).to_le_bytes());
+        ehdr[62..64].copy_from_slice(&1u16.to_le_bytes()); // .shstrtab
+        buf[0..64].copy_from_slice(&ehdr);
+        buf
+    }
+
+    fn shlib_libdep_results(
+        go_note: bool,
+        needed: Option<&str>,
+        is_shobj: bool,
+    ) -> Vec<(String, String)> {
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_shobj = is_shobj;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = PkgFile {
+            name: "/usr/lib64/libnodep.so.1".to_string(),
+            ..Default::default()
+        };
+        let bytes = craft_shlib_elf(go_note, needed);
+        let path = std::env::temp_dir().join(format!(
+            "rpmcrab-shlib-nodep-{}-{}",
+            go_note,
+            needed.is_some()
+        ));
+        std::fs::write(&path, &bytes).unwrap();
+        let info = ReadelfInfo::parse(path.to_str().unwrap(), &pkgfile.name);
+        // The crafted bytes must parse the way the check consumes them;
+        // a malformed fixture would pass vacuously.
+        assert!(info.failed.is_none(), "crafted ELF must parse");
+        assert_eq!(info.is_go_binary(), go_note, "go marker detection");
+        match needed {
+            Some(lib) => assert_eq!(
+                info.needed,
+                vec![lib.to_string()],
+                "DT_NEEDED visible through goblin"
+            ),
+            None => assert!(info.needed.is_empty(), "no DT_NEEDED"),
+        }
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_library_dependency(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        std::fs::remove_file(&path).ok();
+        results
+    }
+
+    #[test]
+    fn shlib_without_dependency_information_fires() {
+        let results = shlib_libdep_results(false, None, true);
+        let lines = lines_for(&results, "shared-library-without-dependency-information");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/lib64/libnodep.so.1"),
+            "detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn shlib_without_dependency_information_skips_go() {
+        // Go binaries are ET_DYN with no DT_NEEDED; the exemption keeps
+        // them quiet instead of flagging them as dependency-less.
+        let results = shlib_libdep_results(true, None, true);
+        assert_lacks(&results, "shared-library-without-dependency-information");
+        assert!(results.is_empty(), "Go shlib must be quiet: {results:?}");
+    }
+
+    #[test]
+    fn shlib_with_needed_stays_quiet() {
+        let results = shlib_libdep_results(false, Some("libc.so.6"), true);
+        assert_lacks(&results, "shared-library-without-dependency-information");
+        assert_lacks(&results, "statically-linked-binary");
+    }
+
+    #[test]
+    fn non_shlib_without_needed_still_statically_linked() {
+        // Existing behavior for non-shared objects is unchanged.
+        let results = shlib_libdep_results(false, None, false);
+        let lines = lines_for(&results, "statically-linked-binary");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert_lacks(&results, "shared-library-without-dependency-information");
     }
 
     fn fixture_path(name: &str) -> String {
