@@ -195,6 +195,28 @@ mod tests {
     }
 
     #[test]
+    fn three_cycle_fails_loudly() {
+        // Longer rings go through the same chain-tracking path as the
+        // two-cycle: the entry point depends on HashMap iteration order,
+        // so the assertion names every member without pinning order.
+        let mut table = HashMap::from([
+            ("A".to_string(), "#B#".to_string()),
+            ("B".to_string(), "#C#".to_string()),
+            ("C".to_string(), "#A#".to_string()),
+        ]);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            replace_description_variables(&mut table);
+        }));
+        assert!(r.is_err(), "cycle must not spin forever");
+        let msg = panic_message(r);
+        assert!(msg.contains("cyclic"), "unexpected panic: {msg}");
+        assert!(
+            msg.contains('A') && msg.contains('B') && msg.contains('C'),
+            "chain not named: {msg}"
+        );
+    }
+
+    #[test]
     fn unknown_variable_names_the_referring_entry() {
         let mut table = HashMap::from([("ENTRY".to_string(), "see #NOPE# here".to_string())]);
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
