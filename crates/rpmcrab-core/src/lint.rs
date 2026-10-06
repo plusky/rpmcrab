@@ -328,6 +328,10 @@ impl Lint {
     /// Findings are sorted by `(check, level)` descending, mirroring the
     /// text report's order; the summary carries the footer's counters and
     /// the process exit code.
+    ///
+    /// `duration_secs` is wall-clock time and varies between runs; golden
+    /// tests should ignore or redact it. Fatal per-package diagnostics are
+    /// printed to stderr (exit code 3) and never appear in the document.
     pub fn render_json(
         &self,
         prog: &str,

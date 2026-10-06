@@ -477,7 +477,7 @@ fn format_json_emits_parseable_report() {
     );
 }
 
-/// The findings in JSON mode are the same set as in text mode.
+/// The findings in JSON mode are the same multiset as in text mode.
 #[test]
 fn format_json_matches_text_findings() {
     let rpm = "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm";
@@ -486,19 +486,57 @@ fn format_json_matches_text_findings() {
     assert_eq!(json_out.status.code(), text_out.status.code());
     let doc: serde_json::Value =
         serde_json::from_str(&String::from_utf8_lossy(&json_out.stdout)).expect("JSON");
-    let json_checks: Vec<&str> = doc["findings"]
+    let mut json_findings: Vec<(String, String, String)> = doc["findings"]
         .as_array()
         .expect("findings")
         .iter()
-        .map(|f| f["check"].as_str().expect("check"))
+        .map(|f| {
+            (
+                f["check"].as_str().expect("check").to_string(),
+                f["level"].as_str().expect("level").to_string(),
+                f["details"]
+                    .as_array()
+                    .expect("details")
+                    .iter()
+                    .map(|d| d.as_str().expect("detail"))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        })
         .collect();
+    // Text finding lines render as `<pkg>: L: check details...`; split on
+    // the ` L: ` separator to recover the (check, level, details) triple.
     let text = String::from_utf8_lossy(&text_out.stdout);
-    for check in &json_checks {
-        assert!(
-            text.contains(check),
-            "text report is missing JSON-reported finding {check}"
-        );
+    let mut text_findings: Vec<(String, String, String)> = Vec::new();
+    for line in text.lines() {
+        let mut found: Option<(&str, &str)> = None;
+        for level in ["E", "W", "I"] {
+            let sep = format!(" {level}: ");
+            if let Some((_, rest)) = line.split_once(&sep) {
+                found = Some((level, rest));
+                break;
+            }
+        }
+        let Some((level, mut rest)) = found else {
+            continue;
+        };
+        // Strip the badness suffix the text renderer appends.
+        if let Some((det, _)) = rest.rsplit_once(" (Badness: ") {
+            rest = det;
+        }
+        let mut parts = rest.splitn(2, " ");
+        let check = parts.next().unwrap_or("").to_string();
+        let details = parts.next().unwrap_or("").trim().to_string();
+        text_findings.push((check, level.to_string(), details));
     }
+    json_findings.sort();
+    text_findings.sort();
+    assert_eq!(
+        json_findings.len(),
+        text_findings.len(),
+        "JSON/text finding count differs",
+    );
+    assert_eq!(json_findings, text_findings, "finding multisets differ");
 }
 
 /// An unknown --format value is a CLI usage error, like any other bad
@@ -519,9 +557,8 @@ fn format_unknown_value_exits_two() {
 /// flag still wins when both are given.
 #[test]
 fn output_format_config_selects_json() {
-    let dir = std::env::temp_dir().join("rpmcrab-format-test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let cfg = dir.join("format.toml");
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("format.toml");
     std::fs::write(&cfg, "OutputFormat = \"json\"\n").unwrap();
     let rpm = "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm";
     let out = rpmcrab(&["-c", cfg.to_str().unwrap(), rpm]);
