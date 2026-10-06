@@ -109,10 +109,12 @@ impl<'a> Worker<'a> {
         Pkg::installed(header)
     }
 
-    /// Whether the extractor child's stderr is discarded: the
+    /// Whether the extractor child's stderr would be discarded: the
     /// `SuppressExtractionStderr` config key says so (rpmlint#1592), or the
-    /// run is not verbose. Extracted so tests pin that production code
-    /// reads the config key rather than hardcoding the decision.
+    /// run is not verbose. No-op since native extraction (no child), but the
+    /// plumbing is kept so the config key keeps working. Extracted so tests
+    /// pin that production code reads the config key rather than hardcoding
+    /// the decision.
     fn suppress_stderr(&self) -> bool {
         self.config.suppress_extraction_stderr || !self.config.info
     }

@@ -586,7 +586,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/pull/1592"
 case = "global"
 check = "config"
 kind = "behaviour"
-reason = "SuppressExtractionStderr=false lets the extractor child inherit stderr, but only in verbose mode: the effective discard is `suppress_extraction_stderr || !info`. The reference always discards (DEVNULL even in verbose mode, pkg.py). The default true preserves the reference behaviour."
+reason = "SuppressExtractionStderr=false let the extractor child inherit stderr, but only in verbose mode: the effective discard was `suppress_extraction_stderr || !info`. The reference always discards (DEVNULL even in verbose mode, pkg.py). Since native extraction there is no child and no extractor stderr at all, so the observable behaviour matches the reference in every mode; the key is retained as a no-op for config compatibility."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/pull/1592"
 

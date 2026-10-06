@@ -89,11 +89,14 @@ RPM model plus `rpm -q`/`rpm2archive` subprocesses for the rest. The earlier
 draft chose it to stay static and `unsafe`-free; that trade is no longer worth
 it now that the binding is known to cover the whole surface.
 
-**Extraction caveat.** `librpm`'s safe `archive::PackageReader` returns zero
-entries for the compressed payloads that are all real-world RPMs — it omits the
+**Extraction.** `librpm`'s safe `archive::PackageReader` returns zero entries
+for the compressed payloads that are all real-world RPMs — it omits the
 `Fdopen(fdi, "r.<compressor>")` step `rpm2archive` performs. Payload extraction
-therefore shells out to `rpm2archive | tar -xz` (§7.4) rather than using that
-API, which also matches rpmlint's own extraction byte for byte.
+is therefore native (`pkg/extract.rs`): the container is parsed with the
+pure-Rust `rpm` crate, the payload decompressed in-stream (gzip/xz/zstd), and
+the newc cpio entries materialized directly — reproducing `rpm2archive | tar
+-xz` plus the reference's `chmod -R +rX .`, including setuid preservation
+(which the old BSD-tar path dropped on macOS).
 
 **Escape hatch.** If the binding proves too incomplete, the header/file layers
 can move to the `rpm` crate behind a feature; not in the default build.
@@ -602,8 +605,9 @@ checks appears, revisit as an additive feature.
 ### 7.4 External tools
 
 Header, file-list and rpmdb reads go through **`librpm`** (§3.1), not a
-subprocess. **Payload extraction** shells out to `rpm2archive | tar -xz`
-(fallback `rpm2cpio | cpio -id`), exactly as rpmlint does — the binding's
+subprocess. **Payload extraction** is native pure-Rust code (`pkg/extract.rs`): container
+parse via the `rpm` crate, in-stream decompression (gzip/xz/zstd), direct newc
+cpio materialization — no `rpm2archive`/`tar` subprocess. The binding's
 `archive::PackageReader` is unusable for compressed payloads (§3.1).
 ELF binary analysis uses the pure-Rust `goblin` crate (section/program
 headers, dynamic section, symbols) and `gimli` for DWARF, not `readelf`/`ldd`/

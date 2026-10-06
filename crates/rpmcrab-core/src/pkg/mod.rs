@@ -294,9 +294,10 @@ impl Pkg {
     /// Open a `.rpm` file, unpack its payload into a tempdir under
     /// `extract_dir`, and build the package. Signature checks are skipped, as
     /// rpmlint does; `extract_dir` comes from the config's `ExtractDir`.
-    /// `suppress_stderr` discards the extractor child's stderr outright;
-    /// when false, stderr is inherited in verbose mode and discarded
-    /// otherwise. (The reference always discards, DEVNULL even in verbose
+    /// `suppress_stderr` is a no-op since native extraction: there is no
+    /// extractor child whose stderr could appear. It is still threaded
+    /// through so the `SuppressExtractionStderr` config key keeps parsing.
+    /// (The reference always discards, DEVNULL even in verbose
     /// mode: pkg.py's `None if verbose else DEVNULL` is dead, overwritten
     /// unconditionally two lines later.)
     pub fn open(path: &Path, extract_dir: &Path, suppress_stderr: bool) -> Result<Self, PkgError> {

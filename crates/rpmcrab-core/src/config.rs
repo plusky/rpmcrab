@@ -78,7 +78,9 @@ pub struct Config {
     pub skip_package_patterns: Vec<String>,
     /// `RpmlintrcSearchPaths` (rpmlint#1592).
     pub rpmlintrc_search_paths: Vec<String>,
-    /// `SuppressExtractionStderr` (rpmlint#1592).
+    /// `SuppressExtractionStderr` (rpmlint#1592). No-op since native
+    /// extraction: there is no extractor child whose stderr could appear.
+    /// Retained so existing configs keep parsing.
     pub suppress_extraction_stderr: bool,
     /// `OutputFormat` (`"text"` default, `"json"` for machine-readable
     /// output; upstream rpmlint#1156). The CLI `--format` overrides this.

@@ -23,8 +23,18 @@ workspace = true
 # `TransactionSet().parseSpec`). Safe API only — `unsafe` stays inside
 # librpm/librpm-sys, so this crate keeps `unsafe_code = "forbid"`. Payload
 # extraction does NOT use the binding (its PackageReader returns no entries for
-# compressed payloads); it shells out to rpm2archive (M2b).
+# compressed payloads); the payload is extracted natively (see pkg/extract.rs).
 librpm = { version = "0.6", default-features = false, features = ["build"] }
+# Native payload extraction: RPM container parse + payload compression
+# detection (pure Rust). The `payload` feature unlocks the builder API used by
+# extraction tests to synthesize RPMs. Replaces the old rpm2archive-tar
+# subprocess.
+rpm = { version = "0.30", default-features = false, features = ["payload"] }
+# xz payload decompression for native extraction. Pure Rust.
+liblzma = "0.4"
+# mkfifo/mknod for native extraction of special files (safe wrappers;
+# this crate keeps `unsafe_code = "forbid"`).
+nix = { version = "0.30", features = ["fs"] }
 # `preserve_order`: the reference reads configs into Python dicts (insertion
 # order) and `lookup_check_for_file` is first-match-wins, so table order is
 # observable. Without it `toml::Table` is a BTreeMap (sorted).
