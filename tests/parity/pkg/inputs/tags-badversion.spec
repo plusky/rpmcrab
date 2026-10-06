@@ -1,3 +1,5 @@
+%define optflags -O2 -g
+# Pinned for reproducible fixture builds (see build-tags-emission-pins.sh).
 Name:           tags-badversion
 Version:        0pre
 Release:        1
@@ -17,6 +19,7 @@ Invalid version test package.
 
 %install
 
+%{?build_epoch:find %{buildroot} -exec touch -h -d "@%{build_epoch}" {} +}
 %files
 
 %changelog

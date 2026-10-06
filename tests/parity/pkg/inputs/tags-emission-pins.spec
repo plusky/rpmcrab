@@ -1,3 +1,5 @@
+%define optflags -O2 -g
+# Pinned for reproducible fixture builds (see build-tags-emission-pins.sh).
 Name:           tags-emission-pins
 Version:        1.0
 Release:        1
@@ -90,6 +92,7 @@ Description: test
 Version: 1.0
 EOF
 
+%{?build_epoch:find %{buildroot} -exec touch -h -d "@%{build_epoch}" {} +}
 %files
 
 %files -n tags-emission-pins-devel
