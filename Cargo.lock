@@ -986,6 +986,7 @@ dependencies = [
  "log",
  "md-5",
  "quick-xml",
+ "rayon",
  "serde_json",
  "sha1",
  "sha2",

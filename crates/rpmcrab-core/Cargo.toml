@@ -58,6 +58,10 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 spellbook = "0.4.2"
 # ELF parsing for BinariesCheck (replaces readelf/ldd). Pure Rust, MIT.
 goblin = "0.10"
+# Per-file parallelism for BinariesCheck ELF metadata parsing (rayon
+# pre-pass in check_binary). Finding emission stays sequential in file
+# order, so the output bytes are frozen.
+rayon = "1"
 # DWARF parsing for BinariesCheck DW_AT_producer extraction (the optflags
 # check). Pure Rust; replaces the reference objdump --dwarf=info subprocess.
 gimli = "0.34"

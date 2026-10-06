@@ -12,6 +12,7 @@
 use std::path::Path;
 
 use fancy_regex::Regex;
+use rayon::prelude::*;
 
 use crate::check::{Check, add_info};
 use crate::config::Config;
@@ -415,6 +416,56 @@ impl ObjdumpInfo {
             Err(e) => info.failed = Some(e.to_string()),
         }
         info
+    }
+}
+
+/// Expensive per-file ELF metadata, parsed in parallel (rayon) before the
+/// sequential finding-emission loop in `check_binary`.
+///
+/// Parsing is pure -- goblin over the file bytes, no shared state -- so it
+/// parallelizes cleanly. Finding *emission* stays sequential in file order,
+/// keeping the output bytes frozen.
+struct ElfAnalysis {
+    info: ReadelfInfo,
+    ldd: Option<LddInfo>,
+}
+
+impl ElfAnalysis {
+    /// Parse a file's ELF metadata. Called from the parallel pre-pass for
+    /// every file that can reach the deep ELF checks; must stay
+    /// side-effect free.
+    fn parse(pkgfile: &PkgFile) -> Self {
+        let info = ReadelfInfo::parse(&pkgfile.path, &pkgfile.name);
+        // Mirrors the `run_elf_checks` gate: ldd info only for non-archives
+        // that are dynamically linked.
+        let ldd = if !pkgfile.magic.contains("current ar archive")
+            && pkgfile.magic.contains("dynamically linked")
+        {
+            Some(LddInfo::parse(&pkgfile.path, true))
+        } else {
+            None
+        };
+        Self { info, ldd }
+    }
+
+    /// Whether this file can reach the deep ELF checks: the cheap,
+    /// magic-based gates from `check_binary`, minus the package-level
+    /// `noarch` gate (passed in). Erring on the side of parsing is safe --
+    /// extra parses only cost time, never correctness.
+    fn wants_analysis(pkgfile: &PkgFile, is_noarch: bool) -> bool {
+        let magic = &pkgfile.magic;
+        let is_ebpf = magic.contains("eBPF");
+        let is_elf = elf_regex().is_match(magic).unwrap_or(false) && !is_ebpf;
+        if !(is_elf || magic.contains("current ar archive")) || is_noarch {
+            return false;
+        }
+        let name = &pkgfile.name;
+        !(magic.contains("Objective caml native")
+            || magic.contains("Lua bytecode")
+            || name.ends_with(".o")
+            || name.ends_with(".static")
+            || name.ends_with(".gox")
+            || name.ends_with(".go"))
     }
 }
 
@@ -1658,12 +1709,30 @@ impl BinariesCheck {
         }
     }
 
-    fn run_elf_checks(&mut self, pkg: &Pkg, pkgfile: &PkgFile, config: &Config, out: &mut Filter) {
+    fn run_elf_checks(
+        &mut self,
+        pkg: &Pkg,
+        pkgfile: &PkgFile,
+        config: &Config,
+        out: &mut Filter,
+        pre: Option<&ElfAnalysis>,
+    ) {
         if self.is_archive && !self.is_standard_archive(pkg, pkgfile, out) {
             self.is_nonstandard_archive = true;
             return;
         }
-        let info = ReadelfInfo::parse(&pkgfile.path, &pkgfile.name);
+        // The parallel pre-pass in `check_binary` parses every file that can
+        // reach this point; parse inline if the gates ever drift (correct,
+        // just serial).
+        let owned;
+        let analysis = match pre {
+            Some(a) => a,
+            None => {
+                owned = ElfAnalysis::parse(pkgfile);
+                &owned
+            }
+        };
+        let info = &analysis.info;
         if let Some(reason) = &info.failed {
             add_info(
                 out,
@@ -1675,9 +1744,8 @@ impl BinariesCheck {
             return;
         }
 
-        let ldd = if !self.is_archive && self.is_dynamically_linked {
-            let l = LddInfo::parse(&pkgfile.path, true);
-            if let Some(reason) = &l.failed {
+        if let Some(ldd) = analysis.ldd.as_ref() {
+            if let Some(reason) = &ldd.failed {
                 add_info(
                     out,
                     Level::Error,
@@ -1687,29 +1755,26 @@ impl BinariesCheck {
                 );
                 return;
             }
-            Some(l)
-        } else {
-            None
-        };
+        }
 
         // The reference runs these in a thread pool; serial is equivalent.
-        self.check_lto_section(pkg, pkgfile, &info, out);
-        self.check_no_text_in_archive(pkg, pkgfile, &info, out);
-        self.check_missing_symtab_in_archive(pkg, pkgfile, &info, out);
-        self.check_missing_debug_info_in_archive(pkg, pkgfile, &info, out);
-        self.check_executable_stack(pkg, pkgfile, &info, out);
-        self.check_shared_library(pkg, pkgfile, &info, out);
-        if let Some(l) = &ldd {
-            self.check_dependency(pkg, pkgfile, &info, l, out);
+        self.check_lto_section(pkg, pkgfile, info, out);
+        self.check_no_text_in_archive(pkg, pkgfile, info, out);
+        self.check_missing_symtab_in_archive(pkg, pkgfile, info, out);
+        self.check_missing_debug_info_in_archive(pkg, pkgfile, info, out);
+        self.check_executable_stack(pkg, pkgfile, info, out);
+        self.check_shared_library(pkg, pkgfile, info, out);
+        if let Some(l) = analysis.ldd.as_ref() {
+            self.check_dependency(pkg, pkgfile, info, l, out);
             self.check_library_dependency_location(pkg, pkgfile, l, out);
         }
-        self.check_security_functions(pkg, pkgfile, &info, out);
-        self.check_rpath(pkg, pkgfile, &info, out);
-        self.check_library_dependency(pkg, pkgfile, &info, out);
-        self.check_forbidden_functions(pkg, pkgfile, &info, config, out);
+        self.check_security_functions(pkg, pkgfile, info, out);
+        self.check_rpath(pkg, pkgfile, info, out);
+        self.check_library_dependency(pkg, pkgfile, info, out);
+        self.check_forbidden_functions(pkg, pkgfile, info, config, out);
         self.check_optflags(pkg, pkgfile, config, out);
-        self.check_hash_sections(pkg, pkgfile, &info, out);
-        self.check_no_patchable_function_entries_in_archive(pkg, pkgfile, &info, out);
+        self.check_hash_sections(pkg, pkgfile, info, out);
+        self.check_no_patchable_function_entries_in_archive(pkg, pkgfile, info, out);
     }
 }
 
@@ -1726,7 +1791,19 @@ impl Check for BinariesCheck {
         let mut pkg_has_usrlib_file = false;
         let mut pkg_has_file_in_lib64 = false;
 
-        for pkgfile in &pkg.files {
+        // Parse the expensive per-file ELF metadata in parallel (rayon).
+        // Finding emission stays in the sequential loop below, in file
+        // order, so the output bytes are unchanged.
+        let is_noarch = pkg.arch == "noarch";
+        let analyses: Vec<Option<ElfAnalysis>> = pkg
+            .files
+            .par_iter()
+            .map(|pkgfile| {
+                ElfAnalysis::wants_analysis(pkgfile, is_noarch).then(|| ElfAnalysis::parse(pkgfile))
+            })
+            .collect();
+
+        for (idx, pkgfile) in pkg.files.iter().enumerate() {
             let fname: &str = &pkgfile.name;
             self.check_libtool_wrapper(pkg, fname, pkgfile, out);
             self.check_invalid_la_file(pkg, fname, pkgfile, out);
@@ -1790,15 +1867,19 @@ impl Check for BinariesCheck {
 
             self.check_unstripped_binary(fname, pkg, pkgfile, out);
             self.detect_attributes(&pkgfile.magic);
-            self.run_elf_checks(pkg, pkgfile, config, out);
+            self.run_elf_checks(pkg, pkgfile, config, out, analyses[idx].as_ref());
 
             if self.is_nonstandard_archive {
                 continue;
             }
 
-            let info_is_shlib = {
-                let info = ReadelfInfo::parse(&pkgfile.path, &pkgfile.name);
-                info.failed.is_none() && info.is_shlib
+            // Reuse the parallel pre-pass parse instead of parsing twice.
+            let info_is_shlib = match analyses[idx].as_ref() {
+                Some(a) => a.info.failed.is_none() && a.info.is_shlib,
+                None => {
+                    let info = ReadelfInfo::parse(&pkgfile.path, &pkgfile.name);
+                    info.failed.is_none() && info.is_shlib
+                }
             };
             if info_is_shlib {
                 pkg_has_lib = true;
@@ -4021,12 +4102,14 @@ description = "explicit priority string bypasses the system crypto policy"
         let pkgfile = PkgFile {
             name: "/usr/lib64/libok.so".to_string(),
             path: elf_path.to_string_lossy().into_owned(),
-            magic: "ELF 64-bit LSB shared object, x86-64".to_string(),
+            magic: "ELF 64-bit LSB shared object, x86-64, dynamically linked".to_string(),
             mode: 0o100755,
             ..Default::default()
         };
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.run_elf_checks(&pkg, &pkgfile, &config, &mut out);
+        let analysis =
+            ElfAnalysis::wants_analysis(&pkgfile, false).then(|| ElfAnalysis::parse(&pkgfile));
+        check.run_elf_checks(&pkg, &pkgfile, &config, &mut out, analysis.as_ref());
         let results = out.results().to_vec();
         assert_lacks(&results, "readelf-failed");
         assert_lacks(&results, "ldd-failed");
@@ -4067,6 +4150,37 @@ description = "explicit priority string bypasses the system crypto policy"
             gnu_lines[0].contains(" W: "),
             "missing-gnu-hash-section is Warning: {}",
             gnu_lines[0]
+        );
+    }
+
+    #[test]
+    fn parallel_prepass_keeps_output_deterministic() {
+        // The rayon pre-pass parallelizes parsing only; finding emission
+        // stays sequential in file order. Pin the frozen-output contract
+        // (#113): 1-thread and N-thread runs must produce identical
+        // findings on a real fixture package.
+        let rpm = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
+        let run = |threads: usize| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("rayon pool")
+                .install(|| {
+                    let dir = tempfile::TempDir::new().expect("tmpdir");
+                    let pkg = Pkg::open(std::path::Path::new(&rpm), dir.path(), true)
+                        .expect("open fixture");
+                    let config = test_config();
+                    let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+                    let mut check = BinariesCheck::with_tool_dir(&config, None);
+                    check.check_binary(&pkg, &config, &mut out);
+                    out.results().to_vec()
+                })
+        };
+        let single = run(1);
+        let parallel = run(4);
+        assert_eq!(
+            single, parallel,
+            "findings must be identical under 1-thread and 4-thread pre-pass"
         );
     }
 }
