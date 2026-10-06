@@ -4403,12 +4403,12 @@ mod tests {
         assert_eq!(hits.len(), 2, "expected 2 findings, got: {hits:?}");
         assert!(
             hits.iter()
-                .any(|d| d.contains("W: zero-perms-ghost Suggestion: \"%ghost %attr(0640,netdev,netdev) /run/netconfig/resolv.conf")),
+                .any(|d| d.contains("W: zero-perms-ghost Suggestion: \"%ghost %attr(0640,netdev,netdev) /run/netconfig/resolv.conf\"")),
             "suggestion must use tmpfiles.d perms: {hits:?}"
         );
         assert!(
             hits.iter().any(|d| d.contains(
-                "W: zero-perms-ghost Suggestion: \"%ghost %attr(0755,root,group) /run/netconfig"
+                "W: zero-perms-ghost Suggestion: \"%ghost %attr(0755,root,group) /run/netconfig\"")
             )),
             "suggestion must use tmpfiles.d perms: {hits:?}"
         );
