@@ -1832,9 +1832,9 @@ mod tests {
     fn invalid_changelog_author_warns_on_bot_entries() {
         // The fixture carries two bot entries and one human entry.
         let config = authors_config(&[
-            "opensuse-packaging@opensuse.org",
-            "nobody@fedoraproject.org",
-            "nobody@mageia.org",
+            "opensuse-packaging@opensuse\\.org",
+            "nobody@fedoraproject\\.org",
+            "nobody@mageia\\.org",
             ".*@example\\.com",
         ]);
         let pkg = authors_fixture();

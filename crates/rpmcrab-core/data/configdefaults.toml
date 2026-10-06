@@ -369,10 +369,9 @@ ObsoleteDirPrefixes = [
 # changelog entry matching one of these regexes warns
 # invalid-changelog-author.
 InvalidChangelogAuthors = [
-    "opensuse-packaging@opensuse.org",
-    "nobody@fedoraproject.org",
-    "nobody@mageia.org",
-    ".*@example\\.com",
+    "opensuse-packaging@opensuse\\.org",
+    "nobody@fedoraproject\\.org",
+    "nobody@mageia\\.org",
 ]
 # Permissions for files in source packages
 ValidSrcPerms = [
