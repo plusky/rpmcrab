@@ -17,8 +17,12 @@ Provenance, verified against the pinned reference (`84848c0`):
 - `IconSizesCheck.toml`, `MixedOwnershipCheck.toml`, `PAMModulesCheck.toml`,
   `ZipCheck.toml`, `ZyppSyntaxCheck.toml` — byte-identical to the reference
   `rpmlint/descriptions/` files of the same name.
-- `XinetdDepCheck.toml` — byte-identical to the reference's
-  `descriptions/CheckForXinetd.toml`, renamed to the module name.
+- `XinetdDepCheck.toml` — the reference's `descriptions/CheckForXinetd.toml`,
+  renamed to the module name, plus the port-only `deprecated-xinetd-config`
+  entry (ledgered in `tests/parity/divergences.toml`).
+- `CheckForXinetd.toml` — byte-identical to the reference file of the same
+  name (its content is duplicated by `XinetdDepCheck.toml`; the merge keeps
+  the identical later copy).
 - `I18NCheck.toml` — the reference file plus the `incorrect-locale-subdir`
   block that `checks/i18n.rs` emits.
 - `ConfigFilesCheck.toml` — the reference file, except
@@ -34,7 +38,22 @@ Provenance, verified against the pinned reference (`84848c0`):
   symbols are provided at once claim is not always accurate: duplicate
   versioned provides trigger the check too), staged ahead of the reference
   per the fix-in-port rule. Ledgered in `tests/parity/divergences.toml`.
+- `DeviceFilesCheck.toml`, `WorldWritableCheck.toml` — the entries carved
+  out of the reference's `FileMetadataCheck.toml`, normalized to the
+  reference's single-line form: the carved files used `"""` blocks, whose
+  trailing newline the reference's entries do not have.
+- `BuildRootAndDateCheck.toml` — the mechanical union of the reference's
+  `descriptions/BuildDateCheck.toml` and `descriptions/BuildRootCheck.toml`
+  (entries byte-identical); the port merged the two reference checks into
+  one, so a single file named after the port check keeps the check-name to
+  TOML mapping total. Ledgered in `tests/parity/divergences.toml`.
+- Every other `*.toml` file — byte-identical to the reference
+  `rpmlint/descriptions/` file of the same name.
 
-Checks whose description file is not staged yet have no wired description:
-`--explain` and `-v` report "Unknown message" for their ids, the same text
-the reference prints when a description is genuinely missing.
+Every check the registry can build now has description coverage: a staged
+`<Name>.toml` — or, for `FHSCheck` and `PostCheck`, details registered in
+code, mirroring the reference which ships no TOML for those two either
+(`fhs_details_dict` / `post_details_dict` installed in each check's
+`__init__`). Enforced by
+`describe::tests::every_registered_check_has_description_coverage`, so the
+gap cannot silently reopen.

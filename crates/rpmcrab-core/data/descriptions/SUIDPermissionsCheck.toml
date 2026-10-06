@@ -1,0 +1,33 @@
+permissions-symlink="""
+permissions handling for symlinks is useless. Please contact security@suse.de to remove the entry. Please refer to #AUDIT_BUG_URL# for more information.
+"""
+permissions-dir-without-slash="""
+the entry in the permissions file refers to a directory. Please contact security@suse.de to append a slash to the entry in order to avoid security problems. Please refer to #AUDIT_BUG_URL# for more information.
+"""
+permissions-file-as-dir="""
+the entry in the permissions file refers to a directory but the package actually contains a file. Please contact security@suse.de to remove the slash. Please refer to #AUDIT_BUG_URL# for more information.
+"""
+permissions-incorrect="""
+please use the %attr/%caps macro to set the correct permissions.
+"""
+permissions-incorrect-owner="""
+please use the %attr macro to set the correct ownership.
+"""
+permissions-file-setuid-bit="""Packaging binaries with setuid/setgid bits or capabilities set requires a
+review and whitelisting by the SUSE security team. #REVIEW_NEEDED_TEXT#"""
+permissions-directory-setuid-bit="""#REVIEW_NEEDED_TEXT#"""
+permissions-fscaps="""Packaging files with capabilities is not allowed. The
+permissions package manages capabilities via the %set_permissions macro
+during %post. Please remove the capabilities from the file."""
+permissions-missing-postin="""
+Please add an appropriate %post section
+"""
+permissions-missing-requires="""
+Please add 'PreReq: permissions'
+"""
+permissions-missing-verifyscript="""
+Please add a %verifyscript section
+"""
+permissions-parse-error="""
+Please fix the file's syntax or the file type (e.g. no symlinks allowed)
+"""

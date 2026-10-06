@@ -12,17 +12,49 @@ use std::collections::HashMap;
 /// One staged description file per line here, in sorted-name order to match
 /// the reference's `sorted(descr_folder.glob('*.toml'))` merge.
 const STAGED: &[&str] = &[
+    include_str!("../data/descriptions/AlternativesCheck.toml"),
+    include_str!("../data/descriptions/AppDataCheck.toml"),
     include_str!("../data/descriptions/AtomicUpdateCheck.toml"),
+    include_str!("../data/descriptions/BashismsCheck.toml"),
     include_str!("../data/descriptions/BinariesCheck.toml"),
+    include_str!("../data/descriptions/BrandingPolicyCheck.toml"),
+    include_str!("../data/descriptions/BuildRootAndDateCheck.toml"),
+    include_str!("../data/descriptions/CheckForXinetd.toml"),
     include_str!("../data/descriptions/ConfigFilesCheck.toml"),
+    include_str!("../data/descriptions/DBusPolicyCheck.toml"),
     include_str!("../data/descriptions/DeviceFilesCheck.toml"),
+    include_str!("../data/descriptions/DocCheck.toml"),
+    include_str!("../data/descriptions/DuplicatesCheck.toml"),
+    include_str!("../data/descriptions/ErlangCheck.toml"),
+    include_str!("../data/descriptions/FileDigestCheck.toml"),
+    include_str!("../data/descriptions/FileMetadataCheck.toml"),
+    include_str!("../data/descriptions/FilelistCheck.toml"),
+    include_str!("../data/descriptions/FilesCheck.toml"),
     include_str!("../data/descriptions/I18NCheck.toml"),
     include_str!("../data/descriptions/IconSizesCheck.toml"),
+    include_str!("../data/descriptions/InitScriptCheck.toml"),
+    include_str!("../data/descriptions/KMPPolicyCheck.toml"),
+    include_str!("../data/descriptions/LSBCheck.toml"),
     include_str!("../data/descriptions/LibraryDependencyCheck.toml"),
+    include_str!("../data/descriptions/LogrotateCheck.toml"),
+    include_str!("../data/descriptions/MenuCheck.toml"),
+    include_str!("../data/descriptions/MenuXDGCheck.toml"),
     include_str!("../data/descriptions/MixedOwnershipCheck.toml"),
     include_str!("../data/descriptions/PAMModulesCheck.toml"),
+    include_str!("../data/descriptions/PkgConfigCheck.toml"),
+    include_str!("../data/descriptions/PolkitCheck.toml"),
+    include_str!("../data/descriptions/PythonCheck.toml"),
+    include_str!("../data/descriptions/SELinuxIndependentModuleCheck.toml"),
+    include_str!("../data/descriptions/SUIDPermissionsCheck.toml"),
+    include_str!("../data/descriptions/SharedLibraryPolicyCheck.toml"),
+    include_str!("../data/descriptions/SignatureCheck.toml"),
     include_str!("../data/descriptions/SourceCheck.toml"),
+    include_str!("../data/descriptions/SpecCheck.toml"),
+    include_str!("../data/descriptions/SysVInitOnSystemdCheck.toml"),
+    include_str!("../data/descriptions/SystemdInstallCheck.toml"),
+    include_str!("../data/descriptions/SystemdTmpfilesCheck.toml"),
     include_str!("../data/descriptions/TagsCheck.toml"),
+    include_str!("../data/descriptions/TmpFilesCheck.toml"),
     include_str!("../data/descriptions/Variables.toml"),
     include_str!("../data/descriptions/WorldWritableCheck.toml"),
     include_str!("../data/descriptions/XinetdDepCheck.toml"),
@@ -260,7 +292,7 @@ mod tests {
         );
     }
 
-    /// The 16 staged description files, byte-pinned: any edit, truncation,
+    /// The 48 staged description files, byte-pinned: any edit, truncation,
     /// or bad rebase merge changes a hash. Provenance of each file against
     /// the pinned reference (`84848c0`) is documented in
     /// `data/descriptions/README.md`.
@@ -269,20 +301,76 @@ mod tests {
         use sha2::{Digest, Sha256};
         let pinned: &[(&str, &str)] = &[
             (
+                "AlternativesCheck.toml",
+                "d10970e45791c9ec4eb2f63fe979c27df9b2e169585f967be8899051af5bec9c",
+            ),
+            (
+                "AppDataCheck.toml",
+                "a7ebdfead7b1aef79273fd76878647227b2fed6f977a49761bd88eda68dc5241",
+            ),
+            (
                 "AtomicUpdateCheck.toml",
                 "d3878db058303c051de21eeb464179e1fe660457f318fb2756f51d42f58e289c",
+            ),
+            (
+                "BashismsCheck.toml",
+                "d1235f30411c3b9a6a5843461a7d80a54465b77cf4ea4dce2908247635db63a2",
             ),
             (
                 "BinariesCheck.toml",
                 "c641607ac210f5820d81956c70147cbd6610edcfb9037bddef9d4e97d8b026a7",
             ),
             (
+                "BrandingPolicyCheck.toml",
+                "eab07cd05c29feaa5b2a537aff908d815f15a39bb14a00cd2c70270aa7c9d24a",
+            ),
+            (
+                "BuildRootAndDateCheck.toml",
+                "210a6d9b95b683072b46e7734a81583beea0f7169ec11479fefdf6e44ffa45f5",
+            ),
+            (
+                "CheckForXinetd.toml",
+                "985a789bb7e6671d530a60a19215b6b250e693fd3e25cb0e0bb34fd57a8e594a",
+            ),
+            (
                 "ConfigFilesCheck.toml",
                 "4c026df7eff586f7ba46cf07719cd8235dca25e30fb4e07de5e73331008a86bf",
             ),
             (
+                "DBusPolicyCheck.toml",
+                "df4abb3068b47bc1dbb3c6bbd79911866efa038fed8b9dc31c9873008d3703b5",
+            ),
+            (
                 "DeviceFilesCheck.toml",
-                "bc009d9bd4058a4602aebcce655dec2fc7d784c13425875a2a5ac242caa8d38f",
+                "c478130450cf85993df51fd59bf5c3f8cc900aefd0b71c7a09d6bd51faad5ace",
+            ),
+            (
+                "DocCheck.toml",
+                "94929cc2087b74f1af0bed8050805ba69372a503f267bca7224f3c7429663de0",
+            ),
+            (
+                "DuplicatesCheck.toml",
+                "ab5e07931eed229932c07fa17bf3ef75bc278ad5cec5e8fe25a2619ea60dc79a",
+            ),
+            (
+                "ErlangCheck.toml",
+                "48df0f4ba8f088c5a50425a6a3b84811b3404a62dbc6505ce1388cf98800f9fd",
+            ),
+            (
+                "FileDigestCheck.toml",
+                "591a8fb13d58b66f1d78cc5c82d339d3788d8fd622b05151632ca8e639900bcd",
+            ),
+            (
+                "FileMetadataCheck.toml",
+                "337ce93d39a4c182ae04b9909533ea502e60deb005a25a61f2649163907e8901",
+            ),
+            (
+                "FilelistCheck.toml",
+                "c13d2643ec624d15848dd0093bb9dd4b77ff9e3d2dfab8a8c7cac37039eda7e6",
+            ),
+            (
+                "FilesCheck.toml",
+                "88e9207b65c3d3d18a609260ca326a4796d40f39c4449cacc2aa77e56fc61849",
             ),
             (
                 "I18NCheck.toml",
@@ -293,8 +381,32 @@ mod tests {
                 "a51bddc5b66a4958b0707bc5a2ef05b7ba39ba0e7d9951dcbcf76dfc2d94d2ce",
             ),
             (
+                "InitScriptCheck.toml",
+                "5bc37d52a320b38ef4f7f9308096f2afaf888ca8f246e403199a198561f8be85",
+            ),
+            (
+                "KMPPolicyCheck.toml",
+                "8f8ae06e9a82c921e64197b35e79f441a201a14a6a3fe7d345b3ba25608c9725",
+            ),
+            (
+                "LSBCheck.toml",
+                "8d8693d4f0f7169ddc7e8031aef0f7a8a1689d393aa68068a02c967d2a08958a",
+            ),
+            (
                 "LibraryDependencyCheck.toml",
                 "2263735551a41186b48588ccc8176ceaca36399b600407fa2c4c4be4f50856aa",
+            ),
+            (
+                "LogrotateCheck.toml",
+                "b40b11757baf314c39cc84914b6e8b20fc8c4b61c55d368360f2026940f0ae1f",
+            ),
+            (
+                "MenuCheck.toml",
+                "7728c3dd7492c18c28f20445d492d377ec3e4ff40e09b1641346a31e9561857e",
+            ),
+            (
+                "MenuXDGCheck.toml",
+                "baba8c36ae9e55cd17e93c1603a817d6a083092c766da57c655a5a0eff79c24f",
             ),
             (
                 "MixedOwnershipCheck.toml",
@@ -305,12 +417,60 @@ mod tests {
                 "6644539632fe3d9f5d4c12a1593b23ec227212ad8342007b7fa06ca8c0565f7d",
             ),
             (
+                "PkgConfigCheck.toml",
+                "fa5aebc5e51fcdb42ae2c45fa185f50cd851d580d4da1fe9c21bcf85e5dd655a",
+            ),
+            (
+                "PolkitCheck.toml",
+                "e9a8b8246e7227e1df94dacce99a5eaf4bc98a22b07c5ecf2203882ab3b8e77a",
+            ),
+            (
+                "PythonCheck.toml",
+                "3f8d795a0a6311c31aca40d15325a814d09eab4c1697892f30c90d4e9ddb38fd",
+            ),
+            (
+                "SELinuxIndependentModuleCheck.toml",
+                "e528a746c24b29b9342dcceff47bb2589d9f9b51dbe49d99c62c33410cc8e652",
+            ),
+            (
+                "SUIDPermissionsCheck.toml",
+                "56156810855981231341ebf3c1e6490878f4c3dfc0de42fa2f7ef75bb312df26",
+            ),
+            (
+                "SharedLibraryPolicyCheck.toml",
+                "0c801894904d52460dec450268758049cc74cd82732432789557fec012c36825",
+            ),
+            (
+                "SignatureCheck.toml",
+                "70d774d2460a8ba85a0a2f00a50f6491a932926e346aa7e6b93b9060751b11be",
+            ),
+            (
                 "SourceCheck.toml",
                 "7b491c89b33ba2362dfb775f6ea360a104efbdeb77a50bb002874962bb9152c6",
             ),
             (
+                "SpecCheck.toml",
+                "7441cafec02240d4cc0f3d69785e19fe64ef57c3899f895b48b0071b14f45f1d",
+            ),
+            (
+                "SysVInitOnSystemdCheck.toml",
+                "f080982b5136ff3661b84510e3a9e7dcda5410a287a39f83b67fdbdadec0ddd6",
+            ),
+            (
+                "SystemdInstallCheck.toml",
+                "96be0fba5e6d82c65270088fd9c65c2e14f805e05effb2de95990bb2eea31491",
+            ),
+            (
+                "SystemdTmpfilesCheck.toml",
+                "cc2e7ef9f19411e89581ab9bd174fa121010a94f59a7a26b3d966c785adfabc8",
+            ),
+            (
                 "TagsCheck.toml",
                 "263a18567fe55ed756db7f836f6728699d88e44a0474e6c1175f9a2ca89389de",
+            ),
+            (
+                "TmpFilesCheck.toml",
+                "c60d2945c48acdb692c114a857a0635ead12faf37da63d343b1d70a89d51e4df",
             ),
             (
                 "Variables.toml",
@@ -318,7 +478,7 @@ mod tests {
             ),
             (
                 "WorldWritableCheck.toml",
-                "4b0e6ecfabd5be179bbbf51ea66802aeddcd13c60e621f20907735cbf50069fe",
+                "dddbb946fb9b449cff9ac37cc312f7f95365cb78aefd4039c45f4dca1f02d103",
             ),
             (
                 "XinetdDepCheck.toml",
@@ -373,5 +533,65 @@ mod tests {
             !detail.contains("versioned and unversioned symbols are provided at once"),
             "inaccurate reference wording still present: {detail}"
         );
+    }
+
+
+    /// Every check the registry can build has description coverage: a staged
+    /// `<Name>.toml` in `STAGED` — or, for `FHSCheck`/`PostCheck`, details
+    /// registered in code, mirroring the reference which ships no TOML for
+    /// those two either (`fhs_details_dict` / `post_details_dict` installed
+    /// in each check's `__init__`). Adding a check without either fails here.
+    #[test]
+    fn every_registered_check_has_description_coverage() {
+        fn check_names() -> Vec<String> {
+            let src = include_str!("check.rs");
+            let body = match src.find("pub fn build(") {
+                Some(start) => {
+                    let rest = &src[start..];
+                    let end = rest.find("\n}\n").map(|i| i + 1).unwrap_or(rest.len());
+                    &rest[..end]
+                }
+                None => panic!("check::build not found"),
+            };
+            body.lines()
+                .filter_map(|l| {
+                    let l = l.trim();
+                    let rest = l.strip_prefix('"')?;
+                    let end = rest.find('"')?;
+                    let name = &rest[..end];
+                    rest[end + 1..]
+                        .trim_start()
+                        .starts_with("=>")
+                        .then(|| name.to_string())
+                })
+                .collect()
+        }
+        fn staged_files() -> Vec<String> {
+            let src = include_str!("describe.rs");
+            src.lines()
+                .filter_map(|l| {
+                    let l = l.trim();
+                    let rest = l.strip_prefix("include_str!(\"../data/descriptions/")?;
+                    let end = rest.find('"')?;
+                    Some(rest[..end].to_string())
+                })
+                .collect()
+        }
+        let staged = staged_files();
+        let mut checks = check_names();
+        assert!(!checks.is_empty(), "no check names parsed from check.rs");
+        checks.sort();
+        for name in checks {
+            let expected = match name.as_str() {
+                // No TOML upstream either; details registered in code.
+                "FHSCheck" | "PostCheck" => continue,
+                _ => format!("{name}.toml"),
+            };
+            assert!(
+                staged.contains(&expected),
+                "check `{name}` has no staged description TOML: add \
+                 `data/descriptions/{expected}` and wire it into STAGED"
+            );
+        }
     }
 }

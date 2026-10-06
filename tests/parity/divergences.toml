@@ -956,3 +956,10 @@ kind = "behaviour"
 reason = "Upstream rpmlint#4: a new `prebuilt-binary-in-sources` warning fires when a source archive (tar, gzip/xz/zstd-compressed tar, zip — nested up to 5 deep) contains prebuilt binaries, detected by magic bytes: ELF, Java class, Python bytecode (.pyc/.pyo, magic plus name), and Java archives (.jar files are reported as a unit, their classes not listed separately). The frozen 2.10.0 reference has no such check (the issue is still open upstream). bzip2-compressed archives are skipped silently: no pure-Rust bzip2 decoder exists, the same limitation native payload extraction ledgers."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/4"
+
+[[divergence]]
+case = "global"
+check = "BuildRootAndDateCheck"
+kind = "detail"
+reason = "`BuildRootAndDateCheck.toml` is the mechanical union of the reference's `descriptions/BuildDateCheck.toml` and `descriptions/BuildRootCheck.toml` (entries byte-identical); the port merged the two reference checks into one, so a single file named after the port check keeps the check-name to TOML mapping total. Provenance: `crates/rpmcrab-core/data/descriptions/README.md`."
+since = "0.1.0"
