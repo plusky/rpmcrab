@@ -624,6 +624,15 @@ impl Check for FilesCheck {
         "FilesCheck"
     }
 
+    fn check_source(&mut self, pkg: &Pkg, config: &Config, out: &mut Filter) {
+        // The trojan-source attack lives in source files, so the bidi scan
+        // runs for source packages too; the rest of FilesCheck is
+        // binary-only. `Check::check` never routes a source package to
+        // `check_binary`, so there is no `is_source` guard there.
+        Self::register_error_details(config, out);
+        self.check_bidi_controls(pkg, out);
+    }
+
     fn check_binary(&mut self, pkg: &Pkg, config: &Config, out: &mut Filter) {
         // `-v`/`--explain` descriptions, mirroring the reference's
         // `__init__` dict which installs them unconditionally.
@@ -631,9 +640,6 @@ impl Check for FilesCheck {
         let mut st = PkgState::default();
         self.check_utf8(pkg, out);
         self.check_bidi_controls(pkg, out);
-        if pkg.is_source {
-            return;
-        }
         st.devel_pkg = is_match(&self.devel_re, &pkg.name);
         if !st.devel_pkg {
             for p in &pkg.provides {
@@ -701,7 +707,7 @@ const BIDI_CONTROLS: [([u8; 3], &str); 9] = [
 /// Scan `path` in windows for the first bidi control character. Windows
 /// overlap by 2 bytes (the longest control is 3 bytes) so a control split
 /// across a boundary is still matched whole. Unreadable files are skipped
-/// silently here; `read-error` is the FSF scanner's job.
+/// silently.
 fn first_bidi_control_in_file(path: &Path) -> Option<&'static str> {
     const WINDOW: usize = 8192;
     const OVERLAP: usize = 2;
@@ -765,11 +771,14 @@ impl FilesCheck {
     /// control characters (trojan-source, CVE-2021-42574), which can make
     /// source code render differently from how it executes.
     ///
-    /// Byte-level scan: the nine controls are 3-byte UTF-8 sequences, so
-    /// they are found whatever the surrounding encoding is; windows overlap
-    /// by 2 bytes so a control split across a window boundary is still seen
-    /// whole. One finding per file, naming the first control found. Only
-    /// libmagic-described text files are scanned, per the issue's scope.
+    /// Byte-level scan: the nine controls are matched as their 3-byte UTF-8
+    /// sequences with no decoding, so surrounding non-UTF-8 bytes cannot
+    /// hide them. A control stored in another encoding is a different byte
+    /// sequence and is not detected (UTF-16's 2-byte units are not the UTF-8
+    /// triples). Windows overlap by 2 bytes so a control split across a
+    /// window boundary is still seen whole. One finding per file, naming the
+    /// first control found. Only libmagic-described text files are scanned,
+    /// per the issue's scope.
     fn check_bidi_controls(&self, pkg: &Pkg, out: &mut Filter) {
         for pkgfile in &pkg.files {
             if !is_reg(pkgfile.mode) {
@@ -3415,6 +3424,49 @@ mod tests {
         assert_eq!(first_bidi_control(b"plain ascii"), None);
         // Trailing partial sequence is not a match.
         assert_eq!(first_bidi_control(&[0xE2, 0x80]), None);
+    }
+
+    #[test]
+    fn bidi_source_package_scanned_through_check_dispatch() {
+        // The trojan-source attack lives in source files: the scan must run
+        // for source packages through the real `Check::check` dispatch, not
+        // just when `check_bidi_controls` is called directly.
+        let evil = "if admin /* \u{202E} */ { return true; }\n";
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = bidi_pkg(
+            &dir,
+            vec![("/evil.c", "ASCII text", evil.as_bytes().to_vec())],
+        );
+        pkg.is_source = true;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let findings = bidi_findings(&out);
+        assert_eq!(findings.len(), 1, "source pkg: one finding: {findings:?}");
+        assert!(findings[0].1.contains("U+202E"), "names the control");
+        assert!(findings[0].1.contains("/evil.c"), "names the file");
+    }
+
+    #[test]
+    fn bidi_control_found_amid_non_utf8_surroundings() {
+        // 0xE9 alone is not valid UTF-8 (Latin-1 e-acute) and 0xFF is not
+        // valid anywhere; the U+202E triple is still found between them.
+        let mut content = b"prefix-\xe9 /* ".to_vec();
+        content.extend_from_slice(&[0xE2, 0x80, 0xAE]);
+        content.extend_from_slice(b" */ \xff\n");
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = bidi_pkg(&dir, vec![("/latin1.c", "ASCII text", content)]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        FilesCheck::new(&config).check_bidi_controls(&pkg, &mut out);
+        let findings = bidi_findings(&out);
+        assert_eq!(
+            findings.len(),
+            1,
+            "control amid non-UTF-8 surroundings: {findings:?}"
+        );
+        assert!(findings[0].1.contains("U+202E"), "names the control");
     }
 
     #[test]
