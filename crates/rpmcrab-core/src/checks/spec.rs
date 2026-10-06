@@ -138,7 +138,7 @@ fn make_check_re() -> &'static Regex {
 static RPM_BUILDROOT_RE: OnceLock<Regex> = OnceLock::new();
 fn rpm_buildroot_re() -> &'static Regex {
     RPM_BUILDROOT_RE.get_or_init(|| {
-        Regex::new(r"^[^#]*?(?:(\\)*\${?RPM_BUILD_ROOT}?|(%+){?buildroot}?)").expect("static regex")
+        Regex::new(r"^[^#]*?(?:(\\*)\${?RPM_BUILD_ROOT}?|(%+){?buildroot}?)").expect("static regex")
     })
 }
 
@@ -596,7 +596,9 @@ impl SpecCheck {
             .configuration
             .get("HardcodedLibPathExceptions")
             .and_then(toml::Value::as_str)
-            .unwrap_or("");
+            // An empty pattern would match every path and suppress all
+            // findings; fall back to the configdefaults.toml default.
+            .unwrap_or(r"/lib/(modules|cpp|perl5|rpm|hotplug|firmware|systemd)($|[\s/,])");
         Self {
             valid_groups,
             hardcoded_lib_path_exceptions_re: Regex::new(exceptions)
