@@ -515,6 +515,15 @@ mod tests {
             .collect()
     }
 
+    /// The exact rendered line for one finding of `pkg`.
+    fn line(pkg: &Pkg, letter: char, check: &str, details: &str) -> String {
+        format!(
+            "{}.{pkg_arch}: {letter}: {check} {details}",
+            pkg.name,
+            pkg_arch = pkg.arch
+        )
+    }
+
     #[test]
     fn finding_output_triple_is_pinned() {
         // The whole (name, level, details) triple lives in one `describe`
@@ -533,19 +542,12 @@ mod tests {
             ],
             vec![],
         );
-        let line = |letter: char, check: &str, details: &str| {
-            format!(
-                "{}.{pkg_arch}: {letter}: {check} {details}",
-                pkg.name,
-                pkg_arch = pkg.arch
-            )
-        };
         assert_eq!(
             emitted(&mut check, &pkg, &config),
             [(
                 "hardlink-across-partition".to_string(),
                 'E',
-                line('E', "hardlink-across-partition", "/var/lib/b /usr/bin/a"),
+                line(&pkg, 'E', "hardlink-across-partition", "/var/lib/b /usr/bin/a"),
             )],
         );
 
@@ -557,19 +559,12 @@ mod tests {
             ],
             vec!["/etc/a".to_string(), "/etc/b".to_string()],
         );
-        let line = |letter: char, check: &str, details: &str| {
-            format!(
-                "{}.{pkg_arch}: {letter}: {check} {details}",
-                pkg.name,
-                pkg_arch = pkg.arch
-            )
-        };
         assert_eq!(
             emitted(&mut check, &pkg, &config),
             [(
                 "hardlink-across-config-files".to_string(),
                 'E',
-                line('E', "hardlink-across-config-files", "/etc/b /etc/a"),
+                line(&pkg, 'E', "hardlink-across-config-files", "/etc/b /etc/a"),
             )],
         );
 
@@ -581,19 +576,12 @@ mod tests {
             ],
             vec![],
         );
-        let line = |letter: char, check: &str, details: &str| {
-            format!(
-                "{}.{pkg_arch}: {letter}: {check} {details}",
-                pkg.name,
-                pkg_arch = pkg.arch
-            )
-        };
         assert_eq!(
             emitted(&mut check, &pkg, &config),
             [(
                 "files-duplicate".to_string(),
                 'W',
-                line('W', "files-duplicate", "/usr/bin/b /usr/bin/a"),
+                line(&pkg, 'W', "files-duplicate", "/usr/bin/b /usr/bin/a"),
             )],
         );
 
@@ -607,25 +595,18 @@ mod tests {
             ],
             vec![],
         );
-        let line = |letter: char, check: &str, details: &str| {
-            format!(
-                "{}.{pkg_arch}: {letter}: {check} {details}",
-                pkg.name,
-                pkg_arch = pkg.arch
-            )
-        };
         assert_eq!(
             emitted(&mut check, &pkg, &config),
             [
                 (
                     "files-duplicate".to_string(),
                     'W',
-                    line('W', "files-duplicate", "/usr/share/z /usr/bin/x:/usr/lib/y"),
+                    line(&pkg, 'W', "files-duplicate", "/usr/share/z /usr/bin/x:/usr/lib/y"),
                 ),
                 (
                     "files-duplicated-waste".to_string(),
                     'E',
-                    line('E', "files-duplicated-waste", "120000"),
+                    line(&pkg, 'E', "files-duplicated-waste", "120000"),
                 ),
             ],
         );
