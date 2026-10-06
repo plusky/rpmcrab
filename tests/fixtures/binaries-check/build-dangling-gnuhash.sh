@@ -11,8 +11,9 @@
 # Needs: podman (or PODMAN=/path/to/podman)
 # Output: input/rpmcrab-binaries-dangling-gnuhash-1.0-1.<arch>.rpm
 #
-# Everything (compile, strip, package) happens in an openSUSE Tumbleweed
-# container so the fixture is a genuine Linux RPM regardless of host OS.
+# Everything (compile, strip, package) happens in the digest-pinned
+# Tumbleweed image built from the shared Dockerfile, so the fixture is a
+# genuine Linux RPM regardless of host OS.
 # (Unlike build.sh, rpmbuild also runs in the container: the host rpmbuild
 # on some machines cannot create its build directories.)
 
@@ -27,7 +28,8 @@ podman_bin="${PODMAN:-podman}"
 # The container-side build runs from a file to avoid nested shell quoting.
 cat >"$work/inner.sh" <<'INNER_EOF'
 set -e
-zypper -n in -y gcc binutils rpm-build >/dev/null 2>&1
+# The toolchain (gcc, binutils, rpm-build) comes from the digest-pinned image
+# built from the shared Dockerfile; nothing is installed in the container.
 cat > /work/libdangling.c <<'EOF'
 int dangling_answer(void) { return 42; }
 EOF
@@ -57,7 +59,11 @@ EOF
 rpmbuild --define "_topdir /work/rpmbuild" --nosignature -bb /work/rpmbuild/SPECS/fixture.spec >/dev/null
 INNER_EOF
 
-"$podman_bin" run --rm -v "$work:/work:z" registry.opensuse.org/opensuse/tumbleweed:latest bash /work/inner.sh
+# The image reference (digest-pinned base) lives in Dockerfile so Dependabot's
+# docker ecosystem can bump the pin monthly; this script only names the built tag.
+"$podman_bin" build -f "$here/Dockerfile" -t rpmcrab-binaries-check-fixture "$here"
+
+"$podman_bin" run --rm -v "$work:/work:z" rpmcrab-binaries-check-fixture bash /work/inner.sh
 
 built="$(find "$work/rpmbuild/RPMS" -name 'rpmcrab-binaries-dangling-gnuhash-*.rpm' -print -quit)"
 [ -n "$built" ] || { echo "rpmbuild produced no package" >&2; exit 1; }
