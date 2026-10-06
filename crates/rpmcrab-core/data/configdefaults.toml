@@ -357,6 +357,13 @@ ValidShells = [
 ]
 # Values for the Group tag, if not specified pulled from RPM
 ValidGroups = []
+# Spec macros (beyond %autosetup/%autopatch) that apply patches in %prep, so
+# patch-not-applied stays quiet when they are used (upstream rpmlint#1074:
+# %forgeautosetup wraps %autosetup). Names without the leading %; extend for
+# distro-specific wrappers.
+PatchApplyingMacros = [
+    "forgeautosetup",
+]
 # Obsolete MIME-format directory prefixes (upstream rpmlint#437): GNOME 1 /
 # KDE 1 era dirs superseded by shared-mime-info. Files installed under one
 # of these prefixes warn obsolete-mime-format-dir (FilelistCheck).
