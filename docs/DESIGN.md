@@ -369,7 +369,9 @@ sorted, only `.rpm`/`.spm`/`.spec`), `-V/--version`, `-c/--config`,
 `-p/--print-config`, `-i/--installed`, `-t/--time-report`,
 `-j/--jobs` (default: machine parallelism; `≤ 0` coerces to 1; capped at the task count and machine parallelism),
 `--ignore-unused-rpmlintrc`, `--checks`, `-s/--strict`, `--errors-only`,
-`-P/--permissive` (mutually exclusive with `-s`). Deliberately **not** accepted: `-T/--profile`
+`-P/--permissive` (mutually exclusive with `-s`), `--format` (`text` default,
+`json`; overrides the `OutputFormat` config key; unknown values exit 2; §5).
+Deliberately **not** accepted: `-T/--profile`
 (removed upstream by #1595 as misleading) and the illogical `--file`/`--info`
 aliases (straightened to `-r`/`-v`).
 **`--errors-only`** (upstream rpmlint#134) skips warning-only checks entirely,
