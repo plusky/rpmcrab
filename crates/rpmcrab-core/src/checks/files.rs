@@ -3444,8 +3444,14 @@ mod tests {
         check.check(&pkg, &config, &mut out);
         let findings = bidi_findings(&out);
         assert_eq!(findings.len(), 1, "source pkg: one finding: {findings:?}");
+        assert_eq!(findings[0].0, Level::Warning, "warning, not error");
         assert!(findings[0].1.contains("U+202E"), "names the control");
         assert!(findings[0].1.contains("/evil.c"), "names the file");
+        assert!(
+            out.get_description("bidi-control-character", &config)
+                .contains("trojan-source"),
+            "the --explain detail must be registered"
+        );
     }
 
     #[test]
