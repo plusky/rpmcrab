@@ -258,8 +258,14 @@ impl Check for DuplicatesCheck {
         );
         for f in &findings {
             let (level, name, details) = Self::describe(f);
-            let detail_refs: Vec<&str> = details.iter().map(String::as_str).collect();
-            add_info(out, level, pkg, name, &detail_refs);
+            // `describe` yields at most two detail strings: a stack array
+            // avoids a per-finding heap allocation for the `&str` view.
+            debug_assert!(details.len() <= 2);
+            let mut detail_refs = [""; 2];
+            for (slot, detail) in detail_refs.iter_mut().zip(details.iter()) {
+                *slot = detail;
+            }
+            add_info(out, level, pkg, name, &detail_refs[..details.len()]);
         }
     }
 }
