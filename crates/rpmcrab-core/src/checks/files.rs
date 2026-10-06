@@ -687,7 +687,10 @@ impl Check for FilesCheck {
 /// segment exactly `debug`. Segment equality (not substring or prefix) keeps
 /// lookalikes like `/usr/share/debugfoo` quiet.
 fn is_debug_path(path: &str) -> bool {
-    path.split('/').any(|seg| seg == "debug")
+    path == "/usr/lib/debug"
+        || path.starts_with("/usr/lib/debug/")
+        || path == "/usr/src/debug"
+        || path.starts_with("/usr/src/debug/")
 }
 
 fn strip_quotes(re: &Regex, s: &str) -> String {
@@ -762,6 +765,11 @@ impl FilesCheck {
             return;
         }
         for f in &pkg.files {
+            // A %ghost entry has no payload on disk: nothing debug lands
+            // in the package.
+            if pkg.ghost_files.iter().any(|g| g == &f.name) {
+                continue;
+            }
             if is_debug_path(&f.name) {
                 add_info(
                     out,
@@ -4407,11 +4415,15 @@ mod tests {
     #[test]
     fn debug_path_segment_match_11() {
         assert!(is_debug_path("/usr/lib/debug/foo.debug"));
-        assert!(is_debug_path("/usr/lib64/debug"));
         assert!(is_debug_path("/usr/lib/debug"));
+        assert!(is_debug_path("/usr/src/debug/foo.c"));
+        assert!(is_debug_path("/usr/src/debug"));
+        assert!(!is_debug_path("/usr/lib64/debug"));
         assert!(!is_debug_path("/usr/bin/foo"));
         assert!(!is_debug_path("/usr/share/debugfoo/bar"));
         assert!(!is_debug_path("/usr/lib/debugfoo/x"));
+        // Coincidental `debug` segments elsewhere are not debug payload.
+        assert!(!is_debug_path("/usr/share/doc/debug/notes"));
     }
 
     #[test]
@@ -4481,6 +4493,22 @@ mod tests {
                 .iter()
                 .any(|(n, _)| n == "debug-files-in-non-debug-package"),
             "debuginfo packages must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn debug_files_ghost_is_quiet_11() {
+        // A %ghost debug path has no payload on disk: nothing lands in
+        // the package, so the warning must stay quiet.
+        let (mut pkg, _dir) =
+            pkg_with_files(vec![mkfile("/usr/lib/debug/foo.debug", 0o100644, 21)]);
+        pkg.ghost_files.push("/usr/lib/debug/foo.debug".to_string());
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, _)| n == "debug-files-in-non-debug-package"),
+            "ghost debug paths must stay quiet: {results:?}"
         );
     }
 
