@@ -547,7 +547,12 @@ mod tests {
             [(
                 "hardlink-across-partition".to_string(),
                 'E',
-                line(&pkg, 'E', "hardlink-across-partition", "/var/lib/b /usr/bin/a"),
+                line(
+                    &pkg,
+                    'E',
+                    "hardlink-across-partition",
+                    "/var/lib/b /usr/bin/a"
+                ),
             )],
         );
 
@@ -601,7 +606,12 @@ mod tests {
                 (
                     "files-duplicate".to_string(),
                     'W',
-                    line(&pkg, 'W', "files-duplicate", "/usr/share/z /usr/bin/x:/usr/lib/y"),
+                    line(
+                        &pkg,
+                        'W',
+                        "files-duplicate",
+                        "/usr/share/z /usr/bin/x:/usr/lib/y"
+                    ),
                 ),
                 (
                     "files-duplicated-waste".to_string(),
