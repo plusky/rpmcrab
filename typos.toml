@@ -36,6 +36,12 @@ gir = "gir"
 tham = "tham"
 # Vai is the Vai script name (Unicode block Vai), not a typo for Via/Vie.
 vai = "vai"
+# packag is a deliberate misspelling in the tags-emission-pins spelling-error
+# fixture and its expected finding detail. Scoped to those two files so the
+# allow-list does not silence a real "packag" typo repo-wide.
+[type.packag-fixture]
+extend-glob = ["**/tags-emission-pins.spec", "**/tags.rs"]
+extend-words = { packag = "packag" }
 
 # SPDX ID table tokens: "iMatix" tokenizes as i + Matix, ND is "No
 # Derivatives" in CC IDs, CAPEC-TOU is a genuine ID. Scoped to the table

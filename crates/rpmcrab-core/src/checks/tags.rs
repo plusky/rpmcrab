@@ -1460,6 +1460,21 @@ impl TagsCheck {
 }
 
 #[cfg(test)]
+impl TagsCheck {
+    /// Install the inline test-dictionary spellchecker for the
+    /// spelling-error emission test. The Mac has no system hunspell
+    /// dictionaries, so `Spellchecker::new()` finds nothing there; the
+    /// inline dictionary (same words as spellcheck.rs's own tests) keeps
+    /// the test hermetic on every machine.
+    fn set_test_spellchecker(&mut self) {
+        self.spellchecker = crate::spellcheck::Spellchecker::from_strings(
+            "SET UTF-8\n",
+            "5\nhello\nworld\ntest\npackage\ncheck\n",
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::color::Color;
@@ -1522,7 +1537,10 @@ mod tests {
             .join("../../tests/parity/pkg/inputs")
             .join(name);
         let tmp = tempfile::tempdir().expect("tmpdir for fixture extraction");
-        let pkg = Pkg::open(&rpm_path, tmp.path(), true).expect("open fixture pkg");
+        let pkg = match Pkg::open(&rpm_path, tmp.path(), true) {
+            Ok(pkg) => pkg,
+            Err(e) => panic!("open fixture pkg {rpm_path:?}: {e:?}"),
+        };
         (tmp, pkg)
     }
 
@@ -2207,13 +2225,235 @@ mod tests {
             ),
         );
     }
+    // Per-finding emission pins for the mechanical tag findings. Each test
+    // opens a hand-built fixture RPM from tests/parity/pkg/inputs/tags-*.rpm
+    // (built by build-tags-emission-pins.sh, never a distro package) and
+    // asserts the finding name, level, and detail through the real emission
+    // path. The Summary/Description content checks only run when the RPM
+    // carries HEADERI18NTABLE (like the reference); rpmbuild writes
+    // RPMTAG_HEADERI18NTABLE=["C"] itself, which TagsCheck requires before
+    // running Summary/Description content checks.
+
+    fn tag_hits<'a>(results: &'a [(String, String)], name: &str) -> Vec<&'a (String, String)> {
+        results.iter().filter(|(n, _)| n == name).collect()
+    }
+
+    fn run_check_with_release_extension(pkg: &Pkg) -> Vec<(String, String)> {
+        let mut config = test_config();
+        config.configuration.insert(
+            "ReleaseExtension".to_string(),
+            toml::Value::String("hello$".to_string()),
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(&config);
+        check.check(pkg, &config, &mut out);
+        out.results().to_vec()
+    }
+
+    fn run_check_with_spellcheck(pkg: &Pkg) -> Vec<(String, String)> {
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(&config);
+        check.set_test_spellchecker();
+        check.check(pkg, &config, &mut out);
+        out.results().to_vec()
+    }
+
+    #[test]
+    fn devel_package_with_non_devel_group_emits() {
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-devel-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        let hits = tag_hits(&results, "devel-package-with-non-devel-group");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert_eq!(
+            hits[0].1,
+            "tags-emission-pins-devel.noarch: W: devel-package-with-non-devel-group Games"
+        );
+    }
+
+    #[test]
+    fn no_group_tag_emits() {
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-nogroup-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        let hits = tag_hits(&results, "no-group-tag");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert_eq!(
+            hits[0].1,
+            "tags-emission-pins-nogroup.noarch: E: no-group-tag"
+        );
+    }
+
+    #[test]
+    fn summary_too_long_emits() {
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-longsummary-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        let hits = tag_hits(&results, "summary-too-long");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert_eq!(
+            hits[0].1,
+            "tags-emission-pins-longsummary.noarch: E: summary-too-long This is a deliberately overlong summary that stretches well past seventy nine characters"
+        );
+    }
+
+    #[test]
+    fn summary_not_capitalized_and_ended_with_dot_emit() {
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-badsummary-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        let summary = "lowercase summary that ends with a dot.";
+        for name in ["summary-not-capitalized", "summary-ended-with-dot"] {
+            let hits = tag_hits(&results, name);
+            assert_eq!(hits.len(), 1, "{name}: {results:?}");
+            assert_eq!(
+                hits[0].1,
+                format!("tags-emission-pins-badsummary.noarch: W: {name} {summary}")
+            );
+        }
+    }
+
+    #[test]
+    fn summary_on_multiple_lines_emits() {
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-multiline-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        let hits = tag_hits(&results, "summary-on-multiple-lines");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert_eq!(
+            hits[0].1,
+            "tags-emission-pins-multiline.noarch: E: summary-on-multiple-lines"
+        );
+    }
+
+    #[test]
+    fn no_description_tag_emits() {
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-nodesc-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        let hits = tag_hits(&results, "no-description-tag");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert_eq!(
+            hits[0].1,
+            "tags-emission-pins-nodesc.noarch: E: no-description-tag"
+        );
+    }
+
+    #[test]
+    fn description_line_too_long_emits() {
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-longdesc-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        let hits = tag_hits(&results, "description-line-too-long");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert_eq!(
+            hits[0].1,
+            "tags-emission-pins-longdesc.noarch: E: description-line-too-long This is a ridiculously long description line that definitely exceeds seventy nine characters."
+        );
+    }
+
+    #[test]
+    fn tag_in_description_emits() {
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-tagdesc-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        let hits = tag_hits(&results, "tag-in-description");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert_eq!(
+            hits[0].1,
+            "tags-emission-pins-tagdesc.noarch: W: tag-in-description Name:"
+        );
+    }
+
+    #[test]
+    fn spelling_error_emits() {
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-spell-1.0-1.noarch.rpm");
+        let results = run_check_with_spellcheck(&pkg);
+        let hits = tag_hits(&results, "spelling-error");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.starts_with(
+                "tags-emission-pins-spell.noarch: E: spelling-error %description -l C packag"
+            ),
+            "line: {}",
+            hits[0].1
+        );
+    }
+
+    #[test]
+    fn obsolete_not_provided_emits() {
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-obsolete-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        let hits = tag_hits(&results, "obsolete-not-provided");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert_eq!(
+            hits[0].1,
+            "tags-emission-pins-obsolete.noarch: W: obsolete-not-provided tags-old-pin"
+        );
+    }
+
+    #[test]
+    fn no_pkg_config_provides_emits() {
+        let (_tmp, mut pkg) = fixture_pkg("tags-emission-pins-pcreq-devel-1.0-1.noarch.rpm");
+        // rpmbuild auto-generates pkgconfig() provides for the .pc file;
+        // drop them so the missing-provide path is exercised.
+        pkg.provides = vec![];
+        let results = run_check(&pkg);
+        let hits = tag_hits(&results, "no-pkg-config-provides");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert_eq!(
+            hits[0].1,
+            "tags-emission-pins-pcreq-devel.noarch: E: no-pkg-config-provides"
+        );
+    }
+
+    #[test]
+    fn invalid_version_emits() {
+        let (_tmp, pkg) = fixture_pkg("tags-badversion-0pre-1.noarch.rpm");
+        let results = run_check(&pkg);
+        let hits = tag_hits(&results, "invalid-version");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert_eq!(hits[0].1, "tags-badversion.noarch: E: invalid-version 0pre");
+    }
+
+    #[test]
+    fn unreasonable_epoch_emits() {
+        let (_tmp, pkg) = fixture_pkg("tags-highepoch-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        let hits = tag_hits(&results, "unreasonable-epoch");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert_eq!(
+            hits[0].1,
+            "tags-highepoch.noarch: W: unreasonable-epoch 100"
+        );
+    }
+
+    #[test]
+    fn not_standard_release_extension_emits() {
+        // Mirrors the reference test's ReleaseExtension='hello$' setup.
+        let (_tmp, pkg) = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        let results = run_check_with_release_extension(&pkg);
+        let hits = tag_hits(&results, "not-standard-release-extension");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert_eq!(
+            hits[0].1,
+            "fcprobe.noarch: W: not-standard-release-extension 1"
+        );
+    }
+
+    #[test]
+    fn forbidden_controlchar_in_changelog_emits() {
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-badchangelog-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        let hits = tag_hits(&results, "forbidden-controlchar-found");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": E: forbidden-controlchar-found"),
+            "line: {}",
+            hits[0].1
+        );
+        assert!(hits[0].1.contains("%changelog"), "line: {}", hits[0].1);
+    }
 }
 
 #[cfg(test)]
 mod rich_dep_emission_tests {
     use super::*;
     use crate::color::Color;
-    use crate::pkg::dep::DepInfo;
+    use crate::pkg::dep::{DepInfo, RPMSENSE_EQUAL};
     use std::path::Path;
 
     fn rich_dep(name: &str) -> DepInfo {
@@ -2387,5 +2627,198 @@ mod rich_dep_emission_tests {
         let hits = named(&results, "invalid-dependency");
         assert_eq!(hits.len(), 1, "all: {results:?}");
         assert!(hits[0].1.ends_with(" qux(meta)"), "line: {}", hits[0].1);
+    }
+    // Per-finding emission pins for the dependency-shape findings, via
+    // field mutation on the hand-built fcprobe fixture (never a distro
+    // package): the header stays real, only the dep under test is synthetic.
+
+    fn plain_dep(name: &str) -> DepInfo {
+        DepInfo {
+            name: name.to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        }
+    }
+
+    fn versioned_dep(name: &str, version: &str) -> DepInfo {
+        DepInfo {
+            name: name.to_string(),
+            flags: RPMSENSE_EQUAL,
+            epoch: None,
+            version: Some(version.to_string()),
+            release: None,
+        }
+    }
+
+    fn so_file() -> crate::pkg::pkgfile::PkgFile {
+        crate::pkg::pkgfile::PkgFile {
+            name: "/usr/lib64/libtags-missingdep.so".to_string(),
+            path: "/usr/lib64/libtags-missingdep.so".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn useless_provides_emits() {
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.provides = vec![plain_dep("selfprov"), versioned_dep("selfprov", "1.0")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "useless-provides");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": E: useless-provides"),
+            "line: {}",
+            hits[0].1
+        );
+        assert!(hits[0].1.ends_with(" selfprov"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn useless_provides_version_only_is_silent() {
+        // The sharp edge from the reference test: a versioned-only
+        // self-provide is legitimate and must stay silent.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.provides = vec![versioned_dep("fuse-common", "1.0")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "useless-provides").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_lib_dependency_emits() {
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![plain_dep("libexplicit")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "explicit-lib-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": E: explicit-lib-dependency"),
+            "line: {}",
+            hits[0].1
+        );
+        assert!(hits[0].1.ends_with(" libexplicit"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn explicit_lib_dependency_versioned_so_is_silent() {
+        // The #1091 fuzzy-lib heuristic: a versioned .so leaf is not an
+        // explicit unversioned lib dependency.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![plain_dep("libexplicit.so.2")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "explicit-lib-dependency").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_build_requires_emits() {
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.is_source = true;
+        pkg.requires = vec![plain_dep("libxx2_2-devel")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "invalid-build-requires");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": E: invalid-build-requires"),
+            "line: {}",
+            hits[0].1
+        );
+        assert!(
+            hits[0].1.ends_with(" libxx2_2-devel"),
+            "line: {}",
+            hits[0].1
+        );
+    }
+
+    #[test]
+    fn invalid_build_requires_plain_devel_is_silent() {
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.is_source = true;
+        pkg.requires = vec![plain_dep("libxx-devel")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "invalid-build-requires").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn missing_dependency_on_emits() {
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.name = "tags-missingdep-devel".to_string();
+        pkg.files.push(so_file());
+        pkg.requires = vec![versioned_dep("tags-missingdep-libs", "2.0")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "missing-dependency-on");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": W: missing-dependency-on"),
+            "line: {}",
+            hits[0].1
+        );
+        assert!(
+            hits[0]
+                .1
+                .ends_with("tags-missingdep*/tags-missingdep-libs/libtags-missingdep* = 2.0"),
+            "line: {}",
+            hits[0].1
+        );
+    }
+
+    #[test]
+    fn no_version_dependency_on_emits() {
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.name = "tags-missingdep-devel".to_string();
+        pkg.files.push(so_file());
+        pkg.requires = vec![plain_dep("tags-missingdep-libs")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "no-version-dependency-on");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0]
+                .1
+                .ends_with("tags-missingdep*/tags-missingdep-libs/libtags-missingdep* 1"),
+            "line: {}",
+            hits[0].1
+        );
+    }
+
+    #[test]
+    fn forbidden_controlchar_in_requires_emits() {
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![plain_dep("foo\x01bar")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "forbidden-controlchar-found");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": E: forbidden-controlchar-found"),
+            "line: {}",
+            hits[0].1
+        );
+        assert!(
+            hits[0].1.contains("Requires: foo\x01bar"),
+            "line: {}",
+            hits[0].1
+        );
+    }
+
+    #[test]
+    fn forbidden_controlchar_in_provides_emits() {
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.provides = vec![plain_dep("bar\x02baz")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "forbidden-controlchar-found");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains("Provides: bar\x02baz"),
+            "line: {}",
+            hits[0].1
+        );
     }
 }

@@ -48,7 +48,7 @@ impl Spellchecker {
 
     /// Build from inline dictionary strings (for tests).
     #[cfg(test)]
-    fn from_strings(aff: &str, dic: &str) -> Option<Self> {
+    pub(crate) fn from_strings(aff: &str, dic: &str) -> Option<Self> {
         spellbook::Dictionary::new(aff, dic)
             .ok()
             .map(|dict| Self { dict })
