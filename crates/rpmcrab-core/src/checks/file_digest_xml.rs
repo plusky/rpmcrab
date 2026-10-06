@@ -3,7 +3,8 @@
 //! Mirrors `xml.etree.ElementTree.canonicalize(from_file=...,
 //! strip_text=True)` (the reference `XmlDigester.parse_content`): inclusive
 //! C14N 1.0 over the whole document, comments and the XML declaration
-//! dropped, whitespace-only text nodes removed, processing instructions kept.
+//! dropped, whitespace-only text nodes removed except under in-scope
+//! `xml:space="preserve"`, processing instructions kept.
 
 use std::collections::HashMap;
 
@@ -35,6 +36,9 @@ struct Canonicalizer {
     scope: Vec<Vec<(Option<String>, String)>>,
     /// Bindings already rendered on an ancestor; parallel to `scope`.
     rendered: Vec<Vec<(Option<String>, String)>>,
+    /// In-scope `xml:space` handling, one frame per open element, parallel
+    /// to `scope`: `true` while `xml:space="preserve"` is in effect.
+    space_preserve: Vec<bool>,
     /// General entities from the internal DTD subset.
     entities: HashMap<String, String>,
     /// Processing instructions seen before the document element.
@@ -55,6 +59,7 @@ impl Canonicalizer {
             entities: HashMap::new(),
             prolog_pis: Vec::new(),
             pending_text: String::new(),
+            space_preserve: Vec::new(),
             seen_root: false,
             depth: 0,
             version_1_1: false,
@@ -107,6 +112,7 @@ impl Canonicalizer {
                     self.out.extend_from_slice(b">");
                     self.scope.pop();
                     self.rendered.pop();
+                    self.space_preserve.pop();
                     self.depth -= 1;
                 }
                 Event::Text(e) => {
@@ -138,12 +144,19 @@ impl Canonicalizer {
         }
     }
 
-    /// Strip the coalesced character data and emit it unless empty.
+    /// Emit the coalesced character data. Whitespace is stripped (the
+    /// `strip_text=True` behaviour) except while `xml:space="preserve"` is
+    /// in scope, which the reference keeps verbatim.
     fn flush_text(&mut self) {
-        let stripped = self.pending_text.trim();
-        if !stripped.is_empty() {
+        let preserve = self.space_preserve.last().copied().unwrap_or(false);
+        let text = if preserve {
+            self.pending_text.as_str()
+        } else {
+            self.pending_text.trim()
+        };
+        if !text.is_empty() {
             let mut escaped = Vec::new();
-            escape_text(&mut escaped, stripped);
+            escape_text(&mut escaped, text);
             self.out.append(&mut escaped);
         }
         self.pending_text.clear();
@@ -239,9 +252,18 @@ impl Canonicalizer {
 
         // The element's own declarations are in scope for its own name.
         self.scope.push(scope_frame);
+        // The `xml` prefix is never rebindable, so the literal qname is the
+        // whole check; any other value (or none) inherits the parent scope.
+        let preserve = regular
+            .iter()
+            .find(|(key, _)| *key == "xml:space")
+            .map(|(_, value)| value.trim() == "preserve")
+            .unwrap_or_else(|| self.space_preserve.last().copied().unwrap_or(false));
+        self.space_preserve.push(preserve);
         let result = self.emit_element(qname, &regular, empty);
         if result.is_err() {
             self.scope.pop();
+            self.space_preserve.pop();
         }
         result
     }
@@ -363,6 +385,7 @@ impl Canonicalizer {
             self.out.extend_from_slice(b">");
             self.scope.pop();
             self.rendered.pop();
+            self.space_preserve.pop();
         }
         Ok(())
     }

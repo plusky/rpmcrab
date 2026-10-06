@@ -1952,6 +1952,30 @@ last</e></root>"#,
                 r#"<root xml:lang="en"><e xml:space="preserve">x</e></root>"#,
                 "23b7cae1caadffe701d0abfbdcb0344375adcd8d2e73e0d93c418ffc277ed3f9",
             ),
+            // `xml:space="preserve"` keeps interior whitespace verbatim
+            // (reference `ET.canonicalize(strip_text=True)` behaviour); the
+            // pre-fix corpus case above has no interior whitespace and stays
+            // blind to this. Digests pinned from the reference.
+            (
+                "xml-space-preserve-ws.xml",
+                r#"<r xml:space="preserve">  x  </r>"#,
+                "4d6ce8012f1047c8ebb8f6d3846ebe00183c480511112a603d946db1d98147d2",
+            ),
+            (
+                "xml-space-preserve-inherit.xml",
+                r#"<r xml:space="preserve"><a>  x  </a></r>"#,
+                "7d69e23452ee9609a68669225dd00546a37d9f006a2033181f85002d3f1bbd59",
+            ),
+            (
+                "xml-space-preserve-reset.xml",
+                r#"<r xml:space="preserve"><a xml:space="default">  x  </a></r>"#,
+                "4f9290f6af8efef19a00e5f82c9318bab5d632b918cd499c3f5eb451220a6d64",
+            ),
+            (
+                "xml-space-preserve-only-ws.xml",
+                r#"<r xml:space="preserve"><a>   </a></r>"#,
+                "96ac5c4f43cac37b670697755203a8b1c86634f2dd3222cc1257e9acffa91678",
+            ),
             (
                 "v_sortxml.xml",
                 r#"<r xmlns:a="http://a"><e z="1" xml:lang="en" a:b="2"/></r>"#,
