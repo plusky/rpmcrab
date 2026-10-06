@@ -52,7 +52,7 @@ pub struct Config {
     /// (`filter.py` `int()`), so negatives/floats/bools/garbage behave
     /// per-finding. Coerced in `filter.rs`.
     pub scoring: HashMap<String, toml::Value>,
-    /// `[severity-overrides]` — finding name → forced level (upstream
+    /// `[SeverityOverrides]` — finding name → forced level (upstream
     /// rpmlint#1335). Applied at the filter layer after scoring and strict
     /// promotion; the override is the final word on the finding's level.
     pub severity_overrides: HashMap<String, Level>,
@@ -114,32 +114,39 @@ impl Config {
             .and_then(toml::Value::as_table)
             .map(|t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();
-        self.severity_overrides = self
-            .configuration
-            .get("severity-overrides")
-            .and_then(toml::Value::as_table)
-            .map(|t| {
+        // `[SeverityOverrides]`: finding name → forced level. A present
+        // non-table value is a fatal configuration error, like every other
+        // table key — never a silent empty map.
+        self.severity_overrides = match self.configuration.get("SeverityOverrides") {
+            None => HashMap::new(),
+            Some(table @ toml::Value::Table(_)) => {
+                let t = table.as_table().expect("matched Table");
                 t.iter()
                     .map(|(k, v)| {
                         let raw = v.as_str().ok_or_else(|| {
                             format!(
-                                "'[severity-overrides] {k:?} must be a level string, found {}",
+                                "'[SeverityOverrides] {k:?} must be a level string, found {}",
                                 value_kind(v)
                             )
                         })?;
                         Level::parse(raw)
                             .ok_or_else(|| {
                                 format!(
-                                    "'[severity-overrides] {k:?} has unknown level {raw:?} \
+                                    "'[SeverityOverrides] {k:?} has unknown level {raw:?} \
                                      (want E/W/I or error/warning/info)"
                                 )
                             })
                             .map(|level| (k.clone(), level))
                     })
-                    .collect::<Result<HashMap<_, _>, String>>()
-            })
-            .transpose()?
-            .unwrap_or_default();
+                    .collect::<Result<HashMap<_, _>, String>>()?
+            }
+            Some(other) => {
+                return Err(format!(
+                    "'SeverityOverrides' must be a table, found {}",
+                    value_kind(other)
+                ));
+            }
+        };
         let flavor = self
             .configuration
             .get("Flavor")
@@ -784,7 +791,7 @@ mod tests {
     fn severity_overrides_parse_letters_and_names() {
         let mut cfg = Config::default();
         cfg.configuration.insert(
-            "severity-overrides".to_string(),
+            "SeverityOverrides".to_string(),
             table_with(&[("a", "E"), ("b", "warning"), ("c", "I")]),
         );
         cfg.finalize().unwrap();
@@ -804,17 +811,42 @@ mod tests {
     fn severity_overrides_reject_unknown_level() {
         let mut cfg = Config::default();
         cfg.configuration.insert(
-            "severity-overrides".to_string(),
+            "SeverityOverrides".to_string(),
             table_with(&[("a", "critical")]),
         );
         assert!(cfg.finalize().is_err());
     }
 
     #[test]
+    fn severity_overrides_non_table_is_fatal() {
+        // A present non-table `[SeverityOverrides]` is a configuration error,
+        // not a silent empty map (same fail-closed rule as every other table
+        // key).
+        let mut cfg = Config::default();
+        cfg.configuration.insert(
+            "SeverityOverrides".to_string(),
+            toml::Value::String("nope".to_string()),
+        );
+        let err = cfg.finalize().expect_err("non-table must fail");
+        assert!(err.contains("must be a table"), "got {err}");
+    }
+
+    #[test]
+    fn severity_overrides_loads_from_real_toml_file() {
+        // Through the real TOML load path (`load_inner`), not just a
+        // hand-built `configuration` table.
+        let cfg = config_with_toml("[SeverityOverrides]\nspelling-error = \"W\"\n");
+        assert_eq!(
+            cfg.severity_overrides.get("spelling-error"),
+            Some(&Level::Warning)
+        );
+    }
+
+    #[test]
     fn severity_overrides_reject_non_string() {
         let mut cfg = Config::default();
         cfg.configuration.insert(
-            "severity-overrides".to_string(),
+            "SeverityOverrides".to_string(),
             toml::Value::Table(
                 [("a".to_string(), toml::Value::Integer(1))]
                     .into_iter()
