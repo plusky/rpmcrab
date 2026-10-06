@@ -2126,7 +2126,9 @@ description = "explicit priority string bypasses the system crypto policy"
             "missing-gnu-hash-section names the library: {}",
             gnu_lines[0]
         );
-        // Name, detail, severity, ORDER byte-identical: E fires before W.
+        // Name, detail, severity, ORDER byte-identical: missing-hash-section
+        // sorts before missing-gnu-hash-section by check-name reverse-alpha
+        // (not by severity: E before W here is coincidence).
         // The report order comes from Filter::render_results sorting, not
         // emission order, so pin the positions on the sorted (wire) vec.
         let mut sorted = results.clone();
