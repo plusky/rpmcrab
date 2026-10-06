@@ -571,9 +571,7 @@ fn allowlist_liveness_get_or_init_closure_skip() {
     );
 
     // Converse: a `Regex::new` below the *closed* closure is outside it, so
-    // it keeps the entry alive. Under the old proximity rule this line (14
-    // lines down, inside the 20-line window) would have been skipped and the
-    // entry wrongly reported dead — this is the #225 tightening biting.
+    // it keeps the entry alive.
     let mut open = closed.clone();
     open.extend(std::iter::repeat_n("    let _pad = 1;", 14));
     open.push("    let re = Regex::new(r\"^foo\");");
