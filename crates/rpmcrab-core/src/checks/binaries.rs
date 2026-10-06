@@ -3308,6 +3308,30 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn non_executable_shlib_stays_quiet() {
+        // shared-library-not-executable was deliberately dropped (upstream rpmlint#596):
+        // a 0644 shared library must stay quiet through the full emission path.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
+        let mut pkg =
+            Pkg::open(std::path::Path::new(&rpm_path), dir.path(), true).expect("open fixture");
+        let mut found = false;
+        for f in pkg.files.iter_mut() {
+            if f.name == "/usr/lib64/libgood.so.1" {
+                f.mode = 0o100644;
+                found = true;
+            }
+        }
+        assert!(found, "libgood.so.1 missing from fixture");
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        assert_lacks(&results, "shared-library-not-executable");
+    }
+
+    #[test]
     fn lto_bytecode_in_archive() {
         let config = test_config();
         let mut check = BinariesCheck::with_tool_dir(&config, None);
