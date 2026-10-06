@@ -690,11 +690,13 @@ against the openSUSE:Factory 2.10.0 tarball. The run header prints
 | `WorldWritableCheck` | **ported** |
 | `AtomicUpdateCheck` | **ported** |
 
-Four more reference modules are **ported** but sit outside the 43: the
-reference ships `LSBCheck`, `PAMModulesCheck`, `XinetdDepCheck` and
-`InitScriptCheck` as modules enabled by neither `configdefaults.toml` nor
-`opensuse.toml`; rpmcrab ports them anyway (registered in
-`crates/rpmcrab-core/src/checks/`, selectable via `Checks`).
+Three more reference modules are **ported** but sit outside the 43: the
+reference ships `LSBCheck`, `PAMModulesCheck` and `XinetdDepCheck` as modules
+enabled by neither `configdefaults.toml` nor `opensuse.toml`; rpmcrab ports
+them anyway (registered in `crates/rpmcrab-core/src/checks/`, selectable via
+`Checks`). (`InitScriptCheck` was deleted: systemd-only world, issue #214;
+`deprecated-init-script` from `SysVInitOnSystemdCheck` remains the deprecation
+signal.)
 **Intentionally out:** `FileMetadataCheck` — dormant in the reference
 (present in the tree, in no `Checks` list); §3.2 says do not port it.
 (`AbstractCheck` is a base class and `TmpfilesParser` a parser, not

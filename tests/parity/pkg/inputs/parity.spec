@@ -1,7 +1,7 @@
 Name:           parity
 Version:        1.0
 Release:        1
-Summary:        Parity fixture for InitScriptCheck (rpmcrab issue #58 B2)
+Summary:        Parity fixture for SysVInitOnSystemdCheck (rpmcrab issue #58 B2)
 License:        MIT
 BuildArch:      noarch
 
