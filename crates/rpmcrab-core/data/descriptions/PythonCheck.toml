@@ -1,0 +1,40 @@
+python-doc-in-package="""
+doc/ or docs/ directory in Python package directory. Documentation should go into %{docdir}, not %{python_sitelib}/<pkgname>"""
+python-egg-info-distutils-style="""
+The Python package's egg-info is a distutils style file.
+Please update to dist-info standardized core metadata.
+"""
+python-tests-in-site-packages="""
+test/ or tests/ directory in %{python_sitelib}. This should never happen since
+this is a global name space not owned by any particular package.
+"""
+python-doc-in-site-packages="""
+doc/ or docs directory installed to %{python_sitelib}. This should never happen
+since this is a global name space not owned by any particular package.
+"""
+python-src-in-site-packages="""
+src/ directory installed to %{python_sitelib}. This should never happen
+since this is a global name space not owned by any particular package.
+"""
+
+python-missing-require="""
+The python package declare some requirement that's not detected in the
+rpm package. Please, verify that all dependencies are added as
+Requires.
+"""
+
+python-leftover-require="""
+Some python module Requires can't be found in the python package
+requirements declaration. Please verify that all dependencies are
+really needed.
+"""
+
+python-pyc-multiple-versions="""
+There are .pyc files in the rpm that are from the different Python
+interperters. Please, verify that all files are needed for this package.
+"""
+
+python-sphinx-doctrees-leftover="""
+Cache Sphinx build folder found in the package ".doctrees". Please, make sure
+to do not include any build files in the final package.
+"""

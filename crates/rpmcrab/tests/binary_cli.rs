@@ -1021,3 +1021,461 @@ fn errors_only_unused_rpmlintrc_filter_names_skipped_check_finding() {
         "the skipped check's filter must audit as unused: {stdout}"
     );
 }
+/// `--explain`: staged `alternatives_check.toml` resolves `alternative-generic-name-not-symlink` instead of "Unknown message".
+#[test]
+fn explain_staged_alternatives_check() {
+    let out = rpmcrab(&["-e", "alternative-generic-name-not-symlink"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "alternative-generic-name-not-symlink:\nThe update-alternative generic-name is not a symlink pointing to\n%{_sysconfdir}/alternatives/$(basename generic-name).\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `appdata_check.toml` resolves `invalid-appdata-file` instead of "Unknown message".
+#[test]
+fn explain_staged_appdata_check() {
+    let out = rpmcrab(&["-e", "invalid-appdata-file"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "invalid-appdata-file:\nAppdata file is not valid. Check the validity with appstream-util.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `bashisms_check.toml` resolves `bin-sh-syntax-error` instead of "Unknown message".
+#[test]
+fn explain_staged_bashisms_check() {
+    let out = rpmcrab(&["-e", "bin-sh-syntax-error"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "bin-sh-syntax-error:\nA /bin/sh shell script contains a POSIX shell syntax error. This might\nindicate a potential bash-specific feature being used, try dash -n <file> for\nmore detailed error message.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `branding_policy_check.toml` resolves `branding-conflicts-missing` instead of "Unknown message".
+#[test]
+fn explain_staged_branding_policy_check() {
+    let out = rpmcrab(&["-e", "branding-conflicts-missing"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "branding-conflicts-missing:\nBranding packages should conflict with other flavors of the branding package\nby using: 'Conflicts: pkg-branding = brandingversion' and not directly by\nlisting all the alternative brandings in it.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `build_root_and_date_check.toml` resolves `file-contains-current-date` instead of "Unknown message".
+#[test]
+fn explain_staged_build_root_and_date_check() {
+    let out = rpmcrab(&["-e", "file-contains-current-date"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "file-contains-current-date:\nYour file contains the current date, this may cause the package to rebuild in\nexcess.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `check_for_xinetd.toml` resolves `obsolete-xinetd-requirement` instead of "Unknown message".
+#[test]
+fn explain_staged_check_for_xinetd() {
+    let out = rpmcrab(&["-e", "obsolete-xinetd-requirement"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "obsolete-xinetd-requirement:\nXinetd is obsolete by systemd socket activated services. Please stop using\nxinetd and switch to socket activation from systemd.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `dbus_policy_check.toml` resolves `dbus-policy-allow-without-destination` instead of "Unknown message".
+#[test]
+fn explain_staged_dbus_policy_check() {
+    let out = rpmcrab(&["-e", "dbus-policy-allow-without-destination"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "dbus-policy-allow-without-destination:\n'allow' directives must always specify a 'send_destination'.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `doc_check.toml` resolves `executable-docs` instead of "Unknown message".
+#[test]
+fn explain_staged_doc_check() {
+    let out = rpmcrab(&["-e", "executable-docs"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout, "executable-docs:\nDocumentation should not be executable.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `duplicates_check.toml` resolves `files-duplicate` instead of "Unknown message".
+#[test]
+fn explain_staged_duplicates_check() {
+    let out = rpmcrab(&["-e", "files-duplicate"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "files-duplicate:\nYour package contains duplicated files that are not hard- or symlinks. You\nshould use the %fdupes macro to link the files to one.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `erlang_check.toml` resolves `beam-compile-info-missed` instead of "Unknown message".
+#[test]
+fn explain_staged_erlang_check() {
+    let out = rpmcrab(&["-e", "beam-compile-info-missed"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout, "beam-compile-info-missed:\nYour beam file has missed compile info chunk.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `file_digest_check.toml` resolves `cron-file-unauthorized` instead of "Unknown message".
+#[test]
+fn explain_staged_file_digest_check() {
+    let out = rpmcrab(&["-e", "cron-file-unauthorized"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "cron-file-unauthorized:\nPackaging cron jobs requires a review and whitelisting by the SUSE security\nteam. If the package is intended for inclusion in any SUSE product please open\na bug report to request review of the package by the security team. Please\nrefer to\nhttps://en.opensuse.org/openSUSE:Package_security_guidelines#audit_bugs for\nmore information.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `file_metadata_check.toml` resolves `device-unauthorized-file` instead of "Unknown message".
+#[test]
+fn explain_staged_file_metadata_check() {
+    let out = rpmcrab(&["-e", "device-unauthorized-file"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "device-unauthorized-file:\nPackaging device files requires a review and whitelisting by the SUSE security\nteam. If the package is intended for inclusion in any SUSE product please open\na bug report to request review of the package by the security team. Please\nrefer to\nhttps://en.opensuse.org/openSUSE:Package_security_guidelines#audit_bugs for\nmore information.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `filelist_check.toml` resolves `filelist-forbidden` instead of "Unknown message".
+#[test]
+fn explain_staged_filelist_check() {
+    let out = rpmcrab(&["-e", "filelist-forbidden"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout, "filelist-forbidden:\nFile is not allowed at the location.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `files_check.toml` resolves `no-documentation` instead of "Unknown message".
+#[test]
+fn explain_staged_files_check() {
+    let out = rpmcrab(&["-e", "no-documentation"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "no-documentation:\nThe package contains no documentation (README, doc, etc). You have to include\ndocumentation files.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `init_script_check.toml` resolves `init-script-without-chkconfig-postin` instead of "Unknown message".
+#[test]
+fn explain_staged_init_script_check() {
+    let out = rpmcrab(&["-e", "init-script-without-chkconfig-postin"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "init-script-without-chkconfig-postin:\nThe package contains an init script but doesn't contain a %post with a call to\nchkconfig.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `kmp_policy_check.toml` resolves `kmp-missing-requires` instead of "Unknown message".
+#[test]
+fn explain_staged_kmp_policy_check() {
+    let out = rpmcrab(&["-e", "kmp-missing-requires"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "kmp-missing-requires:\nMake sure you have extended '%kernel_module_package' by '-p\n%_sourcedir/preamble', a file named 'preamble' as source and there specified\n'Requires: kernel-%1'.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `lsb_check.toml` resolves `non-lsb-compliant-package-name` instead of "Unknown message".
+#[test]
+fn explain_staged_lsb_check() {
+    let out = rpmcrab(&["-e", "non-lsb-compliant-package-name"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "non-lsb-compliant-package-name:\nYour package name contains an illegal character that is not LSB-compliant. Use\nonly lowercase letters, numbers, '.', '+' or '-' characters.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `logrotate_check.toml` resolves `logrotate-log-dir-not-packaged` instead of "Unknown message".
+#[test]
+fn explain_staged_logrotate_check() {
+    let out = rpmcrab(&["-e", "logrotate-log-dir-not-packaged"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "logrotate-log-dir-not-packaged:\nPlease add the specified directory to the file list to be able to check\npermissions.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `menu_check.toml` resolves `non-file-in-menu-dir` instead of "Unknown message".
+#[test]
+fn explain_staged_menu_check() {
+    let out = rpmcrab(&["-e", "non-file-in-menu-dir"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "non-file-in-menu-dir:\nThe directory /usr/lib/menu must not contain anything else than normal files.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `menu_xdg_check.toml` resolves `invalid-desktopfile` instead of "Unknown message".
+#[test]
+fn explain_staged_menu_xdg_check() {
+    let out = rpmcrab(&["-e", "invalid-desktopfile"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "invalid-desktopfile:\nThe .desktop file is not valid, check with desktop-file-validate\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `pkg_config_check.toml` resolves `invalid-pkgconfig-file` instead of "Unknown message".
+#[test]
+fn explain_staged_pkg_config_check() {
+    let out = rpmcrab(&["-e", "invalid-pkgconfig-file"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "invalid-pkgconfig-file:\nYour .pc file appears to be invalid. Possible causes are: - it contains traces\nof $RPM_BUILD_ROOT or $RPM_BUILD_DIR. - it contains unreplaced macros\n(@have_foo@) - it references invalid paths (e.g. /home or /tmp)\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `polkit_check.toml` resolves `polkit-user-privilege` instead of "Unknown message".
+#[test]
+fn explain_staged_polkit_check() {
+    let out = rpmcrab(&["-e", "polkit-user-privilege"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "polkit-user-privilege:\nThe package allows unprivileged users to carry out privileged operations\nwithout root authentication. This could cause security problems if not done\ncarefully. If the package is intended for inclusion in any SUSE product please\nopen a bug report to request review of the package by the security team.\nPlease refer to\nhttps://en.opensuse.org/openSUSE:Package_security_guidelines#audit_bugs for\nmore information.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `python_check.toml` resolves `python-doc-in-package` instead of "Unknown message".
+#[test]
+fn explain_staged_python_check() {
+    let out = rpmcrab(&["-e", "python-doc-in-package"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "python-doc-in-package:\ndoc/ or docs/ directory in Python package directory. Documentation should go\ninto %{docdir}, not %{python_sitelib}/<pkgname>\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `selinux_independent_module_check.toml` resolves `selinux-incorrect-if-file-location` instead of "Unknown message".
+#[test]
+fn explain_staged_selinux_independent_module_check() {
+    let out = rpmcrab(&["-e", "selinux-incorrect-if-file-location"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "selinux-incorrect-if-file-location:\nSELinux interface (.if) files must be installed in\n/usr/share/selinux/devel/include/distributed/ as per Fedora and openSUSE\nindependent module packaging guidelines. Files found elsewhere are packaging\nerrors.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `suid_permissions_check.toml` resolves `permissions-symlink` instead of "Unknown message".
+#[test]
+fn explain_staged_suid_permissions_check() {
+    let out = rpmcrab(&["-e", "permissions-symlink"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "permissions-symlink:\npermissions handling for symlinks is useless. Please contact security@suse.de\nto remove the entry. Please refer to\nhttps://en.opensuse.org/openSUSE:Package_security_guidelines#audit_bugs for\nmore information.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `shared_library_policy_check.toml` resolves `shlib-policy-missing-lib` instead of "Unknown message".
+#[test]
+fn explain_staged_shared_library_policy_check() {
+    let out = rpmcrab(&["-e", "shlib-policy-missing-lib"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "shlib-policy-missing-lib:\nYour package name looks its based on soname, but does not provide any\nlibraries.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `signature_check.toml` resolves `no-signature` instead of "Unknown message".
+#[test]
+fn explain_staged_signature_check() {
+    let out = rpmcrab(&["-e", "no-signature"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "no-signature:\nYou have to include your pgp or gpg signature in your package.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `spec_check.toml` resolves `no-spec-file` instead of "Unknown message".
+#[test]
+fn explain_staged_spec_check() {
+    let out = rpmcrab(&["-e", "no-spec-file"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "no-spec-file:\nNo spec file was specified in your RPM metadata. Please specify a valid SPEC\nfile to build a valid RPM package.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `sysv_init_on_systemd_check.toml` resolves `obsolete-insserv-requirement` instead of "Unknown message".
+#[test]
+fn explain_staged_sysv_init_on_systemd_check() {
+    let out = rpmcrab(&["-e", "obsolete-insserv-requirement"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "obsolete-insserv-requirement:\nIn systemd based distributions insserv is obsolete. Please remove dependencies\non insserv.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `systemd_install_check.toml` resolves `systemd-service-without-service_add_pre` instead of "Unknown message".
+#[test]
+fn explain_staged_systemd_install_check() {
+    let out = rpmcrab(&["-e", "systemd-service-without-service_add_pre"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "systemd-service-without-service_add_pre:\nThe package contains a systemd service but doesn't contain a %pre with a call\nto service_add_pre.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `systemd_tmpfiles_check.toml` resolves `systemd-tmpfile-ghost` instead of "Unknown message".
+#[test]
+fn explain_staged_systemd_tmpfiles_check() {
+    let out = rpmcrab(&["-e", "systemd-tmpfile-ghost"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "systemd-tmpfile-ghost:\nThis package installs a systemd-tmpfiles drop-in configuration file as %ghost\nfile. This is not allowed, since it is impossible to review. Please refer to\nhttps://en.opensuse.org/openSUSE:Package_security_guidelines#audit_bugs for\nmore information\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `tags_check.toml` resolves `invalid-version` instead of "Unknown message".
+#[test]
+fn explain_staged_tags_check() {
+    let out = rpmcrab(&["-e", "invalid-version"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "invalid-version:\nThe version string must not contain the pre, alpha, beta or rc suffixes\nbecause when the final version will be out, you will have to use an Epoch tag\nto make the package upgradable. Instead put it in the release tag, prefixed\nwith something you have control over.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `tmpfiles_check.toml` resolves `pre-with-tmpfile-creation` instead of "Unknown message".
+#[test]
+fn explain_staged_tmpfiles_check() {
+    let out = rpmcrab(&["-e", "pre-with-tmpfile-creation"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "pre-with-tmpfile-creation:\n%pre section contains %tmpfiles_create macro that should be in the %post\nsection instead.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}

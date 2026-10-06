@@ -1,0 +1,15 @@
+non-lsb-compliant-package-name="""
+Your package name contains an illegal character that is not
+LSB-compliant. Use only lowercase letters, numbers, '.', '+'
+or '-' characters.
+"""
+non-lsb-compliant-version="""
+Your version number contains an illegal character that is not
+LSB-compliant. Use only alphanumeric symbols, '.' or '+'
+characters.
+"""
+non-lsb-compliant-release="""
+Your release number contains an illegal character that is not
+LSB-compliant. Use only alphanumeric symbols, '.' or '+'
+characters.
+"""

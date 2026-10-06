@@ -1,4 +1,6 @@
 SUFFIX = "requires a review and whitelisting by the SUSE security team"
 
+device-unauthorized-file="Packaging device files #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+device-mismatched-attrs="Attribute mismatch for device files #SUFFIX#. #REVIEW_NEEDED_TEXT#"
 world-writable-unauthorized-file="Packaging world writable files #SUFFIX#. #REVIEW_NEEDED_TEXT#"
 world-writable-mismatched-attrs="Attribute mismatch for world writable files #SUFFIX#. #REVIEW_NEEDED_TEXT#"

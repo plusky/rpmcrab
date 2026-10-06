@@ -1,0 +1,49 @@
+SUFFIX="requires a review and whitelisting by the SUSE security team"
+
+cron-file-unauthorized="Packaging cron jobs #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+cron-file-digest-mismatch="A whitelisted cron job related file changed in content. Packaging cron jobs #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+cron-file-ghost="This package installs a cron job as a %ghost file. #GHOST_ENCOUNTERED_TEXT#"
+# we allow symlinks for cron jobs, we just add this to satisfy unit tests
+cron-file-symlink="this should never happen"
+
+# The binary PAM modules are whitelisted without digests so -mismatch should
+# not occur here
+pam-file-unauthorized="Packaging new PAM modules #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+pam-file-ghost="This package installs a PAM module as a %ghost file. #GHOST_ENCOUNTERED_TEXT#"
+pam-file-symlink="this should never happen"
+
+permissions-file-unauthorized="Packaging permissions.d drop-in snippets #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+permissions-file-digest-mismatch="A permissions.d drop-in snippet changed in content. Packaging permissions.d drop-in snippets #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+permissions-file-ghost="This package installs a permissions drop-in file as a %ghost file. #GHOST_ENCOUNTERED_TEXT#"
+permissions-file-symlink="Symlinks are not allowed for permissions.d drop-in snippets"
+
+polkit-file-unauthorized="Packaging polkit rules #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+polkit-file-digest-mismatch="A polkit rule file changed in content. Packaging polkit rules #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+polkit-file-ghost="This package installs a polkit rule file as a %ghost file. #GHOST_ENCOUNTERED_TEXT#"
+polkit-file-symlink="Symlinks are not allowed for polkit rule files"
+
+dbus-file-unauthorized="Packaging D-Bus services #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+dbus-file-digest-mismatch="A D-Bus configuration file changed in content. Packaging D-Bus services #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+dbus-file-ghost="This package installs a D-Bus configuration file as a %ghost file. #GHOST_ENCOUNTERED_TEXT#"
+dbus-file-symlink="Symlinks are not allowed for D-Bus configuration files"
+dbus-file-parse-error="A digest of an D-Bus XML file could not be computed, because of an XML parsing error"
+
+sudoers-file-unauthorized="Packaging sudoers.d drop-in configuration files #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+sudoers-file-digest-mismatch="A whitelisting related sudoers.d drop-in file changed in content. Packaging sudoers.d drop in configuration files #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+sudoers-file-ghost="This package installs a sudoers.d drop-in configuration file as a %ghost file. #GHOST_ENCOUNTERED_TEXT#"
+sudoers-file-symlink="Symlinks are not allowed for sudoers.d drop-in configuration files"
+
+sysctl-file-unauthorized="Packaging sysctl.d drop-in configuration files #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+sysctl-file-digest-mismatch="A whitelisting related sysctl.d drop-in file changed in content. Packaging sysctl.d drop in configuration files #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+sysctl-file-ghost="This package installs a sysctl.d drop-in configuration file as a %ghost file. #GHOST_ENCOUNTERED_TEXT#"
+sysctl-file-symlink="Symlinks are not allowed for sysctl.d drop-in configuration files"
+
+varlink-file-digest-mismatch="A systemd socket unit declaring a Varlink service changed in content. Packaging varlink services #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+varlink-file-ghost="This package installs a systemd socket unit declaring a Varlink service as a %ghost file. #GHOST_ENCOUNTERED_TEXT#"
+varlink-file-symlink="Symlinks are not allowed for systemd socket units declaring Varlink services"
+varlink-file-unauthorized="Packaging new Varlink services #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+
+zypperplugin-file-digest-mismatch="A whitelisting related zypper plugin file changed in content. Packaging zypper plugins #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+zypperplugin-file-unauthorized="Packaging new zypper plugins #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+zypperplugin-file-ghost="This package installs a zypper plugin as a %ghost file. #GHOST_ENCOUNTERED_TEXT#"
+zypperplugin-file-symlink="this should never happen"
