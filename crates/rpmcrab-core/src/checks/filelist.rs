@@ -67,27 +67,31 @@ pub struct FilelistCheck {
     restricted_dirs: Vec<String>,
     rules: Vec<FilelistRule>,
     /// Upstream rpmlint#437: GNOME 1 / KDE 1 era MIME dirs superseded by
-    /// shared-mime-info. From `ObsoleteDirPrefixes` (config-driven).
-    obsolete_dir_prefixes: Vec<String>,
+    /// shared-mime-info, as (prefix, prefix-with-trailing-slash) pairs.
+    /// From `ObsoleteDirPrefixes` (config-driven): trailing slashes are
+    /// trimmed and empty entries dropped at load, so a config typo can
+    /// neither silently miss nor match everything.
+    obsolete_dir_prefixes: Vec<(String, String)>,
 }
 
 impl FilelistCheck {
     pub fn new(config: &Config) -> Self {
         // Default to the three obsolete MIME-format dirs; an explicit
         // (even empty) config list overrides.
-        let obsolete_dir_prefixes: Vec<String> =
+        let obsolete_dir_prefixes: Vec<(String, String)> =
             match config.configuration.get("ObsoleteDirPrefixes") {
-                Some(toml::Value::Array(a)) => a
-                    .iter()
-                    .filter_map(toml::Value::as_str)
-                    .map(str::to_string)
-                    .collect(),
+                Some(toml::Value::Array(a)) => a.iter().filter_map(toml::Value::as_str).collect(),
                 _ => vec![
-                    "/usr/share/mime-info".to_string(),
-                    "/usr/share/application-registry".to_string(),
-                    "/usr/share/mimelnk".to_string(),
+                    "/usr/share/mime-info",
+                    "/usr/share/application-registry",
+                    "/usr/share/mimelnk",
                 ],
-            };
+            }
+            .into_iter()
+            .map(|p| p.trim_end_matches('/'))
+            .filter(|p| !p.is_empty())
+            .map(|p| (p.to_string(), format!("{p}/")))
+            .collect();
         let table: toml::Table = toml::from_str(FILELIST_TOML).expect("bundled FilelistCheck.toml");
         let good_prefixes: Vec<String> = table
             .get("GoodPrefixes")
@@ -192,10 +196,10 @@ impl FilelistCheck {
         let mut found = std::collections::BTreeSet::new();
         for pkgfile in &pkg.files {
             let f = pkgfile.name.as_str();
-            for prefix in &self.obsolete_dir_prefixes {
+            for (prefix, prefix_slash) in &self.obsolete_dir_prefixes {
                 // Match the dir itself and anything under it, without
                 // matching a longer sibling (`/usr/share/mimelnk2`).
-                if f == prefix || f.starts_with(&format!("{prefix}/")) {
+                if f == prefix || f.starts_with(prefix_slash.as_str()) {
                     found.insert(prefix.clone());
                 }
             }
@@ -418,6 +422,31 @@ mod tests {
             lines_for(&results, "obsolete-mime-format-dir").is_empty(),
             "unexpected: {results:?}"
         );
+    }
+
+    #[test]
+    fn obsolete_mime_dirs_trailing_slash_and_empty_are_normalized() {
+        // plusky #251 review: a trailing-slash config entry must still
+        // match, and an empty entry must not match everything.
+        let mut tbl = toml::Table::new();
+        tbl.insert(
+            "ObsoleteDirPrefixes".to_string(),
+            toml::Value::Array(vec![
+                toml::Value::String("/opt/obsolete/".to_string()),
+                toml::Value::String(String::new()),
+            ]),
+        );
+        let config = Config {
+            configuration: tbl,
+            ..Default::default()
+        };
+        let pkg = pkg_with_files(&["/opt/obsolete/foo", "/usr/bin/foo"]);
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "obsolete-mime-format-dir");
+        // The trailing slash is trimmed (still matches); the empty entry
+        // is dropped (matches nothing, not even /usr/bin/foo).
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("/opt/obsolete"), "detail: {}", lines[0]);
     }
 
     #[test]

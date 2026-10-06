@@ -200,7 +200,8 @@ impl MenuXDGCheck {
 impl MenuXDGCheck {
     /// Upstream rpmlint#19: desktop entries with unexpanded RPM macros
     /// (`Name=%{title}`) — the macro was never expanded at build time.
-    /// Only the display fields are scanned; `Exec=` legitimately contains
+    /// Only the display fields are scanned, including their localized
+    /// variants (`Name[de]=`, ...); `Exec=` legitimately contains
     /// `%`-codes (`%f`, `%U`) but never `%{`.
     fn check_unexpanded_macros(
         &self,
@@ -209,19 +210,31 @@ impl MenuXDGCheck {
         filename: &str,
         entry: &HashMap<String, String>,
     ) {
-        // Keys are already lowercased by parse_desktop.
-        for (key, field) in [("name", "Name"), ("comment", "Comment"), ("icon", "Icon")] {
-            if let Some(value) = entry.get(key)
-                && value.contains("%{")
-            {
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "unexpanded-macro-in-desktop-file",
-                    &[filename, &format!("{field}={value}")],
-                );
+        // Keys are already lowercased by parse_desktop. Sort for
+        // deterministic emission order.
+        let mut keys: Vec<&String> = entry.keys().collect();
+        keys.sort();
+        for key in keys {
+            let base = key.split("[").next().unwrap_or(key);
+            let field = match base {
+                "name" => "Name",
+                "comment" => "Comment",
+                "icon" => "Icon",
+                _ => continue,
+            };
+            let value = &entry[key];
+            if !value.contains("%{") {
+                continue;
             }
+            // Detail keeps the localized key shape: Name[de]=%{title}.
+            let detail_field = format!("{}{}", field, &key[base.len()..]);
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "unexpanded-macro-in-desktop-file",
+                &[filename, &format!("{}={}", detail_field, value)],
+            );
         }
     }
 }
@@ -493,6 +506,23 @@ mod tests {
             .collect();
         // One finding per offending field.
         assert_eq!(names.len(), 2, "unexpected: {results:?}");
+    }
+
+    // plusky #251 review: localized display fields are scanned too.
+    #[test]
+    fn unexpanded_macro_in_localized_name_warns() {
+        let results = run_desktop("[Desktop Entry]\nName=Foo\nName[de]=%{title}\nExec=foo\n");
+        let lines: Vec<&String> = results
+            .iter()
+            .filter(|(n, _)| n == "unexpanded-macro-in-desktop-file")
+            .map(|(_, l)| l)
+            .collect();
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+        assert!(
+            lines[0].contains("Name[de]=%{title}"),
+            "localized detail: {}",
+            lines[0]
+        );
     }
 
     #[test]
