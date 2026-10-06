@@ -544,7 +544,9 @@ impl Pkg {
     }
 
     /// Read a scalar string tag (rpmlint `pkg[tag]`): byte-decoded, empty →
-    /// `None`, and `GROUP == "Unspecified"` → `None`.
+    /// `None`, and `GROUP == "Unspecified"` → `None`. Not a faithful
+    /// `tags::str_tag` for `Tag::GROUP`: a future `pkg.tag_str(Tag::GROUP)`
+    /// call silently inherits the special case.
     pub fn tag_str(&self, tag: Tag) -> Option<String> {
         let v = tags::str_tag(&self.header, tag);
         if tag == Tag::GROUP && v.as_deref() == Some("Unspecified") {
