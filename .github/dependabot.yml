@@ -22,3 +22,9 @@ updates:
     groups:
       actions-minor-patch:
         update-types: ["minor", "patch"]
+
+  - package-ecosystem: docker
+    directory: "/tests/fixtures/binaries-check"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3

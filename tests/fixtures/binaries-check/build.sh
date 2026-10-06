@@ -94,9 +94,12 @@ chmod 755 %{buildroot}/usr/bin/truncated
 /usr/bin/truncated
 EOF
 
-"$podman_bin" run --rm -v "$work:/work:z" registry.opensuse.org/opensuse/tumbleweed:latest bash -c "
+# The image reference (digest-pinned base) lives in Dockerfile so Dependabot's
+# docker ecosystem can bump the pin monthly; build.sh only names the built tag.
+"$podman_bin" build -f "$here/Dockerfile" -t rpmcrab-binaries-check-fixture "$here"
+
+"$podman_bin" run --rm -v "$work:/work:z" rpmcrab-binaries-check-fixture bash -c "
     set -e
-    zypper -n in -y gcc binutils rpm-build >/dev/null 2>&1
     cd /work/src
     gcc -shared -fPIC -z execstack -o libbad.so.1 libbad.c
     gcc -shared -fPIC -z noexecstack -Wl,-soname,libgood.so.1 -o libgood.so.1 libgood.c
