@@ -327,6 +327,13 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "post-without-tmpfile-creation"
+kind = "behaviour"
+reason = "Deliberate omission: upstream removed TmpFilesCheck._check_post_tmpfile (commit 1c04a49d, fixing rpmlint#1374) because %tmpfiles_create/%tmpfiles_create_package are NOPs since systemd-rpm-macros rev 102 -- creation is handled by the systemd package's file triggers, so demanding a %post creation call only produced false positives. The port does not reintroduce the deleted finding."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "SUIDPermissionsCheck"
 kind = "detail"
 reason = "Drop-in `permissions-parse-error` message texts are paraphrased rather than byte-identical to the reference's wordings; central-profile parse errors abort the run like the reference constructor, emitting no finding."
