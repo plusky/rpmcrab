@@ -683,9 +683,10 @@ impl Check for FilesCheck {
     }
 }
 
-/// Whether `path` is the debug tree itself or below it: any `/`-separated
-/// segment exactly `debug`. Segment equality (not substring or prefix) keeps
-/// lookalikes like `/usr/share/debugfoo` quiet.
+/// Whether `path` is one of the two debug trees itself or below it:
+/// `/usr/lib/debug` or `/usr/src/debug`. Tree-prefix equality (not substring
+/// or segment matching) keeps lookalikes like `/usr/lib64/debug` and
+/// `/usr/share/debugfoo` quiet.
 fn is_debug_path(path: &str) -> bool {
     path == "/usr/lib/debug"
         || path.starts_with("/usr/lib/debug/")
