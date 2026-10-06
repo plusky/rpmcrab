@@ -3,6 +3,10 @@
 //! Ported from `rpmlint/checks/TmpFilesCheck.py`. Two findings:
 //! `tmpfile-not-regular-file` and `tmpfile-not-in-filelist`, plus
 //! `pre-with-tmpfile-creation`.
+//!
+//! The upstream-removed `post-without-tmpfile-creation` is deliberately not
+//! ported (see `divergences.toml`): the creation macros are NOPs and the
+//! systemd package's file triggers handle creation.
 
 use std::path::Path;
 
