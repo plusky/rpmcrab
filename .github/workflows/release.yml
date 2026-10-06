@@ -42,10 +42,12 @@ jobs:
           persist-credentials: false
       - name: Derive and check the version
         id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            version="${{ inputs.version }}"
+            version="$INPUT_VERSION"
           else
             # Strip the leading `v`: v0.9.0 -> 0.9.0.
             version="${GITHUB_REF_NAME#v}"
@@ -91,9 +93,11 @@ jobs:
       - name: Package
         id: package
         shell: bash
+        env:
+          PACKAGE_VERSION: ${{ needs.check-version.outputs.version }}
         run: |
           set -euo pipefail
-          version="${{ needs.check-version.outputs.version }}"
+          version="$PACKAGE_VERSION"
           target="${{ matrix.target }}"
           stage="dist-$target"
           mkdir -p "$stage"
@@ -156,12 +160,14 @@ jobs:
           printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
           echo "signing with key: $(gpg --batch --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')"
           sign_args=(--batch --yes --pinentry-mode loopback --detach-sign --armor)
+          passphrase_input=/dev/null
           if [ -n "${GPG_PASSPHRASE:-}" ]; then
-            sign_args+=(--passphrase "$GPG_PASSPHRASE")
+            sign_args+=(--passphrase-fd 0)
+            passphrase_input=<(printf '%s' "$GPG_PASSPHRASE")
           fi
           cd dist
           for f in rpmcrab-*.tar.gz SHA256SUMS; do
-            gpg "${sign_args[@]}" -o "$f.asc" "$f"
+            gpg "${sign_args[@]}" -o "$f.asc" "$f" <"$passphrase_input"
           done
 
       # Attest the tarballs' build provenance between download and release, so
