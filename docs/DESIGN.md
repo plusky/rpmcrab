@@ -256,6 +256,9 @@ keys the package insertion order is preserved.
   (rule width honours `$COLUMNS`, else the tty, else 80), then the version
   line, a `configuration:` block listing each loaded config indented four
   spaces, an optional `rpmlintrc:` block, then `checks: N, packages: M`.
+  `checks: N` is the configured `Checks` list length, not the number of checks
+  that ran: the reference computes it as `len(self.config.configuration['Checks'])`
+  (`lint.py:272`), so `--checks` narrowing and `--errors-only` do not change it.
 - Footer: `{p} packages and {s} specfiles checked; {E} errors, {W} warnings, {f} filtered, {b} badness; has taken {t:.1f} s`,
   space-padded inside an `=`-rule. `I:` findings are counted nowhere in the
   footer and contribute `0` badness.
@@ -365,10 +368,27 @@ sorted, only `.rpm`/`.spm`/`.spec`), `-V/--version`, `-c/--config`,
 `-e/--explain`, `-r/--rpmlintrc` (repeatable), `-v/--verbose`,
 `-p/--print-config`, `-i/--installed`, `-t/--time-report`,
 `-j/--jobs` (default: machine parallelism; `≤ 0` coerces to 1; capped at the task count and machine parallelism),
-`--ignore-unused-rpmlintrc`, `--checks`, `-s/--strict`, `-P/--permissive`
-(mutually exclusive with `-s`). Deliberately **not** accepted: `-T/--profile`
+`--ignore-unused-rpmlintrc`, `--checks`, `-s/--strict`, `--errors-only`,
+`-P/--permissive` (mutually exclusive with `-s`). Deliberately **not** accepted: `-T/--profile`
 (removed upstream by #1595 as misleading) and the illogical `--file`/`--info`
 aliases (straightened to `-r`/`-v`).
+**`--errors-only`** (upstream rpmlint#134) skips warning-only checks entirely,
+for post-build runs that only care about errors. CLI-only: there is no config-file
+key (the filter lives in check loading, `check::load_with`). The filter is a
+**static pre-scoring bound** on each check's declared `max_severity`
+(`BashismsCheck`, `ConfigFilesCheck`, `FHSCheck`, `TmpFilesCheck` — every
+`add_info` call site audited): runtime promotions a finding may receive at emit
+time (`Scoring>0`, severity overrides) are invisible at load time, so a finding
+that promotion would have raised to E on a skipped check never runs
+(recorded in the parity ledger). `--strict` promotes every finding to E at emit
+time, so under `--strict` the effective maximum of every check is Error and the
+filter is disabled — combining `--strict --errors-only` runs everything.
+The header still reports the configured check count (§4.5). The
+`unused-rpmlintrc-filter` audit only sees findings that ran: a pattern naming a
+skipped check's finding reports as unused. Selecting only warning-only checks
+with `--errors-only` warns (`--errors-only skipped every selected check,
+nothing to run`) instead of silently exiting 0.
+
 The SUSE-only **`-m/--mini-mode`** is a real flag (absent upstream; added in
 `46f9d302`, PR #678) that sets `config.mini_mode`. It makes `TagsCheck` skip
 the enchant spellchecker and `SpecCheck` skip `_check_specfile_error` and

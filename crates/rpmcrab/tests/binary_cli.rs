@@ -881,3 +881,120 @@ fn severity_override_json_reports_overridden_level() {
         "overridden levels: {levels:?}"
     );
 }
+/// `--errors-only` (upstream rpmlint#134) end-to-end: the header still reports
+/// the configured check count (`docs/DESIGN.md` §4.5 — the reference's
+/// `lint.py:272`), even though only 39 checks run.
+#[test]
+fn errors_only_header_reports_configured_check_count() {
+    let out = rpmcrab(&[
+        "--errors-only",
+        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("checks: 43, packages: 1"),
+        "header reports the configured count, not the run count: {stdout}"
+    );
+}
+
+/// `--checks TmpFilesCheck --errors-only`: the only selected check is
+/// warning-only, so the run is empty — it must warn on stderr instead of
+/// silently exiting 0.
+#[test]
+fn errors_only_empty_selection_warns_instead_of_silently_exiting_zero() {
+    let out = rpmcrab(&[
+        "--errors-only",
+        "--checks",
+        "TmpFilesCheck",
+        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--errors-only skipped every selected check, nothing to run"),
+        "stderr: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("0 errors, 0 warnings"), "footer: {stdout}");
+}
+
+/// `--strict` promotes every finding to E at emit time, so under
+/// `--strict --errors-only` the warning-only check runs: no empty-run
+/// warning. Mutation proof for the strict guard in `errors_only_skips` —
+/// without it, this run warns.
+#[test]
+fn strict_reenables_warning_only_checks_under_errors_only() {
+    let out = rpmcrab(&[
+        "--strict",
+        "--errors-only",
+        "--checks",
+        "TmpFilesCheck",
+        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("nothing to run"),
+        "strict must disable the filter; stderr: {stderr}"
+    );
+}
+
+/// `--format json --errors-only`: the finding multiset matches the full run
+/// (the four skipped checks fire nothing on this fixture), no finding names
+/// a warning-only check, the JSON `checks` field reports the configured
+/// count, and the summary exit code matches the process.
+#[test]
+fn errors_only_json_finding_set_matches_full_run() {
+    let rpm = "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm";
+    let full = rpmcrab(&["--format", "json", rpm]);
+    let eo = rpmcrab(&["--format", "json", "--errors-only", rpm]);
+    assert_eq!(eo.status.code(), full.status.code());
+    let full_doc: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&full.stdout)).expect("JSON");
+    let eo_doc: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&eo.stdout)).expect("JSON");
+    assert_eq!(full_doc["findings"], eo_doc["findings"]);
+    for f in eo_doc["findings"].as_array().expect("findings") {
+        let check = f["check"].as_str().expect("check");
+        assert!(
+            ![
+                "BashismsCheck",
+                "ConfigFilesCheck",
+                "FHSCheck",
+                "TmpFilesCheck"
+            ]
+            .contains(&check),
+            "warning-only check ran: {check}"
+        );
+    }
+    assert_eq!(eo_doc["checks"], 43);
+    assert_eq!(
+        eo_doc["summary"]["exit_code"].as_i64(),
+        eo.status.code().map(i64::from)
+    );
+}
+
+/// Under `--errors-only` the `unused-rpmlintrc-filter` audit only sees
+/// findings that ran: a pattern naming a skipped check's finding reports as
+/// unused (documented in `docs/DESIGN.md` §4.10).
+#[test]
+fn errors_only_unused_rpmlintrc_filter_names_skipped_check_finding() {
+    let dir = std::env::temp_dir().join("rpmcrab-errors-only-rpmlintrc");
+    std::fs::create_dir_all(&dir).unwrap();
+    let rc = dir.join("test.rc");
+    std::fs::write(&rc, "addFilter(\"tmpfile-not-in-filelist\")\n").unwrap();
+    let out = rpmcrab(&[
+        "-r",
+        rc.to_str().unwrap(),
+        "--errors-only",
+        "--checks",
+        "TmpFilesCheck",
+        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+    ]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("unused-rpmlintrc-filter"),
+        "the skipped check's filter must audit as unused: {stdout}"
+    );
+}

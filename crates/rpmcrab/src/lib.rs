@@ -108,7 +108,9 @@ struct Cli {
     #[arg(short = 's', long = "strict", action = clap::ArgAction::SetTrue, conflicts_with = "permissive")]
     strict: bool,
 
-    /// Skip warning-only checks entirely (upstream rpmlint#134).
+    /// Skip warning-only checks entirely (upstream rpmlint#134). A static
+    /// pre-scoring bound on each check's declared max severity; disabled
+    /// under --strict.
     #[arg(long = "errors-only", action = clap::ArgAction::SetTrue)]
     errors_only: bool,
 
@@ -300,6 +302,16 @@ pub fn run() -> ExitCode {
     let start = Instant::now();
     let width = term::terminal_width();
     let checks = rpmcrab_core::check::load(&cfg, cli.checks.as_deref());
+    // `--errors-only` (upstream rpmlint#134): an all-warning-only selection
+    // would silently run nothing at exit 0; warn instead of staying quiet.
+    if checks.is_empty()
+        && rpmcrab_core::check::errors_only_dropped(&cfg, cli.checks.as_deref()) > 0
+    {
+        warn!(
+            color,
+            "(none): W: --errors-only skipped every selected check, nothing to run"
+        );
+    }
     let mut lint = match Lint::new(cfg, checks, color, width) {
         Ok(l) => l,
         Err(e) => {

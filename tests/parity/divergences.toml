@@ -903,3 +903,11 @@ kind = "behaviour"
 reason = "New `[SeverityOverrides]` config table (finding name → E/W/I, upstream rpmlint#1335): the override is the final word on a finding's level, applied after Scoring and strict promotion; the frozen 2.10.0 reference has no such key. An overridden finding is not counted as strict-promoted, preserving the DESIGN §4.6 printed(E)==promoted exit-65 split. Explicit Scoring badness is kept (a warning overridden back from Scoring(50) still aborts with 66); Filters regexes and JSON `level` see the overridden level; names that never match a finding warn on stderr."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/1335"
+
+[[divergence]]
+case = "global"
+check = "all"
+kind = "behaviour"
+reason = "Upstream rpmlint#134: a new `--errors-only` CLI flag skips warning-only checks entirely, for post-build runs that only care about errors. The frozen 2.10.0 reference has no such flag: every configured check runs. The filter is a static pre-scoring bound on each check's declared `max_severity` — BashismsCheck, ConfigFilesCheck, FHSCheck and TmpFilesCheck are the four warning-only checks (every `add_info` call site audited) — so a finding that runtime promotion (`Scoring>0`, severity overrides) would have raised to E on a skipped check never runs. `--strict` promotes every finding to E at emit time, so under `--strict` the effective maximum of every check is Error and the filter is disabled. The header still reports the configured `Checks` count (`checks: 43`), matching the reference's `lint.py:272`."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/134"

@@ -13,6 +13,10 @@
 
 use std::path::PathBuf;
 
+use rpmcrab_core::check;
+use rpmcrab_core::config;
+use rpmcrab_core::level::Level;
+
 fn core_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -175,6 +179,35 @@ fn every_constructible_check_is_listed_in_checks() {
              `Checks = [...]` in configdefaults.toml, so it can never run"
         );
     }
+}
+
+/// `--errors-only` (upstream rpmlint#134) drops exactly the four audited
+/// warning-only checks. The per-check assertion lives in `check.rs`; this
+/// closes the multiplicity gap: no other registry check may report a
+/// sub-Error `max_severity`, or `--errors-only` would silently skip a check
+/// that was never audited as warning-only.
+#[test]
+fn exactly_four_warning_only_checks_in_registry() {
+    // Bundled defaults: some checks (e.g. AtomicUpdateCheck) require config
+    // keys that `Config::default()` does not provide.
+    let config = config::load_bundled();
+    let mut below_error: Vec<String> = names_built_by_registry()
+        .iter()
+        .filter_map(|name| check::build(name, &config))
+        .filter(|c| c.max_severity() != Level::Error)
+        .map(|c| c.name().to_string())
+        .collect();
+    below_error.sort_unstable();
+    assert_eq!(
+        below_error,
+        vec![
+            "BashismsCheck",
+            "ConfigFilesCheck",
+            "FHSCheck",
+            "TmpFilesCheck",
+        ],
+        "warning-only set changed: re-audit every add_info call site of the new member"
+    );
 }
 
 /// The reverse direction (issue #85): a name in the default config's
