@@ -581,12 +581,16 @@ impl Pkg {
             return self.tag_str(tag).unwrap_or_default();
         }
         let table = self.tag_str_array(Tag::HEADERI18NTABLE);
+        // extensions: false is load-bearing: with HEADERGET_EXT librpm
+        // performs the i18n locale lookup even under HEADERGET_RAW,
+        // collapsing the array to a single Str, so the I18NStr match below
+        // would never fire.
         if let Some(idx) = table.iter().position(|l| l == lang)
             && let Some(OwnedTagData::I18NStr(v)) = self.header.get_owned_with_options(
                 tag,
                 librpm::package::GetOptions {
                     raw: true,
-                    ..Default::default()
+                    extensions: false,
                 },
             )
         {
