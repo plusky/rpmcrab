@@ -513,6 +513,37 @@ mod exit_code_tests {
     /// An override name that never matched a finding is reported by the
     /// post-run audit (the only honest typo signal: no static registry of
     /// finding tags exists).
+    /// The W+Scoring(50) interaction (DESIGN §4.9): a warning overridden back
+    /// from scoring-driven E prints as W with badness 50, so with a threshold
+    /// it aborts with 66 while printing 0 errors.
+    #[test]
+    fn scoring_override_back_to_warning_aborts_with_66_and_zero_errors() {
+        let config = Config {
+            badness_threshold: 30,
+            scoring: [("some-check".to_string(), toml::Value::Integer(50))]
+                .into_iter()
+                .collect(),
+            severity_overrides: [("some-check".to_string(), Level::Warning)]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let mut lint = Lint::new(config, vec![], Color::for_tty(false), 80).unwrap();
+        lint.filter.add_info(Finding {
+            level: Level::Warning,
+            check: "some-check".to_string(),
+            details: vec![],
+            badness: 0,
+            pkg_name: "testpkg".to_string(),
+            arch: None,
+            line: None,
+        });
+        assert_eq!(lint.filter.printed(Level::Warning), 1);
+        assert_eq!(lint.filter.printed(Level::Error), 0);
+        assert_eq!(lint.filter.score, 50);
+        assert_eq!(lint.exit_code(), 66);
+    }
+
     #[test]
     fn unused_severity_override_is_reported() {
         let config = Config {

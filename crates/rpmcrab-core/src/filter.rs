@@ -495,6 +495,49 @@ mod tests {
     }
 
     #[test]
+    fn severity_override_to_error_keeps_zero_scoring_badness() {
+        // `Scoring(0)` + override to E (DESIGN §4.9): the finding prints as a
+        // genuine error for the §4.6 split, but scoring still drives the
+        // badness, so it scores nothing.
+        let mut c = cfg();
+        c.scoring
+            .insert("zero-badness".to_string(), toml::Value::Integer(0));
+        c.severity_overrides
+            .insert("zero-badness".to_string(), Level::Error);
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        f.add_info(finding("zero-badness", Level::Warning, 0));
+        assert_eq!(f.printed(Level::Error), 1);
+        assert_eq!(f.printed(Level::Warning), 0);
+        assert_eq!(f.score, 0);
+        // An override is not a strict promotion, even when it raises the level.
+        assert_eq!(f.promoted_to_error, 0);
+    }
+
+    #[test]
+    fn filters_match_the_overridden_level() {
+        // Suppression runs after the override (DESIGN §4.9): a `Filters`
+        // regex matching the post-override level letter filters the finding,
+        // while one matching the pre-override letter does not.
+        let mut c = cfg();
+        c.severity_overrides
+            .insert("downgraded".to_string(), Level::Warning);
+        c.filters = vec!["W: downgraded".to_string()];
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        f.add_info(finding("downgraded", Level::Error, 0));
+        assert_eq!(f.filtered_out, 1);
+        assert_eq!(f.printed(Level::Warning), 0);
+
+        let mut c = cfg();
+        c.severity_overrides
+            .insert("downgraded".to_string(), Level::Warning);
+        c.filters = vec!["E: downgraded".to_string()];
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        f.add_info(finding("downgraded", Level::Error, 0));
+        assert_eq!(f.filtered_out, 0);
+        assert_eq!(f.printed(Level::Warning), 1);
+    }
+
+    #[test]
     fn blocked_filter_is_unfilterable() {
         let mut c = cfg();
         c.filters = vec!["no-soname".to_string()];
