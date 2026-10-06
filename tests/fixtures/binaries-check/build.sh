@@ -105,6 +105,15 @@ EOF
     gcc -shared -fPIC -z noexecstack -Wl,-soname,libcryptobad.so -o libcryptobad.so cryptobad.c
     gcc -shared -fPIC -z noexecstack -Wl,-soname,libgnutlswaived.so -o libgnutlswaived.so gnutlswaived.c
     strip libcryptobad.so libgnutlswaived.so
+    # The __asm__(".type ..., @function") directives in cryptobad.c /
+    # gnutlswaived.c are load-bearing: modern GCC emits undefined imports as
+    # NOTYPE, which the forbidden-function scan does not match. If a future
+    # toolchain ignores the directives, the fixture silently stops exercising
+    # the check and the tests still go green -- fail the build loudly instead.
+    readelf --dyn-syms -W libcryptobad.so | grep -q "FUNC.*SSL_CTX_set_cipher_list" \
+        || { echo "fixture broken: SSL_CTX_set_cipher_list is not FUNC" >&2; exit 1; }
+    readelf --dyn-syms -W libgnutlswaived.so | grep -q "FUNC.*gnutls_priority_init" \
+        || { echo "fixture broken: gnutls_priority_init is not FUNC" >&2; exit 1; }
     cp /work/src/libbad.so.1 /work/src/libgood.so.1 /work/src/setuidbin /work/src/rpathbin /work/src/libcryptobad.so /work/src/libgnutlswaived.so /work/rpmbuild/SOURCES/
     rpmbuild --define '_topdir /work/rpmbuild' --nosignature -bb /work/rpmbuild/SPECS/fixture.spec
 "

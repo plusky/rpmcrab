@@ -2415,13 +2415,18 @@ description = "explicit priority string bypasses the system crypto policy"
     fn run_binaries_check_with_config(
         rpm: &str,
         config: &Config,
-    ) -> (Vec<(String, String)>, Vec<Level>, tempfile::TempDir) {
+    ) -> (Vec<(String, String)>, Vec<Level>, tempfile::TempDir, Pkg) {
         let dir = tempfile::TempDir::new().expect("tmpdir");
         let pkg = Pkg::open(std::path::Path::new(rpm), dir.path(), true).expect("open fixture");
         let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
         let mut check = BinariesCheck::with_tool_dir(config, None);
         check.check_binary(&pkg, config, &mut out);
-        (out.results().to_vec(), out.result_levels().to_vec(), dir)
+        (
+            out.results().to_vec(),
+            out.result_levels().to_vec(),
+            dir,
+            pkg,
+        )
     }
 
     fn finding_level(
@@ -2435,6 +2440,27 @@ description = "explicit priority string bypasses the system crypto policy"
             .map(|i| levels[i])
     }
 
+    /// Assert the fixture's `__asm__(".type ..., @function")` hack is live:
+    /// the symbol must be FUNC in .dynsym. Modern GCC emits undefined
+    /// imports as NOTYPE, which the scan does not match -- if a future
+    /// toolchain ignores the directive, the forbidden-function tests would
+    /// still go green, so this fails loudly instead (plusky's #241 review).
+    fn assert_dynsym_is_func(pkg: &Pkg, so: &str, sym_name: &str) {
+        let extracted = pkg.extracted_dir().expect("fixture extracted");
+        let data = std::fs::read(extracted.join(so)).expect("fixture so readable");
+        let elf = goblin::elf::Elf::parse(&data).expect("fixture so parses");
+        let sym = elf
+            .dynsyms
+            .iter()
+            .find(|s| elf.dynstrtab.get_at(s.st_name) == Some(sym_name))
+            .unwrap_or_else(|| panic!("{sym_name} present in {so}"));
+        assert_eq!(
+            sym.st_type(),
+            goblin::elf::sym::STT_FUNC,
+            "{sym_name} must stay FUNC in {so}"
+        );
+    }
+
     #[test]
     fn forbidden_function_fires_for_dynsym_import() {
         // libcryptobad.so is stripped: SSL_CTX_set_cipher_list exists only as
@@ -2446,7 +2472,8 @@ description = "explicit priority string bypasses the system crypto policy"
         // green without guarding anything, so do not remove it.
         let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
         let config = warn_on_function_config();
-        let (results, levels, _dir) = run_binaries_check_with_config(&rpm_path, &config);
+        let (results, levels, _dir, pkg) = run_binaries_check_with_config(&rpm_path, &config);
+        assert_dynsym_is_func(&pkg, "usr/lib64/libcryptobad.so", "SSL_CTX_set_cipher_list");
 
         let lines = lines_for(&results, "crypto-policy-non-compliance-openssl");
         assert_eq!(lines.len(), 1, "one openssl finding: {results:?}");
@@ -2474,7 +2501,8 @@ description = "explicit priority string bypasses the system crypto policy"
         // test_waived_forbidden_c_calls).
         let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
         let config = warn_on_function_config();
-        let (results, _levels, _dir) = run_binaries_check_with_config(&rpm_path, &config);
+        let (results, _levels, _dir, pkg) = run_binaries_check_with_config(&rpm_path, &config);
+        assert_dynsym_is_func(&pkg, "usr/lib64/libgnutlswaived.so", "gnutls_priority_init");
         assert_lacks(&results, "crypto-policy-non-compliance-gnutls-2");
         // The waiver only covers the gnutls entry: the openssl finding for
         // libcryptobad.so must still fire in the same run.

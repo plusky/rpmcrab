@@ -609,6 +609,16 @@ impl Pkg {
         Self::installed(header).expect("build installed package")
     }
 
+    /// Test-only: the payload extraction directory, if this package was
+    /// opened from a file.
+    #[cfg(test)]
+    pub(crate) fn extracted_dir(&self) -> Option<&std::path::Path> {
+        match &self.source {
+            PkgSource::Extracted { dir, .. } => Some(dir),
+            _ => None,
+        }
+    }
+
     /// The interpreter for a scriptlet tag (rpmlint `scriptprog`): `''` when
     /// absent, otherwise the joined `*PROG` (a 1-element array decodes as a
     /// bare string, so join handles both).
