@@ -2100,10 +2100,17 @@ mod tests {
             ..Default::default()
         };
         let bytes = craft_shlib_elf(go_note, needed);
+        // Each caller gets its own fixture file: the flags and pid in
+        // the name keep parallel `cargo test` runners from racing
+        // write/parse/delete on a shared path (a fixed-/tmp- collision
+        // flake). All four callers pass distinct flag tuples; the pid
+        // keeps separate test processes from colliding too.
         let path = std::env::temp_dir().join(format!(
-            "rpmcrab-shlib-nodep-{}-{}",
+            "rpmcrab-shlib-nodep-{}-{}-{}-{}",
             go_note,
-            needed.is_some()
+            needed.is_some(),
+            is_shobj,
+            std::process::id()
         ));
         std::fs::write(&path, &bytes).unwrap();
         let info = ReadelfInfo::parse(path.to_str().unwrap(), &pkgfile.name);
