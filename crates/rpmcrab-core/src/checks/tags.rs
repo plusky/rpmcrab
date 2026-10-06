@@ -2645,6 +2645,44 @@ mod rich_dep_emission_tests {
         results.iter().filter(|(n, _)| n == name).collect()
     }
 
+    /// Emission-level pin for the two-locale fixture (plusky's #258 review).
+    ///
+    /// TagsCheck must run clean over the fixture in every locale: the
+    /// fixture's localized fields are all well-formed, so the emission set
+    /// is exactly these five fixture-hygiene findings. A de-locale
+    /// regression in `tag_i18n_str` (e.g. reverting the `extensions: false`
+    /// fix) resolves the de summary to the empty string, which trips
+    /// `W: summary-not-capitalized de` -- verified by mutation. Pinning the
+    /// full set catches that without depending on a firing finding.
+    ///
+    /// `mini_mode` keeps the test hermetic: the spellchecker degrades
+    /// gracefully when no system hunspell dictionary exists, so without it
+    /// the emission set would depend on the host (GitHub's Ubuntu images
+    /// flag the German words, a bare Mac does not).
+    #[test]
+    fn tags_check_emission_on_two_locale_fixture() {
+        let pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
+        let mut config = rich_test_config(&[], false);
+        config.mini_mode = true;
+        let results = run(&pkg, &config);
+        let names: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "no-packager-tag",
+                "no-group-tag",
+                "invalid-license",
+                "invalid-license-spellcheck",
+                "no-url-tag"
+            ],
+            "unexpected emissions: {results:?}"
+        );
+        assert_eq!(
+            results[2].1, "i18n-two-locale.noarch: W: invalid-license MIT",
+            "level and detail pinned on the rendered line"
+        );
+    }
+
     #[test]
     fn deeply_nested_header_does_not_crash_check() {
         // Regression: `gather_requires` copies REQUIRENAME verbatim, so a

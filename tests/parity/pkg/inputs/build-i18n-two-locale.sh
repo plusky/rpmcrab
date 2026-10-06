@@ -12,8 +12,8 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-work="$HOME/.rpmbuild-i18n-two-locale-work"
-rm -rf "$work"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/rpmbuild"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 
 podman_bin="${PODMAN:-podman}"
@@ -24,7 +24,7 @@ cp "$here/i18n-two-locale.spec" "$work/rpmbuild/SPECS/fixture.spec"
 "$podman_bin" run --rm \
     -v "$work/rpmbuild:/rpmbuild:z" \
     "$image" \
-    bash -c 'zypper -n in rpm-build >/dev/null && rpmbuild -bb --define "_topdir /rpmbuild" /rpmbuild/SPECS/fixture.spec'
+    bash -c 'zypper -n in -y rpm-build >/dev/null && rpmbuild -bb --define "_topdir /rpmbuild" /rpmbuild/SPECS/fixture.spec'
 
 find "$work/rpmbuild/RPMS" -name '*.rpm' -exec cp {} "$here/" \;
 echo "built: $(ls "$here"/i18n-two-locale-*.rpm)"
