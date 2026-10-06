@@ -1277,7 +1277,7 @@ impl FilesCheck {
         }
     }
 
-    /// Upstream rpmlint#435: `usr/share/applications/mimeinfo.cache` is
+    /// Upstream rpmlint#435: `/usr/share/applications/mimeinfo.cache` is
     /// generated at install time and must not be packaged as a real file.
     /// The `desktop-file-utils` exception ships it `%ghost`, which has no
     /// payload and is skipped.
