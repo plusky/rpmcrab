@@ -316,6 +316,24 @@ fn a_repeated_argument_is_counted_once() {
     );
 }
 
+/// Progress lines (`checking … (n of m)`, rpmcrab#286) are emitted in
+/// worker-pickup order, so a parallel run orders them differently than a
+/// sequential one, and each carries a wall-clock timestamp; the set of
+/// lines is identical. Strip the timestamp (like the footer duration below)
+/// and sort before comparing.
+fn strip_timestamp(line: &str) -> &str {
+    match line.find(" INFO ") {
+        Some(i) => &line[i + 1..],
+        None => line,
+    }
+}
+
+fn sorted_lines(s: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = s.lines().map(strip_timestamp).collect();
+    lines.sort_unstable();
+    lines
+}
+
 /// `-j1` and `-j4` produce byte-identical output over several packages,
 /// footer included: the worker pool is a scheduling detail, not a behavior
 /// change (`rpmlint#1595` `test_parallel_output_matches_sequential`). Only
@@ -362,9 +380,49 @@ fn parallel_output_matches_sequential() {
     );
     assert_eq!(seq_out, par_out, "stdout differs");
     assert_eq!(
-        String::from_utf8_lossy(&seq.stderr),
-        String::from_utf8_lossy(&par.stderr),
+        sorted_lines(&String::from_utf8_lossy(&seq.stderr)),
+        sorted_lines(&String::from_utf8_lossy(&par.stderr)),
         "stderr differs"
+    );
+}
+
+/// Progress reporting (upstream rpmlint#255, rpmcrab#286): a multi-package
+/// run logs one `checking <pkg> (n of m)` line per package on stderr, so a
+/// stuck run shows where it stopped. `-j1` keeps pickup order deterministic.
+#[test]
+fn progress_lines_appear_for_multi_package_run() {
+    let src = corpus_rpm();
+    let dir = tempfile::tempdir().unwrap();
+    let args: Vec<String> = (0..2)
+        .map(|i| {
+            let dst = dir.path().join(format!("pkg{i}.rpm"));
+            std::fs::copy(&src, &dst).unwrap();
+            dst.to_str().unwrap().to_string()
+        })
+        .collect();
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let seq_args: Vec<&str> = std::iter::once("-j1").chain(refs.iter().copied()).collect();
+    let out = rpmcrab(&seq_args);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for (i, r) in refs.iter().enumerate() {
+        let line = format!("checking {r} ({} of 2)", i + 1);
+        assert!(
+            stderr.contains(&line),
+            "missing progress line {line:?}: {stderr}"
+        );
+    }
+}
+
+/// Progress reporting stays quiet for a single package: no new noise in
+/// normal output (rpmcrab#286).
+#[test]
+fn no_progress_line_for_single_package_run() {
+    let arg = corpus_rpm().to_str().unwrap().to_string();
+    let out = rpmcrab(&[arg.as_str()]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("checking "),
+        "single-package run must not log progress: {stderr}"
     );
 }
 

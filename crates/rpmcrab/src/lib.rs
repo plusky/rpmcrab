@@ -155,6 +155,20 @@ fn resolve_output_format(cli_format: Option<&str>, config_format: &str) -> Strin
     cli_format.unwrap_or(config_format).to_string()
 }
 
+/// Tracing filter for the binary: `RUST_LOG` wins when set and valid;
+/// otherwise this crate and `rpmcrab-core` log at `info` (the progress
+/// lines) and everything else at `warn`, so a normal run gains no noise.
+fn tracing_filter() -> tracing_subscriber::EnvFilter {
+    std::env::var("RUST_LOG")
+        .ok()
+        .and_then(|directives| directives.parse().ok())
+        .unwrap_or_else(|| {
+            "warn,rpmcrab=info,rpmcrab_core=info"
+                .parse()
+                .expect("the default tracing directives are valid")
+        })
+}
+
 /// The clap `Command` for the `rpmcrab` binary, shared by `main.rs` and the
 /// `rpmcrab-gen` asset generator so the man page and shell completions can
 /// never drift from the shipped CLI.
@@ -168,6 +182,14 @@ pub fn cli_command() -> clap::Command {
 /// Exit-code semantics are part of the frozen compatibility contract (see
 /// `docs/DESIGN.md` §4.6); do not change the mapping without a ledger entry.
 pub fn run() -> ExitCode {
+    // Progress reporting (upstream rpmlint#255): `tracing` events render on
+    // stderr, so finding output on stdout is never perturbed. `RUST_LOG`
+    // overrides the default filter (see `tracing_filter`).
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .with_env_filter(tracing_filter())
+        .try_init();
     // Bare invocation prints help and exits 0 (rpmlint `cli.py:92-94`). clap's
     // `arg_required_else_help` would exit 2, so handle it before parsing.
     if std::env::args_os().count() == 1 {
