@@ -24,6 +24,7 @@ pub mod finding;
 pub mod level;
 pub mod lint;
 pub mod pkg;
+pub mod render;
 pub mod report;
 pub mod spellcheck;
 pub mod term;

@@ -430,13 +430,17 @@ pub fn run() -> ExitCode {
         })
         .unwrap_or_else(|| "rpmlint".to_string());
     let format = resolve_output_format(cli.format.as_deref(), &lint.config().output_format);
-    // `--format json` is new surface: the text wire format is untouched,
-    // and `--time-report` stays a text-mode section.
-    let out = if format == "json" {
-        lint.render_json(&prog, RPMLINT_VERSION, arg_count, duration)
-    } else {
-        lint.render(&prog, RPMLINT_VERSION, arg_count, cli.time_report, duration)
-    };
+    // `--format` dispatches through the pluggable renderers (text/json);
+    // the text wire format is untouched, and `--time-report` stays a
+    // text-mode section.
+    let out = lint.render_report(
+        &format,
+        &prog,
+        RPMLINT_VERSION,
+        arg_count,
+        cli.time_report,
+        duration,
+    );
     print!("{out}");
     ExitCode::from(u8::try_from(lint.exit_code()).unwrap_or(1))
 }

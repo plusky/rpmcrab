@@ -377,6 +377,35 @@ impl Lint {
         out
     }
 
+    /// Render the finished run in the requested `--format` (upstream
+    /// rpmlint#109): `text` (default, byte-frozen) or `json`. JSON is the
+    /// only machine format; unknown formats fall back to text, like the
+    /// config loader.
+    pub fn render_report(
+        &self,
+        format: &str,
+        prog: &str,
+        version: &str,
+        header_packages: usize,
+        time_report: bool,
+        duration_secs: f64,
+    ) -> String {
+        use crate::render::Renderer;
+        use crate::render::{RenderContext, TextRenderer, renderer_for};
+        let ctx = RenderContext {
+            lint: self,
+            prog,
+            version,
+            header_packages,
+            time_report,
+            duration_secs,
+        };
+        match renderer_for(format) {
+            Some(r) => r.render(&ctx),
+            None => TextRenderer.render(&ctx),
+        }
+    }
+
     /// Access the filter (tests inspect counters).
     pub fn filter(&self) -> &Filter {
         &self.filter
@@ -588,6 +617,25 @@ mod exit_code_tests {
             .map(|f| f["level"].as_str().expect("level"))
             .collect();
         assert_eq!(levels, vec!["W"]);
+    }
+
+    #[test]
+    fn render_report_dispatches_to_json_and_falls_back_to_text() {
+        let config = Config::default();
+        let lint = Lint::new(config, vec![], Color::for_tty(false), 80).unwrap();
+        assert_eq!(
+            lint.render_report("json", "rpmcrab", "2.10.0", 1, false, 0.5),
+            lint.render_json("rpmcrab", "2.10.0", 1, 0.5),
+        );
+        assert_eq!(
+            lint.render_report("text", "rpmcrab", "2.10.0", 1, false, 0.5),
+            lint.render("rpmcrab", "2.10.0", 1, false, 0.5),
+        );
+        assert_eq!(
+            lint.render_report("yaml", "rpmcrab", "2.10.0", 1, false, 0.5),
+            lint.render("rpmcrab", "2.10.0", 1, false, 0.5),
+            "unknown format falls back to text"
+        );
     }
 
     #[test]
