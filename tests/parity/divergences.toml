@@ -916,7 +916,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/issues/134"
 case = "global"
 check = "report"
 kind = "behaviour"
-reason = "rpmcrab adds `--format json` (plus the `OutputFormat` config key): a machine-readable JSON report of the same findings the text report emits. The reference has no machine-readable output (upstream rpmlint#109 / rpmlint#1156), so every consumer greps human text. Additive surface only: the default text report is byte-identical with or without the feature, and an unknown `--format` value is a CLI usage error (exit 2), never silently accepted."
+reason = "rpmcrab adds `--format json` (plus the `OutputFormat` config key): a machine-readable JSON report of the same findings the text report emits. The reference has no machine-readable output (upstream rpmlint#109 / rpmlint#1156), so every consumer greps human text. Additive surface only: the default text report is byte-identical with or without the feature. An unknown `--format` value is a CLI usage error (exit 2); an unknown `OutputFormat` config value warns on stderr and falls back to text; the library `render_report` path falls back to text silently for unknown formats."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/109"
 
