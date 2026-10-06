@@ -586,7 +586,12 @@ impl Pkg {
                 tag,
                 librpm::package::GetOptions {
                     raw: true,
-                    ..Default::default()
+                    // HEADERGET_EXT defeats HEADERGET_RAW for i18n tags in
+                    // librpm: the lookup returns the locale-resolved Str
+                    // instead of the raw I18NStr array, so the non-C branch
+                    // below would never match. Extension tags are never i18n
+                    // tags, so dropping EXT here loses nothing.
+                    extensions: false,
                 },
             )
         {
@@ -1044,6 +1049,44 @@ mod tests {
         assert_eq!(pkg.read_file("/etc/hosts"), "");
         let re = fancy_regex::Regex::new(".").expect("static regex");
         assert_eq!(pkg.grep(&re, "/etc/hosts"), None);
+    }
+    /// `tag_i18n_str` over a real two-locale header (follow-up to #248).
+    ///
+    /// The fixture RPM carries SUMMARY/DESCRIPTION in C and de, so
+    /// HEADERI18NTABLE has two entries. This pins the `lang != "C"` branch
+    /// and the i18n-table index mapping against a real package header; the
+    /// corpus previously had no multi-locale package.
+    #[test]
+    fn tag_i18n_str_two_locale_fixture() {
+        use librpm::Tag;
+        let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/i18n-two-locale-1.0-1.noarch.rpm");
+        let pkg = Pkg::installed_from_file(&rpm);
+        // The fixture really is two-locale: without this the assertions
+        // below would pass vacuously on a single-locale header.
+        assert_eq!(
+            pkg.tag_str_array(Tag::HEADERI18NTABLE),
+            vec!["C".to_string(), "de".to_string()]
+        );
+        assert_eq!(
+            pkg.tag_i18n_str(Tag::SUMMARY, "C"),
+            "Two-locale i18n fixture"
+        );
+        assert_eq!(
+            pkg.tag_i18n_str(Tag::SUMMARY, "de"),
+            "Zweisprachiges i18n-Testpaket"
+        );
+        // Unknown locale: empty, not the C default.
+        assert_eq!(pkg.tag_i18n_str(Tag::SUMMARY, "fr"), "");
+        // C.UTF-8 takes the same fast path as C.
+        assert_eq!(
+            pkg.tag_i18n_str(Tag::DESCRIPTION, "C.UTF-8"),
+            pkg.tag_str(Tag::DESCRIPTION).unwrap_or_default()
+        );
+        assert!(
+            pkg.tag_i18n_str(Tag::DESCRIPTION, "de")
+                .starts_with("Testpaket fuer Pkg::tag_i18n_str")
+        );
     }
 }
 
