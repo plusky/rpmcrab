@@ -206,7 +206,6 @@ impl DuplicatesCheck {
         out
     }
 
-    /// Output level and detail strings for one finding.
     /// Output level, finding name and detail strings for one finding, in a
     /// single `match` arm per variant.
     ///
