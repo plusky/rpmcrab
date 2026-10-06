@@ -1072,7 +1072,8 @@ impl SpecCheck {
         // scriptlet sections keep the warning.
         if self.current_section == "description"
             || self.current_section == "changelog"
-            || self.summary_re.is_match(line).unwrap_or(false)
+            || (self.current_section == "package"
+                && self.summary_re.is_match(line).unwrap_or(false))
         {
             return;
         }
@@ -1090,6 +1091,8 @@ impl SpecCheck {
     /// the resulting SRPM can miss the files the spec references
     /// (upstream rpmlint#45). Only the preamble (`package` section)
     /// carries these tags; prose elsewhere may mention them freely.
+    /// `%ifos` blocks are not depth-tracked (pre-existing gap), so a
+    /// conditional tag inside one is not flagged.
     fn checkline_conditional_source_patch(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
         if self.if_depth <= 0 || self.current_section != "package" {
             return;
@@ -2064,6 +2067,14 @@ mod tests {
         assert!(has(&results, "non-break-space"), "missing: {results:?}");
     }
 
+    #[test]
+    fn nbsp_summary_prefixed_code_line_still_warns() {
+        // A `Summary:`-prefixed line in %prep is code, not a tag line:
+        // the prose exemption must not silence it.
+        let results = run_mini("Name: foo\n%prep\nSummary: hot\u{a0} latte\n");
+        assert!(has(&results, "non-break-space"), "missing: {results:?}");
+    }
+
     // Upstream rpmlint#45: conditional Source:/Patch: tags.
     #[test]
     fn conditional_source_warns() {
@@ -2371,15 +2382,14 @@ make install
     }
 
     #[test]
-    fn non_break_space_fires_warning_ref144() {
+    fn nbsp_in_summary_quiet_ref144() {
+        // Deliberate divergence from the frozen 2.10.0 reference (upstream
+        // rpmlint#554, ledgered): a non-breaking space in a `Summary:` tag
+        // line is harmless prose typesetting, not a syntax hazard, so the
+        // port stays quiet where the reference warns.
         let results = run_mini("Name: foo\nSummary: bar\u{a0}baz\n");
         let lines = lines_for(&results, "non-break-space");
-        assert_eq!(lines.len(), 1, "results: {results:?}");
-        assert!(
-            lines[0].contains("W: non-break-space line 2, char 12"),
-            "line: {}",
-            lines[0]
-        );
+        assert!(lines.is_empty(), "results: {results:?}");
     }
 
     #[test]
