@@ -37,7 +37,8 @@ Provenance, verified against the pinned reference (`84848c0`):
   entry reworded per upstream rpmlint#427 (the versioned and unversioned
   symbols are provided at once claim is not always accurate: duplicate
   versioned provides trigger the check too), staged ahead of the reference
-  per the fix-in-port rule. Ledgered in `tests/parity/divergences.toml`.
+  per the fix-in-port rule; minus the `non-standard-group` entry, dropped
+  with the deliberately-removed finding. Ledgered in `tests/parity/divergences.toml`.
 - `DeviceFilesCheck.toml`, `WorldWritableCheck.toml` — the entries carved
   out of the reference's `FileMetadataCheck.toml`, normalized to the
   reference's single-line form: the carved files used `"""` blocks, whose
@@ -51,8 +52,12 @@ Provenance, verified against the pinned reference (`84848c0`):
   `conditional-source-or-patch` (upstream rpmlint#45) and
   `translated-description` (upstream rpmlint#2). The reference has no
   such findings, so `--explain` would print `Unknown message` for them;
-  and the `use-of-RPM_SOURCE_DIR` entry reworded (the reference's
-  `$RPM_BUILD_ROOT` advice is wrong).
+  minus the six entries dropped with their deliberately-removed findings
+  (`no-buildroot-tag`, `hardcoded-path-in-buildroot-tag`,
+  `%ifarch-applied-patch`, `unversioned-explicit-provides`,
+  `unversioned-explicit-obsoletes`, `setup-not-quiet`); and the
+  `use-of-RPM_SOURCE_DIR`
+  entry reworded (the reference's `$RPM_BUILD_ROOT` advice is wrong).
   Ledgered in `tests/parity/divergences.toml`.
 - `AlternativesCheck.toml`, `FileDigestCheck.toml`, `FilelistCheck.toml`,
   `FilesCheck.toml`, `KMPPolicyCheck.toml`,

@@ -1171,9 +1171,23 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "non-standard-group"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE dropped the Group tag -- its own rpmlint config says 'Do not validate package rpm groups' and the packaging guidelines say 'Group: -- always drop' -- so the port does not emit this finding. Both emission sites (SpecCheck and TagsCheck), the staged `--explain` entry, and the ValidGroups plumbing are removed. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "FilesCheck"
 kind = "detail"
 reason = "Port-only `--explain` descriptions for `debug-files-in-non-debug-package`, `infopage-not-compressed`, `kernel-modules-not-in-kernel-packages`, `manpage-not-compressed`, `mimeinfo-cache-packaged`, `no-dependency-on`, `noarch-python-in-64bit-path`, `symlink-contains-up-and-down-segments`, `symlink-has-too-many-up-segments`, `symlink-should-be-absolute`, `zero-length`: the reference emits these findings but ships no descriptions."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "%ifarch-applied-patch"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding ('An issue with OBS, works with autobuild'); Fedora's config carries it only as a commented-out filter line inherited from the openSUSE config, never enabled -- the file's own FIXME asks whether these lines are relevant for Fedora at all ('PR which enables them or remove them is welcome'). No shipped config treats the finding as wanted signal, so the port does not emit it. The emission, its staged `--explain` entry, and the supporting tracking state are removed. The reference still emits it."
 since = "0.1.0"
 
 [[divergence]]
@@ -1185,6 +1199,13 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "no-buildroot-tag"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding as noise/obsolete, so the port does not emit it. The emission, its staged `--explain` entry, and the supporting code are removed. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "AlternativesCheck"
 kind = "detail"
 reason = "Port-only `--explain` descriptions for `double-entries`, `package-supports-libalternatives`, `package-supports-update-alternatives`: the reference emits these findings but ships no descriptions."
@@ -1192,9 +1213,23 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "hardcoded-path-in-buildroot-tag"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding as noise/obsolete, so the port does not emit it. The emission, its staged `--explain` entry, and the supporting code are removed. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "MenuCheck"
 kind = "detail"
 reason = "Port-only `--explain` descriptions for `executable-menu-file`, `invalid-menu-icon-type`, `menu-in-wrong-dir`, `old-menu-entry`, `strange-needs`, `unable-to-parse-menu-entry`, `unable-to-parse-menu-needs`: the reference emits these findings but ships no descriptions. Staged `menu-in-wrong-directory` removed: the port emits `menu-in-wrong-dir`, the `-directory` variant never fires."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "unversioned-explicit-provides"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding; Fedora's config carries it only as a commented-out filter line, never enabled -- and on Fedora the warning is a known false positive against Fedora's own packaging guidelines (bundled()/deprecated() Provides: are required; upstream rpmlint#1330). No shipped config treats the finding as wanted signal, so the port does not emit it. The emission and its staged `--explain` entry are removed. The reference still emits it."
 since = "0.1.0"
 
 [[divergence]]
@@ -1321,4 +1356,18 @@ case = "global"
 check = "SpecCheck"
 kind = "detail"
 reason = "Staged `--explain` text for `use-of-RPM_SOURCE_DIR` reworded: the reference's advice to use $RPM_BUILD_ROOT instead is wrong -- $RPM_SOURCE_DIR is %{_sourcedir} (the SOURCES dir) while $RPM_BUILD_ROOT is the install staging dir. Per the Fedora RPM_Source_Dir guideline (https://docs.fedoraproject.org/en-US/packaging-guidelines/RPM_Source_Dir/), Source#: files must be referenced by their %{SOURCEN} macro: a renamed Source#: entry still resolves by bare filename in the source directory, so the build succeeds locally while the SRPM silently ships the wrong file. Check level unchanged (Error)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "setup-not-quiet"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding as too noisy; Fedora's config carries it only as a commented-out filter line, never enabled. spec-cleaner already normalizes `%setup` to `%setup -q`, so in the openSUSE workflow the warning cannot fire on a cleaned spec. No shipped config treats the finding as wanted signal, so the port does not emit it. The emission, its staged `--explain` entry, and the now-dead -q/-T/-a/-b option regexes are removed. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "unversioned-explicit-obsoletes"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding; Fedora's config carries it only as a commented-out filter line, never enabled (same FIXME as above). No shipped config treats the finding as wanted signal, so the port does not emit it. The emission and its staged `--explain` entry are removed. The reference still emits it."
 since = "0.1.0"

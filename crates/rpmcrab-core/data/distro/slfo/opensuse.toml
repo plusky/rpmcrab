@@ -64,8 +64,6 @@ Filters = [
     '.*invalid-version.*',
     '.*invalid-packager.*',
     '.*invalid-buildhost.*',
-    '.*hardcoded-path-in-buildroot-tag.*',
-    '.*no-buildroot-tag.*',
 
 # Do not validate package rpm groups
     '.*devel-package-with-non-devel-group.*',
@@ -183,19 +181,15 @@ Filters = [
     ' prereq-use',
     ' file-not-utf8',
     ' tag-not-utf8',
-    ' setup-not-quiet',
     ' mixed-use-of-spaces-and-tabs ',
     ' prereq-use ',
 
 # An issue with OBS, works with autobuild
-    ' unversioned-explicit-provides ',
-    ' unversioned-explicit-obsoletes ',
     ' non-standard-dir-perm ',
     ' conffile-without-noreplace-flag ',
     ' non-standard-executable-perm ',
     ' jar-not-indexed ',
     ' uncompressed-zip ',
-    ' %ifarch-applied-patch ',
     ' read-error ',
     ' no-dependency-on locales',
     ' executable-marked-as-config-file',
