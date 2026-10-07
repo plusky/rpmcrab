@@ -19,6 +19,9 @@
 #   Filters: dropped 'postin-without-chkconfig' (killed: InitScriptCheck deleted (issue #214))
 #   Filters: dropped 'preun-without-chkconfig' (killed: InitScriptCheck deleted (issue #214))
 #   Filters: dropped 'no-default-runlevel' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'info-files-without-install-info-postin' (killed: file triggers handle info-dir updates)
+#   Filters: dropped 'postin-without-install-info' (killed: file triggers handle info-dir updates)
+#   Filters: dropped 'info-files-without-install-info-postun' (killed: file triggers handle info-dir updates)
 #
 # SLFO files byte-identical to openSUSE (not vendored twice;
 # the generated Rust consts fall back to the openSUSE copy):
