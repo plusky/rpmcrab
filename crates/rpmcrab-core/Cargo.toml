@@ -48,6 +48,9 @@ indexmap = "2"
 # fancy-regex wraps `regex` for the fast path and stays unsafe-free.
 fancy-regex = "0.19"
 log = "0.4"
+# Progress reporting (`tracing::info!` in `worker.rs`, upstream rpmlint#255).
+# This crate only emits events; the subscriber is installed by the binary.
+tracing = "0.1"
 # Machine-readable `--format json` report (upstream rpmlint#1156).
 serde_json = "1"
 # Terminal width for the centered banners/footer: shutil.get_terminal_size

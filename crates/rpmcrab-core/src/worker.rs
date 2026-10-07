@@ -30,6 +30,46 @@ pub enum Task {
     Installed { name: String, index: usize },
 }
 
+impl Task {
+    /// The display form used in progress lines and the fatal message: the
+    /// path for files, the package name for installed packages.
+    fn display(&self) -> String {
+        match self {
+            Task::File(path) => path.display().to_string(),
+            Task::Installed { name, .. } => name.clone(),
+        }
+    }
+}
+
+/// Progress reporting for a batch (upstream rpmlint#255): one `info` event
+/// per task as its work starts, so a stuck run shows where it stopped. The
+/// numbering is the task index, so parallel runs emit the same set of lines
+/// as sequential ones, just in pickup order. Single-task batches stay
+/// silent: no new noise in normal output. The guard is deliberately on the
+/// task count rather than the log level, so even `RUST_LOG=debug` stays quiet
+/// for a single package -- there is no multi-package progress to observe.
+#[derive(Clone, Copy)]
+struct Progress {
+    total: usize,
+}
+
+impl Progress {
+    fn new(total: usize) -> Self {
+        Self { total }
+    }
+
+    fn task_started(self, index: usize, task: &Task) {
+        if self.total > 1 {
+            tracing::info!(
+                "checking {} ({} of {})",
+                task.display(),
+                index + 1,
+                self.total
+            );
+        }
+    }
+}
+
 /// The structured per-package result (`worker.py:check_package`).
 pub struct TaskResult {
     /// The package's findings, suppression already applied.
@@ -76,10 +116,7 @@ impl<'a> Worker<'a> {
     /// Check one package (`worker.py:check_package`). A panic anywhere in the
     /// task becomes a fatal result, never a dead worker thread.
     pub fn check_package(&mut self, task: Task) -> TaskResult {
-        let display = match &task {
-            Task::File(path) => path.display().to_string(),
-            Task::Installed { name, .. } => name.clone(),
-        };
+        let display = task.display();
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.check_package_inner(task, &display)
         })) {
@@ -311,9 +348,19 @@ pub fn run_tasks(
     // Each worker's check set is built up front; the sets are moved into the
     // threads, so the factory itself is never shared between threads.
     let mut check_sets: Vec<Vec<Box<dyn Check>>> = (0..jobs).map(|_| make_checks()).collect();
+    // One `info` line per task as its work starts (upstream rpmlint#255).
+    // `Copy`, so each worker thread gets its own.
+    let progress = Progress::new(tasks.len());
     if jobs == 1 {
         let mut worker = Worker::new(config, check_sets.pop().expect("one set per worker"), color);
-        return tasks.into_iter().map(|t| worker.check_package(t)).collect();
+        return tasks
+            .into_iter()
+            .enumerate()
+            .map(|(i, t)| {
+                progress.task_started(i, &t);
+                worker.check_package(t)
+            })
+            .collect();
     }
     let (result_tx, result_rx) = mpsc::channel::<(usize, TaskResult)>();
     std::thread::scope(|s| {
@@ -333,6 +380,7 @@ pub fn run_tasks(
                     else {
                         break;
                     };
+                    progress.task_started(i, &task);
                     let _ = result_tx.send((i, worker.check_package(task)));
                 }
             });
