@@ -4260,11 +4260,16 @@ mod tests {
         // reference does not. The reference gates on the anchored
         // sofile_regex (FilesCheck.py:165, _check_file_link_devel), so only
         // the unversioned development symlink (libfoo.so) triggers -- not
-        // versioned libfoo.so.0 / libfoo.so.0.0.0 links.
+        // versioned libfoo.so.0 / libfoo.so.0.0.0 links, and not a
+        // libbar.so.bak backup (the regex is end-anchored).
         let (pkg, _dir) = pkg_with_files(vec![
             PkgFile {
                 linkto: "libfcgi.so.0.0.0".to_string(),
                 ..mkfile("/usr/lib64/libfcgi.so.0", 0o120777, 61)
+            },
+            PkgFile {
+                linkto: "libbar.so.1".to_string(),
+                ..mkfile("/usr/lib64/libbar.so.bak", 0o120777, 63)
             },
             PkgFile {
                 linkto: "libfoo.so.1.2.3".to_string(),
