@@ -47,6 +47,11 @@ Provenance, verified against the pinned reference (`84848c0`):
   (entries byte-identical); the port merged the two reference checks into
   one, so a single file named after the port check keeps the check-name to
   TOML mapping total. Ledgered in `tests/parity/divergences.toml`.
+- `SpecCheck.toml` — the reference file, plus two port-only entries:
+  `conditional-source-or-patch` (upstream rpmlint#45) and
+  `translated-description` (upstream rpmlint#2). The reference has no
+  such findings, so `--explain` would print `Unknown message` for them.
+  Ledgered in `tests/parity/divergences.toml`.
 - Every other `*.toml` file — byte-identical to the reference
   `rpmlint/descriptions/` file of the same name.
 
