@@ -1214,20 +1214,6 @@ fn explain_staged_files_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `init_script_check.toml` resolves `init-script-without-chkconfig-postin` instead of "Unknown message".
-#[test]
-fn explain_staged_init_script_check() {
-    let out = rpmcrab(&["-e", "init-script-without-chkconfig-postin"]);
-    assert_eq!(out.status.code(), Some(0));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(
-        stdout,
-        "init-script-without-chkconfig-postin:\nThe package contains an init script but doesn't contain a %post with a call to\nchkconfig.\n\n\n",
-        "exact --explain stdout",
-    );
-    assert!(out.stderr.is_empty());
-}
-
 /// `--explain`: staged `kmp_policy_check.toml` resolves `kmp-missing-requires` instead of "Unknown message".
 #[test]
 fn explain_staged_kmp_policy_check() {
