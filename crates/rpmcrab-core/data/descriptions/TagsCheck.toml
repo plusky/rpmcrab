@@ -142,10 +142,6 @@ name-repeated-in-summary="""
 The name of the package is repeated in its summary. Make the summary
 brief and to the point without including redundant information in it.
 """
-enchant-dictionary-not-found="""
-A dictionary for the Enchant spell checking library is not available for
-the language given in the info message.
-"""
 self-obsoletion="""
 The package obsoletes itself. This is known to cause errors in various
 tools and should thus be avoided, usually by using appropriately versioned
@@ -154,14 +150,6 @@ Obsoletes and/or Provides and avoiding unversioned ones.
 unexpanded-macro="""
 This tag contains something that looks like an unexpanded macro; this is
 often the sign of a misspelling. Please check your specfile.
-"""
-private-shared-object-provides="""
-A shared object soname provides is provided by a file in a path from which
-other packages should not directly load shared objects from. Such shared
-objects should thus not be depended on and they should not result in provides
-in the containing package. Get rid of the provides if appropriate, for example
-by filtering it out during build. Note that in some cases this may require
-disabling rpmbuild's internal dependency generator.
 """
 devel-package-with-non-devel-group="""
 The package ends with -devel but does not have a RPM group starting with

@@ -32,10 +32,6 @@ info-files-without-install-info-postun="""
 This package contains info files and provides no %postun scriptlet
 containing a call to install-info.
 """
-postun-without-install-info="""
-This package contains info files and its %postun doesn't call
-install-info.
-"""
 perl-temp-file="""
 You have a perl temporary file in your package. Usually, this
 file begins with a dot (.) and contains 'perl' in its name.
@@ -309,22 +305,11 @@ doesn't require logrotate to be installed. Because logrotate is not part of the 
 your package should explicitly depend on logrotate to make sure that your logrotate
 job is executed. If it is an optional feature of your package, recommend or suggest logrotate.
 """
-missing-dependency-to-xinetd="""
-This package installs a file in /etc/xinetd.d/ but
-doesn't require xinetd to be installed. Because xinetd is not part of the essential packages,
-your package should explicitly depend on xinetd to make sure that your xinetd
-job is executed. If it is an optional feature of your package, recommend or suggest xinetd.
-"""
 read-error="""
 This file could not be read. A reason for this could be that the info about
 it in the rpm header indicates that it is supposed to be a readable normal file
 but it actually is not in the filesystem. Because of this, some checks will
 be skipped.
-"""
-inaccessible-filename="""
-An error occurred while trying to access this file due to some characters
-in its name. Because of this, some checks will be skipped. Access could work
-with some other locale settings.
 """
 executable-crontab-file="""
 This crontab file has executable bit set, which is refused by newer version
