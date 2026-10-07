@@ -2577,6 +2577,11 @@ make install
         let results = run_mini("Name: foo\n%post\n%{tmpfiles_create_package}\n");
         let lines = lines_for(&results, "obsolete-tmpfiles-macro");
         assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: obsolete-tmpfiles-macro %{tmpfiles_create_package}"),
+            "line: {}",
+            lines[0]
+        );
     }
 
     #[test]
