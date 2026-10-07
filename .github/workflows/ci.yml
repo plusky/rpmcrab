@@ -215,3 +215,26 @@ jobs:
         run: python3 scripts/test_audit_reference_coverage.py
       - name: Run reference coverage audit
         run: python3 scripts/audit-reference-coverage.py /tmp/rpmlint-ref
+
+  # Every registered check must have an --explain description: a staged
+  # <Check>.toml (or, for FHSCheck/PostCheck, details registered in code,
+  # mirroring the reference which ships no TOML for those either). Runs the
+  # coverage tests standalone so the check is visible by name and cannot be
+  # skipped by test-selection.
+  description-coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: . -> target
+      # The lib links librpm, so compiling its tests needs the RPM headers.
+      - name: Install RPM toolchain (headers + tools)
+        run: sudo apt-get update && sudo apt-get install -y librpm-dev rpm file pkg-config
+      - run: cargo test -p rpmcrab-core --lib --locked description_coverage
