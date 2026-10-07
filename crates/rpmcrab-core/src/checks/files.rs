@@ -4290,6 +4290,23 @@ mod tests {
                     && d.contains("/usr/lib64/libfoo.so")),
             "missing finding on unversioned .so link: {results:?}"
         );
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "devel-file-in-non-devel-package" && d.contains("libbar.so.bak")),
+            "false positive on .so.bak backup: {results:?}"
+        );
+        let lines: Vec<&String> = results
+            .iter()
+            .filter(|(n, _)| n == "devel-file-in-non-devel-package")
+            .map(|(_, l)| l)
+            .collect();
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+        assert!(
+            lines[0].contains(": W: devel-file-in-non-devel-package /usr/lib64/libfoo.so"),
+            "name, level and detail: {}",
+            lines[0]
+        );
     }
 
     // Upstream rpmlint#435: mimeinfo.cache must not be packaged as a real file.
