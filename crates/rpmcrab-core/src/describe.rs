@@ -462,7 +462,7 @@ mod tests {
             ),
             (
                 "TagsCheck.toml",
-                "efd95f0236a71965e189130e1b22fc06f3bbe0a8165d279a270a992c9a947529",
+                "869045c55c70f88ef35a6fd76eb6f8555ebc5db4c06143229ebf6ce57329dd85",
             ),
             (
                 "TmpFilesCheck.toml",
