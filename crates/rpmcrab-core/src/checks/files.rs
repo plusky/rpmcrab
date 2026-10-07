@@ -163,9 +163,6 @@ fn normal_zero_length_regex() -> &'static Regex {
     })
 }
 
-static DEPMOD_REGEX: OnceLock<Regex> = OnceLock::new();
-fn depmod_regex() -> &'static Regex {
-    DEPMOD_REGEX.get_or_init(|| Regex::new(r"(?m)^[^#]*depmod").expect("static regex"))
 }
 
 static PERL_TEMP_FILE_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -250,13 +247,6 @@ fn python_bytecode_pep3147_regex() -> &'static Regex {
 static PYTHON_BYTECODE_REGEX: OnceLock<Regex> = OnceLock::new();
 fn python_bytecode_regex() -> &'static Regex {
     PYTHON_BYTECODE_REGEX.get_or_init(|| Regex::new(r"^(.*)(\.py[oc])$").expect("static regex"))
-}
-
-static DEPMOD_KERNEL_REGEX: OnceLock<Regex> = OnceLock::new();
-fn depmod_kernel_regex() -> &'static Regex {
-    DEPMOD_KERNEL_REGEX.get_or_init(|| {
-        Regex::new(r"^(?:/usr)/lib/modules/([0-9]+\.[0-9]+\.[0-9]+[^/]*?)/").expect("static regex")
-    })
 }
 
 static LOG_FILE_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -374,7 +364,6 @@ pub struct FilesCheck {
     sofile_re: Regex,
     lib_re: Regex,
     normal_zero_length_re: Regex,
-    depmod_re: Regex,
     perl_temp_file_re: Regex,
     interpreter_re: Regex,
     script_re: Regex,
@@ -387,7 +376,6 @@ pub struct FilesCheck {
     python_re: Regex,
     python_bytecode_pep3147_re: Regex,
     python_bytecode_re: Regex,
-    depmod_kernel_re: Regex,
     log_file_re: Regex,
     lib_path_re: Regex,
     start_certificate_re: Regex,
@@ -405,66 +393,6 @@ pub struct FilesCheck {
     python_default_version: String,
     /// Probed `gzip`, `bzip2`, `xz`, `zstd`, in that order.
     decompressors: [Tool; 4],
-}
-
-/// Whether `script` contains a depmod call for `kernel_version`, replicating
-/// the reference's per-kernel regex without compiling one per file.
-fn depmod_call_for_kernel(script: &str, kernel_version: &str) -> bool {
-    fn is_word(b: u8) -> bool {
-        b.is_ascii_alphanumeric() || b == b'_'
-    }
-    let bytes = script.as_bytes();
-    let mut pos = 0;
-    while let Some(i) = script[pos..].find("depmod") {
-        let d = pos + i;
-        // \bdepmod
-        if d > 0 && is_word(bytes[d - 1]) {
-            pos = d + 1;
-            continue;
-        }
-        // \s+-a
-        let after = script[d + 6..].trim_start_matches(|c: char| c.is_whitespace());
-        if !after.starts_with("-a") {
-            pos = d + 1;
-            continue;
-        }
-        let rest = &after[2..];
-        // .*F\s+/boot/System\.map-<ver>\b
-        let needle = format!("/boot/System.map-{kernel_version}");
-        let mut found = false;
-        let mut fpos = 0;
-        while let Some(fi) = rest[fpos..].find('F') {
-            let f = fpos + fi;
-            let after_f = rest[f + 1..].trim_start_matches(|c: char| c.is_whitespace());
-            if let Some(ni) = after_f.find(&needle) {
-                let after_ver = &after_f[ni + needle.len()..];
-                if after_ver.as_bytes().first().is_none_or(|&b| !is_word(b)) {
-                    // .*\b<ver>\b
-                    let mut vpos = ni + needle.len();
-                    while let Some(vi) = after_f[vpos..].find(kernel_version) {
-                        let v = vpos + vi;
-                        let before_ok = v == 0 || !is_word(after_f.as_bytes()[v - 1]);
-                        let after_v = &after_f[v + kernel_version.len()..];
-                        let after_ok = after_v.as_bytes().first().is_none_or(|&b| !is_word(b));
-                        if before_ok && after_ok {
-                            found = true;
-                            break;
-                        }
-                        vpos = v + 1;
-                    }
-                }
-            }
-            if found {
-                break;
-            }
-            fpos = f + 1;
-        }
-        if found {
-            return true;
-        }
-        pos = d + 1;
-    }
-    false
 }
 
 impl FilesCheck {
@@ -544,7 +472,6 @@ impl FilesCheck {
             sofile_re: sofile_regex().clone(),
             lib_re: lib_regex().clone(),
             normal_zero_length_re: normal_zero_length_regex().clone(),
-            depmod_re: depmod_regex().clone(),
             perl_temp_file_re: perl_temp_file_regex().clone(),
             interpreter_re: interpreter_regex().clone(),
             script_re: script_regex().clone(),
@@ -557,7 +484,6 @@ impl FilesCheck {
             python_re: python_regex().clone(),
             python_bytecode_pep3147_re: python_bytecode_pep3147_regex().clone(),
             python_bytecode_re: python_bytecode_regex().clone(),
-            depmod_kernel_re: depmod_kernel_regex().clone(),
             log_file_re: log_file_regex().clone(),
             lib_path_re: lib_path_regex().clone(),
             start_certificate_re: start_certificate_regex().clone(),
@@ -2060,7 +1986,6 @@ impl FilesCheck {
         self.check_normal_doc(pkg, fname, &mut fd, out);
         self.check_normal_non_devel(pkg, fname, st, out);
         self.check_normal_lib(pkg, fname, pkgfile, st, out);
-        self.check_normal_depmod_call(pkg, fname, st, out);
         self.check_normal_perl_temp(pkg, fname, out);
         self.check_normal_rpaths_in_buildconfig(pkg, fname, &fd, out);
         self.check_normal_bin(pkg, fname, pkgfile, st, out);
@@ -2239,35 +2164,6 @@ impl FilesCheck {
         }
     }
 
-    fn check_normal_depmod_call(&self, pkg: &Pkg, fname: &str, st: &PkgState, out: &mut Filter) {
-        let caps = match self.depmod_kernel_re.captures(fname) {
-            Ok(Some(c)) if !st.is_kernel_package => c,
-            _ => return,
-        };
-        let kernel_version = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-        if st.postin.is_empty() || !is_match(&self.depmod_re, &st.postin) {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "module-without-depmod-postin",
-                &[fname],
-            );
-        } else if !depmod_call_for_kernel(&st.postin, kernel_version) {
-            add_info(out, Level::Error, pkg, "postin-with-wrong-depmod", &[fname]);
-        }
-        if st.postun.is_empty() || !is_match(&self.depmod_re, &st.postun) {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "module-without-depmod-postun",
-                &[fname],
-            );
-        } else if !depmod_call_for_kernel(&st.postun, kernel_version) {
-            add_info(out, Level::Error, pkg, "postun-with-wrong-depmod", &[fname]);
-        }
-    }
 
     fn check_normal_perl_temp(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
         if is_match(&self.perl_temp_file_re, fname) {
@@ -3523,31 +3419,6 @@ mod tests {
         assert_has(&names, "unexpanded-macro");
     }
 
-    #[test]
-    fn files_check_depmod_variants() {
-        let config = test_config();
-        let (ok_names, _d1) = run_files_check(
-            &fixture_path("filescheck-depmod-ok-1.0-1.noarch.rpm"),
-            &config,
-        );
-        assert_lacks(&ok_names, "module-without-depmod-postin");
-        assert_lacks(&ok_names, "module-without-depmod-postun");
-        assert_lacks(&ok_names, "postin-with-wrong-depmod");
-        assert_lacks(&ok_names, "postun-with-wrong-depmod");
-
-        let (wrong_names, _d2) = run_files_check(
-            &fixture_path("filescheck-depmod-wrong-1.0-1.noarch.rpm"),
-            &config,
-        );
-        assert_has(&wrong_names, "postin-with-wrong-depmod");
-        assert_has(&wrong_names, "postun-with-wrong-depmod");
-
-        let (missing_names, _d3) = run_files_check(
-            &fixture_path("filescheck-depmod-missing-1.0-1.noarch.rpm"),
-            &config,
-        );
-        assert_has(&missing_names, "module-without-depmod-postin");
-        assert_has(&missing_names, "module-without-depmod-postun");
     }
 
     #[test]
@@ -4405,7 +4276,7 @@ mod tests {
                 .expect("chmod 000");
         }
         let pkg = Pkg::open(
-            std::path::Path::new(&fixture_path("filescheck-depmod-ok-1.0-1.noarch.rpm")),
+            std::path::Path::new(&fixture_path("scriptlet-empty-post-1.0-1.noarch.rpm")),
             dir.path(),
             true,
         )

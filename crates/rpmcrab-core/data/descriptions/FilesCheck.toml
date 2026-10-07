@@ -162,22 +162,6 @@ hidden-file-or-dir="""
 The file or directory is hidden. You should see if this is normal,
 and delete it from the package if not.
 """
-module-without-depmod-postin="""
-This package contains a kernel module but provides no call to depmod in the
-%post scriptlet.
-"""
-postin-with-wrong-depmod="""
-This package contains a kernel module but its %post scriptlet calls depmod
-for the wrong kernel.
-"""
-module-without-depmod-postun="""
-This package contains a kernel module but provides no call to depmod in the
-%postun scriptlet.
-"""
-postun-with-wrong-depmod="""
-This package contains a kernel module but its %postun scriptlet calls depmod
-for the wrong kernel.
-"""
 log-files-without-logrotate="""
 This package contains files in /var/log/ without adding logrotate
 configuration for them.
