@@ -609,7 +609,11 @@ mod tests {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/descriptions");
         let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
             .unwrap_or_else(|e| panic!("cannot list description dir {dir:?}: {e}"))
-            .filter_map(|entry| entry.ok().map(|e| e.file_name()))
+            .map(|entry| {
+                entry
+                    .unwrap_or_else(|e| panic!("cannot read description dir entry {dir:?}: {e}"))
+                    .file_name()
+            })
             .map(|name| name.to_string_lossy().into_owned())
             .filter(|name| name.ends_with(".toml"))
             .collect();
