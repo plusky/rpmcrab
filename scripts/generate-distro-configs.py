@@ -220,6 +220,25 @@ def prune_stale_filters(text, known, pruned_log):
     return "".join(out)
 
 
+def assert_no_flavor_key(flavor, filename, text):
+    """Fail if a vendored file sets a top-level ``Flavor`` key.
+
+    ``load_inner``'s pre-pass scans only ``Layer::File`` when selecting the
+    vendored distro set; a vendored ``Flavor`` would make the pre-pass and
+    ``finalize`` silently disagree on which set to load. Only top-level keys
+    count (a ``Flavor`` inside a ``[table]`` is inert).
+    """
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            break
+        if re.match(r"^Flavor\s*=", stripped):
+            raise SystemExit(
+                f"vendored file sets Flavor: {flavor}/{filename} "
+                "(pre-pass/finalize would disagree)"
+            )
+
+
 def generate(ref_dir=None, pins=None):
     """Return {flavor: {filename: text}} and the provenance text."""
     pins = pins or {}
@@ -240,6 +259,7 @@ def generate(ref_dir=None, pins=None):
     pruned_log = []
     for flavor, data in result.items():
         for filename, text in data["files"].items():
+            assert_no_flavor_key(flavor, filename, text)
             data["files"][filename] = prune_stale_filters(text, known, pruned_log)
 
     # Dedupe: an SLFO file byte-identical to its openSUSE counterpart (after
