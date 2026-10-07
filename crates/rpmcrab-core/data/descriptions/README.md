@@ -53,7 +53,7 @@ Provenance, verified against the pinned reference (`84848c0`):
   such findings, so `--explain` would print `Unknown message` for them.
   Ledgered in `tests/parity/divergences.toml`.
 - `AlternativesCheck.toml`, `FileDigestCheck.toml`, `FilelistCheck.toml`,
-  `FilesCheck.toml`, `InitScriptCheck.toml`, `KMPPolicyCheck.toml`,
+  `FilesCheck.toml`, `KMPPolicyCheck.toml`,
   `LogrotateCheck.toml`, `MenuCheck.toml`, `MenuXDGCheck.toml`,
   `PythonCheck.toml`, `SharedLibraryPolicyCheck.toml`, `SpecCheck.toml`
   (besides its two port-only entries above), `SystemdTmpfilesCheck.toml`,

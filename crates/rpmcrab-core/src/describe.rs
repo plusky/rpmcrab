@@ -32,7 +32,6 @@ const STAGED: &[&str] = &[
     include_str!("../data/descriptions/FilesCheck.toml"),
     include_str!("../data/descriptions/I18NCheck.toml"),
     include_str!("../data/descriptions/IconSizesCheck.toml"),
-    include_str!("../data/descriptions/InitScriptCheck.toml"),
     include_str!("../data/descriptions/KMPPolicyCheck.toml"),
     include_str!("../data/descriptions/LSBCheck.toml"),
     include_str!("../data/descriptions/LibraryDependencyCheck.toml"),
@@ -292,7 +291,7 @@ mod tests {
         );
     }
 
-    /// The 48 staged description files, byte-pinned: any edit, truncation,
+    /// The 47 staged description files, byte-pinned: any edit, truncation,
     /// or bad rebase merge changes a hash. Provenance of each file against
     /// the pinned reference (`84848c0`) is documented in
     /// `data/descriptions/README.md`.
@@ -371,7 +370,7 @@ mod tests {
             ),
             (
                 "FilesCheck.toml",
-                "28aa82ec03cb8ba48f9ded4231ba33cb15c62d4a32c61f65d3b8b4ece055a8a8",
+                "fed1fec48f73a0ba249d15e605201ef70651f2fc9dff2dd1567649f3d8ffa855",
             ),
             (
                 "I18NCheck.toml",
@@ -380,10 +379,6 @@ mod tests {
             (
                 "IconSizesCheck.toml",
                 "a51bddc5b66a4958b0707bc5a2ef05b7ba39ba0e7d9951dcbcf76dfc2d94d2ce",
-            ),
-            (
-                "InitScriptCheck.toml",
-                "6f1ee34848f758c540547fb176ceb8e669a0d29a56fc1df93dffbb4c4ddf674c",
             ),
             (
                 "KMPPolicyCheck.toml",
@@ -467,7 +462,7 @@ mod tests {
             ),
             (
                 "TagsCheck.toml",
-                "764e54feca0de9b8bf840e15bd467766286d7818f5a4cc6564ba01554c5ba7ff",
+                "50b68c01f4c33a1747f025040d558a69bdbef3ab3201bce3ec8ca6b105bdb8dc",
             ),
             (
                 "TmpFilesCheck.toml",

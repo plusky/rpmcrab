@@ -1480,19 +1480,6 @@ fn explain_staged_tmpfiles_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: reworded `FilesCheck.toml` entry `missing-dependency-to-xinetd` pins the fixed wording.
-#[test]
-fn explain_reworded_missing_dependency_to_xinetd() {
-    let out = rpmcrab(&["-e", "missing-dependency-to-xinetd"]);
-    assert_eq!(out.status.code(), Some(0));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(
-        stdout,
-        "missing-dependency-to-xinetd:\nThis package installs a file in /etc/xinetd.d/ but doesn't require xinetd to\nbe installed. Because xinetd is not part of the essential packages, your\npackage should explicitly depend on xinetd to make sure that your xinetd job\nis executed. If it is an optional feature of your package, recommend or\nsuggest xinetd.\n\n\n",
-        "exact --explain stdout",
-    );
-    assert!(out.stderr.is_empty());
-}
 
 /// `--explain`: reworded `AlternativesCheck.toml` entry `update-alternatives-postun-call-missing` pins the fixed wording.
 #[test]
@@ -1718,19 +1705,6 @@ fn explain_reworded_pem_private_key() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: reworded `InitScriptCheck.toml` entry `incoherent-subsys` pins the fixed wording.
-#[test]
-fn explain_reworded_incoherent_subsys() {
-    let out = rpmcrab(&["-e", "incoherent-subsys"]);
-    assert_eq!(out.status.code(), Some(0));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(
-        stdout,
-        "incoherent-subsys:\nThe filename of your lock file in /var/lock/subsys/ is incoherent with your\nactual init script name. For example, if your script name is httpd, you have\nto use 'httpd' as the filename in your subsys directory. It is also possible\nthat rpmlint gets this wrong, especially if the init script contains\nnontrivial shell variables and/or assignments. These cases usually manifest\nthemselves when rpmlint reports that the subsys name starts with '$'; in these\ncases a warning instead of an error is reported and you should check the\nscript manually.\n\n\n",
-        "exact --explain stdout",
-    );
-    assert!(out.stderr.is_empty());
-}
 
 /// `--explain`: reworded `FilelistCheck.toml` entry `filelist-forbidden-xinetd-configuration` pins the fixed wording.
 #[test]
