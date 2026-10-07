@@ -4108,11 +4108,16 @@ mod tests {
         // reference does not. The reference gates on the anchored
         // sofile_regex (FilesCheck.py:165, _check_file_link_devel), so only
         // the unversioned development symlink (libfoo.so) triggers -- not
-        // versioned libfoo.so.0 / libfoo.so.0.0.0 links.
+        // versioned libfoo.so.0 / libfoo.so.0.0.0 links, and not a
+        // libbar.so.bak backup (the regex is end-anchored).
         let (pkg, _dir) = pkg_with_files(vec![
             PkgFile {
                 linkto: "libfcgi.so.0.0.0".to_string(),
                 ..mkfile("/usr/lib64/libfcgi.so.0", 0o120777, 61)
+            },
+            PkgFile {
+                linkto: "libbar.so.1".to_string(),
+                ..mkfile("/usr/lib64/libbar.so.bak", 0o120777, 63)
             },
             PkgFile {
                 linkto: "libfoo.so.1.2.3".to_string(),
@@ -4132,6 +4137,23 @@ mod tests {
                 .any(|(n, d)| n == "devel-file-in-non-devel-package"
                     && d.contains("/usr/lib64/libfoo.so")),
             "missing finding on unversioned .so link: {results:?}"
+        );
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "devel-file-in-non-devel-package" && d.contains("libbar.so.bak")),
+            "false positive on .so.bak backup: {results:?}"
+        );
+        let lines: Vec<&String> = results
+            .iter()
+            .filter(|(n, _)| n == "devel-file-in-non-devel-package")
+            .map(|(_, l)| l)
+            .collect();
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+        assert!(
+            lines[0].contains(": W: devel-file-in-non-devel-package /usr/lib64/libfoo.so"),
+            "name, level and detail: {}",
+            lines[0]
         );
     }
 
