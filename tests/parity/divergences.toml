@@ -56,6 +56,13 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "session-header"
+kind = "behaviour"
+reason = "The vendored distro-config layer lists every vendored file under 'configuration:' as <distro:opensuse>/... (one line per file), while the reference under the same overlay lists only the disk paths it read. A parity runner diffing full reports would flag the header even when every finding matches; normalize the <distro:...> lines out (or compare findings only) before diffing."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "argument-globbing"
 kind = "behaviour"
 reason = "A positional argument containing * or ? is taken literally, so it is reported as a missing path and exits 2; the reference expands it as a working-directory-relative glob (cli.py:103-120). Repeated arguments are deduplicated as the reference's set does. Path::glob is nightly-only, and glob semantics (**, character classes, escaping) are a parsing surface that needs its own change with golden tests."

@@ -424,17 +424,40 @@ pub fn load(extra: &[PathBuf]) -> Config {
     load_inner(extra, &xdg_config_dirs(), autoload)
 }
 
-/// Read a top-level `Flavor` key from a TOML config file, if present.
+/// What a config file's top-level `Flavor` key says.
+#[derive(PartialEq, Debug)]
+enum FlavorRead {
+    /// No key, or the file is unreadable/unparseable: leave the selection.
+    Absent,
+    /// A string value.
+    Value(String),
+    /// Present but not a string. [`Config::finalize`] falls back to
+    /// `"opensuse"` for this (via `unwrap_or`), so the pre-pass does the
+    /// same instead of silently ignoring it — otherwise the two would select
+    /// different vendored sets.
+    NonString,
+}
+
+/// Read a top-level `Flavor` key from a TOML config file.
 /// Used by [`load_inner`] to select the vendored distro config before the
 /// main merge; the merged table's `Flavor` (via `finalize`) stays the
 /// authority for check behavior.
-fn read_flavor_key(path: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let table: toml::Table = toml::from_str(&text).ok()?;
-    table
-        .get("Flavor")
-        .and_then(toml::Value::as_str)
-        .map(|s| s.to_ascii_lowercase())
+fn read_flavor_key(path: &Path) -> FlavorRead {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(_) => return FlavorRead::Absent,
+    };
+    let table: toml::Table = match toml::from_str(&text) {
+        Ok(t) => t,
+        Err(_) => return FlavorRead::Absent,
+    };
+    match table.get("Flavor") {
+        None => FlavorRead::Absent,
+        Some(v) => match v.as_str() {
+            Some(s) => FlavorRead::Value(s.to_ascii_lowercase()),
+            None => FlavorRead::NonString,
+        },
+    }
 }
 
 /// The env-independent core of [`load`], so tests can drive it without
@@ -473,14 +496,29 @@ fn load_inner(extra: &[PathBuf], xdg_dirs: &[PathBuf], autoload: bool) -> Config
     if autoload {
         // Flavor for vendored distro-config selection: the last `Flavor` key
         // in merge order (XDG, then extras) wins; the vendored layer itself
-        // never sets it. Unknown values warn and fall back, mirroring
-        // `finalize`.
+        // never sets it (enforced by scripts/generate-distro-configs.py and
+        // pinned by vendored_manifest_matches_directory). Unknown values warn
+        // and fall back, mirroring `finalize`.
+        //
+        // The scan runs in merge order — the same stable sort the merge below
+        // uses — not insertion order: an `*.override.toml` file sorts after a
+        // normal file in the merge, so scanning insertion order would pick a
+        // different "last" Flavor than `finalize` sees.
+        let mut ordered: Vec<(u8, usize, &Path)> = entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (is_def, name, layer))| match layer {
+                Layer::File(p) => Some((sort_key(*is_def, name), i, p.as_path())),
+                _ => None,
+            })
+            .collect();
+        ordered.sort();
         let mut flavor = "opensuse".to_string();
-        for (_, _, layer) in &entries {
-            if let Layer::File(p) = layer
-                && let Some(f) = read_flavor_key(p)
-            {
-                flavor = f;
+        for (_, _, p) in ordered {
+            match read_flavor_key(p) {
+                FlavorRead::Absent => {}
+                FlavorRead::Value(f) => flavor = f,
+                FlavorRead::NonString => flavor = "opensuse".to_string(),
             }
         }
         let flavor = match flavor.as_str() {
@@ -1096,6 +1134,43 @@ mod tests {
     }
 
     #[test]
+    fn flavor_non_string_selects_opensuse_vendored_set() {
+        // `finalize` falls back to "opensuse" for a non-string `Flavor`
+        // (via `unwrap_or`); the pre-pass must agree so both select the same
+        // vendored set.
+        let cfg = config_with_toml("Flavor = 5\n");
+        assert_eq!(cfg.flavor, "opensuse");
+        assert!(
+            cfg.conf_files
+                .iter()
+                .any(|f| f.starts_with("<distro:opensuse>")),
+            "pre-pass must select the opensuse vendored set, got {:?}",
+            cfg.conf_files
+        );
+    }
+
+    #[test]
+    fn flavor_override_file_wins_in_prepass() {
+        // `*.override.toml` sorts after normal files in the merge; the
+        // pre-pass scans in merge order so it agrees with `finalize` on
+        // which `Flavor` is last, regardless of filesystem order.
+        let tmp = tempfile::tempdir().unwrap();
+        let rpmlint_dir = tmp.path().join("xdg").join("rpmlint");
+        std::fs::create_dir_all(&rpmlint_dir).unwrap();
+        std::fs::write(rpmlint_dir.join("z.toml"), "Flavor = \"opensuse\"\n").unwrap();
+        std::fs::write(rpmlint_dir.join("a.override.toml"), "Flavor = \"slfo\"\n").unwrap();
+        let cfg = load_inner(&[], &[tmp.path().join("xdg")], true);
+        assert_eq!(cfg.flavor, "slfo");
+        assert!(
+            cfg.conf_files
+                .iter()
+                .any(|f| f.starts_with("<distro:slfo>")),
+            "pre-pass must select the slfo vendored set, got {:?}",
+            cfg.conf_files
+        );
+    }
+
+    #[test]
     fn divergence_applies_respects_entry_flavor() {
         // The corpus runner compares in the default flavor: an entry without a
         // flavor key applies everywhere, a slfo-gated entry only on slfo runs.
@@ -1220,6 +1295,18 @@ mod tests {
                     "dedupe fallback broken: slfo/{name}"
                 );
             }
+        }
+
+        // No vendored file may set a top-level `Flavor` key: the pre-pass
+        // scans only `Layer::File`, so a vendored `Flavor` would make it and
+        // `finalize` silently disagree on the vendored set. The generator
+        // asserts this too; this pins the checked-in files.
+        for (name, content) in DISTRO_OPENSUSE_FILES.iter().chain(DISTRO_SLFO_FILES.iter()) {
+            let table: toml::Table = toml::from_str(content).expect("vendored TOML parses");
+            assert!(
+                table.get("Flavor").is_none(),
+                "vendored file sets Flavor: {name}"
+            );
         }
     }
 
