@@ -11,7 +11,7 @@ extend-exclude = [
   "crates/rpmcrab/man/**",
   "crates/rpmcrab/completions/**",
   # Bundled upstream data (rpmlint's configdefaults.toml), verbatim — never
-  # "fixed" for wording (e.g. the upstream "Treshold" comment).
+  # "fixed" for wording.
   "crates/rpmcrab-core/data/**",
   # Generated ISO 639/3166 code tables (from rpmlint's __isocodes__.py):
   # three-letter codes read as typos, but every entry is normative data.
