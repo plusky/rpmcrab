@@ -139,108 +139,116 @@ PRUNE_PACKAGES = {
     "pcfclock": "removed from Factory; not in SLE 16",
 }
 
-# Stale pie-executables paths: each entry carries removal evidence like
-# PRUNE_PACKAGES does. "removed from Factory" means the owning package is
-# gone (OBS source API 404); "moved" entries name the new path. Verified
-# 2026-10-07 against openSUSE:Factory.
+# Stale pie-executables paths: each entry is (owning package, kind, reason),
+# carrying per-entry evidence like PRUNE_PACKAGES does. kind "removed" means
+# the owning package is gone from openSUSE:Factory (OBS source API 404);
+# kind "moved" means the package still ships but relocated the binary. The
+# package is checked live at generation time: a reintroduced "removed"
+# package - or a vanished "moved" package, whose relocation evidence is then
+# stale - keeps the path and logs loudly, so the drift check fails for a
+# fresh audit instead of the path staying silently pruned.
+# Verified 2026-10-07 against the openSUSE:Factory filelists (97 paths shipped
+# by no TW package). Pruning is scoped to the opensuse flavor: the evidence
+# is Factory-only, and the SLE 16 codebase behind the slfo flavor has no
+# public per-package query to verify against.
 PRUNE_PIE_PATHS = {
-    "/usr/bin/achfile": "netatalk removed from Factory",
-    "/usr/bin/adv1tov2": "netatalk removed from Factory",
-    "/usr/bin/aecho": "netatalk removed from Factory",
-    "/usr/bin/afile": "netatalk removed from Factory",
-    "/usr/bin/afppasswd": "netatalk removed from Factory",
-    "/usr/bin/cnid_index": "netatalk removed from Factory",
-    "/usr/bin/dund": "BlueZ 4 tool, removed in BlueZ 5",
-    "/usr/bin/finger": "finger removed from Factory",
-    "/usr/bin/getzones": "netatalk removed from Factory",
-    "/usr/bin/hidd": "BlueZ 4 tool, removed in BlueZ 5",
-    "/usr/bin/lppasswd": "cups dropped the 1.x tools",
-    "/usr/bin/megatron": "netatalk removed from Factory",
-    "/usr/bin/nbplkup": "netatalk removed from Factory",
-    "/usr/bin/nbprgstr": "netatalk removed from Factory",
-    "/usr/bin/nbpunrgstr": "netatalk removed from Factory",
-    "/usr/bin/ncplogin": "ncpfs removed from Factory",
-    "/usr/bin/ncpmap": "ncpfs removed from Factory",
-    "/usr/bin/nwsfind": "ncpfs removed from Factory",
-    "/usr/bin/pand": "BlueZ 4 tool, removed in BlueZ 5",
-    "/usr/bin/pap": "netatalk removed from Factory",
-    "/usr/bin/papstatus": "netatalk removed from Factory",
-    "/usr/bin/psorder": "cups dropped the 1.x tools",
-    "/usr/bin/rcp": "rsh removed from Factory",
-    "/usr/bin/rexec": "rsh removed from Factory",
-    "/usr/bin/rlogin": "rsh removed from Factory",
-    "/usr/bin/rsh": "rsh removed from Factory",
-    "/usr/bin/showppd": "cups dropped the 1.x tools",
-    "/usr/bin/testprns": "cups dropped the 1.x tools",
-    "/usr/lib/mit/bin/gss-client": "krb5 installs to /usr/bin, not /usr/lib/mit",
-    "/usr/lib/mit/bin/kdestroy": "krb5 installs to /usr/bin, not /usr/lib/mit",
-    "/usr/lib/mit/bin/kinit": "krb5 installs to /usr/bin, not /usr/lib/mit",
-    "/usr/lib/mit/bin/klist": "krb5 installs to /usr/bin, not /usr/lib/mit",
-    "/usr/lib/mit/bin/kpasswd": "krb5 installs to /usr/bin, not /usr/lib/mit",
-    "/usr/lib/mit/bin/krb524init": "krb5 installs to /usr/bin, not /usr/lib/mit",
-    "/usr/lib/mit/bin/ksu": "krb5 installs to /usr/bin, not /usr/lib/mit",
-    "/usr/lib/mit/bin/kvno": "krb5 installs to /usr/bin, not /usr/lib/mit",
-    "/usr/lib/mit/bin/sclient": "krb5 installs to /usr/bin, not /usr/lib/mit",
-    "/usr/lib/mit/bin/sim_client": "krb5 installs to /usr/bin, not /usr/lib/mit",
-    "/usr/lib/mit/bin/uuclient": "krb5 installs to /usr/bin, not /usr/lib/mit",
-    "/usr/lib/mit/bin/v4rcp": "krb5 installs to /usr/bin, not /usr/lib/mit",
-    "/usr/lib/mit/sbin/gss-server": "krb5 installs to /usr/sbin, not /usr/lib/mit",
-    "/usr/lib/mit/sbin/kadmin": "krb5 installs to /usr/sbin, not /usr/lib/mit",
-    "/usr/lib/mit/sbin/kadmin.local": "krb5 installs to /usr/sbin, not /usr/lib/mit",
-    "/usr/lib/mit/sbin/kadmind": "krb5 installs to /usr/sbin, not /usr/lib/mit",
-    "/usr/lib/mit/sbin/kdb5_util": "krb5 installs to /usr/sbin, not /usr/lib/mit",
-    "/usr/lib/mit/sbin/kprop": "krb5 installs to /usr/sbin, not /usr/lib/mit",
-    "/usr/lib/mit/sbin/kpropd": "krb5 installs to /usr/sbin, not /usr/lib/mit",
-    "/usr/lib/mit/sbin/krb524d": "krb5 installs to /usr/sbin, not /usr/lib/mit",
-    "/usr/lib/mit/sbin/krb5kdc": "krb5 installs to /usr/sbin, not /usr/lib/mit",
-    "/usr/lib/mit/sbin/ktutil": "krb5 installs to /usr/sbin, not /usr/lib/mit",
-    "/usr/lib/mit/sbin/sim_server": "krb5 installs to /usr/sbin, not /usr/lib/mit",
-    "/usr/lib/mit/sbin/sserver": "krb5 installs to /usr/sbin, not /usr/lib/mit",
-    "/usr/lib/mit/sbin/uuserver": "krb5 installs to /usr/sbin, not /usr/lib/mit",
-    "/usr/lib/news/bin/innbind": "inn moved to /usr/libexec",
-    "/usr/lib/news/bin/innd": "inn moved to /usr/libexec",
-    "/usr/lib/news/bin/rnews": "inn moved to /usr/libexec",
-    "/usr/lib/openldap/slapd": "openldap2 ships the slapd binary at /usr/lib64/slapd",
-    "/usr/lib/sudo/sesh": "sesh moved to /usr/libexec/sudo/sesh",
-    "/usr/sbin/afpd": "netatalk removed from Factory",
-    "/usr/sbin/amdd": "amd removed from Factory",
-    "/usr/sbin/arping": "iputils moved to /usr/bin/arping",
-    "/usr/sbin/atalkd": "netatalk removed from Factory",
-    "/usr/sbin/bluetoothd": "moved to /usr/libexec/bluetooth/bluetoothd in BlueZ 5",
-    "/usr/sbin/clockdiff": "iputils moved to /usr/bin/clockdiff",
-    "/usr/sbin/cnid_dbd": "netatalk removed from Factory",
-    "/usr/sbin/cnid_metad": "netatalk removed from Factory",
-    "/usr/sbin/dnssec-keygen": "bind moved to /usr/bin/dnssec-keygen",
-    "/usr/sbin/dnssec-signzone": "bind moved to /usr/bin/dnssec-signzone",
-    "/usr/sbin/hciattach": "moved to /usr/bin/hciattach in BlueZ 5",
-    "/usr/sbin/hciconfig": "moved to /usr/bin/hciconfig in BlueZ 5",
-    "/usr/sbin/hid2hci": "moved to /usr/lib/udev/hid2hci in BlueZ 5",
-    "/usr/sbin/httpd2": "apache 2.2 name, renamed in 2.4",
-    "/usr/sbin/httpd2-prefork": "apache 2.2 name, renamed in 2.4",
-    "/usr/sbin/httpd2-worker": "apache 2.2 name, renamed in 2.4",
-    "/usr/sbin/in.fingerd": "fingerd removed from Factory",
-    "/usr/sbin/in.rexecd": "rsh removed from Factory",
-    "/usr/sbin/in.rlogind": "rsh removed from Factory",
-    "/usr/sbin/in.rshd": "rsh removed from Factory",
-    "/usr/sbin/lwresd": "lwresd dropped in bind 9.16; ships nowhere in TW",
-    "/usr/sbin/named-checkconf": "bind moved to /usr/bin/named-checkconf",
-    "/usr/sbin/named-checkzone": "bind moved to /usr/bin/named-checkzone",
-    "/usr/sbin/nscd": "nscd removed from Factory",
-    "/usr/sbin/ntlm_auth": "samba moved to /usr/bin/ntlm_auth",
-    "/usr/sbin/papd": "netatalk removed from Factory",
-    "/usr/sbin/praliases": "sendmail moved to /usr/bin/praliases",
-    "/usr/sbin/rarpd": "rarpd removed from Factory",
-    "/usr/sbin/rotatelogs2": "apache 2.2 name, renamed in 2.4",
-    "/usr/sbin/rpc.rwalld": "rwalld removed from Factory",
-    "/usr/sbin/rpc.yppasswdd": "ypserv removed from Factory",
-    "/usr/sbin/rpc.ypxfrd": "ypserv removed from Factory",
-    "/usr/sbin/squidclient": "squid does not ship squidclient",
-    "/usr/sbin/suexec2": "apache 2.2 name, renamed in 2.4",
-    "/usr/sbin/tracepath": "iputils moved to /usr/bin/tracepath",
-    "/usr/sbin/tracepath6": "tracepath6 folded into tracepath (/usr/bin/tracepath); the name ships nowhere in TW",
-    "/usr/sbin/utempter": "libutempter removed from Factory",
-    "/usr/sbin/yppush": "ypserv removed from Factory",
-    "/usr/sbin/ypserv": "ypserv removed from Factory",
+    "/usr/bin/achfile": ("netatalk", "removed", "netatalk removed from Factory"),
+    "/usr/bin/adv1tov2": ("netatalk", "removed", "netatalk removed from Factory"),
+    "/usr/bin/aecho": ("netatalk", "removed", "netatalk removed from Factory"),
+    "/usr/bin/afile": ("netatalk", "removed", "netatalk removed from Factory"),
+    "/usr/bin/afppasswd": ("netatalk", "removed", "netatalk removed from Factory"),
+    "/usr/bin/cnid_index": ("netatalk", "removed", "netatalk removed from Factory"),
+    "/usr/bin/dund": ("bluez", "moved", "BlueZ 4 tool, removed in BlueZ 5"),
+    "/usr/bin/finger": ("finger", "removed", "finger removed from Factory"),
+    "/usr/bin/getzones": ("netatalk", "removed", "netatalk removed from Factory"),
+    "/usr/bin/hidd": ("bluez", "moved", "BlueZ 4 tool, removed in BlueZ 5"),
+    "/usr/bin/lppasswd": ("cups", "moved", "cups dropped the 1.x tools"),
+    "/usr/bin/megatron": ("netatalk", "removed", "netatalk removed from Factory"),
+    "/usr/bin/nbplkup": ("netatalk", "removed", "netatalk removed from Factory"),
+    "/usr/bin/nbprgstr": ("netatalk", "removed", "netatalk removed from Factory"),
+    "/usr/bin/nbpunrgstr": ("netatalk", "removed", "netatalk removed from Factory"),
+    "/usr/bin/ncplogin": ("ncpfs", "removed", "ncpfs removed from Factory"),
+    "/usr/bin/ncpmap": ("ncpfs", "removed", "ncpfs removed from Factory"),
+    "/usr/bin/nwsfind": ("ncpfs", "removed", "ncpfs removed from Factory"),
+    "/usr/bin/pand": ("bluez", "moved", "BlueZ 4 tool, removed in BlueZ 5"),
+    "/usr/bin/pap": ("netatalk", "removed", "netatalk removed from Factory"),
+    "/usr/bin/papstatus": ("netatalk", "removed", "netatalk removed from Factory"),
+    "/usr/bin/psorder": ("cups", "moved", "cups dropped the 1.x tools"),
+    "/usr/bin/rcp": ("rsh", "removed", "rsh removed from Factory"),
+    "/usr/bin/rexec": ("rsh", "removed", "rsh removed from Factory"),
+    "/usr/bin/rlogin": ("rsh", "removed", "rsh removed from Factory"),
+    "/usr/bin/rsh": ("rsh", "removed", "rsh removed from Factory"),
+    "/usr/bin/showppd": ("cups", "moved", "cups dropped the 1.x tools"),
+    "/usr/bin/testprns": ("cups", "moved", "cups dropped the 1.x tools"),
+    "/usr/lib/mit/bin/gss-client": ("krb5", "moved", "krb5 installs to /usr/bin, not /usr/lib/mit"),
+    "/usr/lib/mit/bin/kdestroy": ("krb5", "moved", "krb5 installs to /usr/bin, not /usr/lib/mit"),
+    "/usr/lib/mit/bin/kinit": ("krb5", "moved", "krb5 installs to /usr/bin, not /usr/lib/mit"),
+    "/usr/lib/mit/bin/klist": ("krb5", "moved", "krb5 installs to /usr/bin, not /usr/lib/mit"),
+    "/usr/lib/mit/bin/kpasswd": ("krb5", "moved", "krb5 installs to /usr/bin, not /usr/lib/mit"),
+    "/usr/lib/mit/bin/krb524init": ("krb5", "moved", "krb5 installs to /usr/bin, not /usr/lib/mit"),
+    "/usr/lib/mit/bin/ksu": ("krb5", "moved", "krb5 installs to /usr/bin, not /usr/lib/mit"),
+    "/usr/lib/mit/bin/kvno": ("krb5", "moved", "krb5 installs to /usr/bin, not /usr/lib/mit"),
+    "/usr/lib/mit/bin/sclient": ("krb5", "moved", "krb5 installs to /usr/bin, not /usr/lib/mit"),
+    "/usr/lib/mit/bin/sim_client": ("krb5", "moved", "krb5 installs to /usr/bin, not /usr/lib/mit"),
+    "/usr/lib/mit/bin/uuclient": ("krb5", "moved", "krb5 installs to /usr/bin, not /usr/lib/mit"),
+    "/usr/lib/mit/bin/v4rcp": ("krb5", "moved", "krb5 installs to /usr/bin, not /usr/lib/mit"),
+    "/usr/lib/mit/sbin/gss-server": ("krb5", "moved", "krb5 installs to /usr/sbin, not /usr/lib/mit"),
+    "/usr/lib/mit/sbin/kadmin": ("krb5", "moved", "krb5 installs to /usr/sbin, not /usr/lib/mit"),
+    "/usr/lib/mit/sbin/kadmin.local": ("krb5", "moved", "krb5 installs to /usr/sbin, not /usr/lib/mit"),
+    "/usr/lib/mit/sbin/kadmind": ("krb5", "moved", "krb5 installs to /usr/sbin, not /usr/lib/mit"),
+    "/usr/lib/mit/sbin/kdb5_util": ("krb5", "moved", "krb5 installs to /usr/sbin, not /usr/lib/mit"),
+    "/usr/lib/mit/sbin/kprop": ("krb5", "moved", "krb5 installs to /usr/sbin, not /usr/lib/mit"),
+    "/usr/lib/mit/sbin/kpropd": ("krb5", "moved", "krb5 installs to /usr/sbin, not /usr/lib/mit"),
+    "/usr/lib/mit/sbin/krb524d": ("krb5", "moved", "krb5 installs to /usr/sbin, not /usr/lib/mit"),
+    "/usr/lib/mit/sbin/krb5kdc": ("krb5", "moved", "krb5 installs to /usr/sbin, not /usr/lib/mit"),
+    "/usr/lib/mit/sbin/ktutil": ("krb5", "moved", "krb5 installs to /usr/sbin, not /usr/lib/mit"),
+    "/usr/lib/mit/sbin/sim_server": ("krb5", "moved", "krb5 installs to /usr/sbin, not /usr/lib/mit"),
+    "/usr/lib/mit/sbin/sserver": ("krb5", "moved", "krb5 installs to /usr/sbin, not /usr/lib/mit"),
+    "/usr/lib/mit/sbin/uuserver": ("krb5", "moved", "krb5 installs to /usr/sbin, not /usr/lib/mit"),
+    "/usr/lib/news/bin/innbind": ("inn", "moved", "inn moved to /usr/libexec"),
+    "/usr/lib/news/bin/innd": ("inn", "moved", "inn moved to /usr/libexec"),
+    "/usr/lib/news/bin/rnews": ("inn", "moved", "inn moved to /usr/libexec"),
+    "/usr/lib/openldap/slapd": ("openldap2", "moved", "openldap2 ships the slapd binary at /usr/lib64/slapd"),
+    "/usr/lib/sudo/sesh": ("sudo", "moved", "sesh moved to /usr/libexec/sudo/sesh"),
+    "/usr/sbin/afpd": ("netatalk", "removed", "netatalk removed from Factory"),
+    "/usr/sbin/amdd": ("amd", "removed", "amd removed from Factory"),
+    "/usr/sbin/arping": ("iputils", "moved", "iputils moved to /usr/bin/arping"),
+    "/usr/sbin/atalkd": ("netatalk", "removed", "netatalk removed from Factory"),
+    "/usr/sbin/bluetoothd": ("bluez", "moved", "moved to /usr/libexec/bluetooth/bluetoothd in BlueZ 5"),
+    "/usr/sbin/clockdiff": ("iputils", "moved", "iputils moved to /usr/bin/clockdiff"),
+    "/usr/sbin/cnid_dbd": ("netatalk", "removed", "netatalk removed from Factory"),
+    "/usr/sbin/cnid_metad": ("netatalk", "removed", "netatalk removed from Factory"),
+    "/usr/sbin/dnssec-keygen": ("bind", "moved", "bind moved to /usr/bin/dnssec-keygen"),
+    "/usr/sbin/dnssec-signzone": ("bind", "moved", "bind moved to /usr/bin/dnssec-signzone"),
+    "/usr/sbin/hciattach": ("bluez", "moved", "moved to /usr/bin/hciattach in BlueZ 5"),
+    "/usr/sbin/hciconfig": ("bluez", "moved", "moved to /usr/bin/hciconfig in BlueZ 5"),
+    "/usr/sbin/hid2hci": ("bluez", "moved", "moved to /usr/lib/udev/hid2hci in BlueZ 5"),
+    "/usr/sbin/httpd2": ("apache2", "moved", "apache 2.2 name, renamed in 2.4"),
+    "/usr/sbin/httpd2-prefork": ("apache2", "moved", "apache 2.2 name, renamed in 2.4"),
+    "/usr/sbin/httpd2-worker": ("apache2", "moved", "apache 2.2 name, renamed in 2.4"),
+    "/usr/sbin/in.fingerd": ("finger", "removed", "fingerd removed from Factory"),
+    "/usr/sbin/in.rexecd": ("rsh", "removed", "rsh removed from Factory"),
+    "/usr/sbin/in.rlogind": ("rsh", "removed", "rsh removed from Factory"),
+    "/usr/sbin/in.rshd": ("rsh", "removed", "rsh removed from Factory"),
+    "/usr/sbin/lwresd": ("bind", "moved", "lwresd dropped in bind 9.16; ships nowhere in TW"),
+    "/usr/sbin/named-checkconf": ("bind", "moved", "bind moved to /usr/bin/named-checkconf"),
+    "/usr/sbin/named-checkzone": ("bind", "moved", "bind moved to /usr/bin/named-checkzone"),
+    "/usr/sbin/nscd": ("nscd", "removed", "nscd removed from Factory"),
+    "/usr/sbin/ntlm_auth": ("samba", "moved", "samba moved to /usr/bin/ntlm_auth"),
+    "/usr/sbin/papd": ("netatalk", "removed", "netatalk removed from Factory"),
+    "/usr/sbin/praliases": ("sendmail", "moved", "sendmail moved to /usr/bin/praliases"),
+    "/usr/sbin/rarpd": ("rarpd", "removed", "rarpd removed from Factory"),
+    "/usr/sbin/rotatelogs2": ("apache2", "moved", "apache 2.2 name, renamed in 2.4"),
+    "/usr/sbin/rpc.rwalld": ("rwalld", "removed", "rwalld removed from Factory"),
+    "/usr/sbin/rpc.yppasswdd": ("ypserv", "removed", "ypserv removed from Factory"),
+    "/usr/sbin/rpc.ypxfrd": ("ypserv", "removed", "ypserv removed from Factory"),
+    "/usr/sbin/squidclient": ("squid", "moved", "squid does not ship squidclient"),
+    "/usr/sbin/suexec2": ("apache2", "moved", "apache 2.2 name, renamed in 2.4"),
+    "/usr/sbin/tracepath": ("iputils", "moved", "iputils moved to /usr/bin/tracepath"),
+    "/usr/sbin/tracepath6": ("iputils", "moved", "tracepath6 folded into tracepath (/usr/bin/tracepath); the name ships nowhere in TW"),
+    "/usr/sbin/utempter": ("libutempter", "removed", "libutempter removed from Factory"),
+    "/usr/sbin/yppush": ("ypserv", "removed", "ypserv removed from Factory"),
+    "/usr/sbin/ypserv": ("ypserv", "removed", "ypserv removed from Factory"),
 }
 
 LIST_KEYS = ("Filters", "BlockedFilters")
@@ -473,16 +481,33 @@ def _usrmerge_norm(path):
     return path
 
 
-def prune_pie_paths(text, pruned_log):
-    """Drop pie-executables.toml entries for paths no Tumbleweed package ships."""
+def prune_pie_paths(text, pruned_log, flavor):
+    """Drop pie-executables.toml entries for paths no distro package ships.
+
+    Each entry names its owning package, checked live against the flavor's
+    distro (OBS source API, like PRUNE_PACKAGES): a reintroduced "removed"
+    package - or a vanished "moved" package, whose relocation evidence is
+    then stale - keeps the path and logs loudly, so the drift check fails
+    for a fresh audit instead of the path staying silently pruned.
+    """
     out = []
     for line in text.splitlines(keepends=True):
         m = re.fullmatch(r'"([^"]+)",?', line.strip())
         norm = _usrmerge_norm(m.group(1)) if m else None
         if m and norm in PRUNE_PIE_PATHS:
+            pkg, kind, reason = PRUNE_PIE_PATHS[norm]
+            present = package_present(pkg, flavor)
+            if (kind == "removed" and present) or (kind == "moved" and not present):
+                pruned_log.append(
+                    "pie-executables: KEPT stale path %r - owning package %r "
+                    "changed state in the flavor's distro (%s), needs a fresh "
+                    "audit" % (m.group(1), pkg, reason)
+                )
+                out.append(line)
+                continue
             pruned_log.append(
                 "pie-executables: dropped stale path %r (%s)"
-                % (m.group(1), PRUNE_PIE_PATHS[norm])
+                % (m.group(1), reason)
             )
             continue
         out.append(line)
@@ -514,8 +539,11 @@ def generate(ref_dir=None, pins=None):
             assert_no_flavor_key(flavor, filename, text)
             text = prune_stale_filters(text, known, pruned_log)
             text = prune_stale_packages(text, pkg_pruned_log, flavor)
-            if filename == "pie-executables.toml":
-                text = prune_pie_paths(text, pie_pruned_log)
+            if filename == "pie-executables.toml" and flavor == "opensuse":
+                # Factory-only evidence (see PRUNE_PIE_PATHS): the SLE 16
+                # codebase behind the slfo flavor has no public
+                # per-package query, so slfo keeps the upstream entries.
+                text = prune_pie_paths(text, pie_pruned_log, flavor)
             data["files"][filename] = text
 
     # Dedupe: an SLFO file byte-identical to its openSUSE counterpart (after
