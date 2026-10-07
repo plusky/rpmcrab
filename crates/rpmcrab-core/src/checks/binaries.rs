@@ -1148,7 +1148,15 @@ impl BinariesCheck {
                 add_info(out, Level::Warning, pkg, "no-soname", &[&pkgfile.name]);
             }
             Some(soname) => {
-                if validso_regex().is_match(soname).unwrap_or(false) {
+                if !validso_regex().is_match(soname).unwrap_or(false) {
+                    add_info(
+                        out,
+                        Level::Error,
+                        pkg,
+                        "invalid-soname",
+                        &[&pkgfile.name, soname],
+                    );
+                } else {
                     self.check_soname_symlink(pkg, &pkgfile.name, soname, out);
                     if pkg.name.starts_with("lib")
                         && !self
@@ -3358,6 +3366,22 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(
             lines[0].contains("/usr/lib64/libfoo.so.1"),
             "detail: {}",
+            lines[0]
+        );
+
+        // Malformed SONAME -> E invalid-soname.
+        let mut info = syn_info();
+        info.is_shlib = true;
+        info.soname = Some("b soname".to_string());
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_shared_library(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "invalid-soname");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("b soname"),
+            "detail names the soname: {}",
             lines[0]
         );
 
