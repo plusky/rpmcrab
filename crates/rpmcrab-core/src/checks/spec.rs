@@ -3046,4 +3046,56 @@ Patch0: foo.patch
             "unexpected: {results:?}"
         );
     }
+
+    #[test]
+    fn translated_description_has_explain_text() {
+        // Port-only finding (upstream rpmlint#2): --explain must describe it,
+        // not print "Unknown message".
+        let text = "Name: foo\nVersion: 1\nRelease: 1\nSummary: foo\nLicense: MIT\n\n%description -l fi\nKuvaus.\n\n%description\nPlain.\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.spec");
+        std::fs::write(&path, text).unwrap();
+        let pkg = SpecPkg::open(&path).unwrap();
+        let config = config_mini();
+        let mut check = SpecCheck::new(&config);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_spec(&pkg, &config, &mut out);
+        assert!(
+            out.results()
+                .iter()
+                .any(|(c, _)| c == "translated-description"),
+            "finding must fire"
+        );
+        let desc = out.get_description("translated-description", &config);
+        assert!(
+            desc.contains("translated description"),
+            "explain text missing, got: {desc:?}"
+        );
+    }
+
+    #[test]
+    fn conditional_source_or_patch_has_explain_text() {
+        // Port-only finding (upstream rpmlint#45): --explain must describe it,
+        // not print "Unknown message".
+        let text = "Name: foo\n%if 0%{?suse_version}\nSource0: a.tar.gz\n%endif\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.spec");
+        std::fs::write(&path, text).unwrap();
+        let pkg = SpecPkg::open(&path).unwrap();
+        let config = config_mini();
+        let mut check = SpecCheck::new(&config);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_spec(&pkg, &config, &mut out);
+        assert!(
+            out.results()
+                .iter()
+                .any(|(c, _)| c == "conditional-source-or-patch"),
+            "finding must fire"
+        );
+        let desc = out.get_description("conditional-source-or-patch", &config);
+        assert!(
+            desc.contains("conditional"),
+            "explain text missing, got: {desc:?}"
+        );
+    }
 }

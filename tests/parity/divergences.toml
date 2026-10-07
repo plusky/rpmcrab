@@ -963,3 +963,18 @@ check = "BuildRootAndDateCheck"
 kind = "detail"
 reason = "`BuildRootAndDateCheck.toml` is the mechanical union of the reference's `descriptions/BuildDateCheck.toml` and `descriptions/BuildRootCheck.toml` (entries byte-identical); the port merged the two reference checks into one, so a single file named after the port check keeps the check-name to TOML mapping total. Provenance: `crates/rpmcrab-core/data/descriptions/README.md`."
 since = "0.1.0"
+[[divergence]]
+case = "global"
+check = "SpecCheck"
+kind = "detail"
+reason = "Port-only `conditional-source-or-patch` (upstream rpmlint#45) has a staged `--explain` description written from the ticket: conditional Source:/Patch: tags inside %if blocks. The reference has no such finding, so `--explain` would print `Unknown message` for it."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/45"
+
+[[divergence]]
+case = "global"
+check = "SpecCheck"
+kind = "detail"
+reason = "Port-only `translated-description` (upstream rpmlint#2) has a staged `--explain` description written from the ticket: %description -l <lang> sections some distros do not want to ship. The reference has no such finding, so `--explain` would print `Unknown message` for it."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/2"

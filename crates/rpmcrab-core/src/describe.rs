@@ -296,6 +296,7 @@ mod tests {
     /// or bad rebase merge changes a hash. Provenance of each file against
     /// the pinned reference (`84848c0`) is documented in
     /// `data/descriptions/README.md`.
+
     #[test]
     fn staged_toml_files_are_pinned() {
         use sha2::{Digest, Sha256};
@@ -450,7 +451,7 @@ mod tests {
             ),
             (
                 "SpecCheck.toml",
-                "7441cafec02240d4cc0f3d69785e19fe64ef57c3899f895b48b0071b14f45f1d",
+                "fed050ef73bfe807715577dbd5864a207246e8070da8921c8323f8736531d56a",
             ),
             (
                 "SysVInitOnSystemdCheck.toml",
