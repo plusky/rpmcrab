@@ -2379,6 +2379,18 @@ mod tests {
     }
 
     #[test]
+    fn non_standard_group_never_emits() {
+        // The Group tag is obsolete (openSUSE dropped it); the finding was
+        // removed outright, so even a present Group tag stays silent.
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-devel-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        assert!(
+            tag_hits(&results, "non-standard-group").is_empty(),
+            "non-standard-group must stay dead: {results:?}"
+        );
+    }
+
+    #[test]
     fn no_group_tag_emits() {
         let (_tmp, pkg) = fixture_pkg("tags-emission-pins-nogroup-1.0-1.noarch.rpm");
         let results = run_check(&pkg);
