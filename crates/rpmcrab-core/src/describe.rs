@@ -542,6 +542,22 @@ mod tests {
     /// registered in code, mirroring the reference which ships no TOML for
     /// those two either (`fhs_details_dict` / `post_details_dict` installed
     /// in each check's `__init__`). Adding a check without either fails here.
+    /// Port-only findings have no reference TOML entry to be byte-identical
+    /// to; their staged descriptions are deliberate additions (ledgered as
+    /// `kind="detail"`). This pins them so they cannot silently go back to
+    /// `--explain` printing "Unknown message".
+    #[test]
+    fn port_only_findings_have_description_coverage() {
+        let corpus = staged_descriptions();
+        for id in ["conditional-source-or-patch", "translated-description"] {
+            let text = corpus.get(id).cloned().unwrap_or_default();
+            assert!(
+                !text.trim().is_empty(),
+                "port-only finding `{id}` has no staged --explain description"
+            );
+        }
+    }
+
     #[test]
     fn every_registered_check_has_description_coverage() {
         fn check_names() -> Vec<String> {
