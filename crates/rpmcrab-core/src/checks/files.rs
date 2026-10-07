@@ -1772,8 +1772,10 @@ impl FilesCheck {
             return;
         }
         let link = &pkgfile.linkto;
-        // devel-file-in-non-devel-package for .so links
-        if !st.devel_pkg && fname.contains(".so") && !link.ends_with(".so") {
+        // devel-file-in-non-devel-package for .so links: the reference
+        // gates on the anchored sofile_regex (FilesCheck.py:165,
+        // _check_file_link_devel), so versioned libfoo.so.0 links do not fire.
+        if !st.devel_pkg && is_match(&self.sofile_re, fname) && !link.ends_with(".so") {
             add_info(
                 out,
                 Level::Warning,
@@ -4248,6 +4250,40 @@ mod tests {
                     && d.contains(": E: library-without-ldconfig-postin")
                     && d.contains("libfoo.so.1.2.3")),
             "missing E-level finding on real .so: {results:?}"
+        );
+    }
+
+    #[test]
+    fn devel_link_uses_anchored_sofile_regex() {
+        // Log diff on FastCGI: crab flagged /usr/lib64/libfcgi.so.0 ->
+        // libfcgi.so.0.0.0 as devel-file-in-non-devel-package, but the
+        // reference does not. The reference gates on the anchored
+        // sofile_regex (FilesCheck.py:165, _check_file_link_devel), so only
+        // the unversioned development symlink (libfoo.so) triggers -- not
+        // versioned libfoo.so.0 / libfoo.so.0.0.0 links.
+        let (pkg, _dir) = pkg_with_files(vec![
+            PkgFile {
+                linkto: "libfcgi.so.0.0.0".to_string(),
+                ..mkfile("/usr/lib64/libfcgi.so.0", 0o120777, 61)
+            },
+            PkgFile {
+                linkto: "libfoo.so.1.2.3".to_string(),
+                ..mkfile("/usr/lib64/libfoo.so", 0o120777, 62)
+            },
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "devel-file-in-non-devel-package" && d.contains("libfcgi.so.0")),
+            "false positive on versioned .so link: {results:?}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|(n, d)| n == "devel-file-in-non-devel-package"
+                    && d.contains("/usr/lib64/libfoo.so")),
+            "missing finding on unversioned .so link: {results:?}"
         );
     }
 
