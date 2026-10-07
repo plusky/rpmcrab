@@ -531,7 +531,6 @@ mod tests {
         );
     }
 
-
     /// Every check the registry can build has description coverage: a staged
     /// `<Name>.toml` in `STAGED` — or, for `FHSCheck`/`PostCheck`, details
     /// registered in code, mirroring the reference which ships no TOML for

@@ -1480,7 +1480,6 @@ fn explain_staged_tmpfiles_check() {
     assert!(out.stderr.is_empty());
 }
 
-
 /// `--explain`: reworded `AlternativesCheck.toml` entry `update-alternatives-postun-call-missing` pins the fixed wording.
 #[test]
 fn explain_reworded_update_alternatives_postun_call_missing() {
@@ -1704,7 +1703,6 @@ fn explain_reworded_pem_private_key() {
     );
     assert!(out.stderr.is_empty());
 }
-
 
 /// `--explain`: reworded `FilelistCheck.toml` entry `filelist-forbidden-xinetd-configuration` pins the fixed wording.
 #[test]
