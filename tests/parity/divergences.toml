@@ -335,9 +335,10 @@ since = "0.1.0"
 [[divergence]]
 case = "global"
 check = "post-without-tmpfile-creation"
-kind = "behaviour"
+kind = "missing"
 reason = "Deliberate omission: upstream removed TmpFilesCheck._check_post_tmpfile (commit 1c04a49d, fixing rpmlint#1374) because %tmpfiles_create/%tmpfiles_create_package are NOPs since systemd-rpm-macros rev 102 -- creation is handled by the systemd package's file triggers, so demanding a %post creation call only produced false positives. The port does not reintroduce the deleted finding."
 since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/1374"
 
 [[divergence]]
 case = "global"
