@@ -1,8 +1,12 @@
 //! `SourceCheck` — validate the files in a source package.
 //!
-//! Ported from `rpmlint/checks/SourceCheck.py`. Four findings:
-//! `inconsistent-file-extension`, `strange-permission` and
-//! `source-not-compressed` (warnings), `multiple-specfiles` (error).
+//! Ported from `rpmlint/checks/SourceCheck.py`. Five findings:
+//! `inconsistent-file-extension`, `strange-permission`,
+//! `source-not-compressed` and `prebuilt-binary-in-sources` (warnings),
+//! `multiple-specfiles` (error).
+//!
+//! `prebuilt-binary-in-sources` is rpmcrab-new (upstream rpmlint#4, still
+//! open): the reference never unpacks source archives.
 
 use fancy_regex::Regex;
 
@@ -32,6 +36,17 @@ impl SourceCheck {
         out.set_error_detail(
             "source-not-compressed",
             Self::not_compressed_detail(compress_ext),
+        );
+        out.set_error_detail(
+            "prebuilt-binary-in-sources",
+            "A source archive in this package contains prebuilt binary files: \
+             compiled code shipped as binaries instead of being built from \
+             source during the package build. Such files are opaque blobs \
+             that can neither be audited nor rebuilt; delete them in %prep \
+             (or replace them with real sources). Do not repack the upstream \
+             archive to remove them — that breaks source verification. Like \
+             every warning, this one can be filtered out in the configuration."
+                .to_string(),
         );
     }
 
@@ -158,6 +173,327 @@ impl SourceCheck {
                 None
             }
         }
+    }
+
+    /// `prebuilt-binary-in-sources` (issue #150, upstream rpmlint#4): scan
+    /// every file of the source package for prebuilt binaries — directly by
+    /// magic bytes, and inside source archives (tar, gzip/xz/zstd-compressed
+    /// tar, zip), recursing into nested archives. The reference never
+    /// implemented this (the upstream issue is still open), so the finding
+    /// is rpmcrab-new and ledgered as `kind = "behaviour"`.
+    fn check_prebuilt_binaries(&self, pkg: &Pkg, out: &mut Filter) {
+        for f in &pkg.files {
+            let size = std::fs::metadata(&f.path).map(|m| m.len()).unwrap_or(0);
+            if size > prebuilt::MAX_ARCHIVE_BYTES as u64 {
+                continue;
+            }
+            let data = match std::fs::read(&f.path) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            let mut hits = Vec::new();
+            prebuilt::inspect_entry(&f.name, &data, &f.name, 0, &mut hits);
+            for (kind, path) in hits {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "prebuilt-binary-in-sources",
+                    &[&path, kind.as_str()],
+                );
+            }
+        }
+    }
+}
+
+/// Prebuilt-binary detection inside source archives (issue #150).
+///
+/// The walker is deliberately small: magic-byte archive detection, a minimal
+/// ustar reader, and capped in-memory decompression. bzip2 is not decoded
+/// (no pure-Rust decoder exists — the same limitation as native payload
+/// extraction, ledgered there); bzip2 archives are skipped silently.
+///
+/// Scope choices: only ustar tarballs are recognized - pre-POSIX V7 format
+/// has no magic bytes and is skipped - and of the zip-based Java archives
+/// only `.jar` is reported as a unit; `.war`/`.ear`/`.aar` are walked like
+/// plain zips, their classes listed individually.
+mod prebuilt {
+    use std::io::Read;
+
+    /// Cap on one archive's in-memory bytes (decompressed). Beyond this the
+    /// archive is skipped rather than risk a decompression bomb.
+    pub const MAX_ARCHIVE_BYTES: usize = 256 * 1024 * 1024;
+    /// Cap on one archive entry's bytes.
+    const MAX_ENTRY_BYTES: usize = 64 * 1024 * 1024;
+    /// Nesting limit for archives inside archives.
+    const MAX_DEPTH: u8 = 5;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum BinaryKind {
+        Elf,
+        JavaClass,
+        PythonBytecode,
+        JavaArchive,
+    }
+
+    impl BinaryKind {
+        pub fn as_str(self) -> &'static str {
+            match self {
+                BinaryKind::Elf => "ELF binary",
+                BinaryKind::JavaClass => "Java class file",
+                BinaryKind::PythonBytecode => "Python bytecode",
+                BinaryKind::JavaArchive => "Java archive (jar)",
+            }
+        }
+    }
+
+    /// Magic-byte classification of one file's bytes. ELF and Java class
+    /// magics are unambiguous; Python bytecode needs its `.pyc`/`.pyo` name
+    /// too (bytes 2-3 are `\r\n` in every CPython version, but so are the
+    /// first bytes of any CRLF text file); a jar is a zip archive by
+    /// definition, so it needs the `.jar` name as well.
+    fn classify(name: &str, data: &[u8]) -> Option<BinaryKind> {
+        if data.starts_with(b"\x7fELF") {
+            return Some(BinaryKind::Elf);
+        }
+        if data.starts_with(b"\xca\xfe\xba\xbe") {
+            return Some(BinaryKind::JavaClass);
+        }
+        let lower = name.to_ascii_lowercase();
+        if data.len() >= 4
+            && &data[2..4] == b"\r\n"
+            && (lower.ends_with(".pyc") || lower.ends_with(".pyo"))
+        {
+            return Some(BinaryKind::PythonBytecode);
+        }
+        if lower.ends_with(".jar") && data.starts_with(b"PK\x03\x04") {
+            return Some(BinaryKind::JavaArchive);
+        }
+        None
+    }
+
+    /// Inspect one file: flag it when it is itself a prebuilt binary,
+    /// otherwise walk it when it is an archive. `ctx` is the display path
+    /// (`outer.tar.gz: inner/file.o`); `depth` counts nested archives.
+    pub fn inspect_entry(
+        name: &str,
+        data: &[u8],
+        ctx: &str,
+        depth: u8,
+        hits: &mut Vec<(BinaryKind, String)>,
+    ) {
+        if let Some(kind) = classify(name, data) {
+            // A jar is reported as a unit; its classes are not listed
+            // separately — the jar is what the packager removes in %prep.
+            hits.push((kind, ctx.to_string()));
+        } else {
+            scan_archive(data, ctx, depth + 1, hits);
+        }
+    }
+
+    fn scan_archive(data: &[u8], ctx: &str, depth: u8, hits: &mut Vec<(BinaryKind, String)>) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        if data.starts_with(b"\x1f\x8b") {
+            if let Some(d) = decompress_gzip(data) {
+                scan_decompressed(&d, ctx, depth, hits);
+            }
+        } else if data.starts_with(b"\xfd7zXZ\x00") {
+            if let Some(d) = decompress_xz(data) {
+                scan_decompressed(&d, ctx, depth, hits);
+            }
+        } else if data.starts_with(b"\x28\xb5\x2f\xfd") {
+            if let Some(d) = decompress_zstd(data) {
+                scan_decompressed(&d, ctx, depth, hits);
+            }
+        } else if data.starts_with(b"PK\x03\x04") {
+            walk_zip(data, ctx, depth, hits);
+        } else if is_tar(data) {
+            walk_tar(data, ctx, depth, hits);
+        }
+        // Anything else (including bzip2, `BZh`) is opaque: skip silently.
+    }
+
+    /// A decompressed stream is either a tarball or a single file (e.g.
+    /// `prebuilt.o.gz` — the compressed file itself is the binary).
+    fn scan_decompressed(data: &[u8], ctx: &str, depth: u8, hits: &mut Vec<(BinaryKind, String)>) {
+        if is_tar(data) {
+            walk_tar(data, ctx, depth, hits);
+        } else if let Some(kind) = classify(ctx, data) {
+            hits.push((kind, ctx.to_string()));
+        }
+    }
+
+    fn is_tar(data: &[u8]) -> bool {
+        data.len() >= 512 && &data[257..262] == b"ustar"
+    }
+
+    fn walk_tar(data: &[u8], ctx: &str, depth: u8, hits: &mut Vec<(BinaryKind, String)>) {
+        for (name, off, len) in read_tar(data) {
+            let entry = &data[off..off + len];
+            inspect_entry(&name, entry, &format!("{ctx}: {name}"), depth, hits);
+        }
+    }
+
+    fn walk_zip(data: &[u8], ctx: &str, depth: u8, hits: &mut Vec<(BinaryKind, String)>) {
+        let mut archive = match zip::ZipArchive::new(std::io::Cursor::new(data)) {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        for i in 0..archive.len() {
+            let entry = match archive.by_index(i) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if !entry.is_file() {
+                continue;
+            }
+            let name = entry.name().to_string();
+            if entry.size() > MAX_ENTRY_BYTES as u64 {
+                continue;
+            }
+            let mut bytes = Vec::new();
+            if entry
+                .take(MAX_ENTRY_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .is_err()
+                || bytes.len() > MAX_ENTRY_BYTES
+            {
+                continue;
+            }
+            inspect_entry(&name, &bytes, &format!("{ctx}: {name}"), depth, hits);
+        }
+    }
+
+    /// Capped decompression: one byte past the cap means "too big".
+    fn capped<R: Read>(r: R) -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        if r.take(MAX_ARCHIVE_BYTES as u64 + 1)
+            .read_to_end(&mut out)
+            .is_err()
+            || out.len() > MAX_ARCHIVE_BYTES
+        {
+            return None;
+        }
+        Some(out)
+    }
+
+    fn decompress_gzip(data: &[u8]) -> Option<Vec<u8>> {
+        capped(flate2::read::GzDecoder::new(data))
+    }
+
+    fn decompress_xz(data: &[u8]) -> Option<Vec<u8>> {
+        capped(liblzma::read::XzDecoder::new(data))
+    }
+
+    fn decompress_zstd(data: &[u8]) -> Option<Vec<u8>> {
+        capped(zstd::stream::read::Decoder::new(data).ok()?)
+    }
+
+    /// Parse an octal field (tar size), strictly: only `[0-7]`, blank-padded.
+    /// Returns `None` on any other byte so corrupt headers stop the walk
+    /// instead of being guessed at.
+    fn parse_octal(field: &[u8]) -> Option<u64> {
+        let mut s = field;
+        while let Some((&b, rest)) = s.split_last() {
+            if b == 0 || b == b' ' {
+                s = rest;
+            } else {
+                break;
+            }
+        }
+        while let Some((&b, rest)) = s.split_first() {
+            if b == b' ' {
+                s = rest;
+            } else {
+                break;
+            }
+        }
+        if s.is_empty() {
+            return Some(0);
+        }
+        let mut v: u64 = 0;
+        for &b in s {
+            if !(b'0'..=b'7').contains(&b) {
+                return None;
+            }
+            v = v.checked_mul(8)?.checked_add((b - b'0') as u64)?;
+        }
+        Some(v)
+    }
+
+    fn header_str(hdr: &[u8], range: std::ops::Range<usize>) -> String {
+        let raw = &hdr[range];
+        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        String::from_utf8_lossy(&raw[..end]).into_owned()
+    }
+
+    /// Minimal ustar reader: `(name, data_offset, data_len)` for regular
+    /// files. Understands GNU long names (`L`); skips directories,
+    /// symlinks and pax headers with their data; stops at the first
+    /// corrupt header or the end-of-archive zero blocks. Entry sizes are
+    /// capped — oversized entries are skipped, not read.
+    fn read_tar(data: &[u8]) -> Vec<(String, usize, usize)> {
+        let mut out = Vec::new();
+        let mut pos = 0;
+        let mut long_name: Option<String> = None;
+        while pos + 512 <= data.len() {
+            let hdr = &data[pos..pos + 512];
+            if hdr.iter().all(|&b| b == 0) {
+                break;
+            }
+            let typeflag = hdr[156];
+            let size = match parse_octal(&hdr[124..136]) {
+                Some(s) => s,
+                None => break,
+            };
+            pos += 512;
+            // `div_ceil` on the raw size: skipping stays aligned even for
+            // entries too big to read.
+            let blocks = size.div_ceil(512).checked_mul(512);
+            let Some(blocks) = blocks else {
+                break;
+            };
+            let Ok(blocks) = usize::try_from(blocks) else {
+                break;
+            };
+            let data_end = pos.saturating_add(size.min(4096) as usize);
+            if typeflag == b'L' {
+                // GNU long name: the data is the next entry's name. Capped at
+                // 4 KiB: real paths never approach this; longer is corrupt or hostile.
+                if data_end <= data.len() {
+                    let raw = &data[pos..data_end];
+                    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+                    long_name = Some(String::from_utf8_lossy(&raw[..end]).into_owned());
+                }
+            } else if typeflag == b'0' || typeflag == 0 {
+                let name = match long_name.take() {
+                    Some(n) => n,
+                    None => {
+                        let mut name = header_str(hdr, 0..100);
+                        let prefix = header_str(hdr, 345..500);
+                        if !prefix.is_empty() {
+                            name = format!("{prefix}/{name}");
+                        }
+                        name
+                    }
+                };
+                let len = (size as usize).min(MAX_ENTRY_BYTES);
+                if size <= MAX_ENTRY_BYTES as u64 && pos + len <= data.len() {
+                    out.push((name, pos, len));
+                }
+            } else {
+                // Directories, symlinks, pax headers: a pending long name
+                // does not belong to them.
+                long_name = None;
+            }
+            pos = pos.saturating_add(blocks);
+            if pos > data.len() {
+                break;
+            }
+        }
+        out
     }
 }
 
@@ -365,6 +701,7 @@ impl Check for SourceCheck {
                 );
             }
         }
+        self.check_prebuilt_binaries(pkg, out);
     }
 
     fn reset(&mut self) {
@@ -679,5 +1016,370 @@ ValidSrcPerms = ["0o644", "0o755"]
         check.check_source(&pkg, &config, &mut out);
         let names: Vec<&str> = out.results().iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["inconsistent-file-extension"]);
+    }
+}
+
+#[cfg(test)]
+mod prebuilt_tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Minimal ustar writer for fixtures (test-only). Names must fit in 100
+    /// bytes; the production reader is what is under test.
+    fn tarball(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (name, data) in entries {
+            assert!(name.len() <= 100, "test tar writer: name too long");
+            let mut hdr = [0u8; 512];
+            hdr[..name.len()].copy_from_slice(name.as_bytes());
+            hdr[100..108].copy_from_slice(b"0000644\0");
+            let size = format!("{:011o}\0", data.len());
+            hdr[124..136].copy_from_slice(size.as_bytes());
+            hdr[156] = b'0';
+            hdr[257..262].copy_from_slice(b"ustar");
+            hdr[148..156].copy_from_slice(b"        ");
+            let sum: u32 = hdr.iter().map(|&b| b as u32).sum();
+            let sum_field = format!("{sum:06o}\0 ");
+            hdr[148..156].copy_from_slice(sum_field.as_bytes());
+            out.extend_from_slice(&hdr);
+            out.extend_from_slice(data);
+            out.extend(std::iter::repeat_n(0, (512 - data.len() % 512) % 512));
+        }
+        out.extend([0u8; 1024]);
+        out
+    }
+
+    fn gzip_bytes(data: &[u8]) -> Vec<u8> {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(data).unwrap();
+        enc.finish().unwrap()
+    }
+
+    fn zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        for (name, data) in entries {
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            archive.start_file(*name, options).unwrap();
+            archive.write_all(data).unwrap();
+        }
+        archive.finish().unwrap();
+        buf
+    }
+
+    // Magic-byte fixtures: detection is magic-based, so these carry the real
+    // signatures (a longer fake body proves only the head is inspected).
+    const ELF: &[u8] = b"\x7fELF\x02\x01\x01\x00fake-elf-binary-body";
+    const CLASS: &[u8] = b"\xca\xfe\xba\xbe\x00\x00\x00\x34fake-class-body";
+    const PYC: &[u8] = b"\xa6\xf3\x0d\x0afake-pyc-body";
+
+    /// Build a source RPM at test time (never a committed distro RPM) with
+    /// `files` at package-relative paths, then open it with real payload
+    /// extraction. The rpm crate's builder sets no SOURCERPM tag, so
+    /// `is_source` is forced like the reference derives it for .src.rpm.
+    fn source_pkg(files: &[(&str, Vec<u8>)]) -> (Pkg, tempfile::TempDir, tempfile::TempDir) {
+        use rpm::{BuildConfig, FileMode, FileOptions, PackageBuilder};
+        let src = tempfile::tempdir().unwrap();
+        let rpm_path = src.path().join("prebuilt-test-1.0-1.src.rpm");
+        let mut b = PackageBuilder::new("prebuilt-test", "1.0", "MIT", "x86_64", "prebuilt");
+        b.using_config(BuildConfig::default());
+        for (name, data) in files {
+            let dest = format!("/{name}");
+            b.with_file_contents(
+                data.clone(),
+                FileOptions::new(&dest).mode(FileMode::regular(0o644)),
+            )
+            .unwrap();
+        }
+        let built = b.build().unwrap();
+        built
+            .write(&mut std::fs::File::create(&rpm_path).unwrap())
+            .unwrap();
+        let extract = tempfile::tempdir().unwrap();
+        let mut pkg = Pkg::open(&rpm_path, extract.path(), true).expect("open test srpm");
+        // The rpm crate's builder emits a SOURCERPM tag, so force the
+        // source-package shape the reference derives for .src.rpm (a real
+        // source RPM has no SOURCERPM tag, relative file names and arch
+        // "src").
+        pkg.is_source = true;
+        pkg.arch = "src".to_string();
+        for f in &mut pkg.files {
+            f.name = f.name.trim_start_matches('/').to_string();
+        }
+        (pkg, src, extract)
+    }
+
+    fn test_config() -> Config {
+        let table: toml::Table =
+            toml::from_str("CompressExtension = \"gz\"\nValidSrcPerms = [\"0o644\", \"0o755\"]")
+                .expect("parse test config");
+        Config {
+            configuration: table,
+            ..Default::default()
+        }
+    }
+
+    /// Real emission path: `Check::check` dispatch on a source package with
+    /// a tarball → findings in the filter.
+    fn run_source(pkg: &Pkg) -> Vec<(String, String, Level)> {
+        use crate::color::Color;
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SourceCheck::new(&config);
+        Check::check(&mut check, pkg, &config, &mut out);
+        out.results()
+            .iter()
+            .zip(out.result_levels().iter())
+            .map(|((n, line), l)| (n.clone(), line.clone(), *l))
+            .collect()
+    }
+
+    fn prebuilt_lines(findings: &[(String, String, Level)]) -> Vec<String> {
+        let mut lines: Vec<String> = findings
+            .iter()
+            .filter(|(n, _, l)| n == "prebuilt-binary-in-sources" && *l == Level::Warning)
+            .map(|(_, line, _)| line.clone())
+            .collect();
+        lines.sort();
+        lines
+    }
+
+    #[test]
+    fn prebuilt_binaries_in_tarball_emit_through_dispatch() {
+        let inner = tarball(&[("nested/prebuilt2.o", ELF)]);
+        let jar = zip_bytes(&[("com/example/Foo.class", CLASS)]);
+        let tar = tarball(&[
+            ("src/prebuilt.o", ELF),
+            ("src/Foo.class", CLASS),
+            ("src/mod.pyc", PYC),
+            ("lib/nested.jar", &jar),
+            ("deep/inner.tar.gz", &gzip_bytes(&inner)),
+            ("src/main.c", b"int main(void) { return 0; }\n"),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("prebuilt-test-1.0.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        // Pinned output contract: every finding line content, byte-exact
+        // (order asserted sorted - the helper sorts before comparing).
+        assert_eq!(
+            prebuilt_lines(&findings),
+            [
+                "prebuilt-test.src: W: prebuilt-binary-in-sources \
+                 prebuilt-test-1.0.tar.gz: deep/inner.tar.gz: nested/prebuilt2.o ELF binary",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources \
+                 prebuilt-test-1.0.tar.gz: lib/nested.jar Java archive (jar)",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources \
+                 prebuilt-test-1.0.tar.gz: src/Foo.class Java class file",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources \
+                 prebuilt-test-1.0.tar.gz: src/mod.pyc Python bytecode",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources \
+                 prebuilt-test-1.0.tar.gz: src/prebuilt.o ELF binary",
+            ]
+        );
+    }
+
+    #[test]
+    fn prebuilt_clean_sources_are_silent() {
+        let tar = tarball(&[
+            ("src/main.c", b"int main(void) { return 0; }\n"),
+            ("src/util.h", b"#pragma once\n"),
+            ("README", b"hello\n"),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("prebuilt-test-1.0.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert!(prebuilt_lines(&findings).is_empty(), "all: {findings:?}");
+    }
+
+    #[test]
+    fn prebuilt_direct_object_in_srpm_is_flagged() {
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("prebuilt.o", ELF.to_vec()),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            ["prebuilt-test.src: W: prebuilt-binary-in-sources prebuilt.o ELF binary"]
+        );
+    }
+
+    #[test]
+    fn prebuilt_pyc_magic_without_name_is_silent() {
+        // bytes 2-3 are \r\n in every CPython version, but so are the
+        // first bytes of any CRLF text file: the .pyc/.pyo name is required.
+        let tar = tarball(&[("notes.txt", b"ab\r\nnot bytecode\n")]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("prebuilt-test-1.0.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert!(prebuilt_lines(&findings).is_empty(), "all: {findings:?}");
+    }
+
+    #[test]
+    fn prebuilt_bzip2_archive_skipped_silently() {
+        // No pure-Rust bzip2 decoder exists: the archive is skipped, not
+        // misread and not a panic.
+        let tar = tarball(&[("src/prebuilt.o", ELF)]);
+        let mut bz2 = b"BZh91".to_vec();
+        bz2.extend_from_slice(&tar);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("prebuilt-test-1.0.tar.bz2", bz2),
+        ]);
+        let findings = run_source(&pkg);
+        assert!(prebuilt_lines(&findings).is_empty(), "all: {findings:?}");
+    }
+
+    #[test]
+    fn prebuilt_corrupt_tar_does_not_panic() {
+        let mut bad = vec![0u8; 1024];
+        bad[257..262].copy_from_slice(b"ustar");
+        bad[124..136].copy_from_slice(b"not-octal!!!"); // corrupt size
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("prebuilt-test-1.0.tar", bad),
+        ]);
+        let findings = run_source(&pkg);
+        assert!(prebuilt_lines(&findings).is_empty(), "all: {findings:?}");
+    }
+
+    #[test]
+    fn prebuilt_nesting_depth_is_bounded() {
+        // Seven nested tars with an ELF at the bottom: past the depth limit,
+        // so silent (and terminating).
+        let mut data = ELF.to_vec();
+        for i in 0..7 {
+            data = tarball(&[(format!("level{i}.tar").as_str(), &data)]);
+        }
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("prebuilt-test-1.0.tar", data),
+        ]);
+        let findings = run_source(&pkg);
+        assert!(prebuilt_lines(&findings).is_empty(), "all: {findings:?}");
+    }
+
+    #[test]
+    fn prebuilt_jar_does_not_list_classes_inside() {
+        // The jar is the actionable unit; classes inside are not findings.
+        let jar = zip_bytes(&[
+            ("com/example/A.class", CLASS),
+            ("com/example/B.class", CLASS),
+        ]);
+        let tar = tarball(&[("lib/app.jar", &jar)]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("prebuilt-test-1.0.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            ["prebuilt-test.src: W: prebuilt-binary-in-sources \
+              prebuilt-test-1.0.tar.gz: lib/app.jar Java archive (jar)"]
+        );
+    }
+
+    #[test]
+    fn prebuilt_non_jar_zip_is_walked() {
+        // A plain zip (not a jar) is walked for prebuilt entries.
+        let z = zip_bytes(&[("payload.o", ELF), ("readme.txt", b"hi\n")]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("sources.zip", z),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            ["prebuilt-test.src: W: prebuilt-binary-in-sources sources.zip: payload.o ELF binary"]
+        );
+    }
+
+    #[test]
+    fn prebuilt_xz_tarball_is_walked() {
+        let tar = tarball(&[("src/prebuilt.o", ELF)]);
+        let mut xz = Vec::new();
+        {
+            use liblzma::write::XzEncoder;
+            let mut enc = XzEncoder::new(&mut xz, 6);
+            enc.write_all(&tar).unwrap();
+            enc.finish().unwrap();
+        }
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("prebuilt-test-1.0.tar.xz", xz),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            ["prebuilt-test.src: W: prebuilt-binary-in-sources \
+              prebuilt-test-1.0.tar.xz: src/prebuilt.o ELF binary"]
+        );
+    }
+
+    #[test]
+    fn prebuilt_zstd_tarball_is_walked() {
+        let tar = tarball(&[("src/prebuilt.o", ELF)]);
+        let zst = zstd::encode_all(&tar[..], 3).expect("zstd compress");
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test".to_vec()),
+            ("prebuilt-test-1.0.tar.zst", zst),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            [
+                "prebuilt-test.src: W: prebuilt-binary-in-sources prebuilt-test-1.0.tar.zst: src/prebuilt.o ELF binary"
+            ]
+        );
+    }
+
+    #[test]
+    fn prebuilt_unit_classify() {
+        use super::prebuilt::{BinaryKind, inspect_entry};
+        let mut hits = Vec::new();
+        inspect_entry("a.o", ELF, "a.o", 0, &mut hits);
+        assert_eq!(hits, [(BinaryKind::Elf, "a.o".to_string())]);
+        hits.clear();
+        inspect_entry("A.class", CLASS, "A.class", 0, &mut hits);
+        assert_eq!(hits, [(BinaryKind::JavaClass, "A.class".to_string())]);
+        hits.clear();
+        inspect_entry("m.pyc", PYC, "m.pyc", 0, &mut hits);
+        assert_eq!(hits, [(BinaryKind::PythonBytecode, "m.pyc".to_string())]);
+        // .pyo shares the pyc format.
+        hits.clear();
+        inspect_entry("m.pyo", PYC, "m.pyo", 0, &mut hits);
+        assert_eq!(hits, [(BinaryKind::PythonBytecode, "m.pyo".to_string())]);
+        // Text is never a binary, whatever its head bytes.
+        hits.clear();
+        inspect_entry("t.txt", b"ab\r\ncd", "t.txt", 0, &mut hits);
+        assert!(hits.is_empty());
+        // A zip that is not a jar is walked, not flagged.
+        hits.clear();
+        inspect_entry("a.zip", b"PK\x03\x04garbage", "a.zip", 0, &mut hits);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn prebuilt_unit_tar_reader() {
+        // A tar with a directory entry before the regular file: the dir
+        // entry is skipped, the file is reported.
+        let mut tar = tarball(&[("src/prebuilt.o", ELF)]);
+        let mut dir_hdr = [0u8; 512];
+        dir_hdr[..4].copy_from_slice(b"src/");
+        dir_hdr[156] = b'5';
+        dir_hdr[257..262].copy_from_slice(b"ustar");
+        let at = tar.len() - 1024; // before the end-of-archive zero blocks
+        tar.splice(at..at, dir_hdr.iter().cloned());
+        let mut hits = Vec::new();
+        super::prebuilt::inspect_entry("t.tar", &tar, "t.tar", 0, &mut hits);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].1.ends_with("src/prebuilt.o"));
     }
 }
