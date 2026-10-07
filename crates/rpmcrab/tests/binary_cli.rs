@@ -1118,7 +1118,7 @@ fn errors_only_unused_rpmlintrc_filter_names_skipped_check_finding() {
         "the skipped check's filter must audit as unused: {stdout}"
     );
 }
-/// `--explain`: staged `alternatives_check.toml` resolves `alternative-generic-name-not-symlink` instead of "Unknown message".
+/// `--explain`: staged `AlternativesCheck.toml` resolves `alternative-generic-name-not-symlink` instead of "Unknown message".
 #[test]
 fn explain_staged_alternatives_check() {
     let out = rpmcrab(&["-e", "alternative-generic-name-not-symlink"]);
@@ -1132,7 +1132,7 @@ fn explain_staged_alternatives_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `appdata_check.toml` resolves `invalid-appdata-file` instead of "Unknown message".
+/// `--explain`: staged `AppDataCheck.toml` resolves `invalid-appdata-file` instead of "Unknown message".
 #[test]
 fn explain_staged_appdata_check() {
     let out = rpmcrab(&["-e", "invalid-appdata-file"]);
@@ -1146,7 +1146,7 @@ fn explain_staged_appdata_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `bashisms_check.toml` resolves `bin-sh-syntax-error` instead of "Unknown message".
+/// `--explain`: staged `BashismsCheck.toml` resolves `bin-sh-syntax-error` instead of "Unknown message".
 #[test]
 fn explain_staged_bashisms_check() {
     let out = rpmcrab(&["-e", "bin-sh-syntax-error"]);
@@ -1160,7 +1160,7 @@ fn explain_staged_bashisms_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `branding_policy_check.toml` resolves `branding-conflicts-missing` instead of "Unknown message".
+/// `--explain`: staged `BrandingPolicyCheck.toml` resolves `branding-conflicts-missing` instead of "Unknown message".
 #[test]
 fn explain_staged_branding_policy_check() {
     let out = rpmcrab(&["-e", "branding-conflicts-missing"]);
@@ -1174,7 +1174,7 @@ fn explain_staged_branding_policy_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `build_root_and_date_check.toml` resolves `file-contains-current-date` instead of "Unknown message".
+/// `--explain`: staged `BuildRootAndDateCheck.toml` resolves `file-contains-current-date` instead of "Unknown message".
 #[test]
 fn explain_staged_build_root_and_date_check() {
     let out = rpmcrab(&["-e", "file-contains-current-date"]);
@@ -1188,7 +1188,7 @@ fn explain_staged_build_root_and_date_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `check_for_xinetd.toml` resolves `obsolete-xinetd-requirement` instead of "Unknown message".
+/// `--explain`: staged `CheckForXinetd.toml` resolves `obsolete-xinetd-requirement` instead of "Unknown message".
 #[test]
 fn explain_staged_check_for_xinetd() {
     let out = rpmcrab(&["-e", "obsolete-xinetd-requirement"]);
@@ -1202,7 +1202,7 @@ fn explain_staged_check_for_xinetd() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `dbus_policy_check.toml` resolves `dbus-policy-allow-without-destination` instead of "Unknown message".
+/// `--explain`: staged `DBusPolicyCheck.toml` resolves `dbus-policy-allow-without-destination` instead of "Unknown message".
 #[test]
 fn explain_staged_dbus_policy_check() {
     let out = rpmcrab(&["-e", "dbus-policy-allow-without-destination"]);
@@ -1216,7 +1216,7 @@ fn explain_staged_dbus_policy_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `doc_check.toml` resolves `executable-docs` instead of "Unknown message".
+/// `--explain`: staged `DocCheck.toml` resolves `executable-docs` instead of "Unknown message".
 #[test]
 fn explain_staged_doc_check() {
     let out = rpmcrab(&["-e", "executable-docs"]);
@@ -1229,7 +1229,7 @@ fn explain_staged_doc_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `duplicates_check.toml` resolves `files-duplicate` instead of "Unknown message".
+/// `--explain`: staged `DuplicatesCheck.toml` resolves `files-duplicate` instead of "Unknown message".
 #[test]
 fn explain_staged_duplicates_check() {
     let out = rpmcrab(&["-e", "files-duplicate"]);
@@ -1243,7 +1243,7 @@ fn explain_staged_duplicates_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `erlang_check.toml` resolves `beam-compile-info-missed` instead of "Unknown message".
+/// `--explain`: staged `ErlangCheck.toml` resolves `beam-compile-info-missed` instead of "Unknown message".
 #[test]
 fn explain_staged_erlang_check() {
     let out = rpmcrab(&["-e", "beam-compile-info-missed"]);
@@ -1256,7 +1256,7 @@ fn explain_staged_erlang_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `file_digest_check.toml` resolves `cron-file-unauthorized` instead of "Unknown message".
+/// `--explain`: staged `FileDigestCheck.toml` resolves `cron-file-unauthorized` instead of "Unknown message".
 #[test]
 fn explain_staged_file_digest_check() {
     let out = rpmcrab(&["-e", "cron-file-unauthorized"]);
@@ -1270,7 +1270,7 @@ fn explain_staged_file_digest_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `file_metadata_check.toml` resolves `device-unauthorized-file` instead of "Unknown message".
+/// `--explain`: staged `FileMetadataCheck.toml` resolves `device-unauthorized-file` instead of "Unknown message".
 #[test]
 fn explain_staged_file_metadata_check() {
     let out = rpmcrab(&["-e", "device-unauthorized-file"]);
@@ -1284,7 +1284,7 @@ fn explain_staged_file_metadata_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `filelist_check.toml` resolves `filelist-forbidden` instead of "Unknown message".
+/// `--explain`: staged `FilelistCheck.toml` resolves `filelist-forbidden` instead of "Unknown message".
 #[test]
 fn explain_staged_filelist_check() {
     let out = rpmcrab(&["-e", "filelist-forbidden"]);
@@ -1297,7 +1297,7 @@ fn explain_staged_filelist_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `files_check.toml` resolves `no-documentation` instead of "Unknown message".
+/// `--explain`: staged `FilesCheck.toml` resolves `no-documentation` instead of "Unknown message".
 #[test]
 fn explain_staged_files_check() {
     let out = rpmcrab(&["-e", "no-documentation"]);
@@ -1311,7 +1311,7 @@ fn explain_staged_files_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `kmp_policy_check.toml` resolves `kmp-missing-requires` instead of "Unknown message".
+/// `--explain`: staged `KMPPolicyCheck.toml` resolves `kmp-missing-requires` instead of "Unknown message".
 #[test]
 fn explain_staged_kmp_policy_check() {
     let out = rpmcrab(&["-e", "kmp-missing-requires"]);
@@ -1325,7 +1325,7 @@ fn explain_staged_kmp_policy_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `lsb_check.toml` resolves `non-lsb-compliant-package-name` instead of "Unknown message".
+/// `--explain`: staged `LSBCheck.toml` resolves `non-lsb-compliant-package-name` instead of "Unknown message".
 #[test]
 fn explain_staged_lsb_check() {
     let out = rpmcrab(&["-e", "non-lsb-compliant-package-name"]);
@@ -1339,7 +1339,7 @@ fn explain_staged_lsb_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `logrotate_check.toml` resolves `logrotate-log-dir-not-packaged` instead of "Unknown message".
+/// `--explain`: staged `LogrotateCheck.toml` resolves `logrotate-log-dir-not-packaged` instead of "Unknown message".
 #[test]
 fn explain_staged_logrotate_check() {
     let out = rpmcrab(&["-e", "logrotate-log-dir-not-packaged"]);
@@ -1353,7 +1353,7 @@ fn explain_staged_logrotate_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `menu_check.toml` resolves `non-file-in-menu-dir` instead of "Unknown message".
+/// `--explain`: staged `MenuCheck.toml` resolves `non-file-in-menu-dir` instead of "Unknown message".
 #[test]
 fn explain_staged_menu_check() {
     let out = rpmcrab(&["-e", "non-file-in-menu-dir"]);
@@ -1367,7 +1367,7 @@ fn explain_staged_menu_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `menu_xdg_check.toml` resolves `invalid-desktopfile` instead of "Unknown message".
+/// `--explain`: staged `MenuXDGCheck.toml` resolves `invalid-desktopfile` instead of "Unknown message".
 #[test]
 fn explain_staged_menu_xdg_check() {
     let out = rpmcrab(&["-e", "invalid-desktopfile"]);
@@ -1381,7 +1381,7 @@ fn explain_staged_menu_xdg_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `pkg_config_check.toml` resolves `invalid-pkgconfig-file` instead of "Unknown message".
+/// `--explain`: staged `PkgConfigCheck.toml` resolves `invalid-pkgconfig-file` instead of "Unknown message".
 #[test]
 fn explain_staged_pkg_config_check() {
     let out = rpmcrab(&["-e", "invalid-pkgconfig-file"]);
@@ -1395,7 +1395,7 @@ fn explain_staged_pkg_config_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `polkit_check.toml` resolves `polkit-user-privilege` instead of "Unknown message".
+/// `--explain`: staged `PolkitCheck.toml` resolves `polkit-user-privilege` instead of "Unknown message".
 #[test]
 fn explain_staged_polkit_check() {
     let out = rpmcrab(&["-e", "polkit-user-privilege"]);
@@ -1409,7 +1409,7 @@ fn explain_staged_polkit_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `python_check.toml` resolves `python-doc-in-package` instead of "Unknown message".
+/// `--explain`: staged `PythonCheck.toml` resolves `python-doc-in-package` instead of "Unknown message".
 #[test]
 fn explain_staged_python_check() {
     let out = rpmcrab(&["-e", "python-doc-in-package"]);
@@ -1423,7 +1423,7 @@ fn explain_staged_python_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `selinux_independent_module_check.toml` resolves `selinux-incorrect-if-file-location` instead of "Unknown message".
+/// `--explain`: staged `SELinuxIndependentModuleCheck.toml` resolves `selinux-incorrect-if-file-location` instead of "Unknown message".
 #[test]
 fn explain_staged_selinux_independent_module_check() {
     let out = rpmcrab(&["-e", "selinux-incorrect-if-file-location"]);
@@ -1437,7 +1437,7 @@ fn explain_staged_selinux_independent_module_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `suid_permissions_check.toml` resolves `permissions-symlink` instead of "Unknown message".
+/// `--explain`: staged `SUIDPermissionsCheck.toml` resolves `permissions-symlink` instead of "Unknown message".
 #[test]
 fn explain_staged_suid_permissions_check() {
     let out = rpmcrab(&["-e", "permissions-symlink"]);
@@ -1451,7 +1451,7 @@ fn explain_staged_suid_permissions_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `shared_library_policy_check.toml` resolves `shlib-policy-missing-lib` instead of "Unknown message".
+/// `--explain`: staged `SharedLibraryPolicyCheck.toml` resolves `shlib-policy-missing-lib` instead of "Unknown message".
 #[test]
 fn explain_staged_shared_library_policy_check() {
     let out = rpmcrab(&["-e", "shlib-policy-missing-lib"]);
@@ -1465,7 +1465,7 @@ fn explain_staged_shared_library_policy_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `signature_check.toml` resolves `no-signature` instead of "Unknown message".
+/// `--explain`: staged `SignatureCheck.toml` resolves `no-signature` instead of "Unknown message".
 #[test]
 fn explain_staged_signature_check() {
     let out = rpmcrab(&["-e", "no-signature"]);
@@ -1479,7 +1479,7 @@ fn explain_staged_signature_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `spec_check.toml` resolves `no-spec-file` instead of "Unknown message".
+/// `--explain`: staged `SpecCheck.toml` resolves `no-spec-file` instead of "Unknown message".
 #[test]
 fn explain_staged_spec_check() {
     let out = rpmcrab(&["-e", "no-spec-file"]);
@@ -1493,7 +1493,7 @@ fn explain_staged_spec_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `sysv_init_on_systemd_check.toml` resolves `obsolete-insserv-requirement` instead of "Unknown message".
+/// `--explain`: staged `SysVInitOnSystemdCheck.toml` resolves `obsolete-insserv-requirement` instead of "Unknown message".
 #[test]
 fn explain_staged_sysv_init_on_systemd_check() {
     let out = rpmcrab(&["-e", "obsolete-insserv-requirement"]);
@@ -1507,7 +1507,7 @@ fn explain_staged_sysv_init_on_systemd_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `systemd_install_check.toml` resolves `systemd-service-without-service_add_pre` instead of "Unknown message".
+/// `--explain`: staged `SystemdInstallCheck.toml` resolves `systemd-service-without-service_add_pre` instead of "Unknown message".
 #[test]
 fn explain_staged_systemd_install_check() {
     let out = rpmcrab(&["-e", "systemd-service-without-service_add_pre"]);
@@ -1521,7 +1521,7 @@ fn explain_staged_systemd_install_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `systemd_tmpfiles_check.toml` resolves `systemd-tmpfile-ghost` instead of "Unknown message".
+/// `--explain`: staged `SystemdTmpfilesCheck.toml` resolves `systemd-tmpfile-ghost` instead of "Unknown message".
 #[test]
 fn explain_staged_systemd_tmpfiles_check() {
     let out = rpmcrab(&["-e", "systemd-tmpfile-ghost"]);
@@ -1535,7 +1535,7 @@ fn explain_staged_systemd_tmpfiles_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `tags_check.toml` resolves `invalid-version` instead of "Unknown message".
+/// `--explain`: staged `TagsCheck.toml` resolves `invalid-version` instead of "Unknown message".
 #[test]
 fn explain_staged_tags_check() {
     let out = rpmcrab(&["-e", "invalid-version"]);
@@ -1549,7 +1549,7 @@ fn explain_staged_tags_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `tmpfiles_check.toml` resolves `pre-with-tmpfile-creation` instead of "Unknown message".
+/// `--explain`: staged `TmpFilesCheck.toml` resolves `pre-with-tmpfile-creation` instead of "Unknown message".
 #[test]
 fn explain_staged_tmpfiles_check() {
     let out = rpmcrab(&["-e", "pre-with-tmpfile-creation"]);
