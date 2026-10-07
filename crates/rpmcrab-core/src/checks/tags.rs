@@ -2501,6 +2501,23 @@ mod tests {
         );
         assert!(hits[0].1.contains("%changelog"), "line: {}", hits[0].1);
     }
+
+    /// Negative pin for the deleted `not-standard-release-extension` finding:
+    /// the port must stay silent where the reference would fire, and
+    /// `cargo test` (not just the reference-coverage auditor) must catch
+    /// a re-add.
+    #[test]
+    fn killed_not_standard_release_extension_stays_absent() {
+        // The deleted test drove ReleaseExtension='hello$' on fcprobe; the
+        // release no longer warns.
+        let (_tmp, pkg) = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        let config = test_config_with(Some("hello$"));
+        let results = run_check_with(&config, &pkg);
+        assert!(
+            tag_hits(&results, "not-standard-release-extension").is_empty(),
+            "must stay silent: {results:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2602,6 +2619,21 @@ mod rich_dep_emission_tests {
         assert_eq!(
             results[1].1, "i18n-two-locale.noarch: W: invalid-license MIT",
             "level and detail pinned on the rendered line"
+        );
+    }
+
+    /// Explicit negative pin for the deleted `no-packager-tag` finding:
+    /// i18n-two-locale ships no Packager tag, so the exact-list assertion
+    /// above already pins the absence; this names it for the auditor.
+    #[test]
+    fn killed_no_packager_tag_stays_absent() {
+        let pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
+        let mut config = rich_test_config(&[], false);
+        config.mini_mode = true;
+        let results = run(&pkg, &config);
+        assert!(
+            !results.iter().any(|(n, _)| n == "no-packager-tag"),
+            "must stay silent: {results:?}"
         );
     }
 

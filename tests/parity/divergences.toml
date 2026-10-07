@@ -430,6 +430,13 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "SignatureCheck"
+kind = "behaviour"
+reason = "The any-signature regex is widened to `[Ss]ignature|\\(sha1\\) dsa|\\(sha1\\) rsa` (the reference only matches `[Ss]ignature, key ID`), so `no-signature` fires less often on old-style `rpm -Kv` output lines."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "LibraryDependencyCheck"
 kind = "behaviour"
 reason = "Deliberate fix (plusky/rpmcrab#74): the per-package maps are keyed on `(name, arch)` instead of `pkg.name` alone. The reference keys on name alone (`LibraryDependencyCheck.py:37-39`), so linting `foo-devel.x86_64` then `foo-devel.aarch64` together silently drops the first arch — only the last arch is ever checked, and no user would want that. The port checks each arch. Pinned by `cross_arch_packages_are_each_checked`."
@@ -499,6 +506,13 @@ case = "global"
 check = "FileDigestCheck"
 kind = "detail"
 reason = "FileDigestCheck drops the `({digest_hint})` detail argument on `{type}-file-unauthorized` findings; the reference appends the observed per-digester digests of the offending file."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SignatureCheck"
+kind = "behaviour"
+reason = "The any-signature regex is widened to `[Ss]ignature|\\(sha1\\) dsa|\\(sha1\\) rsa` (the reference only matches `[Ss]ignature, key ID`), so `no-signature` fires less often on old-style `rpm -Kv` output lines. As a consequence the reference's `no-signature` + `invalid-signature` pair is unreachable here: any output matching `invalid OpenPGP signature` also matches the widened regex, so `no-signature` never fires alongside it."
 since = "0.1.0"
 
 [[divergence]]
@@ -753,7 +767,7 @@ since = "0.1.0"
 case = "global"
 check = "TagsCheck"
 kind = "behaviour"
-reason = "The bundled ReleaseExtension default is the per-distro %{?dist} suffix catalog (fedora/rhel/eln/mageia/amazon linux/openEuler/elrepo/suse); the reference still ships an empty default. rpmcrab therefore tolerates known dist suffixes in the changelog version comparison, where the current reference does neither. Under the pinned openSUSE flavour the new finding is suppressed by opensuse.toml:66; of the 20 committed parity cases, the 11 whose footer matched on `gh-main` are each exactly +1 filtered over the frozen expected/stdout (e.g. `6 filtered` vs `5 filtered`); the other 9 were already off on `gh-main` and are unchanged. Across the 33 corpus RPMs no finding name, order, severity or detail differs."
+reason = "The bundled ReleaseExtension default is the per-distro %{?dist} suffix catalog (fedora/rhel/eln/mageia/amazon linux/openEuler/elrepo/suse); the reference still ships an empty default. rpmcrab therefore warns not-standard-release-extension on releases without a known dist suffix and tolerates known suffixes in the changelog version comparison, where the current reference does neither. Under the pinned openSUSE flavour the new finding is suppressed by opensuse.toml:66; of the 20 committed parity cases, the 11 whose footer matched on `gh-main` are each exactly +1 filtered over the frozen expected/stdout (e.g. `6 filtered` vs `5 filtered`); the other 9 were already off on `gh-main` and are unchanged. Across the 33 corpus RPMs no finding name, order, severity or detail differs."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/pull/1608"
 
@@ -1157,23 +1171,9 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "not-standard-release-extension"
-kind = "missing"
-reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs as autobuild redundancy (the build systems enforce release-tag hygiene, so the lint can never be actionable in a pipeline). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its in-code `--explain` detail, and the dedicated tests are removed; a negative pin in the TagsCheck tests keeps the absence pinned under `cargo test`. The `ReleaseExtension` catalog stays: it still tolerates dist suffixes in the changelog version comparison. The reference still emits it.
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "FilesCheck"
 kind = "detail"
 reason = "Port-only `--explain` descriptions for `debug-files-in-non-debug-package`, `infopage-not-compressed`, `kernel-modules-not-in-kernel-packages`, `manpage-not-compressed`, `mimeinfo-cache-packaged`, `no-dependency-on`, `noarch-python-in-64bit-path`, `symlink-contains-up-and-down-segments`, `symlink-has-too-many-up-segments`, `symlink-should-be-absolute`, `zero-length`: the reference emits these findings but ships no descriptions."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "executable-in-library-package"
-kind = "missing"
-reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs (Fedora enables SharedLibraryPolicyCheck but filters this diagnostic, enforcing the policy in the build pipeline instead). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; a negative pin in the BinariesCheck tests keeps the absence pinned under `cargo test`. The reference still emits it.
 since = "0.1.0"
 
 [[divergence]]
@@ -1185,23 +1185,9 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "non-versioned-file-in-library-package"
-kind = "missing"
-reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs (Fedora enables SharedLibraryPolicyCheck but filters this diagnostic, enforcing the policy in the build pipeline instead). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; a negative pin in the BinariesCheck tests keeps the absence pinned under `cargo test`. The reference still emits it.
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "AlternativesCheck"
 kind = "detail"
 reason = "Port-only `--explain` descriptions for `double-entries`, `package-supports-libalternatives`, `package-supports-update-alternatives`: the reference emits these findings but ships no descriptions."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "no-packager-tag"
-kind = "missing"
-reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs as pure build-pipeline redundancy (Fedora copied openSUSE's autobuild rationale verbatim; the build system stamps the packager itself). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; the exact-list TagsCheck fixture test keeps the absence pinned under `cargo test`. The reference still emits it.
 since = "0.1.0"
 
 [[divergence]]
@@ -1259,6 +1245,33 @@ check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
 since = "0.1.0"
+[[divergence]]
+case = "global"
+check = "not-standard-release-extension"
+kind = "missing"
+reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs as autobuild redundancy (the build systems enforce release-tag hygiene, so the lint can never be actionable in a pipeline). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its in-code `--explain` detail, and the dedicated tests are removed; a negative pin in the TagsCheck tests keeps the absence pinned under `cargo test`. The `ReleaseExtension` catalog stays: it still tolerates dist suffixes in the changelog version comparison. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "executable-in-library-package"
+kind = "missing"
+reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs (Fedora enables SharedLibraryPolicyCheck but filters this diagnostic, enforcing the policy in the build pipeline instead). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; a negative pin in the BinariesCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "non-versioned-file-in-library-package"
+kind = "missing"
+reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs (Fedora enables SharedLibraryPolicyCheck but filters this diagnostic, enforcing the policy in the build pipeline instead). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; a negative pin in the BinariesCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "no-packager-tag"
+kind = "missing"
+reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs as pure build-pipeline redundancy (Fedora copied openSUSE's autobuild rationale verbatim; the build system stamps the packager itself). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; the exact-list TagsCheck fixture test keeps the absence pinned under `cargo test`. The reference still emits it."
+since = "0.1.0"
 
 [[divergence]]
 case = "global"
@@ -1300,5 +1313,6 @@ since = "0.1.0"
 case = "global"
 check = "no-signature"
 kind = "missing"
-reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs. Koji signs after the build, so every build-pipeline RPM is unsigned at lint time and the finding can never be actionable there. The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; a negative pin in the SignatureCheck tests keeps the absence pinned under `cargo test`. The reference still emits it.
+reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs. Koji signs after the build, so every build-pipeline RPM is unsigned at lint time and the finding can never be actionable there. The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; a negative pin in the SignatureCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
 since = "0.1.0"
+

@@ -4061,4 +4061,33 @@ description = "explicit priority string bypasses the system crypto policy"
             "findings must be identical under 1-thread and 4-thread pre-pass"
         );
     }
+    /// Negative pins for the deleted autobuild-redundant findings
+    /// (`executable-in-library-package`, `non-versioned-file-in-library-package`):
+    /// the fixture carries a real shared library plus an executable and an
+    /// unversioned data file -- the shape that fired pre-removal -- so
+    /// re-adding either emission fails here under plain `cargo test`.
+    #[test]
+    fn killed_library_package_findings_stay_absent() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let so_path = dir.path().join("libfoo.so");
+        std::fs::write(&so_path, craft_shlib_elf(false, None)).expect("write so");
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        let mut so_file = syn_file("/usr/lib64/libfoo.so", "ELF 64-bit LSB shared object");
+        so_file.path = so_path.to_str().unwrap().to_string();
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![
+                so_file,
+                syn_file("/usr/bin/foo", "ELF 64-bit LSB executable"),
+                syn_file("/usr/lib64/README", "ASCII text"),
+            ],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        assert_lacks(&results, "executable-in-library-package");
+        assert_lacks(&results, "non-versioned-file-in-library-package");
+    }
 }

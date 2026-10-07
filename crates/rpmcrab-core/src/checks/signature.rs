@@ -264,4 +264,19 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+    /// Negative pin for the deleted `no-signature` finding: an unsigned RPM
+    /// must stay silent, and `cargo test` (not just the reference-coverage
+    /// auditor) must catch a re-add.
+    #[test]
+    fn killed_no_signature_stays_absent() {
+        let dir = tmpdir("rpmcrab-sig-nosig-absent");
+        let rpm = fake_rpm(&dir, "rpm", "test.rpm: digests OK", 0);
+        let pkg = fixture_pkg();
+        let results = run_check(&pkg, &rpm);
+        assert!(
+            !results.iter().any(|(n, _)| n == "no-signature"),
+            "must stay silent: {results:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
