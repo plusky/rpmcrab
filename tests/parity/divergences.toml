@@ -1145,6 +1145,7 @@ check = "SpecCheck"
 kind = "behaviour"
 reason = "A new port-only `obsolete-tmpfiles-macro` warning flags `%tmpfiles_create` / `%tmpfiles_create_package` calls in spec scriptlets. Both macros have been no-ops since systemd-rpm-macros rev 102 (June 2023): tmpfiles.d entries are created by the systemd package's file triggers at install time, and upstream rpmlint deleted its `post-without-tmpfile-creation` check (commit 1c04a49d, Aug 2025) rather than flagging them. The check runs at spec level because built RPMs can never contain the expanded macro, and its `--explain` description is registered in code like the reference's other SpecCheck descriptions."
 since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/1374"
 
 [[divergence]]
 case = "global"
