@@ -212,6 +212,11 @@ impl SourceCheck {
 /// ustar reader, and capped in-memory decompression. bzip2 is not decoded
 /// (no pure-Rust decoder exists — the same limitation as native payload
 /// extraction, ledgered there); bzip2 archives are skipped silently.
+///
+/// Scope choices: only ustar tarballs are recognized - pre-POSIX V7 format
+/// has no magic bytes and is skipped - and of the zip-based Java archives
+/// only `.jar` is reported as a unit; `.war`/`.ear`/`.aar` are walked like
+/// plain zips, their classes listed individually.
 mod prebuilt {
     use std::io::Read;
 
@@ -455,7 +460,8 @@ mod prebuilt {
             };
             let data_end = pos.saturating_add(size.min(4096) as usize);
             if typeflag == b'L' {
-                // GNU long name: the data is the next entry's name.
+                // GNU long name: the data is the next entry's name. Capped at
+                // 4 KiB: real paths never approach this; longer is corrupt or hostile.
                 if data_end <= data.len() {
                     let raw = &data[pos..data_end];
                     let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
@@ -1156,7 +1162,8 @@ mod prebuilt_tests {
             ("prebuilt-test-1.0.tar.gz", gzip_bytes(&tar)),
         ]);
         let findings = run_source(&pkg);
-        // Pinned output contract: every finding, byte-exact.
+        // Pinned output contract: every finding line content, byte-exact
+        // (order asserted sorted - the helper sorts before comparing).
         assert_eq!(
             prebuilt_lines(&findings),
             [
@@ -1313,6 +1320,23 @@ mod prebuilt_tests {
             prebuilt_lines(&findings),
             ["prebuilt-test.src: W: prebuilt-binary-in-sources \
               prebuilt-test-1.0.tar.xz: src/prebuilt.o ELF binary"]
+        );
+    }
+
+    #[test]
+    fn prebuilt_zstd_tarball_is_walked() {
+        let tar = tarball(&[("src/prebuilt.o", ELF)]);
+        let zst = zstd::encode_all(&tar[..], 3).expect("zstd compress");
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test".to_vec()),
+            ("prebuilt-test-1.0.tar.zst", zst),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            [
+                "prebuilt-test.src: W: prebuilt-binary-in-sources prebuilt-test-1.0.tar.zst: src/prebuilt.o ELF binary"
+            ]
         );
     }
 
