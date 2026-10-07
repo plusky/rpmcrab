@@ -118,14 +118,6 @@ nodigests = [
 ]
 
 [[FileDigestGroup]]
-package = "pam_userpass"
-type = "pam"
-note = "legacy: not audited"
-nodigests = [
-    "glob:*/security/pam_userpass.so",
-]
-
-[[FileDigestGroup]]
 package = "pam_apparmor"
 type = "pam"
 note = "legacy: not audited"
@@ -578,11 +570,3 @@ nodigests = [
     "glob:*/security/pam_unix_ng.so"
 ]
 
-[[FileDigestGroup]]
-package  = "pam-ssh-agent"
-note     = "authentication via SSH public keys"
-bug      = "bsc#1274633"
-type     = "pam"
-nodigests = [
-    "glob:*/security/pam_ssh_agent.so"
-]

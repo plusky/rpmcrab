@@ -4,7 +4,8 @@
 Copies ``configs/openSUSE/*.toml`` from the pinned upstream rpmlint commits
 into ``crates/rpmcrab-core/data/distro/<flavor>/``, prunes ``Filters`` /
 ``BlockedFilters`` entries that reference findings rpmcrab no longer emits,
-and stamps provenance.
+drops whitelist stanzas for packages gone from Tumbleweed/SLE 16 and stale
+pie-executables paths, and stamps provenance.
 
 The checked-in files are the build's source of truth; this script runs by hand
 and in CI (drift check + monthly refresh), never at build time.
@@ -35,6 +36,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
+import urllib.error
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -109,6 +111,136 @@ PRUNE_CANDIDATES = {
     "module-without-depmod-postun": "killed: KMP macro template calls depmod (bnc#456048)",
     "postin-with-wrong-depmod": "killed: no manual depmod in scriptlets (bnc#456048)",
     "postun-with-wrong-depmod": "killed: no manual depmod in scriptlets (bnc#456048)",
+}
+
+# Packages gone from the distros: whitelist stanzas naming them are pruned.
+# A stanza is pruned only when the package is actually absent from the
+# flavor's codebase (openSUSE:Factory for the opensuse flavor,
+# openSUSE:Leap:16.0 for the slfo flavor — checked live at generation time),
+# so the vendored config always matches reality. A package that reappears is
+# kept and logged — reintroduced software gets a fresh audit, never a silent
+# free pass on a stale stanza.
+PRUNE_PACKAGES = {
+    # package: reason
+    "snapd": "removed from Factory (bsc#1256175, bsc#1248682, bsc#1261739)",
+    "lxd": "removed from Factory after the Canonical license change (replaced by incus); still in SLE 16, kept there",
+    "nscd": "removed from Factory and SLE 16 (use the system resolver)",
+    "foomuuri": "removed from Factory (bsc#1254385)",
+    "foomuuri-firewalld": "removed from Factory (bsc#1254385)",
+    "sddm-kalpa": "removed from Factory (bsc#1232647)",
+    "txnupd-maintenance-tools": "removed from Factory (bsc#1268577)",
+    "pam-ssh-agent": "removed from Factory (bsc#1274633)",
+    "pam_userpass": "removed from Factory; legacy: not audited",
+    "deepin-api": "removed from Factory (security removal); not in SLE 16",
+    "kcm_sddm": "removed from Factory; renamed to sddm-kcm6, not in SLE 16 under the old name",
+    "passim": "removed from Factory; not in SLE 16",
+    "scmon": "removed from Factory; legacy: not audited",
+    "pam_csync": "removed from Factory; legacy: not audited",
+    "pcfclock": "removed from Factory; not in SLE 16",
+}
+
+# Stale pie-executables paths: each entry carries removal evidence like
+# PRUNE_PACKAGES does. "removed from Factory" means the owning package is
+# gone (OBS source API 404); "moved" entries name the new path. Verified
+# 2026-10-07 against openSUSE:Factory.
+PRUNE_PIE_PATHS = {
+    "/usr/bin/achfile": "netatalk removed from Factory",
+    "/usr/bin/adv1tov2": "netatalk removed from Factory",
+    "/usr/bin/aecho": "netatalk removed from Factory",
+    "/usr/bin/afile": "netatalk removed from Factory",
+    "/usr/bin/afppasswd": "netatalk removed from Factory",
+    "/usr/bin/cnid_index": "netatalk removed from Factory",
+    "/usr/bin/dund": "BlueZ 4 tool, removed in BlueZ 5",
+    "/usr/bin/finger": "finger removed from Factory",
+    "/usr/bin/getzones": "netatalk removed from Factory",
+    "/usr/bin/hidd": "BlueZ 4 tool, removed in BlueZ 5",
+    "/usr/bin/lppasswd": "cups dropped the 1.x tools",
+    "/usr/bin/megatron": "netatalk removed from Factory",
+    "/usr/bin/nbplkup": "netatalk removed from Factory",
+    "/usr/bin/nbprgstr": "netatalk removed from Factory",
+    "/usr/bin/nbpunrgstr": "netatalk removed from Factory",
+    "/usr/bin/ncplogin": "ncpfs removed from Factory",
+    "/usr/bin/ncpmap": "ncpfs removed from Factory",
+    "/usr/bin/nwsfind": "ncpfs removed from Factory",
+    "/usr/bin/pand": "BlueZ 4 tool, removed in BlueZ 5",
+    "/usr/bin/pap": "netatalk removed from Factory",
+    "/usr/bin/papstatus": "netatalk removed from Factory",
+    "/usr/bin/psorder": "cups dropped the 1.x tools",
+    "/usr/bin/rcp": "rsh removed from Factory",
+    "/usr/bin/rexec": "rsh removed from Factory",
+    "/usr/bin/rlogin": "rsh removed from Factory",
+    "/usr/bin/rsh": "rsh removed from Factory",
+    "/usr/bin/showppd": "cups dropped the 1.x tools",
+    "/usr/bin/testprns": "cups dropped the 1.x tools",
+    "/usr/lib/mit/bin/gss-client": "krb5 installs to /usr/bin, not /usr/lib/mit",
+    "/usr/lib/mit/bin/kdestroy": "krb5 installs to /usr/bin, not /usr/lib/mit",
+    "/usr/lib/mit/bin/kinit": "krb5 installs to /usr/bin, not /usr/lib/mit",
+    "/usr/lib/mit/bin/klist": "krb5 installs to /usr/bin, not /usr/lib/mit",
+    "/usr/lib/mit/bin/kpasswd": "krb5 installs to /usr/bin, not /usr/lib/mit",
+    "/usr/lib/mit/bin/krb524init": "krb5 installs to /usr/bin, not /usr/lib/mit",
+    "/usr/lib/mit/bin/ksu": "krb5 installs to /usr/bin, not /usr/lib/mit",
+    "/usr/lib/mit/bin/kvno": "krb5 installs to /usr/bin, not /usr/lib/mit",
+    "/usr/lib/mit/bin/sclient": "krb5 installs to /usr/bin, not /usr/lib/mit",
+    "/usr/lib/mit/bin/sim_client": "krb5 installs to /usr/bin, not /usr/lib/mit",
+    "/usr/lib/mit/bin/uuclient": "krb5 installs to /usr/bin, not /usr/lib/mit",
+    "/usr/lib/mit/bin/v4rcp": "krb5 installs to /usr/bin, not /usr/lib/mit",
+    "/usr/lib/mit/sbin/gss-server": "krb5 installs to /usr/sbin, not /usr/lib/mit",
+    "/usr/lib/mit/sbin/kadmin": "krb5 installs to /usr/sbin, not /usr/lib/mit",
+    "/usr/lib/mit/sbin/kadmin.local": "krb5 installs to /usr/sbin, not /usr/lib/mit",
+    "/usr/lib/mit/sbin/kadmind": "krb5 installs to /usr/sbin, not /usr/lib/mit",
+    "/usr/lib/mit/sbin/kdb5_util": "krb5 installs to /usr/sbin, not /usr/lib/mit",
+    "/usr/lib/mit/sbin/kprop": "krb5 installs to /usr/sbin, not /usr/lib/mit",
+    "/usr/lib/mit/sbin/kpropd": "krb5 installs to /usr/sbin, not /usr/lib/mit",
+    "/usr/lib/mit/sbin/krb524d": "krb5 installs to /usr/sbin, not /usr/lib/mit",
+    "/usr/lib/mit/sbin/krb5kdc": "krb5 installs to /usr/sbin, not /usr/lib/mit",
+    "/usr/lib/mit/sbin/ktutil": "krb5 installs to /usr/sbin, not /usr/lib/mit",
+    "/usr/lib/mit/sbin/sim_server": "krb5 installs to /usr/sbin, not /usr/lib/mit",
+    "/usr/lib/mit/sbin/sserver": "krb5 installs to /usr/sbin, not /usr/lib/mit",
+    "/usr/lib/mit/sbin/uuserver": "krb5 installs to /usr/sbin, not /usr/lib/mit",
+    "/usr/lib/news/bin/innbind": "inn moved to /usr/libexec",
+    "/usr/lib/news/bin/innd": "inn moved to /usr/libexec",
+    "/usr/lib/news/bin/rnews": "inn moved to /usr/libexec",
+    "/usr/lib/openldap/slapd": "slapd moved to /usr/sbin/slapd",
+    "/usr/lib/sudo/sesh": "sesh moved to /usr/libexec/sudo/sesh",
+    "/usr/sbin/afpd": "netatalk removed from Factory",
+    "/usr/sbin/amdd": "amd removed from Factory",
+    "/usr/sbin/arping": "iputils moved to /usr/bin/arping",
+    "/usr/sbin/atalkd": "netatalk removed from Factory",
+    "/usr/sbin/bluetoothd": "moved to /usr/libexec/bluetooth/bluetoothd in BlueZ 5",
+    "/usr/sbin/clockdiff": "iputils moved to /usr/bin/clockdiff",
+    "/usr/sbin/cnid_dbd": "netatalk removed from Factory",
+    "/usr/sbin/cnid_metad": "netatalk removed from Factory",
+    "/usr/sbin/dnssec-keygen": "bind moved to /usr/bin/dnssec-keygen",
+    "/usr/sbin/dnssec-signzone": "bind moved to /usr/bin/dnssec-signzone",
+    "/usr/sbin/hciattach": "BlueZ 4 tool, removed in BlueZ 5",
+    "/usr/sbin/hciconfig": "BlueZ 4 tool, removed in BlueZ 5",
+    "/usr/sbin/hid2hci": "BlueZ 4 tool, removed in BlueZ 5",
+    "/usr/sbin/httpd2": "apache 2.2 name, renamed in 2.4",
+    "/usr/sbin/httpd2-prefork": "apache 2.2 name, renamed in 2.4",
+    "/usr/sbin/httpd2-worker": "apache 2.2 name, renamed in 2.4",
+    "/usr/sbin/in.fingerd": "fingerd removed from Factory",
+    "/usr/sbin/in.rexecd": "rsh removed from Factory",
+    "/usr/sbin/in.rlogind": "rsh removed from Factory",
+    "/usr/sbin/in.rshd": "rsh removed from Factory",
+    "/usr/sbin/lwresd": "bind moved to /usr/bin/lwresd",
+    "/usr/sbin/named-checkconf": "bind moved to /usr/bin/named-checkconf",
+    "/usr/sbin/named-checkzone": "bind moved to /usr/bin/named-checkzone",
+    "/usr/sbin/nscd": "nscd removed from Factory",
+    "/usr/sbin/ntlm_auth": "samba moved to /usr/bin/ntlm_auth",
+    "/usr/sbin/papd": "netatalk removed from Factory",
+    "/usr/sbin/praliases": "sendmail moved to /usr/bin/praliases",
+    "/usr/sbin/rarpd": "rarpd removed from Factory",
+    "/usr/sbin/rotatelogs2": "apache 2.2 name, renamed in 2.4",
+    "/usr/sbin/rpc.rwalld": "rwalld removed from Factory",
+    "/usr/sbin/rpc.yppasswdd": "ypserv removed from Factory",
+    "/usr/sbin/rpc.ypxfrd": "ypserv removed from Factory",
+    "/usr/sbin/squidclient": "squid does not ship squidclient",
+    "/usr/sbin/suexec2": "apache 2.2 name, renamed in 2.4",
+    "/usr/sbin/tracepath": "iputils moved to /usr/bin/tracepath",
+    "/usr/sbin/tracepath6": "iputils moved to /usr/bin/tracepath6",
+    "/usr/sbin/utempter": "libutempter removed from Factory",
+    "/usr/sbin/yppush": "ypserv removed from Factory",
+    "/usr/sbin/ypserv": "ypserv removed from Factory",
 }
 
 LIST_KEYS = ("Filters", "BlockedFilters")
@@ -239,6 +371,124 @@ def assert_no_flavor_key(flavor, filename, text):
             )
 
 
+WHITELIST_TABLES = {
+    "FileDigestGroup",
+    "WorldWritableWhitelist",
+    "SystemdTmpfilesWhitelist",
+    "DeviceFilesWhitelist",
+}
+
+_package_presence_cache = {}
+
+# Project checked per flavor: the opensuse flavor tracks Tumbleweed, the
+# slfo flavor tracks the SLE 16 codebase (openSUSE:Leap:16.0 is built on it).
+FLAVOR_PROJECTS = {
+    "opensuse": ("openSUSE:Factory",),
+    "slfo": ("openSUSE:Leap:16.0",),
+}
+
+
+def package_present(pkg, flavor):
+    """True if the package exists in the flavor's distro codebase."""
+    key = (pkg, flavor)
+    if key not in _package_presence_cache:
+        present = False
+        for project in FLAVOR_PROJECTS[flavor]:
+            url = f"https://api.opensuse.org/public/source/{project}/{pkg}"
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "rpmcrab-distro-config-sync"}
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    if resp.status == 200:
+                        present = True
+                        break
+            except urllib.error.HTTPError as e:
+                if e.code != 404:
+                    raise
+        _package_presence_cache[key] = present
+    return _package_presence_cache[key]
+
+
+_package_re = re.compile(r'^package\s*=\s*"([^"]+)"', re.MULTILINE)
+_packages_re = re.compile(r"^packages\s*=\s*\[(.*?)\]", re.MULTILINE | re.DOTALL)
+
+
+def split_stanzas(text):
+    """Split TOML text at top-level [[Table]] lines; sub-tables stay attached."""
+    marks = [
+        (m.start(), m.group(1))
+        for m in re.finditer(r"^\[\[([A-Za-z]+)\]\]$", text, re.MULTILINE)
+    ]
+    if not marks:
+        return [("preamble", text)]
+    chunks = []
+    if marks[0][0] > 0:
+        chunks.append(("preamble", text[: marks[0][0]]))
+    for i, (pos, table) in enumerate(marks):
+        end = marks[i + 1][0] if i + 1 < len(marks) else len(text)
+        chunks.append((table, text[pos:end]))
+    return chunks
+
+
+def prune_stale_packages(text, pruned_log, flavor):
+    """Drop whitelist stanzas whose package(s) are all gone from the flavor's distro."""
+    out = []
+    for table, block in split_stanzas(text):
+        if table not in WHITELIST_TABLES:
+            out.append(block)
+            continue
+        pkgs = []
+        m = _package_re.search(block)
+        if m:
+            pkgs = [m.group(1)]
+        else:
+            m = _packages_re.search(block)
+            if m:
+                pkgs = re.findall(r'"([^"]+)"', m.group(1))
+        if pkgs and all(p in PRUNE_PACKAGES for p in pkgs):
+            if all(not package_present(p, flavor) for p in pkgs):
+                pruned_log.append(
+                    "whitelist: dropped [[%s]] stanza for %s"
+                    % (
+                        table,
+                        ", ".join("%r (%s)" % (p, PRUNE_PACKAGES[p]) for p in pkgs),
+                    )
+                )
+                continue
+            pruned_log.append(
+                "whitelist: KEPT [[%s]] stanza for %s — package present in the "
+                "flavor's distro, needs a fresh audit before any allowance "
+                "is trusted" % (table, ", ".join(pkgs))
+            )
+        out.append(block)
+    return "".join(out)
+
+
+def _usrmerge_norm(path):
+    if path.startswith("/sbin/"):
+        return "/usr/sbin/" + path[len("/sbin/") :]
+    if path.startswith("/bin/"):
+        return "/usr/bin/" + path[len("/bin/") :]
+    return path
+
+
+def prune_pie_paths(text, pruned_log):
+    """Drop pie-executables.toml entries for paths no Tumbleweed package ships."""
+    out = []
+    for line in text.splitlines(keepends=True):
+        m = re.fullmatch(r'"([^"]+)",?', line.strip())
+        norm = _usrmerge_norm(m.group(1)) if m else None
+        if m and norm in PRUNE_PIE_PATHS:
+            pruned_log.append(
+                "pie-executables: dropped stale path %r (%s)"
+                % (m.group(1), PRUNE_PIE_PATHS[norm])
+            )
+            continue
+        out.append(line)
+    return "".join(out)
+
+
 def generate(ref_dir=None, pins=None):
     """Return {flavor: {filename: text}} and the provenance text."""
     pins = pins or {}
@@ -257,10 +507,16 @@ def generate(ref_dir=None, pins=None):
 
     known = known_findings()
     pruned_log = []
+    pkg_pruned_log = []
+    pie_pruned_log = []
     for flavor, data in result.items():
         for filename, text in data["files"].items():
             assert_no_flavor_key(flavor, filename, text)
-            data["files"][filename] = prune_stale_filters(text, known, pruned_log)
+            text = prune_stale_filters(text, known, pruned_log)
+            text = prune_stale_packages(text, pkg_pruned_log, flavor)
+            if filename == "pie-executables.toml":
+                text = prune_pie_paths(text, pie_pruned_log)
+            data["files"][filename] = text
 
     # Dedupe: an SLFO file byte-identical to its openSUSE counterpart (after
     # pruning) is not vendored twice; the generated Rust consts fall back to
@@ -291,6 +547,20 @@ def generate(ref_dir=None, pins=None):
             provenance.append(f"#   {entry}")
     else:
         provenance.append("# No Filters entries pruned: all referenced findings exist.")
+    if pkg_pruned_log:
+        provenance.append("#")
+        provenance.append(
+            "# Pruned whitelist stanzas (packages gone from Tumbleweed/SLE 16):"
+        )
+        for entry in pkg_pruned_log:
+            provenance.append(f"#   {entry}")
+    if pie_pruned_log:
+        provenance.append("#")
+        provenance.append(
+            "# Pruned pie-executables paths (shipped by no Tumbleweed package):"
+        )
+        for entry in pie_pruned_log:
+            provenance.append(f"#   {entry}")
     if deduped:
         provenance.append("#")
         provenance.append("# SLFO files byte-identical to openSUSE (not vendored twice;")
@@ -300,7 +570,14 @@ def generate(ref_dir=None, pins=None):
     else:
         provenance.append("# No SLFO files deduplicated: every SLFO file differs.")
     provenance.append("")
-    return result, "\n".join(provenance), pruned_log, deduped
+    return (
+        result,
+        "\n".join(provenance),
+        pruned_log,
+        pkg_pruned_log,
+        pie_pruned_log,
+        deduped,
+    )
 
 
 def emit_rs(deduped):
@@ -402,7 +679,9 @@ def main():
         pins[m.group(1)] = (m.group(2), m.group(3))
 
     ref_dir = Path(args.ref_dir) if args.ref_dir else None
-    result, provenance, pruned_log, deduped = generate(ref_dir=ref_dir, pins=pins)
+    result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, deduped = generate(
+        ref_dir=ref_dir, pins=pins
+    )
 
     if args.check:
         failures = []
@@ -440,7 +719,7 @@ def main():
         return 0
 
     write_all(result, provenance, deduped)
-    for entry in pruned_log:
+    for entry in pruned_log + pkg_pruned_log + pie_pruned_log:
         print(f"pruned: {entry}")
     print(f"wrote {sum(len(d['files']) for d in result.values())} files + PROVENANCE")
     return 0
