@@ -19,7 +19,7 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
-use crate::pkg::pkgfile::{self, PkgFile};
+use crate::pkg::pkgfile::PkgFile;
 use crate::tools::{Tool, ToolSource, test_source};
 use std::sync::OnceLock;
 
@@ -664,7 +664,6 @@ pub struct BinariesCheck {
     ar: Tool,
     system_lib_paths: Vec<String>,
     pie_exec_regexes: Vec<Regex>,
-    usr_lib_exception_regex: Regex,
     setgid_call_regex: Regex,
     setuid_call_regex: Regex,
     setgroups_call_regex: Regex,
@@ -701,10 +700,6 @@ impl BinariesCheck {
             .iter()
             .filter_map(|r| Regex::new(r).ok())
             .collect();
-        let usr_lib_exception = tbl
-            .get("UsrLibBinaryException")
-            .and_then(toml::Value::as_str)
-            .unwrap_or_default();
         let (strings, _) = Tool::probe(&source, "strings", &[]);
         let (ar, _) = Tool::probe(&source, "ar", &["--version"]);
         BinariesCheck {
@@ -713,8 +708,6 @@ impl BinariesCheck {
             ar,
             system_lib_paths: get_strings("SystemLibPaths"),
             pie_exec_regexes,
-            usr_lib_exception_regex: Regex::new(usr_lib_exception)
-                .unwrap_or_else(|_| Regex::new("$^").expect("static regex")),
             setgid_call_regex: SETGID_CALL_REGEX
                 .get_or_init(|| {
                     Regex::new(r"(set(?:res|e)?gid(?:@GLIBC\S+)?)(?:\s|$)")
@@ -905,18 +898,6 @@ impl BinariesCheck {
     fn check_noarch_with_lib64(&self, pkg: &Pkg, has_file_in_lib64: bool, out: &mut Filter) {
         if pkg.arch == "noarch" && has_file_in_lib64 {
             add_info(out, Level::Error, pkg, "noarch-with-lib64", &[]);
-        }
-    }
-
-    fn check_only_non_binary_in_usrlib(
-        &self,
-        pkg: &Pkg,
-        has_usr_lib_file: bool,
-        has_binary_in_usr_lib: bool,
-        out: &mut Filter,
-    ) {
-        if has_usr_lib_file && !has_binary_in_usr_lib {
-            add_info(out, Level::Warning, pkg, "only-non-binary-in-usr-lib", &[]);
         }
     }
 
@@ -1144,25 +1125,10 @@ impl BinariesCheck {
         } else {
             format!("{}/{}", parent, soname)
         };
-        match pkg.files.iter().find(|f| f.name == symlink) {
-            Some(f) => {
-                let link = f.linkto.as_str();
-                let base = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if link != shlib && link != base && !link.is_empty() {
-                    add_info(
-                        out,
-                        Level::Error,
-                        pkg,
-                        "invalid-ldconfig-symlink",
-                        &[shlib, link],
-                    );
-                }
-            }
-            None => {
-                let base = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if base.starts_with("lib") || base.starts_with("ld-") {
-                    add_info(out, Level::Error, pkg, "no-ldconfig-symlink", &[shlib]);
-                }
+        if pkg.files.iter().all(|f| f.name != symlink) {
+            let base = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if base.starts_with("lib") || base.starts_with("ld-") {
+                add_info(out, Level::Error, pkg, "no-ldconfig-symlink", &[shlib]);
             }
         }
     }
@@ -1182,15 +1148,7 @@ impl BinariesCheck {
                 add_info(out, Level::Warning, pkg, "no-soname", &[&pkgfile.name]);
             }
             Some(soname) => {
-                if !validso_regex().is_match(soname).unwrap_or(false) {
-                    add_info(
-                        out,
-                        Level::Error,
-                        pkg,
-                        "invalid-soname",
-                        &[&pkgfile.name, soname],
-                    );
-                } else {
+                if validso_regex().is_match(soname).unwrap_or(false) {
                     self.check_soname_symlink(pkg, &pkgfile.name, soname, out);
                     if pkg.name.starts_with("lib")
                         && !self
@@ -1717,8 +1675,6 @@ impl Check for BinariesCheck {
 
     fn check_binary(&mut self, pkg: &Pkg, config: &Config, out: &mut Filter) {
         let mut pkg_has_binary = false;
-        let mut pkg_has_binary_in_usrlib = false;
-        let mut pkg_has_usrlib_file = false;
         let mut pkg_has_file_in_lib64 = false;
 
         // Parse the expensive per-file ELF metadata in parallel (rayon).
@@ -1737,18 +1693,6 @@ impl Check for BinariesCheck {
             let fname: &str = &pkgfile.name;
             self.check_libtool_wrapper(pkg, fname, pkgfile, out);
             self.check_invalid_la_file(pkg, fname, pkgfile, out);
-
-            if !pkgfile::is_dir(pkgfile.mode) && usr_lib_regex().is_match(fname).unwrap_or(false) {
-                pkg_has_usrlib_file = true;
-                if !pkg_has_binary_in_usrlib
-                    && self
-                        .usr_lib_exception_regex
-                        .is_match(fname)
-                        .unwrap_or(false)
-                {
-                    pkg_has_binary_in_usrlib = true;
-                }
-            }
 
             if fname.starts_with("/usr/lib64") || fname.starts_with("/lib64") {
                 pkg_has_file_in_lib64 = true;
@@ -1769,13 +1713,6 @@ impl Check for BinariesCheck {
 
             self.checked_files += 1;
             pkg_has_binary = true;
-
-            if pkg_has_usrlib_file
-                && !pkg_has_binary_in_usrlib
-                && usr_lib_regex().is_match(fname).unwrap_or(false)
-            {
-                pkg_has_binary_in_usrlib = true;
-            }
 
             self.check_binary_in_noarch(pkg, fname, out);
             if pkg.arch == "noarch" {
@@ -1823,12 +1760,6 @@ impl Check for BinariesCheck {
 
         self.check_no_binary(pkg, pkg_has_binary, pkg_has_file_in_lib64, out);
         self.check_noarch_with_lib64(pkg, pkg_has_file_in_lib64, out);
-        self.check_only_non_binary_in_usrlib(
-            pkg,
-            pkg_has_usrlib_file,
-            pkg_has_binary_in_usrlib,
-            out,
-        );
     }
 
     fn checked_files(&self) -> Option<usize> {
@@ -3382,42 +3313,6 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
-    fn invalid_ldconfig_symlink() {
-        let config = test_config();
-        let check = BinariesCheck::with_tool_dir(&config, None);
-        let pkg = synthetic_pkg(
-            "testpkg",
-            "x86_64",
-            vec![syn_link("/usr/lib64/libfoo.so.1", "libfoo.so.9.9.9")],
-        );
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_soname_symlink(&pkg, "/usr/lib64/libfoo.so.1.2.3", "libfoo.so.1", &mut out);
-        let results = out.results().to_vec();
-        let lines = lines_for(&results, "invalid-ldconfig-symlink");
-        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
-        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
-        assert!(
-            lines[0].contains("libfoo.so.9.9.9"),
-            "detail names the bad target: {}",
-            lines[0]
-        );
-
-        // A symlink pointing at the library itself is valid.
-        let pkg = synthetic_pkg(
-            "testpkg",
-            "x86_64",
-            vec![syn_link("/usr/lib64/libfoo.so.1", "libfoo.so.1.2.3")],
-        );
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_soname_symlink(&pkg, "/usr/lib64/libfoo.so.1.2.3", "libfoo.so.1", &mut out);
-        assert!(
-            out.results().is_empty(),
-            "valid symlink must be quiet: {:?}",
-            out.results()
-        );
-    }
-
-    #[test]
     fn missing_ldconfig_symlink() {
         let config = test_config();
         let check = BinariesCheck::with_tool_dir(&config, None);
@@ -3463,22 +3358,6 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(
             lines[0].contains("/usr/lib64/libfoo.so.1"),
             "detail: {}",
-            lines[0]
-        );
-
-        // Malformed SONAME -> E invalid-soname.
-        let mut info = syn_info();
-        info.is_shlib = true;
-        info.soname = Some("b soname".to_string());
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_shared_library(&pkg, &pkgfile, &info, &mut out);
-        let results = out.results().to_vec();
-        let lines = lines_for(&results, "invalid-soname");
-        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
-        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
-        assert!(
-            lines[0].contains("b soname"),
-            "detail names the soname: {}",
             lines[0]
         );
 
@@ -3533,7 +3412,6 @@ description = "explicit priority string bypasses the system crypto policy"
             lines[0]
         );
         assert_lacks(&results, "no-ldconfig-symlink");
-        assert_lacks(&results, "invalid-ldconfig-symlink");
     }
 
     #[test]

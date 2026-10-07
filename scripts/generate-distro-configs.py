@@ -126,6 +126,18 @@ PRUNE_CANDIDATES = {
     "preun-without-chkconfig": "killed: InitScriptCheck deleted (issue #214)",
     "no-default-runlevel": "killed: InitScriptCheck deleted (issue #214)",
     "service-default-enabled": "killed: InitScriptCheck deleted (issue #214)",
+    "invalid-ldconfig-symlink": "killed: openSUSE config says 'Doesn't seem to make sense'",
+    "invalid-soname": "killed: openSUSE config says 'Doesn't seem to make sense'",
+    "only-non-binary-in-usr-lib": "killed: openSUSE config says 'Doesn't seem to make sense'",
+    "outside-libdir-files": "killed: openSUSE config says 'Doesn't seem to make sense'",
+    "invalid-build-requires": "killed: Mandriva-specific, openSUSE doesn't want it",
+    "no-provides": "killed: Mandriva-specific, openSUSE doesn't want it",
+    "incorrect-fsf-address": "killed: FSF address text outdated",
+    "hardcoded-prefix-tag": "killed: Prefix: tag obsolete/ignored",
+    "jar-not-indexed": "killed: negligible value",
+    "uncompressed-zip": "killed: negligible value",
+    "spurious-bracket-in-": "killed: PostCheck stylistic nit",
+    "one-line-command-in-": "killed: PostCheck stylistic nit",
 }
 
 # (finding, scope) -> reason: Filters entries scoped to dead paths. The finding

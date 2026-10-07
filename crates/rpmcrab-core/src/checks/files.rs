@@ -199,20 +199,6 @@ fn sourced_script_regex() -> &'static Regex {
     })
 }
 
-static FSF_LICENSE_REGEX: OnceLock<Regex> = OnceLock::new();
-fn fsf_license_regex() -> &'static Regex {
-    FSF_LICENSE_REGEX.get_or_init(|| Regex::new(r"(?i)(GNU((\s+(Library|Lesser|Affero))?(\s+General)?\s+Public|\s+Free\s+Documentation)\s+Licen[cs]e|(GP|FD)L)")
-        .expect("static regex"))
-}
-
-static FSF_WRONG_ADDRESS_REGEX: OnceLock<Regex> = OnceLock::new();
-fn fsf_wrong_address_regex() -> &'static Regex {
-    FSF_WRONG_ADDRESS_REGEX.get_or_init(|| {
-        Regex::new(r"(?i)(675\s+Mass\s+Ave|59\s+Temple\s+Place|02139|51\s+Franklin\s+St)")
-            .expect("static regex")
-    })
-}
-
 static SCALABLE_ICON_REGEX: OnceLock<Regex> = OnceLock::new();
 fn scalable_icon_regex() -> &'static Regex {
     SCALABLE_ICON_REGEX.get_or_init(|| {
@@ -379,8 +365,6 @@ pub struct FilesCheck {
     interpreter_re: Regex,
     script_re: Regex,
     sourced_script_re: Regex,
-    fsf_license_re: Regex,
-    fsf_wrong_address_re: Regex,
     scalable_icon_re: Regex,
     tcl_re: Regex,
     perl_re: Regex,
@@ -549,8 +533,6 @@ impl FilesCheck {
             interpreter_re: interpreter_regex().clone(),
             script_re: script_regex().clone(),
             sourced_script_re: sourced_script_regex().clone(),
-            fsf_license_re: fsf_license_regex().clone(),
-            fsf_wrong_address_re: fsf_wrong_address_regex().clone(),
             scalable_icon_re: scalable_icon_regex().clone(),
             tcl_re: tcl_regex().clone(),
             perl_re: perl_regex().clone(),
@@ -598,8 +580,6 @@ struct PkgState {
     lib_package: bool,
     perl_dep_error: bool,
     python_dep_error: bool,
-    lib_file: bool,
-    non_lib_file: Option<String>,
     log_files: Vec<String>,
     logrotate_file: bool,
     debuginfo_srcs: bool,
@@ -677,7 +657,6 @@ impl Check for FilesCheck {
         }
         self.check_debug_files_in_non_debug_package(pkg, &st, out);
         self.check_log_files_without_logrotate(pkg, &st, out);
-        self.check_outside_libdir_files(pkg, &st, out);
         self.check_debuginfo_without_sources(pkg, &st, out);
         self.check_bindir_exes(pkg, &st, out);
     }
@@ -826,14 +805,6 @@ impl FilesCheck {
                 "log-files-without-logrotate",
                 &[&joined],
             );
-        }
-    }
-
-    fn check_outside_libdir_files(&self, pkg: &Pkg, st: &PkgState, out: &mut Filter) {
-        if st.lib_package && st.lib_file {
-            if let Some(f) = st.non_lib_file.as_ref() {
-                add_info(out, Level::Error, pkg, "outside-libdir-files", &[f]);
-            }
         }
     }
 
@@ -1085,16 +1056,6 @@ const STANDARD_DIRS: &[&str] = &[
 /// Packages allowed to own standard directories.
 const FILESYS_PACKAGES: &[&str] = &["filesystem"];
 
-/// Scan window for the whole-file incorrect-fsf-address scan: the file is
-/// streamed in windows of this size so peak memory stays bounded no matter
-/// how large the file is.
-const FSF_SCAN_WINDOW: usize = 8192;
-/// Overlap between consecutive FSF scan windows. Any match of at most this
-/// many bytes straddling a window boundary is still seen whole inside one
-/// window; the FSF patterns only match fixed license/address phrases of tens
-/// of bytes joined by short whitespace runs, so this is ample headroom.
-const FSF_SCAN_OVERLAP: usize = 1024;
-
 /// Per-normal-file scratch state, mirroring the reference's `_file_*`
 /// attributes.
 #[derive(Default)]
@@ -1144,66 +1105,6 @@ impl FilesCheck {
         let control = chunk.iter().filter(|b| !is_peek_printable(**b)).count();
         let istext = control as f64 / chunk.len() as f64 <= 0.30;
         (chunk, istext)
-    }
-
-    /// Scan the whole file for the FSF license and wrong-address patterns in
-    /// bounded windows.
-    ///
-    /// Upstream rpmlint#40: the reference searches only its 2048-byte peek
-    /// chunk, so a stale FSF address past byte 2048 goes unreported. The port
-    /// scans the whole file instead (divergences.toml), but streams it in
-    /// `FSF_SCAN_WINDOW`-byte windows: each window is lossy-decoded and
-    /// regex-scanned on its own, so peak memory is one window plus overlap
-    /// regardless of file size -- the file is never materialized whole, let
-    /// alone twice via a lossy UTF-8 copy.
-    ///
-    /// Consecutive windows overlap by `FSF_SCAN_OVERLAP` bytes, so a match
-    /// straddling a window boundary is still found whole inside one window.
-    /// A file that cannot be opened, or a read that fails mid-scan, reports
-    /// `read-error` through the same plumbing `peek` uses, and the check is
-    /// skipped loudly rather than on an empty buffer.
-    ///
-    /// Returns true when both patterns match anywhere in the file, mirroring
-    /// the reference's boolean `search() and search()`: one finding per file,
-    /// never per match.
-    fn fsf_address_matches(&self, pkg: &Pkg, pkgfile: &PkgFile, out: &mut Filter) -> bool {
-        let mut file = match std::fs::File::open(&pkgfile.path) {
-            Ok(f) => f,
-            Err(e) => {
-                add_info(out, Level::Warning, pkg, "read-error", &[&e.to_string()]);
-                return false;
-            }
-        };
-        // One window plus the overlap carried over from the previous window.
-        let mut window = vec![0u8; FSF_SCAN_WINDOW + FSF_SCAN_OVERLAP];
-        let mut carry = 0usize;
-        let mut found_license = false;
-        let mut found_address = false;
-        loop {
-            let n =
-                match std::io::Read::read(&mut file, &mut window[carry..FSF_SCAN_WINDOW + carry]) {
-                    Ok(0) => break,
-                    Ok(n) => n,
-                    Err(e) => {
-                        add_info(out, Level::Warning, pkg, "read-error", &[&e.to_string()]);
-                        return false;
-                    }
-                };
-            let len = carry + n;
-            let text = String::from_utf8_lossy(&window[..len]);
-            if !found_license && is_match(&self.fsf_license_re, text.as_ref()) {
-                found_license = true;
-            }
-            if !found_address && is_match(&self.fsf_wrong_address_re, text.as_ref()) {
-                found_address = true;
-            }
-            if found_license && found_address {
-                return true;
-            }
-            carry = len.min(FSF_SCAN_OVERLAP);
-            window.copy_within(len - carry..len, 0);
-        }
-        found_license && found_address
     }
 }
 
@@ -2054,7 +1955,6 @@ impl FilesCheck {
         }
         let mut fd = FileData::default();
         self.check_normal_setuid_bit(pkg, fname, pkgfile, out);
-        self.check_normal_libfile(pkg, fname, st);
         self.check_normal_logfile(pkg, fname, pkgfile, &mut fd, out);
         self.check_normal_getdata(pkg, fname, pkgfile, &mut fd, out);
         self.check_normal_doc(pkg, fname, &mut fd, out);
@@ -2115,17 +2015,6 @@ impl FilesCheck {
                 "non-standard-executable-perm",
                 &[fname, &format!("{:o}", perm)],
             );
-        }
-    }
-
-    fn check_normal_libfile(&self, pkg: &Pkg, fname: &str, st: &mut PkgState) {
-        let is_doc = pkg.doc_files.iter().any(|d| d == fname);
-        if !st.devel_pkg {
-            if is_match(&self.lib_path_re, fname) {
-                st.lib_file = true;
-            } else if !is_doc {
-                st.non_lib_file = Some(fname.to_string());
-            }
         }
     }
 
@@ -2895,13 +2784,6 @@ impl FilesCheck {
                 add_info(out, Level::Warning, pkg, "file-not-utf8", &[fname]);
             }
         }
-        // Upstream rpmlint#40: the reference scans only its 2048-byte peek
-        // chunk for the FSF address, missing it in longer files. The port
-        // scans the whole file instead (divergences.toml), streaming it in
-        // bounded windows so a large file never sits in memory twice.
-        if self.fsf_address_matches(pkg, pkgfile, out) {
-            add_info(out, Level::Error, pkg, "incorrect-fsf-address", &[fname]);
-        }
     }
 
     fn check_normal_not_utf8(
@@ -3155,7 +3037,6 @@ mod tests {
         // documentation and encoding
         assert_has(&names, "wrong-file-end-of-line-encoding");
         assert_has(&names, "file-not-utf8");
-        assert_has(&names, "incorrect-fsf-address");
         // symlinks
         assert_has(&names, "symlink-has-too-many-up-segments");
         assert_has(&names, "symlink-should-be-relative");
@@ -3237,7 +3118,7 @@ mod tests {
     }
 
     fn bidi_pkg(dir: &tempfile::TempDir, files: Vec<(&str, &str, Vec<u8>)>) -> Pkg {
-        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
+        let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
         let mut pkg =
             Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
         pkg.files = files
@@ -3404,78 +3285,6 @@ mod tests {
     }
 
     #[test]
-    fn fsf_address_scanned_past_2048_bytes() {
-        // Upstream rpmlint#40: the reference scans only its 2048-byte peek
-        // chunk for the FSF address, missing it in longer files. The port
-        // scans the whole file instead.
-        let config = test_config();
-        let dir = tempfile::TempDir::new().expect("tmpdir");
-        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
-        let pkg = Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let mut check = FilesCheck::new(&config);
-        check.check(&pkg, &config, &mut out);
-        let fsf: Vec<&str> = out
-            .results()
-            .iter()
-            .filter(|(name, _)| name == "incorrect-fsf-address")
-            .map(|(_, line)| line.as_str())
-            .collect();
-        // LICENSE-early carries the wrong address at byte 385 (inside the
-        // old 2048-byte window); LICENSE-late carries it at byte 3372
-        // (past it); LICENSE-ok mentions the GPL with no street address
-        // and must stay silent.
-        assert_eq!(
-            fsf,
-            [
-                "fsf-address-fixture.noarch: E: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-early",
-                "fsf-address-fixture.noarch: E: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-late",
-            ],
-        );
-    }
-
-    #[test]
-    fn fsf_address_match_survives_window_boundary() {
-        // The whole-file FSF scan streams in FSF_SCAN_WINDOW-byte windows with
-        // FSF_SCAN_OVERLAP bytes of overlap: a wrong-address match straddling
-        // a window boundary must still be found whole inside one window.
-        // Without the overlap this fails (neither window sees "Place" whole).
-        let config = test_config();
-        let dir = tempfile::TempDir::new().expect("tmpdir");
-        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
-        let pkg = Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let check = FilesCheck::new(&config);
-
-        // "59 Temple Place" starts 4 bytes before the first window ends, so
-        // the address match spans the 8192-byte boundary.
-        let mut content = vec![b'x'; FSF_SCAN_WINDOW - 4];
-        content.extend_from_slice(b"59 Temple Place, Suite 330, Boston, MA 02111-1307 USA");
-        content.extend_from_slice(b"\nGNU General Public License\n");
-        let path = dir.path().join("boundary.txt");
-        std::fs::write(&path, &content).expect("write temp file");
-        let pkgfile = PkgFile {
-            path: path.to_string_lossy().into_owned(),
-            ..Default::default()
-        };
-        assert!(check.fsf_address_matches(&pkg, &pkgfile, &mut out));
-
-        // Sanity: the license phrase alone, with no street address, stays
-        // silent.
-        let ok_path = dir.path().join("ok.txt");
-        std::fs::write(
-            &ok_path,
-            b"GNU General Public License\nno street address here\n",
-        )
-        .expect("write temp file");
-        let ok_file = PkgFile {
-            path: ok_path.to_string_lossy().into_owned(),
-            ..Default::default()
-        };
-        assert!(!check.fsf_address_matches(&pkg, &ok_file, &mut out));
-    }
-
-    #[test]
     fn files_check_devel_non_devel_file() {
         let config = test_config();
         let (names, _dir) =
@@ -3493,20 +3302,6 @@ mod tests {
         let (names, _dir) =
             run_files_check(&fixture_path("libnodoc-test-1.0-1.noarch.rpm"), &config);
         assert_lacks(&names, "no-documentation");
-    }
-
-    #[test]
-    fn lib_package_with_non_lib_file_emits_outside_libdir_files() {
-        // The shared lib_package_regex must match "liboutsidelib-test": with
-        // the broken double-escaped form st.lib_package was always false, so
-        // outside-libdir-files could never fire. Restoring the broken regex
-        // makes this fail.
-        let config = test_config();
-        let (names, _dir) = run_files_check(
-            &fixture_path("liboutsidelib-test-1.0-1.noarch.rpm"),
-            &config,
-        );
-        assert_has(&names, "outside-libdir-files");
     }
 
     #[test]

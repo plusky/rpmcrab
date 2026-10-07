@@ -154,10 +154,6 @@ If you need log files owned by a non-root group, just create a subdir in
 non-ghost-file="""
 File should be tagged %ghost.
 """
-outside-libdir-files="""
-This library package must not contain non library files to allow 64
-and 32 bits versions of the package to coexist.
-"""
 hidden-file-or-dir="""
 The file or directory is hidden. You should see if this is normal,
 and delete it from the package if not.
@@ -336,11 +332,6 @@ It can cause problems when dirs in $PATH are reordered.
 """
 no-manual-page-for-binary="""
 Each executable in standard binary directories should have a man page.
-"""
-incorrect-fsf-address="""
-The Free Software Foundation address in this file seems to be outdated or
-misspelled. Ask upstream to update the address, or if this is a license file,
-possibly the entire file with a new copy available from the FSF.
 """
 gzipped-svg-icon="""
 Not all desktop environments that support SVG icons support them gzipped

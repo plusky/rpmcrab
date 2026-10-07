@@ -286,8 +286,8 @@ mod tests {
         );
         // Plain entries pass through untouched.
         assert_eq!(
-            descriptions["uncompressed-zip"],
-            "The zip file is not compressed.\n"
+            descriptions["bad-crc-in-zip"],
+            "The reported file in the zip fails the CRC check.\nUsually this is a sign of a corrupt zip file.\n"
         );
     }
 

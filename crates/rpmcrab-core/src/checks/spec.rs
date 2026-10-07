@@ -96,11 +96,6 @@ fn buildroot_re() -> &'static Regex {
         .get_or_init(|| Regex::new(r"(?i)^BuildRoot\s*:\s*(\S.*?)\s*$").expect("static regex"))
 }
 
-static PREFIX_RE: OnceLock<Regex> = OnceLock::new();
-fn prefix_re() -> &'static Regex {
-    PREFIX_RE.get_or_init(|| Regex::new(r"(?i)^Prefix\s*:\s*(\S.*?)\s*$").expect("static regex"))
-}
-
 static PACKAGER_RE: OnceLock<Regex> = OnceLock::new();
 fn packager_re() -> &'static Regex {
     PACKAGER_RE
@@ -533,7 +528,6 @@ pub struct SpecCheck {
     source_dir_re: Regex,
     obsolete_tags_re: Regex,
     buildroot_re: Regex,
-    prefix_re: Regex,
     packager_re: Regex,
     buildarch_re: Regex,
     buildprereq_re: Regex,
@@ -655,7 +649,6 @@ impl SpecCheck {
             source_dir_re: source_dir_re().clone(),
             obsolete_tags_re: obsolete_tags_re().clone(),
             buildroot_re: buildroot_re().clone(),
-            prefix_re: prefix_re().clone(),
             packager_re: packager_re().clone(),
             buildarch_re: buildarch_re().clone(),
             buildprereq_re: buildprereq_re().clone(),
@@ -1452,7 +1445,6 @@ impl SpecCheck {
         self.checkline_package_buildroot(pkg, out, line);
         self.checkline_package_buildarch(pkg, out, line);
         self.checkline_package_packager(pkg, out, line);
-        self.checkline_package_prefix(pkg, out, line);
         self.checkline_package_suse_prefix(pkg, out, line);
         self.checkline_package_prereq(pkg, out, line);
         self.checkline_package_buildprereq(pkg, out, line);
@@ -1526,15 +1518,6 @@ impl SpecCheck {
         if let Ok(Some(caps)) = self.packager_re.captures(line) {
             let value = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             self.info(out, pkg, Level::Warning, "hardcoded-packager-tag", &[value]);
-        }
-    }
-
-    fn checkline_package_prefix(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
-        if let Ok(Some(caps)) = self.prefix_re.captures(line) {
-            let value = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-            if !value.starts_with('%') {
-                self.info(out, pkg, Level::Warning, "hardcoded-prefix-tag", &[value]);
-            }
         }
     }
 
@@ -2043,24 +2026,6 @@ mod tests {
     }
 
     #[test]
-    fn prefix_macro_value_is_quiet_35() {
-        // Upstream #35 asked for a warning on literally any `Prefix:`,
-        // but maintainer scop declined in r1462: a macro value is not
-        // hardcoded. The port matches the reference: only non-macro
-        // values warn.
-        let results = run_mini("Name: foo\nPrefix: %{_prefix}\n");
-        assert!(
-            !has(&results, "hardcoded-prefix-tag"),
-            "unexpected: {results:?}"
-        );
-
-        let results = run_mini("Name: foo\nPrefix: /opt/foo\n");
-        let lines = lines_for(&results, "hardcoded-prefix-tag");
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0], "test.spec:2: W: hardcoded-prefix-tag /opt/foo");
-    }
-
-    #[test]
     fn buildarch_real_arch_still_errors() {
         let results = run_mini("Name: foo\nBuildArch: x86_64\n");
         let lines = lines_for(&results, "buildarch-instead-of-exclusivearch-tag");
@@ -2262,7 +2227,6 @@ make install
             "buildarch-instead-of-exclusivearch-tag",
             "hardcoded-path-in-buildroot-tag",
             "hardcoded-packager-tag",
-            "hardcoded-prefix-tag",
             "comparison-operator-in-deptoken",
             "unversioned-explicit-provides",
             "suse-update-desktop-file-deprecated",

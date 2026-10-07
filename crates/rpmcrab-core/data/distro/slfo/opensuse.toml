@@ -72,8 +72,6 @@ Filters = [
     '.*no-group-tag.*',
 
 # Output filters
-    '.*spurious-bracket-in-.*',
-    '.*one-line-command-in-.*',
     ' dir-or-file-in-opt ',  # handled by CheckFilelist.py
     ' dir-or-file-in-usr-local ',  # handled by CheckFilelist.py
     ' non-standard-dir-in-usr ',  # handled by CheckFilelist.py
@@ -152,10 +150,6 @@ Filters = [
     'hardcoded-library-path',
 
 # Doesn't seem to make sense
-    'invalid-ldconfig-symlink',
-    'invalid-soname',
-    'only-non-binary-in-usr-lib',
-    'outside-libdir-files',
 
 # We want these files
     ' perl-temp-file ',
@@ -193,14 +187,11 @@ Filters = [
     ' non-standard-dir-perm ',
     ' conffile-without-noreplace-flag ',
     ' non-standard-executable-perm ',
-    ' jar-not-indexed ',
-    ' uncompressed-zip ',
     ' %ifarch-applied-patch ',
     ' read-error ',
     ' no-dependency-on locales',
     ' executable-marked-as-config-file',
     ' log-files-without-logrotate',
-    ' hardcoded-prefix-tag',
     ' no-documentation',
     ' multiple-specfiles',
     ' setgid-binary ',
@@ -219,7 +210,6 @@ Filters = [
     '(?:dosutils|skelcd|installation-images|yast2-slide-show|instlux|skelcd-.*|patterns-.*)\.\S+: \w: filelist-forbidden-fhs23 /CD1',
 
 # Too noisy, and usually not something downstream packagers can fix
-    ' incorrect-fsf-address ',
     ' no-manual-page-for-binary ',
     ' static-library-without-debuginfo /usr/lib(?:64)?/ghc-[\d\.]+/',
 
@@ -227,8 +217,6 @@ Filters = [
     ' non-coherent-filename ',
 
 # Mandriva specific stuff that we don't want
-    ' invalid-build-requires ',
-    ' no-provides ',
 
 # Bash completion files are not scripts, do not require them marked as %config
     'W: non-conffile-in-etc /etc/bash_completion.d/',

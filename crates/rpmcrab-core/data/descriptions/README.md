@@ -10,13 +10,18 @@ like `filter.py::_replace_description_variables`.
 Provenance, verified against the pinned reference (`84848c0`):
 
 - `BinariesCheck.toml` — the pinned reference file, minus the
-  `shared-library-not-executable` entry dropped with the check in #267, plus
+  `shared-library-not-executable` entry dropped with the check in #267 and
+  the `invalid-soname`, `invalid-ldconfig-symlink`,
+  `only-non-binary-in-usr-lib` entries dropped with the findings
+  (openSUSE: "Doesn't seem to make sense"), plus
   the restored `shared-library-without-dependency-information` entry (copied
   verbatim from the pre-deletion upstream file; upstream removed entry and
   check in `cf619f717bc3`).
 - `IconSizesCheck.toml`, `MixedOwnershipCheck.toml`, `PAMModulesCheck.toml`,
-  `ZipCheck.toml`, `ZyppSyntaxCheck.toml` — byte-identical to the reference
+  `ZyppSyntaxCheck.toml` — byte-identical to the reference
   `rpmlint/descriptions/` files of the same name.
+- `ZipCheck.toml` — the reference file, minus the `jar-not-indexed` and
+  `uncompressed-zip` entries dropped with the findings (negligible value).
 - `XinetdDepCheck.toml` — the reference's `descriptions/CheckForXinetd.toml`,
   renamed to the module name, plus the port-only `deprecated-xinetd-config`
   entry (ledgered in `tests/parity/divergences.toml`).
@@ -56,12 +61,18 @@ Provenance, verified against the pinned reference (`84848c0`):
   `FilesCheck.toml`, `KMPPolicyCheck.toml`,
   `LogrotateCheck.toml`, `MenuCheck.toml`, `MenuXDGCheck.toml`,
   `PythonCheck.toml`, `SharedLibraryPolicyCheck.toml`, `SpecCheck.toml`
-  (besides its two port-only entries above), `SystemdTmpfilesCheck.toml`,
-  `TagsCheck.toml` — the reference files with English/logic fixes to
+  (besides its two port-only entries above, minus the dropped
+  `hardcoded-prefix-tag` entry), `SystemdTmpfilesCheck.toml`,
+  `TagsCheck.toml` (minus the dropped `invalid-build-requires` and
+  `no-provides` entries) — the reference files with English/logic fixes to
   individual entries (copy-paste errors naming the wrong package, wrong
   scriptlet phase, self-contradictory sentences, ungrammatical wording);
   each fix is a deliberate `kind="detail"` divergence, ledgered in
   `tests/parity/divergences.toml`.
+- `FilesCheck.toml` — the reference file, minus the `outside-libdir-files`
+  entry (openSUSE: "Doesn't seem to make sense") and the
+  `incorrect-fsf-address` entry (FSF address text outdated) dropped with
+  the findings.
 - Every other `*.toml` file — byte-identical to the reference
   `rpmlint/descriptions/` file of the same name.
 
