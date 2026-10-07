@@ -31,6 +31,7 @@ _rpmcrab() {
 '--version[Print version and exit]' \
 '-v[Inline explanations (and re-raise internal errors)]' \
 '--verbose[Inline explanations (and re-raise internal errors)]' \
+'--info[Inline explanations (and re-raise internal errors)]' \
 '-p[Dump the merged configuration as TOML and exit]' \
 '--print-config[Dump the merged configuration as TOML and exit]' \
 '-t[Per-check timing report]' \

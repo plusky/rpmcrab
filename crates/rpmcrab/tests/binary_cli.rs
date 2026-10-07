@@ -212,13 +212,21 @@ fn profile_flag_is_rejected() {
     assert_eq!(out2.status.code(), Some(2));
 }
 
-/// The straightened aliases are gone: `-r/--rpmlintrc` and `-v/--verbose` keep
-/// their canonical flags, but the illogical `--file`/`--info` synonyms are
-/// rejected.
+/// The straightened `--file` alias is gone: `-r/--rpmlintrc` keeps its
+/// canonical flag, but the illogical `--file` synonym is rejected.
+/// (`--info` is the exception: kept as a visible alias for `-v/--verbose`
+/// because build infrastructure invokes `rpmlint --info`.)
 #[test]
-fn straightened_aliases_are_rejected() {
+fn straightened_file_alias_is_rejected() {
     assert_eq!(rpmcrab(&["--file", "x"]).status.code(), Some(2));
-    assert_eq!(rpmcrab(&["--info"]).status.code(), Some(2));
+}
+
+/// `--info` is accepted as the reference's long name for `--verbose`.
+#[test]
+fn info_alias_is_accepted() {
+    let rpm = corpus_rpm();
+    let out = rpmcrab(&["--info", rpm.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0));
 }
 
 /// `-j/--jobs` is accepted and defaults to the machine's parallelism.

@@ -7,7 +7,7 @@ complete -c rpmcrab -l checks -d 'Run only these checks (debug)' -r
 complete -c rpmcrab -l format -d 'Report output format: human-readable text (default) or machine-readable JSON (upstream rpmlint#1156). Overrides the `OutputFormat` config key' -r -f -a "text\t''
 json\t''"
 complete -c rpmcrab -s V -l version -d 'Print version and exit'
-complete -c rpmcrab -s v -l verbose -d 'Inline explanations (and re-raise internal errors)'
+complete -c rpmcrab -s v -l verbose -l info -d 'Inline explanations (and re-raise internal errors)'
 complete -c rpmcrab -s p -l print-config -d 'Dump the merged configuration as TOML and exit'
 complete -c rpmcrab -s t -l time-report -d 'Per-check timing report'
 complete -c rpmcrab -l ignore-unused-rpmlintrc -d 'Suppress the `unused-rpmlintrc-filter` audit'
