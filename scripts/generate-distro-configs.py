@@ -334,8 +334,11 @@ def generate(ref_dir=None, pins=None):
     if pruned_log:
         provenance.append("#")
         provenance.append("# Pruned Filters entries (findings rpmcrab killed):")
+        seen = set()
         for entry in pruned_log:
-            provenance.append(f"#   {entry}")
+            if entry not in seen:
+                seen.add(entry)
+                provenance.append(f"#   {entry}")
     else:
         provenance.append("# No Filters entries pruned: all referenced findings exist.")
     if deduped:
