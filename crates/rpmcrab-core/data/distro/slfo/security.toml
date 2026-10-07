@@ -1,0 +1,93 @@
+# Configuration for security checks
+
+[FileDigestLocation.cron]
+FollowSymlinks = true
+Locations = [
+    "/etc/cron.d/",
+    "/etc/cron.hourly/",
+    "/etc/cron.daily/",
+    "/etc/cron.weekly/",
+    "/etc/cron.monthly/"
+]
+
+[FileDigestLocation.dbus]
+FollowSymlinks = false
+Locations = [
+    "/usr/share/dbus-1/system-services/",
+    "/usr/share/dbus-1/system.d/",
+    "/etc/dbus-1/system.d/"
+]
+
+[FileDigestLocation.polkit]
+FollowSymlinks = false
+Locations = [
+    "/etc/polkit-default-privs.d/",
+    "/etc/polkit-1/rules.d/",
+    "/usr/share/polkit-1/rules.d/"
+]
+
+[FileDigestLocation.permissions]
+FollowSymlinks = false
+Locations = [
+    "/etc/permissions.d/",
+    "/usr/share/permissions/permissions.d/",
+    "/usr/share/permissions/packages.d/"
+]
+
+[FileDigestLocation.pam]
+# a single PAM module uses a symlink: pam_krb5afs.so from pam_krb5
+# so we need to accept symlinks here
+FollowSymlinks = true
+NamePatterns = [
+    "*.so",
+]
+Locations = [
+    "/usr/lib/security/",
+    "/usr/lib64/security/",
+    "/lib/security/",
+    "/lib64/security/"
+]
+
+[FileDigestLocation.zypperplugin]
+FollowSymlinks = true
+Locations = [
+    "/usr/lib/zypp/plugins/"
+]
+
+[FileDigestLocation.sysctl]
+FollowSymlinks = false
+NamePatterns = [
+    # sysctl only considers *.conf files in the drop in directories
+    "*.conf",
+]
+Locations = [
+    "/etc/sysctl.d/",
+    "/run/sysctl.d/",
+    "/usr/local/lib/sysctl.d/",
+    "/usr/lib/sysctl.d/",
+    "/lib/sysctl.d/"
+]
+
+[FileDigestLocation.sudoers]
+FollowSymlinks = false
+# the directories for this are currently configured in /etc/sudoers via
+# the @includedir directive.
+Locations = [
+    "/etc/sudoers.d"
+]
+
+[SystemdTmpfiles]
+DropinDirs = [
+    # nothing should ever be installed here, but lets stay on the safe side
+    "/etc/tmpfiles.d",
+    "/usr/lib/tmpfiles.d"
+]
+# base system packages that would create too much noise to include them in the
+# whitelistings
+IgnorePackages = [
+    "filesystem",
+    "udev",
+    "udev-mini",
+    "systemd",
+    "systemd-mini"
+]

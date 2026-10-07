@@ -1,0 +1,227 @@
+[[SystemdTmpfilesWhitelist]]
+package = "rpmlint-integration-test"
+bug = "bsc#1150905"
+note = "valid test whitelisting entry for the OBS integration test package"
+path = "/usr/lib/tmpfiles.d/rpmlint-test.conf"
+entries = [
+	"d /tmp/.rpmlint-stuff 0777 root root -"
+]
+
+[[SystemdTmpfilesWhitelist]]
+package = "tmux"
+bug = "bsc#1150905"
+note = "tmux creates per-session directories there"
+path = "/usr/lib/tmpfiles.d/tmux.conf"
+entries = [
+	"d /run/tmux 1777 root root -"
+]
+
+[[SystemdTmpfilesWhitelist]]
+package = "libtss2-fapi-common"
+bug = "bsc#1150905"
+note = "shared setgid tss directories for the feature API framework"
+path = "/usr/lib/tmpfiles.d/tpm2-tss-fapi.conf"
+entries = [
+	"d  /var/lib/tpm2-tss/system/keystore 2775 tss tss - -",
+	"d  /run/tpm2-tss/eventlog            2775 tss tss - -",
+	"a+ /var/lib/tpm2-tss/system/keystore - - - - default:group:tss:rwx",
+	"a+ /run/tpm2-tss/eventlog            - - - - default:group:tss:rwx"
+]
+
+[[SystemdTmpfilesWhitelist]]
+package = "brltty"
+bug = "bsc#1150905"
+note = "directories for UNIX domain sockets"
+path = "/usr/lib/tmpfiles.d/brltty.conf"
+entries = [
+	"d /var/lib/brltty 2770 brltty brltty",
+	"d /var/lib/BrlAPI 3777 brltty brltty"
+]
+
+[[SystemdTmpfilesWhitelist]]
+package = "rubygem-passenger"
+bug = "bsc#1150905"
+note = "alternative /tmp directory introduced through SUSE specific patch"
+path = "/usr/lib/tmpfiles.d/passenger.conf"
+entries = [
+	"D /run/passenger 1777 root root -"
+]
+
+[[SystemdTmpfilesWhitelist]]
+package = "openQA"
+bug = "bsc#1150905"
+note = "directory for downloading assets"
+path = "/usr/lib/tmpfiles.d/openqa-webui.conf"
+entries = [
+	"d /var/lib/openqa/share/factory/tmp 1777 root root 6h"
+]
+
+[[SystemdTmpfilesWhitelist]]
+package = "parallel-printer-support"
+bug = "bsc#1150905"
+note = "device nodes for parallel printers that udev no longer creates"
+path = "/usr/lib/tmpfiles.d/parallel-printer.conf"
+entries = [
+	"c /dev/lp0 0660 root lp - 6:0",
+	"c /dev/lp1 0660 root lp - 6:1",
+	"c /dev/lp2 0660 root lp - 6:2",
+	"c /dev/lp3 0660 root lp - 6:3"
+]
+
+[[SystemdTmpfilesWhitelist]]
+package = "screen"
+bug = "bsc#1150905"
+note = "shared session dir for non-root users"
+path = "/usr/lib/tmpfiles.d/screen.conf"
+entries = [
+	"d /run/uscreens 1777 root root -"
+]
+
+[[SystemdTmpfilesWhitelist]]
+package = "dkms"
+bug = "bsc#1150905"
+note = "private tmp directory for this package"
+path = "/usr/lib/tmpfiles.d/dkms.conf"
+entries = [
+	"d /var/tmp/dkms 0700 root root -"
+]
+
+[[SystemdTmpfilesWhitelist]]
+package = "gromox"
+bug = "bsc#1200165"
+note = "gromox creates these two temporary directories"
+path = "/usr/lib/tmpfiles.d/tmpfiles-gromox.conf"
+entries = [
+	"d /run/gromox 0775 gromox gromox",
+	"d /var/tmp/gromox-fpm 0770 gromox gromox 1d"
+]
+
+[[SystemdTmpfilesWhitelist]]
+package = "nix"
+bugs = ["bsc#1243206", "bsc#1246162"]
+note = "The Nix package manager maintains a UNIX domain socket and directory structure in this non-standard location"
+path = "/usr/lib/tmpfiles.d/nix-daemon.conf"
+entries = [
+    "d /nix/var/nix/daemon-socket 0755 root root - -",
+    "d /nix/var/nix/builds        0755 root root 7d -"
+]
+
+[[SystemdTmpfilesWhitelist]]
+package = "samba-client"
+bugs = ["bsc#1251267"]
+note = "Used as Samba printer spool. A non-default location to help dealing with SELinux."
+path = "/usr/lib/tmpfiles.d/samba.conf"
+entries = [
+    "d /var/samba/spool 1777 root root"
+]
+
+[[SystemdTmpfilesWhitelist]]
+package = "aaa_base-extras"
+bugs = ["bsc#1255794"]
+note = "Regular directories in /var/adm/backup"
+path = "/usr/lib/tmpfiles.d/adm-backup.conf"
+entries = [
+    "d /var/adm/backup/rpmdb 0755 root root -",
+    "d /var/adm/backup/sysconfig 0755 root root -"
+]
+
+[[SystemdTmpfilesWhitelist]]
+package = "dracut-tools"
+bugs = ["bsc#1256380"]
+note = "Regular directory in /boot/dracut"
+path = "/usr/lib/tmpfiles.d/dracut.conf"
+entries = [
+    "D  /boot/dracut  - - - -"
+]
+
+[[SystemdTmpfilesWhitelist]]
+package = "sendmail"
+bugs = ["bsc#1256160"]
+note = "Spool directory with mode 1777"
+path = "/usr/lib/tmpfiles.d/sendmail.conf"
+entries = [
+    "d /var/spool/mail                      1777 root root -"
+]
+
+[[SystemdTmpfilesWhitelist]]
+package = "texlive-filesystem"
+bugs = ["bsc#1256841"]
+note = "Various state and cache directories used by texlive"
+path = "/usr/lib/tmpfiles.d/texlive.conf"
+entries = [
+    "d /var/cache/texmf                     1755 root  root  - -",
+    "d /var/cache/texmf/fonts               3775 mktex mktex - -",
+    "d /var/cache/texmf/fonts/pk            3775 mktex mktex - -",
+    "d /var/cache/texmf/fonts/source        3775 mktex mktex - -",
+    "d /var/cache/texmf/fonts/tfm           3775 mktex mktex - -",
+    "d /var/cache/texmf/fonts/luatex-cache  3775 mktex mktex - -",
+    "f /var/cache/texmf/fonts/ls-R          0664 mktex mktex - %% ls-R -- filename database for kpathsea; do not change this line.",
+    "d /var/lib/texmf                       1755 root  root  - -",
+    "d /var/lib/texmf/dist                  1755 root  root  - -",
+    "f /var/lib/texmf/dist/ls-R             0664 root  mktex - %% ls-R -- filename database for kpathsea; do not change this line.",
+    "d /var/lib/texmf/fonts                 1755 root  root  - -",
+    "d /var/lib/texmf/fonts/dvipdfm         1755 root  root  - -",
+    "d /var/lib/texmf/fonts/dvips           1755 root  root  - -",
+    "d /var/lib/texmf/fonts/pdftex          1755 root  root  - -",
+    "d /var/lib/texmf/fonts/conf            1755 root  root  - -",
+    "d /var/lib/texmf/fonts/map             1755 root  root  - -",
+    "d /var/lib/texmf/main                  1755 root  root  - -",
+    "f /var/lib/texmf/main/ls-R             0664 root  mktex - %% ls-R -- filename database for kpathsea; do not change this line.",
+    "d /var/lib/texmf/md5                   0755 root  root  - -",
+    "d /var/lib/texmf/web2c                 1755 root  root  - -",
+    "d /var/lib/texmf/web2c/aleph           1755 root  root  - -",
+    "d /var/lib/texmf/web2c/eptex           1755 root  root  - -",
+    "d /var/lib/texmf/web2c/luatex          1755 root  root  - -",
+    "d /var/lib/texmf/web2c/metafont        1755 root  root  - -",
+    "d /var/lib/texmf/web2c/pdftex          1755 root  root  - -",
+    "d /var/lib/texmf/web2c/ptex            1755 root  root  - -",
+    "d /var/lib/texmf/web2c/tex             1755 root  root  - -",
+    "d /var/lib/texmf/web2c/xetex           1755 root  root  - -",
+    "d /var/lib/texmf/web2c/hitex           1755 root  root  - -",
+    "d /var/lib/texmf/web2c/luahbtex        1755 root  root  - -",
+    "d /var/lib/texmf/web2c/luajithbtex     1755 root  root  - -",
+    "d /var/lib/texmf/web2c/luajittex       1755 root  root  - -",
+    "d /var/lib/texmf/web2c/mflua-nowin     1755 root  root  - -",
+    "d /var/lib/texmf/web2c/euptex          1755 root  root  - -",
+    "d /var/lib/texmf/web2c/uptex           1755 root  root  - -",
+    "d /var/lib/texmf/luatex-cache          0755 root  root  - -",
+    "d /var/lib/texmf/luametatex-cache      0755 root  root  - -",
+    "f /var/lib/texmf/ls-R                  0664 root  mktex - %% ls-R -- filename database for kpathsea; do not change this line.",
+]
+
+[[SystemdTmpfilesWhitelist]]
+package = "libpulp-tools"
+bugs = ["bsc#1257865"]
+note = "Directory for dealing with live patches during updates"
+path = "/usr/lib/tmpfiles.d/ulp-tmp.conf"
+entries = [
+    "d /var/livepatches 0755 root root"
+]
+
+[[SystemdTmpfilesWhitelist]]
+packages = ["postfix", "postfix-bdb"]
+bugs = ["bsc#1258381"]
+note = "manages the spool directory for postfix"
+path = "/usr/lib/tmpfiles.d/postfix.conf"
+entries = [
+    "d /var/spool/mail 1777 root root - -"
+]
+
+[[SystemdTmpfilesWhitelist]]
+package = "snapd"
+bugs = ["bsc#1261739"]
+note = "pre-creation of /tmp/snap-private-tmp during boot"
+path = "/usr/lib/tmpfiles.d/snapd.conf"
+entries = [
+    "D! /tmp/snap-private-tmp 0700 root root -"
+]
+
+[[SystemdTmpfilesWhitelist]]
+package = "google-guest-oslogin"
+bugs = ["bsc#1261275"]
+note = "Google-specific drop-in directories for openSSH and sudo"
+path = "/usr/lib/tmpfiles.d/google-guest-oslogin.conf"
+entries = [
+    "d /var/google-users.d",
+    "d /var/google-sudoers.d"
+]

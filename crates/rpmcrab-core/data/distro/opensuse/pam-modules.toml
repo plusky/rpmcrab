@@ -1,0 +1,588 @@
+[[FileDigestGroup]]
+package = "rpmlint-integration-test"
+type = "pam"
+note = "test whitelisting entry for the OBS integration test package"
+bug = "bsc#1188704"
+nodigests = [
+    "glob:*/security/pam_rpmlint.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_krb5"
+type = "pam"
+note = "legacy: not audited"
+nodigests = [
+    "glob:*/security/pam_krb5.so",
+    "glob:*/security/pam_krb5afs.so",
+]
+
+[[FileDigestGroup]]
+package = "ecryptfs-utils"
+type = "pam"
+note = "legacy: not audited"
+nodigests = [
+    "glob:*/security/pam_ecryptfs.so",
+]
+
+[[FileDigestGroup]]
+package = "gnome-keyring-pam"
+type = "pam"
+note = "authenticate via Gnome keyring"
+bug = "bsc#297049"
+nodigests = [
+    "glob:*/security/pam_gnome_keyring.so",
+]
+
+[[FileDigestGroup]]
+package = "samba-winbind-libs"
+type = "pam"
+bug  = "bsc#1194573"
+note = "performs authentication against a Windows domain server"
+nodigests = [
+    "glob:*/security/pam_winbind.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_ssh"
+type = "pam"
+note = "legacy: not audited"
+nodigests = [
+    "glob:*/security/pam_ssh.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_ssh_agent_auth"
+type = "pam"
+note = ""
+bug  = "bsc#1190983"
+nodigests = [
+    "glob:*/security/pam_ssh_agent_auth.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_u2f"
+type = "pam"
+note = ""
+bug  = "bsc#1190790"
+nodigests = [
+    "glob:*/security/pam_u2f.so",
+]
+
+
+[[FileDigestGroup]]
+package = "pam_mount"
+type = "pam"
+note = "legacy: not audited"
+nodigests = [
+    "glob:*/security/pam_mount.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_ccreds"
+type = "pam"
+note = "legacy: not audited"
+nodigests = [
+    "glob:*/security/pam_ccreds.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_radius"
+type = "pam"
+note = "legacy: not audited"
+nodigests = [
+    "glob:*/security/pam_radius_auth.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_pkcs11"
+type = "pam"
+note = "legacy: not audited"
+nodigests = [
+    "glob:*/security/pam_pkcs11.so",
+]
+
+[[FileDigestGroup]]
+package = "nss-pam-ldapd"
+type = "pam"
+note = "legacy: not audited"
+nodigests = [
+    "glob:*/security/pam_ldap.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_passwdqc"
+type = "pam"
+note = "legacy: not audited"
+nodigests = [
+    "glob:*/security/pam_passwdqc.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_userpass"
+type = "pam"
+note = "legacy: not audited"
+nodigests = [
+    "glob:*/security/pam_userpass.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_apparmor"
+type = "pam"
+note = "legacy: not audited"
+nodigests = [
+    "glob:*/security/pam_apparmor.so",
+]
+
+[[FileDigestGroup]]
+package = "pam"
+type = "pam"
+note = "imported from rpmlint1 PAMModules.WhiteList"
+nodigests = [
+    "glob:*/security/pam_access.so",
+    "glob:*/security/pam_debug.so",
+    "glob:*/security/pam_deny.so",
+    "glob:*/security/pam_echo.so",
+    "glob:*/security/pam_env.so",
+    "glob:*/security/pam_exec.so",
+    "glob:*/security/pam_faildelay.so",
+    "glob:*/security/pam_filter.so",
+    "glob:*/security/pam_ftp.so",
+    "glob:*/security/pam_group.so",
+    "glob:*/security/pam_keyinit.so",
+    "glob:*/security/pam_lastlog.so",
+    "glob:*/security/pam_listfile.so",
+    "glob:*/security/pam_localuser.so",
+    "glob:*/security/pam_loginuid.so",
+    "glob:*/security/pam_mail.so",
+    "glob:*/security/pam_mkhomedir.so",
+    "glob:*/security/pam_motd.so",
+    "glob:*/security/pam_nologin.so",
+    "glob:*/security/pam_permit.so",
+    "glob:*/security/pam_pwhistory.so",
+    "glob:*/security/pam_rhosts.so",
+    "glob:*/security/pam_rootok.so",
+    "glob:*/security/pam_securetty.so",
+    "glob:*/security/pam_selinux.so",
+    "glob:*/security/pam_sepermit.so",
+    "glob:*/security/pam_shells.so",
+    "glob:*/security/pam_stress.so",
+    "glob:*/security/pam_succeed_if.so",
+    "glob:*/security/pam_time.so",
+    "glob:*/security/pam_tty_audit.so",
+    "glob:*/security/pam_umask.so",
+    "glob:*/security/pam_warn.so",
+    "glob:*/security/pam_wheel.so",
+    "glob:*/security/pam_xauth.so",
+]
+
+[[FileDigestGroup]]
+package = "pam"
+type = "pam"
+note = "configurable account locking upon login failures"
+bugs = ["bsc#1171562"]
+nodigests = [
+    "glob:*/security/pam_faillock.so",
+]
+
+[[FileDigestGroup]]
+package = "pam"
+type = "pam"
+note = "checks whether an account is a system or a regular user account"
+bugs = ["bsc#1171564"]
+nodigests = [
+    "glob:*/security/pam_usertype.so",
+]
+
+[[FileDigestGroup]]
+package = "pam"
+type = "pam"
+note = "verifies session quotas on session start"
+bugs = ["bsc#1171563"]
+nodigests = [
+    "glob:*/security/pam_setquota.so",
+]
+
+[[FileDigestGroup]]
+package = "pam"
+type = "pam"
+note = "creates poly-instantiated directories e.g. of /tmp, where each login session gets its unique instance"
+bugs = ["bsc#1218108"]
+nodigests = [
+    "glob:*/security/pam_namespace.so",
+]
+
+[[FileDigestGroup]]
+package = "pam-extra"
+type = "pam"
+note = "imported from rpmlint1 PAMModules.WhiteList, moved to new sub-package"
+bugs = ["bsc#1210371", "bsc#1230447"]
+nodigests = [
+    "glob:*/security/pam_timestamp.so",
+    "glob:*/security/pam_issue.so",
+    "glob:*/security/pam_limits.so",
+]
+
+[[FileDigestGroup]]
+package = "pam"
+type = "pam"
+note = "legacy: not audited"
+bugs = ["bsc#1206485"]
+nodigests = [
+    "glob:*/security/pam_unix.so",
+    "glob:*/security/pam_unix_acct.so",
+    "glob:*/security/pam_unix_auth.so",
+    "glob:*/security/pam_unix_passwd.so",
+    "glob:*/security/pam_unix_session.so",
+]
+
+[[FileDigestGroup]]
+package = "pam"
+type = "pam"
+note = "A minimal PAM auth module that harmonizes usernames"
+bugs = ["bsc#1219358"]
+nodigests = [
+    "glob:*/security/pam_canonicalize_user.so",
+]
+
+[[FileDigestGroup]]
+package = "pam-userdb"
+type = "pam"
+note = "legacy: not audited"
+bugs = ["bsc#1210371"]
+nodigests = [
+    "glob:*/security/pam_userdb.so",
+]
+
+[[FileDigestGroup]]
+packages = ["systemd", "systemd-mini"]
+type = "pam"
+note = "legacy: not audited"
+nodigests = [
+    "glob:*/security/pam_systemd.so",
+]
+
+[[FileDigestGroup]]
+package = "systemd-homed"
+type = "pam"
+note = "authentication and session-time mount of per-user (portable, encrypted) home directories"
+bugs = ["bsc#1185285", "bsc#1213692"]
+nodigests = [
+    "glob:*/security/pam_systemd_home.so",
+]
+
+[[FileDigestGroup]]
+packages = ["systemd", "systemd-mini"]
+type = "pam"
+note = "reuse encryption password stored in a kernel keyring for unlocking display manager etc."
+bugs = ["bsc#1220249"]
+nodigests = [
+    "glob:*/security/pam_systemd_loadkey.so",
+]
+
+[[FileDigestGroup]]
+package = "sssd"
+type = "pam"
+note = "authenticate and get user information via sssd suite"
+bug = "bsc#1106600"
+nodigests = [
+    "glob:*/security/pam_sss.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_mktemp"
+type = "pam"
+note = "legacy: not audited"
+nodigests = [
+    "glob:*/security/pam_mktemp.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_chroot"
+type = "pam"
+note = "legacy: not audited"
+nodigests = [
+    "glob:*/security/pam_chroot.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_snapper"
+type = "pam"
+note = "imported from rpmlint1 PAMModules.WhiteList"
+bug = "bsc#815383"
+nodigests = [
+    "glob:*/security/pam_snapper.so",
+]
+
+[[FileDigestGroup]]
+package = "gdm"
+type = "pam"
+note = "imported from rpmlint1 PAMModules.WhiteList"
+bug = "bsc#1004346"
+nodigests = [
+    "glob:*/security/pam_gdm.so",
+]
+
+[[FileDigestGroup]]
+package = "slurm-pam_slurm"
+type = "pam"
+note = "imported from rpmlint1 PAMModules.WhiteList"
+bugs = ["bsc#1007053", "bsc#1116758"]
+nodigests = [
+    "glob:*/security/pam_slurm.so",
+    "glob:*/security/pam_slurm_adopt.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_script"
+type = "pam"
+note = "imported from rpmlint1 PAMModules.WhiteList"
+bug = "bsc#1039848"
+nodigests = [
+    "glob:*/security/pam_script.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_yubico"
+type = "pam"
+note = "imported from rpmlint1 PAMModules.WhiteList"
+bug = "bsc#1087060"
+nodigests = [
+    "glob:*/security/pam_yubico.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_oath"
+type = "pam"
+note = "imported from rpmlint1 PAMModules.WhiteList"
+bug = "bsc#1089114"
+nodigests = [
+    "glob:*/security/pam_oath.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_p11"
+type = "pam"
+note = "imported from rpmlint1 PAMModules.WhiteList"
+bug = "bsc#1123916"
+nodigests = [
+    "glob:*/security/pam_p11.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_cifscreds"
+type = "pam"
+note = "imported from rpmlint1 PAMModules.WhiteList"
+bug = "bsc#1150527"
+nodigests = [
+    "glob:*/security/pam_cifscreds.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_pwquality"
+type = "pam"
+note = "imported from rpmlint1 PAMModules.WhiteList"
+bug = "bsc#1150520"
+nodigests = [
+    "glob:*/security/pam_pwquality.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_cgfs"
+type = "pam"
+note = "imported from rpmlint1 PAMModules.WhiteList"
+bug = "bsc#1150519"
+nodigests = [
+    "glob:*/security/pam_cgfs.so",
+]
+
+[[FileDigestGroup]]
+package = "google-authenticator-libpam"
+type = "pam"
+note = "imported from rpmlint1 PAMModules.WhiteList"
+bug = "bsc#1150524"
+nodigests = [
+    "glob:*/security/pam_google_authenticator.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_u2f"
+type = "pam"
+note = "imported from rpmlint1 PAMModules.WhiteList"
+bug = "bsc#1087061"
+nodigests = [
+    "glob:*/security/pam_u2f.so",
+]
+
+[[FileDigestGroup]]
+packages = ["pam_kwallet6"]
+type = "pam"
+note = "unlocks the kwallet during the session phase of PAM login"
+bugs = ["bsc#993806", "bsc#1217183"]
+nodigests = [
+    "glob:*/security/pam_kwallet5.so",
+]
+
+[[FileDigestGroup]]
+package = "google-guest-oslogin"
+type = "pam"
+note = "authorization and management of users based on the Google cloud metadata instance service"
+bugs = ["bsc#1146353", "bsc#1222457"]
+nodigests = [
+    "glob:*/security/pam_oslogin_login.so",
+    "glob:*/security/pam_oslogin_admin.so"
+]
+
+[[FileDigestGroup]]
+package = "fprintd-pam"
+type = "pam"
+note = "imported from rpmlint1 PAMModules.WhiteList"
+bug = "bsc#792095"
+nodigests = [
+    "glob:*/security/pam_fprintd.so",
+]
+
+[[FileDigestGroup]]
+package = "mariadb"
+type = "pam"
+note = "imported from rpmlint1 PAMModules.WhiteList"
+bug = "bsc#1163362"
+nodigests = [
+    "glob:*/security/pam_user_map.so",
+]
+
+[[FileDigestGroup]]
+package = "oddjob-mkhomedir"
+type = "pam"
+note = "imported from rpmlint1 PAMModules.WhiteList"
+bug = "bsc#1169494"
+nodigests = [
+    "glob:*/security/pam_oddjob_mkhomedir.so",
+]
+
+[[FileDigestGroup]]
+package = "cockpit-ws"
+type = "pam"
+note = "imported from rpmlint1 PAMModules.WhiteList"
+bug = "bsc#1169614"
+nodigests = [
+    "glob:*/security/pam_cockpit_cert.so",
+    "glob:*/security/pam_ssh_add.so",
+]
+
+[[FileDigestGroup]]
+package = "kanidm-unixd-clients"
+type = "pam"
+note = "imported from rpmlint1 PAMModules.WhiteList"
+bug = "bsc#1173387"
+nodigests = [
+    "glob:*/security/pam_kanidm.so",
+]
+
+[[FileDigestGroup]]
+package = "malcontent"
+type = "pam"
+note = "imported from rpmlint1 PAMModules.WhiteList"
+bug = "bsc#1177974"
+nodigests = [
+    "glob:*/security/pam_malcontent.so",
+]
+
+[[FileDigestGroup]]
+package = "sssd"
+type = "pam"
+note = "sssd gssapi extension"
+bug = "bsc#1182509"
+nodigests = [
+    "glob:*/security/pam_sss_gss.so",
+]
+
+[[FileDigestGroup]]
+package = "oddjob-gpupdate"
+type = "pam"
+note = "samba group-policy update helper"
+bug = "bsc#1188680"
+nodigests = [
+    "glob:*/security/pam_oddjob_gpupdate.so",
+]
+
+[[FileDigestGroup]]
+package = "pam-fscrypt"
+type = "pam"
+note = "PAM session time unlocking of encrypted directories"
+bug = "bsc#1195623"
+nodigests = [
+    "glob:*/security/pam_fscrypt.so",
+]
+
+[[FileDigestGroup]]
+package = "gromox"
+type = "pam"
+note = "PAM module provided by gromox to authenticate non-Gromox processes to a backend such as MySQL or LDAP"
+bug = "bsc#1200165"
+nodigests = [
+    "glob:*/security/pam_gromox.so",
+]
+
+[[FileDigestGroup]]
+package = "pam_saslauthd"
+type = "pam"
+note = "Connects to a local cyrus-saslauthd for authentication"
+bug = "bsc#1205459"
+nodigests = [
+    "glob:*/security/pam_saslauthd.so",
+]
+
+[[FileDigestGroup]]
+package = "lastlog2"
+type = "pam"
+note = "Logs user session information to an sqlite3 database"
+bug = "bsc#1209238"
+nodigests = [
+    "glob:*/security/pam_lastlog2.so",
+]
+
+[[FileDigestGroup]]
+package = "wtmpdb"
+type = "pam"
+note = "Keeps Y2038 safe login records in a sqlite database"
+bug = "bsc#1209963"
+nodigests = [
+    "glob:*/security/pam_wtmpdb.so",
+]
+
+[[FileDigestGroup]]
+package = "pam-himmelblau"
+type = "pam"
+note = "Based on kanidm's PAM module this here allows to authenticate against MS Azure Cloud AD"
+bug = "bsc#1215355"
+nodigests = [
+    "glob:*/security/pam_himmelblau.so",
+]
+
+[[FileDigestGroup]]
+package  = "libcgroup-pam"
+note     = "session PAM module that places the login process into a cgroup according to configuration"
+bug      = "bsc#1231381"
+type     = "pam"
+nodigests = [
+    "glob:*/security/pam_cgroup.so",
+]
+
+[[FileDigestGroup]]
+package  = "account-utils"
+note     = "pam_unix replacement for use in environments with `no_new_privs` everywhere"
+bug      = "bsc#1254218"
+type     = "pam"
+nodigests = [
+    "glob:*/security/pam_debuginfo.so",
+    "glob:*/security/pam_unix_ng.so"
+]
+
+[[FileDigestGroup]]
+package  = "pam-ssh-agent"
+note     = "authentication via SSH public keys"
+bug      = "bsc#1274633"
+type     = "pam"
+nodigests = [
+    "glob:*/security/pam_ssh_agent.so"
+]

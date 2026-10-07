@@ -1,0 +1,187 @@
+[[FileDigestGroup]]
+package = "rpmlint-integration-test"
+type = "sysctl"
+note = "valid test whitelisting entry for the OBS integration test package"
+bug = "bsc#1174722"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/sysctl.d/valid.conf"
+digester = "shell"
+hash = "c5d05102eb15d5986e15ac48e369fef3310010e1e2e4bfe7329f25780b02ce0c"
+
+[[FileDigestGroup]]
+package = "rpmlint-integration-test"
+type = "sysctl"
+note = "mismatching test whitelisting entry for the OBS integration test package"
+bug = "bsc#1174722"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/sysctl.d/mismatch.conf"
+digester = "shell"
+hash = "a4cf85013ddd404ad1f67ccf1259567b57305acd3b5bfaa696cf9f25a25dfcaa"
+
+[[FileDigestGroup]]
+package = "redis"
+type = "sysctl"
+note = "changes maximum number of socket connections and overcommit_memory behaviour"
+bug = "bsc#1174722"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/sysctl.d/00-redis.conf"
+digester = "shell"
+hash = "7642699dc64ccba77154ede500b8657989cbe0e82c67753a3df8c334efa0a8f8"
+
+[[FileDigestGroup]]
+package = "valkey"
+type = "sysctl"
+note = "changes maximum number of socket connections and overcommit_memory behaviour"
+bug = "bsc#1226083"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/sysctl.d/00-valkey.conf"
+digester = "shell"
+hash = "7642699dc64ccba77154ede500b8657989cbe0e82c67753a3df8c334efa0a8f8"
+
+[[FileDigestGroup]]
+package = "owncloud-client"
+type = "sysctl"
+note = "increases inotify max user watches"
+bug = "bsc#1174722"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/sysctl.d/69-sync-inotify.conf"
+digester = "shell"
+hash = "e70681a232f129648465d4aa036f37e3da8dcbfa611b1380baa5bd98030c6b61"
+
+[[FileDigestGroup]]
+package = "systemd"
+type = "sysctl"
+note = "sets core pattern, core pipe limit and suid_dumpable"
+bugs = ["bsc#1174722", "bsc#1226865", "bsc#1243959", "bsc#1267504"]
+[[FileDigestGroup.digests]]
+path = "/usr/lib/sysctl.d/50-coredump.conf"
+digester = "shell"
+hash = "d3a082282a3e403ccba14cfee50e47da483943306f3405ece1b50c3fcde4c623"
+
+[[FileDigestGroup]]
+package = "aaa_base"
+type = "sysctl"
+note = "some base hardenings of networking, (sym)link protection etc."
+bugs = ["bsc#1174722", "bsc#1219656", "bsc#1226464", "bsc#1228731"]
+[[FileDigestGroup.digests]]
+path = "/usr/lib/sysctl.d/50-default.conf"
+digester = "shell"
+hash = "c440fe069ee0bdfa77e5c3c594b473aa379788717e1ac55bb4cc5dc74812dc0e"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/sysctl.d/50-pid-max.conf"
+digester = "shell"
+hash = "dd590458104d1bc68b9233e018575925d3c14e667217cfb69a410cbdf4cde9a7"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/sysctl.d/51-network.conf"
+digester = "shell"
+hash = "4292c83e211bc30c928712a25708edf1cbeb94cf39d4d17b6594ad5559eef2e0"
+
+[[FileDigestGroup]]
+package  = "aaa_base-yama-enable-ptrace"
+note     = "sub-package to opt-out of the YAMA ptrace restrictions"
+bug      = "bsc#1226460"
+type     = "sysctl"
+[[FileDigestGroup.digests]]
+path     = "/usr/lib/sysctl.d/52-yama.conf"
+digester = "shell"
+hash     = "e874c084daaf0035d29687ec65275ad5b429ca312b72ef7f6362d2fd9d5bcc46"
+
+[[FileDigestGroup]]
+package = "raspberrypi-firmware"
+type = "sysctl"
+note = "reserves memory for DMA buffers for the network controller on rpi3"
+bug = "bsc#1174722"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/sysctl.d/50-rpi3.conf"
+digester = "shell"
+hash = "d5719ed7fed8b805b35ff28beabaffbe38e44211dd3dad0909d0270394426aa8"
+
+[[FileDigestGroup]]
+package = "google-guest-configs"
+type = "sysctl"
+note = "mostly network hardening, kernel hardening, auto reboot after panic"
+bug = "bsc#1174722"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/sysctl.d/60-gce-network-security.conf"
+digester = "shell"
+hash = "e51a21b525e8b4f95f8e2971740f85c1ef39fc38ab0f6d2e2abbd0d70072332b"
+
+[[FileDigestGroup]]
+package = "lxd"
+type = "sysctl"
+note = "inotify limit increase, ip neighborhood gc-threshold settings, max kernel keys increase"
+bug = "bsc#1174722"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/sysctl.d/60-lxd.conf"
+digester = "shell"
+hash = "25d4856bfebac6880d789f328381ac2c4f2280521fe166d3fbf539ab0f7d7612"
+
+[[FileDigestGroup]]
+package = "389-ds"
+type = "sysctl"
+note = "changes TCP performance related settings, changes swappiness behaviour"
+bug = "bsc#1174722"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/sysctl.d/70-dirsrv.conf"
+digester = "shell"
+hash = "7ebc48e75cf317301ddbdcae09d4e72db7fbcad01c90684869ca91f7a207bfd8"
+
+[[FileDigestGroup]]
+package = "ceph-osd"
+type = "sysctl"
+note = "changes max aio objects, pid_max"
+bug = "bsc#1174722"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/sysctl.d/90-ceph-osd.conf"
+digester = "shell"
+hash = "a947a84d4d883a5f14382d2698a7d5f4e8e04617ec692d76edc27eb0832818cd"
+
+[[FileDigestGroup]]
+package = "soapy-remote-server"
+type = "sysctl"
+note = "changes maximum size of socket buffers"
+bug = "bsc#1174722"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/sysctl.d/SoapySDRServer.conf"
+digester = "shell"
+hash = "7ec5f6a48c24802a58ebe31c962c0fb63d5215f4562bb200111c6ef9df380a6a"
+
+[[FileDigestGroup]]
+package = "glob:kubernetes1.[3-9][0-9]-kubeadm"
+type = "sysctl"
+note = "enables IPv4 forwarding system-wide, same content for all kubeadm versions >= 1.24"
+bugs = ["bsc#1174722", "bsc#1209363", "bsc#1210951", "bsc#1215542", "bsc#1219168"]
+[[FileDigestGroup.digests]]
+path = "/usr/lib/sysctl.d/90-kubeadm.conf"
+digester = "shell"
+hash = "43e95061f764465452c91708145e6d5948ab0e4750ed9ce98b59e1a1f223f45a"
+
+[[FileDigestGroup]]
+package = "traefik"
+type = "sysctl"
+note = "increases the maximum network socket buffer size"
+bug = "bsc#1230555"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/sysctl.d/90-traefik.conf"
+digester = "shell"
+hash = "fa6168516d46bc00f6d0cccc4470fa0e2beea74396490d3466b1640f8e312bd2"
+
+[[FileDigestGroup]]
+package  = "health-checker"
+note     = "helper which checks system health after updates with potential rollback; sets kernel reboot timeout after panic"
+bug      = "bsc#1252778"
+type     = "sysctl"
+[[FileDigestGroup.digests]]
+path     = "/usr/lib/sysctl.d/health-checker.conf"
+digester = "shell"
+hash     = "40838811f1f8ec4f4b19ce8f049f63ab616f92a1d0a8190e29d0bbf6fe43e66a"
+
+[[FileDigestGroup]]
+package  = "foomuuri"
+note     = "networking stack and firewall related settings"
+bug      = "bsc#1254385"
+type     = "sysctl"
+[[FileDigestGroup.digests]]
+path     = "/usr/lib/sysctl.d/50-foomuuri.conf"
+digester = "shell"
+hash     = "c5077daeb66bbb4b6f2f160c799950547adf52c9454545080eefef244424e669"
