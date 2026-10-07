@@ -6,6 +6,7 @@
 # slfo: opensuse-slfo-main @ 5c758cf12f9be87e9487bb60b023397f1e97115e (2026-06-09)
 #
 # Pruned Filters entries (findings rpmcrab killed):
+#   Filters: dropped 'non-standard-group' (killed: openSUSE dropped the Group tag)
 #   Filters: dropped 'without-chkconfig' (killed: InitScriptCheck deleted (issue #214))
 #   Filters: dropped 'no-chkconfig' (killed: InitScriptCheck deleted (issue #214))
 #   Filters: dropped 'subsys-not-used' (killed: InitScriptCheck deleted (issue #214))
