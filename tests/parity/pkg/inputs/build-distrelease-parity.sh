@@ -9,8 +9,7 @@
 #                     differs, not just the suffix).
 # distrelease-weird:  Release 3.weird9 (suffix unknown to the catalog),
 #                     changelog entry "1.15.1-3" -> still
-#                     incoherent-version-in-changelog, and the release also
-#                     trips not-standard-release-extension.
+#                     incoherent-version-in-changelog (nothing is stripped).
 #
 # Usage: bash tests/parity/pkg/inputs/build-distrelease-parity.sh
 # Needs: podman (or PODMAN=/path/to/podman), an openSUSE container image

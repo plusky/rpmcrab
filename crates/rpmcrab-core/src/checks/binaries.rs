@@ -47,18 +47,6 @@ fn ldso_soname_regex() -> &'static Regex {
         .get_or_init(|| Regex::new(r"^ld(-linux(-(ia|x86_)64))?\.so").expect("static regex"))
 }
 
-static NUMERIC_DIR_REGEX: OnceLock<Regex> = OnceLock::new();
-fn numeric_dir_regex() -> &'static Regex {
-    NUMERIC_DIR_REGEX.get_or_init(|| {
-        Regex::new(r"/usr(?:/share)/man/man./(.*)\.[0-9](?:\.gz|\.bz2)").expect("static regex")
-    })
-}
-
-static VERSIONED_DIR_REGEX: OnceLock<Regex> = OnceLock::new();
-fn versioned_dir_regex() -> &'static Regex {
-    VERSIONED_DIR_REGEX.get_or_init(|| Regex::new(r"[^.][0-9]").expect("static regex"))
-}
-
 static SO_REGEX: OnceLock<Regex> = OnceLock::new();
 fn so_regex() -> &'static Regex {
     SO_REGEX.get_or_init(|| Regex::new(r"/lib(64)?/[^/]+\.so(\.[0-9]+)*$").expect("static regex"))
@@ -902,62 +890,6 @@ impl BinariesCheck {
         }
     }
 
-    fn check_exec_in_library(
-        &self,
-        pkg: &Pkg,
-        has_lib: bool,
-        exec_files: &[String],
-        out: &mut Filter,
-    ) {
-        if has_lib {
-            for f in exec_files {
-                add_info(
-                    out,
-                    Level::Error,
-                    pkg,
-                    "executable-in-library-package",
-                    &[f],
-                );
-            }
-        }
-    }
-
-    fn check_non_versioned(
-        &self,
-        pkg: &Pkg,
-        has_lib: bool,
-        exec_files: &[String],
-        out: &mut Filter,
-    ) {
-        if !has_lib {
-            return;
-        }
-        for pkgfile in &pkg.files {
-            let f = &pkgfile.name;
-            let search_name = numeric_dir_regex()
-                .captures(f)
-                .ok()
-                .flatten()
-                .and_then(|c| c.name("1"))
-                .map(|m| m.as_str().to_string())
-                .unwrap_or_else(|| f.clone());
-            if !exec_files.contains(f)
-                && !so_regex().is_match(f).unwrap_or(false)
-                && !versioned_dir_regex()
-                    .is_match(&search_name)
-                    .unwrap_or(false)
-            {
-                add_info(
-                    out,
-                    Level::Error,
-                    pkg,
-                    "non-versioned-file-in-library-package",
-                    &[f],
-                );
-            }
-        }
-    }
-
     fn check_no_binary(
         &self,
         pkg: &Pkg,
@@ -1784,8 +1716,6 @@ impl Check for BinariesCheck {
     }
 
     fn check_binary(&mut self, pkg: &Pkg, config: &Config, out: &mut Filter) {
-        let mut exec_files: Vec<String> = Vec::new();
-        let mut pkg_has_lib = false;
         let mut pkg_has_binary = false;
         let mut pkg_has_binary_in_usrlib = false;
         let mut pkg_has_usrlib_file = false;
@@ -1873,18 +1803,6 @@ impl Check for BinariesCheck {
                 continue;
             }
 
-            // Reuse the parallel pre-pass parse instead of parsing twice.
-            let info_is_shlib = match analyses[idx].as_ref() {
-                Some(a) => a.info.failed.is_none() && a.info.is_shlib,
-                None => {
-                    let info = ReadelfInfo::parse(&pkgfile.path, &pkgfile.name);
-                    info.failed.is_none() && info.is_shlib
-                }
-            };
-            if info_is_shlib {
-                pkg_has_lib = true;
-            }
-
             if !self.is_exec && !self.is_shobj {
                 continue;
             }
@@ -1899,15 +1817,10 @@ impl Check for BinariesCheck {
             }
 
             if is_exec {
-                if bin_regex().is_match(fname).unwrap_or(false) {
-                    exec_files.push(fname.to_string());
-                }
                 self.check_non_pie(pkg, fname, out);
             }
         }
 
-        self.check_exec_in_library(pkg, pkg_has_lib, &exec_files, out);
-        self.check_non_versioned(pkg, pkg_has_lib, &exec_files, out);
         self.check_no_binary(pkg, pkg_has_binary, pkg_has_file_in_lib64, out);
         self.check_noarch_with_lib64(pkg, pkg_has_file_in_lib64, out);
         self.check_only_non_binary_in_usrlib(
@@ -3464,41 +3377,6 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(
             out.results().is_empty(),
             "shobj must be quiet: {:?}",
-            out.results()
-        );
-    }
-
-    #[test]
-    fn executable_in_library_package() {
-        let config = test_config();
-        let check = BinariesCheck::with_tool_dir(&config, None);
-        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_exec_in_library(&pkg, true, &["/usr/bin/foo".to_string()], &mut out);
-        let results = out.results().to_vec();
-        let lines = lines_for(&results, "executable-in-library-package");
-        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
-        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
-        assert!(lines[0].contains("/usr/bin/foo"), "detail: {}", lines[0]);
-
-        // One finding per exec file: two files must yield two findings, so
-        // a count assertion that cannot fail on multiplicity is impossible.
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_exec_in_library(
-            &pkg,
-            true,
-            &["/usr/bin/foo".to_string(), "/usr/bin/bar".to_string()],
-            &mut out,
-        );
-        let results = out.results().to_vec();
-        let lines = lines_for(&results, "executable-in-library-package");
-        assert_eq!(lines.len(), 2, "one finding per exec file: {results:?}");
-
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_exec_in_library(&pkg, false, &[], &mut out);
-        assert!(
-            out.results().is_empty(),
-            "no libs means quiet: {:?}",
             out.results()
         );
     }

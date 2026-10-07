@@ -298,8 +298,6 @@ impl TagsCheck {
             {
                 add_info(out, Level::Warning, pkg, "invalid-packager", &[packager]);
             }
-        } else {
-            add_info(out, Level::Error, pkg, "no-packager-tag", &[]);
         }
     }
 
@@ -317,17 +315,6 @@ impl TagsCheck {
     fn check_release(&self, pkg: &Pkg, out: &mut Filter, release: &str) {
         if !release.is_empty() {
             self.unexpanded_macro(out, pkg, "Release", release);
-            if let Some(re) = &self.extension_regex
-                && !re.is_match(release).unwrap_or(true)
-            {
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "not-standard-release-extension",
-                    &[release],
-                );
-            }
         } else {
             add_info(out, Level::Error, pkg, "no-release-tag", &[]);
         }
@@ -1437,13 +1424,7 @@ impl TagsCheck {
     /// `error_details` for `--explain`, mirroring the `__init__` dict
     /// (`TagsCheck.py:54-62`).
     pub fn register_error_details(config: &Config, out: &mut Filter) {
-        let tbl = &config.configuration;
-        let get_str = |k: &str| {
-            tbl.get(k)
-                .and_then(toml::Value::as_str)
-                .unwrap_or_default()
-                .to_string()
-        };
+        let _tbl = &config.configuration;
         for tag in [
             "obsoletes",
             "conflicts",
@@ -1460,13 +1441,6 @@ impl TagsCheck {
                 format!("Your package contains a versioned {capitalized} entry without an Epoch."),
             );
         }
-        out.set_error_detail(
-            "not-standard-release-extension",
-            format!(
-                "Your release tag must match the regular expression {}.",
-                get_str("ReleaseExtension")
-            ),
-        );
     }
 }
 
@@ -1570,8 +1544,7 @@ mod tests {
     fn release_extension_strip_tolerates_dist_suffix_in_changelog() {
         // Release 3.fc42 with a changelog entry of 1.15.1-3 (no dist suffix):
         // the configured extension is stripped before comparing, so no
-        // incoherent-version-in-changelog, and the release itself matches
-        // the catalog so no not-standard-release-extension either.
+        // incoherent-version-in-changelog.
         let config = test_config_with(Some(&shipped_release_extension()));
         let (_tmp, pkg) = fixture_pkg("distrelease-1.15.1-3.fc42.noarch.rpm");
         let results = run_check_with(&config, &pkg);
@@ -1580,12 +1553,6 @@ mod tests {
                 .iter()
                 .all(|(n, _)| n != "incoherent-version-in-changelog"),
             "unexpected incoherent-version-in-changelog: {results:?}"
-        );
-        assert!(
-            results
-                .iter()
-                .all(|(n, _)| n != "not-standard-release-extension"),
-            "3.fc42 matches the catalog: {results:?}"
         );
     }
 
@@ -1616,8 +1583,7 @@ mod tests {
     #[test]
     fn release_extension_strip_ignores_unknown_suffix() {
         // 3.weird9 is not in the catalog: nothing is stripped, so the
-        // suffix-less changelog entry is incoherent, and the release itself
-        // is not a standard extension.
+        // suffix-less changelog entry is incoherent.
         let config = test_config_with(Some(&shipped_release_extension()));
         let (_tmp, pkg) = fixture_pkg("distrelease-weird-1.15.1-3.weird9.noarch.rpm");
         let results = run_check_with(&config, &pkg);
@@ -1632,12 +1598,6 @@ mod tests {
             "single-string detail shape, not a duplicated candidate list: {}",
             inco.1
         );
-        let finding = results
-            .iter()
-            .find(|(n, _)| n == "not-standard-release-extension")
-            .expect("not-standard-release-extension");
-        assert!(finding.1.contains(": W: "), "level: {}", finding.1);
-        assert!(finding.1.contains("3.weird9"), "release: {}", finding.1);
     }
 
     #[test]
@@ -2345,18 +2305,6 @@ mod tests {
         results.iter().filter(|(n, _)| n == name).collect()
     }
 
-    fn run_check_with_release_extension(pkg: &Pkg) -> Vec<(String, String)> {
-        let mut config = test_config();
-        config.configuration.insert(
-            "ReleaseExtension".to_string(),
-            toml::Value::String("hello$".to_string()),
-        );
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let mut check = TagsCheck::new(&config);
-        check.check(pkg, &config, &mut out);
-        out.results().to_vec()
-    }
-
     fn run_check_with_spellcheck(pkg: &Pkg) -> Vec<(String, String)> {
         let config = test_config();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
@@ -2541,19 +2489,6 @@ mod tests {
     }
 
     #[test]
-    fn not_standard_release_extension_emits() {
-        // Mirrors the reference test's ReleaseExtension='hello$' setup.
-        let (_tmp, pkg) = fixture_pkg("fcprobe-1-1.noarch.rpm");
-        let results = run_check_with_release_extension(&pkg);
-        let hits = tag_hits(&results, "not-standard-release-extension");
-        assert_eq!(hits.len(), 1, "all: {results:?}");
-        assert_eq!(
-            hits[0].1,
-            "fcprobe.noarch: W: not-standard-release-extension 1"
-        );
-    }
-
-    #[test]
     fn forbidden_controlchar_in_changelog_emits() {
         let (_tmp, pkg) = fixture_pkg("tags-emission-pins-badchangelog-1.0-1.noarch.rpm");
         let results = run_check(&pkg);
@@ -2657,7 +2592,6 @@ mod rich_dep_emission_tests {
         assert_eq!(
             names,
             [
-                "no-packager-tag",
                 "no-group-tag",
                 "invalid-license",
                 "invalid-license-spellcheck",
@@ -2666,7 +2600,7 @@ mod rich_dep_emission_tests {
             "unexpected emissions: {results:?}"
         );
         assert_eq!(
-            results[2].1, "i18n-two-locale.noarch: W: invalid-license MIT",
+            results[1].1, "i18n-two-locale.noarch: W: invalid-license MIT",
             "level and detail pinned on the rendered line"
         );
     }

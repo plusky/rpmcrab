@@ -52,18 +52,6 @@ to a non-system library path.
 statically-linked-binary="""
 The package installs a statically linked binary or object file.
 """
-executable-in-library-package="""
-The package mixes up libraries and executables. Mixing up these
-both types of files makes upgrades quite impossible.
-"""
-non-versioned-file-in-library-package="""
-The package contains files in non versioned directories. This makes it
-impossible to have multiple major versions of the libraries installed.
-One solution can be to change the directories which contain the files
-to subdirs of /usr/lib/<name>-<version> or /usr/share/<name>-<version>.
-Another solution can be to include a version number in the file names
-themselves.
-"""
 shlib-policy-name-error="""
 The package contains shared library but is not named after its SONAME.
 """
