@@ -52,7 +52,7 @@ FilterErrorTitles = []
 Filters = []
 # List of errors that can't be filtered
 BlockedFilters = []
-# Treshold where we should error out, by default single error is enough
+# Threshold where we should error out, by default single error is enough
 BadnessThreshold = -1
 # Report output format: "text" (the frozen human-readable wire format) or
 # "json" (machine-readable, upstream rpmlint#1156). Overridden by --format.
