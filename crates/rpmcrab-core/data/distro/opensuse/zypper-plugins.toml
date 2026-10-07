@@ -1,0 +1,108 @@
+[[FileDigestGroup]]
+package = "rpmlint-integration-test"
+type = "zypperplugin"
+note = "test whitelisting entry for the OBS integration test package"
+bug = "bsc#1204314"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/zypp/plugins/commit/test-plugin.sh"
+digester = "shell"
+hash = "2709ba21a4c4905560166ab13bb7bf6a92ff604adc7cb61fa1768d3f562ab189"
+
+[[FileDigestGroup]]
+package = "rpmlint-integration-test"
+type = "zypperplugin"
+note = "test whitelisting entry for the OBS integration test package (invalid digest)"
+bug = "bsc#1204314"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/zypp/plugins/commit/mismatching-plugin.sh"
+digester = "shell"
+hash = "36416902a4636949e17cecd375524609cc599c83245ca5b5ab9ddcacd77e4d64"
+
+[[FileDigestGroup]]
+package = "btrfsmaintenance"
+type = "zypperplugin"
+note = "this plugin defragments the RPM database after zypper operations are complete"
+bug = "bsc#1204314"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/zypp/plugins/commit/btrfs-defrag-plugin.sh"
+digester = "shell"
+hash = "dbfdf581ce1929f2815ed854c267b1e47bbedb9e8083e835f66850168fabf2d2"
+
+[[FileDigestGroup]]
+package = "etckeeper-zypp-plugin"
+type = "zypperplugin"
+note = "this plugin performs commits for /etc before and after every zypper operation"
+bug = "bsc#1204314"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/zypp/plugins/commit/zypper-etckeeper.py"
+digester = "shell"
+hash = "14f744b4146f304b9432ec768cb2a08b184a1a214ecb9bf5086b9a98151dc4b0"
+
+[[FileDigestGroup]]
+package = "libzypp-plugin-appdata"
+type = "zypperplugin"
+note = "this plugin maintains AppStream metadata for each installed package"
+bugs = ["bsc#1204314", "bsc#1206836", "bsc#1219873"]
+[[FileDigestGroup.digests]]
+path = "/usr/lib/zypp/plugins/appdata/InstallAppdata"
+digester = "shell"
+hash = "fa505770dbaae9bfbc456dcf3064b437d2b5740c030fdd7d22d320526b12da40"
+
+[[FileDigestGroup]]
+package = "permissions-zypp-plugin"
+type = "zypperplugin"
+note = "this plugin calls `chkstat --system` after certain package install to make sure the permission settings are maintained at all times"
+bug = "bsc#1204314"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/zypp/plugins/commit/permissions.py"
+digester = "shell"
+hash = "4bf79850d3c77363f7164647ec4a00d6226a67a8093ae3388a3dc5617ea65452"
+
+[[FileDigestGroup]]
+package = "snapper-zypp-plugin"
+type = "zypperplugin"
+note = "this plugin creates snapper snapshots before zypper modifications take place"
+bug = "bsc#1204314"
+nodigests = [
+    "/usr/lib/zypp/plugins/commit/snapper-zypp-plugin"
+]
+
+[[FileDigestGroup]]
+package = "container-suseconnect"
+type = "zypperplugin"
+note = "this plugin make host SUSE subscriptions available in containers"
+bug = "bsc#1204314"
+nodigests = [
+    "/usr/lib/zypp/plugins/services/container-suseconnect-zypp",
+    "/usr/lib/zypp/plugins/urlresolver/susecloud"
+]
+
+[[FileDigestGroup]]
+package = "salt-minion"
+type = "zypperplugin"
+note = "this plugin maintains a timestamp and checksum of the RPM database"
+bug = "bsc#1204314"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/zypp/plugins/commit/zyppnotify"
+digester = "shell"
+hash = "58a04efaa1ca353f298b61be48dbb7a6512837733ef42468fcb5cb07cd82db92"
+
+[[FileDigestGroup]]
+package = "zypp-boot-plugin"
+type = "zypperplugin"
+note = "a helper for ALP to determine when a soft/hard reboot is required due to updates"
+bug = "bsc#1215988"
+nodigests = [
+    "/usr/lib/zypp/plugins/commit/boot-plugin",
+]
+
+[[FileDigestGroup]]
+package  = "pqcverification-zypp-plugin"
+note     = "this plugin enables post-quantum cryptography verification"
+bug      = "bsc#1265207"
+type     = "zypperplugin"
+[[FileDigestGroup.digests]]
+path     = "/usr/lib/zypp/plugins/sigcheck/pqcverification"
+digester = "shell"
+hash     = "77e775e984d1b0ec01391ebd83b002e5b699d2011adddd0aea3130d8bbfc4bec"
+

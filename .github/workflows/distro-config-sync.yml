@@ -1,0 +1,85 @@
+# Monthly refresh of the vendored distro configs from upstream rpmlint.
+#
+# Upstream owns these configs until rpmlint is fully superseded, so this job
+# re-resolves the pins to the latest upstream commits and opens a PR when the
+# regenerated files differ. The PR body carries the provenance (old/new SHAs,
+# prune log) for review. No-op months produce no PR.
+#
+# The checked-in files stay the build's source of truth; the generator never
+# runs at build time.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 1 * *' # 1st of month 04:00 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: distro-config-sync
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Regenerate distro configs from latest upstream
+        id: regen
+        run: |
+          set -euo pipefail
+          old_opensuse=$(sed -n 's|^# opensuse: main @ \([0-9a-f]*\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
+          old_slfo=$(sed -n 's|^# slfo: opensuse-slfo-main @ \([0-9a-f]*\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
+          python3 scripts/generate-distro-configs.py --refresh > /tmp/refresh.log 2>&1
+          cat /tmp/refresh.log
+          new_opensuse=$(sed -n 's|^# opensuse: main @ \([0-9a-f]*\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
+          new_slfo=$(sed -n 's|^# slfo: opensuse-slfo-main @ \([0-9a-f]*\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
+          echo "old_opensuse=${old_opensuse}" >> "$GITHUB_OUTPUT"
+          echo "old_slfo=${old_slfo}" >> "$GITHUB_OUTPUT"
+          echo "new_opensuse=${new_opensuse}" >> "$GITHUB_OUTPUT"
+          echo "new_slfo=${new_slfo}" >> "$GITHUB_OUTPUT"
+          # The generator prunes Filters entries for findings rpmcrab no longer
+          # emits; surface the prune log for the PR body.
+          grep '^pruned: ' /tmp/refresh.log > /tmp/prunes.txt || true
+      - name: Check for drift
+        id: diff
+        run: |
+          if git diff --quiet -- crates/rpmcrab-core/data/distro scripts/generate-distro-configs.py; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Open refresh PR
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          date=$(date -u +%F)
+          branch="distro-config-sync-${date}"
+          git -c user.name=github-actions -c user.email=github-actions@github.com \
+            checkout -B "$branch"
+          git add crates/rpmcrab-core/data/distro scripts/generate-distro-configs.py
+          git -c user.name=github-actions -c user.email=github-actions@github.com \
+            commit -m "Refresh vendored distro configs to upstream ${date}"
+          git push -u origin "$branch"
+          if [ -z "$(gh pr list --head "$branch" --json number --jq '.[].number')" ]; then
+            prunes=$(cat /tmp/prunes.txt)
+            body="Upstream rpmlint moved; regenerating the vendored distro configs.
+
+          opensuse: ${{ steps.regen.outputs.old_opensuse }} -> ${{ steps.regen.outputs.new_opensuse }} (main)
+          slfo: ${{ steps.regen.outputs.old_slfo }} -> ${{ steps.regen.outputs.new_slfo }} (opensuse-slfo-main)
+
+          Generator prune log (Filters entries dropped for findings rpmcrab no longer emits):
+          ${prunes:-none}
+
+          Produced by the monthly distro-config-sync job. Upstream remains the owner of these configs until rpmlint is fully superseded."
+            gh pr create --base main --head "$branch" \
+              --title "Refresh vendored distro configs to upstream ${date}" \
+              --body "$body"
+          fi

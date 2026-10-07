@@ -1,0 +1,79 @@
+[[FileDigestGroup]]
+package = "rpmlint-integration-test"
+note = "valid test whitelisting entry for the OBS integration test package"
+type = "permissions"
+[[FileDigestGroup.digests]]
+path = "/etc/permissions.d/valid"
+hash = "3c07438f28b0545bfe83a2355693c94b91e3fe380c07f12d542e9d27a08de1f9"
+
+[[FileDigestGroup]]
+package = "rpmlint-integration-test"
+note = "mismatching test whitelisting entry for the OBS integration test package"
+type = "permissions"
+[[FileDigestGroup.digests]]
+path = "/etc/permissions.d/mismatch"
+hash = "4a5e8e9ca514c73f1dbee55e88c4d75a235473c1d5cef4751d84016833961fdf"
+
+[[FileDigestGroup]]
+package = "postfix"
+type = "permissions"
+[[FileDigestGroup.digests]]
+path = "/etc/permissions.d/postfix"
+hash = "6233f37dc93ae05d476bbeb03ffa6de4d006893a9d5c91d38afb66506d224e9d"
+[[FileDigestGroup.digests]]
+path = "/etc/permissions.d/postfix.paranoid"
+hash = "d5e51380e7ec868a42d336c868fc012ab95cac771d95361504cc6040b8d86221"
+
+[[FileDigestGroup]]
+package = "postfix-bdb"
+type = "permissions"
+[[FileDigestGroup.digests]]
+path = "/etc/permissions.d/postfix"
+hash = "6233f37dc93ae05d476bbeb03ffa6de4d006893a9d5c91d38afb66506d224e9d"
+[[FileDigestGroup.digests]]
+path = "/etc/permissions.d/postfix.paranoid"
+hash = "d5e51380e7ec868a42d336c868fc012ab95cac771d95361504cc6040b8d86221"
+
+[[FileDigestGroup]]
+package = "sendmail"
+bugs = ["bsc#1219339"]
+type = "permissions"
+note = """Be careful about calculating digest sums here, the sendmail package
+      replaces file contents during RPM build time with architecture dependent
+      values."""
+[[FileDigestGroup.digests]]
+path = "/usr/share/permissions/permissions.d/sendmail"
+hash = "e09ca5efebd0b3c123afc2364f9745f4d85c4327fa83f709bccbaa64da764486"
+[[FileDigestGroup.digests]]
+path = "/usr/share/permissions/permissions.d/sendmail.paranoid"
+hash = "2d5c56cdfb00ec169c182de791cf2934331159842f1849c5f2d7059f0086bd2c"
+
+[[FileDigestGroup]]
+package = "texlive-filesystem"
+type = "permissions"
+note = """DEPRECATED. texlive is currently migrating these directories to systemd-tmpfile. This entry can be deleted once the new setup is complete. See also: bsc#1256841 but double-check, even if that bug is closed."""
+[[FileDigestGroup.digests]]
+path = "/etc/permissions.d/texlive"
+hash = "c4d3d806535c6737a07828ac84e297b87f6a406f6df67c9928c4fac71f47a17d"
+[[FileDigestGroup.digests]]
+path = "/etc/permissions.d/texlive.texlive"
+hash = "c4d3d806535c6737a07828ac84e297b87f6a406f6df67c9928c4fac71f47a17d"
+
+[[FileDigestGroup]]
+package  = "libcgroup-tools"
+note     = "this is for a setgid binary 'cgexec', running with 'cgred' group privs"
+bug      = "bsc#1231381"
+type     = "permissions"
+[[FileDigestGroup.digests]]
+path     = "/usr/share/permissions/permissions.d/libcgroup"
+hash     = "6d3a669b10b2449484dcad1c6d932f5897666bcbeef2a45d9608ef63a1e43188"
+
+[[FileDigestGroup]]
+package  = "exim"
+note     = "Permissions for the spool directory"
+bug      = "bsc#1240755"
+type     = "permissions"
+[[FileDigestGroup.digests]]
+path     = "/etc/permissions.d/exim"
+digester = "shell"
+hash     = "bcc22a994f7bbb3aea193ab77ef49a57bf171bafce9f55e4bc1b02e16e7e308f"

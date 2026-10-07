@@ -1,0 +1,355 @@
+# Configuration for the rpmlint utility.
+
+# Configuration options used by the checks
+CompressExtension = "gz"
+UseVarLockSubsys = false
+UseVersionInChangelog = false
+BadnessThreshold = 999
+
+# Set to true to issue a warning for ghost entries outside snapshots
+# when checking for atomic update compatibility
+AtomicCheckGhosts = false
+
+# Enabled checks for the rpmlint to be run (besides the default set)
+Checks = [
+    "BashismsCheck",
+    "TmpFilesCheck",
+    "SysVInitOnSystemdCheck",
+    "SharedLibraryPolicyCheck",
+
+    # Checks present at opensuse branch only
+    "BrandingPolicyCheck",
+    "DeviceFilesCheck",
+    "FileDigestCheck",
+    "FilelistCheck",
+    "KMPPolicyCheck",
+    "PolkitCheck",
+    "SystemdInstallCheck",
+    "SystemdTmpfilesCheck",
+    "SUIDPermissionsCheck",
+    "WorldWritableCheck",
+    "AtomicUpdateCheck",
+]
+
+# List of directory prefixes that are not allowed in packages
+DisallowedDirs = [
+    "/etc/NetworkManager/dispatcher.d",
+]
+
+# Only these directories may be used by packages compatible with
+# atomic updates
+AtomicAllowedDirs = [
+    "/etc/",
+    "/usr/",
+    "/bin/",
+    "/lib/",
+    "/lib64/",
+    "/sbin/",
+    "/boot/",
+]
+
+# List of subdirectories which are disallowed for atomic updates
+# despite being within otherwise allowed directories
+AtomicDisallowedSubdirs = [
+    "/usr/local/",
+    "/boot/efi/",
+]
+
+FilterErrorTitles = [
+    'cross-directory-hard-link',
+]
+
+Filters = [
+# Stuff autobuild takes care about
+    '.*invalid-version.*',
+    '.*invalid-packager.*',
+    '.*not-standard-release-extension.*',
+    '.*invalid-buildhost.*',
+    '.*executable-in-library-package.*',
+    '.*non-versioned-file-in-library-package.*',
+    '.*hardcoded-path-in-buildroot-tag.*',
+    '.*no-buildroot-tag.*',
+
+# Do not validate package rpm groups
+    '.*devel-package-with-non-devel-group.*',
+    '.*no-group-tag.*',
+    '.*non-standard-group.*',
+
+# Output filters
+    '.*spurious-bracket-in-.*',
+    '.*one-line-command-in-.*',
+    ' dir-or-file-in-opt ',  # handled by CheckFilelist.py
+    ' dir-or-file-in-usr-local ',  # handled by CheckFilelist.py
+    ' non-standard-dir-in-usr ',  # handled by CheckFilelist.py
+    'incoherent-version-in-changelog',
+    ' no-signature',
+    ' symlink-crontab-file',  #bnc591431
+    ' without-chkconfig',
+    'unstripped-binary-or-object.*\.ko',
+    ' no-chkconfig',
+    ' subsys-not-used',
+    ' dangerous-command.*',
+    ' setuid-binary.*',
+    'subdir-in-bin /sbin/conf.d/',
+    '.* nss_db non-standard-dir-in-var db',
+    'non-standard-dir-in-usr openwin',
+    'ibcs2 non-standard-dir-in-usr i486-sysv4',
+    'shlibs5 non-standard-dir-in-usr i486-linux-libc5',
+    'explicit-lib-dependency libtool',
+
+# Filesystem package needs special exceptions
+    '^filesystem\..*: dir-or-file-in-var-run',
+    '^filesystem\..*: dir-or-file-in-var-lock',
+    '^filesystem\..*: dir-or-file-in-var-tmp',
+    '^filesystem\..*: dir-or-file-in-var-run',
+    '^filesystem\..*: dir-or-file-in-var-lock',
+    '^filesystem\..*: dir-or-file-in-usr-tmp',
+    '^filesystem\..*: dir-or-file-in-tmp',
+    '^filesystem\..*: dir-or-file-in-mnt',
+    '^filesystem\..*: dir-or-file-in-home',
+    '^filesystem\..*: dir-or-file-outside-snapshot',
+    '^filesystem\..*: hidden-file-or-dir /root/.gnupg',
+    '^filesystem\..*: hidden-file-or-dir /root/.gnupg',
+    '^filesystem\..*: hidden-file-or-dir /etc/skel/.config',
+    '^filesystem\..*: hidden-file-or-dir /etc/skel/.local',
+    '^filesystem\..*: hidden-file-or-dir /tmp/.X11-unix',
+    '^filesystem\..*: hidden-file-or-dir /tmp/.ICE-unix',
+    '^filesystem\..*: hidden-file-or-dir /etc/skel/.fonts',
+    '^filesystem\..*: filelist-forbidden-fhs23',
+    '^filesystem\..*: filelist-forbidden-opt',
+    '^filesystem\..*: non-standard-uid /var/lib/nobody nobody',
+    '^filesystem\..*: missing-dependency-to-cron',
+# has arch specific dirs in /usr
+    '^filesystem\..*: no-binary',
+
+# Suppress any errors about internal packages
+    '^qa\S+: [EWI]:',
+    '^\S*(?:INTERNAL|internal)\.\S+: [EWI]:',
+
+# Exceptions for devel-files
+    'devel-file-in-non-devel-package.*/boot/vmlinuz-.*autoconf.h',
+    'devel-file-in-non-devel-package.*/usr/src/linux-',
+    'devel-file-in-non-devel-package.*/usr/share/systemtap',
+    '-(?:examples|doc)\.\S+: \w: devel-file-in-non-devel-package',
+    'java\S+-demo\.\S+: \w: devel-file-in-non-devel-package',
+    'avr-libc\.\S+: \w: devel-file-in-non-devel-package',
+    'cross-.*devel-file-in-non-devel-package',
+    'cmake.*devel-file-in-non-devel-package',
+    'gcc\d\d.*devel-file-in-non-devel-package',
+    'OpenOffice_org-sdk\.\S+: \w: devel-file-in-non-devel-package',
+    'wnn-sdk\.\S+: \w: devel-file-in-non-devel-package',
+    'ocaml\.\S+: \w: devel-file-in-non-devel-package',
+    'xorg-x11-server-sdk\.\S+: \w: devel-file-in-non-devel-package',
+    'linux-kernel-headers\.\S+: \w: devel-file-in-non-devel-package',
+    ' devel-file-in-non-devel-package.*-config',
+    'libtool\.\S+: \w: devel-file-in-non-devel-package',
+    'sdb.* dangling-relative-symlink /usr/share/doc/sdb/.*/gifs ../gifs',
+    'kernel-modules-not-in-kernel-packages',
+
+# SUSE kmp's don't need manual depmod (bnc#456048)
+    'module-without-depmod-postin',
+    'postin-with-wrong-depmod',
+    'module-without-depmod-postun',
+    'postun-with-wrong-depmod',
+    'configure-without-libdir-spec',
+    'conffile-without-noreplace-flag /etc/init.d',
+    'use-of-RPM_SOURCE_DIR',
+    'use-tmp-in-',
+    'symlink-contains-up-and-down-segments /var/lib/named',
+    'no-ldconfig-symlink',
+    'aaa_base\.\S+: \w: use-of-home-in-%post',
+    'description-line-too-long',
+    'hardcoded-library-path',
+
+# Doesn't seem to make sense
+    'invalid-ldconfig-symlink',
+    'invalid-soname',
+    'only-non-binary-in-usr-lib',
+    'outside-libdir-files',
+
+# We want these files
+    ' perl-temp-file ',
+    ' hidden-file-or-dir .*/\.packlist',
+    ' hidden-file-or-dir .*/\.directory',
+    'perl-.*no-binary',
+    ' no-major-in-name ',
+
+# We check for that already
+    'dangling-relative-symlink',
+    ' lib-package-without-%mklibname',
+    ' requires-on-release',
+    ' non-executable-script /etc/profile.d/',
+    ' non-executable-script /var/adm/fillup-templates/',
+    ' init-script-name-with-dot ',
+    '.* statically-linked-binary /sbin/ldconfig',
+    '.* statically-linked-binary /sbin/init',
+    'valgrind.* statically-linked-binary',
+    'ldconfig-post.*/ddiwrapper/wine/',
+    'glibc\.\S+: \w: statically-linked-binary /usr/sbin/glibc_post_upgrade',
+    ' symlink-should-be-relative ',
+    'libzypp.*shlib-policy-name-error.*libzypp',
+    'libtool.*shlib-policy.*',
+
+# Stuff that is currently too noisy, but might become relevant in the future
+    ' prereq-use',
+    ' file-not-utf8',
+    ' tag-not-utf8',
+    ' setup-not-quiet',
+    ' mixed-use-of-spaces-and-tabs ',
+    ' prereq-use ',
+
+# An issue with OBS, works with autobuild
+    ' no-packager-tag',
+    ' unversioned-explicit-provides ',
+    ' unversioned-explicit-obsoletes ',
+    ' service-default-enabled ',
+    ' non-standard-dir-perm ',
+    ' conffile-without-noreplace-flag ',
+    ' non-standard-executable-perm ',
+    ' jar-not-indexed ',
+    ' uncompressed-zip ',
+    ' %ifarch-applied-patch ',
+    ' read-error ',
+    ' init-script-without-chkconfig-postin ',
+    ' init-script-without-chkconfig-preun ',
+    ' postin-without-chkconfig ',
+    ' preun-without-chkconfig ',
+    ' no-dependency-on locales',
+    ' executable-marked-as-config-file',
+    ' log-files-without-logrotate',
+    ' hardcoded-prefix-tag',
+    ' no-documentation',
+    ' multiple-specfiles',
+    ' no-default-runlevel ',
+    ' setgid-binary ',
+    ' non-readable ',
+    ' postin-without-ghost-file-creation ',
+
+# Exceptions for filelist checks
+    'nfs-client\.\S+: \w: filelist-forbidden-backup-file /var/lib/nfs/sm.bak',
+    'perl\.\S+: \w: filelist-forbidden-perl-dir ',
+    'info\.\S+: \w: info-dir-file .*/usr/share/info/dir',
+
+# These packages are used for CD creation and are not supposed to be
+# installed. It's still a dirty hack to make an exception. The
+# packages should either be built in a separate project with
+# different config or file be put somewhere below /opt/suse/*
+    '(?:dosutils|skelcd|installation-images|yast2-slide-show|instlux|skelcd-.*|patterns-.*)\.\S+: \w: filelist-forbidden-fhs23 /CD1',
+
+# Too noisy, and usually not something downstream packagers can fix
+    ' incorrect-fsf-address ',
+    ' no-manual-page-for-binary ',
+    ' static-library-without-debuginfo /usr/lib(?:64)?/ghc-[\d\.]+/',
+
+# Many places have shorter paths
+    ' non-coherent-filename ',
+
+# Mandriva specific stuff that we don't want
+    ' invalid-build-requires ',
+    ' no-provides ',
+
+# Bash completion files are not scripts, do not require them marked as %config
+    'W: non-conffile-in-etc /etc/bash_completion.d/',
+
+# Info uses file triggers now (boo#1152169)
+    ' info-files-without-install-info-postin' ,
+    ' postin-without-install-info ',
+    ' info-files-without-install-info-postun ',
+]
+
+BlockedFilters = [
+    "cron-file-digest-mismatch",
+    "cron-file-ghost",
+    "cron-file-unauthorized",
+    "cron-file-symlink",
+    "dbus-file-digest-mismatch",
+    "dbus-file-ghost",
+    "dbus-file-unauthorized",
+    "dbus-file-symlink",
+    "device-mismatched-attrs",
+    "device-unauthorized-file",
+    "non-position-independent-executable",
+    "pam-file-ghost",
+    "pam-file-unauthorized",
+    "permissions-directory-setuid-bit",
+    "permissions-dir-without-slash",
+    "permissions-file-as-dir",
+    "permissions-file-digest-mismatch",
+    "permissions-file-ghost",
+    "permissions-file-unauthorized",
+    "permissions-file-setuid-bit",
+    "permissions-file-symlink",
+    "permissions-fscaps",
+    "permissions-incorrect",
+    "permissions-incorrect-owner",
+    "permissions-missing-postin",
+    "permissions-missing-requires",
+    "permissions-missing-verifyscript",
+    "permissions-parse-error",
+    "permissions-symlink",
+    "polkit-file-ghost",
+    "polkit-file-digest-mismatch",
+    "polkit-file-unauthorized",
+    "polkit-file-symlink",
+    "polkit-ghost-file",
+    "polkit-untracked-privilege",
+    "polkit-user-privilege",
+    "polkit-xml-exception",
+    "systemd-tmpfile-ghost",
+    "systemd-tmpfile-symlink",
+    "systemd-tmpfile-parse-error",
+    "systemd-tmpfile-entry-unauthorized",
+    "world-writable-mismatched-attrs",
+    "world-writable-unauthorized-file",
+    "zypperplugin-file-digest-mismatch",
+    "zypperplugin-file-ghost",
+    "zypperplugin-file-unauthorized"
+]
+
+[DanglingSymlinkExceptions."/usr/share/doc/licenses/"]
+path = "/usr/share/doc/licenses/"
+name = "licenses"
+[DanglingSymlinkExceptions."consolehelper$"]
+path = "consolehelper$"
+name = "usermode-consoleonly"
+
+# package/path combinations that are allowed to ship %ghost files in locations
+# restricted by FileDigestCheck
+[[GhostFilesExceptions]]
+package = "polkit-default-privs"
+paths = [
+    "/etc/polkit-1/rules.d/90-default-privs.rules",
+]
+
+# package/path combinations that are allowed to ship symlinks in locations
+# restricted by FileDigestCheck (where otherwise symlinks are rejected)
+#
+# files matching this condition will be ignored and not be verified at all
+[[SymlinkExceptions]]
+packages = ["systemd", "systemd-mini"]
+paths = [
+    # compability symlink towards /etc/sysctl.conf for systemd-sysctl
+    "/usr/lib/sysctl.d/99-sysctl.conf"
+]
+
+[FileDigestLocation]
+
+[FileDigestGroup]
+
+[DeviceFilesWhitelist]
+
+[WorldWritableWhitelist]
+
+[SystemdTmpfilesWhitelist]
+
+[Descriptions]
+non-standard-uid = '''A file in this package is owned by an unregistered user id.
+To register the user, please make a pull request to the rpmlint config file
+configs/openSUSE/users-groups.toml in the rpmlint repository.
+'''
+non-standard-gid = '''A file in this package is owned by an unregistered group id.
+To register the group, please make a pull request to the rpmlint config file
+configs/openSUSE/users-groups.toml in the rpmlint repository.
+'''
+no-changelogname-tag = '''There is no changelog. Please insert a '%changelog' section heading in your
+spec file and prepare your changes file using e.g. the 'osc vc' command.'''

@@ -1,0 +1,106 @@
+[[FileDigestGroup]]
+package = "rpmlint-integration-test"
+note = "valid test whitelisting entry for the OBS integration test package"
+type = "permissions"
+[[FileDigestGroup.digests]]
+path = "/etc/permissions.d/valid"
+hash = "3c07438f28b0545bfe83a2355693c94b91e3fe380c07f12d542e9d27a08de1f9"
+
+[[FileDigestGroup]]
+package = "rpmlint-integration-test"
+note = "mismatching test whitelisting entry for the OBS integration test package"
+type = "permissions"
+[[FileDigestGroup.digests]]
+path = "/etc/permissions.d/mismatch"
+hash = "4a5e8e9ca514c73f1dbee55e88c4d75a235473c1d5cef4751d84016833961fdf"
+
+[[FileDigestGroup]]
+packages = ["postfix", "postfix-bdb"]
+type = "permissions"
+[[FileDigestGroup.digests]]
+path = "/usr/share/permissions/permissions.d/postfix"
+hash = "6f2e5d01189c05662083125ae3addab8b7273f6a57eae8369bc34b08a9a1d638"
+[[FileDigestGroup.digests]]
+path = "/usr/share/permissions/permissions.d/postfix.paranoid"
+hash = "54d194477fc688076940c93bfd201680b5cc0fd6079bba10bd0101fb986a2231"
+
+[[FileDigestGroup]]
+package = "sendmail"
+bugs = ["bsc#1219339", "bsc#1256160"]
+type = "permissions"
+note = """Be careful about calculating digest sums here, the sendmail package
+      replaces file contents during RPM build time with architecture dependent
+      values."""
+[[FileDigestGroup.digests]]
+path = "/usr/share/permissions/permissions.d/sendmail"
+hash = "544b91b15ce1dd54659a2d98a66ce945db2ca99134acb97f8a0a196612c57bb6"
+[[FileDigestGroup.digests]]
+path = "/usr/share/permissions/permissions.d/sendmail.paranoid"
+hash = "7a593f6678ab48c4eab010bb885989bd06e5a73a307575399d71a2d7c3d3f0c3"
+
+[[FileDigestGroup]]
+package  = "libcgroup-tools"
+note     = "this is for a setgid binary 'cgexec', running with 'cgred' group privs"
+bug      = "bsc#1231381"
+type     = "permissions"
+[[FileDigestGroup.digests]]
+path     = "/usr/share/permissions/permissions.d/libcgroup"
+hash     = "6d3a669b10b2449484dcad1c6d932f5897666bcbeef2a45d9608ef63a1e43188"
+
+[[FileDigestGroup]]
+package  = "sssd"
+note     = "sssd authentication services, this sets up capabilities for helper programs. For upstream this is only for hardening, not tight user separation."
+bug      = "bsc#1233131"
+type     = "permissions"
+[[FileDigestGroup.digests]]
+path     = "/usr/share/permissions/permissions.d/sssd"
+digester = "shell"
+hash     = "c90615240af575b857e264caa1bd56282a74c68ab1f53a411b56d6747a8a0df6"
+
+[[FileDigestGroup]]
+package  = "exim"
+note     = "Permissions for the spool directory"
+bug      = "bsc#1240755"
+type     = "permissions"
+[[FileDigestGroup.digests]]
+path     = "/etc/permissions.d/exim"
+digester = "shell"
+hash     = "bcc22a994f7bbb3aea193ab77ef49a57bf171bafce9f55e4bc1b02e16e7e308f"
+
+[[FileDigestGroup]]
+package  = "snapd"
+note     = "Capabilities for snap-confine"
+bug      = "bsc#1248682"
+type     = "permissions"
+[[FileDigestGroup.digests]]
+path     = "/etc/permissions.d/snapd"
+digester = "shell"
+hash     = "b9235a656a3bd124f18113976f491f3018d45de68d93da830b4b19bbdd8a2dcb"
+[[FileDigestGroup.digests]]
+path     = "/etc/permissions.d/snapd.paranoid"
+digester = "shell"
+hash     = "3d57053a143f2828783d2c835ddfb0af85db16cfde1a088fe2db8a161d5b053c"
+
+[[FileDigestGroup]]
+package  = "account-utils"
+note     = "Disables setuid bits for shadow utilities, which are replaced by this package. In the long run there should be a drop-in file for shadow instead."
+bug      = "bsc#1254218"
+type     = "permissions"
+[[FileDigestGroup.digests]]
+path     = "/usr/share/permissions/permissions.d/account-utils"
+digester = "shell"
+hash     = "3d993065d4bf90ae94a32959c391a656ad3a1125faeecfeacaec866c6bf046af"
+
+[[FileDigestGroup]]
+package  = "shadow-pw-mgmt"
+note     = "account management utilities setuid-root bits and capabilities"
+bug      = "bsc#1254844"
+type     = "permissions"
+[[FileDigestGroup.digests]]
+path     = "/usr/share/permissions/permissions.d/shadow"
+digester = "shell"
+hash     = "b2842a4ea14b23d188b32e786f5e2d304270eeb9df2de81d3be47d56d12b5427"
+[[FileDigestGroup.digests]]
+path     = "/usr/share/permissions/permissions.d/shadow.paranoid"
+digester = "shell"
+hash     = "376852944deadff2ed60413d61806f9fc791d33b0913bb301ecc4b43de70338c"

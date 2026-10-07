@@ -198,6 +198,18 @@ jobs:
       - run: diff -r /tmp/rpmcrab-gen-assets/completions crates/rpmcrab/completions
 
 
+  distro-config-drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The vendored distro configs are upstream-owned until rpmlint is fully
+      # superseded; this fails when they diverge from what the generator
+      # produces at the pinned SHAs. See scripts/generate-distro-configs.py.
+      - run: python3 scripts/generate-distro-configs.py --check
+
   reference-coverage-audit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
