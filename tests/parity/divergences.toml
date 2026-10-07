@@ -933,20 +933,74 @@ kind = "behaviour"
 reason = "rpmcrab adds `--format json` (plus the `OutputFormat` config key): a machine-readable JSON report of the same findings the text report emits. The reference has no machine-readable output (upstream rpmlint#109 / rpmlint#1156), so every consumer greps human text. Additive surface only: the default text report is byte-identical with or without the feature. An unknown `--format` value is a CLI usage error (exit 2); an unknown `OutputFormat` config value warns on stderr and falls back to text; the library `render_report` path falls back to text silently for unknown formats."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/109"
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `missing-dependency-to-xinetd` told the packager to depend on logrotate -- a copy-paste from the logrotate sibling; the finding is about xinetd. Fixed to name xinetd, and the misspelling of `explicitly` fixed. The reference keeps the wrong package name."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "AlternativesCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `update-alternatives-postun-call-missing` said the `--install` being undone was done in postun; the check undoes installs collected from the `%post` phase (verified in `checks/alternatives.rs`), so the text claimed the wrong phase. Fixed to `post`."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "KMPPolicyCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `kmp-missing-supplements` told the packager to fix `BuildRequires` (`kernel-syms`, `modutils`) -- advice unrelated to the finding, which fires when the package lacks the kernel-flavor Supplements (verified in `checks/kmp_policy.rs`). Reworded in the voice of the sibling `kmp-missing-requires`/`kmp-missing-enhances` entries: extend `%kernel_module_package` with the preamble carrying `Supplements: packageand(kernel-%1:%name)`."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SpecCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `%ifarch-applied-patch` contradicted itself: patches must be applied on all architectures, yet may be effective only on a given arch. Reworded to state the actual rule: apply unconditionally, put the arch-specific condition inside the patch instead of guarding the %patch directive."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SharedLibraryPolicyCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `shlib-fixed-dependency` ended with the garbled `move it to the runtime uses of your library`. Reworded: add the dependency to the packages that use the library at runtime instead."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "TagsCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `invalid-packager` described the finding as an email-suffix rule; it fires when the tag does not match the configured `packager_regex` (verified in `checks/tags.rs`), a regex match. Reworded to describe the pattern mismatch."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "MenuXDGCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `desktopfile-without-binary` hid the subject (`is for a file not present in the package`) and had a grammar slip. Reworded: the .desktop file refers to a binary not present in the package."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "MenuCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `use-of-launcher-in-menu-but-no-requires-on` parsed ambiguously. Reworded: the package has no dependency on the package that provides the launcher (verified in `checks/menu.rs`)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "PythonCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `python-leftover-require` read inverted, as if the requirements declaration had lost the Requires. The finding is RPM Requires entries for python modules with no match in the package's declared requirements (verified in `checks/python.rs`). Reworded to state the direction plainly."
+since = "0.1.0"
 
 [[divergence]]
 case = "global"
 check = "FilesCheck"
-kind = "behaviour"
-reason = "Upstream rpmlint#776: a new `bidi-control-character` warning fires when a libmagic-described text file contains one of the nine Unicode bidirectional control characters (trojan-source, CVE-2021-42574). The frozen 2.10.0 reference has no such check (its sole \"bidi\" hit is an unrelated I18NCheck.py comment). The scan runs for source packages too, where the attack lives; one warning per file, naming the first control found."
-since = "0.1.0"
-upstream = "https://github.com/rpm-software-management/rpmlint/issues/776"
-
-[[divergence]]
-case = "global"
-check = "pkg-layer"
-kind = "behaviour"
-reason = "Native payload extraction rejects bzip2-compressed payloads (`ExtractError::UnsupportedCompressor`); the reference handles them through tar's format autodetection. No pure-Rust bzip2 decoder exists, and the last RPMs using bzip2 payloads predate 2010."
+kind = "detail"
+reason = "Staged `--explain` text for `zero-perms` was ungrammatical to the point of baffling. Reworded: check the file permissions, ensure they are correct, or fix them in the %install section."
 since = "0.1.0"
 
 [[divergence]]
@@ -963,18 +1017,122 @@ check = "BuildRootAndDateCheck"
 kind = "detail"
 reason = "`BuildRootAndDateCheck.toml` is the mechanical union of the reference's `descriptions/BuildDateCheck.toml` and `descriptions/BuildRootCheck.toml` (entries byte-identical); the port merged the two reference checks into one, so a single file named after the port check keeps the check-name to TOML mapping total. Provenance: `crates/rpmcrab-core/data/descriptions/README.md`."
 since = "0.1.0"
+
 [[divergence]]
 case = "global"
-check = "SpecCheck"
+check = "FilesCheck"
 kind = "detail"
-reason = "Port-only `conditional-source-or-patch` (upstream rpmlint#45) has a staged `--explain` description written from the ticket: conditional Source:/Patch: tags inside %if blocks. The reference has no such finding, so `--explain` would print `Unknown message` for it."
+reason = "Staged `--explain` text for `perl-temp-file` used wrong verb forms. Fixed to `begins ... and contains`."
 since = "0.1.0"
-upstream = "https://github.com/rpm-software-management/rpmlint/issues/45"
+
+[[divergence]]
+case = "global"
+check = "FilelistCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `filelist-forbidden-perl-dir` was not a sentence. Reworded: `Perl files are installed in a non-vendor path.`"
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "AlternativesCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `libalternatives-conf-not-found` was ungrammatical. Reworded: the libalternatives configuration file defined in the package file section was not found."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SharedLibraryPolicyCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `shlib-policy-missing-lib` was ungrammatical. Reworded: `Your package name looks like it is based on soname, but the package does not provide any libraries.`"
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "PythonCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `python-sphinx-doctrees-leftover` was ungrammatical. Reworded: a cached Sphinx build folder (`.doctrees`) was found in the package; please make sure not to include any build files in the final package."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "detail"
+reason = "Bundled typo fixes in staged `--explain` texts: the misspelling of `explicitly` in `missing-dependency-to-crontabs` and `missing-dependency-to-logrotate`, and in `pem-private-key` the verb agreement and the article. Meaning unchanged."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "InitScriptCheck"
+kind = "detail"
+reason = "Typo fix in staged `--explain` text for `incoherent-subsys`: stray `a` removed. Meaning unchanged."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FilelistCheck"
+kind = "detail"
+reason = "Typo fix in staged `--explain` text for `filelist-forbidden-xinetd-configuration`: the misspelling of `configuration` fixed. Meaning unchanged."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "detail"
+reason = "Typo fix in staged `--explain` text for `dbus-file-parse-error`: the article before `D-Bus` fixed. Meaning unchanged."
+since = "0.1.0"
 
 [[divergence]]
 case = "global"
 check = "SpecCheck"
 kind = "detail"
-reason = "Port-only `translated-description` (upstream rpmlint#2) has a staged `--explain` description written from the ticket: %description -l <lang> sections some distros do not want to ship. The reference has no such finding, so `--explain` would print `Unknown message` for it."
+reason = "Bundled typo fixes in staged `--explain` texts: the article in `macro-in-comment`, the possessive and verb agreement in `patch-fuzz-is-changed`, the misspelling of `intended` in `unversioned-explicit-obsoletes`, and the misspelling of `explicitly` in `shared-dir-glob-in-files`. Meaning unchanged."
 since = "0.1.0"
-upstream = "https://github.com/rpm-software-management/rpmlint/issues/2"
+
+[[divergence]]
+case = "global"
+check = "MenuCheck"
+kind = "detail"
+reason = "Typo fixes in staged `--explain` texts for `version-in-menu-longtitle` and `version-in-menu-title`: `filed` to `field`. Meaning unchanged."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "LogrotateCheck"
+kind = "detail"
+reason = "Typo fix in staged `--explain` text for `logrotate-duplicate`: the misspelling of `duplicated` fixed. Meaning unchanged."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "KMPPolicyCheck"
+kind = "detail"
+reason = "Typo fix in staged `--explain` text for `kmp-excessive-supplements`: the misspelling of `Supplements` fixed. Meaning unchanged."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SystemdTmpfilesCheck"
+kind = "detail"
+reason = "Typo fix in staged `--explain` text for `systemd-tmpfile-parse-error`: the misspelling of `occurred` fixed. Meaning unchanged."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "PythonCheck"
+kind = "detail"
+reason = "Bundled typo fixes in staged `--explain` texts: verb agreement in `python-missing-require`, and in `python-pyc-multiple-versions` the misspelling of `interpreters` fixed. Meaning unchanged."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SharedLibraryPolicyCheck"
+kind = "detail"
+reason = "Typo fixes in staged `--explain` text for `shlib-policy-excessive-dependency`: redundant word dropped and the misspelling of `separate` fixed. Meaning unchanged."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "TagsCheck"
+kind = "detail"
+reason = "Typo fix in staged `--explain` text for `no-changelogname-tag`: the article fixed. Meaning unchanged."
+since = "0.1.0"

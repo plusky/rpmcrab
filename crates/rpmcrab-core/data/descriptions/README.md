@@ -52,6 +52,16 @@ Provenance, verified against the pinned reference (`84848c0`):
   `translated-description` (upstream rpmlint#2). The reference has no
   such findings, so `--explain` would print `Unknown message` for them.
   Ledgered in `tests/parity/divergences.toml`.
+- `AlternativesCheck.toml`, `FileDigestCheck.toml`, `FilelistCheck.toml`,
+  `FilesCheck.toml`, `InitScriptCheck.toml`, `KMPPolicyCheck.toml`,
+  `LogrotateCheck.toml`, `MenuCheck.toml`, `MenuXDGCheck.toml`,
+  `PythonCheck.toml`, `SharedLibraryPolicyCheck.toml`, `SpecCheck.toml`
+  (besides its two port-only entries above), `SystemdTmpfilesCheck.toml`,
+  `TagsCheck.toml` — the reference files with English/logic fixes to
+  individual entries (copy-paste errors naming the wrong package, wrong
+  scriptlet phase, self-contradictory sentences, ungrammatical wording);
+  each fix is a deliberate `kind="detail"` divergence, ledgered in
+  `tests/parity/divergences.toml`.
 - Every other `*.toml` file — byte-identical to the reference
   `rpmlint/descriptions/` file of the same name.
 

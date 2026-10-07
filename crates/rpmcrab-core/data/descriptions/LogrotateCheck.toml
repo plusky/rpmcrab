@@ -1,5 +1,5 @@
 logrotate-duplicate="""
-There are dupliated logrotate entries with different settings for
+There are duplicated logrotate entries with different settings for
 the specified file."""
 logrotate-user-writable-log-dir="""
 The log directory is writable by unprivileged users. Please fix

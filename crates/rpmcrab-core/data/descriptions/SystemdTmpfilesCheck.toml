@@ -9,7 +9,7 @@ This package installs a symlink as a systemd-tmpfiles drop-in configuration
 file. This is not allowed currently. #TMPFILES_SUFFIX#
 """
 systemd-tmpfile-parse-error="""
-A warning occured trying to parse a systemd-tmpfiles drop-in configuration
+A warning occurred trying to parse a systemd-tmpfiles drop-in configuration
 file line. Either the configuration file is inconsistent or this rpmlint check
 has issues. #TMPFILES_SUFFIX#
 """

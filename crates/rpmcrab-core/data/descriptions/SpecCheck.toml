@@ -104,8 +104,9 @@ coexistence.
 """
 "%ifarch-applied-patch"="""
 A patch is applied inside an %ifarch block. Patches must be applied
-on all architectures and may contain necessary configure and/or code
-patch to be effective only on a given arch.
+on all architectures. If the fix is only needed on a given arch, put
+the arch-specific condition inside the patch (configure or code)
+instead of guarding the %patch directive.
 """
 prereq-use="""
 The use of PreReq is deprecated. In the majority of cases, a plain Requires
@@ -162,7 +163,7 @@ unversioned-explicit-obsoletes="""
 The specfile contains an unversioned Obsoletes: token, which will match all
 older, equal and newer versions of the obsoleted thing.  This may cause update
 problems, restrict future package/provides naming, and may match something it
-was originally not inteded to match -- make the Obsoletes versioned if
+was originally not intended to match -- make the Obsoletes versioned if
 possible.
 """
 libdir-macro-in-noarch-package="""
@@ -198,14 +199,14 @@ references, depending on which conditions hold at build time. Declare
 Source and Patch tags unconditionally.
 """
 macro-in-comment="""
-There is a unescaped macro after a shell style comment in the specfile.
+There is an unescaped macro after a shell style comment in the specfile.
 Macros are expanded everywhere, so check if it can cause a problem in this
 case and escape the macro with another leading % if appropriate.
 """
 patch-fuzz-is-changed="""
-The internal patch fuzz value was changed, and could hide patchs issues, or
+The internal patch fuzz value was changed, and could hide patch's issues, or
 could lead to applying a patch at the wrong location. Usually, this is often
-the sign that someone didn't check if a patch is still needed and do not want
+the sign that someone didn't check if a patch is still needed and does not want
 to rediff it. It is usually better to rediff the patch and try to send it
 upstream.
 """
@@ -243,7 +244,7 @@ shared-dir-glob-in-files="""
 The %files section contains "%{_bindir}/*", "%{_datadir}/*", "%{_docdir}/*",
 "%{_includedir}/*" or "%{_mandir}/*".  These can lead to packagers not noticing
 when upstream adds new and possibly conflicting files in these directories.
-Therefore, files in these directories should be explicitely listed like
+Therefore, files in these directories should be explicitly listed like
 "%{_bindir}/foobar" or "%{_includedir}/foobar.h".
 """
 suse-update-desktop-file-deprecated="""

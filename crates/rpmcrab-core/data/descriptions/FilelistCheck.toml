@@ -4,7 +4,7 @@ filelist-forbidden-sysconfig="""
 Please use %{_fillupdir}/sysconfig.<pkgname>
 and call %fillup_and_insserv for new sysconfig files."""
 filelist-forbidden-perl-dir="""
-Perl files installed a non-vendor installed path."""
+Perl files are installed in a non-vendor path."""
 filelist-forbidden-backup-file="""
 Backup files (~, .swp or .bak) are not allowed."""
 filelist-forbidden-devel-in-lib="""
@@ -39,7 +39,7 @@ filelist-forbidden-bashcomp-userdirs="""
 This directory is for user files,
 use /usr/share/bash-completion/completions/."""
 filelist-forbidden-xinetd-configuration="""
-Xinetd configuation files are deprecated.
+Xinetd configuration files are deprecated.
 Please migrate to systemd socket activated unit files.
 http://0pointer.de/blog/projects/socket-activation.html"""
 filelist-forbidden-move-to-usr="""

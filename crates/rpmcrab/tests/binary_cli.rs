@@ -1376,7 +1376,7 @@ fn explain_staged_shared_library_policy_check() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         stdout,
-        "shlib-policy-missing-lib:\nYour package name looks its based on soname, but does not provide any\nlibraries.\n\n\n",
+        "shlib-policy-missing-lib:\nYour package name looks like it is based on soname, but the package does not\nprovide any libraries.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());
@@ -1475,6 +1475,468 @@ fn explain_staged_tmpfiles_check() {
     assert_eq!(
         stdout,
         "pre-with-tmpfile-creation:\n%pre section contains %tmpfiles_create macro that should be in the %post\nsection instead.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `FilesCheck.toml` entry `missing-dependency-to-xinetd` pins the fixed wording.
+#[test]
+fn explain_reworded_missing_dependency_to_xinetd() {
+    let out = rpmcrab(&["-e", "missing-dependency-to-xinetd"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "missing-dependency-to-xinetd:\nThis package installs a file in /etc/xinetd.d/ but doesn't require xinetd to\nbe installed. Because xinetd is not part of the essential packages, your\npackage should explicitly depend on xinetd to make sure that your xinetd job\nis executed. If it is an optional feature of your package, recommend or\nsuggest xinetd.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `AlternativesCheck.toml` entry `update-alternatives-postun-call-missing` pins the fixed wording.
+#[test]
+fn explain_reworded_update_alternatives_postun_call_missing() {
+    let out = rpmcrab(&["-e", "update-alternatives-postun-call-missing"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "update-alternatives-postun-call-missing:\nThe package does not call update-alternatives --remove in postun phase to\nremove all the configuration for each individual --install binary that was\ndone in post.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `KMPPolicyCheck.toml` entry `kmp-missing-supplements` pins the fixed wording.
+#[test]
+fn explain_reworded_kmp_missing_supplements() {
+    let out = rpmcrab(&["-e", "kmp-missing-supplements"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "kmp-missing-supplements:\nMake sure you have extended '%kernel_module_package' by '-p\n%_sourcedir/preamble', a file named 'preamble' as source and there specified\n'Supplements: packageand(kernel-%1:%name)'.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `SpecCheck.toml` entry `%ifarch-applied-patch` pins the fixed wording.
+#[test]
+fn explain_reworded_ifarch_applied_patch() {
+    let out = rpmcrab(&["-e", "%ifarch-applied-patch"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "%ifarch-applied-patch:\nA patch is applied inside an %ifarch block. Patches must be applied on all\narchitectures. If the fix is only needed on a given arch, put the\narch-specific condition inside the patch (configure or code) instead of\nguarding the %patch directive.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `SharedLibraryPolicyCheck.toml` entry `shlib-fixed-dependency` pins the fixed wording.
+#[test]
+fn explain_reworded_shlib_fixed_dependency() {
+    let out = rpmcrab(&["-e", "shlib-fixed-dependency"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "shlib-fixed-dependency:\nYour shared library package requires a fixed version of another package. The\nintention of the Shared Library Policy is to allow parallel installation of\nmultiple versions of the same shared library, hard dependencies likely make\nthat impossible. Please remove this dependency and instead add it to the\npackages that use your library at runtime.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `TagsCheck.toml` entry `invalid-packager` pins the fixed wording.
+#[test]
+fn explain_reworded_invalid_packager() {
+    let out = rpmcrab(&["-e", "invalid-packager"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "invalid-packager:\nThe Packager tag does not match the pattern configured in the Packager option\nof the rpmlint configuration. Please change it and rebuild your package.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `MenuXDGCheck.toml` entry `desktopfile-without-binary` pins the fixed wording.
+#[test]
+fn explain_reworded_desktopfile_without_binary() {
+    let out = rpmcrab(&["-e", "desktopfile-without-binary"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "desktopfile-without-binary:\nThe .desktop file refers to a binary that is not present in the package. You\nshould check the Requires or see if this is not an error.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `MenuCheck.toml` entry `use-of-launcher-in-menu-but-no-requires-on` pins the fixed wording.
+#[test]
+fn explain_reworded_use_of_launcher_in_menu_but_no_requires_on() {
+    let out = rpmcrab(&["-e", "use-of-launcher-in-menu-but-no-requires-on"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "use-of-launcher-in-menu-but-no-requires-on:\nThe menu command uses a launcher, but the package has no dependency on the\npackage that provides the launcher.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `PythonCheck.toml` entry `python-leftover-require` pins the fixed wording.
+#[test]
+fn explain_reworded_python_leftover_require() {
+    let out = rpmcrab(&["-e", "python-leftover-require"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "python-leftover-require:\nSome python module Requires are missing from the python package's requirements\ndeclaration. Please verify that all dependencies are really needed.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `FilesCheck.toml` entry `zero-perms` pins the fixed wording.
+#[test]
+fn explain_reworded_zero_perms() {
+    let out = rpmcrab(&["-e", "zero-perms"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "zero-perms:\nYour package contains a file with no permissions. This is usually an error\nbecause the file won't be accessible by any user. You should check the file\npermissions, ensure they are correct, or fix them in the %install section.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `FilesCheck.toml` entry `perl-temp-file` pins the fixed wording.
+#[test]
+fn explain_reworded_perl_temp_file() {
+    let out = rpmcrab(&["-e", "perl-temp-file"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "perl-temp-file:\nYou have a perl temporary file in your package. Usually, this file begins with\na dot (.) and contains 'perl' in its name.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `FilelistCheck.toml` entry `filelist-forbidden-perl-dir` pins the fixed wording.
+#[test]
+fn explain_reworded_filelist_forbidden_perl_dir() {
+    let out = rpmcrab(&["-e", "filelist-forbidden-perl-dir"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "filelist-forbidden-perl-dir:\nPerl files are installed in a non-vendor path.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `AlternativesCheck.toml` entry `libalternatives-conf-not-found` pins the fixed wording.
+#[test]
+fn explain_reworded_libalternatives_conf_not_found() {
+    let out = rpmcrab(&["-e", "libalternatives-conf-not-found"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "libalternatives-conf-not-found:\nThe libalternatives configuration file defined in the package file section was\nnot found. This does not have to be an error if the file has been tagged as a\nghost file.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `PythonCheck.toml` entry `python-sphinx-doctrees-leftover` pins the fixed wording.
+#[test]
+fn explain_reworded_python_sphinx_doctrees_leftover() {
+    let out = rpmcrab(&["-e", "python-sphinx-doctrees-leftover"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "python-sphinx-doctrees-leftover:\nA cached Sphinx build folder (\".doctrees\") was found in the package. Please\nmake sure not to include any build files in the final package.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `FilesCheck.toml` entry `missing-dependency-to-crontabs` pins the fixed wording.
+#[test]
+fn explain_reworded_missing_dependency_to_crontabs() {
+    let out = rpmcrab(&["-e", "missing-dependency-to-crontabs"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "missing-dependency-to-crontabs:\nThis package installs a file in /etc/cron.*/ but doesn't require crontabs to\nbe installed. As crontabs is not part of the essential packages, your package\nshould explicitly require crontabs to make sure that your cron job is\nexecuted. If it is an optional feature of your package, recommend or suggest\ncrontabs.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `FilesCheck.toml` entry `missing-dependency-to-logrotate` pins the fixed wording.
+#[test]
+fn explain_reworded_missing_dependency_to_logrotate() {
+    let out = rpmcrab(&["-e", "missing-dependency-to-logrotate"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "missing-dependency-to-logrotate:\nThis package installs a file in /etc/logrotate.d/ but doesn't require\nlogrotate to be installed. Because logrotate is not part of the essential\npackages, your package should explicitly depend on logrotate to make sure that\nyour logrotate job is executed. If it is an optional feature of your package,\nrecommend or suggest logrotate.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `FilesCheck.toml` entry `pem-private-key` pins the fixed wording.
+#[test]
+fn explain_reworded_pem_private_key() {
+    let out = rpmcrab(&["-e", "pem-private-key"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "pem-private-key:\nPrivate key in a .pem file should not be shipped in a rpm, unless this is for\ntesting purpose ( ie, run by the test suite ). Shipping it as part of the\nexample documentation means that someone will sooner or later use it and setup\nan insecure configuration.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `InitScriptCheck.toml` entry `incoherent-subsys` pins the fixed wording.
+#[test]
+fn explain_reworded_incoherent_subsys() {
+    let out = rpmcrab(&["-e", "incoherent-subsys"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "incoherent-subsys:\nThe filename of your lock file in /var/lock/subsys/ is incoherent with your\nactual init script name. For example, if your script name is httpd, you have\nto use 'httpd' as the filename in your subsys directory. It is also possible\nthat rpmlint gets this wrong, especially if the init script contains\nnontrivial shell variables and/or assignments. These cases usually manifest\nthemselves when rpmlint reports that the subsys name starts with '$'; in these\ncases a warning instead of an error is reported and you should check the\nscript manually.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `FilelistCheck.toml` entry `filelist-forbidden-xinetd-configuration` pins the fixed wording.
+#[test]
+fn explain_reworded_filelist_forbidden_xinetd_configuration() {
+    let out = rpmcrab(&["-e", "filelist-forbidden-xinetd-configuration"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "filelist-forbidden-xinetd-configuration:\nXinetd configuration files are deprecated. Please migrate to systemd socket\nactivated unit files. http://0pointer.de/blog/projects/socket-activation.html\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `FileDigestCheck.toml` entry `dbus-file-parse-error` pins the fixed wording.
+#[test]
+fn explain_reworded_dbus_file_parse_error() {
+    let out = rpmcrab(&["-e", "dbus-file-parse-error"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "dbus-file-parse-error:\nA digest of a D-Bus XML file could not be computed, because of an XML parsing\nerror\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `SpecCheck.toml` entry `macro-in-comment` pins the fixed wording.
+#[test]
+fn explain_reworded_macro_in_comment() {
+    let out = rpmcrab(&["-e", "macro-in-comment"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "macro-in-comment:\nThere is an unescaped macro after a shell style comment in the specfile.\nMacros are expanded everywhere, so check if it can cause a problem in this\ncase and escape the macro with another leading % if appropriate.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `SpecCheck.toml` entry `patch-fuzz-is-changed` pins the fixed wording.
+#[test]
+fn explain_reworded_patch_fuzz_is_changed() {
+    let out = rpmcrab(&["-e", "patch-fuzz-is-changed"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "patch-fuzz-is-changed:\nThe internal patch fuzz value was changed, and could hide patch's issues, or\ncould lead to applying a patch at the wrong location. Usually, this is often\nthe sign that someone didn't check if a patch is still needed and does not\nwant to rediff it. It is usually better to rediff the patch and try to send it\nupstream.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `SpecCheck.toml` entry `unversioned-explicit-obsoletes` pins the fixed wording.
+#[test]
+fn explain_reworded_unversioned_explicit_obsoletes() {
+    let out = rpmcrab(&["-e", "unversioned-explicit-obsoletes"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "unversioned-explicit-obsoletes:\nThe specfile contains an unversioned Obsoletes: token, which will match all\nolder, equal and newer versions of the obsoleted thing.  This may cause update\nproblems, restrict future package/provides naming, and may match something it\nwas originally not intended to match -- make the Obsoletes versioned if\npossible.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `SpecCheck.toml` entry `shared-dir-glob-in-files` pins the fixed wording.
+#[test]
+fn explain_reworded_shared_dir_glob_in_files() {
+    let out = rpmcrab(&["-e", "shared-dir-glob-in-files"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "shared-dir-glob-in-files:\nThe %files section contains \"%{_bindir}/*\", \"%{_datadir}/*\", \"%{_docdir}/*\",\n\"%{_includedir}/*\" or \"%{_mandir}/*\".  These can lead to packagers not\nnoticing when upstream adds new and possibly conflicting files in these\ndirectories. Therefore, files in these directories should be explicitly listed\nlike \"%{_bindir}/foobar\" or \"%{_includedir}/foobar.h\".\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `MenuCheck.toml` entry `version-in-menu-longtitle` pins the fixed wording.
+#[test]
+fn explain_reworded_version_in_menu_longtitle() {
+    let out = rpmcrab(&["-e", "version-in-menu-longtitle"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "version-in-menu-longtitle:\nThe longtitle field of the menu entry contains a version. This is bad because\nit will be prone to error when the version of the package changes.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `MenuCheck.toml` entry `version-in-menu-title` pins the fixed wording.
+#[test]
+fn explain_reworded_version_in_menu_title() {
+    let out = rpmcrab(&["-e", "version-in-menu-title"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "version-in-menu-title:\nThe title field of the menu entry contains a version. This is bad because it\nwill be prone to error when the version of the package changes.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `LogrotateCheck.toml` entry `logrotate-duplicate` pins the fixed wording.
+#[test]
+fn explain_reworded_logrotate_duplicate() {
+    let out = rpmcrab(&["-e", "logrotate-duplicate"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "logrotate-duplicate:\nThere are duplicated logrotate entries with different settings for the\nspecified file.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `KMPPolicyCheck.toml` entry `kmp-excessive-supplements` pins the fixed wording.
+#[test]
+fn explain_reworded_kmp_excessive_supplements() {
+    let out = rpmcrab(&["-e", "kmp-excessive-supplements"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "kmp-excessive-supplements:\nThere is more than one flavor of kernel specified in Supplements field.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `SystemdTmpfilesCheck.toml` entry `systemd-tmpfile-parse-error` pins the fixed wording.
+#[test]
+fn explain_reworded_systemd_tmpfile_parse_error() {
+    let out = rpmcrab(&["-e", "systemd-tmpfile-parse-error"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "systemd-tmpfile-parse-error:\nA warning occurred trying to parse a systemd-tmpfiles drop-in configuration\nfile line. Either the configuration file is inconsistent or this rpmlint check\nhas issues. Please refer to\nhttps://en.opensuse.org/openSUSE:Package_security_guidelines#audit_bugs for\nmore information\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `PythonCheck.toml` entry `python-missing-require` pins the fixed wording.
+#[test]
+fn explain_reworded_python_missing_require() {
+    let out = rpmcrab(&["-e", "python-missing-require"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "python-missing-require:\nThe python package declares some requirement that's not detected in the rpm\npackage. Please, verify that all dependencies are added as Requires.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `PythonCheck.toml` entry `python-pyc-multiple-versions` pins the fixed wording.
+#[test]
+fn explain_reworded_python_pyc_multiple_versions() {
+    let out = rpmcrab(&["-e", "python-pyc-multiple-versions"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "python-pyc-multiple-versions:\nThere are .pyc files in the rpm that are from different Python interpreters.\nPlease, verify that all files are needed for this package.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `SharedLibraryPolicyCheck.toml` entry `shlib-policy-excessive-dependency` pins the fixed wording.
+#[test]
+fn explain_reworded_shlib_policy_excessive_dependency() {
+    let out = rpmcrab(&["-e", "shlib-policy-excessive-dependency"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "shlib-policy-excessive-dependency:\nYour package starts with 'lib' as part of its name, but also contains binaries\nthat have more dependencies than those already required by the libraries.\nThose binaries should probably not be part of the library package, but split\ninto a separate one to reduce the additional dependencies for other users of\nthis library.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: reworded `TagsCheck.toml` entry `no-changelogname-tag` pins the fixed wording.
+#[test]
+fn explain_reworded_no_changelogname_tag() {
+    let out = rpmcrab(&["-e", "no-changelogname-tag"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "no-changelogname-tag:\nThere is no %changelog tag in your spec file(or it's empty). To fix it,\nplease insert a '%changelog' section in your spec file and add an entry change\nbelow it.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());
