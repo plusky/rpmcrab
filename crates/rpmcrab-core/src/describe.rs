@@ -22,6 +22,7 @@ const STAGED: &[&str] = &[
     include_str!("../data/descriptions/MixedOwnershipCheck.toml"),
     include_str!("../data/descriptions/PAMModulesCheck.toml"),
     include_str!("../data/descriptions/SourceCheck.toml"),
+    include_str!("../data/descriptions/TagsCheck.toml"),
     include_str!("../data/descriptions/Variables.toml"),
     include_str!("../data/descriptions/WorldWritableCheck.toml"),
     include_str!("../data/descriptions/XinetdDepCheck.toml"),
@@ -259,7 +260,7 @@ mod tests {
         );
     }
 
-    /// The 15 staged description files, byte-pinned: any edit, truncation,
+    /// The 16 staged description files, byte-pinned: any edit, truncation,
     /// or bad rebase merge changes a hash. Provenance of each file against
     /// the pinned reference (`84848c0`) is documented in
     /// `data/descriptions/README.md`.
@@ -308,6 +309,10 @@ mod tests {
                 "7b491c89b33ba2362dfb775f6ea360a104efbdeb77a50bb002874962bb9152c6",
             ),
             (
+                "TagsCheck.toml",
+                "263a18567fe55ed756db7f836f6728699d88e44a0474e6c1175f9a2ca89389de",
+            ),
+            (
                 "Variables.toml",
                 "1f16f802df34c12091239310164f0727e800e66eb75fcce8b108bbf5b47bad92",
             ),
@@ -346,5 +351,27 @@ mod tests {
                 "unresolved variable in staged description {k}: {v}"
             );
         }
+    }
+
+    /// Upstream rpmlint#427: the reference useless-provides text claims
+    /// versioned and unversioned symbols are provided at once, which is not
+    /// always accurate (duplicate versioned provides trigger the check too).
+    /// The staged text is reworded ahead of the reference, per the
+    /// fix-in-port rule.
+    #[test]
+    fn useless_provides_description_is_reworded() {
+        let descriptions = staged_descriptions();
+        let detail = &descriptions["useless-provides"];
+        assert_eq!(
+            detail,
+            "This package provides multiple times the same capacity.\n\
+             Identical automated and manual provides exist, so the redundant manual\n\
+             provide is useless: the same provide name is listed more than once\n\
+             (e.g. 'foo' together with 'foo = 1.0').\n"
+        );
+        assert!(
+            !detail.contains("versioned and unversioned symbols are provided at once"),
+            "inaccurate reference wording still present: {detail}"
+        );
     }
 }
