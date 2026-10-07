@@ -420,6 +420,18 @@ fn appdata_unknown_encoding_emits_nothing() {
 #[test]
 #[cfg(unix)]
 fn appdata_injected_tool_is_honored() {
+    // The fake appstream-util shells out to python3 for minidom parsing.
+    // Without python3 the fake fails every file, so there is nothing to
+    // honor-check; skip instead of failing spuriously (e.g. minimal
+    // buildroots without python3).
+    if std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping appdata_injected_tool_is_honored: python3 not available");
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     fake_tool(
         dir.path(),
