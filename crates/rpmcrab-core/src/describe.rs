@@ -446,7 +446,7 @@ mod tests {
             ),
             (
                 "SpecCheck.toml",
-                "63d78689f54705fb4e2de75e9201479fee76e6045280f152b3f015cf689bbe54",
+                "e2c14338b70b31f3b7204ccad8d15bf29ce8351b3a4178ac138e2b39c35a22b6",
             ),
             (
                 "SysVInitOnSystemdCheck.toml",
@@ -680,6 +680,8 @@ mod tests {
         "pam-ghost-module",
         "pam-unauthorized-module",
         // pkg_config.rs, configfiles.rs, lsb.rs, zypp_syntax.rs: variable IDs from helpers.
+        // spec.rs: `format!("no-%{sec}-section")` loop over prep/build/install/check;
+        // the parser sees only `&check`, not the IDs.
         "double-slash-in-pkgconfig-path",
         "invalid-pkgconfig-file",
         "pkgconfig-invalid-libs-dir",
@@ -690,6 +692,10 @@ mod tests {
         "non-lsb-compliant-version",
         "suse-zypp-otherproviders",
         "suse-zypp-packageand",
+        "no-%prep-section",
+        "no-%build-section",
+        "no-%install-section",
+        "no-%check-section",
     ];
 
     fn matches_dynamic(id: &str) -> bool {

@@ -1222,7 +1222,7 @@ since = "0.1.0"
 case = "global"
 check = "SpecCheck"
 kind = "detail"
-reason = "Port-only `--explain` descriptions for `%autopatch-not-in-prep` and `%autosetup-not-in-prep`: the reference emits these findings but ships no descriptions. Staged `no-%prep-section`, `no-%build-section`, `no-%install-section` removed: dead text, never emitted by the reference or the port."
+reason = "Port-only `--explain` descriptions for `%autopatch-not-in-prep` and `%autosetup-not-in-prep`: the reference emits these findings but ships no descriptions."
 since = "0.1.0"
 
 [[divergence]]
