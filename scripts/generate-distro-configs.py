@@ -109,6 +109,9 @@ PRUNE_CANDIDATES = {
     "module-without-depmod-postun": "killed: KMP macro template calls depmod (bnc#456048)",
     "postin-with-wrong-depmod": "killed: no manual depmod in scriptlets (bnc#456048)",
     "postun-with-wrong-depmod": "killed: no manual depmod in scriptlets (bnc#456048)",
+    "postin-without-install-info": "killed: file triggers handle info-dir updates",
+    "info-files-without-install-info-postin": "killed: file triggers handle info-dir updates",
+    "info-files-without-install-info-postun": "killed: file triggers handle info-dir updates",
     # InitScriptCheck was deliberately deleted (issue #214): SysV init is gone,
     # so every finding it emitted is dead. Verified absent from the tree.
     "without-chkconfig": "killed: InitScriptCheck deleted (issue #214)",
