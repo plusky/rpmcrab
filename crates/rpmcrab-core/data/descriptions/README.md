@@ -37,8 +37,9 @@ Provenance, verified against the pinned reference (`84848c0`):
   entry reworded per upstream rpmlint#427 (the versioned and unversioned
   symbols are provided at once claim is not always accurate: duplicate
   versioned provides trigger the check too), staged ahead of the reference
-  per the fix-in-port rule; minus the `non-standard-group` entry, dropped
-  with the deliberately-removed finding. Ledgered in `tests/parity/divergences.toml`.
+  per the fix-in-port rule; minus the `non-standard-group`,
+  `no-group-tag`, and `devel-package-with-non-devel-group` entries, dropped
+  with the deliberately-removed findings. Ledgered in `tests/parity/divergences.toml`.
 - `DeviceFilesCheck.toml`, `WorldWritableCheck.toml` — the entries carved
   out of the reference's `FileMetadataCheck.toml`, normalized to the
   reference's single-line form: the carved files used `"""` blocks, whose

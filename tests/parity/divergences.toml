@@ -957,13 +957,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "SpecCheck"
-kind = "detail"
-reason = "Staged `--explain` text for `%ifarch-applied-patch` contradicted itself: patches must be applied on all architectures, yet may be effective only on a given arch. Reworded to state the actual rule: apply unconditionally, put the arch-specific condition inside the patch instead of guarding the %patch directive."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "SharedLibraryPolicyCheck"
 kind = "detail"
 reason = "Staged `--explain` text for `shlib-fixed-dependency` ended with the garbled `move it to the runtime uses of your library`. Reworded: add the dependency to the packages that use the library at runtime instead."
@@ -1079,7 +1072,7 @@ since = "0.1.0"
 case = "global"
 check = "SpecCheck"
 kind = "detail"
-reason = "Bundled typo fixes in staged `--explain` texts: the article in `macro-in-comment`, the possessive and verb agreement in `patch-fuzz-is-changed`, the misspelling of `intended` in `unversioned-explicit-obsoletes`, and the misspelling of `explicitly` in `shared-dir-glob-in-files`. Meaning unchanged."
+reason = "Bundled typo fixes in staged `--explain` texts: the article in `macro-in-comment`, the possessive and verb agreement in `patch-fuzz-is-changed`, and the misspelling of `explicitly` in `shared-dir-glob-in-files`. Meaning unchanged."
 since = "0.1.0"
 
 [[divergence]]
@@ -1173,7 +1166,7 @@ since = "0.1.0"
 case = "global"
 check = "non-standard-group"
 kind = "missing"
-reason = "Deliberate removal per triage: openSUSE dropped the Group tag -- its own rpmlint config says 'Do not validate package rpm groups' and the packaging guidelines say 'Group: -- always drop' -- so the port does not emit this finding. Both emission sites (SpecCheck and TagsCheck), the staged `--explain` entry, and the ValidGroups plumbing are removed. The reference still emits it."
+reason = "Deliberate removal per triage: openSUSE dropped the Group tag -- its own rpmlint config says 'Do not validate package rpm groups', the wiki (https://en.opensuse.org/openSUSE:Package_group_guidelines) says the field has fallen out of use, and the packaging guidelines say 'Group: -- always drop' -- so the port does not emit this finding. Both emission sites (SpecCheck and TagsCheck), the staged `--explain` entry, and the ValidGroups plumbing are removed. The reference still emits it."
 since = "0.1.0"
 
 [[divergence]]
@@ -1320,7 +1313,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/issues/776"
 case = "global"
 check = "non-standard-group"
 kind = "missing"
-reason = "Deliberate removal per triage: openSUSE dropped the Group tag -- its own rpmlint config says Do not validate package rpm groups and the packaging guidelines say Group: -- always drop -- so the port does not emit this finding. Both emission sites (SpecCheck and TagsCheck), the staged `--explain` entry, and the ValidGroups plumbing are removed. The reference still emits it."
+reason = "Deliberate removal per triage: openSUSE dropped the Group tag -- its own rpmlint config says Do not validate package rpm groups and the packaging guidelines say 'Group: -- always drop' -- so the port does not emit this finding. Both emission sites (SpecCheck and TagsCheck), the staged `--explain` entry, and the ValidGroups plumbing are removed. The reference still emits it."
 since = "0.1.0"
 
 [[divergence]]
@@ -1370,4 +1363,18 @@ case = "global"
 check = "unversioned-explicit-obsoletes"
 kind = "missing"
 reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding; Fedora's config carries it only as a commented-out filter line, never enabled (same FIXME as above). No shipped config treats the finding as wanted signal, so the port does not emit it. The emission and its staged `--explain` entry are removed. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "no-group-tag"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE dropped the Group tag -- its own rpmlint config says 'Do not validate package rpm groups', the wiki (https://en.opensuse.org/openSUSE:Package_group_guidelines) says the field has fallen out of use, and the packaging guidelines say 'Group: -- always drop' -- so the port does not emit this finding. The emission and its staged `--explain` entry are removed. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "devel-package-with-non-devel-group"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE dropped the Group tag -- its own rpmlint config says 'Do not validate package rpm groups', the wiki (https://en.opensuse.org/openSUSE:Package_group_guidelines) says the field has fallen out of use, and the packaging guidelines say 'Group: -- always drop' -- so the port does not emit this finding. The emission and its staged `--explain` entry are removed. The reference still emits it."
 since = "0.1.0"

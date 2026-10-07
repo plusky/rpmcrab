@@ -971,6 +971,8 @@ def test_stale_check_catches_name_keyed_entry():
         # Deliberately removed per SpecCheck triage (openSUSE filters them as
         # noise/obsolete; Group tag dropped by openSUSE).
         "non-standard-group",
+        "no-group-tag",
+        "devel-package-with-non-devel-group",
         "%ifarch-applied-patch",
         "no-buildroot-tag",
         "hardcoded-path-in-buildroot-tag",
