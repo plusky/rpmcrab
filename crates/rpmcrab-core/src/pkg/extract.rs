@@ -884,7 +884,13 @@ mod tests {
     /// LONGFILESIZES size must survive as u64, never truncate to u32.
     /// The header is built tiny and fast, then surgically given a
     /// LONGFILESIZES entry — no 4GB file is needed for the guard.
+    ///
+    /// 64-bit only: the `rpm` crate exposes `FileEntry::size` as `usize`,
+    /// so a size above `u32::MAX` is truncated before rpmcrab ever sees it
+    /// on 32-bit targets. `read_stripped_entry` keeps `u64` throughout;
+    /// the truncation happens upstream, not here.
     #[test]
+    #[cfg(target_pointer_width = "64")]
     fn stripped_entry_preserves_size_above_u32_max() {
         use rpm::{
             BuildConfig, FileMode, FileOptions, Header, HeaderEntry, IndexData, IndexTag,
