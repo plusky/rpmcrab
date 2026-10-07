@@ -2839,6 +2839,77 @@ Patch0: foo.patch
     }
 
     #[test]
+    fn missing_mandatory_sections_fire_warnings() {
+        let results = run_mini("Name: foo\nVersion: 1.0\n%description\nfoo\n");
+        for check in [
+            "no-%prep-section",
+            "no-%build-section",
+            "no-%install-section",
+            "no-%check-section",
+        ] {
+            let lines = lines_for(&results, check);
+            assert_eq!(lines.len(), 1, "missing {check}: {results:?}");
+            assert!(
+                lines[0].contains(&format!("W: {check}")),
+                "line: {}",
+                lines[0]
+            );
+        }
+    }
+
+    #[test]
+    fn present_sections_do_not_fire() {
+        let results = run_mini(
+            "Name: foo\nVersion: 1.0\n%description\nfoo\n%prep\n%build\n%install\n%check\n%files\n%changelog\n",
+        );
+        for check in [
+            "no-%prep-section",
+            "no-%build-section",
+            "no-%install-section",
+            "no-%check-section",
+        ] {
+            assert!(!has(&results, check), "unexpected {check}: {results:?}");
+        }
+    }
+
+    #[test]
+    fn declarative_build_skips_section_warnings() {
+        let results = run_mini("Name: foo\nVersion: 1.0\nBuildSystem: cargo\n%description\nfoo\n");
+        for check in [
+            "no-%prep-section",
+            "no-%build-section",
+            "no-%install-section",
+            "no-%check-section",
+        ] {
+            assert!(!has(&results, check), "unexpected {check}: {results:?}");
+        }
+    }
+
+    #[test]
+    fn missing_section_descriptions_resolve() {
+        let config = config_mini();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.spec");
+        std::fs::write(&path, "Name: foo\n").unwrap();
+        let pkg = SpecPkg::open(&path).unwrap();
+        let mut check = SpecCheck::new(&config);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_spec(&pkg, &config, &mut out);
+        for id in [
+            "no-%prep-section",
+            "no-%build-section",
+            "no-%install-section",
+        ] {
+            let detail = out.get_description(id, &config);
+            assert!(
+                !detail.contains("Unknown message"),
+                "no --explain description for {id}"
+            );
+            assert!(!detail.trim().is_empty(), "empty description for {id}");
+        }
+    }
+
+    #[test]
     fn lib_package_without_mklibname_fires_error_ref959() {
         let results = run_mini("Name: foo\n%package -n libfoo\n%description\nfoo\n");
         let lines = lines_for(&results, "lib-package-without-%mklibname");

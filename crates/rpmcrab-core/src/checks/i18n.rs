@@ -190,6 +190,27 @@ impl I18NCheck {
         Self
     }
 
+    /// `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and
+    /// `incorrect-locale-*` findings, one per corrected code in
+    /// `INCORRECT_LOCALES`. The reference ships no descriptions for these;
+    /// the port describes them so `--explain` never prints "Unknown message".
+    pub fn register_error_details(out: &mut Filter) {
+        for (_, correct) in INCORRECT_LOCALES {
+            out.set_error_detail(
+                &format!("incorrect-i18n-tag-{correct}"),
+                format!(
+                    "The i18n tag uses the incorrect locale code. Replace it with `{correct}`."
+                ),
+            );
+            out.set_error_detail(
+                &format!("incorrect-locale-{correct}"),
+                format!(
+                    "The file is installed under a directory with the incorrect locale code. Rename it to use `{correct}`."
+                ),
+            );
+        }
+    }
+
     /// Pure core over mockable inputs: `(path, lang)` files, header i18n
     /// tags, require names and the package name. Returns
     /// `(level, finding, details)` in emission order.
@@ -302,6 +323,7 @@ impl Check for I18NCheck {
     }
 
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
+        Self::register_error_details(out);
         let i18n_tags = pkg.tag_str_array(Tag::HEADERI18NTABLE);
         let files: Vec<(&str, &str)> = pkg
             .files

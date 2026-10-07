@@ -59,3 +59,13 @@ wrong-tag-found="""
 Unknown tag in libalternatives configuration file.
 """
 
+
+double-entries="""
+The alternatives entry is defined more than once. Keep a single definition.
+"""
+package-supports-libalternatives="""
+The package supports libalternatives for managing alternative implementations.
+"""
+package-supports-update-alternatives="""
+The package supports update-alternatives for managing alternative implementations.
+"""

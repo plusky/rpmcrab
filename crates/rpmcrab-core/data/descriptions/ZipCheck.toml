@@ -15,3 +15,7 @@ The jar file is not indexed, i.e. it does not contain the META-INF/INDEX.LIST
 file. Indexed jars speed up the class searching process of classloaders
 in some situations.
 """
+
+unable-to-read-zip="""
+The zip archive could not be read. The archive may be corrupted.
+"""

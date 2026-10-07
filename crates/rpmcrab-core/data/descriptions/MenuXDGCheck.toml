@@ -19,3 +19,7 @@ which can trigger parsing ambiguities. Remove the duplicate.
 desktopfile-missing-header="""
 The .desktop file should start with a section header.
 """
+
+unexpanded-macro-in-desktop-file="""
+The desktop file contains an unexpanded RPM macro. Expand the macro or remove it.
+"""

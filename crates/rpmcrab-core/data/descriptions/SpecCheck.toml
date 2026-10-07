@@ -257,3 +257,10 @@ The spec file contains a %description section translated into another
 language. Some distributions do not want to ship translated descriptions;
 remove the %description -l sections if yours is one of them.
 """
+
+"%autopatch-not-in-prep"="""
+The spec file uses %autopatch but it is not in the %prep section. Move it to %prep.
+"""
+"%autosetup-not-in-prep"="""
+The spec file uses %autosetup but it is not in the %prep section. Move it to %prep.
+"""
