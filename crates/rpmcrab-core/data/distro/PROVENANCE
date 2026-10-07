@@ -30,200 +30,200 @@
 #   whitelist: dropped [[WorldWritableWhitelist]] stanza for 'nscd' (removed from Factory and SLE 16 (use the system resolver))
 #
 # Pruned pie-executables paths (shipped by no Tumbleweed package):
-#   pie-executables: dropped stale path '/sbin/arping'
-#   pie-executables: dropped stale path '/sbin/clockdiff'
-#   pie-executables: dropped stale path '/sbin/tracepath'
-#   pie-executables: dropped stale path '/sbin/tracepath6'
-#   pie-executables: dropped stale path '/usr/bin/achfile'
-#   pie-executables: dropped stale path '/usr/bin/adv1tov2'
-#   pie-executables: dropped stale path '/usr/bin/aecho'
-#   pie-executables: dropped stale path '/usr/bin/afile'
-#   pie-executables: dropped stale path '/usr/bin/afppasswd'
-#   pie-executables: dropped stale path '/usr/bin/cnid_index'
-#   pie-executables: dropped stale path '/usr/bin/dund'
-#   pie-executables: dropped stale path '/usr/bin/finger'
-#   pie-executables: dropped stale path '/usr/bin/getzones'
-#   pie-executables: dropped stale path '/usr/bin/hidd'
-#   pie-executables: dropped stale path '/usr/bin/lppasswd'
-#   pie-executables: dropped stale path '/usr/bin/megatron'
-#   pie-executables: dropped stale path '/usr/bin/nbplkup'
-#   pie-executables: dropped stale path '/usr/bin/nbprgstr'
-#   pie-executables: dropped stale path '/usr/bin/nbpunrgstr'
-#   pie-executables: dropped stale path '/usr/bin/ncplogin'
-#   pie-executables: dropped stale path '/usr/bin/ncpmap'
-#   pie-executables: dropped stale path '/usr/bin/nwsfind'
-#   pie-executables: dropped stale path '/usr/bin/pand'
-#   pie-executables: dropped stale path '/usr/bin/pap'
-#   pie-executables: dropped stale path '/usr/bin/papstatus'
-#   pie-executables: dropped stale path '/usr/bin/psorder'
-#   pie-executables: dropped stale path '/usr/bin/rcp'
-#   pie-executables: dropped stale path '/usr/bin/rexec'
-#   pie-executables: dropped stale path '/usr/bin/rlogin'
-#   pie-executables: dropped stale path '/usr/bin/rsh'
-#   pie-executables: dropped stale path '/usr/bin/showppd'
-#   pie-executables: dropped stale path '/usr/bin/testprns'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/gss-client'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/kdestroy'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/kinit'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/klist'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/kpasswd'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/krb524init'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/ksu'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/kvno'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/sclient'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/sim_client'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/uuclient'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/v4rcp'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/gss-server'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kadmin'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kadmin.local'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kadmind'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kdb5_util'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kprop'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kpropd'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/krb524d'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/krb5kdc'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/ktutil'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/sim_server'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/sserver'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/uuserver'
-#   pie-executables: dropped stale path '/usr/lib/news/bin/innd'
-#   pie-executables: dropped stale path '/usr/lib/news/bin/innbind'
-#   pie-executables: dropped stale path '/usr/lib/news/bin/rnews'
-#   pie-executables: dropped stale path '/usr/sbin/afpd'
-#   pie-executables: dropped stale path '/usr/sbin/amdd'
-#   pie-executables: dropped stale path '/usr/sbin/atalkd'
-#   pie-executables: dropped stale path '/usr/sbin/cnid_dbd'
-#   pie-executables: dropped stale path '/usr/sbin/cnid_metad'
-#   pie-executables: dropped stale path '/usr/sbin/dnssec-keygen'
-#   pie-executables: dropped stale path '/usr/sbin/dnssec-signzone'
-#   pie-executables: dropped stale path '/usr/sbin/hciattach'
-#   pie-executables: dropped stale path '/usr/sbin/bluetoothd'
-#   pie-executables: dropped stale path '/usr/sbin/hciconfig'
-#   pie-executables: dropped stale path '/usr/sbin/hid2hci'
-#   pie-executables: dropped stale path '/usr/sbin/httpd2'
-#   pie-executables: dropped stale path '/usr/sbin/httpd2-prefork'
-#   pie-executables: dropped stale path '/usr/sbin/httpd2-worker'
-#   pie-executables: dropped stale path '/usr/sbin/in.fingerd'
-#   pie-executables: dropped stale path '/usr/sbin/in.rexecd'
-#   pie-executables: dropped stale path '/usr/sbin/in.rlogind'
-#   pie-executables: dropped stale path '/usr/sbin/in.rshd'
-#   pie-executables: dropped stale path '/usr/sbin/lwresd'
-#   pie-executables: dropped stale path '/usr/sbin/named-checkconf'
-#   pie-executables: dropped stale path '/usr/sbin/named-checkzone'
-#   pie-executables: dropped stale path '/usr/sbin/nscd'
-#   pie-executables: dropped stale path '/usr/sbin/ntlm_auth'
-#   pie-executables: dropped stale path '/usr/sbin/papd'
-#   pie-executables: dropped stale path '/usr/sbin/praliases'
-#   pie-executables: dropped stale path '/usr/sbin/rarpd'
-#   pie-executables: dropped stale path '/usr/sbin/rotatelogs2'
-#   pie-executables: dropped stale path '/usr/sbin/rpc.rwalld'
-#   pie-executables: dropped stale path '/usr/sbin/rpc.yppasswdd'
-#   pie-executables: dropped stale path '/usr/sbin/rpc.ypxfrd'
-#   pie-executables: dropped stale path '/usr/lib/sudo/sesh'
-#   pie-executables: dropped stale path '/usr/lib/openldap/slapd'
-#   pie-executables: dropped stale path '/usr/sbin/squidclient'
-#   pie-executables: dropped stale path '/usr/sbin/suexec2'
-#   pie-executables: dropped stale path '/usr/sbin/utempter'
-#   pie-executables: dropped stale path '/usr/sbin/yppush'
-#   pie-executables: dropped stale path '/usr/sbin/ypserv'
-#   pie-executables: dropped stale path '/sbin/arping'
-#   pie-executables: dropped stale path '/sbin/clockdiff'
-#   pie-executables: dropped stale path '/sbin/tracepath'
-#   pie-executables: dropped stale path '/sbin/tracepath6'
-#   pie-executables: dropped stale path '/usr/bin/achfile'
-#   pie-executables: dropped stale path '/usr/bin/adv1tov2'
-#   pie-executables: dropped stale path '/usr/bin/aecho'
-#   pie-executables: dropped stale path '/usr/bin/afile'
-#   pie-executables: dropped stale path '/usr/bin/afppasswd'
-#   pie-executables: dropped stale path '/usr/bin/cnid_index'
-#   pie-executables: dropped stale path '/usr/bin/dund'
-#   pie-executables: dropped stale path '/usr/bin/finger'
-#   pie-executables: dropped stale path '/usr/bin/getzones'
-#   pie-executables: dropped stale path '/usr/bin/hidd'
-#   pie-executables: dropped stale path '/usr/bin/lppasswd'
-#   pie-executables: dropped stale path '/usr/bin/megatron'
-#   pie-executables: dropped stale path '/usr/bin/nbplkup'
-#   pie-executables: dropped stale path '/usr/bin/nbprgstr'
-#   pie-executables: dropped stale path '/usr/bin/nbpunrgstr'
-#   pie-executables: dropped stale path '/usr/bin/ncplogin'
-#   pie-executables: dropped stale path '/usr/bin/ncpmap'
-#   pie-executables: dropped stale path '/usr/bin/nwsfind'
-#   pie-executables: dropped stale path '/usr/bin/pand'
-#   pie-executables: dropped stale path '/usr/bin/pap'
-#   pie-executables: dropped stale path '/usr/bin/papstatus'
-#   pie-executables: dropped stale path '/usr/bin/psorder'
-#   pie-executables: dropped stale path '/usr/bin/rcp'
-#   pie-executables: dropped stale path '/usr/bin/rexec'
-#   pie-executables: dropped stale path '/usr/bin/rlogin'
-#   pie-executables: dropped stale path '/usr/bin/rsh'
-#   pie-executables: dropped stale path '/usr/bin/showppd'
-#   pie-executables: dropped stale path '/usr/bin/testprns'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/gss-client'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/kdestroy'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/kinit'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/klist'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/kpasswd'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/krb524init'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/ksu'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/kvno'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/sclient'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/sim_client'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/uuclient'
-#   pie-executables: dropped stale path '/usr/lib/mit/bin/v4rcp'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/gss-server'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kadmin'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kadmin.local'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kadmind'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kdb5_util'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kprop'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kpropd'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/krb524d'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/krb5kdc'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/ktutil'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/sim_server'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/sserver'
-#   pie-executables: dropped stale path '/usr/lib/mit/sbin/uuserver'
-#   pie-executables: dropped stale path '/usr/lib/news/bin/innd'
-#   pie-executables: dropped stale path '/usr/lib/news/bin/innbind'
-#   pie-executables: dropped stale path '/usr/lib/news/bin/rnews'
-#   pie-executables: dropped stale path '/usr/sbin/afpd'
-#   pie-executables: dropped stale path '/usr/sbin/amdd'
-#   pie-executables: dropped stale path '/usr/sbin/atalkd'
-#   pie-executables: dropped stale path '/usr/sbin/cnid_dbd'
-#   pie-executables: dropped stale path '/usr/sbin/cnid_metad'
-#   pie-executables: dropped stale path '/usr/sbin/dnssec-keygen'
-#   pie-executables: dropped stale path '/usr/sbin/dnssec-signzone'
-#   pie-executables: dropped stale path '/usr/sbin/hciattach'
-#   pie-executables: dropped stale path '/usr/sbin/bluetoothd'
-#   pie-executables: dropped stale path '/usr/sbin/hciconfig'
-#   pie-executables: dropped stale path '/usr/sbin/hid2hci'
-#   pie-executables: dropped stale path '/usr/sbin/httpd2'
-#   pie-executables: dropped stale path '/usr/sbin/httpd2-prefork'
-#   pie-executables: dropped stale path '/usr/sbin/httpd2-worker'
-#   pie-executables: dropped stale path '/usr/sbin/in.fingerd'
-#   pie-executables: dropped stale path '/usr/sbin/in.rexecd'
-#   pie-executables: dropped stale path '/usr/sbin/in.rlogind'
-#   pie-executables: dropped stale path '/usr/sbin/in.rshd'
-#   pie-executables: dropped stale path '/usr/sbin/lwresd'
-#   pie-executables: dropped stale path '/usr/sbin/named-checkconf'
-#   pie-executables: dropped stale path '/usr/sbin/named-checkzone'
-#   pie-executables: dropped stale path '/usr/sbin/nscd'
-#   pie-executables: dropped stale path '/usr/sbin/ntlm_auth'
-#   pie-executables: dropped stale path '/usr/sbin/papd'
-#   pie-executables: dropped stale path '/usr/sbin/praliases'
-#   pie-executables: dropped stale path '/usr/sbin/rarpd'
-#   pie-executables: dropped stale path '/usr/sbin/rotatelogs2'
-#   pie-executables: dropped stale path '/usr/sbin/rpc.rwalld'
-#   pie-executables: dropped stale path '/usr/sbin/rpc.yppasswdd'
-#   pie-executables: dropped stale path '/usr/sbin/rpc.ypxfrd'
-#   pie-executables: dropped stale path '/usr/lib/sudo/sesh'
-#   pie-executables: dropped stale path '/usr/lib/openldap/slapd'
-#   pie-executables: dropped stale path '/usr/sbin/squidclient'
-#   pie-executables: dropped stale path '/usr/sbin/suexec2'
-#   pie-executables: dropped stale path '/usr/sbin/utempter'
-#   pie-executables: dropped stale path '/usr/sbin/yppush'
-#   pie-executables: dropped stale path '/usr/sbin/ypserv'
+#   pie-executables: dropped stale path '/sbin/arping' (iputils moved to /usr/bin/arping)
+#   pie-executables: dropped stale path '/sbin/clockdiff' (iputils moved to /usr/bin/clockdiff)
+#   pie-executables: dropped stale path '/sbin/tracepath' (iputils moved to /usr/bin/tracepath)
+#   pie-executables: dropped stale path '/sbin/tracepath6' (iputils moved to /usr/bin/tracepath6)
+#   pie-executables: dropped stale path '/usr/bin/achfile' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/adv1tov2' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/aecho' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/afile' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/afppasswd' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/cnid_index' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/dund' (BlueZ 4 tool, removed in BlueZ 5)
+#   pie-executables: dropped stale path '/usr/bin/finger' (finger removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/getzones' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/hidd' (BlueZ 4 tool, removed in BlueZ 5)
+#   pie-executables: dropped stale path '/usr/bin/lppasswd' (cups dropped the 1.x tools)
+#   pie-executables: dropped stale path '/usr/bin/megatron' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/nbplkup' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/nbprgstr' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/nbpunrgstr' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/ncplogin' (ncpfs removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/ncpmap' (ncpfs removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/nwsfind' (ncpfs removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/pand' (BlueZ 4 tool, removed in BlueZ 5)
+#   pie-executables: dropped stale path '/usr/bin/pap' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/papstatus' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/psorder' (cups dropped the 1.x tools)
+#   pie-executables: dropped stale path '/usr/bin/rcp' (rsh removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/rexec' (rsh removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/rlogin' (rsh removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/rsh' (rsh removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/showppd' (cups dropped the 1.x tools)
+#   pie-executables: dropped stale path '/usr/bin/testprns' (cups dropped the 1.x tools)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/gss-client' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/kdestroy' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/kinit' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/klist' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/kpasswd' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/krb524init' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/ksu' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/kvno' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/sclient' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/sim_client' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/uuclient' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/v4rcp' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/gss-server' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kadmin' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kadmin.local' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kadmind' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kdb5_util' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kprop' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kpropd' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/krb524d' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/krb5kdc' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/ktutil' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/sim_server' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/sserver' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/uuserver' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/news/bin/innd' (inn moved to /usr/libexec)
+#   pie-executables: dropped stale path '/usr/lib/news/bin/innbind' (inn moved to /usr/libexec)
+#   pie-executables: dropped stale path '/usr/lib/news/bin/rnews' (inn moved to /usr/libexec)
+#   pie-executables: dropped stale path '/usr/sbin/afpd' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/amdd' (amd removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/atalkd' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/cnid_dbd' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/cnid_metad' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/dnssec-keygen' (bind moved to /usr/bin/dnssec-keygen)
+#   pie-executables: dropped stale path '/usr/sbin/dnssec-signzone' (bind moved to /usr/bin/dnssec-signzone)
+#   pie-executables: dropped stale path '/usr/sbin/hciattach' (BlueZ 4 tool, removed in BlueZ 5)
+#   pie-executables: dropped stale path '/usr/sbin/bluetoothd' (moved to /usr/libexec/bluetooth/bluetoothd in BlueZ 5)
+#   pie-executables: dropped stale path '/usr/sbin/hciconfig' (BlueZ 4 tool, removed in BlueZ 5)
+#   pie-executables: dropped stale path '/usr/sbin/hid2hci' (BlueZ 4 tool, removed in BlueZ 5)
+#   pie-executables: dropped stale path '/usr/sbin/httpd2' (apache 2.2 name, renamed in 2.4)
+#   pie-executables: dropped stale path '/usr/sbin/httpd2-prefork' (apache 2.2 name, renamed in 2.4)
+#   pie-executables: dropped stale path '/usr/sbin/httpd2-worker' (apache 2.2 name, renamed in 2.4)
+#   pie-executables: dropped stale path '/usr/sbin/in.fingerd' (fingerd removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/in.rexecd' (rsh removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/in.rlogind' (rsh removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/in.rshd' (rsh removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/lwresd' (bind moved to /usr/bin/lwresd)
+#   pie-executables: dropped stale path '/usr/sbin/named-checkconf' (bind moved to /usr/bin/named-checkconf)
+#   pie-executables: dropped stale path '/usr/sbin/named-checkzone' (bind moved to /usr/bin/named-checkzone)
+#   pie-executables: dropped stale path '/usr/sbin/nscd' (nscd removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/ntlm_auth' (samba moved to /usr/bin/ntlm_auth)
+#   pie-executables: dropped stale path '/usr/sbin/papd' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/praliases' (sendmail moved to /usr/bin/praliases)
+#   pie-executables: dropped stale path '/usr/sbin/rarpd' (rarpd removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/rotatelogs2' (apache 2.2 name, renamed in 2.4)
+#   pie-executables: dropped stale path '/usr/sbin/rpc.rwalld' (rwalld removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/rpc.yppasswdd' (ypserv removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/rpc.ypxfrd' (ypserv removed from Factory)
+#   pie-executables: dropped stale path '/usr/lib/sudo/sesh' (sesh moved to /usr/libexec/sudo/sesh)
+#   pie-executables: dropped stale path '/usr/lib/openldap/slapd' (slapd moved to /usr/sbin/slapd)
+#   pie-executables: dropped stale path '/usr/sbin/squidclient' (squid does not ship squidclient)
+#   pie-executables: dropped stale path '/usr/sbin/suexec2' (apache 2.2 name, renamed in 2.4)
+#   pie-executables: dropped stale path '/usr/sbin/utempter' (libutempter removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/yppush' (ypserv removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/ypserv' (ypserv removed from Factory)
+#   pie-executables: dropped stale path '/sbin/arping' (iputils moved to /usr/bin/arping)
+#   pie-executables: dropped stale path '/sbin/clockdiff' (iputils moved to /usr/bin/clockdiff)
+#   pie-executables: dropped stale path '/sbin/tracepath' (iputils moved to /usr/bin/tracepath)
+#   pie-executables: dropped stale path '/sbin/tracepath6' (iputils moved to /usr/bin/tracepath6)
+#   pie-executables: dropped stale path '/usr/bin/achfile' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/adv1tov2' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/aecho' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/afile' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/afppasswd' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/cnid_index' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/dund' (BlueZ 4 tool, removed in BlueZ 5)
+#   pie-executables: dropped stale path '/usr/bin/finger' (finger removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/getzones' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/hidd' (BlueZ 4 tool, removed in BlueZ 5)
+#   pie-executables: dropped stale path '/usr/bin/lppasswd' (cups dropped the 1.x tools)
+#   pie-executables: dropped stale path '/usr/bin/megatron' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/nbplkup' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/nbprgstr' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/nbpunrgstr' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/ncplogin' (ncpfs removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/ncpmap' (ncpfs removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/nwsfind' (ncpfs removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/pand' (BlueZ 4 tool, removed in BlueZ 5)
+#   pie-executables: dropped stale path '/usr/bin/pap' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/papstatus' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/psorder' (cups dropped the 1.x tools)
+#   pie-executables: dropped stale path '/usr/bin/rcp' (rsh removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/rexec' (rsh removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/rlogin' (rsh removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/rsh' (rsh removed from Factory)
+#   pie-executables: dropped stale path '/usr/bin/showppd' (cups dropped the 1.x tools)
+#   pie-executables: dropped stale path '/usr/bin/testprns' (cups dropped the 1.x tools)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/gss-client' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/kdestroy' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/kinit' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/klist' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/kpasswd' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/krb524init' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/ksu' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/kvno' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/sclient' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/sim_client' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/uuclient' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/bin/v4rcp' (krb5 installs to /usr/bin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/gss-server' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kadmin' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kadmin.local' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kadmind' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kdb5_util' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kprop' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/kpropd' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/krb524d' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/krb5kdc' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/ktutil' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/sim_server' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/sserver' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/mit/sbin/uuserver' (krb5 installs to /usr/sbin, not /usr/lib/mit)
+#   pie-executables: dropped stale path '/usr/lib/news/bin/innd' (inn moved to /usr/libexec)
+#   pie-executables: dropped stale path '/usr/lib/news/bin/innbind' (inn moved to /usr/libexec)
+#   pie-executables: dropped stale path '/usr/lib/news/bin/rnews' (inn moved to /usr/libexec)
+#   pie-executables: dropped stale path '/usr/sbin/afpd' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/amdd' (amd removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/atalkd' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/cnid_dbd' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/cnid_metad' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/dnssec-keygen' (bind moved to /usr/bin/dnssec-keygen)
+#   pie-executables: dropped stale path '/usr/sbin/dnssec-signzone' (bind moved to /usr/bin/dnssec-signzone)
+#   pie-executables: dropped stale path '/usr/sbin/hciattach' (BlueZ 4 tool, removed in BlueZ 5)
+#   pie-executables: dropped stale path '/usr/sbin/bluetoothd' (moved to /usr/libexec/bluetooth/bluetoothd in BlueZ 5)
+#   pie-executables: dropped stale path '/usr/sbin/hciconfig' (BlueZ 4 tool, removed in BlueZ 5)
+#   pie-executables: dropped stale path '/usr/sbin/hid2hci' (BlueZ 4 tool, removed in BlueZ 5)
+#   pie-executables: dropped stale path '/usr/sbin/httpd2' (apache 2.2 name, renamed in 2.4)
+#   pie-executables: dropped stale path '/usr/sbin/httpd2-prefork' (apache 2.2 name, renamed in 2.4)
+#   pie-executables: dropped stale path '/usr/sbin/httpd2-worker' (apache 2.2 name, renamed in 2.4)
+#   pie-executables: dropped stale path '/usr/sbin/in.fingerd' (fingerd removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/in.rexecd' (rsh removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/in.rlogind' (rsh removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/in.rshd' (rsh removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/lwresd' (bind moved to /usr/bin/lwresd)
+#   pie-executables: dropped stale path '/usr/sbin/named-checkconf' (bind moved to /usr/bin/named-checkconf)
+#   pie-executables: dropped stale path '/usr/sbin/named-checkzone' (bind moved to /usr/bin/named-checkzone)
+#   pie-executables: dropped stale path '/usr/sbin/nscd' (nscd removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/ntlm_auth' (samba moved to /usr/bin/ntlm_auth)
+#   pie-executables: dropped stale path '/usr/sbin/papd' (netatalk removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/praliases' (sendmail moved to /usr/bin/praliases)
+#   pie-executables: dropped stale path '/usr/sbin/rarpd' (rarpd removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/rotatelogs2' (apache 2.2 name, renamed in 2.4)
+#   pie-executables: dropped stale path '/usr/sbin/rpc.rwalld' (rwalld removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/rpc.yppasswdd' (ypserv removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/rpc.ypxfrd' (ypserv removed from Factory)
+#   pie-executables: dropped stale path '/usr/lib/sudo/sesh' (sesh moved to /usr/libexec/sudo/sesh)
+#   pie-executables: dropped stale path '/usr/lib/openldap/slapd' (slapd moved to /usr/sbin/slapd)
+#   pie-executables: dropped stale path '/usr/sbin/squidclient' (squid does not ship squidclient)
+#   pie-executables: dropped stale path '/usr/sbin/suexec2' (apache 2.2 name, renamed in 2.4)
+#   pie-executables: dropped stale path '/usr/sbin/utempter' (libutempter removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/yppush' (ypserv removed from Factory)
+#   pie-executables: dropped stale path '/usr/sbin/ypserv' (ypserv removed from Factory)
 #
 # SLFO files byte-identical to openSUSE (not vendored twice;
 # the generated Rust consts fall back to the openSUSE copy):
