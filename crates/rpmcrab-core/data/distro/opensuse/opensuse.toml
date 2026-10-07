@@ -142,10 +142,6 @@ Filters = [
     'kernel-modules-not-in-kernel-packages',
 
 # SUSE kmp's don't need manual depmod (bnc#456048)
-    'module-without-depmod-postin',
-    'postin-with-wrong-depmod',
-    'module-without-depmod-postun',
-    'postun-with-wrong-depmod',
     'configure-without-libdir-spec',
     'use-of-RPM_SOURCE_DIR',
     'use-tmp-in-',

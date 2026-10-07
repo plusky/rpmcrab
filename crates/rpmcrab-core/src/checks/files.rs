@@ -163,8 +163,6 @@ fn normal_zero_length_regex() -> &'static Regex {
     })
 }
 
-}
-
 static PERL_TEMP_FILE_REGEX: OnceLock<Regex> = OnceLock::new();
 fn perl_temp_file_regex() -> &'static Regex {
     PERL_TEMP_FILE_REGEX
@@ -2164,7 +2162,6 @@ impl FilesCheck {
         }
     }
 
-
     fn check_normal_perl_temp(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
         if is_match(&self.perl_temp_file_re, fname) {
             add_info(out, Level::Warning, pkg, "perl-temp-file", &[fname]);
@@ -3438,7 +3435,6 @@ mod tests {
         );
         assert_lacks(&wrong_names, "postin-with-wrong-depmod");
         assert_lacks(&wrong_names, "postun-with-wrong-depmod");
-    }
     }
 
     #[test]
