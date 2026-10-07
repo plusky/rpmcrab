@@ -18,23 +18,23 @@ since this is a global name space not owned by any particular package.
 """
 
 python-missing-require="""
-The python package declare some requirement that's not detected in the
+The python package declares some requirement that's not detected in the
 rpm package. Please, verify that all dependencies are added as
 Requires.
 """
 
 python-leftover-require="""
-Some python module Requires can't be found in the python package
+Some python module Requires are missing from the python package's
 requirements declaration. Please verify that all dependencies are
 really needed.
 """
 
 python-pyc-multiple-versions="""
-There are .pyc files in the rpm that are from the different Python
-interperters. Please, verify that all files are needed for this package.
+There are .pyc files in the rpm that are from different Python
+interpreters. Please, verify that all files are needed for this package.
 """
 
 python-sphinx-doctrees-leftover="""
-Cache Sphinx build folder found in the package ".doctrees". Please, make sure
-to do not include any build files in the final package.
+A cached Sphinx build folder (".doctrees") was found in the package.
+Please make sure not to include any build files in the final package.
 """

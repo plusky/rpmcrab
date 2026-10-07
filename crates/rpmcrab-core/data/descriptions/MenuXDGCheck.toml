@@ -5,8 +5,8 @@ non-utf8-desktopfile="""
 The .desktop file is not encoded in UTF-8.
 """
 desktopfile-without-binary="""
-The .desktop file is for a file not present in the package. You
-should check the requires or see if this is not a error.
+The .desktop file refers to a binary that is not present in the package.
+You should check the Requires or see if this is not an error.
 """
 desktopfile-duplicate-section="""
 The .desktop file contains the mentioned section name twice, which

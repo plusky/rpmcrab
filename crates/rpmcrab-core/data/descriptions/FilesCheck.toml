@@ -38,7 +38,7 @@ install-info.
 """
 perl-temp-file="""
 You have a perl temporary file in your package. Usually, this
-file is beginning with a dot (.) and contain 'perl' in its name.
+file begins with a dot (.) and contains 'perl' in its name.
 """
 non-ghost-in-run="""
 A file or directory in the package is located in /run. Files installed
@@ -300,19 +300,19 @@ unexpectedly stripped and that the intended compiler flags are used.
 missing-dependency-to-crontabs="""
 This package installs a file in /etc/cron.*/ but
 doesn't require crontabs to be installed. As crontabs is not part of the essential packages,
-your package should explicitely require crontabs to make sure that your cron job is
+your package should explicitly require crontabs to make sure that your cron job is
 executed. If it is an optional feature of your package, recommend or suggest crontabs.
 """
 missing-dependency-to-logrotate="""
 This package installs a file in /etc/logrotate.d/ but
 doesn't require logrotate to be installed. Because logrotate is not part of the essential packages,
-your package should explicitely depend on logrotate to make sure that your logrotate
+your package should explicitly depend on logrotate to make sure that your logrotate
 job is executed. If it is an optional feature of your package, recommend or suggest logrotate.
 """
 missing-dependency-to-xinetd="""
 This package installs a file in /etc/xinetd.d/ but
 doesn't require xinetd to be installed. Because xinetd is not part of the essential packages,
-your package should explicitely depend on logrotate to make sure that your xinetd
+your package should explicitly depend on xinetd to make sure that your xinetd
 job is executed. If it is an optional feature of your package, recommend or suggest xinetd.
 """
 read-error="""
@@ -382,8 +382,8 @@ so ignore this warning if this is the case.
 pem-private-key="""
 Private key in a .pem file should not be shipped in a rpm, unless
 this is for testing purpose ( ie, run by the test suite ). Shipping it
-as part of the example documentation mean that someone will sooner or later
-use it and setup a insecure configuration.
+as part of the example documentation means that someone will sooner or later
+use it and setup an insecure configuration.
 """
 tcl-extension-file="""
 Script libraries for Tcl extensions should be in a package-specific
@@ -413,7 +413,7 @@ be done manually.
 zero-perms="""
 Your package contains a file with no permissions. This is usually an error
 because the file won't be accessible by any user. You should check the file
-permissions and ensure that are correct or fix during in the %install section.
+permissions, ensure they are correct, or fix them in the %install section.
 """
 
 zero-perms-ghost="""

@@ -30,8 +30,8 @@ incoherent-package-value-in-menu="""
 The package field of the menu entry isn't the same as the package name.
 """
 use-of-launcher-in-menu-but-no-requires-on="""
-The menu command uses a launcher but there is no dependency in the package
-that contains it.
+The menu command uses a launcher, but the package has no dependency on
+the package that provides the launcher.
 """
 menu-command-not-in-package="""
 The command used in the menu isn't included in the package.
@@ -40,7 +40,7 @@ menu-longtitle-not-capitalized="""
 The longtitle field of the menu doesn't start with a capital letter.
 """
 version-in-menu-longtitle="""
-The longtitle filed of the menu entry contains a version. This is bad
+The longtitle field of the menu entry contains a version. This is bad
 because it will be prone to error when the version of the package changes.
 """
 no-longtitle-in-menu="""
@@ -50,7 +50,7 @@ menu-title-not-capitalized="""
 The title field of the menu entry doesn't start with a capital letter.
 """
 version-in-menu-title="""
-The title filed of the menu entry contains a version. This is bad
+The title field of the menu entry contains a version. This is bad
 because it will be prone to error when the version of the package changes.
 """
 no-title-in-menu="""

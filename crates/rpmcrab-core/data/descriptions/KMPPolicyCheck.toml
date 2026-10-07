@@ -12,9 +12,10 @@ Make sure you have extended '%kernel_module_package' by
 specified 'Enhances: kernel-%1'.
 """
 kmp-excessive-supplements="""
-There is more than one flavor of kernel specified in Suplements field.
+There is more than one flavor of kernel specified in Supplements field.
 """
 kmp-missing-supplements="""
-Make sure your 'BuildRequires:' include 'kernel-syms' and 'modutils'
-for proper dependencies to be inserted in the resulting binary RPM.
+Make sure you have extended '%kernel_module_package' by
+'-p %_sourcedir/preamble', a file named 'preamble' as source and there
+specified 'Supplements: packageand(kernel-%1:%name)'.
 """

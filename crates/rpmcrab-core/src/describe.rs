@@ -303,7 +303,7 @@ mod tests {
         let pinned: &[(&str, &str)] = &[
             (
                 "AlternativesCheck.toml",
-                "d10970e45791c9ec4eb2f63fe979c27df9b2e169585f967be8899051af5bec9c",
+                "d423336243cdb0f96d367c7fb8ddebf936ede9fa3c5a8d95ccb55e2c9acf1458",
             ),
             (
                 "AppDataCheck.toml",
@@ -359,7 +359,7 @@ mod tests {
             ),
             (
                 "FileDigestCheck.toml",
-                "591a8fb13d58b66f1d78cc5c82d339d3788d8fd622b05151632ca8e639900bcd",
+                "2ed29b916b02a456a60c3dc87d99d17325d22d6e4ab9ff4f5a68cc40a6752f4d",
             ),
             (
                 "FileMetadataCheck.toml",
@@ -367,11 +367,11 @@ mod tests {
             ),
             (
                 "FilelistCheck.toml",
-                "c13d2643ec624d15848dd0093bb9dd4b77ff9e3d2dfab8a8c7cac37039eda7e6",
+                "21f9f0db18fe90a0cbf1e53ad222e77236e5affe75aca6265feae65ca884890e",
             ),
             (
                 "FilesCheck.toml",
-                "88e9207b65c3d3d18a609260ca326a4796d40f39c4449cacc2aa77e56fc61849",
+                "28aa82ec03cb8ba48f9ded4231ba33cb15c62d4a32c61f65d3b8b4ece055a8a8",
             ),
             (
                 "I18NCheck.toml",
@@ -383,11 +383,11 @@ mod tests {
             ),
             (
                 "InitScriptCheck.toml",
-                "5bc37d52a320b38ef4f7f9308096f2afaf888ca8f246e403199a198561f8be85",
+                "6f1ee34848f758c540547fb176ceb8e669a0d29a56fc1df93dffbb4c4ddf674c",
             ),
             (
                 "KMPPolicyCheck.toml",
-                "8f8ae06e9a82c921e64197b35e79f441a201a14a6a3fe7d345b3ba25608c9725",
+                "eab5b6cfe39e79e8e2f19328214970f5a4cccfd9c7a596beb5122d9a922f6493",
             ),
             (
                 "LSBCheck.toml",
@@ -399,15 +399,15 @@ mod tests {
             ),
             (
                 "LogrotateCheck.toml",
-                "b40b11757baf314c39cc84914b6e8b20fc8c4b61c55d368360f2026940f0ae1f",
+                "25c54f3ab3b9a77ae53c6caff8e6fd904f008bd272327e47989819ff2594f7a4",
             ),
             (
                 "MenuCheck.toml",
-                "7728c3dd7492c18c28f20445d492d377ec3e4ff40e09b1641346a31e9561857e",
+                "2c0d654ef52bd397aa2f0642ec6920919fc49989acf6a47c59ebe1fbe3ee2f24",
             ),
             (
                 "MenuXDGCheck.toml",
-                "baba8c36ae9e55cd17e93c1603a817d6a083092c766da57c655a5a0eff79c24f",
+                "3d015c3bfd054208bdf0eea23cce623e208ff3197149cf8041224248d73b0739",
             ),
             (
                 "MixedOwnershipCheck.toml",
@@ -427,7 +427,7 @@ mod tests {
             ),
             (
                 "PythonCheck.toml",
-                "3f8d795a0a6311c31aca40d15325a814d09eab4c1697892f30c90d4e9ddb38fd",
+                "4e531ff3d2f94153a9137f6aa0d42b35b69c8a20e9063076b9cd6050e9e7552d",
             ),
             (
                 "SELinuxIndependentModuleCheck.toml",
@@ -439,7 +439,7 @@ mod tests {
             ),
             (
                 "SharedLibraryPolicyCheck.toml",
-                "0c801894904d52460dec450268758049cc74cd82732432789557fec012c36825",
+                "5c86008e156d20ed9000ffc7a1af8beeef25981878730ae25f14d4720faf2342",
             ),
             (
                 "SignatureCheck.toml",
@@ -451,7 +451,7 @@ mod tests {
             ),
             (
                 "SpecCheck.toml",
-                "fed050ef73bfe807715577dbd5864a207246e8070da8921c8323f8736531d56a",
+                "949e8272fddfcdbab5843b8b96d3873595e5de3d7577f9f1932237b857945c1b",
             ),
             (
                 "SysVInitOnSystemdCheck.toml",
@@ -463,11 +463,11 @@ mod tests {
             ),
             (
                 "SystemdTmpfilesCheck.toml",
-                "cc2e7ef9f19411e89581ab9bd174fa121010a94f59a7a26b3d966c785adfabc8",
+                "5817ac6b70ca3e605265eaad2d7e92b1abebd983ce061fcb719bcb397e9aa8ed",
             ),
             (
                 "TagsCheck.toml",
-                "263a18567fe55ed756db7f836f6728699d88e44a0474e6c1175f9a2ca89389de",
+                "764e54feca0de9b8bf840e15bd467766286d7818f5a4cc6564ba01554c5ba7ff",
             ),
             (
                 "TmpFilesCheck.toml",

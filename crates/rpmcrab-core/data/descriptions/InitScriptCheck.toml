@@ -58,7 +58,7 @@ is httpd, you have to use 'httpd' as the filename in your subsys directory.
 It is also possible that rpmlint gets this wrong, especially if the init
 script contains nontrivial shell variables and/or assignments. These
 cases usually manifest themselves when rpmlint reports that the subsys name
-starts a with '$'; in these cases a warning instead of an error is reported
+starts with '$'; in these cases a warning instead of an error is reported
 and you should check the script manually.
 """
 incoherent-init-script-name="""
