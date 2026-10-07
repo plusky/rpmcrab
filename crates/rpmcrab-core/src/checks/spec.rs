@@ -2573,6 +2573,13 @@ make install
     }
 
     #[test]
+    fn obsolete_tmpfiles_macro_braced_package_form_fires() {
+        let results = run_mini("Name: foo\n%post\n%{tmpfiles_create_package}\n");
+        let lines = lines_for(&results, "obsolete-tmpfiles-macro");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+    }
+
+    #[test]
     fn obsolete_tmpfiles_macro_outside_scriptlet_is_quiet() {
         // A mention in prose is not a scriptlet call.
         let results = run_mini("Name: foo\n%description\nUses %tmpfiles_create_package.\n");
