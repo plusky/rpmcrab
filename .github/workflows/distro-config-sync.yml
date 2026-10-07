@@ -51,7 +51,7 @@ jobs:
       - name: Check for drift
         id: diff
         run: |
-          if git diff --quiet -- crates/rpmcrab-core/data/distro scripts/generate-distro-configs.py; then
+          if git diff --quiet -- crates/rpmcrab-core/data/distro crates/rpmcrab-core/src/distro_files_generated.rs scripts/generate-distro-configs.py; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -66,7 +66,7 @@ jobs:
           branch="distro-config-sync-${date}"
           git -c user.name=github-actions -c user.email=github-actions@github.com \
             checkout -B "$branch"
-          git add crates/rpmcrab-core/data/distro scripts/generate-distro-configs.py
+          git add crates/rpmcrab-core/data/distro crates/rpmcrab-core/src/distro_files_generated.rs scripts/generate-distro-configs.py
           git -c user.name=github-actions -c user.email=github-actions@github.com \
             commit -m "Refresh vendored distro configs to upstream ${date}"
           git push -u origin "$branch"
