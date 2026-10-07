@@ -190,6 +190,7 @@ pub trait Check: Send {
 pub fn register_error_details(config: &Config, out: &mut Filter) {
     crate::checks::fhs::FHSCheck::register_error_details(out);
     crate::checks::files::FilesCheck::register_error_details(config, out);
+    crate::checks::i18n::I18NCheck::register_error_details(out);
     crate::checks::post::register_error_details(out);
     crate::checks::source::SourceCheck::register_error_details(config, out);
     crate::checks::spec::SpecCheck::register_error_details(config, out);
@@ -744,5 +745,23 @@ mod add_info_tests {
             "{}",
             out.results()[0].1
         );
+    }
+
+    /// The central `--explain` registrar must wire every check's in-code
+    /// descriptions. `I18NCheck::register_error_details` was private and
+    /// uncalled here, so `--explain` printed "Unknown message" for the
+    /// dynamic i18n findings the check itself describes at check time.
+    #[test]
+    fn central_registrar_resolves_i18n_dynamic_ids() {
+        let config = crate::config::load_bundled();
+        let mut out = Filter::new(&config, crate::color::Color::for_tty(false)).unwrap();
+        register_error_details(&config, &mut out);
+        for id in ["incorrect-i18n-tag-cs", "incorrect-locale-id"] {
+            let explanation = out.explanation(id, &config);
+            assert!(
+                !explanation.contains("Unknown message"),
+                "--explain {id} must resolve, got: {explanation}"
+            );
+        }
     }
 }

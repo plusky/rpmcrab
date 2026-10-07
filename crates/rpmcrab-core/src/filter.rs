@@ -195,8 +195,8 @@ impl Filter {
 
     /// Register a long explanation for `-v`/`--explain`, for the checks that
     /// compute theirs at runtime instead of shipping a staged description
-    /// (`FHSCheck`, `FilesCheck`, `PostCheck`, `SourceCheck`, `SpecCheck`,
-    /// `TagsCheck` — the reference installs these in each check's `__init__`).
+    /// (`FHSCheck`, `FilesCheck`, `I18NCheck`, `PostCheck`, `SourceCheck`,
+    /// `SpecCheck`, `TagsCheck` — the reference installs these in each check's `__init__`).
     pub fn set_error_detail(&mut self, check: &str, text: String) {
         self.error_details.insert(check.to_string(), text);
     }

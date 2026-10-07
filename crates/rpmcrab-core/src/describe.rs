@@ -676,22 +676,11 @@ mod tests {
         // bashisms.rs: `out.push("...")` into a findings vec.
         "bin-sh-syntax-error",
         "potential-bashisms",
-        // pam_modules.rs: `("id", ...)` 2-tuples from helper.
-        "pam-ghost-module",
-        "pam-unauthorized-module",
-        // pkg_config.rs, configfiles.rs, lsb.rs, zypp_syntax.rs: variable IDs from helpers.
+        // configfiles.rs: `out.push("...")` into a findings vec, emitted via variable.
         // spec.rs: `format!("no-%{sec}-section")` loop over prep/build/install/check;
         // the parser sees only `&check`, not the IDs.
-        "double-slash-in-pkgconfig-path",
-        "invalid-pkgconfig-file",
-        "pkgconfig-invalid-libs-dir",
         "conffile-without-noreplace-flag",
         "non-etc-or-var-file-marked-as-conffile",
-        "non-lsb-compliant-package-name",
-        "non-lsb-compliant-release",
-        "non-lsb-compliant-version",
-        "suse-zypp-otherproviders",
-        "suse-zypp-packageand",
         "no-%prep-section",
         "no-%build-section",
         "no-%install-section",
@@ -880,6 +869,176 @@ mod tests {
         out
     }
 
+    /// Bodies of the finding-collector helpers: functions returning
+    /// `Vec<(&'static str, ...)>` (`LSBCheck::collect`,
+    /// `PkgConfigCheck::check_line`, ...). Their `("kebab-id", ...)` tuples
+    /// are emitted later through a variable, invisible to the `(Level::X,
+    /// "id", ...)` tuple scan and the fourth-argument scan. Brace matching
+    /// skips strings, char literals and comments so a `}` inside any of
+    /// those cannot end the body early.
+    fn finding_helper_bodies(src: &str) -> Vec<&str> {
+        const NEEDLE: &[u8] = b"-> Vec<(&'static str";
+        let bytes = src.as_bytes();
+        let mut out = Vec::new();
+        let mut search = 0;
+        while search < bytes.len() {
+            let Some(rel) = bytes[search..]
+                .windows(NEEDLE.len())
+                .position(|w| w == NEEDLE)
+            else {
+                break;
+            };
+            // The return type holds no braces, so the next `{` opens the
+            // function body.
+            let mut i = search + rel + NEEDLE.len();
+            while i < bytes.len() && bytes[i] != b'{' {
+                i += 1;
+            }
+            if i >= bytes.len() {
+                break;
+            }
+            if let Some(end) = brace_matched_end(bytes, i) {
+                out.push(&src[i..end]);
+                search = end;
+            } else {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Byte index just past the `}` matching the `{` at `open`. String
+    /// literals, char literals and line/block comments are skipped; all the
+    /// syntax characters matched here are ASCII, which never appear inside
+    /// a multi-byte UTF-8 sequence.
+    fn brace_matched_end(bytes: &[u8], open: usize) -> Option<usize> {
+        #[derive(PartialEq)]
+        enum State {
+            Code,
+            Str,
+            Chr,
+            LineComment,
+            BlockComment,
+        }
+        let mut state = State::Code;
+        let mut block_depth = 0u32;
+        let mut depth = 0u32;
+        let mut esc = false;
+        let mut i = open;
+        while i < bytes.len() {
+            let c = bytes[i];
+            let next = bytes.get(i + 1).copied();
+            match state {
+                State::Code => {
+                    if c == b'"' {
+                        state = State::Str;
+                    } else if c == b'\'' {
+                        state = State::Chr;
+                    } else if c == b'/' && next == Some(b'/') {
+                        state = State::LineComment;
+                        i += 1;
+                    } else if c == b'/' && next == Some(b'*') {
+                        state = State::BlockComment;
+                        block_depth = 1;
+                        i += 1;
+                    } else if c == b'{' {
+                        depth += 1;
+                    } else if c == b'}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(i + 1);
+                        }
+                    }
+                }
+                State::Str | State::Chr => {
+                    let quote = if state == State::Str { b'"' } else { b'\'' };
+                    if esc {
+                        esc = false;
+                    } else if c == b'\\' {
+                        esc = true;
+                    } else if c == quote {
+                        state = State::Code;
+                    }
+                }
+                State::LineComment => {
+                    if c == b'\n' {
+                        state = State::Code;
+                    }
+                }
+                State::BlockComment => {
+                    if c == b'/' && next == Some(b'*') {
+                        block_depth += 1;
+                        i += 1;
+                    } else if c == b'*' && next == Some(b'/') {
+                        block_depth -= 1;
+                        i += 1;
+                        if block_depth == 0 {
+                            state = State::Code;
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Finding IDs from `("kebab-id", ...)` string-first 2-tuples inside the
+    /// finding-collector helper bodies: literals emitted later through a
+    /// variable (`LSBCheck::collect`, ...). A `(` following an identifier is
+    /// a call's argument list, not a tuple (`dep("name", 0)`).
+    fn string_tuple_literals(src: &str) -> Vec<String> {
+        let bytes = src.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'(' {
+                let mut p = i;
+                while p > 0 && bytes[p - 1].is_ascii_whitespace() {
+                    p -= 1;
+                }
+                let is_call =
+                    p > 0 && (bytes[p - 1].is_ascii_alphanumeric() || bytes[p - 1] == b'_');
+                if !is_call {
+                    let mut j = i + 1;
+                    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    if j < bytes.len() && bytes[j] == b'"' {
+                        let mut k = j + 1;
+                        let mut esc = false;
+                        let mut cur = String::new();
+                        let mut done = false;
+                        while k < bytes.len() {
+                            let c = bytes[k];
+                            if esc {
+                                esc = false;
+                            } else if c == b'\\' {
+                                esc = true;
+                            } else if c == b'"' {
+                                done = true;
+                                break;
+                            }
+                            cur.push(c as char);
+                            k += 1;
+                        }
+                        if done {
+                            let mut m = k + 1;
+                            while m < bytes.len() && bytes[m].is_ascii_whitespace() {
+                                m += 1;
+                            }
+                            if m < bytes.len() && bytes[m] == b',' && is_finding_id(&cur) {
+                                out.push(cur);
+                            }
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
     /// All statically-enumerated finding IDs emitted across the checks.
     fn emitted_finding_ids(sources: &[String]) -> Vec<String> {
         let mut ids = std::collections::HashSet::new();
@@ -893,6 +1052,11 @@ mod tests {
             }
             for id in tuple_literals(src) {
                 ids.insert(id);
+            }
+            for body in finding_helper_bodies(src) {
+                for id in string_tuple_literals(body) {
+                    ids.insert(id);
+                }
             }
         }
         let mut v: Vec<_> = ids.into_iter().collect();

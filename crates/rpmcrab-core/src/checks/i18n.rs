@@ -194,7 +194,7 @@ impl I18NCheck {
     /// `incorrect-locale-*` findings, one per corrected code in
     /// `INCORRECT_LOCALES`. The reference ships no descriptions for these;
     /// the port describes them so `--explain` never prints "Unknown message".
-    fn register_error_details(out: &mut Filter) {
+    pub fn register_error_details(out: &mut Filter) {
         for (_, correct) in INCORRECT_LOCALES {
             out.set_error_detail(
                 &format!("incorrect-i18n-tag-{correct}"),
