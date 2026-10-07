@@ -3419,6 +3419,26 @@ mod tests {
         assert_has(&names, "unexpanded-macro");
     }
 
+    #[test]
+    fn files_check_depmod_findings_absent() {
+        // The depmod findings were removed (SUSE-KMP-specific; the KMP macro
+        // template handles depmod). Each fixture below fired its pair before
+        // the removal -- restoring any of the four emissions makes this fail.
+        let config = test_config();
+        let (missing_names, _d1) = run_files_check(
+            &fixture_path("filescheck-depmod-missing-1.0-1.noarch.rpm"),
+            &config,
+        );
+        assert_lacks(&missing_names, "module-without-depmod-postin");
+        assert_lacks(&missing_names, "module-without-depmod-postun");
+
+        let (wrong_names, _d2) = run_files_check(
+            &fixture_path("filescheck-depmod-wrong-1.0-1.noarch.rpm"),
+            &config,
+        );
+        assert_lacks(&wrong_names, "postin-with-wrong-depmod");
+        assert_lacks(&wrong_names, "postun-with-wrong-depmod");
+    }
     }
 
     #[test]
