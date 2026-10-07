@@ -239,9 +239,6 @@ Filters = [
     'W: non-conffile-in-etc /etc/bash_completion.d/',
 
 # Info uses file triggers now (boo#1152169)
-    ' info-files-without-install-info-postin' ,
-    ' postin-without-install-info ',
-    ' info-files-without-install-info-postun ',
 ]
 
 BlockedFilters = [

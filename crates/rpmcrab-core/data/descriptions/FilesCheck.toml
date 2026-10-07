@@ -21,17 +21,6 @@ a call to ldconfig.
 postun-without-ldconfig="""
 This package contains a library and its %postun doesn't call ldconfig.
 """
-info-files-without-install-info-postin="""
-This package contains info files and provides no %post scriptlet containing
-a call to install-info.
-"""
-postin-without-install-info="""
-This package contains info files and its %post doesn't call install-info.
-"""
-info-files-without-install-info-postun="""
-This package contains info files and provides no %postun scriptlet
-containing a call to install-info.
-"""
 perl-temp-file="""
 You have a perl temporary file in your package. Usually, this
 file begins with a dot (.) and contains 'perl' in its name.
