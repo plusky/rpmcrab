@@ -39,10 +39,12 @@ jobs:
           cat /tmp/refresh.log
           new_opensuse=$(sed -n 's|^# opensuse: main @ \([0-9a-f]*\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
           new_slfo=$(sed -n 's|^# slfo: opensuse-slfo-main @ \([0-9a-f]*\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
-          echo "old_opensuse=${old_opensuse}" >> "$GITHUB_OUTPUT"
-          echo "old_slfo=${old_slfo}" >> "$GITHUB_OUTPUT"
-          echo "new_opensuse=${new_opensuse}" >> "$GITHUB_OUTPUT"
-          echo "new_slfo=${new_slfo}" >> "$GITHUB_OUTPUT"
+          {
+            echo "old_opensuse=${old_opensuse}"
+            echo "old_slfo=${old_slfo}"
+            echo "new_opensuse=${new_opensuse}"
+            echo "new_slfo=${new_slfo}"
+          } >> "$GITHUB_OUTPUT"
           # The generator prunes Filters entries for findings rpmcrab no longer
           # emits; surface the prune log for the PR body.
           grep '^pruned: ' /tmp/refresh.log > /tmp/prunes.txt || true
