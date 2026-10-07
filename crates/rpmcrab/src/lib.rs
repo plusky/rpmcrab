@@ -158,15 +158,25 @@ fn resolve_output_format(cli_format: Option<&str>, config_format: &str) -> Strin
 /// Tracing filter for the binary: `RUST_LOG` wins when set and valid;
 /// otherwise this crate and `rpmcrab-core` log at `info` (the progress
 /// lines) and everything else at `warn`, so a normal run gains no noise.
+/// An invalid `RUST_LOG` warns on stderr and falls back to the default, so a
+/// typo is visible instead of silently ignored.
 fn tracing_filter() -> tracing_subscriber::EnvFilter {
-    std::env::var("RUST_LOG")
-        .ok()
-        .and_then(|directives| directives.parse().ok())
-        .unwrap_or_else(|| {
-            "warn,rpmcrab=info,rpmcrab_core=info"
-                .parse()
-                .expect("the default tracing directives are valid")
-        })
+    match std::env::var("RUST_LOG") {
+        Ok(directives) => match directives.parse() {
+            Ok(filter) => filter,
+            Err(e) => {
+                eprintln!("warning: ignoring invalid RUST_LOG={directives:?}: {e}");
+                default_tracing_filter()
+            }
+        },
+        Err(_) => default_tracing_filter(),
+    }
+}
+
+fn default_tracing_filter() -> tracing_subscriber::EnvFilter {
+    "warn,rpmcrab=info,rpmcrab_core=info"
+        .parse()
+        .expect("the default tracing directives are valid")
 }
 
 /// The clap `Command` for the `rpmcrab` binary, shared by `main.rs` and the

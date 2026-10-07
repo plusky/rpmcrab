@@ -45,7 +45,9 @@ impl Task {
 /// per task as its work starts, so a stuck run shows where it stopped. The
 /// numbering is the task index, so parallel runs emit the same set of lines
 /// as sequential ones, just in pickup order. Single-task batches stay
-/// silent: no new noise in normal output.
+/// silent: no new noise in normal output. The guard is deliberately on the
+/// task count rather than the log level, so even `RUST_LOG=debug` stays quiet
+/// for a single package -- there is no multi-package progress to observe.
 #[derive(Clone, Copy)]
 struct Progress {
     total: usize,

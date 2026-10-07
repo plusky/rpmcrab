@@ -322,7 +322,17 @@ fn a_repeated_argument_is_counted_once() {
 /// lines is identical. Strip the timestamp (like the footer duration below)
 /// and sort before comparing.
 fn strip_timestamp(line: &str) -> &str {
-    match line.find(" INFO ") {
+    // tracing's default fmt layer renders `{timestamp} {LEVEL} {target}: message`.
+    // Cut before the level token, whatever the level, so neither the timestamp
+    // nor a level change breaks the comparison.
+    let mut cut = None;
+    for level in ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"] {
+        let token = format!(" {level} ");
+        if let Some(i) = line.find(token.as_str()) {
+            cut = Some(cut.map_or(i, |c: usize| c.min(i)));
+        }
+    }
+    match cut {
         Some(i) => &line[i + 1..],
         None => line,
     }
@@ -403,6 +413,11 @@ fn progress_lines_appear_for_multi_package_run() {
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let seq_args: Vec<&str> = std::iter::once("-j1").chain(refs.iter().copied()).collect();
     let out = rpmcrab(&seq_args);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("checking "),
+        "progress lines must stay on stderr: {stdout}"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     for (i, r) in refs.iter().enumerate() {
         let line = format!("checking {r} ({} of 2)", i + 1);

@@ -1145,3 +1145,11 @@ check = "SpecCheck"
 kind = "behaviour"
 reason = "A new port-only `obsolete-tmpfiles-macro` warning flags `%tmpfiles_create` / `%tmpfiles_create_package` calls in spec scriptlets. Both macros have been no-ops since systemd-rpm-macros rev 102 (June 2023): tmpfiles.d entries are created by the systemd package's file triggers at install time, and upstream rpmlint deleted its `post-without-tmpfile-creation` check (commit 1c04a49d, Aug 2025) rather than flagging them. The check runs at spec level because built RPMs can never contain the expanded macro, and its `--explain` description is registered in code like the reference's other SpecCheck descriptions."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "worker/report"
+kind = "behaviour"
+reason = "Upstream rpmlint#255 (rpmcrab#286): a multi-package run logs one `checking <pkg> (n of m)` info line per package on stderr as its work starts, so a stuck run shows where it stopped. stderr-only: the findings and the footer on stdout are byte-identical, and single-package runs stay silent behind the `total > 1` guard, so single-input parity cases are unaffected. Multi-input cases (`dbus-parity`, `parity`) gain progress lines on stderr while their stdout stays clean. `RUST_LOG` overrides the default filter; an invalid `RUST_LOG` warns on stderr and falls back to the default."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/255"
