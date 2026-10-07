@@ -220,7 +220,7 @@ mod tests {
             assert_eq!(
                 resolved.whole_seconds(),
                 expected_secs,
-                "TZ={:?} did not resolve to the requested offset; tzdata may be missing",
+                "TZ={:?} did not resolve to the requested offset",
                 std::env::var("TZ").unwrap_or_default()
             );
             println!("RPMCRAB-TODAY: {}", today_string());
@@ -235,12 +235,14 @@ mod tests {
             "RPMCRAB_TZ_PROBE_CHILD must not be set in the ambient environment"
         );
         let now = OffsetDateTime::now_utc();
-        // NB: POSIX inverts the sign — `Etc/GMT-14` is UTC+14.
+        // POSIX TZ strings are parsed straight from the value — no
+        // tzdata files involved — so the probe also works in minimal
+        // buildroots. NB: POSIX inverts the sign: `<+14>-14` is UTC+14.
         let (tz_name, offset) =
             if now.to_offset(UtcOffset::from_hms(14, 0, 0).unwrap()).date() != now.date() {
-                ("Etc/GMT-14", UtcOffset::from_hms(14, 0, 0).unwrap())
+                ("<+14>-14", UtcOffset::from_hms(14, 0, 0).unwrap())
             } else {
-                ("Etc/GMT+12", UtcOffset::from_hms(-12, 0, 0).unwrap())
+                ("<+12>+12", UtcOffset::from_hms(-12, 0, 0).unwrap())
             };
         // `module_path!()` carries the crate name (`rpmcrab_core::...`) which
         // the test harness omits from test names; strip it so a module rename
