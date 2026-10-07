@@ -109,6 +109,27 @@ PRUNE_CANDIDATES = {
     "module-without-depmod-postun": "killed: KMP macro template calls depmod (bnc#456048)",
     "postin-with-wrong-depmod": "killed: no manual depmod in scriptlets (bnc#456048)",
     "postun-with-wrong-depmod": "killed: no manual depmod in scriptlets (bnc#456048)",
+    # InitScriptCheck was deliberately deleted (issue #214): SysV init is gone,
+    # so every finding it emitted is dead. Verified absent from the tree.
+    "without-chkconfig": "killed: InitScriptCheck deleted (issue #214)",
+    "no-chkconfig": "killed: InitScriptCheck deleted (issue #214)",
+    "subsys-not-used": "killed: InitScriptCheck deleted (issue #214)",
+    "init-script-name-with-dot": "killed: InitScriptCheck deleted (issue #214)",
+    "init-script-without-chkconfig-postin": "killed: InitScriptCheck deleted (issue #214)",
+    "init-script-without-chkconfig-preun": "killed: InitScriptCheck deleted (issue #214)",
+    "postin-without-chkconfig": "killed: InitScriptCheck deleted (issue #214)",
+    "preun-without-chkconfig": "killed: InitScriptCheck deleted (issue #214)",
+    "no-default-runlevel": "killed: InitScriptCheck deleted (issue #214)",
+    "service-default-enabled": "killed: InitScriptCheck deleted (issue #214)",
+}
+
+# (finding, scope) -> reason: Filters entries scoped to dead paths. The finding
+# itself stays (its general form is live); only the listed scope is pruned.
+# Unlike PRUNE_CANDIDATES these are unconditional: the scope paths are dead
+# (SysV init removed), verified by hand when listed here.
+PRUNE_SCOPED = {
+    ("subdir-in-bin", "/sbin/conf.d/"): "dead SysV scope",
+    ("conffile-without-noreplace-flag", "/etc/init.d"): "dead SysV scope",
 }
 
 LIST_KEYS = ("Filters", "BlockedFilters")
@@ -189,8 +210,27 @@ def pure_finding_pattern(entry):
     return None
 
 
+def scoped_entry(entry):
+    """If a Filters entry is 'finding scope' form, return (finding, scope).
+
+    Handles path-scoped entries like 'subdir-in-bin /sbin/conf.d/' where the
+    finding itself is live but the scope is dead. Returns None otherwise.
+    """
+    s = entry.strip().split("#", 1)[0].strip().rstrip(",").strip()
+    if (s.startswith("'") and s.endswith("'")) or (
+        s.startswith('"') and s.endswith('"')
+    ):
+        s = s[1:-1]
+    else:
+        return None
+    parts = s.strip().split(None, 1)
+    if len(parts) == 2 and re.fullmatch(r"[A-Za-z0-9_.\-%]+", parts[0]):
+        return (parts[0], parts[1].strip())
+    return None
+
+
 def prune_stale_filters(text, known, pruned_log):
-    """Drop Filters/BlockedFilters lines that purely reference killed findings."""
+    """Drop Filters/BlockedFilters lines referencing killed findings or dead scopes."""
     lines = text.splitlines(keepends=True)
     out = []
     in_list = None
@@ -214,6 +254,13 @@ def prune_stale_filters(text, known, pruned_log):
             ):
                 pruned_log.append(
                     f"{in_list}: dropped {finding!r} ({PRUNE_CANDIDATES[finding]})"
+                )
+                continue
+            scoped = scoped_entry(line)
+            if scoped is not None and scoped in PRUNE_SCOPED:
+                pruned_log.append(
+                    f"{in_list}: dropped {scoped[0]!r} scoped to {scoped[1]!r} "
+                    f"({PRUNE_SCOPED[scoped]})"
                 )
                 continue
         out.append(line)

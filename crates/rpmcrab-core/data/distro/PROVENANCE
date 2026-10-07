@@ -4,7 +4,32 @@
 # upstream_repo = https://github.com/rpm-software-management/rpmlint
 # opensuse: main @ 84848c05c5571c22274a55ff9afdfe6d88c67dc9 (2026-09-28)
 # slfo: opensuse-slfo-main @ 5c758cf12f9be87e9487bb60b023397f1e97115e (2026-06-09)
-# No Filters entries pruned: all referenced findings exist.
+#
+# Pruned Filters entries (findings rpmcrab killed):
+#   Filters: dropped 'without-chkconfig' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'no-chkconfig' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'subsys-not-used' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'subdir-in-bin' scoped to '/sbin/conf.d/' (dead SysV scope)
+#   Filters: dropped 'conffile-without-noreplace-flag' scoped to '/etc/init.d' (dead SysV scope)
+#   Filters: dropped 'init-script-name-with-dot' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'service-default-enabled' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'init-script-without-chkconfig-postin' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'init-script-without-chkconfig-preun' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'postin-without-chkconfig' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'preun-without-chkconfig' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'no-default-runlevel' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'without-chkconfig' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'no-chkconfig' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'subsys-not-used' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'subdir-in-bin' scoped to '/sbin/conf.d/' (dead SysV scope)
+#   Filters: dropped 'conffile-without-noreplace-flag' scoped to '/etc/init.d' (dead SysV scope)
+#   Filters: dropped 'init-script-name-with-dot' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'service-default-enabled' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'init-script-without-chkconfig-postin' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'init-script-without-chkconfig-preun' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'postin-without-chkconfig' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'preun-without-chkconfig' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'no-default-runlevel' (killed: InitScriptCheck deleted (issue #214))
 #
 # SLFO files byte-identical to openSUSE (not vendored twice;
 # the generated Rust consts fall back to the openSUSE copy):
