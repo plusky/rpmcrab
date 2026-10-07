@@ -376,8 +376,11 @@ sorted, only `.rpm`/`.spm`/`.spec`), `-V/--version`, `-c/--config`,
 `-P/--permissive` (mutually exclusive with `-s`), `--format` (`text` default,
 `json`; overrides the `OutputFormat` config key; unknown values exit 2; §5).
 Deliberately **not** accepted: `-T/--profile`
-(removed upstream by #1595 as misleading) and the illogical `--file`/`--info`
-aliases (straightened to `-r`/`-v`).
+(removed upstream by #1595 as misleading) and the illogical `--file`
+alias (straightened to `-r`). `--info` is accepted as a visible alias
+for `-v/--verbose`: the reference's long name survives in build
+infrastructure (OBS invokes `rpmlint --info`), so drop-in replacement
+requires it.
 **`--errors-only`** (upstream rpmlint#134) skips warning-only checks entirely,
 for post-build runs that only care about errors. CLI-only: there is no config-file
 key (the filter lives in check loading, `check::load_with`). The filter is a

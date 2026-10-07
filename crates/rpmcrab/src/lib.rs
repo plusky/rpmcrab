@@ -67,7 +67,7 @@ struct Cli {
     rpmlintrc: Vec<PathBuf>,
 
     /// Inline explanations (and re-raise internal errors).
-    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::SetTrue)]
+    #[arg(short = 'v', long = "verbose", visible_alias = "info", action = clap::ArgAction::SetTrue)]
     verbose: bool,
 
     /// Dump the merged configuration as TOML and exit.
@@ -814,5 +814,33 @@ mod rpmlintrc_tests {
     fn a_glob_argument_is_taken_literally_for_now() {
         let files = vec![PathBuf::from("*.rpm")];
         assert_eq!(dedup_files(&files), vec![PathBuf::from("*.rpm")]);
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    use clap::Parser;
+
+    // --info is the reference rpmlint long name for --verbose; rpmcrab must
+    // accept it as a drop-in replacement (OBS invokes rpmlint --info).
+    #[test]
+    fn info_alias_sets_verbose() {
+        let cli = Cli::try_parse_from(["rpmcrab", "--info", "x.rpm"]).unwrap();
+        assert!(cli.verbose);
+    }
+
+    // --verbose keeps working alongside the new alias.
+    #[test]
+    fn verbose_long_still_sets_verbose() {
+        let cli = Cli::try_parse_from(["rpmcrab", "--verbose", "x.rpm"]).unwrap();
+        assert!(cli.verbose);
+    }
+
+    // The short flag is unaffected.
+    #[test]
+    fn verbose_short_still_sets_verbose() {
+        let cli = Cli::try_parse_from(["rpmcrab", "-v", "x.rpm"]).unwrap();
+        assert!(cli.verbose);
     }
 }
