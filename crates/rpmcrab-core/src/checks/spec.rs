@@ -260,6 +260,16 @@ fn deprecated_grep_re() -> &'static Regex {
     DEPRECATED_GREP_RE.get_or_init(|| Regex::new(r"\b[ef]grep\b").expect("static regex"))
 }
 
+static TMPFILES_MACRO_RE: OnceLock<Regex> = OnceLock::new();
+fn tmpfiles_macro_re() -> &'static Regex {
+    TMPFILES_MACRO_RE.get_or_init(|| {
+        Regex::new(
+            r"%tmpfiles_create_package\b|%tmpfiles_create\b|%\{tmpfiles_create_package\}|%\{tmpfiles_create\}",
+        )
+        .expect("static regex")
+    })
+}
+
 static HARDCODED_LIBRARY_PATH_RE: OnceLock<Regex> = OnceLock::new();
 fn hardcoded_library_path_re() -> &'static Regex {
     HARDCODED_LIBRARY_PATH_RE.get_or_init(|| Regex::new(r"^[^#]*((^|\s+|\.\./\.\.|\${?RPM_BUILD_ROOT}?|%{?buildroot}?|%{?_prefix}?)(/lib|/usr/lib|/usr/X11R6/lib/(?!([^/]+/)+)[^/]*\.([oa]|la|so[0-9.]*))(?=[\s;/])([^\s,;]*))")
@@ -543,6 +553,7 @@ pub struct SpecCheck {
     description_lang_re: Regex,
     section_res: Vec<(String, Regex)>,
     deprecated_grep_re: Regex,
+    tmpfiles_macro_re: Regex,
     hardcoded_library_path_re: Regex,
     /// Required: spec parsing shells out to `rpm`.
     rpm: Tool,
@@ -675,6 +686,7 @@ impl SpecCheck {
             description_lang_re: description_lang_re().clone(),
             section_res: section_res(),
             deprecated_grep_re: deprecated_grep_re().clone(),
+            tmpfiles_macro_re: tmpfiles_macro_re().clone(),
             hardcoded_library_path_re: hardcoded_library_path_re().clone(),
             depscript_override_re: depscript_override_re().clone(),
             depgen_disable_re: depgen_disable_re().clone(),
@@ -1058,6 +1070,7 @@ impl SpecCheck {
         self.checkline_files(pkg, out, line);
         self.checkline_indent(pkg, line);
         self.checkline_deprecated_grep(pkg, out, line);
+        self.checkline_obsolete_tmpfiles_macro(pkg, out, line);
         self.checkline_valid_groups(pkg, out, line);
         self.checkline_macros_in_comments(pkg, out, line);
         self.checkline_python_setup_test(pkg, out, line);
@@ -1816,6 +1829,21 @@ impl SpecCheck {
         }
     }
 
+    /// The `%tmpfiles_create` / `%tmpfiles_create_package` macros have been
+    /// no-ops since 2023 (tmpfiles.d entries are created by the systemd
+    /// package's file triggers); flag the dead call in scriptlets so
+    /// packagers remove it.
+    fn checkline_obsolete_tmpfiles_macro(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
+        if !RPM_SCRIPTLETS.contains(&self.current_section.as_str()) {
+            return;
+        }
+        let Ok(Some(m)) = self.tmpfiles_macro_re.captures(line) else {
+            return;
+        };
+        let name = m.get(0).map(|m| m.as_str()).unwrap_or("");
+        self.info(out, pkg, Level::Warning, "obsolete-tmpfiles-macro", &[name]);
+    }
+
     fn checkline_valid_groups(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
         // When not checking a spec file only, the spec comes from inside an
         // SRPM; skip to avoid duplicate warnings (#167).
@@ -1977,6 +2005,13 @@ impl SpecCheck {
                 "The value of the Group tag in the package is not valid.  Valid groups are:\n'{}'.",
                 valid_groups.join(", ")
             ),
+        );
+        out.set_error_detail(
+            "obsolete-tmpfiles-macro",
+            "The %tmpfiles_create and %tmpfiles_create_package macros are no-ops: \
+             tmpfiles.d entries are created by the systemd package's file triggers \
+             at install time. Remove the macro call from the scriptlet."
+                .to_string(),
         );
     }
 }
@@ -2498,6 +2533,65 @@ make install
         // `grep -E` is the sanctioned spelling.
         let clean = run_mini("Name: foo\n%build\ngrep -E foo\n");
         assert!(!has(&clean, "deprecated-grep"), "results: {clean:?}");
+    }
+
+    #[test]
+    fn obsolete_tmpfiles_macro_fires_in_post() {
+        let results = run_mini("Name: foo\n%post\n%tmpfiles_create_package\n");
+        let lines = lines_for(&results, "obsolete-tmpfiles-macro");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: obsolete-tmpfiles-macro %tmpfiles_create_package"),
+            "line: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn obsolete_tmpfiles_macro_short_form_fires() {
+        let results = run_mini("Name: foo\n%post\n%tmpfiles_create\n");
+        let lines = lines_for(&results, "obsolete-tmpfiles-macro");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: obsolete-tmpfiles-macro %tmpfiles_create"),
+            "line: {}",
+            lines[0]
+        );
+        // The longer macro must not be truncated to its prefix.
+        assert!(
+            !lines[0].contains("tmpfiles_create_package"),
+            "line: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn obsolete_tmpfiles_macro_braced_form_fires() {
+        let results = run_mini("Name: foo\n%post\n%{tmpfiles_create}\n");
+        let lines = lines_for(&results, "obsolete-tmpfiles-macro");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+    }
+
+    #[test]
+    fn obsolete_tmpfiles_macro_outside_scriptlet_is_quiet() {
+        // A mention in prose is not a scriptlet call.
+        let results = run_mini("Name: foo\n%description\nUses %tmpfiles_create_package.\n");
+        assert!(
+            !has(&results, "obsolete-tmpfiles-macro"),
+            "results: {results:?}"
+        );
+    }
+
+    #[test]
+    fn obsolete_tmpfiles_macro_has_description() {
+        let config = config_mini();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        SpecCheck::register_error_details(&config, &mut out);
+        let text = out.get_description("obsolete-tmpfiles-macro", &config);
+        assert!(
+            text.contains("no-ops") && text.contains("file triggers"),
+            "description: {text:?}"
+        );
     }
 
     #[test]
