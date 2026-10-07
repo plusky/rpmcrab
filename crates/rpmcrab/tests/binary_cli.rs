@@ -640,6 +640,22 @@ same provide name is listed more than once (e.g. 'foo' together with 'foo =
     assert!(out.stderr.is_empty());
 }
 
+/// `--explain` for the port-only `obsolete-tmpfiles-macro` finding: the
+/// description is registered in code (like the reference's other SpecCheck
+/// descriptions), pinned byte-exact.
+#[test]
+fn explain_obsolete_tmpfiles_macro() {
+    let out = rpmcrab(&["-e", "obsolete-tmpfiles-macro"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "obsolete-tmpfiles-macro:\nThe %tmpfiles_create and %tmpfiles_create_package macros are no-ops:\ntmpfiles.d entries are created by the systemd package's file triggers at\ninstall time. Remove the macro call from the scriptlet.\n\n\n",
+        "exact --explain stdout"
+    );
+    assert!(out.stderr.is_empty());
+}
+
 /// `--explain`: port of `test_lint.py::test_explain_with_unknown`.
 #[test]
 fn explain_known_and_unknown_ids() {
