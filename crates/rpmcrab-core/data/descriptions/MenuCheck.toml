@@ -84,9 +84,28 @@ The menu title contains invalid characters like /.
 missing-menu-command="""
 The menu file doesn't contain a command.
 """
-menu-in-wrong-directory="""
-The menu files must be under /usr/lib/menu.
-"""
 non-xdg-migrated-menu="""
 The menu file has not been migrated to new XDG menu system.
+"""
+
+executable-menu-file="""
+The menu file is executable. Menu files must not have the executable bit set.
+"""
+invalid-menu-icon-type="""
+The menu icon has an invalid type. Use a supported icon type.
+"""
+menu-in-wrong-dir="""
+The menu file is installed in the wrong directory.
+"""
+old-menu-entry="""
+The menu entry uses the obsolete menu format. Convert it to the current format.
+"""
+strange-needs="""
+The menu Needs field contains an unrecognized value.
+"""
+unable-to-parse-menu-entry="""
+The menu entry could not be parsed. Check its syntax.
+"""
+unable-to-parse-menu-needs="""
+The menu Needs field could not be parsed. Check its syntax.
 """

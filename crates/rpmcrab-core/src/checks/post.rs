@@ -315,6 +315,18 @@ pub fn register_error_details(out: &mut Filter) {
         "postin-without-ghost-file-creation",
         "A file tagged as ghost is not created during %prein nor during %postin.".to_string(),
     );
+    out.set_error_detail(
+        "ghost-files-without-postin",
+        "The package tags files as ghost but has no %postin scriptlet to create them.".to_string(),
+    );
+    out.set_error_detail(
+        "no-prereq-on",
+        "The package should have a Prereq dependency but does not declare one.".to_string(),
+    );
+    out.set_error_detail(
+        "empty-%post",
+        "The %post scriptlet is empty. Remove it if it serves no purpose.".to_string(),
+    );
     // `Pkg.RPM_SCRIPTLETS` in the reference.
     for name in [
         "pre",

@@ -302,7 +302,7 @@ mod tests {
         let pinned: &[(&str, &str)] = &[
             (
                 "AlternativesCheck.toml",
-                "d423336243cdb0f96d367c7fb8ddebf936ede9fa3c5a8d95ccb55e2c9acf1458",
+                "0ca651303419582d8eee3e3cc8a5269b3051068ea517a9c7dc1a1081feb0618a",
             ),
             (
                 "AppDataCheck.toml",
@@ -318,7 +318,7 @@ mod tests {
             ),
             (
                 "BinariesCheck.toml",
-                "c641607ac210f5820d81956c70147cbd6610edcfb9037bddef9d4e97d8b026a7",
+                "60e0cc7937de6d5ff3865b3952a277fcb0b084cbb7a0fa232468f0b1287162ee",
             ),
             (
                 "BrandingPolicyCheck.toml",
@@ -366,11 +366,11 @@ mod tests {
             ),
             (
                 "FilelistCheck.toml",
-                "21f9f0db18fe90a0cbf1e53ad222e77236e5affe75aca6265feae65ca884890e",
+                "fcb653433c3b6e59dfbcdefbcc1f13fe998b3bcdaa130415f4da574e374ed694",
             ),
             (
                 "FilesCheck.toml",
-                "fed1fec48f73a0ba249d15e605201ef70651f2fc9dff2dd1567649f3d8ffa855",
+                "ea2efde3ae65ae29c73d6beb2dc6974028cf6ea69cef7f486e678c54d4dbc111",
             ),
             (
                 "I18NCheck.toml",
@@ -394,15 +394,15 @@ mod tests {
             ),
             (
                 "LogrotateCheck.toml",
-                "25c54f3ab3b9a77ae53c6caff8e6fd904f008bd272327e47989819ff2594f7a4",
+                "ff31ebe15488f56277851a98914be28af295ff8643184d004d2ff20f71da9f19",
             ),
             (
                 "MenuCheck.toml",
-                "2c0d654ef52bd397aa2f0642ec6920919fc49989acf6a47c59ebe1fbe3ee2f24",
+                "373e9c6e375dcb1c7e3bcec10e664c8884334608c88e54fddc72e1703ee49a7d",
             ),
             (
                 "MenuXDGCheck.toml",
-                "3d015c3bfd054208bdf0eea23cce623e208ff3197149cf8041224248d73b0739",
+                "6e55c908f703f4c00f2c153788210298c98bb1b1ca0017ad9bcdd79622f9a34f",
             ),
             (
                 "MixedOwnershipCheck.toml",
@@ -446,7 +446,7 @@ mod tests {
             ),
             (
                 "SpecCheck.toml",
-                "949e8272fddfcdbab5843b8b96d3873595e5de3d7577f9f1932237b857945c1b",
+                "63d78689f54705fb4e2de75e9201479fee76e6045280f152b3f015cf689bbe54",
             ),
             (
                 "SysVInitOnSystemdCheck.toml",
@@ -462,7 +462,7 @@ mod tests {
             ),
             (
                 "TagsCheck.toml",
-                "50b68c01f4c33a1747f025040d558a69bdbef3ab3201bce3ec8ca6b105bdb8dc",
+                "efd95f0236a71965e189130e1b22fc06f3bbe0a8165d279a270a992c9a947529",
             ),
             (
                 "TmpFilesCheck.toml",
@@ -482,7 +482,7 @@ mod tests {
             ),
             (
                 "ZipCheck.toml",
-                "48b0053c4eda21d28d80abda66570882e720c0bd6ded4b0983852695bfe428ea",
+                "d4271d3a9848eda2c043d5825d6ef64c3d6225abc1fc3bf8766f26fa94b58144",
             ),
             (
                 "ZyppSyntaxCheck.toml",
@@ -624,5 +624,385 @@ mod tests {
                 "staged description `{name}` is on disk but not wired into STAGED"
             );
         }
+    }
+    /// Finding-ID patterns constructed at runtime via `format!`; they cannot
+    /// be enumerated by static source parsing. Each entry has a one-line
+    /// comment giving the construction site and why the ID varies.
+    const DYNAMIC_FINDING_PATTERNS: &[&str] = &[
+        // menu.rs: `format!("{typ}-icon-not-in-package")`, `typ` from the config `IconPath` table.
+        "*-icon-not-in-package",
+        // tags.rs: `format!("no-epoch-in-{tagname}")`; concrete IDs get in-code descriptions.
+        "no-epoch-in-*",
+        // fhs.rs: `format!("non-standard-dir-in-{dir_type}")`; concrete IDs get in-code descriptions.
+        "non-standard-dir-in-*",
+        // files.rs: `format!("dir-or-file-in-{}")` from config `DisallowedDirs`; concrete IDs get in-code descriptions.
+        "dir-or-file-in-*",
+        // filelist.rs: `Message` from the config `[[Check]]` list.
+        "filelist-forbidden*",
+        // file_digest.rs: `format!("{check_type}-file-{kind}")`, `check_type` from config `FileDigestLocation` tables.
+        "*-file-digest-mismatch",
+        "*-file-ghost",
+        "*-file-symlink",
+        "*-file-unauthorized",
+        "*-file-parse-error",
+        // i18n.rs: `format!("incorrect-i18n-tag-{correct}")`; concrete IDs get in-code descriptions per `INCORRECT_LOCALES`.
+        "incorrect-i18n-tag-*",
+        // i18n.rs: `format!("incorrect-locale-{correct}")`; concrete IDs get in-code descriptions per `INCORRECT_LOCALES`.
+        "incorrect-locale-*",
+    ];
+
+    /// Finding IDs with live emission sites the static parser cannot see
+    /// (unusual patterns: struct fields, `out.push`, match arms). Each entry
+    /// names the pattern so a future refactor can drop it from this list.
+    const STATICALLY_OPAQUE_LIVE_IDS: &[&str] = &[
+        // i18n.rs: struct field `invalid: ...then_some("invalid-lc-messages-dir")`.
+        "invalid-lc-messages-dir",
+        // i18n.rs: struct field for man dir locale.
+        "invalid-locale-man-dir",
+        // library_dependency.rs: emitted via helper with variable ID.
+        "no-library-dependency-for",
+        "no-library-dependency-on",
+        // suid_permissions.rs: `diag` variable from helper.
+        "permissions-directory-setuid-bit",
+        "permissions-file-setuid-bit",
+        // python.rs: match arms mapping dir names to IDs.
+        "python-doc-in-site-packages",
+        "python-src-in-site-packages",
+        "python-tests-in-site-packages",
+        // alternatives.rs: variable ID from helper.
+        "update-alternatives-post-call-missing",
+        // filelist.rs: `Message` from bundled `[[Check]]` config (not the default `filelist-forbidden*` family).
+        "wrong-suse-capitalisation",
+        // bashisms.rs: `out.push("...")` into a findings vec.
+        "bin-sh-syntax-error",
+        "potential-bashisms",
+        // pam_modules.rs: `("id", ...)` 2-tuples from helper.
+        "pam-ghost-module",
+        "pam-unauthorized-module",
+        // pkg_config.rs, configfiles.rs, lsb.rs, zypp_syntax.rs: variable IDs from helpers.
+        "double-slash-in-pkgconfig-path",
+        "invalid-pkgconfig-file",
+        "pkgconfig-invalid-libs-dir",
+        "conffile-without-noreplace-flag",
+        "non-etc-or-var-file-marked-as-conffile",
+        "non-lsb-compliant-package-name",
+        "non-lsb-compliant-release",
+        "non-lsb-compliant-version",
+        "suse-zypp-otherproviders",
+        "suse-zypp-packageand",
+    ];
+
+    fn matches_dynamic(id: &str) -> bool {
+        DYNAMIC_FINDING_PATTERNS.iter().any(|p| {
+            if let Some(prefix) = p.strip_suffix('*') {
+                id.starts_with(prefix)
+            } else if let Some(suffix) = p.strip_prefix('*') {
+                id.ends_with(suffix)
+            } else {
+                id == *p
+            }
+        })
+    }
+
+    /// All `src/checks/*.rs` sources, read at test time so new check files
+    /// are covered without editing this test.
+    fn check_sources() -> Vec<String> {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/checks");
+        let mut paths: Vec<_> = std::fs::read_dir(dir)
+            .expect("checks dir is readable")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("rs"))
+            .collect();
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|p| std::fs::read_to_string(&p).expect("check source is readable"))
+            .collect()
+    }
+
+    /// Whether `s` looks like a finding ID: lowercase alphanumerics,
+    /// dashes and `%` (e.g. `%ifarch-applied-patch`), no `format!`
+    /// placeholders.
+    fn is_finding_id(s: &str) -> bool {
+        !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'%')
+    }
+
+    /// String literals in `text` that look like finding IDs.
+    fn finding_literals(text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut in_str = false;
+        let mut esc = false;
+        let mut cur = String::new();
+        for c in text.chars() {
+            if in_str {
+                if esc {
+                    esc = false;
+                } else if c == '\\' {
+                    esc = true;
+                } else if c == '"' {
+                    in_str = false;
+                    if is_finding_id(&cur) {
+                        out.push(std::mem::take(&mut cur));
+                    } else {
+                        cur.clear();
+                    }
+                    continue;
+                }
+                cur.push(c);
+            } else if c == '"' {
+                in_str = true;
+                cur.clear();
+            }
+        }
+        out
+    }
+
+    /// The 4th comma-separated argument of the call whose opening paren ends
+    /// at byte index `open` (index just after `(`), respecting nesting and
+    /// string literals.
+    fn fourth_arg(src: &str, open: usize) -> Option<String> {
+        let chars: Vec<(usize, char)> = src[open..].char_indices().collect();
+        let mut depth = 0i32;
+        let mut arg_idx = 0;
+        let mut arg_start = 0;
+        let mut in_str = false;
+        let mut esc = false;
+        let mut i = 0;
+        while i < chars.len() {
+            let (byte_off, c) = chars[i];
+            let abs_byte = open + byte_off;
+            if in_str {
+                if esc {
+                    esc = false;
+                } else if c == '\\' {
+                    esc = true;
+                } else if c == '"' {
+                    in_str = false;
+                }
+            } else if c == '"' {
+                in_str = true;
+            } else if c == '(' || c == '[' || c == '{' {
+                depth += 1;
+            } else if c == ')' || c == ']' || c == '}' {
+                if depth == 0 {
+                    return if arg_idx == 3 {
+                        Some(src[open + arg_start..abs_byte].to_string())
+                    } else {
+                        None
+                    };
+                }
+                depth -= 1;
+            } else if c == ',' && depth == 0 {
+                arg_idx += 1;
+                if arg_idx == 4 {
+                    return Some(src[open + arg_start..abs_byte].to_string());
+                }
+                // arg starts after this comma (at next char's byte offset)
+                arg_start = if i + 1 < chars.len() {
+                    chars[i + 1].0
+                } else {
+                    byte_off + c.len_utf8()
+                };
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Byte indices just after the `(` of `add_info(` (free function) and
+    /// `.info(` (SpecCheck's method); the finding ID is the 4th argument in
+    /// both.
+    fn emission_call_opens(src: &str) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut search = 0;
+        while search < src.len() {
+            let rest = &src[search..];
+            if let Some(pos) = rest.find("add_info(") {
+                let abs = search + pos;
+                let ok = abs == 0 || {
+                    let p = src[..abs].chars().next_back().unwrap();
+                    !p.is_alphanumeric() && p != '_' && p != '.'
+                };
+                if ok {
+                    out.push(abs + "add_info(".len());
+                }
+                search = abs + 1;
+            } else if let Some(pos) = rest.find(".info(") {
+                let abs = search + pos;
+                out.push(abs + ".info(".len());
+                search = abs + 1;
+            } else {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Finding IDs from `(Level::X, "id", ...)` tuples (helpers returning
+    /// findings for later emission).
+    fn tuple_literals(src: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut search = 0;
+        while let Some(pos) = src[search..].find("(Level::") {
+            let abs = search + pos;
+            if let Some(comma) = src[abs..].find(',') {
+                let rest = src[abs + comma + 1..].trim_start();
+                if let Some(lit) = rest.strip_prefix('"') {
+                    let mut esc = false;
+                    let mut cur = String::new();
+                    let mut done = false;
+                    for c in lit.chars() {
+                        if esc {
+                            esc = false;
+                        } else if c == '\\' {
+                            esc = true;
+                        } else if c == '"' {
+                            done = true;
+                            break;
+                        }
+                        cur.push(c);
+                    }
+                    if done && is_finding_id(&cur) {
+                        out.push(cur);
+                    }
+                }
+            }
+            search = abs + 1;
+        }
+        out
+    }
+
+    /// All statically-enumerated finding IDs emitted across the checks.
+    fn emitted_finding_ids(sources: &[String]) -> Vec<String> {
+        let mut ids = std::collections::HashSet::new();
+        for src in sources {
+            for open in emission_call_opens(src) {
+                if let Some(arg) = fourth_arg(src, open) {
+                    for id in finding_literals(&arg) {
+                        ids.insert(id);
+                    }
+                }
+            }
+            for id in tuple_literals(src) {
+                ids.insert(id);
+            }
+        }
+        let mut v: Vec<_> = ids.into_iter().collect();
+        v.sort();
+        v
+    }
+
+    /// Finding IDs with in-code `--explain` descriptions via
+    /// `set_error_detail("id", ...)`.
+    fn incode_description_ids(sources: &[String]) -> Vec<String> {
+        let mut ids = std::collections::HashSet::new();
+        for src in sources {
+            let mut search = 0;
+            while let Some(pos) = src[search..].find("set_error_detail") {
+                let abs = search + pos;
+                let rest = src[abs + "set_error_detail".len()..].trim_start();
+                if let Some(inner) = rest.strip_prefix('(') {
+                    let inner = inner.trim_start();
+                    if let Some(lit) = inner.strip_prefix('"') {
+                        let mut esc = false;
+                        let mut cur = String::new();
+                        let mut done = false;
+                        for c in lit.chars() {
+                            if esc {
+                                esc = false;
+                            } else if c == '\\' {
+                                esc = true;
+                            } else if c == '"' {
+                                done = true;
+                                break;
+                            }
+                            cur.push(c);
+                        }
+                        if done && is_finding_id(&cur) {
+                            ids.insert(cur);
+                        }
+                    }
+                }
+                search = abs + 1;
+            }
+        }
+        let mut v: Vec<_> = ids.into_iter().collect();
+        v.sort();
+        v
+    }
+
+    /// Every finding a check can emit must resolve to an `--explain`
+    /// description: a staged TOML entry, an in-code `set_error_detail`
+    /// registration, or an allowlisted dynamic pattern. Emitting a finding
+    /// without a description fails here.
+    #[test]
+    fn every_emitted_finding_has_description() {
+        let sources = check_sources();
+        let emitted = emitted_finding_ids(&sources);
+        let incode: std::collections::HashSet<_> =
+            incode_description_ids(&sources).into_iter().collect();
+        let staged = staged_descriptions();
+        assert!(!emitted.is_empty(), "no finding IDs parsed from checks");
+        let mut missing = Vec::new();
+        for id in emitted {
+            if !staged.contains_key(&id) && !incode.contains(&id) && !matches_dynamic(&id) {
+                missing.push(id);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "findings without --explain descriptions: {}\nAdd a staged TOML entry, an in-code set_error_detail registration, or a DYNAMIC_FINDING_PATTERNS entry with justification.",
+            missing.join(", ")
+        );
+    }
+
+    /// Every staged description must correspond to a live finding: a
+    /// statically-emitted ID, an in-code registration, an allowlisted dynamic
+    /// pattern, a manually-verified opaque emission site, or a quoted literal
+    /// anywhere in the check sources (catches unusual emission patterns).
+    /// Stale entries fail here instead of lingering.
+    #[test]
+    fn every_staged_description_has_finding() {
+        let sources = check_sources();
+        let emitted: std::collections::HashSet<_> =
+            emitted_finding_ids(&sources).into_iter().collect();
+        let incode: std::collections::HashSet<_> =
+            incode_description_ids(&sources).into_iter().collect();
+        let opaque: std::collections::HashSet<_> = STATICALLY_OPAQUE_LIVE_IDS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let staged = staged_descriptions();
+        let mut dangling = Vec::new();
+        'keys: for key in staged.keys() {
+            // `Variables.toml` constants (`#VAR#` substitution), not findings.
+            if key.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
+                continue;
+            }
+            if emitted.contains(key)
+                || incode.contains(key)
+                || opaque.contains(key)
+                || matches_dynamic(key)
+            {
+                continue;
+            }
+            // Fallback: the ID appears as a quoted literal in the check
+            // sources (unusual emission patterns the parser cannot see).
+            let quoted = format!("\"{key}\"");
+            for src in &sources {
+                if src.contains(&quoted) {
+                    continue 'keys;
+                }
+            }
+            dangling.push(key.clone());
+        }
+        dangling.sort();
+        assert!(
+            dangling.is_empty(),
+            "staged descriptions without a live finding: {}\nDelete the entry, or document the emission site in STATICALLY_OPAQUE_LIVE_IDS / DYNAMIC_FINDING_PATTERNS.",
+            dangling.join(", ")
+        );
     }
 }

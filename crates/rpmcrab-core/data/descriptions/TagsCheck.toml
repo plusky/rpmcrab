@@ -176,3 +176,34 @@ This package has a description line of length greater than 79 characters. Break 
 non-standard-group="""
 This package contains a Group: tag value different from the one defined in ValidGroups inside configdefaults.toml. Make sure both the values match to remove the warning.
 """
+
+description-use-invalid-word="""
+The Description tag contains a word that must not be used. Reword the description.
+"""
+invalid-buildhost="""
+The BuildHost tag contains an invalid hostname.
+"""
+invalid-changelog-author="""
+The changelog entry has an invalid author line. Use the `Name <email>` format.
+"""
+invalid-license="""
+The value of the License tag was not recognized. Use a valid SPDX license expression.
+"""
+invalid-license-spellcheck="""
+The License tag value appears to be misspelled. Check the spelling against the SPDX license list.
+"""
+invalid-url="""
+The URL tag does not contain a valid URL.
+"""
+missing-dependency-on="""
+The package is missing a dependency. Add the required dependency to the spec file.
+"""
+no-buildhost-tag="""
+There is no BuildHost tag in the package. The build host should be recorded.
+"""
+no-version-dependency-on="""
+The dependency should include a version constraint.
+"""
+summary-use-invalid-word="""
+The Summary tag contains a word that must not be used. Reword the summary.
+"""

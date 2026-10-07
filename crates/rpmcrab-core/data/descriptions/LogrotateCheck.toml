@@ -8,3 +8,7 @@ to your logrotate config."""
 logrotate-log-dir-not-packaged="""
 Please add the specified directory to the file list to be able to
 check permissions."""
+
+logrotate-exception="""
+An error occurred while checking the logrotate configuration. Verify the configuration syntax.
+"""

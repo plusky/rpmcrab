@@ -46,3 +46,7 @@ filelist-forbidden-move-to-usr="""
 This directory has been moved to /usr."""
 wrong-suse-capitalisation="""
 This file should be renamed to README.SUSE or README.openSUSE."""
+
+obsolete-mime-format-dir="""
+The mime format directory is obsolete. Do not ship files there.
+"""

@@ -1154,3 +1154,87 @@ kind = "behaviour"
 reason = "Upstream rpmlint#255 (rpmcrab#286): a multi-package run logs one `checking <pkg> (n of m)` info line per package on stderr as its work starts, so a stuck run shows where it stopped. stderr-only: the findings and the footer on stdout are byte-identical, and single-package runs stay silent behind the `total > 1` guard, so single-input parity cases are unaffected. Multi-input cases (`dbus-parity`, `parity`) gain progress lines on stderr while their stdout stays clean. `RUST_LOG` overrides the default filter; an invalid `RUST_LOG` warns on stderr and falls back to the default."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/255"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "detail"
+reason = "Port-only `--explain` description for `ar-failed`: the reference emits the finding but ships no description. The port describes it so `--explain` never prints \"Unknown message\"."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "detail"
+reason = "Port-only `--explain` descriptions for `debug-files-in-non-debug-package`, `infopage-not-compressed`, `kernel-modules-not-in-kernel-packages`, `manpage-not-compressed`, `mimeinfo-cache-packaged`, `no-dependency-on`, `noarch-python-in-64bit-path`, `symlink-contains-up-and-down-segments`, `symlink-has-too-many-up-segments`, `symlink-should-be-absolute`, `zero-length`: the reference emits these findings but ships no descriptions."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "TagsCheck"
+kind = "detail"
+reason = "Port-only `--explain` descriptions for `description-use-invalid-word`, `invalid-buildhost`, `invalid-changelog-author`, `invalid-license`, `invalid-license-spellcheck`, `invalid-url`, `missing-dependency-on`, `no-buildhost-tag`, `no-version-dependency-on`, `summary-use-invalid-word`: the reference emits these findings but ships no descriptions."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "AlternativesCheck"
+kind = "detail"
+reason = "Port-only `--explain` descriptions for `double-entries`, `package-supports-libalternatives`, `package-supports-update-alternatives`: the reference emits these findings but ships no descriptions."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "MenuCheck"
+kind = "detail"
+reason = "Port-only `--explain` descriptions for `executable-menu-file`, `invalid-menu-icon-type`, `menu-in-wrong-dir`, `old-menu-entry`, `strange-needs`, `unable-to-parse-menu-entry`, `unable-to-parse-menu-needs`: the reference emits these findings but ships no descriptions. Staged `menu-in-wrong-directory` removed: the port emits `menu-in-wrong-dir`, the `-directory` variant never fires."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "LogrotateCheck"
+kind = "detail"
+reason = "Port-only `--explain` description for `logrotate-exception`: the reference emits the finding but ships no description."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FilelistCheck"
+kind = "detail"
+reason = "Port-only `--explain` description for `obsolete-mime-format-dir`: the reference emits the finding but ships no description."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "MenuXDGCheck"
+kind = "detail"
+reason = "Port-only `--explain` description for `unexpanded-macro-in-desktop-file`: the reference emits the finding but ships no descriptions."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "ZipCheck"
+kind = "detail"
+reason = "Port-only `--explain` description for `unable-to-read-zip`: the reference emits the finding but ships no description."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SpecCheck"
+kind = "detail"
+reason = "Port-only `--explain` descriptions for `%autopatch-not-in-prep` and `%autosetup-not-in-prep`: the reference emits these findings but ships no descriptions. Staged `no-%prep-section`, `no-%build-section`, `no-%install-section` removed: dead text, never emitted by the reference or the port."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "PostCheck"
+kind = "detail"
+reason = "Port-only in-code `--explain` descriptions for `ghost-files-without-postin`, `no-prereq-on`, `empty-%post`: the reference emits these findings but ships no descriptions. Registered in code like the reference's other PostCheck descriptions."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "I18NCheck"
+kind = "detail"
+reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
+since = "0.1.0"

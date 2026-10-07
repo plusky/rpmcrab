@@ -182,3 +182,7 @@ patchable-function-entry-in-archive="""
 This archive contains a __patchable_function_entries section and can
 accidentally make a shared library or an executable live-patchable.
 """
+
+ar-failed="""
+The `ar` archive could not be parsed. The archive may be corrupted.
+"""

@@ -408,3 +408,37 @@ permissions and ensure that are correct or fix it using "%attr" macro in %files
 section.
 http://ftp.rpm.org/max-rpm/s1-rpm-anywhere-specifying-file-attributes.html
 """
+
+debug-files-in-non-debug-package="""
+The package contains debug files but is not a debug package. Debug files belong in a separate debuginfo package.
+"""
+infopage-not-compressed="""
+This info page is not compressed. Compress info pages with gzip.
+"""
+kernel-modules-not-in-kernel-packages="""
+Kernel modules must be shipped in kernel packages, not in regular packages.
+"""
+manpage-not-compressed="""
+This manual page is not compressed. Compress manual pages with gzip.
+"""
+mimeinfo-cache-packaged="""
+The mimeinfo cache must not be packaged; it is regenerated at install time.
+"""
+no-dependency-on="""
+The package uses files from another package without depending on it. Add the missing dependency.
+"""
+noarch-python-in-64bit-path="""
+A noarch Python package installs files into the 64-bit library path. Noarch packages must use the architecture-independent path.
+"""
+symlink-contains-up-and-down-segments="""
+The symlink contains both `..` and `.` segments. Simplify the symlink target.
+"""
+symlink-has-too-many-up-segments="""
+The symlink contains more `..` segments than the path depth allows. The symlink likely escapes its directory.
+"""
+symlink-should-be-absolute="""
+The symlink uses a relative target where an absolute one is required.
+"""
+zero-length="""
+The file has zero length. Empty files are usually a packaging error; remove it if it serves no purpose.
+"""
