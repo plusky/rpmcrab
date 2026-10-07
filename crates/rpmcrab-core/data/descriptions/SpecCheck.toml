@@ -10,8 +10,10 @@ non-utf8-spec-file="""
 The character encoding of the spec file is not UTF-8.
 """
 use-of-RPM_SOURCE_DIR="""
-You use $RPM_SOURCE_DIR or %{_sourcedir} in your spec file. If you have to
-use a directory for building, use $RPM_BUILD_ROOT instead.
+You use $RPM_SOURCE_DIR or %{_sourcedir} in your spec file. Files itemized as
+Source#: must be referenced by their %{SOURCEN} macro instead: if a Source#:
+entry is renamed, the old filename still resolves in the source directory, so
+the build succeeds locally while the SRPM silently ships the wrong file.
 """
 patch-not-applied="""
 A patch is included in your package but was not applied.

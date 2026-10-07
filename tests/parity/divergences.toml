@@ -1316,3 +1316,9 @@ kind = "missing"
 reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs. Koji signs after the build, so every build-pipeline RPM is unsigned at lint time and the finding can never be actionable there. The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; a negative pin in the SignatureCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
 since = "0.1.0"
 
+[[divergence]]
+case = "global"
+check = "SpecCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `use-of-RPM_SOURCE_DIR` reworded: the reference's advice to use $RPM_BUILD_ROOT instead is wrong -- $RPM_SOURCE_DIR is %{_sourcedir} (the SOURCES dir) while $RPM_BUILD_ROOT is the install staging dir. Per the Fedora RPM_Source_Dir guideline (https://docs.fedoraproject.org/en-US/packaging-guidelines/RPM_Source_Dir/), Source#: files must be referenced by their %{SOURCEN} macro: a renamed Source#: entry still resolves by bare filename in the source directory, so the build succeeds locally while the SRPM silently ships the wrong file. Check level unchanged (Error)."
+since = "0.1.0"

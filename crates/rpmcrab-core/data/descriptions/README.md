@@ -50,7 +50,9 @@ Provenance, verified against the pinned reference (`84848c0`):
 - `SpecCheck.toml` — the reference file, plus two port-only entries:
   `conditional-source-or-patch` (upstream rpmlint#45) and
   `translated-description` (upstream rpmlint#2). The reference has no
-  such findings, so `--explain` would print `Unknown message` for them.
+  such findings, so `--explain` would print `Unknown message` for them;
+  and the `use-of-RPM_SOURCE_DIR` entry reworded (the reference's
+  `$RPM_BUILD_ROOT` advice is wrong).
   Ledgered in `tests/parity/divergences.toml`.
 - `AlternativesCheck.toml`, `FileDigestCheck.toml`, `FilelistCheck.toml`,
   `FilesCheck.toml`, `KMPPolicyCheck.toml`,

@@ -446,7 +446,7 @@ mod tests {
             ),
             (
                 "SpecCheck.toml",
-                "e2c14338b70b31f3b7204ccad8d15bf29ce8351b3a4178ac138e2b39c35a22b6",
+                "00fcfca7539b159f157e46c292418b7dabc43e20dc088353e06c8cd6d0fbfb15",
             ),
             (
                 "SysVInitOnSystemdCheck.toml",
@@ -528,6 +528,34 @@ mod tests {
         assert!(
             !detail.contains("versioned and unversioned symbols are provided at once"),
             "inaccurate reference wording still present: {detail}"
+        );
+    }
+
+    /// The reference's `use-of-RPM_SOURCE_DIR` advice ("use $RPM_BUILD_ROOT
+    /// instead") is wrong: `$RPM_SOURCE_DIR` is `%{_sourcedir}` (the SOURCES
+    /// dir) while `$RPM_BUILD_ROOT` is the install staging dir. The staged
+    /// text is reworded per the Fedora RPM_Source_Dir guideline: `Source#:`
+    /// files go by their `%{SOURCEN}` macro, because a renamed `Source#:`
+    /// entry still resolves by bare filename in the source directory — the
+    /// build succeeds locally while the SRPM silently ships the wrong file.
+    /// Byte-exact `--explain` pin; the check itself stays at Error.
+    #[test]
+    fn explain_reworded_use_of_rpm_source_dir() {
+        let config = crate::config::load_bundled();
+        let mut filter =
+            crate::filter::Filter::new(&config, crate::color::Color::for_tty(false)).unwrap();
+        crate::check::register_error_details(&config, &mut filter);
+        // The `--explain` path prints `filter.explanation(id)` with one
+        // trailing newline (`println!`).
+        let stdout = format!("{}\n", filter.explanation("use-of-RPM_SOURCE_DIR", &config));
+        assert_eq!(
+            stdout,
+            "use-of-RPM_SOURCE_DIR:\n\
+             You use $RPM_SOURCE_DIR or %{_sourcedir} in your spec file. Files itemized as\n\
+             Source#: must be referenced by their %{SOURCEN} macro instead: if a Source#:\n\
+             entry is renamed, the old filename still resolves in the source directory, so\n\
+             the build succeeds locally while the SRPM silently ships the wrong file.\n\n\n",
+            "exact --explain stdout",
         );
     }
 
