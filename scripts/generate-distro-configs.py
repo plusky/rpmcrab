@@ -102,6 +102,10 @@ PRUNE_CANDIDATES = {
     "setup-not-quiet": "killed: spec-cleaner adds -q",
     "mixed-use-of-spaces-and-tabs": "killed: spec-cleaner normalizes whitespace",
     "prereq-use": "killed: spec-cleaner handles PreReq; qualifier needs a human",
+    "module-without-depmod-postin": "killed: KMP macro template calls depmod (bnc#456048)",
+    "module-without-depmod-postun": "killed: KMP macro template calls depmod (bnc#456048)",
+    "postin-with-wrong-depmod": "killed: no manual depmod in scriptlets (bnc#456048)",
+    "postun-with-wrong-depmod": "killed: no manual depmod in scriptlets (bnc#456048)",
 }
 
 LIST_KEYS = ("Filters", "BlockedFilters")
