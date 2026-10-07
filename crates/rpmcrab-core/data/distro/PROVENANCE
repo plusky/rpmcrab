@@ -5,3 +5,10 @@
 # opensuse: main @ 84848c05c5571c22274a55ff9afdfe6d88c67dc9 (2026-09-28)
 # slfo: opensuse-slfo-main @ 5c758cf12f9be87e9487bb60b023397f1e97115e (2026-06-09)
 # No Filters entries pruned: all referenced findings exist.
+#
+# SLFO files byte-identical to openSUSE (not vendored twice;
+# the generated Rust consts fall back to the openSUSE copy):
+#   slfo/cron-whitelist.toml
+#   slfo/device-files-whitelist.toml
+#   slfo/licenses.toml
+#   slfo/pie-executables.toml
