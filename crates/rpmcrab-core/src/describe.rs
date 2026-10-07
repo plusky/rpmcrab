@@ -604,5 +604,25 @@ mod tests {
                  `data/descriptions/{expected}` and wire it into STAGED"
             );
         }
+        // Reverse direction: every *.toml on disk must be wired into STAGED,
+        // so a stray unwired file fails here instead of staying silently inert.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/descriptions");
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("cannot list description dir {dir:?}: {e}"))
+            .map(|entry| {
+                entry
+                    .unwrap_or_else(|e| panic!("cannot read description dir entry {dir:?}: {e}"))
+                    .file_name()
+            })
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".toml"))
+            .collect();
+        on_disk.sort_unstable();
+        for name in on_disk {
+            assert!(
+                staged.contains(&name),
+                "staged description `{name}` is on disk but not wired into STAGED"
+            );
+        }
     }
 }
