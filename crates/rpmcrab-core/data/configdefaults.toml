@@ -124,21 +124,15 @@ ReleaseExtension = '\.(fc|rhe?l|el|eln|mga|amzn|oe)\d+(?=\.|$)|\.suse\.[\w.]+$|\
 RpmGamesGroup = "Games"
 # Doc files to which end of line and UTF-8 checks should not be applied
 SkipDocsRegexp = '\.(?:rtf|x?html?|svg|ml[ily]?)$'
-# Whether to use the Enchant spell checker for spell checking
-UseEnchant = true
 # Whether debug sources are expected to be in separate packages from
 # -debuginfo, typically -debugsource.
 UseDebugSource = true
 # Whether an explicit Epoch should always be specified in preamble
 UseEpoch = false
-# Whether to want default start/stop runlevels specified in init scripts
-UseDefaultRunlevels = true
 # Whether symlinks between directories should be relative.
 UseRelativeSymlinks = true
 # Whether %changelog entries should contain a version
 UseVersionInChangelog = true
-# Whether init scripts must use /var/lock/subsys
-UseVarLockSubsys = true
 # Regexp string with value for the BuildHost preamble tag
 ValidBuildHost = ''
 # Standard "needs" values for non-XDG legacy menu items
@@ -355,8 +349,6 @@ ValidShells = [
     "/usr/bin/perl",
     "/sbin/ldconfig",
 ]
-# Values for the Group tag, if not specified pulled from RPM
-ValidGroups = []
 # Spec macros (beyond %autosetup/%autopatch) that apply patches in %prep, so
 # patch-not-applied stays quiet when they are used (upstream rpmlint#1074:
 # %forgeautosetup wraps %autosetup). Names without the leading %; extend for

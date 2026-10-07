@@ -521,7 +521,6 @@ fn url_scheme_netloc(url: &str) -> (Option<&str>, Option<&str>) {
 
 /// `SpecCheck`, ported from rpmlint's `SpecCheck.py`.
 pub struct SpecCheck {
-    valid_groups: Vec<String>,
     hardcoded_lib_path_exceptions_re: Regex,
     mini_mode: bool,
     macro_re: Regex,
@@ -615,8 +614,8 @@ pub struct SpecCheck {
 }
 
 impl SpecCheck {
-    /// Build the check from the config (`ValidGroups`,
-    /// `HardcodedLibPathExceptions`, `mini_mode`).
+    /// Build the check from the config (`HardcodedLibPathExceptions`,
+    /// `mini_mode`).
     pub fn new(config: &Config) -> Self {
         Self::with_tool_source(config, ToolSource::Path)
     }
@@ -625,16 +624,6 @@ impl SpecCheck {
     /// mandatory for spec parsing, so absence fails here with a clear
     /// message instead of deep inside the check.
     pub fn with_tool_source(config: &Config, source: ToolSource) -> Self {
-        let valid_groups = config
-            .configuration
-            .get("ValidGroups")
-            .and_then(toml::Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
         let patch_applying_macros = config
             .configuration
             .get("PatchApplyingMacros")
@@ -653,7 +642,6 @@ impl SpecCheck {
             // findings; fall back to the configdefaults.toml default.
             .unwrap_or(r"/lib/(modules|cpp|perl5|rpm|hotplug|firmware|systemd)($|[\s/,])");
         Self {
-            valid_groups,
             hardcoded_lib_path_exceptions_re: Regex::new(exceptions)
                 .unwrap_or_else(|_| Regex::new("$^").expect("static regex")),
             mini_mode: config.mini_mode,
@@ -1071,7 +1059,6 @@ impl SpecCheck {
         self.checkline_indent(pkg, line);
         self.checkline_deprecated_grep(pkg, out, line);
         self.checkline_obsolete_tmpfiles_macro(pkg, out, line);
-        self.checkline_valid_groups(pkg, out, line);
         self.checkline_macros_in_comments(pkg, out, line);
         self.checkline_python_setup_test(pkg, out, line);
         self.checkline_python_setup_install(pkg, out, line);
@@ -1844,20 +1831,6 @@ impl SpecCheck {
         self.info(out, pkg, Level::Warning, "obsolete-tmpfiles-macro", &[name]);
     }
 
-    fn checkline_valid_groups(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
-        // When not checking a spec file only, the spec comes from inside an
-        // SRPM; skip to avoid duplicate warnings (#167).
-        if self.spec_only
-            && !self.valid_groups.is_empty()
-            && line.to_lowercase().starts_with("group:")
-        {
-            let group = line[6..].trim();
-            if !self.valid_groups.iter().any(|g| g == group) {
-                self.info(out, pkg, Level::Warning, "non-standard-group", &[group]);
-            }
-        }
-    }
-
     fn checkline_macros_in_comments(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
         // Quote-aware `#` detection (#1601): a `#` inside shell quotes does
         // not start a comment.
@@ -1988,24 +1961,7 @@ impl SpecCheck {
 impl SpecCheck {
     /// `error_details` for `--explain`, mirroring the `__init__` entry
     /// (`SpecCheck.py:124-126`).
-    pub fn register_error_details(config: &Config, out: &mut Filter) {
-        let valid_groups = config
-            .configuration
-            .get("ValidGroups")
-            .and_then(toml::Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        out.set_error_detail(
-            "non-standard-group",
-            format!(
-                "The value of the Group tag in the package is not valid.  Valid groups are:\n'{}'.",
-                valid_groups.join(", ")
-            ),
-        );
+    pub fn register_error_details(_config: &Config, out: &mut Filter) {
         out.set_error_detail(
             "obsolete-tmpfiles-macro",
             "The %tmpfiles_create and %tmpfiles_create_package macros are no-ops: \
@@ -2264,13 +2220,7 @@ mod tests {
 
     #[test]
     fn fixture_exercising_major_checks() {
-        let mut config = config_mini();
-        config.configuration.insert(
-            "ValidGroups".to_string(),
-            toml::Value::Array(vec![toml::Value::String(
-                "System Environment/Base".to_string(),
-            )]),
-        );
+        let config = config_mini();
         let spec = r#"Name:           wobble
 Version:        1.0
 Release:        1
@@ -2320,7 +2270,6 @@ make install
             "configure-without-libdir-spec",
             "shared-dir-glob-in-files",
             "patch-not-applied",
-            "non-standard-group",
         ] {
             assert!(has(&results, check), "missing {check}: {results:?}");
         }

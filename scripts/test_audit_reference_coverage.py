@@ -954,6 +954,7 @@ def test_stale_check_catches_name_keyed_entry():
         "lengthy-symlink",
         "InitScriptCheck",
         "missing-dependency-to-xinetd",
+        "non-standard-group",
         "post-without-tmpfile-creation",
         "shared-library-not-executable",
     }, names

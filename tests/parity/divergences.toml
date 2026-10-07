@@ -1253,3 +1253,10 @@ kind = "behaviour"
 reason = "Upstream rpmlint#776: a new `bidi-control-character` warning fires when a libmagic-described text file contains one of the nine Unicode bidirectional control characters (trojan-source, CVE-2021-42574). The frozen 2.10.0 reference has no such check (its sole \"bidi\" hit is an unrelated I18NCheck.py comment). The scan runs for source packages too, where the attack lives; one warning per file, naming the first control found."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/776"
+
+[[divergence]]
+case = "global"
+check = "non-standard-group"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE dropped the Group tag -- its own rpmlint config says Do not validate package rpm groups and the packaging guidelines say Group: -- always drop -- so the port does not emit this finding. Both emission sites (SpecCheck and TagsCheck), the staged `--explain` entry, and the ValidGroups plumbing are removed. The reference still emits it."
+since = "0.1.0"
