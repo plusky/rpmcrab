@@ -36,6 +36,8 @@ gir = "gir"
 tham = "tham"
 # Vai is the Vai script name (Unicode block Vai), not a typo for Via/Vie.
 vai = "vai"
+# sourcen is the RPM %{SOURCEN} macro (Source#: references), not a typo for source.
+sourcen = "sourcen"
 # packag is a deliberate misspelling in the tags-emission-pins spelling-error
 # fixture and its expected finding detail. Scoped to those two files so the
 # allow-list does not silence a real "packag" typo repo-wide.

@@ -12,17 +12,6 @@ BuildArch:      noarch
 %description
 Tags emission pins fixture.
 
-%package -n tags-emission-pins-devel
-Summary:        Devel group test package
-Group:          Games
-%description -n tags-emission-pins-devel
-Devel group test package.
-
-%package -n tags-emission-pins-nogroup
-Summary:        No group test package
-%description -n tags-emission-pins-nogroup
-No group test package.
-
 %package -n tags-emission-pins-longsummary
 Summary:        This is a deliberately overlong summary that stretches well past seventy nine characters
 Group:          Development/Tools
@@ -94,10 +83,6 @@ EOF
 
 %{?build_epoch:find %{buildroot} -exec touch -h -d "@%{build_epoch}" {} +}
 %files
-
-%files -n tags-emission-pins-devel
-
-%files -n tags-emission-pins-nogroup
 
 %files -n tags-emission-pins-longsummary
 
