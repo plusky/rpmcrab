@@ -524,6 +524,35 @@ LEAP16_OSS_REPOMD_URL = (
 _leap16_binary_names_cache = None
 
 
+def _scan_binary_names(stdout):
+    """Collect <name> tag values from a zstd -dc pipe.
+
+    A tag may span chunk boundaries no matter how long it is: the tail is
+    kept from the last tag start instead of a fixed byte count.
+    """
+    name_re = re.compile(rb"<name>([^<]*)</name>")
+    names = set()
+    buf = b""
+    while True:
+        chunk = stdout.read(1 << 16)
+        data = buf + chunk if chunk else buf
+        end = len(data)
+        for match in name_re.finditer(data):
+            if chunk and match.end() == end:
+                # Tag may be split across chunks; re-scan it with the
+                # next chunk (kept in the tail).
+                continue
+            names.add(match.group(1).decode("utf-8", "replace"))
+        if not chunk:
+            break
+        idx = data.rfind(b"<name")
+        if idx < 0:
+            # Chunk split landed inside the opening tag itself.
+            idx = data.rfind(b"<")
+        buf = data[idx:] if idx >= 0 else b""
+    return names
+
+
 def _leap16_binary_names():
     """Binary package names shipped in Leap 16.0 (oss), fetched once, cached."""
     global _leap16_binary_names_cache
@@ -552,27 +581,15 @@ def _leap16_binary_names():
             + m.group(1)
         )
         names = set()
-        name_re = re.compile(rb"<name>([^<]*)</name>")
-        with tempfile.NamedTemporaryFile(suffix=".xml.zst") as tmp:
+        # A 58 MB download: keep it out of TMPDIR, which is a small tmpfs on
+        # some build machines.
+        with tempfile.NamedTemporaryFile(suffix=".xml.zst", dir=".") as tmp:
             with urllib.request.urlopen(_get(primary_url), timeout=600) as resp:
                 shutil.copyfileobj(resp, tmp)
             tmp.flush()
             proc = subprocess.Popen([zstd, "-dc", tmp.name], stdout=subprocess.PIPE)
             try:
-                buf = b""
-                while True:
-                    chunk = proc.stdout.read(1 << 16)
-                    data = buf + chunk if chunk else buf
-                    end = len(data)
-                    for match in name_re.finditer(data):
-                        if chunk and match.end() == end:
-                            # Tag may be split across chunks; re-scan it
-                            # with the next chunk (kept in the overlap).
-                            continue
-                        names.add(match.group(1).decode("utf-8", "replace"))
-                    if not chunk:
-                        break
-                    buf = data[-512:]
+                names = _scan_binary_names(proc.stdout)
             finally:
                 proc.stdout.close()
                 proc.wait()
