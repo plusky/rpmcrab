@@ -11,7 +11,6 @@ PieExecutables = [
     "/sbin/klogd",
     "/sbin/rpcbind",
     "/sbin/syslogd",
-    "/usr/bin/uniconv",
     "/usr/bin/at",
     "/usr/bin/cadaver",
     "/usr/bin/chage",
