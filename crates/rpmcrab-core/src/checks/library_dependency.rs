@@ -11,9 +11,9 @@
 //! on `(name, arch)`; the rationale is in the doc comment on the
 //! `devel_order` field below.
 //!
-//! Deliberate divergence: chained `.so` symlinks are resolved inside the
-//! devel package to the real library before recording; the reference keeps
-//! the one-hop target.
+//! Deliberate divergence: symlink chains are resolved inside the
+//! devel package to the real file before recording (any intermediate,
+//! not just `.so` links); the reference keeps the one-hop target.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -148,7 +148,7 @@ impl Check for LibraryDependencyCheck {
 
             let symlinks = self.package_so_symlinks.get_mut(&key).unwrap();
             // One-hop targets of every symlink in this package, for resolving
-            // chained `.so` links below.
+            // chained links below.
             let targets: HashMap<&str, String> = pkg
                 .files
                 .iter()
@@ -445,6 +445,10 @@ mod tests {
         let results = run(&lib, &devel);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "no-library-dependency-on");
+        assert_eq!(
+            results[0].1,
+            "foo-devel.x86_64: E: no-library-dependency-on libfoo /usr/lib64/libfoo.so.1"
+        );
     }
 
     #[test]
