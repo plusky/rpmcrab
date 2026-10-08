@@ -35,6 +35,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -511,8 +512,24 @@ def _filelist_hits(paths, repomd_url, repo_base, cache, label):
         req = urllib.request.Request(
             repomd_url, headers={"User-Agent": "rpmcrab-distro-config-sync"}
         )
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            repomd = resp.read().decode("utf-8")
+        # Transient mirror errors (5xx) are retried: a single failed fetch
+        # must not fail the whole run when the mirror is briefly down.
+        repomd = None
+        last_err = None
+        for attempt in range(4):
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    repomd = resp.read().decode("utf-8")
+                break
+            except urllib.error.HTTPError as e:
+                last_err = e
+                if e.code < 500:
+                    raise
+                time.sleep(15 * (attempt + 1))
+        if repomd is None:
+            raise RuntimeError(
+                "repomd.xml fetch failed for %s after retries: %s" % (label, last_err)
+            )
         m = re.search(
             r'<data type="filelists">.*?<location href="([^"]+)"', repomd, re.S
         )
