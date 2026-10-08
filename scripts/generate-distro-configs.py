@@ -523,24 +523,31 @@ def _filelist_hits(paths, repomd_url, repo_base, cache, label):
         for q in missing:
             args += ["-e", ">%s<" % q]
         # Every stage must succeed: checking only grep's return code lets a
-        # failed download prune everything this guard verifies.
+        # failed download prune everything this guard verifies. -f makes
+        # HTTP errors catchable; --show-error keeps the message (captured
+        # below) diagnosable. The speed-limit/speed-time pair stalls out a
+        # hung mirror instead of hanging the job: a transfer under 50KB/s
+        # for 60s aborts and retries, while a merely slow mirror is allowed
+        # to finish - a hard --max-time would kill legitimate slow
+        # downloads (100KB/s observed from a mirror).
         curl = subprocess.Popen(
             [
                 "curl",
                 "-fsSL",
+                "--show-error",
+                "--connect-timeout",
+                "60",
                 "--retry",
                 "3",
                 "--retry-all-errors",
-                # Stall out a hung mirror instead of hanging the job.
-                "--max-time",
-                "600",
                 "--speed-limit",
-                "10240",
+                "50000",
                 "--speed-time",
                 "60",
                 fl_url,
             ],
             stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
         zstd = subprocess.Popen(
             ["zstd", "-dc"], stdin=curl.stdout, stdout=subprocess.PIPE
@@ -555,10 +562,11 @@ def _filelist_hits(paths, repomd_url, repo_base, cache, label):
         zstd.stdout.close()
         curl_rc = curl.wait()
         zstd_rc = zstd.wait()
+        curl_err = curl.stderr.read().decode("utf-8", "replace").strip()
         if curl_rc != 0:
             raise RuntimeError(
-                "filelist download failed (curl rc=%d) for %s"
-                % (curl_rc, label)
+                "filelist download failed (curl rc=%d) for %s: %s"
+                % (curl_rc, label, curl_err[:300])
             )
         if zstd_rc != 0:
             raise RuntimeError(

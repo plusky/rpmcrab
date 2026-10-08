@@ -31,8 +31,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The generator streams repo filelists through curl | zstd; declare
       # them instead of relying on the runner image shipping both.
+      # The cache-apt-pkgs-action key is md5(packages + version + repos [+arch
+      # iff non-x86_64]) - no distro dimension. Fold the runner OS release into
+      # `version` so a floating `ubuntu-latest` image (24.04 -> 26.04) never
+      # restores stale .debs onto a new distro, and rotate on the ISO week so a
+      # cache hit never tests against weeks-old packages.
+      - name: Compute apt cache version
+        id: apt-cache-version
+        run: |
+          . /etc/os-release
+          echo "version=1.0-${VERSION_ID}-$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
       - name: Install generator dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq curl zstd
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
+        with:
+          packages: curl zstd
+          version: ${{ steps.apt-cache-version.outputs.version }}
+          execute_install_scripts: true
       - name: Regenerate distro configs from latest upstream
         id: regen
         run: |

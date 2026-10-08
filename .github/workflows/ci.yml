@@ -263,7 +263,22 @@ jobs:
           persist-credentials: false
       # The generator streams repo filelists through curl | zstd; declare
       # them instead of relying on the runner image shipping both.
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq curl zstd
+      # The cache-apt-pkgs-action key is md5(packages + version + repos [+arch
+      # iff non-x86_64]) - no distro dimension. Fold the runner OS release into
+      # `version` so a floating `ubuntu-latest` image (24.04 -> 26.04) never
+      # restores stale .debs onto a new distro, and rotate on the ISO week so a
+      # cache hit never tests against weeks-old packages.
+      - name: Compute apt cache version
+        id: apt-cache-version
+        run: |
+          . /etc/os-release
+          echo "version=1.0-${VERSION_ID}-$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+      - name: Install filelist pipeline deps
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
+        with:
+          packages: curl zstd
+          version: ${{ steps.apt-cache-version.outputs.version }}
+          execute_install_scripts: true
       # The vendored distro configs are upstream-owned until rpmlint is fully
       # superseded; this fails when they diverge from what the generator
       # produces at the pinned SHAs. See scripts/generate-distro-configs.py.
