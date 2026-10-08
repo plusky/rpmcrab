@@ -1,7 +1,7 @@
 //! `SignatureCheck` — PGP signature presence and validity.
 //!
 //! Ported from `rpmlint/checks/SignatureCheck.py`. Three findings:
-//! `no-signature`, `unknown-key`, `invalid-signature`.
+//! `unknown-key`, `invalid-signature`.
 //!
 //! Like the reference, this shells out to `rpm -Kv` and parses its output.
 
@@ -65,13 +65,6 @@ impl SignatureCheck {
         (output.status.code().unwrap_or(-1), text)
     }
 
-    fn any_sig_regex() -> &'static Regex {
-        static ANY_SIG_REGEX: OnceLock<Regex> = OnceLock::new();
-        ANY_SIG_REGEX.get_or_init(|| {
-            Regex::new(r"[Ss]ignature|\(sha1\) dsa|\(sha1\) rsa").expect("signature regex")
-        })
-    }
-
     fn nokey_sig_regex() -> &'static Regex {
         static NOKEY_SIG_REGEX: OnceLock<Regex> = OnceLock::new();
         NOKEY_SIG_REGEX.get_or_init(|| {
@@ -96,11 +89,6 @@ impl Check for SignatureCheck {
 
         // The reference runs all three sub-checks unconditionally
         // (SignatureCheck.py:36-40); each decides for itself whether to fire.
-        // No signature at all.
-        if !is_match(Self::any_sig_regex(), &output) {
-            add_info(out, Level::Error, pkg, "no-signature", &[]);
-        }
-
         // Unknown key (NOKEY) without an invalid signature.
         if retcode == 1 {
             if let Some(caps) = Self::nokey_sig_regex().captures(&output).ok().flatten() {
@@ -162,22 +150,6 @@ mod tests {
     }
 
     #[test]
-    fn no_signature_reported() {
-        let dir = tmpdir("rpmcrab-sig-nosig");
-        let rpm = fake_rpm(&dir, "rpm", "test.rpm: digests OK", 0);
-        let pkg = fixture_pkg();
-        let results = run_check(&pkg, &rpm);
-        assert_eq!(results.len(), 1, "{results:?}");
-        assert_eq!(results[0].0, "no-signature");
-        assert!(
-            results[0].1.starts_with("testpkg.noarch: E: no-signature"),
-            "error level: {}",
-            results[0].1
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn unknown_key_reported() {
         let dir = tmpdir("rpmcrab-sig-nokey");
         let rpm = fake_rpm(
@@ -235,17 +207,6 @@ mod tests {
     }
 
     #[test]
-    fn any_sig_matches() {
-        let re = SignatureCheck::any_sig_regex();
-        assert!(is_match(
-            re,
-            "foo.rpm: RSA/SHA256 Signature, key ID abc123: OK"
-        ));
-        assert!(is_match(re, "foo.rpm: (sha1) dsa sha1 md5 gpg OK"));
-        assert!(!is_match(re, "foo.rpm: digests OK"));
-    }
-
-    #[test]
     fn nokey_extracts_key_id() {
         let re = SignatureCheck::nokey_sig_regex();
         let caps = re
@@ -264,19 +225,6 @@ mod tests {
             re,
             "foo.rpm: RSA/SHA256 Signature, key ID abc: OK"
         ));
-    }
-
-    #[test]
-    fn no_signature_with_retcode_1_yields_only_no_signature() {
-        // Guards the unconditional sub-check structure: with no signature
-        // mention in the output, the retcode==1 block must not add findings.
-        let dir = tmpdir("rpmcrab-sig-nosig-rc1");
-        let rpm = fake_rpm(&dir, "rpm", "test.rpm: digests OK", 1);
-        let pkg = fixture_pkg();
-        let results = run_check(&pkg, &rpm);
-        assert_eq!(results.len(), 1, "{results:?}");
-        assert_eq!(results[0].0, "no-signature");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A fake `rpm` that writes to stderr only, so the finding can only come
@@ -313,6 +261,21 @@ mod tests {
                 .iter()
                 .any(|(name, line)| name == "unknown-key" && line.contains("1234abcd")),
             "stderr did not reach the matchers: {results:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// Negative pin for the deleted `no-signature` finding: an unsigned RPM
+    /// must stay silent, and `cargo test` (not just the reference-coverage
+    /// auditor) must catch a re-add.
+    #[test]
+    fn killed_no_signature_stays_absent() {
+        let dir = tmpdir("rpmcrab-sig-nosig-absent");
+        let rpm = fake_rpm(&dir, "rpm", "test.rpm: digests OK", 0);
+        let pkg = fixture_pkg();
+        let results = run_check(&pkg, &rpm);
+        assert!(
+            !results.iter().any(|(n, _)| n == "no-signature"),
+            "must stay silent: {results:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -7,10 +7,6 @@ with something you have control over.
 spelling-error="""
 The value of this tag appears to be misspelled. Please double-check.
 """
-no-packager-tag="""
-There is no Packager tag in your package. You have to specify a packager
-using the Packager tag. Ex: Packager: John Doe <john.doe@example.com>.
-"""
 invalid-packager="""
 The Packager tag does not match the pattern configured in the Packager
 option of the rpmlint configuration. Please change it and rebuild your
