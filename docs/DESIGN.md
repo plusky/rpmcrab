@@ -460,9 +460,9 @@ consumers a finding must serve to survive:
    are vendored in-tree and flavor-specific behavior is `Flavor`-gated (§4.11).
 2. **Fedora (P2).** Supported, nice to have. No vendored config yet; findings
    are kept when Fedora's own rpmlint config lets them fire.
-3. **Everything else — not considered.** Mandriva and similar flavors are
-   dead. A new flavor enters support only when a maintainer steps up to own
-   that flow end to end (vendored config, parity corpus, drift guard).
+3. **Everything else — not considered.** No other flavor is currently
+   supported. A new flavor enters support only when a maintainer steps up to
+   own that flow end to end (vendored config, parity corpus, drift guard).
 
 Consequence: the **generic/no-overlay flavor is not a supported use case**.
 "The generic flavor still emits it" is not a valid argument for retaining a
