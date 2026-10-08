@@ -496,6 +496,9 @@ def package_present(pkg, flavor):
 _filelist_cache_tw = {}
 _filelist_cache_leap = {}
 
+# Attempts for the repomd.xml fetch before giving up.
+_REPOMD_ATTEMPTS = 4
+
 
 def _filelist_hits(paths, repomd_url, repo_base, cache, label):
     """Subset of `paths` still shipped by some package in a repo's filelists.
@@ -512,19 +515,25 @@ def _filelist_hits(paths, repomd_url, repo_base, cache, label):
         req = urllib.request.Request(
             repomd_url, headers={"User-Agent": "rpmcrab-distro-config-sync"}
         )
-        # Transient mirror errors (5xx) are retried: a single failed fetch
-        # must not fail the whole run when the mirror is briefly down.
+        # Transient mirror failures (5xx, network errors, timeouts) are
+        # retried: a single failed fetch must not fail the whole run when
+        # the mirror is briefly down. The backoff sleeps only between
+        # attempts - the last attempt raises immediately instead of
+        # sleeping pointlessly before the error.
         repomd = None
         last_err = None
-        for attempt in range(4):
+        for attempt in range(_REPOMD_ATTEMPTS):
             try:
                 with urllib.request.urlopen(req, timeout=60) as resp:
                     repomd = resp.read().decode("utf-8")
                 break
             except urllib.error.HTTPError as e:
-                last_err = e
                 if e.code < 500:
                     raise
+                last_err = e
+            except (urllib.error.URLError, TimeoutError) as e:
+                last_err = e
+            if attempt + 1 < _REPOMD_ATTEMPTS:
                 time.sleep(15 * (attempt + 1))
         if repomd is None:
             raise RuntimeError(
@@ -567,7 +576,10 @@ def _filelist_hits(paths, repomd_url, repo_base, cache, label):
             stderr=subprocess.PIPE,
         )
         zstd = subprocess.Popen(
-            ["zstd", "-dc"], stdin=curl.stdout, stdout=subprocess.PIPE
+            ["zstd", "-dc"],
+            stdin=curl.stdout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
         curl.stdout.close()
         grep = subprocess.run(
@@ -580,6 +592,7 @@ def _filelist_hits(paths, repomd_url, repo_base, cache, label):
         curl_rc = curl.wait()
         zstd_rc = zstd.wait()
         curl_err = curl.stderr.read().decode("utf-8", "replace").strip()
+        zstd_err = zstd.stderr.read().decode("utf-8", "replace").strip()
         if curl_rc != 0:
             raise RuntimeError(
                 "filelist download failed (curl rc=%d) for %s: %s"
@@ -587,8 +600,8 @@ def _filelist_hits(paths, repomd_url, repo_base, cache, label):
             )
         if zstd_rc != 0:
             raise RuntimeError(
-                "filelist decompression failed (zstd rc=%d) for %s"
-                % (zstd_rc, label)
+                "filelist decompression failed (zstd rc=%d) for %s: %s"
+                % (zstd_rc, label, zstd_err[:300])
             )
         if grep.returncode not in (0, 1):
             raise RuntimeError(
@@ -738,6 +751,12 @@ def prune_pie_paths(text, pruned_log, flavor):
         else:
             entries.append((line, None, None, None, None, None))
     shipped = {}
+    if flavor not in FLAVOR_FILELIST_SOURCES:
+        raise RuntimeError(
+            "no filelist source configured for flavor %r "
+            "(known flavors: %s)"
+            % (flavor, ", ".join(sorted(FLAVOR_FILELIST_SOURCES)))
+        )
     for label, source in FLAVOR_FILELIST_SOURCES[flavor]:
         for path in source(moved_paths):
             shipped.setdefault(path, label)
