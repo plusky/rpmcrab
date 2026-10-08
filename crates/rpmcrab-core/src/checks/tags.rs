@@ -15,7 +15,7 @@ use fancy_regex::Regex;
 use librpm::Tag;
 
 use super::is_match;
-use super::shared::{devel_regex, lib_package_regex, macro_regex};
+use super::shared::{devel_infix_regex, devel_regex, lib_package_regex, macro_regex};
 use super::spdx::suggest_licenses;
 use crate::check::{Check, add_info};
 use crate::config::Config;
@@ -372,6 +372,16 @@ impl TagsCheck {
         is_source: bool,
     ) {
         let mut devel_depend = false;
+        // Biarch/flavored devel packages (`-devel-32bit`, `-devel-doc`,
+        // `-debug-libs`, ...): the devel keyword is a hyphen-delimited
+        // component rather than a name suffix. They are devel packages, so
+        // their requirements must not trip devel-dependency or
+        // explicit-lib-dependency (the reference only matches the suffix
+        // form and misfires on 242 such packages in Tumbleweed). This is
+        // the requirer-side class; the dependency-side class from
+        // plusky/rpmcrab#283 (DevelNumberExceptions / word-boundary regex
+        // for required names) stays open.
+        let requirer_is_biarch_devel = is_match(devel_infix_regex(), &pkg.name);
         for dep in deps {
             let value = format_require(dep);
             // Rich `(a or b)` expressions (RPM >= 4.13): run the name and
@@ -403,12 +413,18 @@ impl TagsCheck {
                     add_info(out, Level::Error, pkg, "invalid-dependency", &[&leaf.name]);
                 }
                 if !is_source && !is_devel {
-                    if !devel_depend && is_match(&self.devel_re, &leaf.name) {
+                    if !devel_depend
+                        && !requirer_is_biarch_devel
+                        && is_match(&self.devel_re, &leaf.name)
+                    {
                         add_info(out, Level::Error, pkg, "devel-dependency", &[&leaf.name]);
                         devel_depend = true;
                     }
                     // Issue #1091: replicate the fuzzy lib heuristic exactly.
-                    if leaf.flags == 0
+                    // Biarch/flavored devel requirers are devel packages, so
+                    // their lib requirements must not trip this either.
+                    if !requirer_is_biarch_devel
+                        && leaf.flags == 0
                         && let Ok(Some(caps)) = self.lib_package_re.captures(&leaf.name)
                         && caps.get(1).is_none()
                     {
@@ -2614,6 +2630,73 @@ mod rich_dep_emission_tests {
     }
 
     #[test]
+    fn devel_dependency_biarch_devel_requirer_is_silent() {
+        // Biarch/flavored devel packages carry the devel keyword as a
+        // hyphen-delimited component rather than a name suffix. They are
+        // devel packages, so requiring devel files must not trip
+        // devel-dependency.
+        let config = rich_test_config(&[], false);
+        for (requirer, dep) in [
+            ("libgcrypt-devel-32bit", "libgcrypt-devel"),
+            ("qwt6-qt5-devel-doc", "qwt6-qt5-devel"),
+            ("dapl-debug-libs", "dapl-debug"),
+            ("mumps-mvapich2-devel-static-compat", "mumps-devel-static"),
+        ] {
+            let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+            pkg.name = requirer.to_string();
+            pkg.requires = vec![plain_dep(dep)];
+            let results = run(&pkg, &config);
+            assert!(
+                named(&results, "devel-dependency").is_empty(),
+                "requirer {requirer}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn devel_dependency_plain_devel_require_still_fires() {
+        // A genuine runtime package requiring a devel package still trips
+        // the finding.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        assert!(
+            !is_match(devel_regex(), &pkg.name),
+            "fixture must not be a devel package"
+        );
+        pkg.requires = vec![plain_dep("somelib-devel")];
+        let config = rich_test_config(&[], false);
+        let results = run(&pkg, &config);
+        assert_eq!(
+            named(&results, "devel-dependency").len(),
+            1,
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn devel_infix_regex_matches_components_not_substrings() {
+        // The infix keyword must be hyphen-delimited: `foo-develx` and
+        // `foo-mydevel` are not devel packages.
+        for name in [
+            "libgcrypt-devel-32bit",
+            "qwt-devel-doc",
+            "dapl-debug-libs",
+            "foo-headers-x",
+            "foo-static-y",
+        ] {
+            assert!(is_match(devel_infix_regex(), name), "name {name}");
+        }
+        for name in [
+            "foo-develx",
+            "foo-mydevel",
+            "foo-profile",
+            "python3-foo",
+            "libfoo2",
+        ] {
+            assert!(!is_match(devel_infix_regex(), name), "name {name}");
+        }
+    }
+
+    #[test]
     fn requires_on_release_uses_leaf_constraint() {
         let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
         pkg.requires.push(rich_dep("(relfoo = 1.0-2 or relbar)"));
@@ -2758,6 +2841,28 @@ mod rich_dep_emission_tests {
             named(&results, "explicit-lib-dependency").is_empty(),
             "all: {results:?}"
         );
+    }
+
+    #[test]
+    fn explicit_lib_dependency_biarch_devel_requirer_is_silent() {
+        // Same requirer-side class as devel-dependency: a biarch/flavored
+        // devel package is a devel package, so its lib requirements must
+        // not trip explicit-lib-dependency either.
+        let config = rich_test_config(&[], false);
+        for requirer in [
+            "libgcrypt-devel-32bit",
+            "qwt6-qt5-devel-doc",
+            "dapl-debug-libs",
+        ] {
+            let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+            pkg.name = requirer.to_string();
+            pkg.requires = vec![plain_dep("libgcrypt")];
+            let results = run(&pkg, &config);
+            assert!(
+                named(&results, "explicit-lib-dependency").is_empty(),
+                "requirer {requirer}: {results:?}"
+            );
+        }
     }
 
     #[test]
