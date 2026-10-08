@@ -282,9 +282,11 @@ jobs:
       # The vendored distro configs are upstream-owned until rpmlint is fully
       # superseded; this fails when they diverge from what the generator
       # produces at the pinned SHAs. See scripts/generate-distro-configs.py.
-      - run: python3 scripts/generate-distro-configs.py --check
       # Fail-closed unit tests for the generator's filelist verification.
+      # Hermetic: runs before the network-dependent --check so a network
+      # flake cannot hide a unit-test failure.
       - run: python3 scripts/test_generate_distro_configs.py
+      - run: python3 scripts/generate-distro-configs.py --check
 
   reference-coverage-audit:
     runs-on: ubuntu-latest

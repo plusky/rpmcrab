@@ -38,6 +38,7 @@ import tempfile
 import time
 import urllib.request
 import urllib.error
+import http.client
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -618,6 +619,9 @@ _filelist_cache_leap = {}
 
 # Attempts for the repomd.xml fetch before giving up.
 _REPOMD_ATTEMPTS = 4
+# Backoff sleeps between repomd fetch attempts (seconds); no sleep after
+# the final attempt.
+_REPOMD_BACKOFF = [15, 30, 45]
 
 
 def _filelist_hits(paths, repomd_url, repo_base, cache, label):
@@ -651,10 +655,15 @@ def _filelist_hits(paths, repomd_url, repo_base, cache, label):
                 if e.code < 500:
                     raise
                 last_err = e
-            except (urllib.error.URLError, TimeoutError) as e:
+            except (
+                urllib.error.URLError,
+                TimeoutError,
+                http.client.IncompleteRead,
+                ConnectionResetError,
+            ) as e:
                 last_err = e
             if attempt + 1 < _REPOMD_ATTEMPTS:
-                time.sleep(15 * (attempt + 1))
+                time.sleep(_REPOMD_BACKOFF[attempt])
         if repomd is None:
             raise RuntimeError(
                 "repomd.xml fetch failed for %s after retries: %s" % (label, last_err)

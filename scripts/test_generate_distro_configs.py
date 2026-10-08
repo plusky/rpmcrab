@@ -177,11 +177,14 @@ def test_repomd_no_sleep_after_final_attempt():
         try:
             _filelist_hits(["/usr/bin/foo"], {})
         except RuntimeError as e:
-            assert "after retries" in str(e), str(e)
+            assert (
+                str(e)
+                == "repomd.xml fetch failed for Tumbleweed after retries: HTTP Error 503: err"
+            ), str(e)
         else:
             raise AssertionError("repomd 503s did not raise")
-    assert urlopen_mock.call_count == 4, urlopen_mock.call_count
-    assert sleeps == [15, 30, 45], sleeps
+    assert urlopen_mock.call_count == gen._REPOMD_ATTEMPTS, urlopen_mock.call_count
+    assert sleeps == gen._REPOMD_BACKOFF, sleeps
 
 
 def test_repomd_retries_urlerror_then_succeeds():
@@ -202,6 +205,24 @@ def test_repomd_retries_urlerror_then_succeeds():
         hits = _filelist_hits(["/usr/bin/foo"], {})
     assert hits == {"/usr/bin/foo"}, hits
     assert len(calls) == 3, calls
+
+
+def test_repomd_retries_incomplete_read_and_conn_reset():
+    """IncompleteRead and ConnectionResetError are transient mid-transfer
+    failures and must be retried like URLError/TimeoutError."""
+    import http.client
+
+    popen_patch, run_patch, _ = _pipeline(
+        grep_rc=0, grep_stdout=">/usr/bin/foo<\n")
+    with mock.patch.object(gen.urllib.request, "urlopen",
+                           side_effect=[http.client.IncompleteRead("partial", 10),
+                                        ConnectionResetError("reset"),
+                                        _repomd_response()]) as urlopen_mock, \
+            mock.patch.object(gen.time, "sleep"), \
+            popen_patch, run_patch:
+        hits = _filelist_hits(["/usr/bin/foo"], {})
+    assert hits == {"/usr/bin/foo"}, hits
+    assert urlopen_mock.call_count == 3, urlopen_mock.call_count
 
 
 def test_repomd_retries_timeout_then_succeeds():
