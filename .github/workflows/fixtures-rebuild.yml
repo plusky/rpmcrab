@@ -78,10 +78,13 @@ jobs:
             local committed=/tmp/fixtures-rebuild-committed.rpm
             # The rebuilt RPM's arch follows the build host, so its name need
             # not match the committed one's: find the committed RPM by pattern.
+            # Escape regex metacharacters (the pattern is a glob: * becomes [^/]*).
             local committed_name
-            committed_name=$(git ls-tree -r --name-only HEAD "$dir/input/" \
-              | grep -E "/${pattern//\*/[^/]*}\$" | head -1)
+            local regex
+            regex=$(printf '%s' "$pattern" | sed -e 's/[][\.*^$/+?{}()|]/\\&/g' -e 's/\\\*/[^/]*/g')
+            committed_name=$(git ls-tree -r --name-only HEAD "$dir/input/" | grep -E "/${regex}\$")
             [ -n "$committed_name" ] || fail "no committed RPM matches $pattern in $dir/input/"
+            [ "$(printf '%s' "$committed_name" | wc -l)" -eq 1 ] || fail "multiple committed RPMs match $pattern in $dir/input/: $committed_name"
             git show "HEAD:$committed_name" > "$committed" \
               || fail "cannot read committed RPM $committed_name"
             diff <(rpm -qlp "$fresh" | sort) <(rpm -qlp "$committed" | sort) \
