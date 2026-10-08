@@ -256,10 +256,13 @@ keys the package insertion order is preserved.
 
 ### 4.5 Header, footer, banner
 
-- Session header: `============================ rpmlint session starts ============================`
+- Session header: `============================ rpmcrab session starts ============================`
   (rule width honours `$COLUMNS`, else the tty, else 80), then the version
-  line, a `configuration:` block listing each loaded config indented four
+  line `rpmcrab: X.Y.Z`, a `configuration:` block listing each loaded config indented four
   spaces, an optional `rpmlintrc:` block, then `checks: N, packages: M`.
+  The banner identifies rpmcrab itself with its own crate version; reference
+  emulation no longer applies to it (nobody greps for that part), and the
+  difference is recorded in `tests/parity/divergences.toml`.
   `checks: N` is the configured `Checks` list length, not the number of checks
   that ran: the reference computes it as `len(self.config.configuration['Checks'])`
   (`lint.py:272`), so `--checks` narrowing and `--errors-only` do not change it.
@@ -489,8 +492,9 @@ plus, where one exists, a linked upstream issue.
   `spelling-error` check's backend is free to differ or to degrade gracefully.
 - **`--time-report` cosmetics** (not consumed by tooling).
 - **The program-identity banner.** The session-starts banner and version line
-  are parameterized by `argv[0]` so the binary can be installed as `rpmlint`.
-  Confirmed at M1.
+  identify rpmcrab itself (`rpmcrab: X.Y.Z`, the crate's own version) rather
+  than the emulated reference — nobody greps for that part, so the emulation
+  was dropped (Tom's call). Recorded in `tests/parity/divergences.toml`.
 
 ### 5.1 The divergence philosophy
 
@@ -812,8 +816,9 @@ from package contents; both go through helpers with golden tests. `cargo-deny`
 
 ## 11. Open questions
 
-1. **Program-identity banner** — the exact parameterization by `argv[0]`
-   (confirm at M1).
+1. **Program-identity banner** — decided 2026-10-08: the banner always
+   identifies rpmcrab itself (`rpmcrab: X.Y.Z`) instead of being
+   parameterized by `argv[0]`; reference emulation does not apply to it.
 2. **Spellcheck backend** — decided at Wave 1: degrades gracefully by
    default (`spelling-error` is not emitted; ledgered in
    `tests/parity/divergences.toml`).

@@ -21,11 +21,11 @@ use rpmcrab_core::config;
 use rpmcrab_core::lint::Lint;
 use rpmcrab_core::{color::Color, term};
 
-/// The rpmlint version rpmcrab emulates in the session banner. The banner is
-/// frozen (`rpmlint: X.Y.Z`); the version shown is the reference version, not
-/// the crate version (`docs/DESIGN.md` §4.5). The crate's own version is
-/// separate (`rpmcrab --version`).
-const RPMLINT_VERSION: &str = "2.10.0";
+/// The version printed in the session banner's version line. The banner
+/// identifies rpmcrab itself (`rpmcrab: X.Y.Z`) with the crate's own version;
+/// reference emulation no longer applies to it (`docs/DESIGN.md` §4.5).
+/// `rpmcrab --version` reports the same version.
+const RPMLINT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// `helpers.print_warning`: the message in red, on stderr. The reference's
 /// `Color` table is chosen by **stdout**'s tty-ness even for stderr writes, so
@@ -451,23 +451,16 @@ pub fn run() -> ExitCode {
     // inputs that were actually validated.
     let arg_count = files.len() + cli.installed.len();
     let duration = start.elapsed().as_secs_f64();
-    // The session banner is parameterized by argv[0]'s basename so the
-    // binary can be installed as `rpmlint` (docs/DESIGN.md §5).
-    let prog = std::env::args_os()
-        .next()
-        .and_then(|p| {
-            Path::new(&p)
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-        })
-        .unwrap_or_else(|| "rpmlint".to_string());
+    // The session banner identifies rpmcrab itself, not the emulated
+    // reference (docs/DESIGN.md §4.5).
+    let prog = "rpmcrab";
     let format = resolve_output_format(cli.format.as_deref(), &lint.config().output_format);
     // `--format` dispatches through the pluggable renderers (text/json);
     // the text wire format is untouched, and `--time-report` stays a
     // text-mode section.
     let out = lint.render_report(
         &format,
-        &prog,
+        prog,
         RPMLINT_VERSION,
         arg_count,
         cli.time_report,

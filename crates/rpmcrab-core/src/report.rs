@@ -1,5 +1,6 @@
-//! The session header, footer and abort banner — the parts of the wire format
-//! that are grepped verbatim by build tooling (`docs/DESIGN.md` §4.5).
+//! The session header, footer and abort banner. The footer and abort banner
+//! are matched verbatim by build tooling (`docs/DESIGN.md` §4.5); the session
+//! header identifies rpmcrab itself and is not grepped.
 
 use std::collections::BTreeMap;
 
