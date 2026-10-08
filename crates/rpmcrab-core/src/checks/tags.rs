@@ -708,11 +708,13 @@ impl TagsCheck {
         let first_word = summary.split(' ').next().unwrap_or("");
         // Reference parity: `summary[0] != summary[0].upper()` warns only
         // when the first char is actually lowercase; digits and other
-        // non-letters never warn.
+        // non-letters never warn. Unicode titlecase letters (e.g. U+01C5)
+        // warn too, so compare against the uppercase form rather than
+        // `is_lowercase()`.
         let lowercase_first = summary
             .chars()
             .next()
-            .map(|c| c.is_lowercase())
+            .map(|c| c.to_uppercase().next() != Some(c))
             .unwrap_or(false);
         if lowercase_first && !CAPITALIZED_IGNORE_LIST.contains(&first_word) {
             let mut d: Vec<&str> = Vec::new();
@@ -2317,8 +2319,8 @@ mod tests {
         }
         let results = out.results().to_vec();
         assert!(
-            results.iter().all(|(n, _)| n != "summary-not-capitalized"),
-            "digit-leading summary must not warn: {results:?}"
+            results.is_empty(),
+            "digit-leading summary must not warn at all: {results:?}"
         );
     }
 
@@ -2330,9 +2332,14 @@ mod tests {
         let check = TagsCheck::new(&config);
         check.check_summary(&pkg, &mut out, "lowercase summary", "C", &[]);
         let results = out.results().to_vec();
-        assert!(
-            results.iter().any(|(n, _)| n == "summary-not-capitalized"),
-            "lowercase-leading summary must warn: {results:?}"
+        let hits: Vec<_> = results
+            .iter()
+            .filter(|(n, _)| n == "summary-not-capitalized")
+            .collect();
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert_eq!(
+            hits[0].1,
+            "tags-emission-pins-badsummary.noarch: W: summary-not-capitalized lowercase summary"
         );
     }
 
