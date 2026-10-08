@@ -3610,7 +3610,8 @@ description = "explicit priority string bypasses the system crypto policy"
             // mode(8) size(10) ending in "`\n". Short SysV names end with '/'.
             let mut header = [b' '; 60];
             let name_field = format!("{name}/");
-            header[..name_field.len()].copy_from_slice(name_field.as_bytes());
+            let name_len = name_field.len().min(16);
+            header[..name_len].copy_from_slice(&name_field.as_bytes()[..name_len]);
             let size_field = data.len().to_string();
             header[48..48 + size_field.len()].copy_from_slice(size_field.as_bytes());
             header[58] = b'`';
@@ -3692,6 +3693,99 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(
             info.failed.is_some(),
             "non-ELF member must fail the whole archive"
+        );
+
+        // Drive the emission path: run_elf_checks must surface the failure
+        // as E: readelf-failed, not just record it on the struct.
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = PkgFile {
+            name: "/usr/lib64/libfoo.a".to_string(),
+            path: path.to_str().unwrap().to_string(),
+            magic: "current ar archive".to_string(),
+            mode: 0o100644,
+            ..Default::default()
+        };
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let analysis =
+            ElfAnalysis::wants_analysis(&pkgfile, false).then(|| ElfAnalysis::parse(&pkgfile));
+        check.run_elf_checks(&pkg, &pkgfile, &config, &mut out, analysis.as_ref());
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "readelf-failed");
+        assert_eq!(lines.len(), 1, "exactly one readelf-failed: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/lib64/libfoo.a"),
+            "detail names the archive: {}",
+            lines[0]
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Build a GNU-style ar archive with a `/` symbol-index member,
+    /// the shape `ar rcs` produces. `craft_ar_archive` above omits it;
+    /// goblin's Archive::parse must skip it (and the `//` extended-name
+    /// table). A refactor walking raw members would emit readelf-failed
+    /// on every shipped .a and stay green without this.
+    fn craft_gnu_ar_archive(members: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out = b"!<arch>\n".to_vec();
+        // Minimal `/` symbol table: zero symbols (4-byte big-endian count).
+        let symtab: &[u8] = &0u32.to_be_bytes();
+        let mut header = [b' '; 60];
+        header[..1].copy_from_slice(b"/");
+        let size_field = symtab.len().to_string();
+        header[48..48 + size_field.len()].copy_from_slice(size_field.as_bytes());
+        header[58] = b'`';
+        header[59] = b'\n';
+        out.extend_from_slice(&header);
+        out.extend_from_slice(symtab);
+        for (name, data) in members {
+            let mut header = [b' '; 60];
+            let name_field = format!("{name}/");
+            let name_len = name_field.len().min(16);
+            header[..name_len].copy_from_slice(&name_field.as_bytes()[..name_len]);
+            let size_field = data.len().to_string();
+            header[48..48 + size_field.len()].copy_from_slice(size_field.as_bytes());
+            header[58] = b'`';
+            header[59] = b'\n';
+            out.extend_from_slice(&header);
+            out.extend_from_slice(data);
+            if data.len() % 2 == 1 {
+                out.push(b'\n');
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn gnu_ar_archive_with_symbol_index_parses() {
+        // The `/` symbol-index member that `ar rcs` emits must not break
+        // member-wise parsing: goblin skips it, sections still merge.
+        let m1 = craft_shlib_elf(false, Some("liba.so.1"));
+        let m2 = craft_shlib_elf(false, None);
+        let archive = craft_gnu_ar_archive(&[("a.o", &m1), ("b.o", &m2)]);
+        let path = std::env::temp_dir().join(format!("rpmcrab-ar-gnu-{}", std::process::id()));
+        std::fs::write(&path, &archive).unwrap();
+
+        let info = ReadelfInfo::parse(path.to_str().unwrap(), "/usr/lib64/libfoo.a");
+        assert!(
+            info.failed.is_none(),
+            "GNU ar archive must parse member-wise: {:?}",
+            info.failed
+        );
+        let names: Vec<&str> = info
+            .sections
+            .iter()
+            .flatten()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(
+            names.iter().filter(|n| **n == ".shstrtab").count(),
+            2,
+            "both members parsed, symbol index skipped: {names:?}"
         );
 
         std::fs::remove_file(&path).ok();
