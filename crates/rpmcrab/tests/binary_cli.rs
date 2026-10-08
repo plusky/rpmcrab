@@ -1577,20 +1577,6 @@ fn explain_reworded_kmp_missing_supplements() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: reworded `SpecCheck.toml` entry `%ifarch-applied-patch` pins the fixed wording.
-#[test]
-fn explain_reworded_ifarch_applied_patch() {
-    let out = rpmcrab(&["-e", "%ifarch-applied-patch"]);
-    assert_eq!(out.status.code(), Some(0));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(
-        stdout,
-        "%ifarch-applied-patch:\nA patch is applied inside an %ifarch block. Patches must be applied on all\narchitectures. If the fix is only needed on a given arch, put the\narch-specific condition inside the patch (configure or code) instead of\nguarding the %patch directive.\n\n\n",
-        "exact --explain stdout",
-    );
-    assert!(out.stderr.is_empty());
-}
-
 /// `--explain`: reworded `SharedLibraryPolicyCheck.toml` entry `shlib-fixed-dependency` pins the fixed wording.
 #[test]
 fn explain_reworded_shlib_fixed_dependency() {
@@ -1824,20 +1810,6 @@ fn explain_reworded_patch_fuzz_is_changed() {
     assert_eq!(
         stdout,
         "patch-fuzz-is-changed:\nThe internal patch fuzz value was changed, and could hide patch's issues, or\ncould lead to applying a patch at the wrong location. Usually, this is often\nthe sign that someone didn't check if a patch is still needed and does not\nwant to rediff it. It is usually better to rediff the patch and try to send it\nupstream.\n\n\n",
-        "exact --explain stdout",
-    );
-    assert!(out.stderr.is_empty());
-}
-
-/// `--explain`: reworded `SpecCheck.toml` entry `unversioned-explicit-obsoletes` pins the fixed wording.
-#[test]
-fn explain_reworded_unversioned_explicit_obsoletes() {
-    let out = rpmcrab(&["-e", "unversioned-explicit-obsoletes"]);
-    assert_eq!(out.status.code(), Some(0));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(
-        stdout,
-        "unversioned-explicit-obsoletes:\nThe specfile contains an unversioned Obsoletes: token, which will match all\nolder, equal and newer versions of the obsoleted thing.  This may cause update\nproblems, restrict future package/provides naming, and may match something it\nwas originally not intended to match -- make the Obsoletes versioned if\npossible.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());

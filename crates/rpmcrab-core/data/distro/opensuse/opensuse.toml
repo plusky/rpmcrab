@@ -64,8 +64,6 @@ Filters = [
     '.*invalid-version.*',
     '.*invalid-packager.*',
     '.*invalid-buildhost.*',
-    '.*hardcoded-path-in-buildroot-tag.*',
-    '.*no-buildroot-tag.*',
 
 # Do not validate package rpm groups
     '.*devel-package-with-non-devel-group.*',
@@ -136,10 +134,6 @@ Filters = [
     'kernel-modules-not-in-kernel-packages',
 
 # SUSE kmp's don't need manual depmod (bnc#456048)
-    'module-without-depmod-postin',
-    'postin-with-wrong-depmod',
-    'module-without-depmod-postun',
-    'postun-with-wrong-depmod',
     'configure-without-libdir-spec',
     'use-of-RPM_SOURCE_DIR',
     'use-tmp-in-',
@@ -178,17 +172,13 @@ Filters = [
     ' prereq-use',
     ' file-not-utf8',
     ' tag-not-utf8',
-    ' setup-not-quiet',
     ' mixed-use-of-spaces-and-tabs ',
     ' prereq-use ',
 
 # An issue with OBS, works with autobuild
-    ' unversioned-explicit-provides ',
-    ' unversioned-explicit-obsoletes ',
     ' non-standard-dir-perm ',
     ' conffile-without-noreplace-flag ',
     ' non-standard-executable-perm ',
-    ' %ifarch-applied-patch ',
     ' read-error ',
     ' no-dependency-on locales',
     ' executable-marked-as-config-file',

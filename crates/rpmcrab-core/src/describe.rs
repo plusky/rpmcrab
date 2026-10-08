@@ -531,6 +531,34 @@ mod tests {
         );
     }
 
+    /// The reference's `use-of-RPM_SOURCE_DIR` advice ("use $RPM_BUILD_ROOT
+    /// instead") is wrong: `$RPM_SOURCE_DIR` is `%{_sourcedir}` (the SOURCES
+    /// dir) while `$RPM_BUILD_ROOT` is the install staging dir. The staged
+    /// text is reworded per the Fedora RPM_Source_Dir guideline: `Source#:`
+    /// files go by their `%{SOURCEN}` macro, because a renamed `Source#:`
+    /// entry still resolves by bare filename in the source directory — the
+    /// build succeeds locally while the SRPM silently ships the wrong file.
+    /// Byte-exact `--explain` pin; the check itself stays at Error.
+    #[test]
+    fn explain_reworded_use_of_rpm_source_dir() {
+        let config = crate::config::load_bundled();
+        let mut filter =
+            crate::filter::Filter::new(&config, crate::color::Color::for_tty(false)).unwrap();
+        crate::check::register_error_details(&config, &mut filter);
+        // The `--explain` path prints `filter.explanation(id)` with one
+        // trailing newline (`println!`).
+        let stdout = format!("{}\n", filter.explanation("use-of-RPM_SOURCE_DIR", &config));
+        assert_eq!(
+            stdout,
+            "use-of-RPM_SOURCE_DIR:\n\
+             You use $RPM_SOURCE_DIR or %{_sourcedir} in your spec file. Files itemized as\n\
+             Source#: must be referenced by their %{SOURCEN} macro instead: if a Source#:\n\
+             entry is renamed, the old filename still resolves in the source directory, so\n\
+             the build succeeds locally while the SRPM silently ships the wrong file.\n\n\n",
+            "exact --explain stdout",
+        );
+    }
+
     /// Every check the registry can build has description coverage: a staged
     /// `<Name>.toml` in `STAGED` — or, for `FHSCheck`/`PostCheck`, details
     /// registered in code, mirroring the reference which ships no TOML for

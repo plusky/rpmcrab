@@ -492,7 +492,7 @@ mod tests {
     /// `check` -> `add_info` -> `Filter` emission path.
     fn pkg_with_files(files: Vec<PkgFile>, config_files: Vec<String>) -> Pkg {
         let mut pkg = Pkg::open_no_extract(std::path::Path::new(&fixture_path(
-            "filescheck-depmod-ok-1.0-1.noarch.rpm",
+            "scriptlet-empty-post-1.0-1.noarch.rpm",
         )))
         .expect("open fixture");
         pkg.files = files;

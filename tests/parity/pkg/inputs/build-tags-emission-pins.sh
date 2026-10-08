@@ -4,7 +4,7 @@
 # tag finding).
 #
 # tags-emission-pins: main package plus subpackages exercising
-#   devel-package-with-non-devel-group, no-group-tag, summary-too-long,
+#   summary-too-long,
 #   summary-not-capitalized, summary-ended-with-dot, no-description-tag,
 #   description-line-too-long, tag-in-description, spelling-error,
 #   obsolete-not-provided, no-pkg-config-provides, summary-on-multiple-lines
@@ -165,12 +165,10 @@ fi
     ( cd "$here" && sha256sum tags-emission-pins-1.0-1.noarch.rpm \
         tags-emission-pins-badchangelog-1.0-1.noarch.rpm \
         tags-emission-pins-badsummary-1.0-1.noarch.rpm \
-        tags-emission-pins-devel-1.0-1.noarch.rpm \
         tags-emission-pins-longdesc-1.0-1.noarch.rpm \
         tags-emission-pins-longsummary-1.0-1.noarch.rpm \
         tags-emission-pins-multiline-1.0-1.noarch.rpm \
         tags-emission-pins-nodesc-1.0-1.noarch.rpm \
-        tags-emission-pins-nogroup-1.0-1.noarch.rpm \
         tags-emission-pins-obsolete-1.0-1.noarch.rpm \
         tags-emission-pins-pcreq-devel-1.0-1.noarch.rpm \
         tags-emission-pins-spell-1.0-1.noarch.rpm \

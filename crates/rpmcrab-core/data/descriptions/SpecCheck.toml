@@ -10,8 +10,11 @@ non-utf8-spec-file="""
 The character encoding of the spec file is not UTF-8.
 """
 use-of-RPM_SOURCE_DIR="""
-You use $RPM_SOURCE_DIR or %{_sourcedir} in your spec file. If you have to
-use a directory for building, use $RPM_BUILD_ROOT instead.
+You use $RPM_SOURCE_DIR or %{_sourcedir} in your spec file. Files itemized
+as Source#: must be referenced by their %{SOURCEN} macro instead: if a
+Source#: entry is renamed, the old filename still resolves in the source
+directory, so the build succeeds locally while the SRPM silently ships the
+wrong file.
 """
 patch-not-applied="""
 A patch is included in your package but was not applied.
@@ -31,17 +34,6 @@ be replaced by License and Epoch respectively.
 deprecated-grep="""
 Direct use of grep as egrep or fgrep is deprecated in GNU grep and
 historical in POSIX, use grep -E and grep -F instead.
-"""
-no-buildroot-tag="""
-The BuildRoot tag isn't used in your spec. It must be used in order to
-allow building the package as non root on some systems. For some rpm versions
-(e.g. rpm.org >= 4.6) the BuildRoot tag is not necessary in specfiles and is
-ignored by rpmbuild; if your package is only going to be built with such rpm
-versions you can ignore this warning.
-"""
-hardcoded-path-in-buildroot-tag="""
-A path is hardcoded in your Buildroot tag. It should be replaced
-by something like %{_tmppath}/%{name}-%{version}-build.
 """
 hardcoded-packager-tag="""
 The Packager tag is hardcoded in your spec file. It should be removed, so
@@ -98,12 +90,6 @@ RPM provides its own clean logic.
 The package name must be built using %mklibname to allow lib64 and lib32
 coexistence.
 """
-"%ifarch-applied-patch"="""
-A patch is applied inside an %ifarch block. Patches must be applied
-on all architectures. If the fix is only needed on a given arch, put
-the arch-specific condition inside the patch (configure or code)
-instead of guarding the %patch directive.
-"""
 prereq-use="""
 The use of PreReq is deprecated. In the majority of cases, a plain Requires
 is enough and the right thing to do. Sometimes Requires(pre), Requires(post),
@@ -117,10 +103,6 @@ setup-not-in-prep="""
 The %setup macro should only be used within the %prep section because it may
 not expand to anything outside of it and can break the build in unpredictable
 ways.
-"""
-setup-not-quiet="""
-Use the -q option to the %setup macro to avoid useless build output from
-unpacking the sources.
 """
 rpm-buildroot-usage="""
 $RPM_BUILD_ROOT or %{buildroot} must not be touched during %build or %prep
@@ -148,19 +130,6 @@ to disable it in the specfile, or don't define __find_provides/requires.
 mixed-use-of-spaces-and-tabs="""
 The specfile mixes use of spaces and tabs for indentation, which is a
 cosmetic annoyance.
-"""
-unversioned-explicit-provides="""
-The specfile contains an unversioned Provides: token, which will match all
-older, equal, and newer versions of the provided thing. This may cause
-update problems and will make versioned dependencies, obsoletions and conflicts
-on the provided thing useless -- make the Provides versioned if possible.
-"""
-unversioned-explicit-obsoletes="""
-The specfile contains an unversioned Obsoletes: token, which will match all
-older, equal and newer versions of the obsoleted thing.  This may cause update
-problems, restrict future package/provides naming, and may match something it
-was originally not intended to match -- make the Obsoletes versioned if
-possible.
 """
 libdir-macro-in-noarch-package="""
 The %{_libdir} or %{_lib} macro was found in a noarch package in a section
