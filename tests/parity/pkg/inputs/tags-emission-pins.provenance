@@ -12,12 +12,10 @@ sha256:
 138b5f1b6b5974ad590d048fff11d43d53cbc617e647ff572c8a6d06609f2f9f  tags-emission-pins-1.0-1.noarch.rpm
 a47ad784624a4e20d7df806f248d4cff839ec3e927477d0d13c49cfb73f41527  tags-emission-pins-badchangelog-1.0-1.noarch.rpm
 9bb0791ba138b1a4f4a9ce161e65dc9f0e73244fab873aa3189fb8ad9ba00d1d  tags-emission-pins-badsummary-1.0-1.noarch.rpm
-6bc195b2f7bea6f375d5c6d494034696c70a8cb97cfa4195ee3e0d476eeb5484  tags-emission-pins-devel-1.0-1.noarch.rpm
 b07aa908586323ed1aede3d9cd3a0aed3fd22ab0f3a7966982cd8598d7d7312f  tags-emission-pins-longdesc-1.0-1.noarch.rpm
 dd56086cffeea90e0ed10eb450e2a1abbceb4bc5d7c5422bbb77988564ac1987  tags-emission-pins-longsummary-1.0-1.noarch.rpm
 1c0a88b3471bdadc8fc3d647a6d672e55ed1706281a344f96cfc8f0c89fd00da  tags-emission-pins-multiline-1.0-1.noarch.rpm
 0868fe6cb6f1bb49d1c844726568359049df21e265ef079e8a269f9f3573d023  tags-emission-pins-nodesc-1.0-1.noarch.rpm
-ee930d0176e77e92dbed486fbf697f9473fe6033db7e5d05f7cfec61d6018ca4  tags-emission-pins-nogroup-1.0-1.noarch.rpm
 4b8985e31777de6f2607deeaf6034011ba0d9d5835943f5beaf8e83e4732063b  tags-emission-pins-obsolete-1.0-1.noarch.rpm
 cc5fbe873d70284def5a3ac8ac180bee8394e2ffcf734dfe223bd840fe7c524d  tags-emission-pins-pcreq-devel-1.0-1.noarch.rpm
 1330b3df24a35ced887659e475822f9ef1c891d5ca87c2f32fc5c81e6b7d4386  tags-emission-pins-spell-1.0-1.noarch.rpm

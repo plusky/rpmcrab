@@ -892,19 +892,9 @@ impl TagsCheck {
     }
 
     fn check_group(&self, pkg: &Pkg, out: &mut Filter, group: &str) {
-        // Issue #611: `no-group-tag` does execute; implement as-is.
+        // Group tag itself is obsolete (openSUSE dropped it); only the
+        // generic unexpanded-macro probe remains.
         self.unexpanded_macro(out, pkg, "Group", group);
-        if group.is_empty() {
-            add_info(out, Level::Error, pkg, "no-group-tag", &[]);
-        } else if pkg.name.ends_with("-devel") && !group.starts_with("Development/") {
-            add_info(
-                out,
-                Level::Warning,
-                pkg,
-                "devel-package-with-non-devel-group",
-                &[group],
-            );
-        }
     }
 
     fn check_buildhost(&self, pkg: &Pkg, out: &mut Filter, buildhost: &str) {
@@ -2315,42 +2305,6 @@ mod tests {
     }
 
     #[test]
-    fn devel_package_with_non_devel_group_emits() {
-        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-devel-1.0-1.noarch.rpm");
-        let results = run_check(&pkg);
-        let hits = tag_hits(&results, "devel-package-with-non-devel-group");
-        assert_eq!(hits.len(), 1, "all: {results:?}");
-        assert_eq!(
-            hits[0].1,
-            "tags-emission-pins-devel.noarch: W: devel-package-with-non-devel-group Games"
-        );
-    }
-
-    #[test]
-    fn non_standard_group_never_emits() {
-        // The Group tag is obsolete (openSUSE dropped it); the finding was
-        // removed outright, so even a present Group tag stays silent.
-        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-devel-1.0-1.noarch.rpm");
-        let results = run_check(&pkg);
-        assert!(
-            tag_hits(&results, "non-standard-group").is_empty(),
-            "non-standard-group must stay dead: {results:?}"
-        );
-    }
-
-    #[test]
-    fn no_group_tag_emits() {
-        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-nogroup-1.0-1.noarch.rpm");
-        let results = run_check(&pkg);
-        let hits = tag_hits(&results, "no-group-tag");
-        assert_eq!(hits.len(), 1, "all: {results:?}");
-        assert_eq!(
-            hits[0].1,
-            "tags-emission-pins-nogroup.noarch: E: no-group-tag"
-        );
-    }
-
-    #[test]
     fn summary_too_long_emits() {
         let (_tmp, pkg) = fixture_pkg("tags-emission-pins-longsummary-1.0-1.noarch.rpm");
         let results = run_check(&pkg);
@@ -2609,7 +2563,6 @@ mod rich_dep_emission_tests {
         assert_eq!(
             names,
             [
-                "no-group-tag",
                 "invalid-license",
                 "invalid-license-spellcheck",
                 "no-url-tag"
@@ -2617,7 +2570,7 @@ mod rich_dep_emission_tests {
             "unexpected emissions: {results:?}"
         );
         assert_eq!(
-            results[1].1, "i18n-two-locale.noarch: W: invalid-license MIT",
+            results[0].1, "i18n-two-locale.noarch: W: invalid-license MIT",
             "level and detail pinned on the rendered line"
         );
     }

@@ -968,6 +968,17 @@ def test_stale_check_catches_name_keyed_entry():
         "non-versioned-file-in-library-package",
         "no-packager-tag",
         "no-signature",
+        # Deliberately removed per SpecCheck triage (openSUSE filters them as
+        # noise/obsolete; Group tag dropped by openSUSE).
+        "non-standard-group",
+        "no-group-tag",
+        "devel-package-with-non-devel-group",
+        "%ifarch-applied-patch",
+        "no-buildroot-tag",
+        "hardcoded-path-in-buildroot-tag",
+        "unversioned-explicit-provides",
+        "unversioned-explicit-obsoletes",
+        "setup-not-quiet",
     }, names
     assert all(e.get("case") == "global" for e in missing), [
         (e.get("case"), e.get("check")) for e in missing]

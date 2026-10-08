@@ -90,12 +90,6 @@ fn obsolete_tags_re() -> &'static Regex {
     })
 }
 
-static BUILDROOT_RE: OnceLock<Regex> = OnceLock::new();
-fn buildroot_re() -> &'static Regex {
-    BUILDROOT_RE
-        .get_or_init(|| Regex::new(r"(?i)^BuildRoot\s*:\s*(\S.*?)\s*$").expect("static regex"))
-}
-
 static PREFIX_RE: OnceLock<Regex> = OnceLock::new();
 fn prefix_re() -> &'static Regex {
     PREFIX_RE.get_or_init(|| Regex::new(r"(?i)^Prefix\s*:\s*(\S.*?)\s*$").expect("static regex"))
@@ -363,21 +357,6 @@ fn setup_re() -> &'static Regex {
     SETUP_RE.get_or_init(|| Regex::new(r"^%setup\b").expect("static regex"))
 }
 
-static SETUP_Q_RE: OnceLock<Regex> = OnceLock::new();
-fn setup_q_re() -> &'static Regex {
-    SETUP_Q_RE.get_or_init(|| Regex::new(r" -[A-Za-z]*q").expect("static regex"))
-}
-
-static SETUP_T_RE: OnceLock<Regex> = OnceLock::new();
-fn setup_t_re() -> &'static Regex {
-    SETUP_T_RE.get_or_init(|| Regex::new(r" -[A-Za-z]*T").expect("static regex"))
-}
-
-static SETUP_AB_RE: OnceLock<Regex> = OnceLock::new();
-fn setup_ab_re() -> &'static Regex {
-    SETUP_AB_RE.get_or_init(|| Regex::new(r" -[A-Za-z]*[ab]").expect("static regex"))
-}
-
 static AUTOSETUP_RE: OnceLock<Regex> = OnceLock::new();
 fn autosetup_re() -> &'static Regex {
     AUTOSETUP_RE.get_or_init(|| Regex::new(r"^\s*%autosetup(\s.*|$)").expect("static regex"))
@@ -532,7 +511,6 @@ pub struct SpecCheck {
     applied_patch_i_re: Regex,
     source_dir_re: Regex,
     obsolete_tags_re: Regex,
-    buildroot_re: Regex,
     prefix_re: Regex,
     packager_re: Regex,
     buildarch_re: Regex,
@@ -569,9 +547,6 @@ pub struct SpecCheck {
     source_patch_re: Regex,
     compop_re: Regex,
     setup_re: Regex,
-    setup_q_re: Regex,
-    setup_t_re: Regex,
-    setup_ab_re: Regex,
     autosetup_re: Regex,
     autosetup_n_re: Regex,
     autopatch_re: Regex,
@@ -590,10 +565,8 @@ pub struct SpecCheck {
     spec_name: Option<String>,
     patches: BTreeMap<i64, String>,
     applied_patches: Vec<i64>,
-    applied_patches_ifarch: Vec<i64>,
     patches_auto_applied: bool,
     source_dir: bool,
-    buildroot: bool,
     configure_linenum: Option<u32>,
     configure_cmdline: String,
     mklibname: bool,
@@ -614,8 +587,8 @@ pub struct SpecCheck {
 }
 
 impl SpecCheck {
-    /// Build the check from the config (`HardcodedLibPathExceptions`,
-    /// `mini_mode`).
+    /// Build the check from the config (`PatchApplyingMacros`,
+    /// `HardcodedLibPathExceptions`, `mini_mode`).
     pub fn new(config: &Config) -> Self {
         Self::with_tool_source(config, ToolSource::Path)
     }
@@ -654,7 +627,6 @@ impl SpecCheck {
             applied_patch_i_re: applied_patch_i_re().clone(),
             source_dir_re: source_dir_re().clone(),
             obsolete_tags_re: obsolete_tags_re().clone(),
-            buildroot_re: buildroot_re().clone(),
             prefix_re: prefix_re().clone(),
             packager_re: packager_re().clone(),
             buildarch_re: buildarch_re().clone(),
@@ -689,9 +661,6 @@ impl SpecCheck {
             source_patch_re: source_patch_re().clone(),
             compop_re: compop_re().clone(),
             setup_re: setup_re().clone(),
-            setup_q_re: setup_q_re().clone(),
-            setup_t_re: setup_t_re().clone(),
-            setup_ab_re: setup_ab_re().clone(),
             autosetup_re: autosetup_re().clone(),
             autosetup_n_re: autosetup_n_re().clone(),
             autopatch_re: autopatch_re().clone(),
@@ -709,10 +678,8 @@ impl SpecCheck {
             spec_name: None,
             patches: BTreeMap::new(),
             applied_patches: Vec::new(),
-            applied_patches_ifarch: Vec::new(),
             patches_auto_applied: false,
             source_dir: false,
-            buildroot: false,
             configure_linenum: None,
             configure_cmdline: String::new(),
             mklibname: false,
@@ -829,7 +796,6 @@ impl Check for SpecCheck {
         }
         pkg.current_linenum.set(None);
 
-        self.check_no_buildroot_tag(pkg, out);
         if !self.declarative {
             for sec in ["prep", "build", "install", "check"] {
                 if self.section.get(sec).copied().unwrap_or(0) == 0 {
@@ -891,16 +857,6 @@ impl Check for SpecCheck {
             let patches: Vec<(i64, String)> =
                 self.patches.iter().map(|(n, f)| (*n, f.clone())).collect();
             for (pnum, pfile) in &patches {
-                if self.applied_patches_ifarch.contains(pnum) {
-                    let tag = format!("Patch{pnum}:");
-                    self.info(
-                        out,
-                        pkg,
-                        Level::Warning,
-                        "%ifarch-applied-patch",
-                        &[&tag, pfile],
-                    );
-                }
                 if !self.applied_patches.contains(pnum) {
                     let tag = format!("Patch{pnum}:");
                     self.info(
@@ -928,10 +884,8 @@ impl Check for SpecCheck {
         self.spec_name = None;
         self.patches.clear();
         self.applied_patches.clear();
-        self.applied_patches_ifarch.clear();
         self.patches_auto_applied = false;
         self.source_dir = false;
-        self.buildroot = false;
         self.configure_linenum = None;
         self.configure_cmdline.clear();
         self.mklibname = false;
@@ -953,12 +907,6 @@ impl Check for SpecCheck {
 }
 
 impl SpecCheck {
-    fn check_no_buildroot_tag(&self, pkg: &SpecPkg, out: &mut Filter) {
-        if !self.buildroot {
-            self.info(out, pkg, Level::Warning, "no-buildroot-tag", &[]);
-        }
-    }
-
     /// Parse the spec with the `rpm` tool and forward its diagnostics
     /// (`SpecCheck.py:300-322`).
     fn check_specfile_error(&self, pkg: &SpecPkg, out: &mut Filter) {
@@ -1216,14 +1164,6 @@ impl SpecCheck {
 
     fn checkline_setup(&mut self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
         if self.setup_re.is_match(line).unwrap_or(false) {
-            if !self.setup_q_re.is_match(line).unwrap_or(false) {
-                // Don't warn if there's a -T without -a or -b.
-                if !self.setup_t_re.is_match(line).unwrap_or(false)
-                    || self.setup_ab_re.is_match(line).unwrap_or(false)
-                {
-                    self.info(out, pkg, Level::Warning, "setup-not-quiet", &[]);
-                }
-            }
             if self.current_section != "prep" {
                 self.info(out, pkg, Level::Warning, "setup-not-in-prep", &[]);
             }
@@ -1314,9 +1254,6 @@ impl SpecCheck {
             }
             for pnum in pnums {
                 self.applied_patches.push(pnum);
-                if self.ifarch_depth > 0 {
-                    self.applied_patches_ifarch.push(pnum);
-                }
             }
             return;
         }
@@ -1326,9 +1263,6 @@ impl SpecCheck {
                 .and_then(|m| m.as_str().parse().ok())
                 .unwrap_or(0);
             self.applied_patches.push(pnum);
-            if self.ifarch_depth > 0 {
-                self.applied_patches_ifarch.push(pnum);
-            }
             return;
         }
         if let Ok(Some(caps)) = self.applied_patch_i_re.captures(line) {
@@ -1337,9 +1271,6 @@ impl SpecCheck {
                 .and_then(|m| m.as_str().parse().ok())
                 .unwrap_or(0);
             self.applied_patches.push(pnum);
-            if self.ifarch_depth > 0 {
-                self.applied_patches_ifarch.push(pnum);
-            }
         }
     }
 
@@ -1449,7 +1380,6 @@ impl SpecCheck {
         }
         self.checkline_package_patch(line);
         self.checkline_package_obsolete_tags(pkg, out, line);
-        self.checkline_package_buildroot(pkg, out, line);
         self.checkline_package_buildarch(pkg, out, line);
         self.checkline_package_packager(pkg, out, line);
         self.checkline_package_prefix(pkg, out, line);
@@ -1481,22 +1411,6 @@ impl SpecCheck {
         if let Ok(Some(caps)) = self.obsolete_tags_re.captures(line) {
             let tag = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             self.info(out, pkg, Level::Warning, "obsolete-tag", &[tag]);
-        }
-    }
-
-    fn checkline_package_buildroot(&mut self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
-        if let Ok(Some(caps)) = self.buildroot_re.captures(line) {
-            self.buildroot = true;
-            let value = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-            if value.starts_with('/') {
-                self.info(
-                    out,
-                    pkg,
-                    Level::Warning,
-                    "hardcoded-path-in-buildroot-tag",
-                    &[value],
-                );
-            }
         }
     }
 
@@ -1627,15 +1541,6 @@ impl SpecCheck {
             }
             for (prov, version) in &provs {
                 if version.is_none() {
-                    if !prov.starts_with('/') {
-                        self.info(
-                            out,
-                            pkg,
-                            Level::Warning,
-                            "unversioned-explicit-provides",
-                            &[prov],
-                        );
-                    }
                     // As above: operators inside a rich expression are
                     // syntax, not a comparison in a dep token.
                     if !is_rich_dep_expr(prov) && self.compop_re.is_match(prov).unwrap_or(false) {
@@ -1667,15 +1572,6 @@ impl SpecCheck {
             }
             for (obs, version) in &obses {
                 if version.is_none() {
-                    if !obs.starts_with('/') {
-                        self.info(
-                            out,
-                            pkg,
-                            Level::Warning,
-                            "unversioned-explicit-obsoletes",
-                            &[obs],
-                        );
-                    }
                     // As above: operators inside a rich expression are
                     // syntax, not a comparison in a dep token.
                     if !is_rich_dep_expr(obs) && self.compop_re.is_match(obs).unwrap_or(false) {
@@ -2260,11 +2156,9 @@ make install
         let results = run_with(spec, &config);
         for check in [
             "buildarch-instead-of-exclusivearch-tag",
-            "hardcoded-path-in-buildroot-tag",
             "hardcoded-packager-tag",
             "hardcoded-prefix-tag",
             "comparison-operator-in-deptoken",
-            "unversioned-explicit-provides",
             "suse-update-desktop-file-deprecated",
             "no-%check-section",
             "configure-without-libdir-spec",
@@ -2456,20 +2350,6 @@ make install
     }
 
     #[test]
-    fn no_buildroot_tag_fires_warning_ref868() {
-        let results = run_mini("Name: foo\n");
-        let lines = lines_for(&results, "no-buildroot-tag");
-        assert_eq!(lines.len(), 1, "results: {results:?}");
-        assert!(
-            lines[0].contains("W: no-buildroot-tag"),
-            "line: {}",
-            lines[0]
-        );
-        let with = run_mini("Name: foo\nBuildRoot: %{_tmppath}/foo\n");
-        assert!(!has(&with, "no-buildroot-tag"), "results: {with:?}");
-    }
-
-    #[test]
     fn deprecated_grep_fires_warning_ref803() {
         let results = run_mini("Name: foo\n%build\negrep foo\n");
         let lines = lines_for(&results, "deprecated-grep");
@@ -2579,22 +2459,6 @@ make install
             "line: {}",
             lines[0]
         );
-    }
-
-    #[test]
-    fn ifarch_applied_patch_fires_warning_ref1063() {
-        let results = run_mini(
-            "Name: foo\nPatch1: Patch1.patch\n%prep\n%build\n%install\n%ifarch\n%patch1 -P 1\n%endif\n",
-        );
-        let lines = lines_for(&results, "%ifarch-applied-patch");
-        assert_eq!(lines.len(), 1, "results: {results:?}");
-        assert!(
-            lines[0].contains("W: %ifarch-applied-patch Patch1: Patch1.patch"),
-            "line: {}",
-            lines[0]
-        );
-        // The patch is applied, just conditionally: not "not applied".
-        assert!(!has(&results, "patch-not-applied"), "results: {results:?}");
     }
 
     #[test]
@@ -3105,24 +2969,6 @@ Patch0: foo.patch
     }
 
     #[test]
-    fn unversioned_explicit_obsoletes_fires_warning_ref704() {
-        let results = run_mini("Name: foo\nObsoletes: Something\n");
-        let lines = lines_for(&results, "unversioned-explicit-obsoletes");
-        assert_eq!(lines.len(), 1, "results: {results:?}");
-        assert!(
-            lines[0].contains("W: unversioned-explicit-obsoletes Something"),
-            "line: {}",
-            lines[0]
-        );
-        // A versioned Obsoletes stays quiet, even with an odd range.
-        let versioned = run_mini("Name: foo\nObsoletes: %{name} <= %{version}\n");
-        assert!(
-            !has(&versioned, "unversioned-explicit-obsoletes"),
-            "results: {versioned:?}"
-        );
-    }
-
-    #[test]
     fn rpm_buildroot_usage_fires_error_ref164() {
         let results = run_mini("Name: foo\n%prep\necho $RPM_BUILD_ROOT\n");
         let lines = lines_for(&results, "rpm-buildroot-usage");
@@ -3223,5 +3069,68 @@ Patch0: foo.patch
             desc.contains("conditional"),
             "explain text missing, got: {desc:?}"
         );
+    }
+
+    /// Deliberately removed findings stay silent. The reference still emits
+    /// each of these, but no shipped distro config treats them as wanted
+    /// signal -- openSUSE's config filters them all, and Fedora's config
+    /// carries them only as commented-out filter lines, never enabled --
+    /// so the port drops them. Every fixture below fired in the reference
+    /// (and in the port before removal); absence is pinned here so a
+    /// reintroduction cannot slip back silently.
+    #[test]
+    fn removed_ifarch_applied_patch_stays_quiet() {
+        let results = run_mini(
+            "Name: foo\nPatch1: Patch1.patch\n%prep\n%build\n%install\n%ifarch\n%patch1 -P 1\n%endif\n",
+        );
+        assert!(
+            !has(&results, "%ifarch-applied-patch"),
+            "results: {results:?}"
+        );
+        // The patch tracking itself is untouched: a conditionally applied
+        // patch is still not "not applied".
+        assert!(!has(&results, "patch-not-applied"), "results: {results:?}");
+    }
+
+    #[test]
+    fn removed_no_buildroot_tag_stays_quiet() {
+        let results = run_mini("Name: foo\n");
+        assert!(!has(&results, "no-buildroot-tag"), "results: {results:?}");
+    }
+
+    #[test]
+    fn removed_hardcoded_path_in_buildroot_tag_stays_quiet() {
+        let results = run_mini("Name: foo\nBuildRoot: /tmp/buildroot\n");
+        assert!(
+            !has(&results, "hardcoded-path-in-buildroot-tag"),
+            "results: {results:?}"
+        );
+    }
+
+    #[test]
+    fn removed_unversioned_explicit_provides_stays_quiet() {
+        let results = run_mini("Name: foo\nProvides: Something\n");
+        assert!(
+            !has(&results, "unversioned-explicit-provides"),
+            "results: {results:?}"
+        );
+    }
+
+    #[test]
+    fn removed_unversioned_explicit_obsoletes_stays_quiet() {
+        let results = run_mini("Name: foo\nObsoletes: Something\n");
+        assert!(
+            !has(&results, "unversioned-explicit-obsoletes"),
+            "results: {results:?}"
+        );
+    }
+
+    #[test]
+    fn removed_setup_not_quiet_stays_quiet() {
+        let results = run_mini("Name: foo\n%prep\n%setup\n");
+        assert!(!has(&results, "setup-not-quiet"), "results: {results:?}");
+        // The neighboring setup-not-in-prep check is untouched: %setup
+        // inside %prep stays quiet there too.
+        assert!(!has(&results, "setup-not-in-prep"), "results: {results:?}");
     }
 }
