@@ -370,7 +370,7 @@ mod tests {
             ),
             (
                 "FilesCheck.toml",
-                "ed990156dea2b92c2fb3e7a75c9ca76f2af3a00bd99d06fde714f6f8a44759c4",
+                "584cf3c568acfbe45651e6000ca983ffc394a27172dd74f940675cf0ff213b35",
             ),
             (
                 "I18NCheck.toml",
@@ -446,7 +446,7 @@ mod tests {
             ),
             (
                 "SpecCheck.toml",
-                "3a123b47e194be8c61f3dac36bcf8670b0516c57f2c0915f5b17527ebf5ce1ee",
+                "350a46c360dea9764299bd9aa09b07690b27db8e8b962b3a9dbec35d74c60b7f",
             ),
             (
                 "SysVInitOnSystemdCheck.toml",
@@ -462,7 +462,7 @@ mod tests {
             ),
             (
                 "TagsCheck.toml",
-                "661a8bb7740b1ad293c95b50918054888aad99d31810ffe703043e2c688f161d",
+                "14f57fd8235f6c9c4b435ff56839509a7b2aa4e6b1358943c6954de0aee7d397",
             ),
             (
                 "TmpFilesCheck.toml",
