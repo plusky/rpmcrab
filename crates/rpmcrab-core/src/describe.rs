@@ -370,7 +370,7 @@ mod tests {
             ),
             (
                 "FilesCheck.toml",
-                "ea2efde3ae65ae29c73d6beb2dc6974028cf6ea69cef7f486e678c54d4dbc111",
+                "0a31a9747d558b3d0d640b0496db4b3b49893e7cc73f75d8207fd65101c26afb",
             ),
             (
                 "I18NCheck.toml",
@@ -462,7 +462,7 @@ mod tests {
             ),
             (
                 "TagsCheck.toml",
-                "efd95f0236a71965e189130e1b22fc06f3bbe0a8165d279a270a992c9a947529",
+                "869045c55c70f88ef35a6fd76eb6f8555ebc5db4c06143229ebf6ce57329dd85",
             ),
             (
                 "TmpFilesCheck.toml",

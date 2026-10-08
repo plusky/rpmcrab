@@ -73,7 +73,6 @@ Filters = [
 # Do not validate package rpm groups
     '.*devel-package-with-non-devel-group.*',
     '.*no-group-tag.*',
-    '.*non-standard-group.*',
 
 # Output filters
     '.*spurious-bracket-in-.*',
@@ -84,13 +83,9 @@ Filters = [
     'incoherent-version-in-changelog',
     ' no-signature',
     ' symlink-crontab-file',  #bnc591431
-    ' without-chkconfig',
     'unstripped-binary-or-object.*\.ko',
-    ' no-chkconfig',
-    ' subsys-not-used',
     ' dangerous-command.*',
     ' setuid-binary.*',
-    'subdir-in-bin /sbin/conf.d/',
     '.* nss_db non-standard-dir-in-var db',
     'non-standard-dir-in-usr openwin',
     'ibcs2 non-standard-dir-in-usr i486-sysv4',
@@ -152,7 +147,6 @@ Filters = [
     'module-without-depmod-postun',
     'postun-with-wrong-depmod',
     'configure-without-libdir-spec',
-    'conffile-without-noreplace-flag /etc/init.d',
     'use-of-RPM_SOURCE_DIR',
     'use-tmp-in-',
     'symlink-contains-up-and-down-segments /var/lib/named',
@@ -180,7 +174,6 @@ Filters = [
     ' requires-on-release',
     ' non-executable-script /etc/profile.d/',
     ' non-executable-script /var/adm/fillup-templates/',
-    ' init-script-name-with-dot ',
     '.* statically-linked-binary /sbin/ldconfig',
     '.* statically-linked-binary /sbin/init',
     'valgrind.* statically-linked-binary',
@@ -202,7 +195,6 @@ Filters = [
     ' no-packager-tag',
     ' unversioned-explicit-provides ',
     ' unversioned-explicit-obsoletes ',
-    ' service-default-enabled ',
     ' non-standard-dir-perm ',
     ' conffile-without-noreplace-flag ',
     ' non-standard-executable-perm ',
@@ -210,17 +202,12 @@ Filters = [
     ' uncompressed-zip ',
     ' %ifarch-applied-patch ',
     ' read-error ',
-    ' init-script-without-chkconfig-postin ',
-    ' init-script-without-chkconfig-preun ',
-    ' postin-without-chkconfig ',
-    ' preun-without-chkconfig ',
     ' no-dependency-on locales',
     ' executable-marked-as-config-file',
     ' log-files-without-logrotate',
     ' hardcoded-prefix-tag',
     ' no-documentation',
     ' multiple-specfiles',
-    ' no-default-runlevel ',
     ' setgid-binary ',
     ' non-readable ',
     ' postin-without-ghost-file-creation ',
@@ -252,9 +239,6 @@ Filters = [
     'W: non-conffile-in-etc /etc/bash_completion.d/',
 
 # Info uses file triggers now (boo#1152169)
-    ' info-files-without-install-info-postin' ,
-    ' postin-without-install-info ',
-    ' info-files-without-install-info-postun ',
 ]
 
 BlockedFilters = [
