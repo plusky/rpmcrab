@@ -31,7 +31,9 @@ Basenames`), which is why legacy packages with such names are rare. So:
    consistent and the *only* anomaly is the file name.
 
 Regenerate with `bash tests/fixtures/nonutf8-basename/build.sh` (needs
-`rpmbuild`; output lands in `input/`). The rebuild is functionally identical
+`rpmbuild`; output lands in `input/`). CI rebuilds it weekly and on fixture changes
+(`.github/workflows/fixtures-rebuild.yml`), failing if the rebuild breaks
+or the result drifts from the committed RPM. The rebuild is functionally identical
 but not byte-identical: rpm orders the signature index entries differently
 between runs, so the digest fields land at different offsets and the sha256
 below changes. Re-check the sha after regenerating.

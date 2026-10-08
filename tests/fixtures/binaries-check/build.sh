@@ -68,7 +68,7 @@ Version:        1.0
 Release:        1
 Summary:        Fixture for BinariesCheck tests
 License:        MIT
-BuildArch:      aarch64
+BuildArch:      %{_target_cpu}
 
 %description
 Test fixture for rpmcrab BinariesCheck.
@@ -94,32 +94,38 @@ chmod 755 %{buildroot}/usr/bin/truncated
 /usr/bin/truncated
 EOF
 
+# The container-side build runs from a file to avoid nested shell quoting:
+# a stray double quote inside `bash -c "..."` silently truncates the payload
+# while the container still exits 0, leaving the stale RPM behind unnoticed.
+# Same idiom as build-dangling-gnuhash.sh.
+cat >"$work/inner.sh" <<'INNER_EOF'
+set -e
+cd /work/src
+gcc -shared -fPIC -z execstack -o libbad.so.1 libbad.c
+gcc -shared -fPIC -z noexecstack -Wl,-soname,libgood.so.1 -o libgood.so.1 libgood.c
+gcc -o setuidbin setuidbin.c
+gcc -Wl,-rpath,/opt/custom/lib -o rpathbin rpathbin.c
+gcc -shared -fPIC -z noexecstack -Wl,-soname,libcryptobad.so -o libcryptobad.so cryptobad.c
+gcc -shared -fPIC -z noexecstack -Wl,-soname,libgnutlswaived.so -o libgnutlswaived.so gnutlswaived.c
+strip libcryptobad.so libgnutlswaived.so
+# The __asm__(".type ..., @function") directives in cryptobad.c /
+# gnutlswaived.c are load-bearing: modern GCC emits undefined imports as
+# NOTYPE, which the forbidden-function scan does not match. If a future
+# toolchain ignores the directives, the fixture silently stops exercising
+# the check and the tests still go green -- fail the build loudly instead.
+readelf --dyn-syms -W libcryptobad.so | grep -q "FUNC.*SSL_CTX_set_cipher_list" \
+    || { echo "fixture broken: SSL_CTX_set_cipher_list is not FUNC" >&2; exit 1; }
+readelf --dyn-syms -W libgnutlswaived.so | grep -q "FUNC.*gnutls_priority_init" \
+    || { echo "fixture broken: gnutls_priority_init is not FUNC" >&2; exit 1; }
+cp /work/src/libbad.so.1 /work/src/libgood.so.1 /work/src/setuidbin /work/src/rpathbin /work/src/libcryptobad.so /work/src/libgnutlswaived.so /work/rpmbuild/SOURCES/
+rpmbuild --define '_topdir /work/rpmbuild' --nosignature -bb /work/rpmbuild/SPECS/fixture.spec
+INNER_EOF
+
 # The image reference (digest-pinned base) lives in Dockerfile so Dependabot's
 # docker ecosystem can bump the pin monthly; build.sh only names the built tag.
 "$podman_bin" build -f "$here/Dockerfile" -t rpmcrab-binaries-check-fixture "$here"
 
-"$podman_bin" run --rm -v "$work:/work:z" rpmcrab-binaries-check-fixture bash -c "
-    set -e
-    cd /work/src
-    gcc -shared -fPIC -z execstack -o libbad.so.1 libbad.c
-    gcc -shared -fPIC -z noexecstack -Wl,-soname,libgood.so.1 -o libgood.so.1 libgood.c
-    gcc -o setuidbin setuidbin.c
-    gcc -Wl,-rpath,/opt/custom/lib -o rpathbin rpathbin.c
-    gcc -shared -fPIC -z noexecstack -Wl,-soname,libcryptobad.so -o libcryptobad.so cryptobad.c
-    gcc -shared -fPIC -z noexecstack -Wl,-soname,libgnutlswaived.so -o libgnutlswaived.so gnutlswaived.c
-    strip libcryptobad.so libgnutlswaived.so
-    # The __asm__(".type ..., @function") directives in cryptobad.c /
-    # gnutlswaived.c are load-bearing: modern GCC emits undefined imports as
-    # NOTYPE, which the forbidden-function scan does not match. If a future
-    # toolchain ignores the directives, the fixture silently stops exercising
-    # the check and the tests still go green -- fail the build loudly instead.
-    readelf --dyn-syms -W libcryptobad.so | grep -q "FUNC.*SSL_CTX_set_cipher_list" \
-        || { echo "fixture broken: SSL_CTX_set_cipher_list is not FUNC" >&2; exit 1; }
-    readelf --dyn-syms -W libgnutlswaived.so | grep -q "FUNC.*gnutls_priority_init" \
-        || { echo "fixture broken: gnutls_priority_init is not FUNC" >&2; exit 1; }
-    cp /work/src/libbad.so.1 /work/src/libgood.so.1 /work/src/setuidbin /work/src/rpathbin /work/src/libcryptobad.so /work/src/libgnutlswaived.so /work/rpmbuild/SOURCES/
-    rpmbuild --define '_topdir /work/rpmbuild' --nosignature -bb /work/rpmbuild/SPECS/fixture.spec
-"
+"$podman_bin" run --rm -v "$work:/work:z" rpmcrab-binaries-check-fixture bash /work/inner.sh
 
 built="$(find "$work/rpmbuild/RPMS" -name 'rpmcrab-binaries-fixture-*.rpm' -print -quit)"
 [ -n "$built" ] || { echo "rpmbuild produced no package" >&2; exit 1; }
