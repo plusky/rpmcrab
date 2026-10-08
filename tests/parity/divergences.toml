@@ -1278,6 +1278,33 @@ check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
 since = "0.1.0"
+[[divergence]]
+case = "global"
+check = "not-standard-release-extension"
+kind = "missing"
+reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs as autobuild redundancy (the build systems enforce release-tag hygiene, so the lint can never be actionable in a pipeline). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its in-code `--explain` detail, and the dedicated tests are removed; a negative pin in the TagsCheck tests keeps the absence pinned under `cargo test`. The `ReleaseExtension` catalog stays: it still tolerates dist suffixes in the changelog version comparison. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "executable-in-library-package"
+kind = "missing"
+reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs (Fedora enables SharedLibraryPolicyCheck but filters this diagnostic, enforcing the policy in the build pipeline instead). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; a negative pin in the BinariesCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "non-versioned-file-in-library-package"
+kind = "missing"
+reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs (Fedora enables SharedLibraryPolicyCheck but filters this diagnostic, enforcing the policy in the build pipeline instead). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; a negative pin in the BinariesCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "no-packager-tag"
+kind = "missing"
+reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs as pure build-pipeline redundancy (Fedora copied openSUSE's autobuild rationale verbatim; the build system stamps the packager itself). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; the exact-list TagsCheck fixture test keeps the absence pinned under `cargo test`. The reference still emits it."
+since = "0.1.0"
 
 [[divergence]]
 case = "global"
@@ -1314,3 +1341,11 @@ check = "info-files-without-install-info-postun"
 kind = "missing"
 reason = "Intentional: info-dir maintenance is handled by file triggers (install-info is a no-op scriptlet call on modern systems), so policing install-info calls in %postun is obsolete. The staged `--explain` entry was removed with the finding: not emitted: no description for a finding that is absent."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "no-signature"
+kind = "missing"
+reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs. Koji signs after the build, so every build-pipeline RPM is unsigned at lint time and the finding can never be actionable there. The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; a negative pin in the SignatureCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
+since = "0.1.0"
+

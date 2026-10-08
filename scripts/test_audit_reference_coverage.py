@@ -964,6 +964,14 @@ def test_stale_check_catches_name_keyed_entry():
         "postin-with-wrong-depmod",
         "postun-with-wrong-depmod",
         "shared-library-not-executable",
+        # Deliberately removed: suppressed by both the openSUSE and Fedora
+        # distro configs as autobuild redundancy (Fedora/Koji use none of
+        # these; see hidden_files/autobuild-fedora-koji.md).
+        "not-standard-release-extension",
+        "executable-in-library-package",
+        "non-versioned-file-in-library-package",
+        "no-packager-tag",
+        "no-signature",
     }, names
     assert all(e.get("case") == "global" for e in missing), [
         (e.get("case"), e.get("check")) for e in missing]

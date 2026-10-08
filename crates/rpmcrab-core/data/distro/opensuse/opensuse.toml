@@ -63,10 +63,7 @@ Filters = [
 # Stuff autobuild takes care about
     '.*invalid-version.*',
     '.*invalid-packager.*',
-    '.*not-standard-release-extension.*',
     '.*invalid-buildhost.*',
-    '.*executable-in-library-package.*',
-    '.*non-versioned-file-in-library-package.*',
     '.*hardcoded-path-in-buildroot-tag.*',
     '.*no-buildroot-tag.*',
 
@@ -81,7 +78,6 @@ Filters = [
     ' dir-or-file-in-usr-local ',  # handled by CheckFilelist.py
     ' non-standard-dir-in-usr ',  # handled by CheckFilelist.py
     'incoherent-version-in-changelog',
-    ' no-signature',
     ' symlink-crontab-file',  #bnc591431
     'unstripped-binary-or-object.*\.ko',
     ' dangerous-command.*',
@@ -188,7 +184,6 @@ Filters = [
     ' prereq-use ',
 
 # An issue with OBS, works with autobuild
-    ' no-packager-tag',
     ' unversioned-explicit-provides ',
     ' unversioned-explicit-obsoletes ',
     ' non-standard-dir-perm ',

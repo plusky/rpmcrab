@@ -1465,20 +1465,6 @@ fn explain_staged_shared_library_policy_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `SignatureCheck.toml` resolves `no-signature` instead of "Unknown message".
-#[test]
-fn explain_staged_signature_check() {
-    let out = rpmcrab(&["-e", "no-signature"]);
-    assert_eq!(out.status.code(), Some(0));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(
-        stdout,
-        "no-signature:\nYou have to include your pgp or gpg signature in your package.\n\n\n",
-        "exact --explain stdout",
-    );
-    assert!(out.stderr.is_empty());
-}
-
 /// `--explain`: staged `SpecCheck.toml` resolves `no-spec-file` instead of "Unknown message".
 #[test]
 fn explain_staged_spec_check() {
