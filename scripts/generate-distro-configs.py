@@ -35,6 +35,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -190,11 +191,15 @@ PRUNE_PACKAGES = {
 # package is checked live at generation time: a reintroduced "removed"
 # package - or a vanished "moved" package, whose relocation evidence is then
 # stale - keeps the path and logs loudly, so the drift check fails for a
-# fresh audit instead of the path staying silently pruned.
+# fresh audit instead of the path staying silently pruned. "moved" entries are
+# additionally checked at filelist level at generation time: an old path that
+# still ships in the current Factory filelist is kept with a loud log, and
+# the Leap 16.0 filelists are checked the same way as the SLES proxy (Leap
+# 16 is SLES-based and public; SLE sources sit behind Customer Center auth).
 # Verified 2026-10-07 against the openSUSE:Factory filelists (97 paths shipped
-# by no TW package). Pruning is scoped to the opensuse flavor: the evidence
-# is Factory-only, and the SLE 16 codebase behind the slfo flavor has no
-# public per-package query to verify against.
+# by no TW package). Pruning is scoped to the opensuse flavor: the per-package
+# evidence is Factory-only, and the SLE 16 codebase behind the slfo flavor
+# has no public per-package query to verify against.
 PRUNE_PIE_PATHS = {
     "/usr/bin/achfile": ("netatalk", "removed", "netatalk removed from Factory"),
     "/usr/bin/adv1tov2": ("netatalk", "removed", "netatalk removed from Factory"),
@@ -488,6 +493,158 @@ def package_present(pkg, flavor):
     return _package_presence_cache[key]
 
 
+_filelist_cache_tw = {}
+_filelist_cache_leap = {}
+
+
+def _filelist_hits(paths, repomd_url, repo_base, cache, label):
+    """Subset of `paths` still shipped by some package in a repo's filelists.
+
+    Streams the repo's oss filelists through one ``curl | zstd -dc | grep``
+    pass, matching ``>path<`` against ``<file>path</file>`` entries so
+    only exact paths hit. Results are cached per path for the run.
+    Raises on download/decompression/grep failure: an unverifiable guard
+    must fail loudly, never prune silently.
+    """
+    paths = sorted(set(paths))
+    missing = [p for p in paths if p not in cache]
+    if missing:
+        req = urllib.request.Request(
+            repomd_url, headers={"User-Agent": "rpmcrab-distro-config-sync"}
+        )
+        # Transient mirror errors (5xx) are retried: a single failed fetch
+        # must not fail the whole run when the mirror is briefly down.
+        repomd = None
+        last_err = None
+        for attempt in range(4):
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    repomd = resp.read().decode("utf-8")
+                break
+            except urllib.error.HTTPError as e:
+                last_err = e
+                if e.code < 500:
+                    raise
+                time.sleep(15 * (attempt + 1))
+        if repomd is None:
+            raise RuntimeError(
+                "repomd.xml fetch failed for %s after retries: %s" % (label, last_err)
+            )
+        m = re.search(
+            r'<data type="filelists">.*?<location href="([^"]+)"', repomd, re.S
+        )
+        if not m:
+            raise RuntimeError("filelists entry not found in %s repomd.xml" % label)
+        fl_url = repo_base + m.group(1)
+        args = []
+        for q in missing:
+            args += ["-e", ">%s<" % q]
+        # Every stage must succeed: checking only grep's return code lets a
+        # failed download prune everything this guard verifies. -f makes
+        # HTTP errors catchable; --show-error keeps the message (captured
+        # below) diagnosable. The speed-limit/speed-time pair stalls out a
+        # hung mirror instead of hanging the job: a transfer under 50KB/s
+        # for 60s aborts and retries, while a merely slow mirror is allowed
+        # to finish - a hard --max-time would kill legitimate slow
+        # downloads (100KB/s observed from a mirror).
+        curl = subprocess.Popen(
+            [
+                "curl",
+                "-fsSL",
+                "--show-error",
+                "--connect-timeout",
+                "60",
+                "--retry",
+                "3",
+                "--retry-all-errors",
+                "--speed-limit",
+                "50000",
+                "--speed-time",
+                "60",
+                fl_url,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        zstd = subprocess.Popen(
+            ["zstd", "-dc"], stdin=curl.stdout, stdout=subprocess.PIPE
+        )
+        curl.stdout.close()
+        grep = subprocess.run(
+            ["grep", "-F", "-o"] + args,
+            stdin=zstd.stdout,
+            capture_output=True,
+            text=True,
+        )
+        zstd.stdout.close()
+        curl_rc = curl.wait()
+        zstd_rc = zstd.wait()
+        curl_err = curl.stderr.read().decode("utf-8", "replace").strip()
+        if curl_rc != 0:
+            raise RuntimeError(
+                "filelist download failed (curl rc=%d) for %s: %s"
+                % (curl_rc, label, curl_err[:300])
+            )
+        if zstd_rc != 0:
+            raise RuntimeError(
+                "filelist decompression failed (zstd rc=%d) for %s"
+                % (zstd_rc, label)
+            )
+        if grep.returncode not in (0, 1):
+            raise RuntimeError(
+                "filelist grep failed (rc=%d): %s"
+                % (grep.returncode, grep.stderr[:200])
+            )
+        hits = {
+            line[1:-1]
+            for line in grep.stdout.splitlines()
+            if line.startswith(">") and line.endswith("<")
+        }
+        for q in missing:
+            cache[q] = q in hits
+    return {p for p in paths if cache[p]}
+
+
+def factory_filelist_hits(paths):
+    """Subset of `paths` still shipped by some openSUSE:Factory package.
+
+    Streams the Tumbleweed oss filelists - the same source the original
+    pie-path verification used.
+    """
+    return _filelist_hits(
+        paths,
+        "https://download.opensuse.org/tumbleweed/repo/oss/repodata/repomd.xml",
+        "https://download.opensuse.org/tumbleweed/repo/oss/",
+        _filelist_cache_tw,
+        "Tumbleweed",
+    )
+
+
+def leap_filelist_hits(paths):
+    """Subset of `paths` still shipped by some Leap 16.0 package.
+
+    Leap 16 is SLES-based, so its public filelists serve as the proxy
+    for the SLE 16 codebase behind the slfo flavor, whose own sources
+    sit behind SUSE Customer Center auth.
+    """
+    return _filelist_hits(
+        paths,
+        "https://download.opensuse.org/distribution/leap/16.0/repo/oss/repodata/repomd.xml",
+        "https://download.opensuse.org/distribution/leap/16.0/repo/oss/",
+        _filelist_cache_leap,
+        "Leap 16.0",
+    )
+
+
+# Filelist evidence per flavor: each flavor consults only its own distro
+# codebase. A flavor without an entry fails loudly instead of silently
+# misapplying another flavor's evidence.
+FLAVOR_FILELIST_SOURCES = {
+    "opensuse": (("Factory", factory_filelist_hits),),
+    "slfo": (("Leap 16.0 (SLES proxy)", leap_filelist_hits),),
+}
+
+
 _package_re = re.compile(r'^package\s*=\s*"([^"]+)"', re.MULTILINE)
 _packages_re = re.compile(r"^packages\s*=\s*\[(.*?)\]", re.MULTILINE | re.DOTALL)
 
@@ -559,28 +716,55 @@ def prune_pie_paths(text, pruned_log, flavor):
     package - or a vanished "moved" package, whose relocation evidence is
     then stale - keeps the path and logs loudly, so the drift check fails
     for a fresh audit instead of the path staying silently pruned.
+
+    "moved" entries get a second, filelist-level check against the
+    flavor's own distro codebase (FLAVOR_FILELIST_SOURCES): the old path
+    must not still be shipped there - the opensuse flavor checks the
+    Tumbleweed filelists, slfo checks Leap 16.0 (SLES proxy: Leap 16 is
+    SLES-based and its filelists are public, while SLE sources sit behind
+    Customer Center auth). A reappearing old path is kept with a loud log
+    for the same reason.
     """
-    out = []
+    entries = []
+    moved_paths = []
     for line in text.splitlines(keepends=True):
         m = re.fullmatch(r'"([^"]+)",?', line.strip())
         norm = _usrmerge_norm(m.group(1)) if m else None
         if m and norm in PRUNE_PIE_PATHS:
             pkg, kind, reason = PRUNE_PIE_PATHS[norm]
-            present = package_present(pkg, flavor)
-            if (kind == "removed" and present) or (kind == "moved" and not present):
-                pruned_log.append(
-                    "pie-executables: KEPT stale path %r - owning package %r "
-                    "changed state in the flavor's distro (%s), needs a fresh "
-                    "audit" % (m.group(1), pkg, reason)
-                )
-                out.append(line)
-                continue
-            pruned_log.append(
-                "pie-executables: dropped stale path %r (%s)"
-                % (m.group(1), reason)
-            )
+            entries.append((line, m.group(1), norm, pkg, kind, reason))
+            if kind == "moved":
+                moved_paths.append(norm)
+        else:
+            entries.append((line, None, None, None, None, None))
+    shipped = {}
+    for label, source in FLAVOR_FILELIST_SOURCES[flavor]:
+        for path in source(moved_paths):
+            shipped.setdefault(path, label)
+    out = []
+    for line, raw, norm, pkg, kind, reason in entries:
+        if raw is None:
+            out.append(line)
             continue
-        out.append(line)
+        present = package_present(pkg, flavor)
+        if (kind == "removed" and present) or (kind == "moved" and not present):
+            pruned_log.append(
+                "pie-executables: KEPT stale path %r - owning package %r "
+                "changed state in the flavor's distro (%s), needs a fresh "
+                "audit" % (raw, pkg, reason)
+            )
+            out.append(line)
+            continue
+        if kind == "moved" and norm in shipped:
+            pruned_log.append(
+                "pie-executables: KEPT stale path %r - old path still shipped "
+                "in %s, needs a fresh audit" % (raw, shipped[norm])
+            )
+            out.append(line)
+            continue
+        pruned_log.append(
+            "pie-executables: dropped stale path %r (%s)" % (raw, reason)
+        )
     return "".join(out)
 
 
