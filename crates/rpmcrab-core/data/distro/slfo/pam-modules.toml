@@ -1,13 +1,4 @@
 [[FileDigestGroup]]
-package = "rpmlint-integration-test"
-type = "pam"
-note = "test whitelisting entry for the OBS integration test package"
-bug = "bsc#1188704"
-nodigests = [
-    "glob:*/security/pam_rpmlint.so",
-]
-
-[[FileDigestGroup]]
 package = "pam_krb5"
 type = "pam"
 note = "legacy: not audited"
@@ -78,14 +69,6 @@ nodigests = [
 ]
 
 [[FileDigestGroup]]
-package = "pam_ccreds"
-type = "pam"
-note = "legacy: not audited"
-nodigests = [
-    "glob:*/security/pam_ccreds.so",
-]
-
-[[FileDigestGroup]]
 package = "pam_radius"
 type = "pam"
 note = "legacy: not audited"
@@ -99,22 +82,6 @@ type = "pam"
 note = "legacy: not audited"
 nodigests = [
     "glob:*/security/pam_pkcs11.so",
-]
-
-[[FileDigestGroup]]
-package = "nss-pam-ldapd"
-type = "pam"
-note = "legacy: not audited"
-nodigests = [
-    "glob:*/security/pam_ldap.so",
-]
-
-[[FileDigestGroup]]
-package = "pam_passwdqc"
-type = "pam"
-note = "legacy: not audited"
-nodigests = [
-    "glob:*/security/pam_passwdqc.so",
 ]
 
 [[FileDigestGroup]]
@@ -281,22 +248,6 @@ nodigests = [
 ]
 
 [[FileDigestGroup]]
-package = "pam_mktemp"
-type = "pam"
-note = "legacy: not audited"
-nodigests = [
-    "glob:*/security/pam_mktemp.so",
-]
-
-[[FileDigestGroup]]
-package = "pam_chroot"
-type = "pam"
-note = "legacy: not audited"
-nodigests = [
-    "glob:*/security/pam_chroot.so",
-]
-
-[[FileDigestGroup]]
 package = "pam_snapper"
 type = "pam"
 note = "imported from rpmlint1 PAMModules.WhiteList"
@@ -331,15 +282,6 @@ note = "imported from rpmlint1 PAMModules.WhiteList"
 bug = "bsc#1039848"
 nodigests = [
     "glob:*/security/pam_script.so",
-]
-
-[[FileDigestGroup]]
-package = "pam_yubico"
-type = "pam"
-note = "imported from rpmlint1 PAMModules.WhiteList"
-bug = "bsc#1087060"
-nodigests = [
-    "glob:*/security/pam_yubico.so",
 ]
 
 [[FileDigestGroup]]
@@ -516,15 +458,6 @@ nodigests = [
 ]
 
 [[FileDigestGroup]]
-package = "pam_saslauthd"
-type = "pam"
-note = "Connects to a local cyrus-saslauthd for authentication"
-bug = "bsc#1205459"
-nodigests = [
-    "glob:*/security/pam_saslauthd.so",
-]
-
-[[FileDigestGroup]]
 package = "lastlog2"
 type = "pam"
 note = "Logs user session information to an sqlite3 database"
@@ -551,11 +484,3 @@ nodigests = [
     "glob:*/security/pam_himmelblau.so",
 ]
 
-[[FileDigestGroup]]
-package  = "libcgroup-pam"
-note     = "session PAM module that places the login process into a cgroup according to configuration"
-bug      = "bsc#1231381"
-type     = "pam"
-nodigests = [
-    "glob:*/security/pam_cgroup.so",
-]

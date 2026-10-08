@@ -40,11 +40,11 @@ pub struct PkgFile {
     /// libmagic description (`_calc_magic`); starts as the header's `FILECLASS`.
     pub magic: String,
     pub filecaps: Option<String>,
-    /// Per-file `Requires` (from `FILEREQUIRE`) — unparsed until the checks that consume them (`PostCheck`,
-    /// `FileDigestCheck`) are ported; empty.
+    /// Per-file `Requires`, parsed from the `FILEREQUIRE` dep-line string
+    /// (rpmlint `Pkg._gather_files`).
     pub requires: Vec<crate::pkg::dep::DepInfo>,
-    /// Per-file `Provides` (from `FILEPROVIDE`) — unparsed until the checks that consume them (`PostCheck`,
-    /// `FileDigestCheck`) are ported; empty.
+    /// Per-file `Provides`, parsed from the `FILEPROVIDE` dep-line string
+    /// (rpmlint `Pkg._gather_files`).
     pub provides: Vec<crate::pkg::dep::DepInfo>,
 }
 

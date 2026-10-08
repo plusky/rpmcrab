@@ -706,12 +706,17 @@ impl TagsCheck {
             add_info(out, Level::Error, pkg, "summary-on-multiple-lines", &d);
         }
         let first_word = summary.split(' ').next().unwrap_or("");
-        let capitalized = summary
+        // Reference parity: `summary[0] != summary[0].upper()` warns only
+        // when the first char is actually lowercase; digits and other
+        // non-letters never warn. Unicode titlecase letters (e.g. U+01C5)
+        // warn too, so compare against the uppercase form rather than
+        // `is_lowercase()`.
+        let lowercase_first = summary
             .chars()
             .next()
-            .map(|c| c.is_uppercase())
+            .map(|c| c.to_uppercase().next() != Some(c))
             .unwrap_or(false);
-        if !capitalized && !CAPITALIZED_IGNORE_LIST.contains(&first_word) {
+        if lowercase_first && !CAPITALIZED_IGNORE_LIST.contains(&first_word) {
             let mut d: Vec<&str> = Vec::new();
             if let Some(l) = lang_err {
                 d.push(l);
@@ -2301,6 +2306,44 @@ mod tests {
     }
 
     #[test]
+    fn summary_not_capitalized_ignores_digit_leading() {
+        // Reference parity: `summary[0] != summary[0].upper()` only warns
+        // when the first char is actually lowercase; a digit (or other
+        // non-letter) first char never warns.
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-badsummary-1.0-1.noarch.rpm");
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = TagsCheck::new(&config);
+        for summary in ["389 Directory Server", "7zip archiver"] {
+            check.check_summary(&pkg, &mut out, summary, "C", &[]);
+        }
+        let results = out.results().to_vec();
+        assert!(
+            results.is_empty(),
+            "digit-leading summary must not warn at all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn summary_not_capitalized_still_warns_on_lowercase() {
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-badsummary-1.0-1.noarch.rpm");
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = TagsCheck::new(&config);
+        check.check_summary(&pkg, &mut out, "lowercase summary", "C", &[]);
+        let results = out.results().to_vec();
+        let hits: Vec<_> = results
+            .iter()
+            .filter(|(n, _)| n == "summary-not-capitalized")
+            .collect();
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert_eq!(
+            hits[0].1,
+            "tags-emission-pins-badsummary.noarch: W: summary-not-capitalized lowercase summary"
+        );
+    }
+
+    #[test]
     fn summary_on_multiple_lines_emits() {
         let (_tmp, pkg) = fixture_pkg("tags-emission-pins-multiline-1.0-1.noarch.rpm");
         let results = run_check(&pkg);
@@ -2438,6 +2481,36 @@ mod tests {
         let results = run_check_with(&config, &pkg);
         assert!(
             tag_hits(&results, "not-standard-release-extension").is_empty(),
+            "must stay silent: {results:?}"
+        );
+    }
+
+    /// Negative pin for the deleted `no-group-tag` finding: a package with
+    /// an empty Group tag must stay silent, and `cargo test` (not just the
+    /// reference-coverage auditor) must catch a re-add.
+    #[test]
+    fn killed_no_group_tag_stays_absent() {
+        // The filescheck fixtures ship no Group tag at all.
+        let (_tmp, pkg) = fixture_pkg("filescheck-depmod-missing-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        assert!(
+            tag_hits(&results, "no-group-tag").is_empty(),
+            "must stay silent: {results:?}"
+        );
+    }
+
+    /// Negative pin for the deleted `devel-package-with-non-devel-group`
+    /// finding: a -devel package outside Development/ must stay silent,
+    /// and `cargo test` (not just the reference-coverage auditor) must
+    /// catch a re-add.
+    #[test]
+    fn killed_devel_package_with_non_devel_group_stays_absent() {
+        // tags-group-devel is grouped as System/Libraries; the old emission fired
+        // on exactly this shape.
+        let (_tmp, pkg) = fixture_pkg("tags-group-devel-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        assert!(
+            tag_hits(&results, "devel-package-with-non-devel-group").is_empty(),
             "must stay silent: {results:?}"
         );
     }

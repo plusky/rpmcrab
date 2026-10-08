@@ -178,10 +178,10 @@ mod tests {
     #[test]
     fn session_banner_is_80_wide() {
         // Matches the captured banner byte for byte.
-        let banner = string_center("rpmlint session starts", '=', 80);
+        let banner = string_center("rpmcrab session starts", '=', 80);
         assert_eq!(
             banner,
-            "============================ rpmlint session starts ============================"
+            "============================ rpmcrab session starts ============================"
         );
         assert_eq!(banner.chars().count(), 80);
     }
@@ -237,8 +237,8 @@ mod tests {
 
     #[test]
     fn session_banner_names_prog() {
-        // The session banner is parameterized by argv[0]; the header must
-        // greet with the program name it was given.
+        // The session banner identifies the program itself; the header must
+        // greet with the program's own name.
         let color = crate::color::Color::for_tty(false);
         let params = crate::report::HeaderParams {
             prog: "rpmcrab",

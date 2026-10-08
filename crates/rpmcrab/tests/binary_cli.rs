@@ -537,6 +537,7 @@ fn format_json_emits_parseable_report() {
     let doc: serde_json::Value =
         serde_json::from_str(&stdout).expect("stdout must be a JSON document");
     assert_eq!(doc["program"], "rpmcrab");
+    assert_eq!(doc["version"], env!("CARGO_PKG_VERSION"));
     let findings = doc["findings"].as_array().expect("findings array");
     assert!(!findings.is_empty(), "expected findings");
     for f in findings {
