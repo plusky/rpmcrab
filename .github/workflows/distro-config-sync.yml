@@ -29,6 +29,10 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The generator streams repo filelists through curl | zstd; declare
+      # them instead of relying on the runner image shipping both.
+      - name: Install generator dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq curl zstd
       - name: Regenerate distro configs from latest upstream
         id: regen
         run: |

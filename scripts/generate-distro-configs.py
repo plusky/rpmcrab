@@ -522,7 +522,26 @@ def _filelist_hits(paths, repomd_url, repo_base, cache, label):
         args = []
         for q in missing:
             args += ["-e", ">%s<" % q]
-        curl = subprocess.Popen(["curl", "-sL", fl_url], stdout=subprocess.PIPE)
+        # Every stage must succeed: checking only grep's return code lets a
+        # failed download prune everything this guard verifies.
+        curl = subprocess.Popen(
+            [
+                "curl",
+                "-fsSL",
+                "--retry",
+                "3",
+                "--retry-all-errors",
+                # Stall out a hung mirror instead of hanging the job.
+                "--max-time",
+                "600",
+                "--speed-limit",
+                "10240",
+                "--speed-time",
+                "60",
+                fl_url,
+            ],
+            stdout=subprocess.PIPE,
+        )
         zstd = subprocess.Popen(
             ["zstd", "-dc"], stdin=curl.stdout, stdout=subprocess.PIPE
         )
@@ -534,8 +553,18 @@ def _filelist_hits(paths, repomd_url, repo_base, cache, label):
             text=True,
         )
         zstd.stdout.close()
-        curl.wait()
-        zstd.wait()
+        curl_rc = curl.wait()
+        zstd_rc = zstd.wait()
+        if curl_rc != 0:
+            raise RuntimeError(
+                "filelist download failed (curl rc=%d) for %s"
+                % (curl_rc, label)
+            )
+        if zstd_rc != 0:
+            raise RuntimeError(
+                "filelist decompression failed (zstd rc=%d) for %s"
+                % (zstd_rc, label)
+            )
         if grep.returncode not in (0, 1):
             raise RuntimeError(
                 "filelist grep failed (rc=%d): %s"
@@ -580,6 +609,15 @@ def leap_filelist_hits(paths):
         _filelist_cache_leap,
         "Leap 16.0",
     )
+
+
+# Filelist evidence per flavor: each flavor consults only its own distro
+# codebase. A flavor without an entry fails loudly instead of silently
+# misapplying another flavor's evidence.
+FLAVOR_FILELIST_SOURCES = {
+    "opensuse": (("Factory", factory_filelist_hits),),
+    "slfo": (("Leap 16.0 (SLES proxy)", leap_filelist_hits),),
+}
 
 
 _package_re = re.compile(r'^package\s*=\s*"([^"]+)"', re.MULTILINE)
@@ -654,12 +692,13 @@ def prune_pie_paths(text, pruned_log, flavor):
     then stale - keeps the path and logs loudly, so the drift check fails
     for a fresh audit instead of the path staying silently pruned.
 
-    "moved" entries get a second, filelist-level check: the old path must
-    not still be shipped by any Factory package (Tumbleweed filelists,
-    the same source the original verification used) nor by any Leap 16.0
-    package (SLES proxy: Leap 16 is SLES-based and its filelists are
-    public, while SLE sources sit behind Customer Center auth). A
-    reappearing old path is kept with a loud log for the same reason.
+    "moved" entries get a second, filelist-level check against the
+    flavor's own distro codebase (FLAVOR_FILELIST_SOURCES): the old path
+    must not still be shipped there - the opensuse flavor checks the
+    Tumbleweed filelists, slfo checks Leap 16.0 (SLES proxy: Leap 16 is
+    SLES-based and its filelists are public, while SLE sources sit behind
+    Customer Center auth). A reappearing old path is kept with a loud log
+    for the same reason.
     """
     entries = []
     moved_paths = []
@@ -673,8 +712,10 @@ def prune_pie_paths(text, pruned_log, flavor):
                 moved_paths.append(norm)
         else:
             entries.append((line, None, None, None, None, None))
-    shipped_tw = factory_filelist_hits(moved_paths)
-    shipped_leap = leap_filelist_hits(moved_paths)
+    shipped = {}
+    for label, source in FLAVOR_FILELIST_SOURCES[flavor]:
+        for path in source(moved_paths):
+            shipped.setdefault(path, label)
     out = []
     for line, raw, norm, pkg, kind, reason in entries:
         if raw is None:
@@ -689,17 +730,10 @@ def prune_pie_paths(text, pruned_log, flavor):
             )
             out.append(line)
             continue
-        if kind == "moved" and norm in shipped_tw:
+        if kind == "moved" and norm in shipped:
             pruned_log.append(
                 "pie-executables: KEPT stale path %r - old path still shipped "
-                "by a Factory package, needs a fresh audit" % raw
-            )
-            out.append(line)
-            continue
-        if kind == "moved" and norm in shipped_leap:
-            pruned_log.append(
-                "pie-executables: KEPT stale path %r - old path still shipped "
-                "by a Leap 16.0 package (SLES proxy), needs a fresh audit" % raw
+                "in %s, needs a fresh audit" % (raw, shipped[norm])
             )
             out.append(line)
             continue
