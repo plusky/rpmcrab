@@ -192,11 +192,13 @@ PRUNE_PACKAGES = {
 # stale - keeps the path and logs loudly, so the drift check fails for a
 # fresh audit instead of the path staying silently pruned. "moved" entries are
 # additionally checked at filelist level at generation time: an old path that
-# still ships in the current Factory filelist is kept with a loud log.
+# still ships in the current Factory filelist is kept with a loud log, and
+# the Leap 16.0 filelists are checked the same way as the SLES proxy (Leap
+# 16 is SLES-based and public; SLE sources sit behind Customer Center auth).
 # Verified 2026-10-07 against the openSUSE:Factory filelists (97 paths shipped
-# by no TW package). Pruning is scoped to the opensuse flavor: the evidence
-# is Factory-only, and the SLE 16 codebase behind the slfo flavor has no
-# public per-package query to verify against.
+# by no TW package). Pruning is scoped to the opensuse flavor: the per-package
+# evidence is Factory-only, and the SLE 16 codebase behind the slfo flavor
+# has no public per-package query to verify against.
 PRUNE_PIE_PATHS = {
     "/usr/bin/achfile": ("netatalk", "removed", "netatalk removed from Factory"),
     "/usr/bin/adv1tov2": ("netatalk", "removed", "netatalk removed from Factory"),
@@ -490,25 +492,22 @@ def package_present(pkg, flavor):
     return _package_presence_cache[key]
 
 
-_filelist_cache = {}
+_filelist_cache_tw = {}
+_filelist_cache_leap = {}
 
 
-def factory_filelist_hits(paths):
-    """Subset of `paths` still shipped by some openSUSE:Factory package.
+def _filelist_hits(paths, repomd_url, repo_base, cache, label):
+    """Subset of `paths` still shipped by some package in a repo's filelists.
 
-    Streams the Tumbleweed oss filelists - the same source the original
-    pie-path verification used - through one ``curl | zstd -dc | grep``
+    Streams the repo's oss filelists through one ``curl | zstd -dc | grep``
     pass, matching ``>path<`` against ``<file>path</file>`` entries so
     only exact paths hit. Results are cached per path for the run.
     Raises on download/decompression/grep failure: an unverifiable guard
     must fail loudly, never prune silently.
     """
     paths = sorted(set(paths))
-    missing = [p for p in paths if p not in _filelist_cache]
+    missing = [p for p in paths if p not in cache]
     if missing:
-        repomd_url = (
-            "https://download.opensuse.org/tumbleweed/repo/oss/repodata/repomd.xml"
-        )
         req = urllib.request.Request(
             repomd_url, headers={"User-Agent": "rpmcrab-distro-config-sync"}
         )
@@ -518,8 +517,8 @@ def factory_filelist_hits(paths):
             r'<data type="filelists">.*?<location href="([^"]+)"', repomd, re.S
         )
         if not m:
-            raise RuntimeError("filelists entry not found in Tumbleweed repomd.xml")
-        fl_url = "https://download.opensuse.org/tumbleweed/repo/oss/" + m.group(1)
+            raise RuntimeError("filelists entry not found in %s repomd.xml" % label)
+        fl_url = repo_base + m.group(1)
         args = []
         for q in missing:
             args += ["-e", ">%s<" % q]
@@ -548,8 +547,39 @@ def factory_filelist_hits(paths):
             if line.startswith(">") and line.endswith("<")
         }
         for q in missing:
-            _filelist_cache[q] = q in hits
-    return {p for p in paths if _filelist_cache[p]}
+            cache[q] = q in hits
+    return {p for p in paths if cache[p]}
+
+
+def factory_filelist_hits(paths):
+    """Subset of `paths` still shipped by some openSUSE:Factory package.
+
+    Streams the Tumbleweed oss filelists - the same source the original
+    pie-path verification used.
+    """
+    return _filelist_hits(
+        paths,
+        "https://download.opensuse.org/tumbleweed/repo/oss/repodata/repomd.xml",
+        "https://download.opensuse.org/tumbleweed/repo/oss/",
+        _filelist_cache_tw,
+        "Tumbleweed",
+    )
+
+
+def leap_filelist_hits(paths):
+    """Subset of `paths` still shipped by some Leap 16.0 package.
+
+    Leap 16 is SLES-based, so its public filelists serve as the proxy
+    for the SLE 16 codebase behind the slfo flavor, whose own sources
+    sit behind SUSE Customer Center auth.
+    """
+    return _filelist_hits(
+        paths,
+        "https://download.opensuse.org/distribution/leap/16.0/repo/oss/repodata/repomd.xml",
+        "https://download.opensuse.org/distribution/leap/16.0/repo/oss/",
+        _filelist_cache_leap,
+        "Leap 16.0",
+    )
 
 
 _package_re = re.compile(r'^package\s*=\s*"([^"]+)"', re.MULTILINE)
@@ -625,9 +655,11 @@ def prune_pie_paths(text, pruned_log, flavor):
     for a fresh audit instead of the path staying silently pruned.
 
     "moved" entries get a second, filelist-level check: the old path must
-    not still be shipped by any Factory package (same filelists source the
-    original verification used). A reappearing old path is kept with a loud
-    log for the same reason.
+    not still be shipped by any Factory package (Tumbleweed filelists,
+    the same source the original verification used) nor by any Leap 16.0
+    package (SLES proxy: Leap 16 is SLES-based and its filelists are
+    public, while SLE sources sit behind Customer Center auth). A
+    reappearing old path is kept with a loud log for the same reason.
     """
     entries = []
     moved_paths = []
@@ -641,7 +673,8 @@ def prune_pie_paths(text, pruned_log, flavor):
                 moved_paths.append(norm)
         else:
             entries.append((line, None, None, None, None, None))
-    shipped = factory_filelist_hits(moved_paths)
+    shipped_tw = factory_filelist_hits(moved_paths)
+    shipped_leap = leap_filelist_hits(moved_paths)
     out = []
     for line, raw, norm, pkg, kind, reason in entries:
         if raw is None:
@@ -656,10 +689,17 @@ def prune_pie_paths(text, pruned_log, flavor):
             )
             out.append(line)
             continue
-        if kind == "moved" and norm in shipped:
+        if kind == "moved" and norm in shipped_tw:
             pruned_log.append(
                 "pie-executables: KEPT stale path %r - old path still shipped "
                 "by a Factory package, needs a fresh audit" % raw
+            )
+            out.append(line)
+            continue
+        if kind == "moved" and norm in shipped_leap:
+            pruned_log.append(
+                "pie-executables: KEPT stale path %r - old path still shipped "
+                "by a Leap 16.0 package (SLES proxy), needs a fresh audit" % raw
             )
             out.append(line)
             continue
