@@ -318,7 +318,7 @@ mod tests {
             ),
             (
                 "BinariesCheck.toml",
-                "d806458289d950f477e7a5da2d98f51c2ae125fc4b225dca1841a81dd455e35f",
+                "9ec5c258cc6d801fb5a33ed15f8f801272f7b312050a2e3f366bd281d169d6a6",
             ),
             (
                 "BrandingPolicyCheck.toml",
@@ -370,7 +370,7 @@ mod tests {
             ),
             (
                 "FilesCheck.toml",
-                "0a31a9747d558b3d0d640b0496db4b3b49893e7cc73f75d8207fd65101c26afb",
+                "ed990156dea2b92c2fb3e7a75c9ca76f2af3a00bd99d06fde714f6f8a44759c4",
             ),
             (
                 "I18NCheck.toml",
@@ -446,7 +446,7 @@ mod tests {
             ),
             (
                 "SpecCheck.toml",
-                "e2c14338b70b31f3b7204ccad8d15bf29ce8351b3a4178ac138e2b39c35a22b6",
+                "3a123b47e194be8c61f3dac36bcf8670b0516c57f2c0915f5b17527ebf5ce1ee",
             ),
             (
                 "SysVInitOnSystemdCheck.toml",
@@ -462,7 +462,7 @@ mod tests {
             ),
             (
                 "TagsCheck.toml",
-                "fd0fda1605e6e5cb30d34bead704d7a1e2de63ef360261928d3855dd5a6773e1",
+                "661a8bb7740b1ad293c95b50918054888aad99d31810ffe703043e2c688f161d",
             ),
             (
                 "TmpFilesCheck.toml",
@@ -482,7 +482,7 @@ mod tests {
             ),
             (
                 "ZipCheck.toml",
-                "d4271d3a9848eda2c043d5825d6ef64c3d6225abc1fc3bf8766f26fa94b58144",
+                "b19fe443d0a90fbd109c5f17444c429fa12beebc804dfd4f2f0987bed9742ea4",
             ),
             (
                 "ZyppSyntaxCheck.toml",
