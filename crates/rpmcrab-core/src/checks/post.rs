@@ -555,7 +555,9 @@ mod tests {
         // bracket regex no longer fires.
         let found = check().check_scriptlet("/bin/sh", "if a]", "%post", &[], &[]);
         assert!(
-            !found.iter().any(|(_, f, _)| f == "spurious-bracket-in-%post"),
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "spurious-bracket-in-%post"),
             "must stay silent: {found:?}"
         );
     }
@@ -568,10 +570,11 @@ mod tests {
     fn killed_one_line_command_stays_absent() {
         // The deleted test drove a bare `/usr/bin/update-foo` scriptlet;
         // the single-command regex no longer fires.
-        let found =
-            check().check_scriptlet("/bin/sh", "/usr/bin/update-foo", "%post", &[], &[]);
+        let found = check().check_scriptlet("/bin/sh", "/usr/bin/update-foo", "%post", &[], &[]);
         assert!(
-            !found.iter().any(|(_, f, _)| f == "one-line-command-in-%post"),
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "one-line-command-in-%post"),
             "must stay silent: {found:?}"
         );
     }

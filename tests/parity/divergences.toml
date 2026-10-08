@@ -1384,7 +1384,7 @@ check = "only-non-binary-in-usr-lib"
 kind = "missing"
 reason = "Deliberate removal per triage: openSUSE's own rpmlint config says 'Doesn't seem to make sense' about this finding. The port does not emit it. The reference still emits it."
 since = "0.1.0"
-upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/BinariesCheck.py"
 
 [[divergence]]
 case = "global"
@@ -1416,7 +1416,7 @@ check = "hardcoded-prefix-tag"
 kind = "missing"
 reason = "Deliberate removal per triage: the Prefix: tag is obsolete and ignored by RPM, the same class as the killed BuildRoot findings. The port does not emit it. The reference still emits it."
 since = "0.1.0"
-upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
 
 [[divergence]]
 case = "global"
