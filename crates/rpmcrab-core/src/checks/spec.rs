@@ -377,12 +377,6 @@ fn pkgname_re() -> &'static Regex {
     PKGNAME_RE.get_or_init(|| Regex::new(r"\s+(?:-n\s+)?(\S+)").expect("static regex"))
 }
 
-static TARBALL_RE: OnceLock<Regex> = OnceLock::new();
-fn tarball_re() -> &'static Regex {
-    TARBALL_RE
-        .get_or_init(|| Regex::new(r"(?i)\.(?:t(?:ar|[glx]z|bz2?)|zip)\b").expect("static regex"))
-}
-
 static PYTHON_SETUP_TEST_RE: OnceLock<Regex> = OnceLock::new();
 fn python_setup_test_re() -> &'static Regex {
     PYTHON_SETUP_TEST_RE.get_or_init(|| Regex::new(r"^[^#]*(setup.py test)").expect("static regex"))
@@ -547,7 +541,6 @@ pub struct SpecCheck {
     patch_applying_macros: Vec<String>,
     filelist_re: Regex,
     pkgname_re: Regex,
-    tarball_re: Regex,
     python_setup_test_re: Regex,
     python_setup_install_re: Regex,
     python_module_def_re: Regex,
@@ -660,7 +653,6 @@ impl SpecCheck {
             patch_applying_macros,
             filelist_re: filelist_re().clone(),
             pkgname_re: pkgname_re().clone(),
-            tarball_re: tarball_re().clone(),
             python_setup_test_re: python_setup_test_re().clone(),
             python_setup_install_re: python_setup_install_re().clone(),
             python_module_def_re: python_module_def_re().clone(),
@@ -968,10 +960,13 @@ impl SpecCheck {
             let is_source = src.is_source();
             let tag = format!("{}{num}", if is_source { "Source" } else { "Patch" });
             let (scheme, netloc) = url_scheme_netloc(url);
-            if scheme.is_some() && netloc.is_some() {
+            if scheme.is_none() {
+                // A bare filename is not a URL and is not required to be
+                // one: nothing to validate. Deliberate divergence from the
+                // reference _check_invalid_url (ledgered).
                 continue;
             }
-            if is_source && self.tarball_re.is_match(url).unwrap_or(false) {
+            if netloc.is_none() {
                 let tag = format!("{tag}:");
                 self.info(out, pkg, Level::Warning, "invalid-url", &[&tag, url]);
             }
@@ -2159,20 +2154,17 @@ make install
             ("specfile-warning", "W"),
             ("no-%check-section", "W"),
             ("macro-in-comment", "W"),
-            ("invalid-url", "W"),
         ] {
             assert!(
                 summary.contains(&(check, level)),
                 "missing {level}: {check} in {summary:?}"
             );
         }
+        // Deliberate divergence (ledgered): a bare tarball filename is
+        // not a URL and is not required to be one, so no `invalid-url`
+        // fires here even though the reference emits one.
         let invalid = lines_for(&results, "invalid-url");
-        assert_eq!(invalid.len(), 1);
-        assert!(
-            invalid[0].contains("W: invalid-url Source0: codequery-0.08.tar.gz"),
-            "line: {}",
-            invalid[0]
-        );
+        assert!(invalid.is_empty(), "unexpected invalid-url: {invalid:?}");
         let warning = lines_for(&results, "specfile-warning");
         assert_eq!(warning.len(), 1);
         assert!(
@@ -2186,6 +2178,61 @@ make install
             comment[0].contains(":20: W: macro-in-comment %{version}"),
             "line: {}",
             comment[0]
+        );
+    }
+
+    #[test]
+    fn invalid_url_only_fires_for_malformed_urls() {
+        fn spec_with(source_line: &str) -> String {
+            format!(
+                "Name:           wobble\nVersion:        1.0\nRelease:        1\n\
+                 Summary:        Wobble\nLicense:        MIT\n{source_line}\n\n\
+                 %description\nWobble.\n"
+            )
+        }
+        // Bare filename: not a URL and not required to be one — no finding.
+        let results = run_with(
+            &spec_with("Source0:        codequery-0.08.tar.gz"),
+            &Config::default(),
+        );
+        assert!(
+            lines_for(&results, "invalid-url").is_empty(),
+            "bare filename must not warn: {results:?}"
+        );
+        // Scheme present but empty netloc: a malformed URL — warns.
+        let results = run_with(&spec_with("Source0:        http://"), &Config::default());
+        let invalid = lines_for(&results, "invalid-url");
+        assert_eq!(
+            invalid.len(),
+            1,
+            "expected one invalid-url, got: {invalid:?}"
+        );
+        assert!(
+            invalid[0].contains("W: invalid-url Source0: http://"),
+            "line: {}",
+            invalid[0]
+        );
+        // Well-formed URL: no finding.
+        let results = run_with(
+            &spec_with("Source0:        https://example.com/foo-1.0.tar.gz"),
+            &Config::default(),
+        );
+        assert!(
+            lines_for(&results, "invalid-url").is_empty(),
+            "valid URL must not warn: {results:?}"
+        );
+        // The malformed-URL rule is not Source-only: Patch warns too.
+        let results = run_with(&spec_with("Patch0:         http://"), &Config::default());
+        let invalid = lines_for(&results, "invalid-url");
+        assert_eq!(
+            invalid.len(),
+            1,
+            "expected one invalid-url, got: {invalid:?}"
+        );
+        assert!(
+            invalid[0].contains("W: invalid-url Patch0: http://"),
+            "line: {}",
+            invalid[0]
         );
     }
 
