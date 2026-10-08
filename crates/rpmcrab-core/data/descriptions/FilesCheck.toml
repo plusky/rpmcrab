@@ -154,10 +154,6 @@ If you need log files owned by a non-root group, just create a subdir in
 non-ghost-file="""
 File should be tagged %ghost.
 """
-outside-libdir-files="""
-This library package must not contain non library files to allow 64
-and 32 bits versions of the package to coexist.
-"""
 hidden-file-or-dir="""
 The file or directory is hidden. You should see if this is normal,
 and delete it from the package if not.

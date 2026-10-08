@@ -19,10 +19,6 @@ invalid-soname="""
 The soname of the library is neither of the form lib<libname>.so.<major> or
 lib<libname>-<major>.so.
 """
-invalid-ldconfig-symlink="""
-The symbolic link references the wrong file. It should reference
-the shared library.
-"""
 no-ldconfig-symlink="""
 The package should not only include the shared library itself, but
 also the symbolic link which ldconfig would produce. (This is
@@ -69,10 +65,6 @@ unused-direct-shlib-dependency="""
 The binary contains unused direct shared library dependencies.  This may
 indicate gratuitously bloated linkage; check that the binary has been linked
 with the intended shared libraries only.
-"""
-only-non-binary-in-usr-lib="""
-There are only non binary files in /usr/lib so they should be in
-/usr/share.
 """
 readelf-failed="""
 Executing readelf on this file failed, all checks could not be run.

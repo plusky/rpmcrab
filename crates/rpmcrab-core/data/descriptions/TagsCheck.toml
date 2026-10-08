@@ -33,10 +33,6 @@ The major number of the library isn't included in the package's name.
 description-shorter-than-summary="""
 The package description should be longer than the summary.
 """
-no-provides="""
-Your library package doesn't provide the -devel name without the major
-version included.
-"""
 no-summary-tag="""
 There is no Summary tag in your package. You have to describe your package
 using this tag.
@@ -108,11 +104,6 @@ Your package contains a versioned dependency without an Epoch.
 devel-dependency="""
 Your package has a dependency on a devel package but it's not a devel
 package itself.
-"""
-invalid-build-requires="""
-Your source package contains a dependency not compliant with the lib64
-naming. This BuildRequires dependency will not be resolved on lib64 platforms
-(eg. amd64).
 """
 explicit-lib-dependency="""
 You must let rpm find the library dependencies by itself. Do not put

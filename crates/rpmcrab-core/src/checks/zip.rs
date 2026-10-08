@@ -1,9 +1,9 @@
 //! `ZipCheck` — validate zip/jar archives.
 //!
-//! Ported from `rpmlint/checks/ZipCheck.py`. Five findings:
+//! Ported from `rpmlint/checks/ZipCheck.py`. Three findings:
 //! `unable-to-read-zip` (error, or warning when the archive only fails like
-//! the reference's `RuntimeError` path), `bad-crc-in-zip`, `uncompressed-zip`,
-//! `class-path-in-manifest`, `jar-not-indexed`.
+//! the reference's `RuntimeError` path), `bad-crc-in-zip`,
+//! `class-path-in-manifest`.
 //!
 //! Uses the pure-Rust `zip` crate instead of CPython's `zipfile`; no
 //! subprocesses.
@@ -73,25 +73,6 @@ fn first_bad_crc(archive: &mut ZipArchive<File>) -> CrcOutcome {
         }
     }
     CrcOutcome::Ok
-}
-
-/// `_check_compression`: no entry actually compressed (and not every entry
-/// empty, which is valid) means the archive is stored, not compressed.
-fn is_uncompressed(archive: &mut ZipArchive<File>) -> bool {
-    let filecount = archive.len();
-    let mut nullcount = 0;
-    for i in 0..filecount {
-        let Ok(entry) = archive.by_index(i) else {
-            continue;
-        };
-        if entry.size() == 0 {
-            nullcount += 1;
-        }
-        if entry.compressed_size() != entry.size() {
-            return false;
-        }
-    }
-    filecount != nullcount
 }
 
 /// Approximation of CPython's `zipfile.is_zipfile`: scan the tail for the
@@ -186,9 +167,6 @@ impl ZipCheck {
                 return unreadable("password required".to_string());
             }
         }
-        if is_uncompressed(&mut archive) {
-            out.push((Level::Error, "uncompressed-zip", vec![fname.to_string()]));
-        }
         if is_match(jar_regex(), fname) {
             // `namelist()` membership, not `by_name`: a corrupt entry is
             // still listed, as in the reference.
@@ -210,9 +188,6 @@ impl ZipCheck {
                         vec![format!("{fname}: {e}")],
                     )),
                 }
-            }
-            if !names.iter().any(|n| n == "META-INF/INDEX.LIST") {
-                out.push((Level::Warning, "jar-not-indexed", vec![fname.to_string()]));
             }
         }
         out
@@ -331,19 +306,6 @@ mod tests {
     }
 
     #[test]
-    fn stored_only_zip_is_uncompressed() {
-        let dir = tempfile::tempdir().unwrap();
-        let bytes = build_zip(
-            &[("a.txt", b"hello world", zip::CompressionMethod::Stored)],
-            None,
-        );
-        let path = write_fixture(dir.path(), "a.zip", &bytes);
-        let findings = ZipCheck::inspect(&path, "a.zip");
-        assert_eq!(fixture_names(&findings), vec!["uncompressed-zip"]);
-        assert_eq!(findings[0].2, vec!["a.zip".to_string()]);
-    }
-
-    #[test]
     fn empty_only_zip_is_not_uncompressed() {
         let dir = tempfile::tempdir().unwrap();
         let bytes = build_zip(&[("empty.txt", b"", zip::CompressionMethod::Stored)], None);
@@ -369,22 +331,6 @@ mod tests {
         let findings = ZipCheck::inspect(&path, "a.zip");
         assert_eq!(fixture_names(&findings), vec!["unable-to-read-zip"]);
         assert!(findings[0].2[0].starts_with("a.zip: "));
-    }
-
-    #[test]
-    fn jar_without_index_warns() {
-        let dir = tempfile::tempdir().unwrap();
-        let bytes = build_zip(
-            &[(
-                "A.class",
-                b"fake class data",
-                zip::CompressionMethod::Deflated,
-            )],
-            None,
-        );
-        let path = write_fixture(dir.path(), "a.jar", &bytes);
-        let findings = ZipCheck::inspect(&path, "a.jar");
-        assert_eq!(fixture_names(&findings), vec!["jar-not-indexed"]);
     }
 
     #[test]
@@ -422,12 +368,7 @@ mod tests {
         );
         let path = write_fixture(dir.path(), "a.jar", &bytes);
         let findings = ZipCheck::inspect(&path, "a.jar");
-        // The manifest itself is stored, so no uncompressed-zip; the index
-        // warning still applies.
-        assert_eq!(
-            fixture_names(&findings),
-            vec!["class-path-in-manifest", "jar-not-indexed"]
-        );
+        assert_eq!(fixture_names(&findings), vec!["class-path-in-manifest"]);
     }
 
     #[test]
@@ -455,7 +396,7 @@ mod tests {
         let findings = ZipCheck::inspect(&path, "a.jar");
         assert_eq!(
             fixture_names(&findings),
-            vec!["bad-crc-in-zip", "unable-to-read-zip", "jar-not-indexed"]
+            vec!["bad-crc-in-zip", "unable-to-read-zip"]
         );
     }
 
@@ -471,8 +412,7 @@ mod tests {
             Some("Manifest-Version: 1.0\n"),
         );
         let path = write_fixture(dir.path(), "a.jar", &bytes);
-        let findings = ZipCheck::inspect(&path, "a.jar");
-        assert_eq!(fixture_names(&findings), vec!["jar-not-indexed"]);
+        assert!(ZipCheck::inspect(&path, "a.jar").is_empty());
     }
 
     #[test]

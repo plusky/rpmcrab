@@ -34,13 +34,6 @@ fn invalid_version_regex() -> &'static Regex {
         .get_or_init(|| Regex::new(r"(?i)([0-9](?:rc|alpha|beta|pre).*)").expect("static regex"))
 }
 
-/// `lib_devel_number_regex`: `^lib(.*?)([0-9.]+)(_[0-9.]+)?-devel`.
-static LIB_DEVEL_NUMBER_REGEX: OnceLock<Regex> = OnceLock::new();
-fn lib_devel_number_regex() -> &'static Regex {
-    LIB_DEVEL_NUMBER_REGEX
-        .get_or_init(|| Regex::new(r"^lib(.*?)([0-9.]+)(_[0-9.]+)?-devel").expect("static regex"))
-}
-
 /// Words that may start a summary in lowercase (`CAPITALIZED_IGNORE_LIST`).
 const CAPITALIZED_IGNORE_LIST: &[&str] = &["jQuery", "openSUSE", "wxWidgets", "a", "an", "uWSGI"];
 
@@ -83,7 +76,6 @@ pub struct TagsCheck {
     valid_license_exceptions: Vec<String>,
     macro_re: Regex,
     devel_re: Regex,
-    lib_devel_number_re: Regex,
     lib_package_re: Regex,
     invalid_version_re: Regex,
     changelog_version_re: Regex,
@@ -159,7 +151,6 @@ impl TagsCheck {
             valid_license_exceptions: get_strings("ValidLicenseExceptions"),
             macro_re: macro_regex().clone(),
             devel_re: devel_regex().clone(),
-            lib_devel_number_re: lib_devel_number_regex().clone(),
             lib_package_re: lib_package_regex().clone(),
             invalid_version_re: invalid_version_regex().clone(),
             changelog_version_re: Regex::new(r"[^>]([^ >]+)\s*$").expect("static regex"),
@@ -411,17 +402,7 @@ impl TagsCheck {
                 if leaf.name.starts_with("/usr/local/") {
                     add_info(out, Level::Error, pkg, "invalid-dependency", &[&leaf.name]);
                 }
-                if is_source {
-                    if is_match(&self.lib_devel_number_re, &leaf.name) {
-                        add_info(
-                            out,
-                            Level::Error,
-                            pkg,
-                            "invalid-build-requires",
-                            &[&leaf.name],
-                        );
-                    }
-                } else if !is_devel {
+                if !is_source && !is_devel {
                     if !devel_depend && is_match(&self.devel_re, &leaf.name) {
                         add_info(out, Level::Error, pkg, "devel-dependency", &[&leaf.name]);
                         devel_depend = true;
@@ -647,20 +628,8 @@ impl TagsCheck {
                         );
                     }
                 }
-                match self.devel_number_re.captures(name).ok().flatten() {
-                    None => {
-                        add_info(out, Level::Warning, pkg, "no-major-in-name", &[name]);
-                    }
-                    Some(caps) => {
-                        let prov = if caps.get(3).is_some() {
-                            format!("{}{}-devel", &caps[1], &caps[2])
-                        } else {
-                            format!("{}-devel", &caps[1])
-                        };
-                        if !pkg.provides.iter().any(|p| p.name == prov) {
-                            add_info(out, Level::Warning, pkg, "no-provides", &[&prov]);
-                        }
-                    }
+                if self.devel_number_re.captures(name).ok().flatten().is_none() {
+                    add_info(out, Level::Warning, pkg, "no-major-in-name", &[name]);
                 }
             }
             if has_pc {
@@ -2817,38 +2786,6 @@ mod rich_dep_emission_tests {
         let results = run(&pkg, &rich_test_config(&[], false));
         assert!(
             named(&results, "explicit-lib-dependency").is_empty(),
-            "all: {results:?}"
-        );
-    }
-
-    #[test]
-    fn invalid_build_requires_emits() {
-        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
-        pkg.is_source = true;
-        pkg.requires = vec![plain_dep("libxx2_2-devel")];
-        let results = run(&pkg, &rich_test_config(&[], false));
-        let hits = named(&results, "invalid-build-requires");
-        assert_eq!(hits.len(), 1, "all: {results:?}");
-        assert!(
-            hits[0].1.contains(": E: invalid-build-requires"),
-            "line: {}",
-            hits[0].1
-        );
-        assert!(
-            hits[0].1.ends_with(" libxx2_2-devel"),
-            "line: {}",
-            hits[0].1
-        );
-    }
-
-    #[test]
-    fn invalid_build_requires_plain_devel_is_silent() {
-        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
-        pkg.is_source = true;
-        pkg.requires = vec![plain_dep("libxx-devel")];
-        let results = run(&pkg, &rich_test_config(&[], false));
-        assert!(
-            named(&results, "invalid-build-requires").is_empty(),
             "all: {results:?}"
         );
     }
