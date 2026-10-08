@@ -28,6 +28,10 @@ Tumbleweed container so they are genuine Linux ELFs regardless of host OS.
 The container architecture (currently aarch64) does not matter — goblin
 parses all ELF types and the findings are architecture-independent.
 
+CI rebuilds the fixtures weekly and on fixture changes
+(`.github/workflows/fixtures-rebuild.yml`), failing if a rebuild breaks or
+the rebuilt RPM differs from the committed one.
+
 ## Dangling DT_GNU_HASH fixture
 
 A second RPM, `input/rpmcrab-binaries-dangling-gnuhash-1.0-1.<arch>.rpm`,
