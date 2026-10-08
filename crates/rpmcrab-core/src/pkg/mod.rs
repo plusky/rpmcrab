@@ -24,7 +24,7 @@ use std::time::Instant;
 use librpm::verify::VerifyOptions;
 use librpm::{OwnedTagData, PackageHeader, Tag};
 
-use dep::{DepInfo, string_to_version};
+use dep::{DepInfo, parse_dep_infos, string_to_version};
 use pkgfile::PkgFile;
 use spec::SpecPkg;
 
@@ -907,6 +907,13 @@ fn gather_files(header: &PackageHeader, dir: &Path, timers: &mut Timers) -> Vec<
     out
 }
 
+/// Per-file `Requires`/`Provides` (`FILEREQUIRE`/`FILEPROVIDE`): the header
+/// stores one dep-line string per file (no separate flags/version arrays),
+/// parsed with the full `parse_deps` shape (rpmlint `Pkg._gather_files`).
+fn parse_dep_line(line: &str) -> Vec<DepInfo> {
+    parse_dep_infos(line)
+}
+
 /// `os.path.normpath` for POSIX paths: collapse repeated slashes and `.`,
 /// resolve `x/..`, and — like `normpath` — **preserve leading `..`** on a
 /// relative path (do not resolve them against a root). `""` becomes `"."`.
@@ -948,16 +955,25 @@ pub fn normalize_path(p: &str) -> String {
     }
 }
 
-/// Per-file `Requires`/`Provides` (`FILEREQUIRE`/`FILEPROVIDE`) are left
-/// unparsed until `PostCheck`/`FileDigestCheck` are ported, which consume them
-/// (rpmlint's `parse_deps`). Always empty for now.
-fn parse_dep_line(_line: &str) -> Vec<DepInfo> {
-    Vec::new()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_dep_line_parses_per_file_dep_strings() {
+        // The NsCDE-doc shape: a bare path require. The old stub returned
+        // an empty vec here, so `doc-file-dependency` could never fire.
+        let deps = parse_dep_line("/bin/ksh");
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "/bin/ksh");
+        assert_eq!(deps[0].flags, 0);
+
+        assert!(parse_dep_line("").is_empty());
+
+        let deps = parse_dep_line("libfoo.so.1()(64bit) >= 1.2");
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "libfoo.so.1()(64bit)");
+    }
 
     #[test]
     fn normalize_path_matches_os_path_normpath() {

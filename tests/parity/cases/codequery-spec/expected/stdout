@@ -27,5 +27,4 @@ codequery.spec: E: superfluous-%clean-section
 codequery.spec: W: specfile-warning warning: Macro expanded in comment on line 20: %{version}.tar.gz
 codequery.spec: W: no-%check-section
 codequery.spec:20: W: macro-in-comment %{version}
-codequery.spec: W: invalid-url Source0: codequery-0.08.tar.gz
  0 packages and 1 specfiles checked; 1 errors, 5 warnings, 0 filtered, 1 badness; has taken <DURATION> s 

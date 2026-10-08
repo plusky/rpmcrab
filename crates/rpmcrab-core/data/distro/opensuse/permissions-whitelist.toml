@@ -1,20 +1,4 @@
 [[FileDigestGroup]]
-package = "rpmlint-integration-test"
-note = "valid test whitelisting entry for the OBS integration test package"
-type = "permissions"
-[[FileDigestGroup.digests]]
-path = "/etc/permissions.d/valid"
-hash = "3c07438f28b0545bfe83a2355693c94b91e3fe380c07f12d542e9d27a08de1f9"
-
-[[FileDigestGroup]]
-package = "rpmlint-integration-test"
-note = "mismatching test whitelisting entry for the OBS integration test package"
-type = "permissions"
-[[FileDigestGroup.digests]]
-path = "/etc/permissions.d/mismatch"
-hash = "4a5e8e9ca514c73f1dbee55e88c4d75a235473c1d5cef4751d84016833961fdf"
-
-[[FileDigestGroup]]
 packages = ["postfix", "postfix-bdb"]
 type = "permissions"
 [[FileDigestGroup.digests]]
@@ -37,15 +21,6 @@ hash = "544b91b15ce1dd54659a2d98a66ce945db2ca99134acb97f8a0a196612c57bb6"
 [[FileDigestGroup.digests]]
 path = "/usr/share/permissions/permissions.d/sendmail.paranoid"
 hash = "7a593f6678ab48c4eab010bb885989bd06e5a73a307575399d71a2d7c3d3f0c3"
-
-[[FileDigestGroup]]
-package  = "libcgroup-tools"
-note     = "this is for a setgid binary 'cgexec', running with 'cgred' group privs"
-bug      = "bsc#1231381"
-type     = "permissions"
-[[FileDigestGroup.digests]]
-path     = "/usr/share/permissions/permissions.d/libcgroup"
-hash     = "6d3a669b10b2449484dcad1c6d932f5897666bcbeef2a45d9608ef63a1e43188"
 
 [[FileDigestGroup]]
 package  = "sssd"
