@@ -165,6 +165,13 @@ PRUNE_SCOPED = {
 # so the vendored config always matches reality. A package that reappears is
 # kept and logged — reintroduced software gets a fresh audit, never a silent
 # free pass on a stale stanza.
+# Entries name binary packages: that is the namespace whitelist `package =`
+# entries match against at lint time. Presence is checked per flavor (see
+# package_present()): via the OBS source-package API for openSUSE:Factory,
+# via the published Leap 16.0 binary repodata for the slfo flavor. An entry
+# whose source package has a different name would wrongly prune on the Factory
+# side, so keep entries to packages where both names agree. (All entries
+# below were verified absent in both namespaces for the flavor they prune.)
 PRUNE_PACKAGES = {
     # package: reason
     "snapd": "removed from Factory (bsc#1256175, bsc#1248682, bsc#1261739)",
@@ -183,6 +190,35 @@ PRUNE_PACKAGES = {
     "pam_csync": "removed from Factory; legacy: not audited",
     "pcfclock": "removed from Factory; not in SLE 16",
     "rpmlint-integration-test": "rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap",
+    # Dead in Leap 16.0 (absent as source package and as binaries, verified
+    # 2026-10-08 against openSUSE:Leap:16.0): pruned from the slfo flavor
+    # only; kept for the opensuse flavor where the package still ships.
+    "pulseaudio": "not shipped in Leap 16.0 (PipeWire-only)",
+    "pommed": "not shipped in Leap 16.0; legacy: not audited",
+    "neard": "not shipped in Leap 16.0",
+    "xpra": "not shipped in Leap 16.0",
+    "iwd": "not shipped in Leap 16.0",
+    "udev-mini": "not shipped in Leap 16.0 (no -mini variants built)",
+    "low-memory-monitor": "not shipped in Leap 16.0",
+    "transactional-update-notifier": "not shipped in Leap 16.0",
+    "libgpiod-manager": "not shipped in Leap 16.0",
+    "pam_ccreds": "not shipped in Leap 16.0; legacy: not audited",
+    "nss-pam-ldapd": "not shipped in Leap 16.0; legacy: not audited",
+    "pam_passwdqc": "not shipped in Leap 16.0; legacy: not audited",
+    "pam_mktemp": "not shipped in Leap 16.0; legacy: not audited",
+    "pam_chroot": "not shipped in Leap 16.0; legacy: not audited",
+    "pam_yubico": "not shipped in Leap 16.0",
+    "pam_saslauthd": "not shipped in Leap 16.0",
+    "libcgroup-pam": "not shipped in Leap 16.0",
+    "libcgroup-tools": "not shipped in Leap 16.0",
+    "gnome-branding-Aeon": "not shipped in Leap 16.0 (Tumbleweed-only desktop branding)",
+    "plasma-branding-Kalpa": "not shipped in Leap 16.0 (Tumbleweed-only desktop branding)",
+    "monitoring-plugins-smart": "not shipped in Leap 16.0",
+    "cscreen": "not shipped in Leap 16.0",
+    "leafnode": "not shipped in Leap 16.0",
+    "soapy-remote-server": "not shipped in Leap 16.0",
+    "rubygem-passenger": "not shipped in Leap 16.0",
+    "parallel-printer-support": "not shipped in Leap 16.0",
 }
 
 # Stale pie-executables paths: each entry is (owning package, kind, reason),
@@ -198,9 +234,11 @@ PRUNE_PACKAGES = {
 # the Leap 16.0 filelists are checked the same way as the SLES proxy (Leap
 # 16 is SLES-based and public; SLE sources sit behind Customer Center auth).
 # Verified 2026-10-07 against the openSUSE:Factory filelists (97 paths shipped
-# by no TW package). Pruning is scoped to the opensuse flavor: the per-package
-# evidence is Factory-only, and the SLE 16 codebase behind the slfo flavor
-# has no public per-package query to verify against.
+# by no TW package), and 2026-10-08 against the Leap 16.0 binary repodata
+# for the slfo flavor (same upstream removals apply). Pruning runs per-flavor:
+# each entry's owning package is checked live against the flavor's own
+# codebase at generation time (OBS source API for openSUSE:Factory, published
+# binary repodata for Leap 16.0 — see package_present()).
 PRUNE_PIE_PATHS = {
     "/usr/bin/achfile": ("netatalk", "removed", "netatalk removed from Factory"),
     "/usr/bin/adv1tov2": ("netatalk", "removed", "netatalk removed from Factory"),
@@ -296,6 +334,7 @@ PRUNE_PIE_PATHS = {
     "/usr/sbin/suexec2": ("apache2", "moved", "apache 2.2 name, renamed in 2.4"),
     "/usr/sbin/tracepath": ("iputils", "moved", "iputils moved to /usr/bin/tracepath"),
     "/usr/sbin/tracepath6": ("iputils", "moved", "tracepath6 folded into tracepath (/usr/bin/tracepath); the name ships nowhere in TW"),
+    "/usr/bin/uniconv": ("uniconv", "removed", "uniconv removed from Factory and Leap 16.0"),
     "/usr/sbin/utempter": ("libutempter", "removed", "libutempter removed from Factory"),
     "/usr/sbin/yppush": ("ypserv", "removed", "ypserv removed from Factory"),
     "/usr/sbin/ypserv": ("ypserv", "removed", "ypserv removed from Factory"),
@@ -472,24 +511,104 @@ FLAVOR_PROJECTS = {
 }
 
 
-def package_present(pkg, flavor):
-    """True if the package exists in the flavor's distro codebase."""
-    key = (pkg, flavor)
-    if key not in _package_presence_cache:
-        present = False
-        for project in FLAVOR_PROJECTS[flavor]:
-            url = f"https://api.opensuse.org/public/source/{project}/{pkg}"
-            req = urllib.request.Request(
+# The Leap 16.0 codebase behind the slfo flavor: its SLE-derived sources are
+# not visible via the OBS source API (openSUSE:Leap:16.0 only hosts
+# Leap-specific sources — e.g. krb5, sudo, samba 404 there while shipping in
+# the distro), so package presence for slfo is checked against the published
+# binary repodata instead. Whitelist `package =` entries match the binary
+# package name being linted, so binary presence is the right signal there.
+LEAP16_OSS_REPOMD_URL = (
+    "https://download.opensuse.org/distribution/leap/16.0/repo/oss"
+    "/repodata/repomd.xml"
+)
+_leap16_binary_names_cache = None
+
+
+def _leap16_binary_names():
+    """Binary package names shipped in Leap 16.0 (oss), fetched once, cached."""
+    global _leap16_binary_names_cache
+    if _leap16_binary_names_cache is None:
+        zstd = shutil.which("zstd")
+        if zstd is None:
+            raise RuntimeError(
+                "the 'zstd' CLI is required to read the Leap 16.0 repodata "
+                "(install zstd and re-run)"
+            )
+
+        def _get(url):
+            return urllib.request.Request(
                 url, headers={"User-Agent": "rpmcrab-distro-config-sync"}
             )
+
+        with urllib.request.urlopen(_get(LEAP16_OSS_REPOMD_URL), timeout=60) as resp:
+            repomd = resp.read().decode("utf-8")
+        m = re.search(r'<location href="([^"]*primary\.xml\.[^"]*)"', repomd)
+        if not m:
+            raise RuntimeError(
+                "primary.xml location not found in Leap 16.0 repomd.xml"
+            )
+        primary_url = (
+            "https://download.opensuse.org/distribution/leap/16.0/repo/oss/"
+            + m.group(1)
+        )
+        names = set()
+        name_re = re.compile(rb"<name>([^<]*)</name>")
+        with tempfile.NamedTemporaryFile(suffix=".xml.zst") as tmp:
+            with urllib.request.urlopen(_get(primary_url), timeout=600) as resp:
+                shutil.copyfileobj(resp, tmp)
+            tmp.flush()
+            proc = subprocess.Popen([zstd, "-dc", tmp.name], stdout=subprocess.PIPE)
             try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    if resp.status == 200:
-                        present = True
+                buf = b""
+                while True:
+                    chunk = proc.stdout.read(1 << 16)
+                    data = buf + chunk if chunk else buf
+                    end = len(data)
+                    for match in name_re.finditer(data):
+                        if chunk and match.end() == end:
+                            # Tag may be split across chunks; re-scan it
+                            # with the next chunk (kept in the overlap).
+                            continue
+                        names.add(match.group(1).decode("utf-8", "replace"))
+                    if not chunk:
                         break
-            except urllib.error.HTTPError as e:
-                if e.code != 404:
-                    raise
+                    buf = data[-512:]
+            finally:
+                proc.stdout.close()
+                proc.wait()
+            if proc.returncode != 0:
+                raise RuntimeError(f"zstd -dc failed on {primary_url}")
+        _leap16_binary_names_cache = names
+    return _leap16_binary_names_cache
+
+
+def package_present(pkg, flavor):
+    """True if the package exists in the flavor's distro codebase.
+
+    For the opensuse flavor this queries the OBS source-package API
+    (openSUSE:Factory hosts all its sources). For the slfo flavor the
+    SLE-derived sources are not visible via the source API, so presence is
+    checked against the binary names in the published Leap 16.0 repodata.
+    """
+    key = (pkg, flavor)
+    if key not in _package_presence_cache:
+        if flavor == "slfo":
+            present = pkg in _leap16_binary_names()
+        else:
+            present = False
+            for project in FLAVOR_PROJECTS[flavor]:
+                url = f"https://api.opensuse.org/public/source/{project}/{pkg}"
+                req = urllib.request.Request(
+                    url, headers={"User-Agent": "rpmcrab-distro-config-sync"}
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        if resp.status == 200:
+                            present = True
+                            break
+                except urllib.error.HTTPError as e:
+                    if e.code != 404:
+                        raise
         _package_presence_cache[key] = present
     return _package_presence_cache[key]
 
@@ -794,10 +913,11 @@ def generate(ref_dir=None, pins=None):
             assert_no_flavor_key(flavor, filename, text)
             text = prune_stale_filters(text, known, pruned_log)
             text = prune_stale_packages(text, pkg_pruned_log, flavor)
-            if filename == "pie-executables.toml" and flavor == "opensuse":
-                # Factory-only evidence (see PRUNE_PIE_PATHS): the SLE 16
-                # codebase behind the slfo flavor has no public
-                # per-package query, so slfo keeps the upstream entries.
+            if filename == "pie-executables.toml":
+                # Per-flavor evidence (see PRUNE_PIE_PATHS): the owning
+                # package is checked live against the flavor's own codebase
+                # (openSUSE:Factory / openSUSE:Leap:16.0, both publicly
+                # queryable), so both flavors prune their stale paths.
                 text = prune_pie_paths(text, pie_pruned_log, flavor)
             data["files"][filename] = text
 
@@ -842,9 +962,8 @@ def generate(ref_dir=None, pins=None):
             provenance.append(f"#   {entry}")
     if pie_pruned_log:
         provenance.append("#")
-        provenance.append(
-            "# Pruned pie-executables paths (shipped by no Tumbleweed package):"
-        )
+        provenance.append("# Pruned pie-executables paths (shipped by no package in the")
+        provenance.append("# flavor's distro codebase):")
         for entry in pie_pruned_log:
             provenance.append(f"#   {entry}")
     if deduped:
