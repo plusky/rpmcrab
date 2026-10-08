@@ -122,7 +122,7 @@ const DISTRO_SLFO_FILES: &[(&str, &str)] = &[
     ),
     (
         "pie-executables.toml",
-        include_str!("../data/distro/opensuse/pie-executables.toml"),
+        include_str!("../data/distro/slfo/pie-executables.toml"),
     ),
     (
         "polkit-rules-whitelist.toml",
