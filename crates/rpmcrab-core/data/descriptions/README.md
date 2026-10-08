@@ -11,7 +11,7 @@ Provenance, verified against the pinned reference (`84848c0`):
 
 - `BinariesCheck.toml` — the pinned reference file, minus the
   `shared-library-not-executable` entry dropped with the check in #267 and
-  the `invalid-soname`, `invalid-ldconfig-symlink`,
+  the `invalid-ldconfig-symlink`,
   `only-non-binary-in-usr-lib` entries dropped with the findings
   (openSUSE: "Doesn't seem to make sense"), plus
   the restored `shared-library-without-dependency-information` entry (copied
@@ -70,8 +70,7 @@ Provenance, verified against the pinned reference (`84848c0`):
   each fix is a deliberate `kind="detail"` divergence, ledgered in
   `tests/parity/divergences.toml`.
 - `FilesCheck.toml` — the reference file, minus the `outside-libdir-files`
-  entry (openSUSE: "Doesn't seem to make sense") and the
-  `incorrect-fsf-address` entry (FSF address text outdated) dropped with
+  entry (openSUSE: "Doesn't seem to make sense") dropped with
   the findings.
 - Every other `*.toml` file — byte-identical to the reference
   `rpmlint/descriptions/` file of the same name.

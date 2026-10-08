@@ -150,6 +150,7 @@ Filters = [
     'hardcoded-library-path',
 
 # Doesn't seem to make sense
+    'invalid-soname',
 
 # We want these files
     ' perl-temp-file ',
@@ -210,6 +211,7 @@ Filters = [
     '(?:dosutils|skelcd|installation-images|yast2-slide-show|instlux|skelcd-.*|patterns-.*)\.\S+: \w: filelist-forbidden-fhs23 /CD1',
 
 # Too noisy, and usually not something downstream packagers can fix
+    ' incorrect-fsf-address ',
     ' no-manual-page-for-binary ',
     ' static-library-without-debuginfo /usr/lib(?:64)?/ghc-[\d\.]+/',
 

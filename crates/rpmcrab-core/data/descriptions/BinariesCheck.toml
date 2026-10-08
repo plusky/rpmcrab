@@ -15,6 +15,10 @@ Not all architectures have this in path, so the package can't be noarch.
 no-soname="""
 The library has no soname.
 """
+invalid-soname="""
+The soname of the library is neither of the form lib<libname>.so.<major> or
+lib<libname>-<major>.so.
+"""
 no-ldconfig-symlink="""
 The package should not only include the shared library itself, but
 also the symbolic link which ldconfig would produce. (This is

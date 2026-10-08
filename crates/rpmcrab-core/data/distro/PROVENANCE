@@ -156,10 +156,8 @@
 #   slfo/device-files-whitelist.toml
 #   slfo/licenses.toml
 #   Filters: dropped 'hardcoded-prefix-tag' (killed: Prefix: tag obsolete/ignored)
-#   Filters: dropped 'incorrect-fsf-address' (killed: FSF address text outdated)
 #   Filters: dropped 'invalid-build-requires' (killed: Mandriva-specific, openSUSE doesn't want it)
 #   Filters: dropped 'invalid-ldconfig-symlink' (killed: openSUSE config says 'Doesn't seem to make sense')
-#   Filters: dropped 'invalid-soname' (killed: openSUSE config says 'Doesn't seem to make sense')
 #   Filters: dropped 'jar-not-indexed' (killed: negligible value)
 #   Filters: dropped 'no-provides' (killed: Mandriva-specific, openSUSE doesn't want it)
 #   Filters: dropped 'one-line-command-in-' (killed: PostCheck stylistic nit)

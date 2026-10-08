@@ -1325,13 +1325,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "invalid-soname"
-kind = "missing"
-reason = "Deliberate removal per triage: openSUSE's own rpmlint config says 'Doesn't seem to make sense' about this finding. The port does not emit it. The reference still emits it."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "only-non-binary-in-usr-lib"
 kind = "missing"
 reason = "Deliberate removal per triage: openSUSE's own rpmlint config says 'Doesn't seem to make sense' about this finding. The port does not emit it. The reference still emits it."
@@ -1356,13 +1349,6 @@ case = "global"
 check = "no-provides"
 kind = "missing"
 reason = "Deliberate removal per triage: openSUSE's rpmlint config calls this 'Mandriva specific stuff that we don't want'. The port does not emit it. The reference still emits it."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "incorrect-fsf-address"
-kind = "missing"
-reason = "Deliberate removal per triage: the FSF street address text changed upstream years ago, so the check's patterns are outdated and the finding is noise. The port does not emit it. The reference still emits it."
 since = "0.1.0"
 
 [[divergence]]
