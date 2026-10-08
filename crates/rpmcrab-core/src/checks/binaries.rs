@@ -1231,20 +1231,26 @@ impl BinariesCheck {
         if self.is_archive || info.is_debug {
             return;
         }
+        // undefined-non-weak-symbol is meaningful for shared libraries only:
+        // in an executable the undefined symbols resolve at load time, so the
+        // reference's `ldd -r` stays silent there while a raw UND scan fires
+        // hundreds of bogus hits.
+        if info.is_shlib {
+            for symbol in &ldd.undefined_symbols {
+                add_info(
+                    out,
+                    Level::Error,
+                    pkg,
+                    "undefined-non-weak-symbol",
+                    &[&pkgfile.name, symbol],
+                );
+            }
+        }
         let info_type = if info.is_shlib {
             Level::Error
         } else {
             Level::Warning
         };
-        for symbol in &ldd.undefined_symbols {
-            add_info(
-                out,
-                info_type,
-                pkg,
-                "undefined-non-weak-symbol",
-                &[&pkgfile.name, symbol],
-            );
-        }
         for dep in &ldd.unused_dependencies {
             add_info(
                 out,
@@ -3685,14 +3691,18 @@ description = "explicit priority string bypasses the system crypto policy"
             lines[0]
         );
 
-        // The same in a plain executable -> Warning.
+        // The same undefined symbols in a plain executable stay quiet:
+        // they resolve at load time, so the reference's `ldd -r` never
+        // reports them (this fired hundreds of bogus hits, e.g. on
+        // amberol's /usr/bin/amberol).
         let info = syn_info();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_dependency(&pkg, &pkgfile, &info, &ldd, &mut out);
         let results = out.results().to_vec();
-        let lines = lines_for(&results, "undefined-non-weak-symbol");
-        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
-        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "executable must stay quiet: {results:?}"
+        );
 
         // Not dynamically linked -> quiet.
         check.is_dynamically_linked = false;

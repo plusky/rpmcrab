@@ -1,20 +1,4 @@
 [[FileDigestGroup]]
-package = "rpmlint-integration-test"
-note = "valid test whitelisting entry for the OBS integration test package"
-type = "permissions"
-[[FileDigestGroup.digests]]
-path = "/etc/permissions.d/valid"
-hash = "3c07438f28b0545bfe83a2355693c94b91e3fe380c07f12d542e9d27a08de1f9"
-
-[[FileDigestGroup]]
-package = "rpmlint-integration-test"
-note = "mismatching test whitelisting entry for the OBS integration test package"
-type = "permissions"
-[[FileDigestGroup.digests]]
-path = "/etc/permissions.d/mismatch"
-hash = "4a5e8e9ca514c73f1dbee55e88c4d75a235473c1d5cef4751d84016833961fdf"
-
-[[FileDigestGroup]]
 packages = ["postfix", "postfix-bdb"]
 type = "permissions"
 [[FileDigestGroup.digests]]
