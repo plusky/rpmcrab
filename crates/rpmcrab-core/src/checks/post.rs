@@ -545,6 +545,37 @@ mod tests {
         );
     }
 
+    /// Negative pin for the deleted `spurious-bracket-in-*` findings (#308):
+    /// the port must stay silent on the exact shape the old emission fired
+    /// on, and `cargo test` (not just the reference-coverage auditor) must
+    /// catch a re-add.
+    #[test]
+    fn killed_spurious_bracket_stays_absent() {
+        // The deleted test drove `if a]` through check_scriptlet; the
+        // bracket regex no longer fires.
+        let found = check().check_scriptlet("/bin/sh", "if a]", "%post", &[], &[]);
+        assert!(
+            !found.iter().any(|(_, f, _)| f == "spurious-bracket-in-%post"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    /// Negative pin for the deleted `one-line-command-in-*` findings (#308):
+    /// the port must stay silent on the exact shape the old emission fired
+    /// on, and `cargo test` (not just the reference-coverage auditor) must
+    /// catch a re-add.
+    #[test]
+    fn killed_one_line_command_stays_absent() {
+        // The deleted test drove a bare `/usr/bin/update-foo` scriptlet;
+        // the single-command regex no longer fires.
+        let found =
+            check().check_scriptlet("/bin/sh", "/usr/bin/update-foo", "%post", &[], &[]);
+        assert!(
+            !found.iter().any(|(_, f, _)| f == "one-line-command-in-%post"),
+            "must stay silent: {found:?}"
+        );
+    }
+
     #[test]
     fn tmp_use_is_flagged() {
         let found = check().check_scriptlet("/bin/sh", "echo hi > /tmp/foo", "%post", &[], &[]);
