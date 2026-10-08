@@ -1600,3 +1600,10 @@ check = "devel-package-with-non-devel-group"
 kind = "missing"
 reason = "Deliberate removal per triage: openSUSE dropped the Group tag -- its own rpmlint config says 'Do not validate package rpm groups', the wiki (https://en.opensuse.org/openSUSE:Package_group_guidelines) says the field has fallen out of use, and the packaging guidelines say 'Group: -- always drop' -- so the port does not emit this finding. The emission and its staged `--explain` entry are removed. The reference still emits it."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "LibraryDependencyCheck"
+kind = "behaviour"
+reason = "Chained devel .so symlinks are resolved inside the devel package to the real library before the dependency check; the reference records the one-hop target, which misfires no-library-dependency-for on intermediate links the devel ships itself (Imath: libImath.so -> libImath-3_2.so -> libImath-3_2.so.30). Separately, the reference driver resets cross-package state after every package, so the check is effectively silent in multi-RPM runs; rpmcrab keeps the intended accumulate-then-verify semantics."
+since = "0.1.0"

@@ -10,8 +10,13 @@
 //! Deliberate divergence (plusky/rpmcrab#74): the per-package maps are keyed
 //! on `(name, arch)`; the rationale is in the doc comment on the
 //! `devel_order` field below.
+//!
+//! Deliberate divergence: chained `.so` symlinks are resolved inside the
+//! devel package to the real library before recording; the reference keeps
+//! the one-hop target.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::check::Check;
@@ -142,11 +147,37 @@ impl Check for LibraryDependencyCheck {
             }
 
             let symlinks = self.package_so_symlinks.get_mut(&key).unwrap();
+            // One-hop targets of every symlink in this package, for resolving
+            // chained `.so` links below.
+            let targets: HashMap<&str, String> = pkg
+                .files
+                .iter()
+                .filter(|pf| is_symlink(pf.mode))
+                .map(|pf| {
+                    let parent = Path::new(&pf.name).parent().unwrap_or(Path::new("/"));
+                    (
+                        pf.name.as_str(),
+                        parent.join(&pf.linkto).to_string_lossy().into_owned(),
+                    )
+                })
+                .collect();
             for pkgfile in &pkg.files {
                 if is_symlink(pkgfile.mode) && pkgfile.name.ends_with(".so") {
                     let parent = Path::new(&pkgfile.name).parent().unwrap_or(Path::new("/"));
-                    let link = parent.join(&pkgfile.linkto);
-                    symlinks.push(link.to_string_lossy().into_owned());
+                    let mut link = parent.join(&pkgfile.linkto).to_string_lossy().into_owned();
+                    // Follow the chain inside the devel package to the real
+                    // library (`libfoo.so -> libfoo-1_2.so -> libfoo.so.1`).
+                    // The reference records the one-hop target, which misfires
+                    // `no-library-dependency-for` on the intermediate link: no
+                    // library package can provide a link the devel ships itself.
+                    let mut seen = HashSet::new();
+                    while let Some(next) = targets.get(link.as_str()) {
+                        if !seen.insert(link.clone()) {
+                            break;
+                        }
+                        link = next.clone();
+                    }
+                    symlinks.push(link);
                 }
             }
         } else {
@@ -367,6 +398,53 @@ mod tests {
             results[0].1,
             "foo-devel: E: no-library-dependency-on libfoo /usr/lib64/libfoo.so.1"
         );
+    }
+
+    #[test]
+    fn chained_symlink_resolves_to_real_library() {
+        // Imath layout: `libfoo.so -> libfoo-1_2.so -> libfoo.so.1`, the
+        // intermediate link shipped by the devel package itself. Resolving
+        // the chain finds the real library, which the devel requires: no
+        // finding. (Fails on the one-hop recording: `no-library-dependency-for`
+        // on the intermediate link.)
+        let mut lib = fixture_pkg();
+        lib.name = "libfoo".to_string();
+        lib.arch = "x86_64".to_string();
+        lib.files = vec![regular("/usr/lib64/libfoo.so.1")];
+
+        let mut devel = fixture_pkg();
+        devel.name = "foo-devel".to_string();
+        devel.arch = "x86_64".to_string();
+        devel.requires = vec![require("libfoo")];
+        devel.prereq = vec![];
+        devel.files = vec![
+            symlink("/usr/lib64/libfoo.so", "libfoo-1_2.so"),
+            symlink("/usr/lib64/libfoo-1_2.so", "libfoo.so.1"),
+        ];
+        assert!(run(&lib, &devel).is_empty());
+    }
+
+    #[test]
+    fn chained_symlink_still_checks_requires() {
+        // The chain resolves, but the devel does not require the library
+        // package: the requires check still fires.
+        let mut lib = fixture_pkg();
+        lib.name = "libfoo".to_string();
+        lib.arch = "x86_64".to_string();
+        lib.files = vec![regular("/usr/lib64/libfoo.so.1")];
+
+        let mut devel = fixture_pkg();
+        devel.name = "foo-devel".to_string();
+        devel.arch = "x86_64".to_string();
+        devel.requires = vec![require("unrelated")];
+        devel.prereq = vec![];
+        devel.files = vec![
+            symlink("/usr/lib64/libfoo.so", "libfoo-1_2.so"),
+            symlink("/usr/lib64/libfoo-1_2.so", "libfoo.so.1"),
+        ];
+        let results = run(&lib, &devel);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "no-library-dependency-on");
     }
 
     #[test]
