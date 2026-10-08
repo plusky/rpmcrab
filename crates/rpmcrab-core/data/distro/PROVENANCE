@@ -11,6 +11,10 @@
 #   Filters: dropped 'no-chkconfig' (killed: InitScriptCheck deleted (issue #214))
 #   Filters: dropped 'subsys-not-used' (killed: InitScriptCheck deleted (issue #214))
 #   Filters: dropped 'subdir-in-bin' scoped to '/sbin/conf.d/' (dead SysV scope)
+#   Filters: dropped 'module-without-depmod-postin' (killed: KMP macro template calls depmod (bnc#456048))
+#   Filters: dropped 'postin-with-wrong-depmod' (killed: no manual depmod in scriptlets (bnc#456048))
+#   Filters: dropped 'module-without-depmod-postun' (killed: KMP macro template calls depmod (bnc#456048))
+#   Filters: dropped 'postun-with-wrong-depmod' (killed: no manual depmod in scriptlets (bnc#456048))
 #   Filters: dropped 'conffile-without-noreplace-flag' scoped to '/etc/init.d' (dead SysV scope)
 #   Filters: dropped 'init-script-name-with-dot' (killed: InitScriptCheck deleted (issue #214))
 #   Filters: dropped 'service-default-enabled' (killed: InitScriptCheck deleted (issue #214))
@@ -144,10 +148,6 @@
 #   pie-executables: dropped stale path '/usr/sbin/utempter' (libutempter removed from Factory)
 #   pie-executables: dropped stale path '/usr/sbin/yppush' (ypserv removed from Factory)
 #   pie-executables: dropped stale path '/usr/sbin/ypserv' (ypserv removed from Factory)
-#   Filters: dropped 'module-without-depmod-postin' (killed: KMP macro template calls depmod (bnc#456048))
-#   Filters: dropped 'postin-with-wrong-depmod' (killed: no manual depmod in scriptlets (bnc#456048))
-#   Filters: dropped 'module-without-depmod-postun' (killed: KMP macro template calls depmod (bnc#456048))
-#   Filters: dropped 'postun-with-wrong-depmod' (killed: no manual depmod in scriptlets (bnc#456048))
 #
 # SLFO files byte-identical to openSUSE (not vendored twice;
 # the generated Rust consts fall back to the openSUSE copy):
