@@ -68,20 +68,6 @@ digester = "shell"
 hash     = "bcc22a994f7bbb3aea193ab77ef49a57bf171bafce9f55e4bc1b02e16e7e308f"
 
 [[FileDigestGroup]]
-package  = "snapd"
-note     = "Capabilities for snap-confine"
-bug      = "bsc#1248682"
-type     = "permissions"
-[[FileDigestGroup.digests]]
-path     = "/etc/permissions.d/snapd"
-digester = "shell"
-hash     = "b9235a656a3bd124f18113976f491f3018d45de68d93da830b4b19bbdd8a2dcb"
-[[FileDigestGroup.digests]]
-path     = "/etc/permissions.d/snapd.paranoid"
-digester = "shell"
-hash     = "3d57053a143f2828783d2c835ddfb0af85db16cfde1a088fe2db8a161d5b053c"
-
-[[FileDigestGroup]]
 package  = "account-utils"
 note     = "Disables setuid bits for shadow utilities, which are replaced by this package. In the long run there should be a drop-in file for shadow instead."
 bug      = "bsc#1254218"

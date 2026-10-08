@@ -78,13 +78,3 @@ mode = "drwxrwxrwt"
 owner = "root"
 group = "root"
 
-[[WorldWritableWhitelist]]
-package = "nscd"
-bug = "bsc#1174642"
-note = "nss caching daemon socket. is packaged as %ghost, therefore 'appears' to be a regular file."
-[[WorldWritableWhitelist.files]]
-path = '/run/nscd/socket'
-mode = "-rw-rw-rw-"
-owner = "root"
-group = "root"
-

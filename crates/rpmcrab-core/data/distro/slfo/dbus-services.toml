@@ -84,14 +84,6 @@ nodigests = [
 ]
 
 [[FileDigestGroup]]
-package = "scmon"
-type = "dbus"
-note = "legacy: not audited"
-nodigests = [
-    "/etc/dbus-1/system.d/com.novell.Pkcs11Monitor.conf",
-]
-
-[[FileDigestGroup]]
 packages = ["systemd", "systemd-mini"]
 type = "dbus"
 note = "imported from rpmlint1 DBUSServices.WhiteList"
@@ -850,16 +842,6 @@ nodigests = [
 ]
 
 [[FileDigestGroup]]
-package = "kcm_sddm"
-type = "dbus"
-note = "imported from rpmlint1 DBUSServices.WhiteList"
-bug = "bsc#1065563"
-nodigests = [
-    "/usr/share/dbus-1/system.d/org.kde.kcontrol.kcmsddm.conf",
-    "/usr/share/dbus-1/system-services/org.kde.kcontrol.kcmsddm.service",
-]
-
-[[FileDigestGroup]]
 package  = "sddm-kcm6"
 note     = "display manager API e.g. for setting up themes"
 bug      = "bsc#1217188"
@@ -1183,20 +1165,6 @@ nodigests = [
 ]
 
 [[FileDigestGroup]]
-package = "deepin-api"
-type = "dbus"
-note = "compatibility entry for the time being until the rename from bsc#1211376 comes into effect"
-bugs = ["bsc#1070943", "bsc#1214101"]
-nodigests = [
-    "/usr/share/dbus-1/system-services/com.deepin.api.Device.service",
-    "/usr/share/dbus-1/system.d/com.deepin.api.Device.conf",
-    "/usr/share/dbus-1/system-services/com.deepin.api.LocaleHelper.service",
-    "/usr/share/dbus-1/system.d/com.deepin.api.LocaleHelper.conf",
-    "/usr/share/dbus-1/system-services/com.deepin.api.SoundThemePlayer.service",
-    "/usr/share/dbus-1/system.d/com.deepin.api.SoundThemePlayer.conf"
-]
-
-[[FileDigestGroup]]
 package = "low-memory-monitor"
 type = "dbus"
 note = "a system wide daemon monitoring low memory situations and sending out signals"
@@ -1342,20 +1310,6 @@ hash = "72e1dbaa64ae4f041b45d87c1ec65ae1f6596245171cf6bd967e4d13e4d48600"
 path = "/usr/share/dbus-1/system.d/org.selinux.conf"
 digester = "xml"
 hash = "0ec37dac1d4ff66ca0ff3aec940c28ad9468e70f7376571dcaf311c58ef66927"
-
-[[FileDigestGroup]]
-package = "passim"
-type = "dbus"
-note = "caching of public files in local networks"
-bug = "bsc#1216434"
-[[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system-services/org.freedesktop.Passim.service"
-digester = "shell"
-hash = "0c07dc9b27fb506af38d60d5b0555fb88849dc457c31b6bc67a979be538a1946"
-[[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system.d/org.freedesktop.Passim.conf"
-digester = "xml"
-hash = "f0a5a607af98b0f4841ac0cab80af5592ee81d29279e50932bccdbf92c10d227"
 
 [[FileDigestGroup]]
 package  = "drkonqi6"
