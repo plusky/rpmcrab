@@ -385,6 +385,60 @@ mod tests {
         assert!(run(&config, &mut check, &huge_docs_pkg("foo-javadoc")).is_empty());
     }
 
+    /// NsCDE-doc shape: every file is documentation, and one doc file
+    /// carries a per-file require (`/bin/ksh`) that no non-doc file and no
+    /// package provide covers.
+    fn doc_dep_pkg(cover_dep: bool) -> Pkg {
+        use crate::pkg::dep::parse_dep_infos;
+        let mut pkg = fixture_pkg();
+        pkg.name = "nscde".to_string();
+        pkg.arch = "noarch".to_string();
+        let mut nitro = big_doc_file("/usr/share/doc/NsCDE-doc/nitrowrapper");
+        nitro.size = Some(1024);
+        nitro.requires = parse_dep_infos("/bin/ksh");
+        let mut readme = big_doc_file("/usr/share/doc/NsCDE-doc/README");
+        readme.size = Some(1024);
+        let nitro_name = nitro.name.clone();
+        let readme_name = readme.name.clone();
+        if cover_dep {
+            // A non-doc file with the same require covers the dep.
+            let mut tool = big_doc_file("/usr/bin/nitrowrapper");
+            tool.size = Some(1024);
+            tool.requires = parse_dep_infos("/bin/ksh");
+            pkg.files = vec![nitro, readme, tool];
+            pkg.doc_files = vec![nitro_name, readme_name];
+        } else {
+            pkg.files = vec![nitro, readme];
+            pkg.doc_files = vec![nitro_name, readme_name];
+        }
+        pkg
+    }
+
+    #[test]
+    fn doc_file_with_unique_per_file_require_is_flagged() {
+        let config = Config::default();
+        let mut check = DocCheck::new(&config);
+        let results = run(&config, &mut check, &doc_dep_pkg(false));
+        assert_eq!(results.len(), 1, "expected one finding, got {results:?}");
+        assert_eq!(results[0].0, "doc-file-dependency");
+        assert!(
+            results[0]
+                .1
+                .contains("/usr/share/doc/NsCDE-doc/nitrowrapper"),
+            "line: {}",
+            results[0].1
+        );
+        assert!(results[0].1.contains("/bin/ksh"), "line: {}", results[0].1);
+    }
+
+    #[test]
+    fn doc_file_require_covered_by_non_doc_file_is_quiet() {
+        let config = Config::default();
+        let mut check = DocCheck::new(&config);
+        let results = run(&config, &mut check, &doc_dep_pkg(true));
+        assert!(results.is_empty(), "expected no findings, got {results:?}");
+    }
+
     #[test]
     fn missing_key_falls_back_to_javadoc_default() {
         // A bare Config with no ExemptDocSuffixes key still exempts -javadoc.
