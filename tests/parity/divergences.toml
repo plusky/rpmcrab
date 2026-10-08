@@ -1572,3 +1572,31 @@ check = "one-line-command-in-%verifyscript"
 kind = "missing"
 reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "setup-not-quiet"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding as too noisy; Fedora's config carries it only as a commented-out filter line, never enabled. spec-cleaner already normalizes `%setup` to `%setup -q`, so in the openSUSE workflow the warning cannot fire on a cleaned spec. No shipped config treats the finding as wanted signal, so the port does not emit it. The emission, its staged `--explain` entry, and the now-dead -q/-T/-a/-b option regexes are removed. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "unversioned-explicit-obsoletes"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding; Fedora's config carries it only as a commented-out filter line, never enabled (same FIXME as above). No shipped config treats the finding as wanted signal, so the port does not emit it. The emission and its staged `--explain` entry are removed. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "no-group-tag"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE dropped the Group tag -- its own rpmlint config says 'Do not validate package rpm groups', the wiki (https://en.opensuse.org/openSUSE:Package_group_guidelines) says the field has fallen out of use, and the packaging guidelines say 'Group: -- always drop' -- so the port does not emit this finding. The emission and its staged `--explain` entry are removed. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "devel-package-with-non-devel-group"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE dropped the Group tag -- its own rpmlint config says 'Do not validate package rpm groups', the wiki (https://en.opensuse.org/openSUSE:Package_group_guidelines) says the field has fallen out of use, and the packaging guidelines say 'Group: -- always drop' -- so the port does not emit this finding. The emission and its staged `--explain` entry are removed. The reference still emits it."
+since = "0.1.0"
