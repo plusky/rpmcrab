@@ -168,11 +168,6 @@ fn depmod_regex() -> &'static Regex {
     DEPMOD_REGEX.get_or_init(|| Regex::new(r"(?m)^[^#]*depmod").expect("static regex"))
 }
 
-static INSTALL_INFO_REGEX: OnceLock<Regex> = OnceLock::new();
-fn install_info_regex() -> &'static Regex {
-    INSTALL_INFO_REGEX.get_or_init(|| Regex::new(r"(?m)^[^#]*install-info").expect("static regex"))
-}
-
 static PERL_TEMP_FILE_REGEX: OnceLock<Regex> = OnceLock::new();
 fn perl_temp_file_regex() -> &'static Regex {
     PERL_TEMP_FILE_REGEX
@@ -380,7 +375,6 @@ pub struct FilesCheck {
     lib_re: Regex,
     normal_zero_length_re: Regex,
     depmod_re: Regex,
-    install_info_re: Regex,
     perl_temp_file_re: Regex,
     interpreter_re: Regex,
     script_re: Regex,
@@ -551,7 +545,6 @@ impl FilesCheck {
             lib_re: lib_regex().clone(),
             normal_zero_length_re: normal_zero_length_regex().clone(),
             depmod_re: depmod_regex().clone(),
-            install_info_re: install_info_regex().clone(),
             perl_temp_file_re: perl_temp_file_regex().clone(),
             interpreter_re: interpreter_regex().clone(),
             script_re: script_regex().clone(),
@@ -2068,7 +2061,6 @@ impl FilesCheck {
         self.check_normal_non_devel(pkg, fname, st, out);
         self.check_normal_lib(pkg, fname, pkgfile, st, out);
         self.check_normal_depmod_call(pkg, fname, st, out);
-        self.check_normal_install_info(pkg, fname, st, out);
         self.check_normal_perl_temp(pkg, fname, out);
         self.check_normal_rpaths_in_buildconfig(pkg, fname, &fd, out);
         self.check_normal_bin(pkg, fname, pkgfile, st, out);
@@ -2274,51 +2266,6 @@ impl FilesCheck {
             );
         } else if !depmod_call_for_kernel(&st.postun, kernel_version) {
             add_info(out, Level::Error, pkg, "postun-with-wrong-depmod", &[fname]);
-        }
-    }
-
-    fn check_normal_install_info(&self, pkg: &Pkg, fname: &str, st: &PkgState, out: &mut Filter) {
-        // check install-info call in %post and %postun
-        if !fname.starts_with("/usr/share/info/") {
-            return;
-        }
-        if st.postin.is_empty() {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "info-files-without-install-info-postin",
-                &[fname],
-            );
-        } else if !is_match(&self.install_info_re, &st.postin) {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "postin-without-install-info",
-                &[fname],
-            );
-        }
-        let postun_ok = !st.postun.is_empty() && is_match(&self.install_info_re, &st.postun);
-        let preun_ok = !st.preun.is_empty() && is_match(&self.install_info_re, &st.preun);
-        if st.postun.is_empty() && st.preun.is_empty() {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "info-files-without-install-info-postun",
-                &[fname],
-            );
-        } else if !postun_ok && !preun_ok {
-            // NB: the reference reports 'postin-without-install-info' for the
-            // postun/preun case too.
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "postin-without-install-info",
-                &[fname],
-            );
         }
     }
 
@@ -3165,27 +3112,6 @@ mod tests {
         );
     }
 
-    /// Like `run_files_check` but keeps each finding's level and rendered
-    /// line, so tests can pin name + level + detail structurally.
-    fn run_files_check_detailed(
-        rpm: &str,
-        config: &Config,
-    ) -> (Vec<(String, Level, String)>, tempfile::TempDir) {
-        let dir = tempfile::TempDir::new().expect("tmpdir");
-        let pkg = Pkg::open(std::path::Path::new(rpm), dir.path(), true).expect("open fixture");
-        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
-        let mut check = FilesCheck::new(config);
-        check.check(&pkg, config, &mut out);
-        let levels = out.result_levels().to_vec();
-        let triples = out
-            .results()
-            .iter()
-            .zip(levels)
-            .map(|((name, line), level)| (name.clone(), level, line.clone()))
-            .collect();
-        (triples, dir)
-    }
-
     #[test]
     fn missing_dependency_to_xinetd_is_gone() {
         // Issue #214: the rule was deleted outright (it contradicted
@@ -3622,84 +3548,6 @@ mod tests {
         );
         assert_has(&missing_names, "module-without-depmod-postin");
         assert_has(&missing_names, "module-without-depmod-postun");
-    }
-
-    #[test]
-    fn files_check_install_info_variants() {
-        let config = test_config();
-        let (ok_names, _d1) = run_files_check(
-            &fixture_path("filescheck-installinfo-ok-1.0-1.noarch.rpm"),
-            &config,
-        );
-        assert_lacks(&ok_names, "postin-without-install-info");
-
-        let (postin_names, _d2) = run_files_check(
-            &fixture_path("filescheck-installinfo-postin-1.0-1.noarch.rpm"),
-            &config,
-        );
-        assert_has(&postin_names, "postin-without-install-info");
-
-        let (postun_names, _d3) = run_files_check(
-            &fixture_path("filescheck-installinfo-postun-1.0-1.noarch.rpm"),
-            &config,
-        );
-        // NB: the reference reports postin-without-install-info for the
-        // postun case too.
-        assert_has(&postun_names, "postin-without-install-info");
-    }
-
-    #[test]
-    fn files_check_install_info_missing_scriptlets() {
-        let config = test_config();
-        // /usr/share/info file, no %post at all: the reference fires
-        // info-files-without-install-info-postin. The fixture's %postun
-        // carries an install-info call so the postun finding stays silent.
-        let (triples, _d1) = run_files_check_detailed(
-            &fixture_path("filescheck-installinfo-nopostin-1.0-1.noarch.rpm"),
-            &config,
-        );
-        // Count, not just presence: Filter::add_info does not dedupe,
-        // so a doubled emission would slip past .find().
-        let hits: Vec<_> = triples
-            .iter()
-            .filter(|(n, _, _)| n == "info-files-without-install-info-postin")
-            .collect();
-        assert_eq!(hits.len(), 1, "exactly one emission: {triples:?}");
-        let (name, level, line) = hits[0];
-        assert_eq!(name, "info-files-without-install-info-postin");
-        assert_eq!(*level, Level::Error);
-        assert!(
-            line.contains("/usr/share/info/foo.info"),
-            "detail must name the info file, got: {line}"
-        );
-        let names: Vec<String> = triples.iter().map(|(n, _, _)| n.clone()).collect();
-        assert_lacks(&names, "info-files-without-install-info-postun");
-        assert_lacks(&names, "postin-without-install-info");
-
-        // /usr/share/info file, %post with an install-info call but neither
-        // %postun nor %preun: the reference fires
-        // info-files-without-install-info-postun.
-        let (triples, _d2) = run_files_check_detailed(
-            &fixture_path("filescheck-installinfo-nopostun-1.0-1.noarch.rpm"),
-            &config,
-        );
-        // Count, not just presence: Filter::add_info does not dedupe,
-        // so a doubled emission would slip past .find().
-        let hits: Vec<_> = triples
-            .iter()
-            .filter(|(n, _, _)| n == "info-files-without-install-info-postun")
-            .collect();
-        assert_eq!(hits.len(), 1, "exactly one emission: {triples:?}");
-        let (name, level, line) = hits[0];
-        assert_eq!(name, "info-files-without-install-info-postun");
-        assert_eq!(*level, Level::Error);
-        assert!(
-            line.contains("/usr/share/info/foo.info"),
-            "detail must name the info file, got: {line}"
-        );
-        let names: Vec<String> = triples.iter().map(|(n, _, _)| n.clone()).collect();
-        assert_lacks(&names, "info-files-without-install-info-postin");
-        assert_lacks(&names, "postin-without-install-info");
     }
 
     #[test]
@@ -4260,11 +4108,16 @@ mod tests {
         // reference does not. The reference gates on the anchored
         // sofile_regex (FilesCheck.py:165, _check_file_link_devel), so only
         // the unversioned development symlink (libfoo.so) triggers -- not
-        // versioned libfoo.so.0 / libfoo.so.0.0.0 links.
+        // versioned libfoo.so.0 / libfoo.so.0.0.0 links, and not a
+        // libbar.so.bak backup (the regex is end-anchored).
         let (pkg, _dir) = pkg_with_files(vec![
             PkgFile {
                 linkto: "libfcgi.so.0.0.0".to_string(),
                 ..mkfile("/usr/lib64/libfcgi.so.0", 0o120777, 61)
+            },
+            PkgFile {
+                linkto: "libbar.so.1".to_string(),
+                ..mkfile("/usr/lib64/libbar.so.bak", 0o120777, 63)
             },
             PkgFile {
                 linkto: "libfoo.so.1.2.3".to_string(),
@@ -4284,6 +4137,23 @@ mod tests {
                 .any(|(n, d)| n == "devel-file-in-non-devel-package"
                     && d.contains("/usr/lib64/libfoo.so")),
             "missing finding on unversioned .so link: {results:?}"
+        );
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "devel-file-in-non-devel-package" && d.contains("libbar.so.bak")),
+            "false positive on .so.bak backup: {results:?}"
+        );
+        let lines: Vec<&String> = results
+            .iter()
+            .filter(|(n, _)| n == "devel-file-in-non-devel-package")
+            .map(|(_, l)| l)
+            .collect();
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+        assert!(
+            lines[0].contains(": W: devel-file-in-non-devel-package /usr/lib64/libfoo.so"),
+            "name, level and detail: {}",
+            lines[0]
         );
     }
 
