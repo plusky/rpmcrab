@@ -2472,6 +2472,36 @@ mod tests {
             "must stay silent: {results:?}"
         );
     }
+
+    /// Negative pin for the deleted `no-group-tag` finding: a package with
+    /// an empty Group tag must stay silent, and `cargo test` (not just the
+    /// reference-coverage auditor) must catch a re-add.
+    #[test]
+    fn killed_no_group_tag_stays_absent() {
+        // The filescheck fixtures ship no Group tag at all.
+        let (_tmp, pkg) = fixture_pkg("filescheck-depmod-missing-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        assert!(
+            tag_hits(&results, "no-group-tag").is_empty(),
+            "must stay silent: {results:?}"
+        );
+    }
+
+    /// Negative pin for the deleted `devel-package-with-non-devel-group`
+    /// finding: a -devel package outside Development/ must stay silent,
+    /// and `cargo test` (not just the reference-coverage auditor) must
+    /// catch a re-add.
+    #[test]
+    fn killed_devel_package_with_non_devel_group_stays_absent() {
+        // tags-group-devel is grouped as System/Libraries; the old emission fired
+        // on exactly this shape.
+        let (_tmp, pkg) = fixture_pkg("tags-group-devel-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        assert!(
+            tag_hits(&results, "devel-package-with-non-devel-group").is_empty(),
+            "must stay silent: {results:?}"
+        );
+    }
 }
 
 #[cfg(test)]

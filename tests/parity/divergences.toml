@@ -1255,7 +1255,7 @@ since = "0.1.0"
 case = "global"
 check = "unversioned-explicit-provides"
 kind = "missing"
-reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding; Fedora's config carries it only as a commented-out filter line, never enabled -- and on Fedora the warning is a known false positive against Fedora's own packaging guidelines (bundled()/deprecated() Provides: are required; upstream rpmlint#1330). No shipped config treats the finding as wanted signal, so the port does not emit it. The emission and its staged `--explain` entry are removed. The reference still emits it."
+reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding; Fedora's config carries it only as a commented-out filter line, never enabled -- and on Fedora the warning is a known false positive against Fedora's own packaging guidelines (bundled()/deprecated() Provides: are required; upstream https://github.com/rpm-software-management/rpmlint/issues/1330). No shipped config treats the finding as wanted signal, so the port does not emit it. The emission and its staged `--explain` entry are removed. The reference still emits it."
 since = "0.1.0"
 
 [[divergence]]
