@@ -84,6 +84,8 @@ jobs:
             local match_count=0
             local f
             while IFS= read -r f; do
+                # shellcheck disable=SC2254
+                # (pattern is intentionally a glob)
                 case "${f##*/}" in
                     $pattern)
                         committed_name="$f"
