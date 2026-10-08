@@ -12,6 +12,18 @@
 #   import (triggers crypto-policy-non-compliance-openssl via WarnOnFunction)
 # - gnutlswaived: stripped shared lib calling gnutls_priority_init whose
 #   strings contain the waiver ("SYSLOG"), so the finding is suppressed
+# - hardenedbin: fully hardened (FORTIFY, SSP, PIE, full RELRO) -- none of
+#   the new hardening findings fire
+# - nofortifybin: like hardenedbin but without -D_FORTIFY_SOURCE
+#   (triggers missing-fortify)
+# - nosspbin: like hardenedbin but with -fno-stack-protector
+#   (triggers missing-stack-protector)
+# - nonpiebin: like hardenedbin but linked -no-pie (triggers
+#   position-independent-executable-suggested)
+# - partialrelrobin: like hardenedbin but linked -z lazy (triggers
+#   partial-relro)
+# - norelrobin: like hardenedbin but linked -z norelro (triggers
+#   missing-relro)
 #
 # Usage: bash tests/fixtures/binaries-check/build.sh
 # Needs: podman (or PODMAN=/path/to/podman)
@@ -61,6 +73,13 @@ __asm__(".type gnutls_priority_init, @function");
 static const char waiver_note[] = "SYSLOG priority approved by policy";
 int init_priority(void *session) { return gnutls_priority_init(session, waiver_note, 0); }
 EOF
+cat >"$work/src/hardening.c" <<'EOF'
+#include <string.h>
+/* strcpy on a stack buffer: fortifiable call (needs -O1+ and
+   -D_FORTIFY_SOURCE) and a stack array (needs -fstack-protector). */
+void harden_target(char *d) { char b[64]; strcpy(b, d); }
+int main(void) { char x[16]; harden_target(x); return 0; }
+EOF
 
 cat >"$work/rpmbuild/SPECS/fixture.spec" <<'EOF'
 Name:           rpmcrab-binaries-fixture
@@ -81,6 +100,9 @@ cp %{_sourcedir}/setuidbin %{buildroot}/usr/bin/
 cp %{_sourcedir}/rpathbin %{buildroot}/usr/bin/
 cp %{_sourcedir}/libcryptobad.so %{buildroot}/usr/lib64/
 cp %{_sourcedir}/libgnutlswaived.so %{buildroot}/usr/lib64/
+for b in hardenedbin nofortifybin nosspbin nonpiebin partialrelrobin norelrobin; do
+    cp %{_sourcedir}/$b %{buildroot}/usr/bin/
+done
 head -c 64 %{_sourcedir}/setuidbin > %{buildroot}/usr/bin/truncated
 chmod 755 %{buildroot}/usr/bin/truncated
 
@@ -92,6 +114,12 @@ chmod 755 %{buildroot}/usr/bin/truncated
 %attr(4755,root,root) /usr/bin/setuidbin
 /usr/bin/rpathbin
 /usr/bin/truncated
+/usr/bin/hardenedbin
+/usr/bin/nofortifybin
+/usr/bin/nosspbin
+/usr/bin/nonpiebin
+/usr/bin/partialrelrobin
+/usr/bin/norelrobin
 EOF
 
 # The container-side build runs from a file to avoid nested shell quoting:
@@ -108,6 +136,20 @@ gcc -Wl,-rpath,/opt/custom/lib -o rpathbin rpathbin.c
 gcc -shared -fPIC -z noexecstack -Wl,-soname,libcryptobad.so -o libcryptobad.so cryptobad.c
 gcc -shared -fPIC -z noexecstack -Wl,-soname,libgnutlswaived.so -o libgnutlswaived.so gnutlswaived.c
 strip libcryptobad.so libgnutlswaived.so
+hard_cflags="-O2 -D_FORTIFY_SOURCE=3 -fstack-protector-strong -fPIE"
+hard_ldflags="-pie -Wl,-z,relro,-z,now"
+# shellcheck disable=SC2086
+gcc $hard_cflags $hard_ldflags -o hardenedbin hardening.c
+# shellcheck disable=SC2086
+gcc -O2 -fstack-protector-strong -fPIE -pie -Wl,-z,relro,-z,now -o nofortifybin hardening.c
+# shellcheck disable=SC2086
+gcc -O2 -D_FORTIFY_SOURCE=3 -fno-stack-protector -fPIE $hard_ldflags -o nosspbin hardening.c
+# shellcheck disable=SC2086
+gcc -O2 -D_FORTIFY_SOURCE=3 -fstack-protector-strong -fno-pie -no-pie -Wl,-z,relro,-z,now -o nonpiebin hardening.c
+# shellcheck disable=SC2086
+gcc $hard_cflags -pie -Wl,-z,relro,-z,lazy -o partialrelrobin hardening.c
+# shellcheck disable=SC2086
+gcc $hard_cflags -pie -Wl,-z,norelro -o norelrobin hardening.c
 # The __asm__(".type ..., @function") directives in cryptobad.c /
 # gnutlswaived.c are load-bearing: modern GCC emits undefined imports as
 # NOTYPE, which the forbidden-function scan does not match. If a future
@@ -117,7 +159,33 @@ readelf --dyn-syms -W libcryptobad.so | grep -q "FUNC.*SSL_CTX_set_cipher_list" 
     || { echo "fixture broken: SSL_CTX_set_cipher_list is not FUNC" >&2; exit 1; }
 readelf --dyn-syms -W libgnutlswaived.so | grep -q "FUNC.*gnutls_priority_init" \
     || { echo "fixture broken: gnutls_priority_init is not FUNC" >&2; exit 1; }
-cp /work/src/libbad.so.1 /work/src/libgood.so.1 /work/src/setuidbin /work/src/rpathbin /work/src/libcryptobad.so /work/src/libgnutlswaived.so /work/rpmbuild/SOURCES/
+# Hardening variants: each must carry exactly the intended properties,
+# otherwise the tests below would assert against the wrong binaries.
+chk() { readelf --dyn-syms -W "$1" | grep -qE "__[a-z0-9_]*_chk@"; }
+ssp() { readelf --dyn-syms -W "$1" | grep -q "__stack_chk_fail"; }
+pie() { readelf -h -W "$1" | grep -q "Type:.*DYN"; }
+bindnow() { readelf -d -W "$1" | grep -q "BIND_NOW" || readelf -d -W "$1" | grep "FLAGS_1" | grep -q "NOW"; }
+relro() { readelf -l -W "$1" | grep -q "GNU_RELRO"; }
+for b in hardenedbin nosspbin partialrelrobin norelrobin; do
+    chk "$b" || { echo "fixture broken: $b lacks __*_chk" >&2; exit 1; }
+    pie "$b" || { echo "fixture broken: $b is not PIE" >&2; exit 1; }
+done
+for b in hardenedbin nofortifybin partialrelrobin norelrobin; do
+    ssp "$b" || { echo "fixture broken: $b lacks __stack_chk_fail" >&2; exit 1; }
+done
+for b in hardenedbin nofortifybin nosspbin nonpiebin; do
+    relro "$b" && bindnow "$b" \
+        || { echo "fixture broken: $b lacks full RELRO" >&2; exit 1; }
+done
+chk nofortifybin && { echo "fixture broken: nofortifybin is fortified" >&2; exit 1; }
+ssp nosspbin && { echo "fixture broken: nosspbin has __stack_chk_fail" >&2; exit 1; }
+pie nonpiebin && { echo "fixture broken: nonpiebin is PIE" >&2; exit 1; }
+chk nonpiebin && ssp nonpiebin \
+    || { echo "fixture broken: nonpiebin lacks fortify/ssp" >&2; exit 1; }
+relro partialrelrobin && ! bindnow partialrelrobin \
+    || { echo "fixture broken: partialrelrobin is not partial RELRO" >&2; exit 1; }
+relro norelrobin && { echo "fixture broken: norelrobin has GNU_RELRO" >&2; exit 1; }
+cp /work/src/libbad.so.1 /work/src/libgood.so.1 /work/src/setuidbin /work/src/rpathbin /work/src/libcryptobad.so /work/src/libgnutlswaived.so /work/src/hardenedbin /work/src/nofortifybin /work/src/nosspbin /work/src/nonpiebin /work/src/partialrelrobin /work/src/norelrobin /work/rpmbuild/SOURCES/
 rpmbuild --define '_topdir /work/rpmbuild' --nosignature -bb /work/rpmbuild/SPECS/fixture.spec
 INNER_EOF
 

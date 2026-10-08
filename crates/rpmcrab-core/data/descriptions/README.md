@@ -16,7 +16,11 @@ Provenance, verified against the pinned reference (`84848c0`):
   (openSUSE: "Doesn't seem to make sense"), plus
   the restored `shared-library-without-dependency-information` entry (copied
   verbatim from the pre-deletion upstream file; upstream removed entry and
-  check in `cf619f717bc3`).
+  check in `cf619f717bc3`), plus the four port-only rpmcrab#17 hardening
+  entries (`missing-fortify`, `missing-stack-protector`, `missing-relro`,
+  `partial-relro`). The reference has no such findings, so `--explain`
+  would print `Unknown message` for them; ledgered in
+  `tests/parity/divergences.toml`.
 - `IconSizesCheck.toml`, `MixedOwnershipCheck.toml`, `PAMModulesCheck.toml`,
   `ZyppSyntaxCheck.toml` — byte-identical to the reference
   `rpmlint/descriptions/` files of the same name.

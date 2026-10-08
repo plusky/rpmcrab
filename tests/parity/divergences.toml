@@ -1649,3 +1649,11 @@ check = "explicit-lib-dependency"
 kind = "behaviour"
 reason = "Same requirer-side class as the devel-dependency entry: biarch/flavored devel packages (`-devel-32bit`, `-devel-doc`, `-debug-libs`, ...) are recognized as devel packages, so their lib requirements do not trip explicit-lib-dependency. The reference only matches the devel-name suffix form and treats these requirers as runtime packages."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
+reason = "rpmcrab#17: checksec-style binary-level hardening verification via ELF inspection, which the frozen reference lacks. Four new Warning findings: `missing-fortify` (no `__*_chk` symbols), `missing-stack-protector` (no `__stack_chk_fail`), `missing-relro` (no GNU_RELRO segment) and `partial-relro` (GNU_RELRO without BIND_NOW). They verify the effective artifact state instead of the compile flags, so silent downgrades (e.g. `-fstack-protector` appended after `%{optflags}` downgrading strong to basic SSP) are caught. The SSP check is presence-only: basic and strong SSP both emit `__stack_chk_fail`, and telling them apart needs per-function canary-coverage analysis. PIE needs no new finding: `non-position-independent-executable` / `position-independent-executable-suggested` already cover it for executables. Provenance: `crates/rpmcrab-core/data/descriptions/BinariesCheck.toml`."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/17"
