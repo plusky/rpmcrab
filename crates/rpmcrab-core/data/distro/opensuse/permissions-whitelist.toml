@@ -23,15 +23,6 @@ path = "/usr/share/permissions/permissions.d/sendmail.paranoid"
 hash = "7a593f6678ab48c4eab010bb885989bd06e5a73a307575399d71a2d7c3d3f0c3"
 
 [[FileDigestGroup]]
-package  = "libcgroup-tools"
-note     = "this is for a setgid binary 'cgexec', running with 'cgred' group privs"
-bug      = "bsc#1231381"
-type     = "permissions"
-[[FileDigestGroup.digests]]
-path     = "/usr/share/permissions/permissions.d/libcgroup"
-hash     = "6d3a669b10b2449484dcad1c6d932f5897666bcbeef2a45d9608ef63a1e43188"
-
-[[FileDigestGroup]]
 package  = "sssd"
 note     = "sssd authentication services, this sets up capabilities for helper programs. For upstream this is only for hardening, not tight user separation."
 bug      = "bsc#1233131"
