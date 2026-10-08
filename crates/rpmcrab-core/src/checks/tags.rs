@@ -706,12 +706,17 @@ impl TagsCheck {
             add_info(out, Level::Error, pkg, "summary-on-multiple-lines", &d);
         }
         let first_word = summary.split(' ').next().unwrap_or("");
-        let capitalized = summary
+        // Reference parity: `summary[0] != summary[0].upper()` warns only
+        // when the first char is actually lowercase; digits and other
+        // non-letters never warn. Unicode titlecase letters (e.g. U+01C5)
+        // warn too, so compare against the uppercase form rather than
+        // `is_lowercase()`.
+        let lowercase_first = summary
             .chars()
             .next()
-            .map(|c| c.is_uppercase())
+            .map(|c| c.to_uppercase().next() != Some(c))
             .unwrap_or(false);
-        if !capitalized && !CAPITALIZED_IGNORE_LIST.contains(&first_word) {
+        if lowercase_first && !CAPITALIZED_IGNORE_LIST.contains(&first_word) {
             let mut d: Vec<&str> = Vec::new();
             if let Some(l) = lang_err {
                 d.push(l);
@@ -2298,6 +2303,44 @@ mod tests {
                 format!("tags-emission-pins-badsummary.noarch: W: {name} {summary}")
             );
         }
+    }
+
+    #[test]
+    fn summary_not_capitalized_ignores_digit_leading() {
+        // Reference parity: `summary[0] != summary[0].upper()` only warns
+        // when the first char is actually lowercase; a digit (or other
+        // non-letter) first char never warns.
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-badsummary-1.0-1.noarch.rpm");
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = TagsCheck::new(&config);
+        for summary in ["389 Directory Server", "7zip archiver"] {
+            check.check_summary(&pkg, &mut out, summary, "C", &[]);
+        }
+        let results = out.results().to_vec();
+        assert!(
+            results.is_empty(),
+            "digit-leading summary must not warn at all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn summary_not_capitalized_still_warns_on_lowercase() {
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-badsummary-1.0-1.noarch.rpm");
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = TagsCheck::new(&config);
+        check.check_summary(&pkg, &mut out, "lowercase summary", "C", &[]);
+        let results = out.results().to_vec();
+        let hits: Vec<_> = results
+            .iter()
+            .filter(|(n, _)| n == "summary-not-capitalized")
+            .collect();
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert_eq!(
+            hits[0].1,
+            "tags-emission-pins-badsummary.noarch: W: summary-not-capitalized lowercase summary"
+        );
     }
 
     #[test]
