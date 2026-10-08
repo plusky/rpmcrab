@@ -451,6 +451,24 @@ If #3 is approved, the divergence matrix is:
 Each gated divergence gets a `[[divergence]]` ledger entry (§6.2) recording
 `flavor = "slfo"`.
 
+### 4.12 Supported flavors
+
+rpmcrab supports distributions in priority order. The order decides which
+consumers a finding must serve to survive:
+
+1. **SUSE (P1).** openSUSE and SLFO/SLE — the primary family. Distro configs
+   are vendored in-tree and flavor-specific behavior is `Flavor`-gated (§4.11).
+2. **Fedora (P2).** Supported, nice to have. No vendored config yet; findings
+   are kept when Fedora's own rpmlint config lets them fire.
+3. **Everything else — not considered.** No other flavor is currently
+   supported. A new flavor enters support only when a maintainer steps up to
+   own that flow end to end (vendored config, parity corpus, drift guard).
+
+Consequence: the **generic/no-overlay flavor is not a supported use case**.
+"The generic flavor still emits it" is not a valid argument for retaining a
+finding when neither SUSE nor Fedora lets it fire. Findings that fire nowhere
+in the supported set are dead weight and are removed, with a ledger entry.
+
 ---
 
 ## 5. The diverging surface
