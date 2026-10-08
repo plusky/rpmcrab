@@ -522,8 +522,6 @@ struct PkgState {
     lib_package: bool,
     perl_dep_error: bool,
     python_dep_error: bool,
-    lib_file: bool,
-    non_lib_file: Option<String>,
     log_files: Vec<String>,
     logrotate_file: bool,
     debuginfo_srcs: bool,
@@ -601,7 +599,6 @@ impl Check for FilesCheck {
         }
         self.check_debug_files_in_non_debug_package(pkg, &st, out);
         self.check_log_files_without_logrotate(pkg, &st, out);
-        self.check_outside_libdir_files(pkg, &st, out);
         self.check_debuginfo_without_sources(pkg, &st, out);
         self.check_bindir_exes(pkg, &st, out);
     }
@@ -750,14 +747,6 @@ impl FilesCheck {
                 "log-files-without-logrotate",
                 &[&joined],
             );
-        }
-    }
-
-    fn check_outside_libdir_files(&self, pkg: &Pkg, st: &PkgState, out: &mut Filter) {
-        if st.lib_package && st.lib_file {
-            if let Some(f) = st.non_lib_file.as_ref() {
-                add_info(out, Level::Error, pkg, "outside-libdir-files", &[f]);
-            }
         }
     }
 
@@ -1978,7 +1967,6 @@ impl FilesCheck {
         }
         let mut fd = FileData::default();
         self.check_normal_setuid_bit(pkg, fname, pkgfile, out);
-        self.check_normal_libfile(pkg, fname, st);
         self.check_normal_logfile(pkg, fname, pkgfile, &mut fd, out);
         self.check_normal_getdata(pkg, fname, pkgfile, &mut fd, out);
         self.check_normal_doc(pkg, fname, &mut fd, out);
@@ -2038,17 +2026,6 @@ impl FilesCheck {
                 "non-standard-executable-perm",
                 &[fname, &format!("{:o}", perm)],
             );
-        }
-    }
-
-    fn check_normal_libfile(&self, pkg: &Pkg, fname: &str, st: &mut PkgState) {
-        let is_doc = pkg.doc_files.iter().any(|d| d == fname);
-        if !st.devel_pkg {
-            if is_match(&self.lib_path_re, fname) {
-                st.lib_file = true;
-            } else if !is_doc {
-                st.non_lib_file = Some(fname.to_string());
-            }
         }
     }
 
@@ -3386,20 +3363,6 @@ mod tests {
         let (names, _dir) =
             run_files_check(&fixture_path("libnodoc-test-1.0-1.noarch.rpm"), &config);
         assert_lacks(&names, "no-documentation");
-    }
-
-    #[test]
-    fn lib_package_with_non_lib_file_emits_outside_libdir_files() {
-        // The shared lib_package_regex must match "liboutsidelib-test": with
-        // the broken double-escaped form st.lib_package was always false, so
-        // outside-libdir-files could never fire. Restoring the broken regex
-        // makes this fail.
-        let config = test_config();
-        let (names, _dir) = run_files_check(
-            &fixture_path("liboutsidelib-test-1.0-1.noarch.rpm"),
-            &config,
-        );
-        assert_has(&names, "outside-libdir-files");
     }
 
     #[test]

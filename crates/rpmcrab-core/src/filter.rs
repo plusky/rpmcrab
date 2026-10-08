@@ -586,8 +586,8 @@ mod tests {
         let c = cfg();
         let f = Filter::new(&c, Color::for_tty(false)).unwrap();
         assert_eq!(
-            f.get_description("uncompressed-zip", &c),
-            "The zip file is not compressed.\n\n"
+            f.get_description("bad-crc-in-zip", &c),
+            "The reported file in the zip fails the CRC check. Usually this is a sign of a\ncorrupt zip file.\n\n"
         );
         assert_eq!(f.get_description("suse-other-error", &c), "");
     }

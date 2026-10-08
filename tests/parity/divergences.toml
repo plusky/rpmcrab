@@ -1379,9 +1379,198 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "SpecCheck"
-kind = "detail"
-reason = "Staged `--explain` text for `use-of-RPM_SOURCE_DIR` reworded: the reference's advice to use $RPM_BUILD_ROOT instead is wrong -- $RPM_SOURCE_DIR is %{_sourcedir} (the SOURCES dir) while $RPM_BUILD_ROOT is the install staging dir. Per the Fedora RPM_Source_Dir guideline (https://docs.fedoraproject.org/en-US/packaging-guidelines/RPM_Source_Dir/), Source#: files must be referenced by their %{SOURCEN} macro: a renamed Source#: entry still resolves by bare filename in the source directory, so the build succeeds locally while the SRPM silently ships the wrong file. Check level unchanged (Error)."
+check = "invalid-ldconfig-symlink"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's own rpmlint config says 'Doesn't seem to make sense' about this finding. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "only-non-binary-in-usr-lib"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's own rpmlint config says 'Doesn't seem to make sense' about this finding. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "outside-libdir-files"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's own rpmlint config says 'Doesn't seem to make sense' about this finding. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "invalid-build-requires"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's rpmlint config calls this 'Mandriva specific stuff that we don't want'. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "no-provides"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's rpmlint config calls this 'Mandriva specific stuff that we don't want'. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "hardcoded-prefix-tag"
+kind = "missing"
+reason = "Deliberate removal per triage: the Prefix: tag is obsolete and ignored by RPM, the same class as the killed BuildRoot findings. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "jar-not-indexed"
+kind = "missing"
+reason = "Deliberate removal per triage: niche Java index check with negligible value at distro scale. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "uncompressed-zip"
+kind = "missing"
+reason = "Deliberate removal per triage: negligible value at distro scale. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "spurious-bracket-in-%filetrigger"
+kind = "missing"
+reason = "Deliberate removal per triage: PostCheck stylistic nit (missing space before ']' in shell 'if []'), low value. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "spurious-bracket-in-%post"
+kind = "missing"
+reason = "Deliberate removal per triage: PostCheck stylistic nit (missing space before ']' in shell 'if []'), low value. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "spurious-bracket-in-%posttrans"
+kind = "missing"
+reason = "Deliberate removal per triage: PostCheck stylistic nit (missing space before ']' in shell 'if []'), low value. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "spurious-bracket-in-%postun"
+kind = "missing"
+reason = "Deliberate removal per triage: PostCheck stylistic nit (missing space before ']' in shell 'if []'), low value. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "spurious-bracket-in-%pre"
+kind = "missing"
+reason = "Deliberate removal per triage: PostCheck stylistic nit (missing space before ']' in shell 'if []'), low value. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "spurious-bracket-in-%pretrans"
+kind = "missing"
+reason = "Deliberate removal per triage: PostCheck stylistic nit (missing space before ']' in shell 'if []'), low value. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "spurious-bracket-in-%preun"
+kind = "missing"
+reason = "Deliberate removal per triage: PostCheck stylistic nit (missing space before ']' in shell 'if []'), low value. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "spurious-bracket-in-%transfiletrigger"
+kind = "missing"
+reason = "Deliberate removal per triage: PostCheck stylistic nit (missing space before ']' in shell 'if []'), low value. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "spurious-bracket-in-%trigger"
+kind = "missing"
+reason = "Deliberate removal per triage: PostCheck stylistic nit (missing space before ']' in shell 'if []'), low value. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "spurious-bracket-in-%verifyscript"
+kind = "missing"
+reason = "Deliberate removal per triage: PostCheck stylistic nit (missing space before ']' in shell 'if []'), low value. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "one-line-command-in-%filetrigger"
+kind = "missing"
+reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "one-line-command-in-%post"
+kind = "missing"
+reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "one-line-command-in-%posttrans"
+kind = "missing"
+reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "one-line-command-in-%postun"
+kind = "missing"
+reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "one-line-command-in-%pre"
+kind = "missing"
+reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "one-line-command-in-%pretrans"
+kind = "missing"
+reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "one-line-command-in-%preun"
+kind = "missing"
+reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "one-line-command-in-%transfiletrigger"
+kind = "missing"
+reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "one-line-command-in-%trigger"
+kind = "missing"
+reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "one-line-command-in-%verifyscript"
+kind = "missing"
+reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
 since = "0.1.0"
 
 [[divergence]]

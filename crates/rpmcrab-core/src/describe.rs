@@ -286,8 +286,8 @@ mod tests {
         );
         // Plain entries pass through untouched.
         assert_eq!(
-            descriptions["uncompressed-zip"],
-            "The zip file is not compressed.\n"
+            descriptions["bad-crc-in-zip"],
+            "The reported file in the zip fails the CRC check.\nUsually this is a sign of a corrupt zip file.\n"
         );
     }
 
@@ -318,7 +318,7 @@ mod tests {
             ),
             (
                 "BinariesCheck.toml",
-                "d806458289d950f477e7a5da2d98f51c2ae125fc4b225dca1841a81dd455e35f",
+                "9ec5c258cc6d801fb5a33ed15f8f801272f7b312050a2e3f366bd281d169d6a6",
             ),
             (
                 "BrandingPolicyCheck.toml",
@@ -370,7 +370,7 @@ mod tests {
             ),
             (
                 "FilesCheck.toml",
-                "f98eed82e447cc337a0793a15a5da3bd51e7107611b44014d823ef8ada16c9fd",
+                "584cf3c568acfbe45651e6000ca983ffc394a27172dd74f940675cf0ff213b35",
             ),
             (
                 "I18NCheck.toml",
@@ -446,7 +446,7 @@ mod tests {
             ),
             (
                 "SpecCheck.toml",
-                "d7e29c5ed54de2e3fe8d1199336c5a39a7125c2c67da24fadaa37aa34883df88",
+                "350a46c360dea9764299bd9aa09b07690b27db8e8b962b3a9dbec35d74c60b7f",
             ),
             (
                 "SysVInitOnSystemdCheck.toml",
@@ -462,7 +462,7 @@ mod tests {
             ),
             (
                 "TagsCheck.toml",
-                "4c1de7fd03501549352656b445ca95ad528274e6d65b4db2bf38e55c527d66a8",
+                "14f57fd8235f6c9c4b435ff56839509a7b2aa4e6b1358943c6954de0aee7d397",
             ),
             (
                 "TmpFilesCheck.toml",
@@ -482,7 +482,7 @@ mod tests {
             ),
             (
                 "ZipCheck.toml",
-                "d4271d3a9848eda2c043d5825d6ef64c3d6225abc1fc3bf8766f26fa94b58144",
+                "b19fe443d0a90fbd109c5f17444c429fa12beebc804dfd4f2f0987bed9742ea4",
             ),
             (
                 "ZyppSyntaxCheck.toml",

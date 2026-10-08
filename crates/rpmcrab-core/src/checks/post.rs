@@ -58,10 +58,6 @@ impl PostCheck {
         static PERCENT_REGEX: OnceLock<Regex> = OnceLock::new();
         PERCENT_REGEX.get_or_init(|| Regex::new(r"(?m)^[^#]*%+\{?\w{3,}").expect("static regex"))
     }
-    fn bracket_regex() -> &'static Regex {
-        static BRACKET_REGEX: OnceLock<Regex> = OnceLock::new();
-        BRACKET_REGEX.get_or_init(|| Regex::new(r"(?m)^[^#]*if\s+[^ :\]]\]").expect("static regex"))
-    }
     fn home_regex() -> &'static Regex {
         static HOME_REGEX: OnceLock<Regex> = OnceLock::new();
         HOME_REGEX
@@ -80,11 +76,6 @@ impl PostCheck {
             Regex::new(r"(?m)(^|[;`|]|&&|$\()\s*(?:\S*/s?bin/)?(chcon|runcon)\s")
                 .expect("static regex")
         })
-    }
-    fn single_command_regex() -> &'static Regex {
-        static SINGLE_COMMAND_REGEX: OnceLock<Regex> = OnceLock::new();
-        SINGLE_COMMAND_REGEX
-            .get_or_init(|| Regex::new(r"^[ \n]*([^ \n]+)[ \n]*$").expect("static regex"))
     }
     fn tmp_regex() -> &'static Regex {
         static TMP_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -165,9 +156,6 @@ impl PostCheck {
         if prog == "/bin/sh" || prog == "/bin/bash" || prog == "/usr/bin/perl" {
             if is_match(Self::percent_regex(), script) {
                 out.push((Level::Warning, finding("percent-in"), vec![]));
-            }
-            if is_match(Self::bracket_regex(), script) {
-                out.push((Level::Warning, finding("spurious-bracket-in"), vec![]));
             }
             if let Some(m) = Self::dangerous_regex()
                 .captures(script)
@@ -252,25 +240,11 @@ impl PostCheck {
             }
         }
 
-        if prog == "/usr/bin/perl" {
-            if let Some(ok) = Self::syntax_ok(prog, &["-wc"], script)
-                && !ok
-            {
-                out.push((Level::Error, finding("perl-syntax-error-in"), vec![]));
-            }
-        } else if prog.ends_with("sh")
-            && !prog.is_empty()
-            && let Some(m) = Self::single_command_regex()
-                .captures(script)
-                .ok()
-                .flatten()
-                .and_then(|c| c.get(1))
+        if prog == "/usr/bin/perl"
+            && let Some(ok) = Self::syntax_ok(prog, &["-wc"], script)
+            && !ok
         {
-            out.push((
-                Level::Warning,
-                finding("one-line-command-in"),
-                vec![m.as_str().to_string()],
-            ));
+            out.push((Level::Error, finding("perl-syntax-error-in"), vec![]));
         }
 
         out
@@ -291,17 +265,12 @@ impl PostCheck {
 }
 
 /// `error_details` for `-v`, mirroring the reference's `post_details_dict`
-/// (`PostCheck.py:78-83`): five families over `Pkg.RPM_SCRIPTLETS` plus
+/// (`PostCheck.py:78-83`): three families over `Pkg.RPM_SCRIPTLETS` plus
 /// the ghost-file entry. Texts are byte-identical to the reference,
 /// including its duplicated `transfiletriggerun` row (dict insertion
 /// dedupes it there; the loop below simply overwrites it here).
-/// `one-line-command-in-<scriptlet>`:
-const ONE_LINE_COMMAND_DETAIL: &str = "You should use {tag} -p <command> instead of using:\n\n        {tag}\n        <command>\n\n        It will avoid the fork of a shell interpreter to execute your command as\n        well as allows rpm to automatically mark the dependency on your command\n        for the execution of the scriptlet.";
 /// `percent-in-<scriptlet>`:
 const PERCENT_IN_DETAIL: &str = "The {tag} scriptlet contains a '%' in a context which might indicate it being\n        fallout from an rpm macro/variable which was not expanded during build.\n        Investigate whether this is the case and fix if appropriate.";
-/// `spurious-bracket-in-<scriptlet>`:
-const SPURIOUS_BRACKET_DETAIL: &str =
-    "The {tag} scriptlet contains an 'if []' construct without a space before\n        the ']'.";
 /// `forbidden-selinux-command-in-<scriptlet>`:
 const FORBIDDEN_SELINUX_DETAIL: &str = "A command which requires intimate knowledge about a specific SELinux\n        policy type was found in the scriptlet. These types are subject to change\n        on a policy version upgrade. Use the restorecon command which queries the\n        currently loaded policy for the correct type instead.";
 /// `non-empty-<scriptlet>`:
@@ -351,20 +320,10 @@ pub fn register_error_details(out: &mut Filter) {
         "transfiletriggerpostun",
     ] {
         let tag = format!("%{name}");
-        // `one-line-command-in-<scriptlet>`:
-        out.set_error_detail(
-            &format!("one-line-command-in-{tag}"),
-            ONE_LINE_COMMAND_DETAIL.replace("{tag}", &tag),
-        );
         // `percent-in-<scriptlet>`:
         out.set_error_detail(
             &format!("percent-in-{tag}"),
             PERCENT_IN_DETAIL.replace("{tag}", &tag),
-        );
-        // `spurious-bracket-in-<scriptlet>`:
-        out.set_error_detail(
-            &format!("spurious-bracket-in-{tag}"),
-            SPURIOUS_BRACKET_DETAIL.replace("{tag}", &tag),
         );
         // `forbidden-selinux-command-in-<scriptlet>`:
         out.set_error_detail(
@@ -573,39 +532,6 @@ mod tests {
             found
                 .iter()
                 .any(|(l, f, _)| *l == Level::Warning && f == "percent-in-%post")
-        );
-    }
-
-    #[test]
-    fn single_line_command_is_flagged() {
-        let found = check().check_scriptlet("/bin/sh", "/usr/bin/update-foo", "%post", &[], &[]);
-        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
-            && f == "one-line-command-in-%post"
-            && d == &vec!["/usr/bin/update-foo".to_string()]));
-    }
-
-    #[test]
-    fn multi_word_command_is_not_one_line_command() {
-        // The reference capture is [^ \n]+: a command with arguments is
-        // not a one-line command.
-        let found =
-            check().check_scriptlet("/bin/sh", "/usr/bin/update-foo --bar", "%post", &[], &[]);
-        assert!(
-            !found
-                .iter()
-                .any(|(_, f, _)| f == "one-line-command-in-%post")
-        );
-    }
-
-    #[test]
-    fn multi_line_script_is_not_one_line_command() {
-        // No (?m): the reference only flags a script that is a single
-        // command on its only line.
-        let found = check().check_scriptlet("/bin/sh", "/usr/bin/a\n/usr/bin/b", "%post", &[], &[]);
-        assert!(
-            !found
-                .iter()
-                .any(|(_, f, _)| f == "one-line-command-in-%post")
         );
     }
 
@@ -829,16 +755,6 @@ mod tests {
         assert!(found.iter().any(|(l, f, d)| *l == Level::Error
             && f == "non-empty-%post"
             && d == &vec!["/sbin/ldconfig".to_string()]));
-    }
-
-    #[test]
-    fn spurious_bracket_is_flagged() {
-        let found = check().check_scriptlet("/bin/sh", "if a]", "%post", &[], &[]);
-        assert!(
-            found
-                .iter()
-                .any(|(l, f, _)| *l == Level::Warning && f == "spurious-bracket-in-%post")
-        );
     }
 
     #[test]

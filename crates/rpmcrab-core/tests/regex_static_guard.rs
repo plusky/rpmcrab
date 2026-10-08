@@ -35,7 +35,6 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
         "filter_map(|r| Regex::new(r).ok())",
         "config",
     ),
-    ("binaries.rs", "Regex::new(usr_lib_exception)", "config"),
     ("files.rs", "Regex::new(path).ok()", "config"),
     ("files.rs", "Regex::new(&games_group)", "config"),
     ("files.rs", "skipdocs_re: Regex::new", "config"),
@@ -82,7 +81,6 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ("tags.rs", "changelog_text_version_re", "ctor-once"),
     ("tags.rs", "changelog_version_re", "ctor-once"),
     // Fallback "never matches" pattern for config-driven regexes.
-    ("binaries.rs", "Regex::new(\"$^\")", "fallback"),
     ("files.rs", "Regex::new(\"$^\")", "fallback"),
     ("spec.rs", "Regex::new(\"$^\")", "fallback"),
     // Constant patterns in struct fields (compile once per instance).

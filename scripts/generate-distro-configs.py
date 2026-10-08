@@ -126,6 +126,26 @@ PRUNE_CANDIDATES = {
     "preun-without-chkconfig": "killed: InitScriptCheck deleted (issue #214)",
     "no-default-runlevel": "killed: InitScriptCheck deleted (issue #214)",
     "service-default-enabled": "killed: InitScriptCheck deleted (issue #214)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/BinariesCheck.py
+    "invalid-ldconfig-symlink": "killed: openSUSE config says 'Doesn't seem to make sense'",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py
+    "only-non-binary-in-usr-lib": "killed: openSUSE config says 'Doesn't seem to make sense'",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py
+    "outside-libdir-files": "killed: openSUSE config says 'Doesn't seem to make sense'",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py
+    "invalid-build-requires": "killed: Mandriva-specific, openSUSE doesn't want it",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py
+    "no-provides": "killed: Mandriva-specific, openSUSE doesn't want it",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py
+    "hardcoded-prefix-tag": "killed: Prefix: tag obsolete/ignored",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/ZipCheck.py
+    "jar-not-indexed": "killed: negligible value",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/ZipCheck.py
+    "uncompressed-zip": "killed: negligible value",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/PostCheck.py
+    "spurious-bracket-in-": "killed: PostCheck stylistic nit",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/PostCheck.py
+    "one-line-command-in-": "killed: PostCheck stylistic nit",
 }
 
 # (finding, scope) -> reason: Filters entries scoped to dead paths. The finding
