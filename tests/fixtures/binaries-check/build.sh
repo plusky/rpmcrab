@@ -68,7 +68,7 @@ Version:        1.0
 Release:        1
 Summary:        Fixture for BinariesCheck tests
 License:        MIT
-BuildArch:      aarch64
+BuildArch:      %{_target_cpu}
 
 %description
 Test fixture for rpmcrab BinariesCheck.

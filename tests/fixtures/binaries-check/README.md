@@ -25,8 +25,10 @@ bash tests/fixtures/binaries-check/build.sh
 
 Needs `podman` and `rpmbuild`. The binaries are compiled in an openSUSE
 Tumbleweed container so they are genuine Linux ELFs regardless of host OS.
-The container architecture (currently aarch64) does not matter — goblin
-parses all ELF types and the findings are architecture-independent.
+The container architecture does not matter for the findings — goblin
+parses all ELF types — and the spec sets `BuildArch: %{_target_cpu}`,
+so the RPM arch follows the build host (the committed artifact is
+aarch64).
 
 CI rebuilds the fixtures weekly and on fixture changes
 (`.github/workflows/fixtures-rebuild.yml`), failing if a rebuild breaks or

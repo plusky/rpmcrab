@@ -8,9 +8,10 @@
 # there). Rebuilding on fixture changes and weekly keeps the scripts honest.
 #
 # Comparison depth is per fixture:
-# - binaries-check (arch-specific ELF payloads): the committed RPM is
-#   aarch64 while CI runners are x86_64, so payload bytes legitimately
-#   differ -- the file list must match and the RPM must be fresh/non-empty.
+# - binaries-check (arch-specific ELF payloads): the RPM arch follows the
+#   build host (`BuildArch: %{_target_cpu}`), so on x86_64 CI the payload
+#   bytes legitimately differ from the committed aarch64 RPM -- the file
+#   list must match and the RPM must be fresh/non-empty.
 # - nonutf8-basename (noarch, host-built): fully deterministic, so the
 #   per-file metadata (names, sizes, modes, owners, digests -- no mtimes)
 #   must match the committed RPM too.
@@ -75,8 +76,14 @@ jobs:
             [ -n "$fresh" ] || fail "$script left no fresh RPM behind (a stale committed RPM would mask the breakage)"
             [ -s "$fresh" ] || fail "$fresh is empty"
             local committed=/tmp/fixtures-rebuild-committed.rpm
-            git show "HEAD:$dir/input/$(basename "$fresh")" > "$committed" \
-              || fail "no committed RPM matches $fresh"
+            # The rebuilt RPM's arch follows the build host, so its name need
+            # not match the committed one's: find the committed RPM by pattern.
+            local committed_name
+            committed_name=$(git ls-tree -r --name-only HEAD "$dir/input/" \
+              | grep -E "/${pattern//\*/[^/]*}\$" | head -1)
+            [ -n "$committed_name" ] || fail "no committed RPM matches $pattern in $dir/input/"
+            git show "HEAD:$committed_name" > "$committed" \
+              || fail "cannot read committed RPM $committed_name"
             diff <(rpm -qlp "$fresh" | sort) <(rpm -qlp "$committed" | sort) \
               || fail "$fresh file list differs from the committed RPM"
             if [ "$mode" = strict ]; then
