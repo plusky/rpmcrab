@@ -4087,6 +4087,18 @@ mod tests {
                 .any(|(n, d)| n == "devel-file-in-non-devel-package" && d.contains("/usr/bin/foo")),
             "false positive on regular file: {results:?}"
         );
+        let lines: Vec<&String> = results
+            .iter()
+            .filter(|(n, _)| n == "devel-file-in-non-devel-package")
+            .map(|(_, l)| l)
+            .collect();
+        assert_eq!(lines.len(), 3, "unexpected: {results:?}");
+        for line in &lines {
+            assert!(
+                line.contains(": W: devel-file-in-non-devel-package"),
+                "level: {line}"
+            );
+        }
     }
 
     #[test]
