@@ -67,7 +67,6 @@ const OLDEST_CHANGELOG_TIMESTAMP: i64 = 788_918_400;
 
 /// `TagsCheck`, ported from `rpmlint/checks/TagsCheck.py`.
 pub struct TagsCheck {
-    valid_groups: Vec<String>,
     valid_licenses: Vec<String>,
     invalid_requires: Vec<Regex>,
     /// Upstream rpmlint#180: bot/invalid changelog authors, from the
@@ -127,7 +126,6 @@ impl TagsCheck {
         let valid_buildhost = get_str("ValidBuildHost");
 
         Self {
-            valid_groups: get_strings("ValidGroups"),
             valid_licenses: get_strings("ValidLicenses"),
             invalid_requires: get_strings("InvalidRequires")
                 .iter()
@@ -919,8 +917,6 @@ impl TagsCheck {
                 "devel-package-with-non-devel-group",
                 &[group],
             );
-        } else if !self.valid_groups.is_empty() && !self.valid_groups.contains(&group.to_string()) {
-            add_info(out, Level::Warning, pkg, "non-standard-group", &[group]);
         }
     }
 
@@ -1448,16 +1444,6 @@ impl TagsCheck {
                 .unwrap_or_default()
                 .to_string()
         };
-        let get_strings = |k: &str| {
-            tbl.get(k)
-                .and_then(toml::Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        };
         for tag in [
             "obsoletes",
             "conflicts",
@@ -1474,13 +1460,6 @@ impl TagsCheck {
                 format!("Your package contains a versioned {capitalized} entry without an Epoch."),
             );
         }
-        out.set_error_detail(
-            "non-standard-group",
-            format!(
-                "The value of the Group tag in the package is not valid.  Valid groups are:\n'{}'.",
-                get_strings("ValidGroups").join(", ")
-            ),
-        );
         out.set_error_detail(
             "not-standard-release-extension",
             format!(
@@ -1525,7 +1504,6 @@ mod tests {
         );
         tbl.insert("UseEpoch".to_string(), toml::Value::Boolean(false));
         tbl.insert("MaxLineLength".to_string(), toml::Value::Integer(79));
-        tbl.insert("ValidGroups".to_string(), toml::Value::Array(vec![]));
         tbl.insert("ValidLicenses".to_string(), toml::Value::Array(vec![]));
         tbl.insert(
             "ValidLicenseExceptions".to_string(),
@@ -2122,7 +2100,6 @@ mod tests {
         );
         tbl.insert("UseEpoch".to_string(), toml::Value::Boolean(false));
         tbl.insert("MaxLineLength".to_string(), toml::Value::Integer(79));
-        tbl.insert("ValidGroups".to_string(), toml::Value::Array(vec![]));
         tbl.insert(
             "ValidLicenses".to_string(),
             toml::Value::Array(
@@ -2402,6 +2379,18 @@ mod tests {
     }
 
     #[test]
+    fn non_standard_group_never_emits() {
+        // The Group tag is obsolete (openSUSE dropped it); the finding was
+        // removed outright, so even a present Group tag stays silent.
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-devel-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        assert!(
+            tag_hits(&results, "non-standard-group").is_empty(),
+            "non-standard-group must stay dead: {results:?}"
+        );
+    }
+
+    #[test]
     fn no_group_tag_emits() {
         let (_tmp, pkg) = fixture_pkg("tags-emission-pins-nogroup-1.0-1.noarch.rpm");
         let results = run_check(&pkg);
@@ -2608,7 +2597,6 @@ mod rich_dep_emission_tests {
         );
         tbl.insert("UseEpoch".to_string(), toml::Value::Boolean(use_epoch));
         tbl.insert("MaxLineLength".to_string(), toml::Value::Integer(79));
-        tbl.insert("ValidGroups".to_string(), toml::Value::Array(vec![]));
         tbl.insert("ValidLicenses".to_string(), toml::Value::Array(vec![]));
         tbl.insert(
             "ValidLicenseExceptions".to_string(),

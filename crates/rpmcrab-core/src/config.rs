@@ -2,7 +2,7 @@
 //! `config.py` (`docs/DESIGN.md` §4.7, §4.8).
 //!
 //! The merged configuration is kept as a generic table because checks read
-//! arbitrary keys (`ValidLicenses`, `ValidGroups`, …). The hot-path fields the
+//! arbitrary keys (`ValidLicenses`, …). The hot-path fields the
 //! filter engine and renderer need are derived from it by [`Config::finalize`]
 //! after every load step.
 
