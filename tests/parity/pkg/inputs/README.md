@@ -11,7 +11,8 @@ each exercising a particular check behavior.
 |  | incorrect-fsf-address whole-file scan (upstream rpmlint#40): wrong address inside/past the 2048-byte window, plus a silent control |
 |------|---------|
 | `fcprobe-1-1.noarch.rpm` | Hand-built binary-bearing RPM for smoke tests |
-| `filescheck-depmod-*.rpm` | depmod scriptlet variants (ok/wrong/missing) |
+| `filescheck-depmod-missing-1.0-1.noarch.rpm` | .ko in non-kernel package, no depmod calls (negative pin for the removed depmod findings) |
+| `filescheck-depmod-wrong-1.0-1.noarch.rpm` | .ko in non-kernel package, wrong depmod form (negative pin for the removed depmod findings) |
 | `filescheck-devel-1.0-1.noarch.rpm` | devel package file placement |
 | `filescheck-deps-ok-1.0-1.noarch.rpm` | Dependency checks |
 | `filescheck-scripts-1.0-1.noarch.rpm` | Scriptlet content checks |

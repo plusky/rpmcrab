@@ -954,11 +954,15 @@ def test_stale_check_catches_name_keyed_entry():
         "lengthy-symlink",
         "InitScriptCheck",
         "missing-dependency-to-xinetd",
-        "non-standard-group",
-        "postin-without-install-info",
         "info-files-without-install-info-postin",
         "info-files-without-install-info-postun",
+        "module-without-depmod-postin",
+        "module-without-depmod-postun",
+        "non-standard-group",
+        "postin-without-install-info",
         "post-without-tmpfile-creation",
+        "postin-with-wrong-depmod",
+        "postun-with-wrong-depmod",
         "shared-library-not-executable",
         # Deliberately removed: suppressed by both the openSUSE and Fedora
         # distro configs as autobuild redundancy (Fedora/Koji use none of
