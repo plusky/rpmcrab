@@ -1255,7 +1255,7 @@ since = "0.1.0"
 case = "global"
 check = "unversioned-explicit-provides"
 kind = "missing"
-reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding; Fedora's config carries it only as a commented-out filter line, never enabled -- and on Fedora the warning is a known false positive against Fedora's own packaging guidelines (bundled()/deprecated() Provides: are required; upstream rpmlint#1330). No shipped config treats the finding as wanted signal, so the port does not emit it. The emission and its staged `--explain` entry are removed. The reference still emits it."
+reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding; Fedora's config carries it only as a commented-out filter line, never enabled -- and on Fedora the warning is a known false positive against Fedora's own packaging guidelines (bundled()/deprecated() Provides: are required; upstream https://github.com/rpm-software-management/rpmlint/issues/1330). No shipped config treats the finding as wanted signal, so the port does not emit it. The emission and its staged `--explain` entry are removed. The reference still emits it."
 since = "0.1.0"
 
 [[divergence]]
@@ -1584,19 +1584,19 @@ since = "0.1.0"
 case = "global"
 check = "unversioned-explicit-obsoletes"
 kind = "missing"
-reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding; Fedora's config carries it only as a commented-out filter line, never enabled (same FIXME as above). No shipped config treats the finding as wanted signal, so the port does not emit it. The emission and its staged `--explain` entry are removed. The reference still emits it."
+reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding; Fedora's config carries it only as a commented-out filter line, never enabled (no upstream issue found 2026-10-08). No shipped config treats the finding as wanted signal, so the port does not emit it. The emission and its staged `--explain` entry are removed. The reference still emits it."
 since = "0.1.0"
 
 [[divergence]]
 case = "global"
 check = "no-group-tag"
 kind = "missing"
-reason = "Deliberate removal per triage: openSUSE dropped the Group tag -- its own rpmlint config says 'Do not validate package rpm groups', the wiki (https://en.opensuse.org/openSUSE:Package_group_guidelines) says the field has fallen out of use, and the packaging guidelines say 'Group: -- always drop' -- so the port does not emit this finding. The emission and its staged `--explain` entry are removed. The reference still emits it."
+reason = "Deliberate removal per triage: openSUSE dropped the Group tag -- its own rpmlint config says 'Do not validate package rpm groups', the wiki (https://en.opensuse.org/openSUSE:Package_group_guidelines) says the field has fallen out of use, and the packaging guidelines say 'Group: -- always drop' -- so the port does not emit this finding. The emission and its staged `--explain` entry are removed. The reference still emits it. No upstream issue found 2026-10-08."
 since = "0.1.0"
 
 [[divergence]]
 case = "global"
 check = "devel-package-with-non-devel-group"
 kind = "missing"
-reason = "Deliberate removal per triage: openSUSE dropped the Group tag -- its own rpmlint config says 'Do not validate package rpm groups', the wiki (https://en.opensuse.org/openSUSE:Package_group_guidelines) says the field has fallen out of use, and the packaging guidelines say 'Group: -- always drop' -- so the port does not emit this finding. The emission and its staged `--explain` entry are removed. The reference still emits it."
+reason = "Deliberate removal per triage: openSUSE dropped the Group tag -- its own rpmlint config says 'Do not validate package rpm groups', the wiki (https://en.opensuse.org/openSUSE:Package_group_guidelines) says the field has fallen out of use, and the packaging guidelines say 'Group: -- always drop' -- so the port does not emit this finding. The emission and its staged `--explain` entry are removed. The reference still emits it. No upstream issue found 2026-10-08."
 since = "0.1.0"
