@@ -33,8 +33,22 @@ jobs:
       # development headers (pkg-config `rpm.pc`); the tests also need the
       # `rpm` CLI (signature check) and `file` (libmagic). Extraction is
       # native now: no rpm2archive/rpm2cpio or cpio needed.
+      # The cache-apt-pkgs-action key is md5(packages + version + repos [+arch
+      # iff non-x86_64]) - no distro dimension. Fold the runner OS release into
+      # `version` so a floating `ubuntu-latest` image (24.04 -> 26.04) never
+      # restores stale .debs onto a new distro, and rotate on the ISO week so a
+      # cache hit never tests against weeks-old packages.
+      - name: Compute apt cache version
+        id: apt-cache-version
+        run: |
+          . /etc/os-release
+          echo "version=1.0-${VERSION_ID}-$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
       - name: Install RPM toolchain (headers + tools)
-        run: sudo apt-get update && sudo apt-get install -y librpm-dev rpm file devscripts dash desktop-file-utils appstream-util
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
+        with:
+          packages: librpm-dev rpm file devscripts dash desktop-file-utils appstream-util
+          version: ${{ steps.apt-cache-version.outputs.version }}
+          execute_install_scripts: true
       # Spellcheck tests need real hunspell dictionaries; grab the LibreOffice
       # en_US pair (the same source openSUSE packages from).
       - name: Install hunspell dictionaries
@@ -118,8 +132,22 @@ jobs:
           # This leg is expected to fail sometimes; with main the only cache
           # writer, a beta break would otherwise freeze the cache.
           cache-on-failure: true
+      # The cache-apt-pkgs-action key is md5(packages + version + repos [+arch
+      # iff non-x86_64]) - no distro dimension. Fold the runner OS release into
+      # `version` so a floating `ubuntu-latest` image (24.04 -> 26.04) never
+      # restores stale .debs onto a new distro, and rotate on the ISO week so a
+      # cache hit never tests against weeks-old packages.
+      - name: Compute apt cache version
+        id: apt-cache-version
+        run: |
+          . /etc/os-release
+          echo "version=1.0-${VERSION_ID}-$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
       - name: Install RPM toolchain (headers + tools)
-        run: sudo apt-get update && sudo apt-get install -y librpm-dev rpm file devscripts dash desktop-file-utils appstream-util
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
+        with:
+          packages: librpm-dev rpm file devscripts dash desktop-file-utils appstream-util
+          version: ${{ steps.apt-cache-version.outputs.version }}
+          execute_install_scripts: true
       - name: Assert beta toolchain
         run: |
           rustc --version
@@ -134,8 +162,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The cache-apt-pkgs-action key is md5(packages + version + repos [+arch
+      # iff non-x86_64]) - no distro dimension. Fold the runner OS release into
+      # `version` so a floating `ubuntu-latest` image (24.04 -> 26.04) never
+      # restores stale .debs onto a new distro, and rotate on the ISO week so a
+      # cache hit never tests against weeks-old packages.
+      - name: Compute apt cache version
+        id: apt-cache-version
+        run: |
+          . /etc/os-release
+          echo "version=1.0-${VERSION_ID}-$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
       - name: Install RPM toolchain (headers + tools)
-        run: sudo apt-get update && sudo apt-get install -y librpm-dev rpm file devscripts dash desktop-file-utils appstream-util
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
+        with:
+          packages: librpm-dev rpm file devscripts dash desktop-file-utils appstream-util
+          version: ${{ steps.apt-cache-version.outputs.version }}
+          execute_install_scripts: true
       - name: Read MSRV from Cargo.toml
         id: msrv
         run: |
@@ -191,8 +233,22 @@ jobs:
           workspaces: . -> target
       # Building rpmcrab-gen links the rpmcrab lib, so this needs the same RPM
       # development headers as the main build.
+      # The cache-apt-pkgs-action key is md5(packages + version + repos [+arch
+      # iff non-x86_64]) - no distro dimension. Fold the runner OS release into
+      # `version` so a floating `ubuntu-latest` image (24.04 -> 26.04) never
+      # restores stale .debs onto a new distro, and rotate on the ISO week so a
+      # cache hit never tests against weeks-old packages.
+      - name: Compute apt cache version
+        id: apt-cache-version
+        run: |
+          . /etc/os-release
+          echo "version=1.0-${VERSION_ID}-$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
       - name: Install RPM toolchain (headers + tools)
-        run: sudo apt-get update && sudo apt-get install -y librpm-dev rpm file pkg-config devscripts dash desktop-file-utils appstream-util
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
+        with:
+          packages: librpm-dev rpm file pkg-config devscripts dash desktop-file-utils appstream-util
+          version: ${{ steps.apt-cache-version.outputs.version }}
+          execute_install_scripts: true
       - run: cargo run -p rpmcrab --features gen --locked --bin rpmcrab-gen -- /tmp/rpmcrab-gen-assets
       - run: diff -r /tmp/rpmcrab-gen-assets/man crates/rpmcrab/man
       - run: diff -r /tmp/rpmcrab-gen-assets/completions crates/rpmcrab/completions
@@ -247,6 +303,20 @@ jobs:
         with:
           workspaces: . -> target
       # The lib links librpm, so compiling its tests needs the RPM headers.
+      # The cache-apt-pkgs-action key is md5(packages + version + repos [+arch
+      # iff non-x86_64]) - no distro dimension. Fold the runner OS release into
+      # `version` so a floating `ubuntu-latest` image (24.04 -> 26.04) never
+      # restores stale .debs onto a new distro, and rotate on the ISO week so a
+      # cache hit never tests against weeks-old packages.
+      - name: Compute apt cache version
+        id: apt-cache-version
+        run: |
+          . /etc/os-release
+          echo "version=1.0-${VERSION_ID}-$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
       - name: Install RPM toolchain (headers + tools)
-        run: sudo apt-get update && sudo apt-get install -y librpm-dev rpm file pkg-config
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
+        with:
+          packages: librpm-dev rpm file pkg-config
+          version: ${{ steps.apt-cache-version.outputs.version }}
+          execute_install_scripts: true
       - run: cargo test -p rpmcrab-core --lib --locked description_coverage
