@@ -2137,7 +2137,7 @@ make install
     }
 
     #[test]
-    fn codequery_spec_matches_captured_reference() {
+    fn codequery_spec_plus_invalid_url_divergence() {
         let input =
             include_str!("../../../../tests/parity/cases/codequery-spec/input/codequery.spec");
         let results = run_with(input, &Config::default());
