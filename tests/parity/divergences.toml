@@ -237,7 +237,7 @@ since = "0.1.0"
 case = "global"
 check = "binaries-dependency-scope"
 kind = "behaviour"
-reason = "The reference runs its ldd-based dependency analysis only for installed packages; rpmcrab runs the DT_NEEDED-based analysis for extracted files too. This is also what makes unused-direct-shlib-dependency impossible to replicate (no ldd -u on extracted files)."
+reason = "The reference runs its ldd-based dependency analysis only for installed packages; rpmcrab runs the DT_NEEDED-based analysis for extracted files too. This is also what makes unused-direct-shlib-dependency impossible to replicate (no ldd -u on extracted files). Within that analysis, undefined-non-weak-symbol fires for shared libraries only: an executable's UND entries resolve at load time (the reference's `ldd -r` stays silent there), and scanning them raw produced hundreds of bogus hits."
 since = "0.1.0"
 
 [[divergence]]
