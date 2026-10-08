@@ -182,6 +182,7 @@ PRUNE_PACKAGES = {
     "scmon": "removed from Factory; legacy: not audited",
     "pam_csync": "removed from Factory; legacy: not audited",
     "pcfclock": "removed from Factory; not in SLE 16",
+    "rpmlint-integration-test": "rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap",
 }
 
 # Stale pie-executables paths: each entry is (owning package, kind, reason),

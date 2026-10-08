@@ -1,26 +1,4 @@
 [[FileDigestGroup]]
-package = "rpmlint-integration-test"
-type = "dbus"
-note = "valid test whitelisting entry for the OBS integration test package"
-bug = "bsc#1188704"
-[[FileDigestGroup.digests]]
-path = "/etc/dbus-1/system.d/rpmlint_test.conf"
-hash = "504c5a60b7173794e565755122ab77beaec9bcf208fb97a40237cb57c67b5a17"
-
-[[FileDigestGroup]]
-package = "rpmlint-integration-test"
-type = "dbus"
-note = "mismatching valid test whitelisting entry for the OBS integration test package"
-bug = "bsc#1188704"
-[[FileDigestGroup.digests]]
-path = "/etc/dbus-1/system.d/rpmlint_mismatch.conf"
-hash = "4a5e8e9ca514c73f1dbee55e88c4d75a235473c1d5cef4751d84016833961fdf"
-[[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system.d/nonsense.conf"
-hash = "9a4e829ca514c73f1dbee55e88c4d75a235473c1d5cef4751d84016833961fda"
-digester = "xml"
-
-[[FileDigestGroup]]
 package = "cups"
 type = "dbus"
 note = "the well known printing system daemon"

@@ -1,24 +1,4 @@
 [[FileDigestGroup]]
-package = "rpmlint-integration-test"
-type = "sysctl"
-note = "valid test whitelisting entry for the OBS integration test package"
-bug = "bsc#1174722"
-[[FileDigestGroup.digests]]
-path = "/usr/lib/sysctl.d/valid.conf"
-digester = "shell"
-hash = "c5d05102eb15d5986e15ac48e369fef3310010e1e2e4bfe7329f25780b02ce0c"
-
-[[FileDigestGroup]]
-package = "rpmlint-integration-test"
-type = "sysctl"
-note = "mismatching test whitelisting entry for the OBS integration test package"
-bug = "bsc#1174722"
-[[FileDigestGroup.digests]]
-path = "/usr/lib/sysctl.d/mismatch.conf"
-digester = "shell"
-hash = "a4cf85013ddd404ad1f67ccf1259567b57305acd3b5bfaa696cf9f25a25dfcaa"
-
-[[FileDigestGroup]]
 package = "redis"
 type = "sysctl"
 note = "changes maximum number of socket connections and overcommit_memory behaviour"
