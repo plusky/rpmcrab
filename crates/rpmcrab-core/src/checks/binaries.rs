@@ -2300,6 +2300,27 @@ mod tests {
             .collect()
     }
 
+    /// Exact rendered line for one hardening finding on one fixture binary.
+    /// Pins name, severity (`W:`) and count (exactly one per variant): flipping
+    /// the level in `check_hardening` must fail this.
+    fn assert_hardening_line(results: &[(String, String)], finding: &str, bin: &str) {
+        let suffix = format!("/usr/bin/{bin}");
+        let lines: Vec<&str> = lines_for(results, finding)
+            .into_iter()
+            .filter(|l| l.ends_with(suffix.as_str()))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "{finding} should fire exactly once for {bin}: {results:?}"
+        );
+        assert_eq!(
+            lines[0],
+            format!("rpmcrab-binaries-fixture.aarch64: W: {finding} {suffix}"),
+            "{finding} rendered line mismatch: {results:?}"
+        );
+    }
+
     #[test]
     fn binaries_check_fixture() {
         let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
@@ -2386,10 +2407,7 @@ mod tests {
         }
 
         // Built without -D_FORTIFY_SOURCE: only missing-fortify.
-        assert!(
-            has("missing-fortify", "nofortifybin"),
-            "missing-fortify should fire for nofortifybin: {results:?}"
-        );
+        assert_hardening_line(&results, "missing-fortify", "nofortifybin");
         for finding in ["missing-stack-protector", "missing-relro", "partial-relro"] {
             assert!(
                 !has(finding, "nofortifybin"),
@@ -2398,10 +2416,7 @@ mod tests {
         }
 
         // Built with -fno-stack-protector: only missing-stack-protector.
-        assert!(
-            has("missing-stack-protector", "nosspbin"),
-            "missing-stack-protector should fire for nosspbin: {results:?}"
-        );
+        assert_hardening_line(&results, "missing-stack-protector", "nosspbin");
         for finding in ["missing-fortify", "missing-relro", "partial-relro"] {
             assert!(
                 !has(finding, "nosspbin"),
@@ -2410,10 +2425,7 @@ mod tests {
         }
 
         // Linked -z norelro: only missing-relro.
-        assert!(
-            has("missing-relro", "norelrobin"),
-            "missing-relro should fire for norelrobin: {results:?}"
-        );
+        assert_hardening_line(&results, "missing-relro", "norelrobin");
         for finding in [
             "missing-fortify",
             "missing-stack-protector",
@@ -2426,10 +2438,7 @@ mod tests {
         }
 
         // Linked -z relro -z lazy: only partial-relro.
-        assert!(
-            has("partial-relro", "partialrelrobin"),
-            "partial-relro should fire for partialrelrobin: {results:?}"
-        );
+        assert_hardening_line(&results, "partial-relro", "partialrelrobin");
         for finding in [
             "missing-fortify",
             "missing-stack-protector",
@@ -2461,6 +2470,35 @@ mod tests {
             !has("position-independent-executable-suggested", "hardenedbin"),
             "position-independent-executable-suggested should not fire for hardenedbin: {results:?}"
         );
+    }
+
+    /// Deliberate divergence (divergences.toml, `case = "global"`, rpmcrab#17):
+    /// the frozen reference emits no hardening findings, so each captured case
+    /// gains exactly one port-only `W: missing-fortify` line:
+    /// - `liblto21`: 0 -> 1 warning (`/usr/lib64/libLTO.so.21.1`)
+    /// - `llvm21-gold`: 1 -> 2 warnings (`/usr/lib64/LLVMgold.so`)
+    #[test]
+    fn hardening_captured_cases_pin_new_lines() {
+        let cases = [
+            (
+                "../../tests/parity/cases/liblto21/input/libLTO21-21.1.8-9.2.aarch64.rpm",
+                "libLTO21.aarch64: W: missing-fortify /usr/lib64/libLTO.so.21.1",
+            ),
+            (
+                "../../tests/parity/cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm",
+                "llvm21-gold.aarch64: W: missing-fortify /usr/lib64/LLVMgold.so",
+            ),
+        ];
+        for (rel, expected) in cases {
+            let rpm = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), rel);
+            let (results, _dir) = run_binaries_check(&rpm);
+            let lines = lines_for(&results, "missing-fortify");
+            assert_eq!(
+                lines,
+                [expected],
+                "port-only hardening delta for {rel}: {results:?}"
+            );
+        }
     }
 
     #[test]
