@@ -29,6 +29,7 @@ Usage:
 
 import argparse
 import difflib
+import hashlib
 import json
 import re
 import shutil
@@ -543,14 +544,19 @@ def _leap16_binary_names():
 
         with urllib.request.urlopen(_get(LEAP16_OSS_REPOMD_URL), timeout=60) as resp:
             repomd = resp.read().decode("utf-8")
-        m = re.search(r'<location href="([^"]*primary\.xml\.[^"]*)"', repomd)
+        m = re.search(
+            r'<data type="primary">.*?<checksum type="sha512">([0-9a-f]+)</checksum>'
+            r'.*?<location href="([^"]*primary\.xml\.[^"]*)"',
+            repomd,
+            re.DOTALL,
+        )
         if not m:
             raise RuntimeError(
-                "primary.xml location not found in Leap 16.0 repomd.xml"
+                "primary.xml location/sha512 not found in Leap 16.0 repomd.xml"
             )
-        primary_url = (
+        expected_sha512, primary_url = m.group(1), (
             "https://download.opensuse.org/distribution/leap/16.0/repo/oss/"
-            + m.group(1)
+            + m.group(2)
         )
         names = set()
         name_re = re.compile(rb"<name>([^<]*)</name>")
@@ -558,6 +564,12 @@ def _leap16_binary_names():
             with urllib.request.urlopen(_get(primary_url), timeout=600) as resp:
                 shutil.copyfileobj(resp, tmp)
             tmp.flush()
+            with open(tmp.name, "rb") as f:
+                actual_sha512 = hashlib.sha512(f.read()).hexdigest()
+            if actual_sha512 != expected_sha512:
+                raise RuntimeError(
+                    f"sha512 mismatch on {primary_url} (truncated download?)"
+                )
             proc = subprocess.Popen([zstd, "-dc", tmp.name], stdout=subprocess.PIPE)
             try:
                 buf = b""
