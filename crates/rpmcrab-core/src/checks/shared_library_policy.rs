@@ -178,6 +178,17 @@ impl Check for SharedLibraryPolicyCheck {
                 if dep.name.starts_with("rpmlib(") || dep.name.starts_with("config(") {
                     continue;
                 }
+                // A flavor package pinning its own base with `=` (e.g.
+                // `libfoo-x86-64-v3` requires `libfoo = 1.0`) is version
+                // lockstep for co-built flavors, not a policy violation:
+                // the base name is a proper prefix of the package name.
+                if pkg
+                    .name
+                    .strip_prefix(dep.name.as_str())
+                    .is_some_and(|rest| rest.starts_with('-'))
+                {
+                    continue;
+                }
                 if dep.flags & (RPMSENSE_GREATER | RPMSENSE_EQUAL) == RPMSENSE_EQUAL {
                     // Like the reference's formatRequire: `name`, a space, the
                     // operator from the flags, a space, then the EVR — which may
@@ -440,6 +451,45 @@ mod tests {
             lines[0].contains("barbaz = 1.0-1"),
             "detail names the pinned dependency: {}",
             lines[0]
+        );
+    }
+
+    #[test]
+    fn fixed_dependency_on_own_base_is_silent() {
+        // A flavor package (`libfoo-x86-64-v3`) pinning its own base
+        // (`libfoo = 1.0`) is version lockstep, not a policy violation:
+        // no shlib-fixed-dependency.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let so_path = dir.path().join("libfoo.so");
+        std::fs::write(&so_path, minimal_elf("libfoo.so")).expect("write elf");
+
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture header");
+        pkg.name = "libfoo-x86-64-v3".to_string();
+        pkg.files = vec![PkgFile {
+            name: "/usr/lib64/libfoo.so".to_string(),
+            path: so_path.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            magic: "ELF 64-bit LSB shared object".to_string(),
+            ..Default::default()
+        }];
+        pkg.requires = vec![DepInfo {
+            name: "libfoo".to_string(),
+            flags: RPMSENSE_EQUAL,
+            epoch: None,
+            version: Some("1.0".to_string()),
+            release: Some("1".to_string()),
+        }];
+
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = checker();
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            results.iter().all(|(n, _)| n != "shlib-fixed-dependency"),
+            "flavor pin must stay quiet: {results:?}"
         );
     }
 }
