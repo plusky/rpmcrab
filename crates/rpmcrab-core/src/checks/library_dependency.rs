@@ -13,7 +13,9 @@
 //!
 //! Deliberate divergence: symlink chains are resolved inside the
 //! devel package to the real file before recording (any intermediate,
-//! not just `.so` links); the reference keeps the one-hop target.
+//! not just `.so` links), and joined targets are lexically normalised
+//! (`.`/`..` resolved); the reference keeps the unnormalised one-hop
+//! target.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -37,6 +39,35 @@ fn expand_isa() -> String {
     librpm::macro_context::MacroContext::default()
         .expand("%{_isa}")
         .unwrap_or_default()
+}
+
+/// Join a symlink's parent directory with its target and lexically
+/// resolve `.`/`..` (`/usr/lib64/glfw2` + `../libglfw.so.2` becomes
+/// `/usr/lib64/libglfw.so.2`). Pure string manipulation: no filesystem
+/// access, so dangling links resolve fine and `..` above the root is
+/// dropped. Without this, a legitimate `..` in a link target records a
+/// path no package can provide and misfires `no-library-dependency-for`.
+fn join_link_target(parent: &Path, linkto: &str) -> String {
+    let joined = parent.join(linkto).to_string_lossy().into_owned();
+    let absolute = joined.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for comp in joined.split('/') {
+        match comp {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            c => parts.push(c),
+        }
+    }
+    let mut out = parts.join("/");
+    if absolute {
+        out.insert(0, '/');
+    }
+    if out.is_empty() {
+        out.push('/');
+    }
+    out
 }
 
 pub struct LibraryDependencyCheck {
@@ -155,16 +186,13 @@ impl Check for LibraryDependencyCheck {
                 .filter(|pf| is_symlink(pf.mode))
                 .map(|pf| {
                     let parent = Path::new(&pf.name).parent().unwrap_or(Path::new("/"));
-                    (
-                        pf.name.as_str(),
-                        parent.join(&pf.linkto).to_string_lossy().into_owned(),
-                    )
+                    (pf.name.as_str(), join_link_target(parent, &pf.linkto))
                 })
                 .collect();
             for pkgfile in &pkg.files {
                 if is_symlink(pkgfile.mode) && pkgfile.name.ends_with(".so") {
                     let parent = Path::new(&pkgfile.name).parent().unwrap_or(Path::new("/"));
-                    let mut link = parent.join(&pkgfile.linkto).to_string_lossy().into_owned();
+                    let mut link = join_link_target(parent, &pkgfile.linkto);
                     // Follow the chain inside the devel package to the real
                     // library (`libfoo.so -> libfoo-1_2.so -> libfoo.so.1`).
                     // The reference records the one-hop target, which misfires
@@ -575,5 +603,29 @@ mod tests {
             seq_out.results(),
             "merged after_checks differs from sequential"
         );
+    }
+
+    #[test]
+    fn dotdot_symlink_target_resolves_to_provided_library() {
+        // glfw2 layout: the devel ships `/usr/lib64/glfw2/libglfw.so ->
+        // ../libglfw.so.2.7.6` while the real file lives in the lib
+        // package. Joining parent + target without normalising records
+        // `/usr/lib64/glfw2/../libglfw.so.2.7.6`, which never matches the
+        // provided path and misfires `no-library-dependency-for`.
+        let mut lib = fixture_pkg();
+        lib.name = "libglfw2".to_string();
+        lib.arch = "x86_64".to_string();
+        lib.files = vec![regular("/usr/lib64/libglfw.so.2.7.6")];
+
+        let mut devel = fixture_pkg();
+        devel.name = "glfw2-devel".to_string();
+        devel.arch = "x86_64".to_string();
+        devel.requires = vec![require("libglfw2")];
+        devel.prereq = vec![];
+        devel.files = vec![symlink(
+            "/usr/lib64/glfw2/libglfw.so",
+            "../libglfw.so.2.7.6",
+        )];
+        assert!(run(&lib, &devel).is_empty());
     }
 }
