@@ -399,8 +399,8 @@ impl ReadelfInfo {
 /// True when the ELF was produced by the Rust toolchain. No single
 /// signal survives every strip level, so several are combined:
 /// `.rustc` section (only rustc emits it; gone after any strip),
-/// Rust runtime symbols, `.debug_gdb_scripts` containing "rust"
-/// (rustc's GDB pretty-printer hook; gone after `strip -g`), and
+/// Rust runtime symbols, `.debug_gdb_scripts` containing "rust" as a
+/// token component (rustc's GDB pretty-printer hook; gone after `strip -g`), and
 /// `.rodata` containing `panicked at` (rustc's panic location format,
 /// which survives even a full strip). Conservative on purpose: an
 /// unrecognized binary is treated as C, so a missed detection only
@@ -409,7 +409,10 @@ impl ReadelfInfo {
 /// C/C++ code. `_ZN` alone is not enough (Itanium C++ mangling shares
 /// the prefix), so only unambiguous Rust runtime names count here.
 fn is_rust_symbol(name: &str) -> bool {
-    name == "rust_begin_unwind" || name == "rust_eh_personality" || name.starts_with("__rust_")
+    // Strip a @VERSION suffix like is_fortify_symbol does: .dynsym names
+    // may carry one, and the base name is what identifies the runtime.
+    let base = name.split('@').next().unwrap_or(name);
+    base == "rust_begin_unwind" || base == "rust_eh_personality" || base.starts_with("__rust_")
 }
 
 fn detect_rust_binary(elf: &goblin::elf::Elf, data: &[u8], functions: &[String]) -> bool {
@@ -433,7 +436,12 @@ fn detect_rust_binary(elf: &goblin::elf::Elf, data: &[u8], functions: &[String])
             None => continue,
         };
         if is_gdb_scripts {
-            if bytes.windows(4).any(|w| w.eq_ignore_ascii_case(b"rust")) {
+            // "rust" must start a token component: preceded by an ASCII
+            // letter it is embedded in a longer word ("Trust", "crust").
+            // rustc emits `gdb_load_rust_pretty_printers.py` ("_rust_").
+            if bytes.windows(4).enumerate().any(|(i, w)| {
+                w.eq_ignore_ascii_case(b"rust") && (i == 0 || !bytes[i - 1].is_ascii_alphabetic())
+            }) {
                 return true;
             }
         } else if bytes
@@ -2661,6 +2669,19 @@ mod tests {
     }
 
     #[test]
+    fn rust_detection_debug_gdb_scripts_embedded_rust_is_not_rust() {
+        // "Trust" embeds "rust" but is not a rustc marker.
+        let info = parse_crafted_sections(
+            "trust",
+            &[(".debug_gdb_scripts", b"\x01Trust the process\0")],
+        );
+        assert!(
+            !info.is_rust_binary(),
+            "embedded 'rust' must not detect Rust"
+        );
+    }
+
+    #[test]
     fn rust_detection_negative_plain_elf() {
         let info = parse_crafted_sections("plain", &[(".text", b"\0"), (".rodata", b"hello\0")]);
         assert!(!info.is_rust_binary(), "plain ELF must not detect Rust");
@@ -2676,6 +2697,10 @@ mod tests {
         assert!(!is_rust_symbol("_ZN3foo3barE"));
         assert!(!is_rust_symbol("memcpy"));
         assert!(!is_rust_symbol("__stack_chk_fail"));
+        // @VERSION suffixes (from .dynsym) are stripped before matching.
+        assert!(is_rust_symbol("rust_begin_unwind@RUST_1.0"));
+        assert!(is_rust_symbol("__rust_alloc@@RUST_1.0"));
+        assert!(!is_rust_symbol("memcpy@GLIBC_2.17"));
     }
 
     fn hardening_results_for(is_rust: bool) -> Vec<(String, String)> {
