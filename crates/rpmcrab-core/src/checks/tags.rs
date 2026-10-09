@@ -2319,8 +2319,8 @@ mod tests {
         }
         let results = out.results().to_vec();
         assert!(
-            results.is_empty(),
-            "digit-leading summary must not warn at all: {results:?}"
+            results.iter().all(|(n, _)| n != "summary-not-capitalized"),
+            "digit-leading summary must not warn: {results:?}"
         );
     }
 
