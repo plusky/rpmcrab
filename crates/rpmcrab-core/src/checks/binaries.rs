@@ -456,11 +456,13 @@ impl ReadelfInfo {
         self.is_rust
     }
 
-    /// Zig toolchain output carries none of the C-hardening artifacts
-    /// either: `_FORTIFY_SOURCE` is a glibc C-header feature Zig does not
-    /// implement, and stack-protector instrumentation requires libc
+    /// Zig toolchain output carries none of the C-hardening artifacts:
+    /// `_FORTIFY_SOURCE` is a glibc C-header feature Zig does not
+    /// implement, stack-protector instrumentation requires libc
     /// (`-fstack-protector` errors with "enabling stack protection
-    /// requires libc"), which the default static Zig build does not link.
+    /// requires libc"), which the default static Zig build does not link,
+    /// and Zig's linker emits no GNU_RELRO segment (verified on real
+    /// Zig-built dynamic binaries: bun, opencode, waylock).
     fn is_zig_binary(&self) -> bool {
         self.is_zig
     }
@@ -533,14 +535,18 @@ fn detect_rust_binary(elf: &goblin::elf::Elf, data: &[u8], functions: &[String])
     false
 }
 /// True when the ELF was produced by the Zig toolchain. Two signals are
-/// combined: the .comment section identifying Zigs LLD fork, and .rodata
-/// containing the Zig panic message for unreachable, which survives strip.
-/// Conservative on purpose: an unrecognized binary is treated as C.
+/// combined: the .comment section identifying Zig's LLD fork, and read-only
+/// data sections (.rodata, .data.rel.ro) containing the Zig panic message
+/// for unreachable, which survives strip. Conservative on purpose: an
+/// unrecognized binary is treated as C.
 fn detect_zig_binary(elf: &goblin::elf::Elf, data: &[u8]) -> bool {
     for sh in &elf.section_headers {
         let sec_name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
         let is_comment = sec_name == ".comment";
-        let is_rodata = sec_name == ".rodata" || sec_name.starts_with(".rodata.");
+        let is_rodata = sec_name == ".rodata"
+            || sec_name.starts_with(".rodata.")
+            || sec_name == ".data.rel.ro"
+            || sec_name.starts_with(".data.rel.ro.");
         if !is_comment && !is_rodata {
             continue;
         }
@@ -1411,14 +1417,13 @@ impl BinariesCheck {
     /// (partial). PIE stays with the existing `check_non_pie`: DYN is normal
     /// for shared objects, so the check only makes sense for executables.
     ///
-    /// Go binaries are skipped: the Go toolchain emits none of these
-    /// C-hardening artifacts, so every finding would be noise. Rust
-    /// and Zig binaries skip only the two C-compiler findings below
-    /// (see `is_rust_binary`, `is_zig_binary`); the linker-level RELRO
-    /// checks still apply.
+    /// Go and Zig binaries are skipped: neither toolchain emits any of
+    /// these C-hardening artifacts, so every finding would be noise. Rust
+    /// binaries skip only the two C-compiler findings below (see
+    /// `is_rust_binary`); the linker-level RELRO checks still apply.
     fn check_hardening(&self, pkg: &Pkg, pkgfile: &PkgFile, info: &ReadelfInfo, out: &mut Filter) {
         use goblin::elf::header::{ET_DYN, ET_EXEC};
-        if self.is_archive || info.is_go_binary() {
+        if self.is_archive || info.is_go_binary() || info.is_zig_binary() {
             return;
         }
         // Separate debuginfo files are never executed or loaded by the
@@ -1434,11 +1439,8 @@ impl BinariesCheck {
         // Rust emits neither `_FORTIFY_SOURCE` instrumentation nor
         // default stack-protector instrumentation: both findings would
         // be noise. When in doubt the binary is treated as C.
-        // Zig is the same: no `_FORTIFY_SOURCE`, and `-fstack-protector`
-        // requires libc, which the default static Zig build does not link.
         let is_rust = info.is_rust_binary();
-        let is_zig = info.is_zig_binary();
-        if !is_rust && !is_zig && !info.functions.iter().any(|s| is_fortify_symbol(s)) {
+        if !is_rust && !info.functions.iter().any(|s| is_fortify_symbol(s)) {
             add_info(
                 out,
                 Level::Warning,
@@ -1447,7 +1449,7 @@ impl BinariesCheck {
                 &[&pkgfile.name],
             );
         }
-        if !is_rust && !is_zig && !info.functions.iter().any(|s| is_stack_protector_symbol(s)) {
+        if !is_rust && !info.functions.iter().any(|s| is_stack_protector_symbol(s)) {
             add_info(
                 out,
                 Level::Warning,
@@ -3134,6 +3136,19 @@ mod tests {
     }
 
     #[test]
+    fn zig_detection_data_rel_ro_unreachable_string() {
+        // waylock keeps the Zig panic message in .data.rel.ro, not .rodata.
+        let info = parse_crafted_sections(
+            "zigdatarelro",
+            &[(".data.rel.ro", b"\0reached unreachable\0")],
+        );
+        assert!(
+            info.is_zig_binary(),
+            ".data.rel.ro unreachable string must detect Zig"
+        );
+    }
+
+    #[test]
     fn zig_detection_negative_plain_elf() {
         let info = parse_crafted_sections("zigplain", &[(".text", b"\0"), (".rodata", b"hello\0")]);
         assert!(!info.is_zig_binary(), "plain ELF must not detect Zig");
@@ -3287,21 +3302,24 @@ mod tests {
 
     #[test]
 fn hardening_zig_binary_skips_fortify_and_ssp() {
+
+    #[test]
+    fn hardening_zig_binary_skips_everything() {
+        // Zig emits none of the C-hardening artifacts: no _FORTIFY_SOURCE,
+        // no stack-protector without libc, and no GNU_RELRO from its linker
+        // (verified on bun, opencode, waylock). Every finding would be noise.
         let results = hardening_results_for(false, true);
-        assert!(
-            lines_for(&results, "missing-fortify").is_empty(),
-            "missing-fortify must not fire for Zig: {results:?}"
-        );
-        assert!(
-            lines_for(&results, "missing-stack-protector").is_empty(),
-            "missing-stack-protector must not fire for Zig: {results:?}"
-        );
-        // Linker-level RELRO checks still apply to Zig binaries.
-        assert_eq!(
-            lines_for(&results, "missing-relro").len(),
-            1,
-            "missing-relro must still fire for Zig: {results:?}"
-        );
+        for finding in [
+            "missing-fortify",
+            "missing-stack-protector",
+            "missing-relro",
+            "partial-relro",
+        ] {
+            assert!(
+                lines_for(&results, finding).is_empty(),
+                "{finding} must not fire for Zig: {results:?}"
+            );
+        }
     }
 
     #[test]
