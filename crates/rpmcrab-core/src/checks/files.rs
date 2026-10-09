@@ -1480,7 +1480,12 @@ impl FilesCheck {
     }
 
     fn check_file_hidden_file_or_dir(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
-        let is_hidden = fname.split('/').any(|c| c.starts_with('.') && c.len() > 1);
+        // Upstream hidden_file_regex is r'/\.[^/]*$': only the final path
+        // component is tested, so files under a hidden dir are not flagged.
+        let is_hidden = fname
+            .rsplit('/')
+            .next()
+            .is_some_and(|c| c.starts_with('.') && c.len() > 1);
         if is_hidden
             && !fname.starts_with("/etc/skel/")
             && !fname.ends_with("/.build-id")
@@ -3033,6 +3038,68 @@ mod tests {
         check.check(&pkg, &config, &mut out);
         let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
         assert_lacks(&names, "missing-dependency-to-xinetd");
+    }
+
+    #[test]
+    fn hidden_file_or_dir_only_flags_final_component() {
+        // Upstream hidden_file_regex r'/\.[^/]*$' tests only the final
+        // path component: the hidden dir itself is flagged, but files nested
+        // under it are not.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = vec![
+            PkgFile {
+                name: "/usr/src/bazel-skylib/.bcr".to_string(),
+                path: "/usr/src/bazel-skylib/.bcr".to_string(),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/src/bazel-skylib/.bcr/gazelle/dep.json".to_string(),
+                path: "/usr/src/bazel-skylib/.bcr/gazelle/dep.json".to_string(),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/share/doc/pkg/.hidden-note".to_string(),
+                path: "/usr/share/doc/pkg/.hidden-note".to_string(),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/share/doc/pkg/README".to_string(),
+                path: "/usr/share/doc/pkg/README".to_string(),
+                ..Default::default()
+            },
+        ];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let flagged: Vec<&str> = out
+            .results()
+            .iter()
+            .filter(|(n, _)| n == "hidden-file-or-dir")
+            .map(|(_, line)| line.as_str())
+            .collect();
+        assert!(
+            flagged
+                .iter()
+                .any(|f| f.contains("/usr/src/bazel-skylib/.bcr")),
+            "hidden dir itself should be flagged, got: {flagged:?}"
+        );
+        assert!(
+            flagged
+                .iter()
+                .any(|f| f.contains("/usr/share/doc/pkg/.hidden-note")),
+            "hidden file should be flagged, got: {flagged:?}"
+        );
+        assert!(
+            !flagged.iter().any(|f| f.contains("dep.json")),
+            "file under hidden dir must not be flagged, got: {flagged:?}"
+        );
+        assert!(
+            !flagged.iter().any(|f| f.contains("README")),
+            "normal file must not be flagged, got: {flagged:?}"
+        );
     }
 
     #[test]
