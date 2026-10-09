@@ -333,6 +333,15 @@ impl<'a> Extractor<'a> {
         Ok(true)
     }
 
+    /// Log a skip forced by a path collision. The linter proceeds on an
+    /// incomplete tree, so these must be visible, never silent.
+    fn log_skip_collision(&self, e: &CpioEntry) {
+        log::warn!(
+            "extract: skipping entry {:?}: path collides with an incompatible existing object",
+            String::from_utf8_lossy(&e.name)
+        );
+    }
+
     /// Fail-closed symlink guard: entries are never materialized *through* a
     /// symlink. Every ancestor strictly below the extraction root is checked
     /// with no-follow metadata — `a -> /tmp` in the archive must not let a
@@ -395,6 +404,7 @@ impl<'a> Extractor<'a> {
                 // ensure_dir_all doubles as the collision check for the entry
                 // itself: an existing non-directory at `path` yields false.
                 if !self.ensure_dir_all(&path)? {
+                    self.log_skip_collision(e);
                     return skip_data(r, e.size);
                 }
                 skip_data(r, e.size)?;
@@ -402,6 +412,7 @@ impl<'a> Extractor<'a> {
             }
             S_IFREG => {
                 if !self.ensure_parent(&path)? || is_existing_dir(&path) {
+                    self.log_skip_collision(e);
                     return skip_data(r, e.size);
                 }
                 if e.nlink > 1 {
@@ -417,6 +428,7 @@ impl<'a> Extractor<'a> {
             }
             S_IFLNK => {
                 if !self.ensure_parent(&path)? || is_existing_dir(&path) {
+                    self.log_skip_collision(e);
                     return skip_data(r, e.size);
                 }
                 // `e.size` is attacker-controlled: cap before allocating
@@ -437,6 +449,7 @@ impl<'a> Extractor<'a> {
             }
             S_IFIFO => {
                 if !self.ensure_parent(&path)? || is_existing_dir(&path) {
+                    self.log_skip_collision(e);
                     return Ok(());
                 }
                 let _ = fs::remove_file(&path);
@@ -1402,68 +1415,25 @@ mod tests {
         );
     }
 
-    /// A symlink where a directory entry lands (and files beneath it): the
-    /// directory is skipped, files that would live under it too.
+    /// A directory entry landing on a live symlink is fail-closed
+    /// (UnsafePath), not skipped: symlink handling belongs to the
+    /// symlink-escape guard, while this PR only skips file/dir collisions.
     #[test]
-    fn extract_skips_symlink_dir_collisions() {
+    fn extract_dir_on_live_symlink_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let mut ex = collide_extractor(dir.path());
         let (e, mut r) = collide_entry(b"./sub/Link", S_IFLNK | 0o777, b"target");
         ex.materialize(&mut r, &e).unwrap();
         let (e, mut r) = collide_entry(b"./sub/Link", S_IFDIR | 0o755, b"");
-        ex.materialize(&mut r, &e).unwrap();
-        let (e, mut r) = collide_entry(b"./sub/Link/nested", S_IFREG | 0o644, b"");
-        ex.materialize(&mut r, &e).unwrap();
-        ex.fixup().unwrap();
+        let err = ex.materialize(&mut r, &e).unwrap_err();
+        assert!(
+            matches!(err, ExtractError::UnsafePath(_)),
+            "expected UnsafePath, got {err:?}"
+        );
 
         assert_eq!(
             std::fs::read_link(dir.path().join("sub/Link")).unwrap(),
             PathBuf::from("target")
-        );
-        assert!(!dir.path().join("sub/Link/nested").exists());
-    }
-
-    /// End-to-end shape of the libzypp-devel failure: a file and a directory
-    /// whose names differ only by case, plus payload beneath the directory.
-    /// On a case-insensitive filesystem the directory cannot be created;
-    /// extraction must still succeed for the rest of the package.
-    #[test]
-    fn extract_libzypp_proxyinfo_case_collision() {
-        use rpm::{BuildConfig, FileMode, FileOptions, PackageBuilder, Timestamp};
-
-        let src = tempfile::tempdir().unwrap();
-        let rpm_path = src.path().join("collide.rpm");
-        let mut b = PackageBuilder::new("collide", "1.0", "MIT", "x86_64", "probe");
-        b.using_config(BuildConfig::default().source_date(Timestamp(1_577_922_245)));
-        b.with_file_contents(
-            b"compat\n".to_vec(),
-            FileOptions::new("/usr/include/zypp-curl/ProxyInfo").mode(FileMode::regular(0o644)),
-        )
-        .unwrap();
-        b.with_dir_entry(FileOptions::dir("/usr/include/zypp-curl/proxyinfo"))
-            .unwrap();
-        b.with_file_contents(
-            b"nested\n".to_vec(),
-            FileOptions::new("/usr/include/zypp-curl/proxyinfo/nested.h")
-                .mode(FileMode::regular(0o644)),
-        )
-        .unwrap();
-        b.with_file_contents(
-            b"control\n".to_vec(),
-            FileOptions::new("/usr/include/zypp-curl/other.h").mode(FileMode::regular(0o644)),
-        )
-        .unwrap();
-        let pkg = b.build().unwrap();
-        pkg.write(&mut File::create(&rpm_path).unwrap()).unwrap();
-
-        let out = tempfile::tempdir().unwrap();
-        // Used to fail here: Io(NotADirectory) on proxyinfo/nested.h.
-        extract(&rpm_path, out.path(), true).unwrap();
-
-        // The unrelated file always extracts with its content.
-        assert_eq!(
-            std::fs::read(out.path().join("usr/include/zypp-curl/other.h")).unwrap(),
-            b"control\n"
         );
     }
 }

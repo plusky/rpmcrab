@@ -1671,3 +1671,10 @@ check = "explicit-lib-dependency"
 kind = "behaviour"
 reason = "The reference lib-package regex's unanchored `libs?[\\d-]*` alternative matches any dependency name ending in \"lib\" (e.g. `appstream-glib`), which is not a library at all; the check's documented intent is `Requires: lib*`. rpmcrab anchors both alternatives to the start of the name, so genuine `libfoo` findings still fire while suffix false positives stay silent. Concrete case: rpmcrab's own package requires `appstream-glib` for its `appstream-util` binary (a runtime subprocess invocation rpm's autodeps can never see); the reference flags it, rpmcrab does not."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "pkg-layer"
+kind = "behaviour"
+reason = "Extraction skips payload entries colliding with an incompatible existing path (a file where a directory entry lands or vice versa, e.g. case-colliding names on case-insensitive filesystems) and logs a warning, instead of aborting the whole package on the resulting ENOTDIR/EISDIR as before."
+since = "0.1.0"
