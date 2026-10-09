@@ -722,4 +722,69 @@ mod tests {
             "got {out}"
         );
     }
+
+    /// rpmcrab#387: the vendored openSUSE config must carry the mingw
+    /// arch-independent filters. The reference suppresses
+    /// `arch-independent-package-contains-binary-or-object` for mingw `.a`
+    /// files via distro-config filters shipped by mingw{32,64}-filesystem
+    /// (see EXTRA_OPENSUSE_FILTERS in scripts/generate-distro-configs.py);
+    /// without them rpmcrab emits the finding 12x where the reference is
+    /// silent.
+    #[test]
+    fn vendored_opensuse_config_suppresses_mingw_arch_independent_a_files() {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let toml_path = manifest_dir.join("data/distro/opensuse/opensuse.toml");
+        let content = std::fs::read_to_string(&toml_path).expect("read opensuse.toml");
+        let value: toml::Value = toml::from_str(&content).expect("parse opensuse.toml");
+        let filters = value
+            .get("Filters")
+            .and_then(|v| v.as_array())
+            .expect("Filters list");
+        let patterns: Vec<&str> = filters.iter().filter_map(|v| v.as_str()).collect();
+
+        let m32 = patterns
+            .iter()
+            .find(|p| {
+                p.starts_with("^mingw32-.*arch-independent-package-contains-binary-or-object")
+            })
+            .expect("mingw32 arch-independent filter in vendored opensuse.toml");
+        let m64 = patterns
+            .iter()
+            .find(|p| {
+                p.starts_with("^mingw64-.*arch-independent-package-contains-binary-or-object")
+            })
+            .expect("mingw64 arch-independent filter in vendored opensuse.toml");
+
+        let re32 = fancy_regex::Regex::new(m32).expect("compile mingw32 filter");
+        let re64 = fancy_regex::Regex::new(m64).expect("compile mingw64 filter");
+        let is_match = |re: &fancy_regex::Regex, s: &str| re.find(s).unwrap().is_some();
+
+        // Suppressed: mingw .a files (the 12 crab-only cases from the audit).
+        assert!(is_match(
+            &re32,
+            "mingw32-binutils-devel.noarch: E: arch-independent-package-contains-binary-or-object /usr/i686-w64-mingw32/sys-root/mingw/lib/libbfd.a"
+        ));
+        assert!(is_match(
+            &re64,
+            "mingw64-binutils-devel.noarch: E: arch-independent-package-contains-binary-or-object /usr/x86_64-w64-mingw32/sys-root/mingw/lib/libbfd.a"
+        ));
+
+        // Not suppressed: non-mingw packages, non-.a files, other findings.
+        assert!(!is_match(
+            &re32,
+            "foo-devel.noarch: E: arch-independent-package-contains-binary-or-object /usr/lib/libfoo.a"
+        ));
+        assert!(!is_match(
+            &re32,
+            "mingw32-foo.noarch: E: arch-independent-package-contains-binary-or-object /usr/i686-w64-mingw32/bin/foo.dll"
+        ));
+        assert!(!is_match(
+            &re32,
+            "mingw32-foo.noarch: E: files-duplicate /usr/i686-w64-mingw32/lib/libfoo.a /usr/lib/libfoo.a"
+        ));
+        assert!(!is_match(
+            &re64,
+            "foo-devel.noarch: E: arch-independent-package-contains-binary-or-object /usr/lib/libfoo.a"
+        ));
+    }
 }

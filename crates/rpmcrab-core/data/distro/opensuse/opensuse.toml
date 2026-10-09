@@ -214,6 +214,14 @@ Filters = [
     'W: non-conffile-in-etc /etc/bash_completion.d/',
 
 # Info uses file triggers now (boo#1152169)
+
+    # Extra: *.dll.a and *.a files are permitted arch-independent objects.
+    # From mingw32-filesystem's mingw32-rpmlintrc (shipped as
+    # /opt/testing/share/rpmlint/mingw32.toml); see EXTRA_OPENSUSE_FILTERS
+    # in scripts/generate-distro-configs.py.
+    '^mingw32-.*arch-independent-package-contains-binary-or-object.*\.a$',
+    # Same for mingw64 (mingw64-filesystem's mingw64-rpmlintrc).
+    '^mingw64-.*arch-independent-package-contains-binary-or-object.*\.a$',
 ]
 
 BlockedFilters = [
