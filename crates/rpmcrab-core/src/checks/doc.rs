@@ -457,13 +457,16 @@ mod tests {
     fn doc_dep_pkg_with_package_require(flags: u32) -> Pkg {
         use crate::pkg::dep::DepInfo;
         let mut pkg = doc_dep_pkg(false);
-        pkg.requires.push(DepInfo {
+        // The seeding chains requires and prereq, so cover both paths.
+        let dep = || DepInfo {
             name: "/bin/ksh".to_string(),
             flags,
             epoch: None,
             version: None,
             release: None,
-        });
+        };
+        pkg.requires.push(dep());
+        pkg.prereq.push(dep());
         pkg
     }
 
