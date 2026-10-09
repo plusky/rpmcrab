@@ -4856,15 +4856,10 @@ description = "explicit priority string bypasses the system crypto policy"
         let elf_path = dir.path().join("libweak.so");
         std::fs::write(&elf_path, elf_with_undef_symbols()).expect("write elf");
         let ldd = LddInfo::parse(&elf_path.to_string_lossy(), true);
-        assert!(
-            ldd.undefined_symbols.contains(&"global_undef".to_string()),
-            "global undefined must be reported: {:?}",
-            ldd.undefined_symbols
-        );
-        assert!(
-            !ldd.undefined_symbols.contains(&"weak_undef".to_string()),
-            "weak undefined must stay silent: {:?}",
-            ldd.undefined_symbols
+        assert_eq!(
+            ldd.undefined_symbols,
+            ["global_undef"],
+            "global undefined reported exactly once; weak undefined stays silent"
         );
     }
 
