@@ -1,0 +1,27 @@
+============================ rpmcrab session starts ============================
+rpmcrab: 0.1.0
+configuration:
+    <builtin>
+    <distro:opensuse>/cron-whitelist.toml
+    <distro:opensuse>/dbus-services.toml
+    <distro:opensuse>/device-files-whitelist.toml
+    <distro:opensuse>/licenses.toml
+    <distro:opensuse>/opensuse.toml
+    <distro:opensuse>/pam-modules.toml
+    <distro:opensuse>/permissions-whitelist.toml
+    <distro:opensuse>/pie-executables.toml
+    <distro:opensuse>/polkit-rules-whitelist.toml
+    <distro:opensuse>/scoring.toml
+    <distro:opensuse>/security.toml
+    <distro:opensuse>/sudoers-whitelist.toml
+    <distro:opensuse>/sysctl-whitelist.toml
+    <distro:opensuse>/systemd-tmpfiles.toml
+    <distro:opensuse>/users-groups.toml
+    <distro:opensuse>/varlink-whitelist.toml
+    <distro:opensuse>/world-writable-whitelist.toml
+    <distro:opensuse>/zypper-plugins.toml
+    <distro:opensuse>/scoring-strict.override.toml
+checks: 43, packages: 1
+
+explicit-libdep-probe.noarch: E: explicit-lib-dependency libfoo
+ 1 packages and 0 specfiles checked; 1 errors, 0 warnings, 0 filtered, 1 badness; has taken <DURATION> s 
