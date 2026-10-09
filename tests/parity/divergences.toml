@@ -1664,3 +1664,10 @@ check = "hidden-file-or-dir"
 kind = "behaviour"
 reason = "Upstream emits hidden-file-or-dir twice for a hidden directory: once from the per-file _check_file_hidden_file_or_dir and again from _check_file_dir (which carries only the /.build-id exception). rpmcrab emits it once per path; the duplicate line is upstream redundancy with no consumer value. Measured 2026-10-09 on the openSUSE:Factory bazel-skylib rpmlint.log: /usr/src/bazel-skylib/.bcr, .bazelci and .github each carry two identical W lines, while hidden files (.bazelignore, .bazelversion, .gitignore) carry one."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "explicit-lib-dependency"
+kind = "behaviour"
+reason = "The reference lib-package regex's unanchored `libs?[\\d-]*` alternative matches any dependency name ending in \"lib\" (e.g. `appstream-glib`), which is not a library at all; the check's documented intent is `Requires: lib*`. rpmcrab anchors both alternatives to the start of the name, so genuine `libfoo` findings still fire while suffix false positives stay silent. Concrete case: rpmcrab's own package requires `appstream-glib` for its `appstream-util` binary (a runtime subprocess invocation rpm's autodeps can never see); the reference flags it, rpmcrab does not."
+since = "0.1.0"
