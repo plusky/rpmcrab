@@ -293,7 +293,6 @@ def test_unknown_flavor_names_valid_flavors():
         raise AssertionError("unknown flavor did not raise")
 
 
-
 # ---------------------------------------------------------------------------
 # Leap 16.0 repomd sha512 verification (follow-up to #334)
 # ---------------------------------------------------------------------------
@@ -331,7 +330,10 @@ class _FakeZstdStdout:
         self._data = data
 
     def read(self, n=-1):
-        chunk, self._data = self._data[:n], self._data[n:]
+        if n is None or n < 0:
+            chunk, self._data = self._data, b''
+        else:
+            chunk, self._data = self._data[:n], self._data[n:]
         return chunk
 
     def close(self):
