@@ -36,8 +36,8 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::dep::{
-    has_forbidden_controlchars, has_forbidden_controlchars_deps, is_parenthesized_versioned,
-    is_rich_dep_expr, parse_deps,
+    first_dep_token, has_forbidden_controlchars, has_forbidden_controlchars_deps,
+    is_parenthesized_versioned, is_rich_dep_expr, parse_deps,
 };
 use crate::pkg::spec::{self, SpecPkg};
 use crate::pkg::{Pkg, init as pkg_init};
@@ -1396,11 +1396,20 @@ impl SpecCheck {
         }
     }
 
-    fn checkline_package_requires(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
-        if let Ok(Some(caps)) = self.requires_re.captures(line) {
-            let reqs = parse_deps(caps.get(1).map(|m| m.as_str()).unwrap_or(""));
-            if let Some(token) = has_forbidden_controlchars_deps(&reqs) {
-                let detail = format!("Requires: {token}");
+    /// Shared body of the `Requires:`/`Provides:`/`Obsoletes:`/`Conflicts:`
+    /// line checks: `forbidden-controlchar-found` plus
+    /// `comparison-operator-in-deptoken`.
+    fn checkline_dep_list(&self, pkg: &SpecPkg, out: &mut Filter, tag: &str, raw: &str) {
+        // Perf: most dep lines are plain names with no comparison operators.
+        // Probe the raw string first so the `parse_deps` allocation is
+        // skipped when no `comparison-operator-in-deptoken` finding can fire
+        // (a token match implies a raw-string match). The
+        // forbidden-controlchar check only ever examines the first token,
+        // so it keeps a cheap probe of its own.
+        if self.compop_re.is_match(raw).unwrap_or(false) {
+            let deps = parse_deps(raw);
+            if let Some(token) = has_forbidden_controlchars_deps(&deps) {
+                let detail = format!("{tag}: {token}");
                 self.info(
                     out,
                     pkg,
@@ -1409,125 +1418,77 @@ impl SpecCheck {
                     &[&detail],
                 );
             }
-            for (req, version) in &reqs {
+            for (dep, version) in &deps {
                 // Rich expressions contain comparison operators as syntax
                 // (`>=` in `(baz >= 1.0 with baz < 2.0)`); the regex would
                 // false-positive on them, so they are skipped.
                 if version.is_none()
-                    && !is_rich_dep_expr(req)
-                    && !is_parenthesized_versioned(req)
-                    && self.compop_re.is_match(req).unwrap_or(false)
+                    && !is_rich_dep_expr(dep)
+                    && !is_parenthesized_versioned(dep)
+                    && self.compop_re.is_match(dep).unwrap_or(false)
                 {
                     self.info(
                         out,
                         pkg,
                         Level::Warning,
                         "comparison-operator-in-deptoken",
-                        &[req],
+                        &[dep],
                     );
                 }
             }
+        } else if let Some(token) = first_dep_token(raw).and_then(has_forbidden_controlchars) {
+            let detail = format!("{tag}: {token}");
+            self.info(
+                out,
+                pkg,
+                Level::Error,
+                "forbidden-controlchar-found",
+                &[&detail],
+            );
+        }
+    }
+
+    fn checkline_package_requires(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
+        if let Ok(Some(caps)) = self.requires_re.captures(line) {
+            self.checkline_dep_list(
+                pkg,
+                out,
+                "Requires",
+                caps.get(1).map(|m| m.as_str()).unwrap_or(""),
+            );
         }
     }
 
     fn checkline_package_provides(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
         if let Ok(Some(caps)) = self.provides_re.captures(line) {
-            let provs = parse_deps(caps.get(1).map(|m| m.as_str()).unwrap_or(""));
-            if let Some(token) = has_forbidden_controlchars_deps(&provs) {
-                let detail = format!("Provides: {token}");
-                self.info(
-                    out,
-                    pkg,
-                    Level::Error,
-                    "forbidden-controlchar-found",
-                    &[&detail],
-                );
-            }
-            for (prov, version) in &provs {
-                if version.is_none() {
-                    // As above: operators inside a rich expression are
-                    // syntax, not a comparison in a dep token.
-                    if !is_rich_dep_expr(prov)
-                        && !is_parenthesized_versioned(prov)
-                        && self.compop_re.is_match(prov).unwrap_or(false)
-                    {
-                        self.info(
-                            out,
-                            pkg,
-                            Level::Warning,
-                            "comparison-operator-in-deptoken",
-                            &[prov],
-                        );
-                    }
-                }
-            }
+            self.checkline_dep_list(
+                pkg,
+                out,
+                "Provides",
+                caps.get(1).map(|m| m.as_str()).unwrap_or(""),
+            );
         }
     }
 
     fn checkline_package_obsoletes(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
         if let Ok(Some(caps)) = self.obsoletes_re.captures(line) {
-            let obses = parse_deps(caps.get(1).map(|m| m.as_str()).unwrap_or(""));
-            if let Some(token) = has_forbidden_controlchars_deps(&obses) {
-                let detail = format!("Obsoletes: {token}");
-                self.info(
-                    out,
-                    pkg,
-                    Level::Error,
-                    "forbidden-controlchar-found",
-                    &[&detail],
-                );
-            }
-            for (obs, version) in &obses {
-                if version.is_none() {
-                    // As above: operators inside a rich expression are
-                    // syntax, not a comparison in a dep token.
-                    if !is_rich_dep_expr(obs)
-                        && !is_parenthesized_versioned(obs)
-                        && self.compop_re.is_match(obs).unwrap_or(false)
-                    {
-                        self.info(
-                            out,
-                            pkg,
-                            Level::Warning,
-                            "comparison-operator-in-deptoken",
-                            &[obs],
-                        );
-                    }
-                }
-            }
+            self.checkline_dep_list(
+                pkg,
+                out,
+                "Obsoletes",
+                caps.get(1).map(|m| m.as_str()).unwrap_or(""),
+            );
         }
     }
 
     fn checkline_package_conflicts(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
         if let Ok(Some(caps)) = self.conflicts_re.captures(line) {
-            let confs = parse_deps(caps.get(1).map(|m| m.as_str()).unwrap_or(""));
-            if let Some(token) = has_forbidden_controlchars_deps(&confs) {
-                let detail = format!("Conflicts: {token}");
-                self.info(
-                    out,
-                    pkg,
-                    Level::Error,
-                    "forbidden-controlchar-found",
-                    &[&detail],
-                );
-            }
-            for (conf, version) in &confs {
-                // As above: operators inside a rich expression are
-                // syntax, not a comparison in a dep token.
-                if version.is_none()
-                    && !is_rich_dep_expr(conf)
-                    && !is_parenthesized_versioned(conf)
-                    && self.compop_re.is_match(conf).unwrap_or(false)
-                {
-                    self.info(
-                        out,
-                        pkg,
-                        Level::Warning,
-                        "comparison-operator-in-deptoken",
-                        &[conf],
-                    );
-                }
-            }
+            self.checkline_dep_list(
+                pkg,
+                out,
+                "Conflicts",
+                caps.get(1).map(|m| m.as_str()).unwrap_or(""),
+            );
         }
     }
 }
@@ -1990,6 +1951,22 @@ Requires:       foo<bar\n";
         let lines = lines_for(&results, "comparison-operator-in-deptoken");
         assert_eq!(lines.len(), 1, "{results:?}");
         assert!(lines[0].contains("W:"), "{results:?}");
+    }
+
+    #[test]
+    fn controlchar_in_dep_list_still_fires_without_compop() {
+        // Fast path: no comparison operator in the raw line, so `parse_deps`
+        // is skipped -- the forbidden-controlchar probe must still fire on
+        // the first token.
+        let results = run_mini(
+            "Name:           wobble\nVersion:        1.0\nRelease:        1\nSummary:        Wobble\nLicense:        MIT\nRequires:       dep\x01x bar\n",
+        );
+        let lines = lines_for(&results, "forbidden-controlchar-found");
+        // The generic line-level check also fires (W:); the dep-list probe
+        // is the E: one with the tag detail.
+        let tagged: Vec<_> = lines.iter().filter(|l| l.contains(" E: ")).collect();
+        assert_eq!(tagged.len(), 1, "{results:?}");
+        assert!(tagged[0].contains("Requires: dep\x01x"), "{:?}", tagged[0]);
     }
 
     #[test]
