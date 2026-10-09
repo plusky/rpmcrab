@@ -538,14 +538,25 @@ fn is_bool_op(tok: &str) -> bool {
 }
 
 fn version_op_flags(tok: &str) -> Option<u32> {
-    match tok {
-        "=" => Some(RPMSENSE_EQUAL),
-        "<" => Some(RPMSENSE_LESS),
-        ">" => Some(RPMSENSE_GREATER),
-        "<=" => Some(RPMSENSE_LESS | RPMSENSE_EQUAL),
-        ">=" => Some(RPMSENSE_GREATER | RPMSENSE_EQUAL),
-        _ => None,
+    // Mirrors rpmlint's parse_deps: any token starting with `=`, `<` or `>`
+    // is a version operator, with flags from the characters present. This
+    // accepts `=<` (old-style `<=`), `=>`, `==` etc., exactly like the
+    // reference; without it rich expressions using `=<` fail to parse and
+    // fall back to opaque names.
+    if !tok.starts_with(['=', '<', '>']) {
+        return None;
     }
+    let mut flags = 0u32;
+    if tok.contains('=') {
+        flags |= RPMSENSE_EQUAL;
+    }
+    if tok.contains('<') {
+        flags |= RPMSENSE_LESS;
+    }
+    if tok.contains('>') {
+        flags |= RPMSENSE_GREATER;
+    }
+    Some(flags)
 }
 
 struct RichParser {
@@ -737,6 +748,29 @@ pub fn parse_dep_expr(s: &str) -> DepExpr {
 /// skip the tokenizing parse for plain dependency names.
 pub fn is_rich_dep_expr(s: &str) -> bool {
     s.contains('(') && parse_dep_expr(s).is_rich()
+}
+
+/// Whether `s` is a parenthesized token like `(clang >= 17)` whose inner
+/// content, shredded the way the reference shreds it, is entirely versioned
+/// dependencies.
+///
+/// Our `parse_deps` keeps `(…)` whole as one token while the reference splits
+/// it on whitespace and only warns on unversioned names; a parenthesized
+/// versioned dependency is a boolean expression per RPM grammar, so the
+/// reference never warns on it. Without this guard the
+/// `comparison-operator-in-deptoken` check false-positives on operators that
+/// are legitimate boolean-expression syntax. Malformed tokens like `(foo<bar)`
+/// still warn, exactly like the reference.
+///
+/// Only a single paren layer is unwrapped: `((a >= 1))` would need a
+/// loop-strip, but double-wrapped tokens cannot arise from real spec
+/// dependency lists, so they are left to warn.
+pub fn is_parenthesized_versioned(s: &str) -> bool {
+    let Some(inner) = s.strip_prefix('(').and_then(|t| t.strip_suffix(')')) else {
+        return false;
+    };
+    let deps = parse_deps(inner);
+    !deps.is_empty() && deps.iter().all(|(_, version)| version.is_some())
 }
 
 #[cfg(test)]
@@ -1030,6 +1064,46 @@ mod rich_dep_tests {
         assert_eq!(parse_dep_expr("foo"), simple("foo"));
         assert_eq!(parse_dep_expr("foo-1.2"), simple("foo-1.2"));
         assert!(!is_rich_dep_expr("foo"));
+    }
+
+    #[test]
+    fn version_op_flags_accepts_old_style_operators() {
+        // `=<` is old-style `<=`; the reference treats any token starting
+        // with `=`, `<`, `>` as a version operator (#362).
+        assert_eq!(version_op_flags("=<"), Some(RPMSENSE_LESS | RPMSENSE_EQUAL));
+        assert_eq!(
+            version_op_flags("=>"),
+            Some(RPMSENSE_GREATER | RPMSENSE_EQUAL)
+        );
+        assert_eq!(version_op_flags("=="), Some(RPMSENSE_EQUAL));
+        assert_eq!(
+            version_op_flags(">="),
+            Some(RPMSENSE_GREATER | RPMSENSE_EQUAL)
+        );
+        assert!(version_op_flags("foo").is_none());
+        assert!(version_op_flags("").is_none());
+    }
+
+    #[test]
+    fn parenthesized_versioned_dep_is_detected() {
+        assert!(is_parenthesized_versioned("(clang >= 17)"));
+        assert!(is_parenthesized_versioned("(cmake(Clang) >= 1.0)"));
+        assert!(is_parenthesized_versioned("(a =< b)"));
+        assert!(!is_parenthesized_versioned("(foo<bar)"));
+        assert!(!is_parenthesized_versioned("(foo)"));
+        assert!(!is_parenthesized_versioned("foo"));
+        assert!(!is_parenthesized_versioned("(foo"));
+        assert!(!is_parenthesized_versioned(""));
+        // Boolean operators make it rich, not parenthesized-versioned;
+        // is_rich_dep_expr covers those.
+        assert!(!is_parenthesized_versioned("(a or b)"));
+    }
+
+    #[test]
+    fn rich_dep_with_old_style_operator_parses() {
+        // #362: `=<` inside a rich expression must parse, not fall back to
+        // an opaque name.
+        assert!(parse_dep_expr("(a >= 1.0 with b =< 2.0)").is_rich());
     }
 
     #[test]

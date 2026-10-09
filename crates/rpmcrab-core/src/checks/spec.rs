@@ -36,7 +36,8 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::dep::{
-    has_forbidden_controlchars, has_forbidden_controlchars_deps, is_rich_dep_expr, parse_deps,
+    has_forbidden_controlchars, has_forbidden_controlchars_deps, is_parenthesized_versioned,
+    is_rich_dep_expr, parse_deps,
 };
 use crate::pkg::spec::{self, SpecPkg};
 use crate::pkg::{Pkg, init as pkg_init};
@@ -1414,6 +1415,7 @@ impl SpecCheck {
                 // false-positive on them, so they are skipped.
                 if version.is_none()
                     && !is_rich_dep_expr(req)
+                    && !is_parenthesized_versioned(req)
                     && self.compop_re.is_match(req).unwrap_or(false)
                 {
                     self.info(
@@ -1445,7 +1447,10 @@ impl SpecCheck {
                 if version.is_none() {
                     // As above: operators inside a rich expression are
                     // syntax, not a comparison in a dep token.
-                    if !is_rich_dep_expr(prov) && self.compop_re.is_match(prov).unwrap_or(false) {
+                    if !is_rich_dep_expr(prov)
+                        && !is_parenthesized_versioned(prov)
+                        && self.compop_re.is_match(prov).unwrap_or(false)
+                    {
                         self.info(
                             out,
                             pkg,
@@ -1476,7 +1481,10 @@ impl SpecCheck {
                 if version.is_none() {
                     // As above: operators inside a rich expression are
                     // syntax, not a comparison in a dep token.
-                    if !is_rich_dep_expr(obs) && self.compop_re.is_match(obs).unwrap_or(false) {
+                    if !is_rich_dep_expr(obs)
+                        && !is_parenthesized_versioned(obs)
+                        && self.compop_re.is_match(obs).unwrap_or(false)
+                    {
                         self.info(
                             out,
                             pkg,
@@ -1508,6 +1516,7 @@ impl SpecCheck {
                 // syntax, not a comparison in a dep token.
                 if version.is_none()
                     && !is_rich_dep_expr(conf)
+                    && !is_parenthesized_versioned(conf)
                     && self.compop_re.is_match(conf).unwrap_or(false)
                 {
                     self.info(
@@ -1950,6 +1959,37 @@ mod tests {
         // misses the common `%{suse_version}` form; we match it too.
         let results = run_mini("Name: foo\n%if %{suse_version} < 1000\n%endif\n");
         assert!(has(&results, "obsolete-suse-version-check"), "{results:?}");
+    }
+
+    #[test]
+    fn comparison_operator_skips_parenthesized_versioned_deps() {
+        // #362: `(clang >= 17)` and rich expressions using `=<` are boolean
+        // dependencies; their operators are legitimate syntax, not misplaced
+        // deptoken characters. The reference never warns on these.
+        let spec = "Name:           wobble\nVersion:        1.0\nRelease:        1\n\
+Summary:        Wobble\nLicense:        MIT\n\
+BuildRequires:  (clang >= 17)\n\
+BuildRequires:  (cmake(Clang) >= 1.0 with cmake(Clang) =< 2.0)\n\
+Requires:       foo<bar\n";
+        let results = run_mini(spec);
+        let lines = lines_for(&results, "comparison-operator-in-deptoken");
+        // Only the `foo<bar` positive control fires; the parenthesized
+        // boolean dependencies stay silent.
+        assert_eq!(lines.len(), 1, "{results:?}");
+        assert!(lines[0].contains("foo<bar"), "{results:?}");
+        assert!(lines[0].contains("W:"), "{results:?}");
+    }
+
+    #[test]
+    fn comparison_operator_still_fires_on_glued_operator() {
+        // `Requires: foo>=1.0` (no spaces) puts the operator in the deptoken;
+        // the reference warns and so do we.
+        let results = run_mini(
+            "Name:           wobble\nVersion:        1.0\nRelease:        1\nSummary:        Wobble\nLicense:        MIT\nRequires:       foo>=1.0\n",
+        );
+        let lines = lines_for(&results, "comparison-operator-in-deptoken");
+        assert_eq!(lines.len(), 1, "{results:?}");
+        assert!(lines[0].contains("W:"), "{results:?}");
     }
 
     #[test]
