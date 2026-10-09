@@ -81,6 +81,15 @@ fn kernel_modules_regex() -> &'static Regex {
 }
 
 static QUOTES_REGEX: OnceLock<Regex> = OnceLock::new();
+
+static MANIFEST_PERL_REGEX: OnceLock<Regex> = OnceLock::new();
+fn manifest_perl_regex() -> &'static Regex {
+    // Mirrors the reference manifest_perl_regex verbatim: only a doc
+    // directory literally named perl-* matches.
+    MANIFEST_PERL_REGEX.get_or_init(|| {
+        Regex::new(r"^/usr/share/doc/perl-.*/MANIFEST(\.SKIP)?$").expect("static regex")
+    })
+}
 fn quotes_regex() -> &'static Regex {
     QUOTES_REGEX.get_or_init(|| Regex::new(r#"['"]"#).expect("static regex"))
 }
@@ -1498,7 +1507,9 @@ impl FilesCheck {
     }
 
     fn check_file_manifest_in_perl_module(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
-        if fname.ends_with("/MANIFEST") && fname.contains("/perl") {
+        // The reference only fires for a doc dir literally named perl-*;
+        // /usr/share/doc/packages/perl-*/MANIFEST must stay silent.
+        if is_match(manifest_perl_regex(), fname) {
             add_info(
                 out,
                 Level::Warning,
@@ -4957,6 +4968,34 @@ mod tests {
                 .any(|(n, _)| n == "debug-files-in-non-debug-package"),
             "ghost debug paths must stay quiet: {results:?}"
         );
+    }
+
+    #[test]
+    fn manifest_in_perl_module_matches_reference_regex() {
+        // Issue #385: the port used fname.contains("/perl"), firing on
+        // /usr/share/doc/packages/perl-*/MANIFEST (21 false positives in
+        // the Factory audit). The reference manifest_perl_regex only
+        // matches a doc dir literally named perl-*.
+        for (path, should_fire) in [
+            ("/usr/share/doc/perl-Foo/MANIFEST", true),
+            ("/usr/share/doc/perl-Foo/MANIFEST.SKIP", true),
+            ("/usr/share/doc/perl-Foo/sub/MANIFEST", true),
+            (
+                "/usr/share/doc/packages/perl-Apache-SessionX/MANIFEST",
+                false,
+            ),
+            (
+                "/usr/share/doc/packages/perl-Apache-SessionX/MANIFEST.SKIP",
+                false,
+            ),
+            ("/usr/share/doc/perl-Foo/README", false),
+            ("/usr/share/doc/packages/perl-Foo/MANIFEST", false),
+        ] {
+            let (pkg, _dir) = pkg_with_files(vec![mkfile(path, 0o100644, 1)]);
+            let results = run_check_binary(&pkg);
+            let fired = results.iter().any(|(n, _)| n == "manifest-in-perl-module");
+            assert_eq!(fired, should_fire, "path {path}");
+        }
     }
 
     #[test]
