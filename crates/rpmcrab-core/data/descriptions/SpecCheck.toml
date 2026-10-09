@@ -157,12 +157,6 @@ This dependency token contains a comparison operator (<, > or =).  This is
 usually not intended and may be caused by missing whitespace between the
 token's name, the comparison operator and the version string.
 """
-conditional-source-or-patch="""
-A Source or Patch tag is declared inside a conditional (%if) block.
-The resulting source package may then be missing the files the spec file
-references, depending on which conditions hold at build time. Declare
-Source and Patch tags unconditionally.
-"""
 macro-in-comment="""
 There is an unescaped macro after a shell style comment in the specfile.
 Macros are expanded everywhere, so check if it can cause a problem in this

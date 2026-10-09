@@ -157,21 +157,6 @@ fn lib_package_re() -> &'static Regex {
     LIB_PACKAGE_RE.get_or_init(|| Regex::new(r"^%package.*\Wlib").expect("static regex"))
 }
 
-static IFARCH_RE: OnceLock<Regex> = OnceLock::new();
-fn ifarch_re() -> &'static Regex {
-    IFARCH_RE.get_or_init(|| Regex::new(r"^\s*%ifn?arch\s").expect("static regex"))
-}
-
-static IF_RE: OnceLock<Regex> = OnceLock::new();
-fn if_re() -> &'static Regex {
-    IF_RE.get_or_init(|| Regex::new(r"^\s*%if\s").expect("static regex"))
-}
-
-static ENDIF_RE: OnceLock<Regex> = OnceLock::new();
-fn endif_re() -> &'static Regex {
-    ENDIF_RE.get_or_init(|| Regex::new(r"^\s*%endif\b").expect("static regex"))
-}
-
 /// `DEFAULT_BIARCH_PACKAGES`: hardcoded library paths are not checked in
 /// biarch packages.
 static BIARCH_PACKAGE_RE: OnceLock<Regex> = OnceLock::new();
@@ -330,14 +315,6 @@ fn declarative_re() -> &'static Regex {
 static SUMMARY_RE: OnceLock<Regex> = OnceLock::new();
 fn summary_re() -> &'static Regex {
     SUMMARY_RE.get_or_init(|| Regex::new(r"(?i)^\s*Summary(\([^)]*\))?\s*:").expect("static regex"))
-}
-
-/// `SourceN:`/`PatchN:` tag lines — a conditional one (inside `%if`) warns
-/// `conditional-source-or-patch` (upstream rpmlint#45).
-static SOURCE_PATCH_RE: OnceLock<Regex> = OnceLock::new();
-fn source_patch_re() -> &'static Regex {
-    SOURCE_PATCH_RE
-        .get_or_init(|| Regex::new(r"^\s*(Source\d*|Patch\d*)\s*:").expect("static regex"))
 }
 
 static COMPOP_RE: OnceLock<Regex> = OnceLock::new();
@@ -510,9 +487,6 @@ pub struct SpecCheck {
     configure_libdir_spec_re: Regex,
     hardcoded_libdir_paths_re: Regex,
     lib_package_re: Regex,
-    ifarch_re: Regex,
-    if_re: Regex,
-    endif_re: Regex,
     biarch_package_re: Regex,
     libdir_re: Regex,
     description_lang_re: Regex,
@@ -532,7 +506,6 @@ pub struct SpecCheck {
     conflicts_re: Regex,
     declarative_re: Regex,
     summary_re: Regex,
-    source_patch_re: Regex,
     compop_re: Regex,
     setup_re: Regex,
     autosetup_re: Regex,
@@ -558,8 +531,6 @@ pub struct SpecCheck {
     configure_cmdline: String,
     mklibname: bool,
     is_lib_pkg: bool,
-    if_depth: i32,
-    ifarch_depth: i32,
     depscript_override: bool,
     depgen_disabled: bool,
     patch_fuzz_override: bool,
@@ -624,9 +595,6 @@ impl SpecCheck {
             configure_libdir_spec_re: configure_libdir_spec_re().clone(),
             hardcoded_libdir_paths_re: hardcoded_libdir_paths_re().clone(),
             lib_package_re: lib_package_re().clone(),
-            ifarch_re: ifarch_re().clone(),
-            if_re: if_re().clone(),
-            endif_re: endif_re().clone(),
             biarch_package_re: biarch_package_re().clone(),
             libdir_re: libdir_re().clone(),
             description_lang_re: description_lang_re().clone(),
@@ -644,7 +612,6 @@ impl SpecCheck {
             conflicts_re: conflicts_re().clone(),
             declarative_re: declarative_re().clone(),
             summary_re: summary_re().clone(),
-            source_patch_re: source_patch_re().clone(),
             compop_re: compop_re().clone(),
             setup_re: setup_re().clone(),
             autosetup_re: autosetup_re().clone(),
@@ -669,8 +636,6 @@ impl SpecCheck {
             configure_cmdline: String::new(),
             mklibname: false,
             is_lib_pkg: false,
-            if_depth: 0,
-            ifarch_depth: -1,
             depscript_override: false,
             depgen_disabled: false,
             patch_fuzz_override: false,
@@ -875,8 +840,6 @@ impl Check for SpecCheck {
         self.configure_cmdline.clear();
         self.mklibname = false;
         self.is_lib_pkg = false;
-        self.if_depth = 0;
-        self.ifarch_depth = -1;
         self.depscript_override = false;
         self.depgen_disabled = false;
         self.patch_fuzz_override = false;
@@ -1001,21 +964,6 @@ impl SpecCheck {
         self.checkline_python_module_def(pkg, out, line);
         self.checkline_python_sitelib_glob(pkg, out, line);
         self.checkline_shared_dir_glob(pkg, out, line);
-        // Before the `%if`/`%endif` depth update below: a `Source:` on the
-        // `%if` line itself is not conditional.
-        self.checkline_conditional_source_patch(pkg, out, line);
-
-        if self.ifarch_re.is_match(line).unwrap_or(false) {
-            self.if_depth += 1;
-            self.ifarch_depth = self.if_depth;
-        } else if self.if_re.is_match(line).unwrap_or(false) {
-            self.if_depth += 1;
-        } else if self.endif_re.is_match(line).unwrap_or(false) {
-            if self.ifarch_depth == self.if_depth {
-                self.ifarch_depth = -1;
-            }
-            self.if_depth -= 1;
-        }
     }
 
     fn checkline_declarative(&mut self, line: &str) {
@@ -1049,30 +997,6 @@ impl SpecCheck {
             );
             self.info(out, pkg, Level::Warning, "non-break-space", &[&detail]);
         }
-    }
-
-    /// Warn when a `Source:`/`Patch:` tag sits inside `%if`/`%endif`:
-    /// the resulting SRPM can miss the files the spec references
-    /// (upstream rpmlint#45). Only the preamble (`package` section)
-    /// carries these tags; prose elsewhere may mention them freely.
-    /// `%ifos` blocks are not depth-tracked (pre-existing gap), so a
-    /// conditional tag inside one is not flagged.
-    fn checkline_conditional_source_patch(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
-        if self.if_depth <= 0 || self.current_section != "package" {
-            return;
-        }
-        let Ok(Some(caps)) = self.source_patch_re.captures(line) else {
-            return;
-        };
-        let tag = format!("{}:", caps.get(1).map(|m| m.as_str()).unwrap_or(""));
-        // The spec-line prefix already carries the line number.
-        self.info(
-            out,
-            pkg,
-            Level::Warning,
-            "conditional-source-or-patch",
-            &[&tag],
-        );
     }
 
     fn checkline_section(&mut self, pkg: &SpecPkg, out: &mut Filter, line: &str) -> bool {
@@ -1999,52 +1923,6 @@ mod tests {
         // the prose exemption must not silence it.
         let results = run_mini("Name: foo\n%prep\nSummary: hot\u{a0} latte\n");
         assert!(has(&results, "non-break-space"), "missing: {results:?}");
-    }
-
-    // Upstream rpmlint#45: conditional Source:/Patch: tags.
-    #[test]
-    fn conditional_source_warns() {
-        let results = run_mini("Name: foo\n%if 0%{?suse_version}\nSource0: a.tar.gz\n%endif\n");
-        let lines = lines_for(&results, "conditional-source-or-patch");
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("W: conditional-source-or-patch Source0:"));
-    }
-
-    #[test]
-    fn conditional_patch_warns() {
-        let results = run_mini("Name: foo\n%ifarch x86_64\nPatch1: b.patch\n%endif\n");
-        let lines = lines_for(&results, "conditional-source-or-patch");
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("W: conditional-source-or-patch Patch1:"));
-    }
-
-    #[test]
-    fn unconditional_source_is_quiet() {
-        let results = run_mini("Name: foo\nSource0: a.tar.gz\n");
-        assert!(
-            !has(&results, "conditional-source-or-patch"),
-            "unexpected: {results:?}"
-        );
-    }
-
-    #[test]
-    fn source_after_endif_is_quiet() {
-        let results = run_mini("Name: foo\n%if 0\n%endif\nSource0: a.tar.gz\n");
-        assert!(
-            !has(&results, "conditional-source-or-patch"),
-            "unexpected: {results:?}"
-        );
-    }
-
-    #[test]
-    fn source_word_in_description_is_quiet() {
-        // Only the preamble carries Source:/Patch: tags; prose mentioning
-        // them must not warn.
-        let results = run_mini("Name: foo\n%description\n%if 0\nSource0: a.tar.gz\n%endif\n");
-        assert!(
-            !has(&results, "conditional-source-or-patch"),
-            "unexpected: {results:?}"
-        );
     }
 
     #[test]
@@ -3052,32 +2930,6 @@ Patch0: foo.patch
         let desc = out.get_description("translated-description", &config);
         assert!(
             desc.contains("translated description"),
-            "explain text missing, got: {desc:?}"
-        );
-    }
-
-    #[test]
-    fn conditional_source_or_patch_has_explain_text() {
-        // Port-only finding (upstream rpmlint#45): --explain must describe it,
-        // not print "Unknown message".
-        let text = "Name: foo\n%if 0%{?suse_version}\nSource0: a.tar.gz\n%endif\n";
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.spec");
-        std::fs::write(&path, text).unwrap();
-        let pkg = SpecPkg::open(&path).unwrap();
-        let config = config_mini();
-        let mut check = SpecCheck::new(&config);
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_spec(&pkg, &config, &mut out);
-        assert!(
-            out.results()
-                .iter()
-                .any(|(c, _)| c == "conditional-source-or-patch"),
-            "finding must fire"
-        );
-        let desc = out.get_description("conditional-source-or-patch", &config);
-        assert!(
-            desc.contains("conditional"),
             "explain text missing, got: {desc:?}"
         );
     }

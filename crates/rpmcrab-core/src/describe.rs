@@ -446,7 +446,7 @@ mod tests {
             ),
             (
                 "SpecCheck.toml",
-                "350a46c360dea9764299bd9aa09b07690b27db8e8b962b3a9dbec35d74c60b7f",
+                "35d288709b827ad9b312563c67f78c11a4df8eb89d086d159867705fcbfcfe66",
             ),
             (
                 "SysVInitOnSystemdCheck.toml",
@@ -571,13 +571,14 @@ mod tests {
     #[test]
     fn port_only_findings_have_description_coverage() {
         let corpus = staged_descriptions();
-        for id in ["conditional-source-or-patch", "translated-description"] {
-            let text = corpus.get(id).cloned().unwrap_or_default();
-            assert!(
-                !text.trim().is_empty(),
-                "port-only finding `{id}` has no staged --explain description"
-            );
-        }
+        let text = corpus
+            .get("translated-description")
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !text.trim().is_empty(),
+            "port-only finding `translated-description` has no staged --explain description"
+        );
     }
 
     #[test]
