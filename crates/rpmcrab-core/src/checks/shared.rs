@@ -45,6 +45,20 @@ pub fn lib_package_regex() -> &'static Regex {
     })
 }
 
+/// `explicit_lib_package_regex`: start-anchored variant of
+/// `lib_package_regex`, for `explicit-lib-dependency` only. The
+/// reference's unanchored `libs?[\d-]*` alternative matches any
+/// dependency name *ending* in "lib" (e.g. `appstream-glib`), which is
+/// not a library at all; the check's documented intent is
+/// `Requires: lib*`. Anchoring keeps genuine `libfoo` findings while
+/// silencing the suffix false positives.
+static EXPLICIT_LIB_PACKAGE_REGEX: OnceLock<Regex> = OnceLock::new();
+pub fn explicit_lib_package_regex() -> &'static Regex {
+    EXPLICIT_LIB_PACKAGE_REGEX.get_or_init(|| {
+        Regex::new(r"(?i)(?:^(?:compat-)?lib.*?(\.so.*)?|^libs?[\d-]*)$").expect("static regex")
+    })
+}
+
 /// The reference's `pkg[tag] or pkg.scriptprog(prog)`: the scriptlet body
 /// wins whenever it is non-empty; an empty body falls back to the `-p`
 /// interpreter string. This is the one place that choice is made -- every
@@ -150,6 +164,22 @@ mod tests {
         assert!(re.is_match("libfoo").unwrap_or(false));
         assert!(re.is_match("lib64").unwrap_or(false));
         assert!(!re.is_match("foo").unwrap_or(true));
+    }
+
+    #[test]
+    fn explicit_lib_package_regex_anchors_to_lib_prefix() {
+        let re = explicit_lib_package_regex();
+        assert!(re.is_match("libfoo").unwrap_or(false));
+        assert!(re.is_match("lib64").unwrap_or(false));
+        assert!(re.is_match("compat-libfoo").unwrap_or(false));
+        // Suffix-only matches are not libraries: the reference fires on
+        // these, we deliberately do not.
+        assert!(!re.is_match("appstream-glib").unwrap_or(true));
+        assert!(!re.is_match("glib2").unwrap_or(true));
+        assert!(!re.is_match("foo").unwrap_or(true));
+        // A versioned .so leaf still captures group 1 (stays silent).
+        let caps = re.captures("libfoo.so.2").unwrap().unwrap();
+        assert!(caps.get(1).is_some());
     }
 
     #[test]
