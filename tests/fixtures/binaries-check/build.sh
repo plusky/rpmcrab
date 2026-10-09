@@ -29,7 +29,7 @@
 # Needs: podman (or PODMAN=/path/to/podman)
 # Output: input/rpmcrab-binaries-fixture-1.0-1.<arch>.rpm
 #
-# Everything (compilation and rpmbuild) runs in an openSUSE container: it
+# Everything (compilation and rpmbuild) runs in the digest-pinned openSUSE Tumbleweed container image (see Dockerfile): it
 # produces genuine ELF output regardless of the host OS, and host rpmbuild
 # is unreliable on macOS.
 
