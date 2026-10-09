@@ -550,9 +550,13 @@ impl LddInfo {
             }
         }
 
-        // Undefined symbols: STN_UNDEF
+        // Undefined symbols: STN_UNDEF with global binding. Weak undefined
+        // symbols resolve to zero at load time, so ldd -r stays silent on
+        // them and the reference never reports them.
         for sym in elf.syms.iter() {
-            if sym.st_shndx == goblin::elf::section_header::SHN_UNDEF as usize {
+            if sym.st_shndx == goblin::elf::section_header::SHN_UNDEF as usize
+                && goblin::elf::sym::st_bind(sym.st_info) != goblin::elf::sym::STB_WEAK
+            {
                 if let Some(name) = elf.strtab.get_at(sym.st_name) {
                     if !name.is_empty() {
                         info.undefined_symbols.push(name.to_string());
@@ -4762,6 +4766,105 @@ description = "explicit priority string bypasses the system crypto policy"
             out.results().is_empty(),
             ".bca must stay quiet: {:?}",
             out.results()
+        );
+    }
+
+    /// Craft a minimal ELF with a .symtab containing one undefined GLOBAL
+    /// and one undefined WEAK symbol.
+    fn elf_with_undef_symbols() -> Vec<u8> {
+        let strtab = b"\0global_undef\0weak_undef\0";
+        let mut symtab = vec![0u8; 24];
+        symtab.extend_from_slice(&1u32.to_le_bytes());
+        symtab.push(0x10);
+        symtab.push(0);
+        symtab.extend_from_slice(&0u16.to_le_bytes());
+        symtab.extend_from_slice(&0u64.to_le_bytes());
+        symtab.extend_from_slice(&0u64.to_le_bytes());
+        symtab.extend_from_slice(&14u32.to_le_bytes());
+        symtab.push(0x20);
+        symtab.push(0);
+        symtab.extend_from_slice(&0u16.to_le_bytes());
+        symtab.extend_from_slice(&0u64.to_le_bytes());
+        symtab.extend_from_slice(&0u64.to_le_bytes());
+
+        let mut shstrtab = vec![0u8];
+        let symtab_name = shstrtab.len() as u32;
+        shstrtab.extend_from_slice(b".symtab\0");
+        let strtab_name = shstrtab.len() as u32;
+        shstrtab.extend_from_slice(b".strtab\0");
+        let shstrtab_name = shstrtab.len() as u32;
+        shstrtab.extend_from_slice(b".shstrtab\0");
+
+        let mut buf = vec![0u8; 64];
+        let symtab_off = buf.len() as u64;
+        buf.extend_from_slice(&symtab);
+        let strtab_off = buf.len() as u64;
+        buf.extend_from_slice(strtab);
+        let shstrtab_off = buf.len() as u64;
+        buf.extend_from_slice(&shstrtab);
+        while !buf.len().is_multiple_of(8) {
+            buf.push(0);
+        }
+        let shoff = buf.len() as u64;
+
+        let mut shdrs = vec![0u8; 64];
+        let mut h = vec![0u8; 64];
+        h[0..4].copy_from_slice(&symtab_name.to_le_bytes());
+        h[4..8].copy_from_slice(&2u32.to_le_bytes());
+        h[24..32].copy_from_slice(&symtab_off.to_le_bytes());
+        h[32..40].copy_from_slice(&(symtab.len() as u64).to_le_bytes());
+        h[40..44].copy_from_slice(&2u32.to_le_bytes());
+        h[44..48].copy_from_slice(&1u32.to_le_bytes());
+        h[48..56].copy_from_slice(&8u64.to_le_bytes());
+        h[56..64].copy_from_slice(&24u64.to_le_bytes());
+        shdrs.extend(h);
+        let mut h = vec![0u8; 64];
+        h[0..4].copy_from_slice(&strtab_name.to_le_bytes());
+        h[4..8].copy_from_slice(&3u32.to_le_bytes());
+        h[24..32].copy_from_slice(&strtab_off.to_le_bytes());
+        h[32..40].copy_from_slice(&(strtab.len() as u64).to_le_bytes());
+        h[48..56].copy_from_slice(&1u64.to_le_bytes());
+        shdrs.extend(h);
+        let mut h = vec![0u8; 64];
+        h[0..4].copy_from_slice(&shstrtab_name.to_le_bytes());
+        h[4..8].copy_from_slice(&3u32.to_le_bytes());
+        h[24..32].copy_from_slice(&shstrtab_off.to_le_bytes());
+        h[32..40].copy_from_slice(&(shstrtab.len() as u64).to_le_bytes());
+        h[48..56].copy_from_slice(&1u64.to_le_bytes());
+        shdrs.extend(h);
+        buf.extend(shdrs);
+
+        let mut ehdr = vec![0u8; 64];
+        ehdr[0..4].copy_from_slice(b"\x7fELF");
+        ehdr[4] = 2;
+        ehdr[5] = 1;
+        ehdr[6] = 1;
+        ehdr[16..18].copy_from_slice(&3u16.to_le_bytes());
+        ehdr[18..20].copy_from_slice(&62u16.to_le_bytes());
+        ehdr[20..24].copy_from_slice(&1u32.to_le_bytes());
+        ehdr[40..48].copy_from_slice(&shoff.to_le_bytes());
+        ehdr[58..60].copy_from_slice(&64u16.to_le_bytes());
+        ehdr[60..62].copy_from_slice(&4u16.to_le_bytes());
+        ehdr[62..64].copy_from_slice(&3u16.to_le_bytes());
+        buf[0..64].copy_from_slice(&ehdr);
+        buf
+    }
+
+    #[test]
+    fn ldd_weak_undefined_symbols_are_silent() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let elf_path = dir.path().join("libweak.so");
+        std::fs::write(&elf_path, elf_with_undef_symbols()).expect("write elf");
+        let ldd = LddInfo::parse(&elf_path.to_string_lossy(), true);
+        assert!(
+            ldd.undefined_symbols.contains(&"global_undef".to_string()),
+            "global undefined must be reported: {:?}",
+            ldd.undefined_symbols
+        );
+        assert!(
+            !ldd.undefined_symbols.contains(&"weak_undef".to_string()),
+            "weak undefined must stay silent: {:?}",
+            ldd.undefined_symbols
         );
     }
 
