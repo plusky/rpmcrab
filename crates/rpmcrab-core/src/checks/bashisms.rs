@@ -3,9 +3,10 @@
 //! Ported from `rpmlint/checks/BashismsCheck.py`. Two findings:
 //! `bin-sh-syntax-error` and `potential-bashisms`.
 //!
-//! The reference shells out to `dash -n` and `checkbashisms`; this port does
-//! the same when the tools exist and skips the file (debug-logged) when they
-//! do not, rather than crashing at init like the reference.
+//! The reference shells out to `dash -n` and `checkbashisms`; this port runs
+//! `dash -n` when dash exists and skips the file (debug-logged) when it does
+//! not, rather than crashing at init like the reference. `checkbashisms` is
+//! optional: without it only `potential-bashisms` is suppressed.
 
 use std::path::Path;
 
@@ -30,8 +31,9 @@ impl BashismsCheck {
     }
 
     /// Probe for `dash` and `checkbashisms` under `source`. The reference
-    /// crashes when `checkbashisms` is absent; we degrade to a no-op check
-    /// instead.
+    /// crashes when `checkbashisms` is absent; we degrade gracefully instead:
+    /// without dash the check is a no-op, without checkbashisms only
+    /// `potential-bashisms` is suppressed.
     pub fn with_tool_source(source: ToolSource) -> Self {
         let (dash, _) = Tool::probe(&source, "dash", &["--version"]);
         let (checkbashisms, help) = Tool::probe(&source, "checkbashisms", &["--help"]);
@@ -59,14 +61,15 @@ impl BashismsCheck {
         Self::with_tool_source(test_source(bin_dir))
     }
 
-    /// `(have_tools, use_early_fail)`, kept for the probe tests.
+    /// `(have_dash, use_early_fail)`, kept for the probe tests.
     pub fn detect_tools(bin_dir: Option<&Path>) -> (bool, bool) {
         let check = Self::with_tool_dir(bin_dir);
-        (check.have_tools(), check.use_early_fail)
+        (check.have_dash(), check.use_early_fail)
     }
 
-    fn have_tools(&self) -> bool {
-        self.dash.is_present() && self.checkbashisms.is_present()
+    /// `bin-sh-syntax-error` needs only `dash -n`; `checkbashisms` is optional.
+    fn have_dash(&self) -> bool {
+        self.dash.is_present()
     }
 
     /// The warnings for one script file: `bin-sh-syntax-error` and/or
@@ -123,8 +126,8 @@ impl Check for BashismsCheck {
     }
 
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
-        if !self.have_tools() {
-            log::debug!("BashismsCheck: dash/checkbashisms not found, skipping");
+        if !self.have_dash() {
+            log::debug!("BashismsCheck: dash not found, skipping");
             return;
         }
         // Cache by md5 like the reference (kernel-source ships the same
@@ -208,13 +211,24 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn detect_tools_reports_missing_tools() {
+    fn detect_tools_reports_missing_checkbashisms() {
         let dir = tempfile::tempdir().expect("tmpdir");
         fake_tool(dir.path(), "dash", "echo 'dash 0.5.12'");
-        assert_eq!(
-            BashismsCheck::detect_tools(Some(dir.path())),
-            (false, false)
+        // dash alone suffices for bin-sh-syntax-error; only the
+        // checkbashisms-dependent early-fail probe is negative.
+        assert_eq!(BashismsCheck::detect_tools(Some(dir.path())), (true, false));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn detect_tools_reports_missing_dash() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        fake_tool(
+            dir.path(),
+            "checkbashisms",
+            "echo 'usage: checkbashisms [-e] file'",
         );
+        assert_eq!(BashismsCheck::detect_tools(Some(dir.path())), (false, true));
     }
 
     #[test]
