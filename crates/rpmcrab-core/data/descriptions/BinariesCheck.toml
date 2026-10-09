@@ -97,6 +97,36 @@ position-independent-executable-suggested="""
 This executable should be position independent (all binaries should).  Check
 that it is built with -fPIE/-fpie in compiler flags and -pie in linker flags.
 """
+missing-fortify="""
+The binary or shared library was not built with _FORTIFY_SOURCE, so
+compile-time-known buffer overflows in libc calls (strcpy, memcpy,
+sprintf, ...) are not replaced with their checked `__*_chk` variants at
+runtime. Rebuild with `%{optflags}` unmodified: the distro flags define
+`_FORTIFY_SOURCE` and require optimization (`-O1` or higher) for the
+fortification to take effect. Verify with `readelf --dyn-syms` that
+`__*_chk` symbols are present.
+"""
+missing-stack-protector="""
+The binary or shared library has no stack protector (`__stack_chk_fail`
+is absent), so stack-based buffer overflows are not detected at runtime.
+Rebuild with `%{optflags}` unmodified, which carries
+`-fstack-protector-strong`; do not append `-fstack-protector` after it,
+as the last directive wins and silently downgrades strong protection
+to basic. This check only verifies presence: basic and strong SSP both
+emit `__stack_chk_fail`, so it cannot tell the two apart.
+"""
+missing-relro="""
+The binary or shared library has no GNU_RELRO segment, so parts of the
+GOT that could be made read-only after relocation stay writable for the
+whole lifetime of the process. Link with `-Wl,-z,relro` (normally already
+in `%{optflags}`); do not pass `-Wl,-z,norelro`.
+"""
+partial-relro="""
+The binary or shared library has a GNU_RELRO segment but was linked
+without BIND_NOW, so relocations resolve lazily and the GOT stays
+writable until first use. Link with `-Wl,-z,relro,-z,now` (both are
+normally already in `%{optflags}`) for full RELRO.
+"""
 missing-call-to-setgroups-before-setuid="""
 This executable is calling setuid and setgid without setgroups or initgroups.
 This means it didn't relinquish all groups, and this would be a potential

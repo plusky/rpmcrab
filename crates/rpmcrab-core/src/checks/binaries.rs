@@ -156,6 +156,13 @@ struct ReadelfInfo {
     needed: Vec<String>,
     runpaths: Vec<String>,
     has_textrel: bool,
+    /// Raw `e_type` from the ELF header. ET_EXEC versus ET_DYN is the
+    /// ground truth for the hardening checks where the file name cannot
+    /// tell a PIE executable from a shared object.
+    elf_type: u16,
+    /// DF_BIND_NOW (DT_FLAGS) or DF_1_NOW (DT_FLAGS_1). Together with a
+    /// GNU_RELRO segment this is the full-versus-partial RELRO distinction.
+    bind_now: bool,
     failed: Option<String>,
 }
 
@@ -177,6 +184,8 @@ impl ReadelfInfo {
             needed: Vec::new(),
             runpaths: Vec::new(),
             has_textrel: false,
+            elf_type: goblin::elf::header::ET_NONE,
+            bind_now: false,
             failed: None,
         }
     }
@@ -209,6 +218,7 @@ impl ReadelfInfo {
             }
         };
         info.fill_from_elf(&elf);
+        info.elf_type = elf.header.e_type;
         info
     }
 
@@ -320,6 +330,13 @@ impl ReadelfInfo {
 
         // Dynamic section
         if let Some(dynamic) = &elf.dynamic {
+            // BIND_NOW lives in DT_FLAGS or DT_FLAGS_1; goblin folds both
+            // into DynamicInfo during the parse.
+            if dynamic.info.flags & goblin::elf::dynamic::DF_BIND_NOW != 0
+                || dynamic.info.flags_1 & goblin::elf::dynamic::DF_1_NOW != 0
+            {
+                self.bind_now = true;
+            }
             let dynstrtab = &elf.dynstrtab;
             for d in &dynamic.dyns {
                 match d.d_tag {
@@ -731,6 +748,21 @@ pub struct BinariesCheck {
     is_dynamically_linked: bool,
     is_pie_exec: bool,
     is_nonstandard_archive: bool,
+}
+
+/// A `_FORTIFY_SOURCE` wrapper from libc (`__memcpy_chk`,
+/// `__sprintf_chk`, ...). Symbol names may carry a `@VERSION` suffix in
+/// `.dynsym`; strip it before matching.
+fn is_fortify_symbol(name: &str) -> bool {
+    let base = name.split('@').next().unwrap_or(name);
+    base.starts_with("__") && base.ends_with("_chk")
+}
+
+/// The stack-protector failure handler. Both `-fstack-protector` and
+/// `-fstack-protector-strong` emit this symbol, so presence alone cannot
+/// distinguish basic from strong protection.
+fn is_stack_protector_symbol(name: &str) -> bool {
+    name.split('@').next().unwrap_or(name) == "__stack_chk_fail"
 }
 
 impl BinariesCheck {
@@ -1169,6 +1201,57 @@ impl BinariesCheck {
             );
         } else if stack_headers[0].flags.contains('E') {
             add_info(out, Level::Error, pkg, "executable-stack", &[&pkgfile.name]);
+        }
+    }
+
+    /// checksec-style verification of the effective hardening state of the
+    /// artifact, from the ELF headers and symbol tables rather than the
+    /// compile flags: flag soup cannot catch silent downgrades (e.g. a
+    /// `-fstack-protector` appended after `%{optflags}` downgrading strong
+    /// to basic SSP while presence checks pass).
+    ///
+    /// FORTIFY is the presence of `__*_chk` symbols, SSP the presence of
+    /// `__stack_chk_fail`. Both basic and strong SSP emit that symbol, so
+    /// the check is presence-only: telling the two apart needs per-function
+    /// canary-coverage analysis, which is out of scope here.
+    ///
+    /// RELRO is the GNU_RELRO segment plus BIND_NOW (full) or without it
+    /// (partial). PIE stays with the existing `check_non_pie`: DYN is normal
+    /// for shared objects, so the check only makes sense for executables.
+    ///
+    /// Go binaries are skipped: the Go toolchain emits none of these
+    /// C-hardening artifacts, so every finding would be noise.
+    fn check_hardening(&self, pkg: &Pkg, pkgfile: &PkgFile, info: &ReadelfInfo, out: &mut Filter) {
+        use goblin::elf::header::{ET_DYN, ET_EXEC};
+        if self.is_archive || info.is_go_binary() {
+            return;
+        }
+        if info.elf_type != ET_EXEC && info.elf_type != ET_DYN {
+            return;
+        }
+        if !info.functions.iter().any(|s| is_fortify_symbol(s)) {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "missing-fortify",
+                &[&pkgfile.name],
+            );
+        }
+        if !info.functions.iter().any(|s| is_stack_protector_symbol(s)) {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "missing-stack-protector",
+                &[&pkgfile.name],
+            );
+        }
+        let has_relro = info.program_headers.iter().any(|h| h.name == "GNU_RELRO");
+        if !has_relro {
+            add_info(out, Level::Warning, pkg, "missing-relro", &[&pkgfile.name]);
+        } else if !info.bind_now {
+            add_info(out, Level::Warning, pkg, "partial-relro", &[&pkgfile.name]);
         }
     }
 
@@ -1722,6 +1805,7 @@ impl BinariesCheck {
         self.check_missing_symtab_in_archive(pkg, pkgfile, info, out);
         self.check_missing_debug_info_in_archive(pkg, pkgfile, info, out);
         self.check_executable_stack(pkg, pkgfile, info, out);
+        self.check_hardening(pkg, pkgfile, info, out);
         self.check_shared_library(pkg, pkgfile, info, out);
         if let Some(l) = analysis.ldd.as_ref() {
             self.check_dependency(pkg, pkgfile, info, l, out);
@@ -2216,6 +2300,27 @@ mod tests {
             .collect()
     }
 
+    /// Exact rendered line for one hardening finding on one fixture binary.
+    /// Pins name, severity (`W:`) and count (exactly one per variant): flipping
+    /// the level in `check_hardening` must fail this.
+    fn assert_hardening_line(results: &[(String, String)], finding: &str, bin: &str) {
+        let suffix = format!("/usr/bin/{bin}");
+        let lines: Vec<&str> = lines_for(results, finding)
+            .into_iter()
+            .filter(|l| l.ends_with(suffix.as_str()))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "{finding} should fire exactly once for {bin}: {results:?}"
+        );
+        assert_eq!(
+            lines[0],
+            format!("rpmcrab-binaries-fixture.aarch64: W: {finding} {suffix}"),
+            "{finding} rendered line mismatch: {results:?}"
+        );
+    }
+
     #[test]
     fn binaries_check_fixture() {
         let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
@@ -2277,6 +2382,139 @@ mod tests {
         // so the check returns before touching DWARF.
         assert_lacks(&results, "unused-direct-shlib-dependency");
         assert_lacks(&results, "missing-mandatory-optflags");
+    }
+    /// rpmcrab#17: checksec-style hardening verification. Each fixture
+    /// binary misses exactly one protection; hardenedbin misses none.
+    #[test]
+    fn hardening_findings() {
+        let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
+        let (results, _dir) = run_binaries_check(&rpm_path);
+
+        let has =
+            |finding: &str, bin: &str| lines_for(&results, finding).iter().any(|l| l.contains(bin));
+
+        // Fully hardened: silent on all four.
+        for finding in [
+            "missing-fortify",
+            "missing-stack-protector",
+            "missing-relro",
+            "partial-relro",
+        ] {
+            assert!(
+                !has(finding, "hardenedbin"),
+                "{finding} should not fire for hardenedbin: {results:?}"
+            );
+        }
+
+        // Built without -D_FORTIFY_SOURCE: only missing-fortify.
+        assert_hardening_line(&results, "missing-fortify", "nofortifybin");
+        for finding in ["missing-stack-protector", "missing-relro", "partial-relro"] {
+            assert!(
+                !has(finding, "nofortifybin"),
+                "{finding} should not fire for nofortifybin: {results:?}"
+            );
+        }
+
+        // Built with -fno-stack-protector: only missing-stack-protector.
+        assert_hardening_line(&results, "missing-stack-protector", "nosspbin");
+        for finding in ["missing-fortify", "missing-relro", "partial-relro"] {
+            assert!(
+                !has(finding, "nosspbin"),
+                "{finding} should not fire for nosspbin: {results:?}"
+            );
+        }
+
+        // Linked -z norelro: only missing-relro.
+        assert_hardening_line(&results, "missing-relro", "norelrobin");
+        for finding in [
+            "missing-fortify",
+            "missing-stack-protector",
+            "partial-relro",
+        ] {
+            assert!(
+                !has(finding, "norelrobin"),
+                "{finding} should not fire for norelrobin: {results:?}"
+            );
+        }
+
+        // Linked -z relro -z lazy: only partial-relro.
+        assert_hardening_line(&results, "partial-relro", "partialrelrobin");
+        for finding in [
+            "missing-fortify",
+            "missing-stack-protector",
+            "missing-relro",
+        ] {
+            assert!(
+                !has(finding, "partialrelrobin"),
+                "{finding} should not fire for partialrelrobin: {results:?}"
+            );
+        }
+
+        // Linked -no-pie: the existing PIE finding fires, none of the new ones.
+        assert!(
+            has("position-independent-executable-suggested", "nonpiebin"),
+            "position-independent-executable-suggested should fire for nonpiebin: {results:?}"
+        );
+        for finding in [
+            "missing-fortify",
+            "missing-stack-protector",
+            "missing-relro",
+            "partial-relro",
+        ] {
+            assert!(
+                !has(finding, "nonpiebin"),
+                "{finding} should not fire for nonpiebin: {results:?}"
+            );
+        }
+        assert!(
+            !has("position-independent-executable-suggested", "hardenedbin"),
+            "position-independent-executable-suggested should not fire for hardenedbin: {results:?}"
+        );
+    }
+
+    /// Deliberate divergence (divergences.toml, `case = "global"`, rpmcrab#17):
+    /// the frozen reference emits no hardening findings, so each captured case
+    /// gains exactly one port-only `W: missing-fortify` line:
+    /// - `liblto21`: 0 -> 1 warning (`/usr/lib64/libLTO.so.21.1`)
+    /// - `llvm21-gold`: 1 -> 2 warnings (`/usr/lib64/LLVMgold.so`)
+    #[test]
+    fn hardening_captured_cases_pin_new_lines() {
+        let cases = [
+            (
+                "../../tests/parity/cases/liblto21/input/libLTO21-21.1.8-9.2.aarch64.rpm",
+                "libLTO21.aarch64: W: missing-fortify /usr/lib64/libLTO.so.21.1",
+            ),
+            (
+                "../../tests/parity/cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm",
+                "llvm21-gold.aarch64: W: missing-fortify /usr/lib64/LLVMgold.so",
+            ),
+        ];
+        for (rel, expected) in cases {
+            let rpm = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), rel);
+            let (results, _dir) = run_binaries_check(&rpm);
+            let lines = lines_for(&results, "missing-fortify");
+            assert_eq!(
+                lines,
+                [expected],
+                "port-only hardening delta for {rel}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hardening_symbol_matching() {
+        assert!(is_fortify_symbol("__memcpy_chk"));
+        assert!(is_fortify_symbol("__sprintf_chk"));
+        // .dynsym names carry a @VERSION suffix.
+        assert!(is_fortify_symbol("__strcpy_chk@GLIBC_2.17"));
+        assert!(!is_fortify_symbol("__stack_chk_fail"));
+        assert!(!is_fortify_symbol("memcpy"));
+        assert!(!is_fortify_symbol("__chk_version"));
+
+        assert!(is_stack_protector_symbol("__stack_chk_fail"));
+        assert!(is_stack_protector_symbol("__stack_chk_fail@GLIBC_2.17"));
+        assert!(!is_stack_protector_symbol("__stack_chk_guard"));
+        assert!(!is_stack_protector_symbol("__memcpy_chk"));
     }
     /// Hand-built minimal ELF64 with crafted DWARF for the optflags tests.
     /// Each `(producer, inline)` pair becomes one compilation unit: `inline`
@@ -2876,6 +3114,8 @@ description = "explicit priority string bypasses the system crypto policy"
                 needed: Vec::new(),
                 runpaths: Vec::new(),
                 has_textrel: false,
+                elf_type: goblin::elf::header::ET_DYN,
+                bind_now: false,
                 failed: None,
             };
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
@@ -3003,6 +3243,8 @@ description = "explicit priority string bypasses the system crypto policy"
             needed: Vec::new(),
             runpaths: Vec::new(),
             has_textrel: false,
+            elf_type: goblin::elf::header::ET_EXEC,
+            bind_now: false,
             failed: None,
         }
     }
