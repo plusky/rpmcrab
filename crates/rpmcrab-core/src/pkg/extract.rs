@@ -266,6 +266,14 @@ fn io_error(path: &Path, source: std::io::Error) -> ExtractError {
     ))
 }
 
+/// Whether `path` already exists as a directory. A symlink counts only when
+/// it resolves to a directory; a dangling link or a non-dir is not one.
+fn is_existing_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
+}
+
 struct Extractor<'a> {
     dir: &'a Path,
     hardlinks: HashMap<(u32, u32, u32), HardlinkGroup>,
@@ -278,17 +286,32 @@ impl<'a> Extractor<'a> {
     /// applied afterwards. (tar creates these 0o777 & ~umask; 0o755 matches the
     /// umask-022 case exactly, and reading the live umask would need unsafe.
     /// Only stat differs — checks read the archived header modes, so benign.)
-    fn ensure_dir_all(&mut self, dir: &Path) -> Result<(), ExtractError> {
+    ///
+    /// Returns false when a path component already exists as a non-directory
+    /// (a file or symlink colliding with the directory — e.g. names differing
+    /// only by case on a case-insensitive filesystem): the directory cannot be
+    /// created there, so the caller skips the entry instead of aborting the
+    /// whole extraction. A symlink resolving to a directory counts as one,
+    /// matching tar for subsequent members.
+    fn ensure_dir_all(&mut self, dir: &Path) -> Result<bool, ExtractError> {
         let mut missing: Vec<PathBuf> = Vec::new();
         let mut cur = dir;
         loop {
-            if cur.as_os_str().is_empty() || cur.exists() {
+            if cur.as_os_str().is_empty() {
                 break;
             }
-            missing.push(cur.to_path_buf());
-            match cur.parent() {
-                Some(p) if !p.as_os_str().is_empty() => cur = p,
-                _ => break,
+            match fs::symlink_metadata(cur) {
+                Ok(m) if m.is_dir() => break,
+                Ok(m) if m.is_symlink() && cur.is_dir() => break,
+                Ok(_) => return Ok(false),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    missing.push(cur.to_path_buf());
+                    match cur.parent() {
+                        Some(p) if !p.as_os_str().is_empty() => cur = p,
+                        _ => break,
+                    }
+                }
+                Err(e) => return Err(io_error(cur, e)),
             }
         }
         for d in missing.iter().rev() {
@@ -300,14 +323,14 @@ impl<'a> Extractor<'a> {
                 is_dir: true,
             });
         }
-        Ok(())
+        Ok(true)
     }
 
-    fn ensure_parent(&mut self, path: &Path) -> Result<(), ExtractError> {
+    fn ensure_parent(&mut self, path: &Path) -> Result<bool, ExtractError> {
         if let Some(parent) = path.parent() {
-            self.ensure_dir_all(parent)?;
+            return self.ensure_dir_all(parent);
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Fail-closed symlink guard: entries are never materialized *through* a
@@ -369,12 +392,18 @@ impl<'a> Extractor<'a> {
         self.reject_symlink_escape(&path, e.mode & S_IFMT == S_IFLNK)?;
         match e.mode & S_IFMT {
             S_IFDIR => {
-                self.ensure_dir_all(&path)?;
+                // ensure_dir_all doubles as the collision check for the entry
+                // itself: an existing non-directory at `path` yields false.
+                if !self.ensure_dir_all(&path)? {
+                    return skip_data(r, e.size);
+                }
                 skip_data(r, e.size)?;
                 self.record(path, e.mode & 0o7777, Some(e.mtime), true);
             }
             S_IFREG => {
-                self.ensure_parent(&path)?;
+                if !self.ensure_parent(&path)? || is_existing_dir(&path) {
+                    return skip_data(r, e.size);
+                }
                 if e.nlink > 1 {
                     self.materialize_hardlink(r, e, &path)?;
                 } else {
@@ -387,7 +416,9 @@ impl<'a> Extractor<'a> {
                 self.record(path, e.mode & 0o7777, Some(e.mtime), false);
             }
             S_IFLNK => {
-                self.ensure_parent(&path)?;
+                if !self.ensure_parent(&path)? || is_existing_dir(&path) {
+                    return skip_data(r, e.size);
+                }
                 // `e.size` is attacker-controlled: cap before allocating
                 // (a 4GB `vec!` would OOM/abort; PATH_MAX bounds any real target).
                 if e.size > 4096 {
@@ -405,7 +436,9 @@ impl<'a> Extractor<'a> {
                 // Symlink modes/mtimes are OS-determined; tar leaves them too.
             }
             S_IFIFO => {
-                self.ensure_parent(&path)?;
+                if !self.ensure_parent(&path)? || is_existing_dir(&path) {
+                    return Ok(());
+                }
                 let _ = fs::remove_file(&path);
                 nix::unistd::mkfifo(&path, nix::sys::stat::Mode::from_bits_truncate(0o644 as _))
                     .map_err(|e| io_error(&path, e.into()))?;
@@ -1283,6 +1316,154 @@ mod tests {
         assert_eq!(
             std::fs::read_link(out.path().join("usr/bin/tool")).unwrap(),
             PathBuf::from("tool")
+        );
+    }
+
+    /// Build one synthetic cpio entry for direct `materialize` tests.
+    fn collide_entry(name: &[u8], mode: u32, data: &[u8]) -> (CpioEntry, std::io::Cursor<Vec<u8>>) {
+        // Pad to the cpio 4-byte alignment: materialize consumes the entry
+        // data plus its padding from the stream.
+        let mut padded = data.to_vec();
+        while !padded.len().is_multiple_of(4) {
+            padded.push(0);
+        }
+        (
+            CpioEntry {
+                ino: 1,
+                mode,
+                nlink: 1,
+                mtime: 0,
+                size: data.len() as u64,
+                dev_major: 0,
+                dev_minor: 0,
+                name: name.to_vec(),
+            },
+            std::io::Cursor::new(padded),
+        )
+    }
+
+    fn collide_extractor(dir: &Path) -> Extractor<'_> {
+        Extractor {
+            dir,
+            hardlinks: HashMap::new(),
+            fixups: Vec::new(),
+        }
+    }
+
+    /// A file and a directory at the same path (duplicate entries, or names
+    /// differing only by case on a case-insensitive filesystem, as in
+    /// libzypp-devel's `ProxyInfo` file vs `proxyinfo/` dir): the loser is
+    /// skipped instead of aborting the package.
+    #[test]
+    fn extract_skips_file_dir_collisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ex = collide_extractor(dir.path());
+        // File first, then a colliding dir and a file that would live under it.
+        let (e, mut r) = collide_entry(b"./sub/Thing", S_IFREG | 0o644, b"");
+        ex.materialize(&mut r, &e).unwrap();
+        let (e, mut r) = collide_entry(b"./sub/Thing", S_IFDIR | 0o755, b"");
+        ex.materialize(&mut r, &e).unwrap();
+        let (e, mut r) = collide_entry(b"./sub/Thing/nested", S_IFREG | 0o644, b"");
+        ex.materialize(&mut r, &e).unwrap();
+        // The rest of the package still extracts.
+        let (e, mut r) = collide_entry(b"./sub/other", S_IFREG | 0o644, b"x");
+        ex.materialize(&mut r, &e).unwrap();
+        ex.fixup().unwrap();
+
+        // First writer wins: the file survives, the dir and its would-be
+        // child are gone, the unrelated file is intact.
+        assert!(dir.path().join("sub/Thing").is_file());
+        assert!(!dir.path().join("sub/Thing/nested").exists());
+        assert_eq!(std::fs::read(dir.path().join("sub/other")).unwrap(), b"x");
+    }
+
+    /// The reverse order: a directory first, then a colliding file or symlink.
+    /// The directory tree stays intact; the colliding entries are skipped.
+    #[test]
+    fn extract_skips_dir_file_collisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ex = collide_extractor(dir.path());
+        let (e, mut r) = collide_entry(b"./sub/Thing", S_IFDIR | 0o755, b"");
+        ex.materialize(&mut r, &e).unwrap();
+        let (e, mut r) = collide_entry(b"./sub/Thing/nested", S_IFREG | 0o644, b"y");
+        ex.materialize(&mut r, &e).unwrap();
+        // Colliding file: skipped, not EISDIR.
+        let (e, mut r) = collide_entry(b"./sub/Thing", S_IFREG | 0o644, b"");
+        ex.materialize(&mut r, &e).unwrap();
+        // Colliding symlink: skipped, the dir is not removed.
+        let (e, mut r) = collide_entry(b"./sub/Thing", S_IFLNK | 0o777, b"elsewhere");
+        ex.materialize(&mut r, &e).unwrap();
+        ex.fixup().unwrap();
+
+        assert!(dir.path().join("sub/Thing").is_dir());
+        assert_eq!(
+            std::fs::read(dir.path().join("sub/Thing/nested")).unwrap(),
+            b"y"
+        );
+    }
+
+    /// A symlink where a directory entry lands (and files beneath it): the
+    /// directory is skipped, files that would live under it too.
+    #[test]
+    fn extract_skips_symlink_dir_collisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ex = collide_extractor(dir.path());
+        let (e, mut r) = collide_entry(b"./sub/Link", S_IFLNK | 0o777, b"target");
+        ex.materialize(&mut r, &e).unwrap();
+        let (e, mut r) = collide_entry(b"./sub/Link", S_IFDIR | 0o755, b"");
+        ex.materialize(&mut r, &e).unwrap();
+        let (e, mut r) = collide_entry(b"./sub/Link/nested", S_IFREG | 0o644, b"");
+        ex.materialize(&mut r, &e).unwrap();
+        ex.fixup().unwrap();
+
+        assert_eq!(
+            std::fs::read_link(dir.path().join("sub/Link")).unwrap(),
+            PathBuf::from("target")
+        );
+        assert!(!dir.path().join("sub/Link/nested").exists());
+    }
+
+    /// End-to-end shape of the libzypp-devel failure: a file and a directory
+    /// whose names differ only by case, plus payload beneath the directory.
+    /// On a case-insensitive filesystem the directory cannot be created;
+    /// extraction must still succeed for the rest of the package.
+    #[test]
+    fn extract_libzypp_proxyinfo_case_collision() {
+        use rpm::{BuildConfig, FileMode, FileOptions, PackageBuilder, Timestamp};
+
+        let src = tempfile::tempdir().unwrap();
+        let rpm_path = src.path().join("collide.rpm");
+        let mut b = PackageBuilder::new("collide", "1.0", "MIT", "x86_64", "probe");
+        b.using_config(BuildConfig::default().source_date(Timestamp(1_577_922_245)));
+        b.with_file_contents(
+            b"compat\n".to_vec(),
+            FileOptions::new("/usr/include/zypp-curl/ProxyInfo").mode(FileMode::regular(0o644)),
+        )
+        .unwrap();
+        b.with_dir_entry(FileOptions::dir("/usr/include/zypp-curl/proxyinfo"))
+            .unwrap();
+        b.with_file_contents(
+            b"nested\n".to_vec(),
+            FileOptions::new("/usr/include/zypp-curl/proxyinfo/nested.h")
+                .mode(FileMode::regular(0o644)),
+        )
+        .unwrap();
+        b.with_file_contents(
+            b"control\n".to_vec(),
+            FileOptions::new("/usr/include/zypp-curl/other.h").mode(FileMode::regular(0o644)),
+        )
+        .unwrap();
+        let pkg = b.build().unwrap();
+        pkg.write(&mut File::create(&rpm_path).unwrap()).unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        // Used to fail here: Io(NotADirectory) on proxyinfo/nested.h.
+        extract(&rpm_path, out.path(), true).unwrap();
+
+        // The unrelated file always extracts with its content.
+        assert_eq!(
+            std::fs::read(out.path().join("usr/include/zypp-curl/other.h")).unwrap(),
+            b"control\n"
         );
     }
 }
