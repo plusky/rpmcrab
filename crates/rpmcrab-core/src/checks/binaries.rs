@@ -356,6 +356,11 @@ impl ReadelfInfo {
                     self.has_nonweak_undefined = true;
                 }
             } else if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
+                // Dynamic table only, deliberately: only an exported `main`
+                // marks the object as an executable entry to the loader,
+                // while a symtab-only (hidden-visibility) `main` is an
+                // internal detail -- and `.symtab` is stripped from shipped
+                // binaries anyway.
                 if name == "main" {
                     self.defines_main = true;
                 }
@@ -2458,8 +2463,23 @@ mod tests {
     #[test]
     fn shlib_without_dependency_information_skips_go() {
         // Go binaries are ET_DYN with no DT_NEEDED; the exemption keeps
-        // them quiet instead of flagging them as dependency-less.
-        let results = shlib_libdep_results("go", true, None, true, None, &[]);
+        // them quiet instead of flagging them as dependency-less. SONAME
+        // plus a real non-weak undefined import (and no `main`) means the
+        // plugin-like path cannot silence this fixture -- only the Go
+        // marker can.
+        let results = shlib_libdep_results(
+            "go",
+            true,
+            None,
+            true,
+            Some("libnodep.so.1"),
+            &[(
+                "external_func",
+                goblin::elf::sym::STB_GLOBAL,
+                goblin::elf::sym::STT_FUNC,
+                0,
+            )],
+        );
         assert_lacks(&results, "shared-library-without-dependency-information");
         assert!(results.is_empty(), "Go shlib must be quiet: {results:?}");
     }
@@ -2514,19 +2534,29 @@ mod tests {
     #[test]
     fn shlib_without_dependency_information_skips_main_shim() {
         // Defines `main`: an executable-entry shim linked into binaries,
-        // not a regular shared library.
+        // not a regular shared library. The real non-weak undefined import
+        // means only the `defines_main` disjunct can silence this fixture --
+        // dropping that disjunct must fail this test.
         let results = shlib_libdep_results(
             "main",
             false,
             None,
             true,
             Some("libnodep.so.1"),
-            &[(
-                "main",
-                goblin::elf::sym::STB_GLOBAL,
-                goblin::elf::sym::STT_FUNC,
-                1,
-            )],
+            &[
+                (
+                    "main",
+                    goblin::elf::sym::STB_GLOBAL,
+                    goblin::elf::sym::STT_FUNC,
+                    1,
+                ),
+                (
+                    "external_func",
+                    goblin::elf::sym::STB_GLOBAL,
+                    goblin::elf::sym::STT_FUNC,
+                    0,
+                ),
+            ],
         );
         assert_lacks(&results, "shared-library-without-dependency-information");
         assert!(results.is_empty(), "main shim must be quiet: {results:?}");
