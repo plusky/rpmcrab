@@ -1607,3 +1607,17 @@ check = "SpecCheck"
 kind = "behaviour"
 reason = "`invalid-url` no longer fires on bare tarball filenames in `Source`/`Patch` tags (e.g. `Source0: foo-1.0.tar.gz`): a filename is not a URL and is not required to be one, so there is nothing to validate — a value is validated only when a URL scheme is present but malformed (e.g. `Source0: http://` with an empty netloc). The reference (`SpecCheck.py::_check_invalid_url`, gated on `tarball_regex`) warns on any tarball-looking source without scheme+netloc, and only for `Source`; the port now also covers `Patch`. Deliberate divergence per Tom's call; no upstream issue filed."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "session-header"
+kind = "behaviour"
+reason = "The session banner identifies rpmcrab itself ('rpmcrab: X.Y.Z', the crate's own version) instead of emulating the reference's banner ('rpmlint: 2.10.0'). The banner is not grepped by build tooling, so the reference emulation was dropped (Tom's call 2026-10-08); the abort banner, footer, sort order and exit codes are untouched."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "LibraryDependencyCheck"
+kind = "behaviour"
+reason = "Symlink chains inside the devel package are resolved to the real file before the dependency check (any intermediate link, not just `.so` ones; targets are joined but not path-normalised, so a `..` in a link target silently stops resolution); the reference records the one-hop target, which misfires no-library-dependency-for on intermediate links the devel ships itself (Imath: libImath.so -> libImath-3_2.so -> libImath-3_2.so.30). Separately, the reference driver resets cross-package state after every package, so the check is effectively silent in multi-RPM runs; rpmcrab keeps the intended accumulate-then-verify semantics."
+since = "0.1.0"

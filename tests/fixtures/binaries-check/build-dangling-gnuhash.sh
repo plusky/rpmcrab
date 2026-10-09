@@ -44,7 +44,7 @@ Version:        1.0
 Release:        1
 Summary:        Fixture: shared lib with stripped hash sections (dangling DT_GNU_HASH)
 License:        MIT
-BuildArch:      aarch64
+BuildArch:      %{_target_cpu}
 
 %description
 Test fixture for the dangling DT_GNU_HASH parity case.

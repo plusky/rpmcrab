@@ -1,26 +1,4 @@
 [[FileDigestGroup]]
-package = "rpmlint-integration-test"
-type = "dbus"
-note = "valid test whitelisting entry for the OBS integration test package"
-bug = "bsc#1188704"
-[[FileDigestGroup.digests]]
-path = "/etc/dbus-1/system.d/rpmlint_test.conf"
-hash = "504c5a60b7173794e565755122ab77beaec9bcf208fb97a40237cb57c67b5a17"
-
-[[FileDigestGroup]]
-package = "rpmlint-integration-test"
-type = "dbus"
-note = "mismatching valid test whitelisting entry for the OBS integration test package"
-bug = "bsc#1188704"
-[[FileDigestGroup.digests]]
-path = "/etc/dbus-1/system.d/rpmlint_mismatch.conf"
-hash = "4a5e8e9ca514c73f1dbee55e88c4d75a235473c1d5cef4751d84016833961fdf"
-[[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system.d/nonsense.conf"
-hash = "9a4e829ca514c73f1dbee55e88c4d75a235473c1d5cef4751d84016833961fda"
-digester = "xml"
-
-[[FileDigestGroup]]
 package = "cups"
 type = "dbus"
 note = "the well known printing system daemon"
@@ -1110,20 +1088,6 @@ digester = "xml"
 hash = "feecf1770babd5649face9cd0eb879fef642153ca87995b35b90897413b022a4"
 
 [[FileDigestGroup]]
-package = "udev-mini"
-type = "dbus"
-note = "imported from rpmlint1 DBUSServices.WhiteList. later moved to udev"
-bugs = ["bsc#1111254", "bsc#1213292"]
-[[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system-services/org.freedesktop.timesync1.service"
-digester = "shell"
-hash = "1319308c6b4c72399d29ff75fe9fd8b08a0fde71297c0eccdd0badc395e7e178"
-[[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system.d/org.freedesktop.timesync1.conf"
-digester = "xml"
-hash = "feecf1770babd5649face9cd0eb879fef642153ca87995b35b90897413b022a4"
-
-[[FileDigestGroup]]
 package = "keepalived"
 type = "dbus"
 note = "imported from rpmlint1 DBUSServices.WhiteList"
@@ -1659,16 +1623,6 @@ hash     = "27fe3098931a301fcbe871e319f8fd6e50138447dec1080935151c41b29703c9"
 path     = "/usr/share/dbus-1/system-services/org.kde.kio.admin.service"
 digester = "shell"
 hash     = "ce9ed24db3c3654551bada756eb9aac5a58358364b41827b8154d0f73d6dc506"
-
-[[FileDigestGroup]]
-package  = "libgpiod-manager"
-note     = "GPIO character device management daemon"
-bug      = "bsc#1244702"
-type     = "dbus"
-[[FileDigestGroup.digests]]
-path     = "/etc/dbus-1/system.d/io.gpiod1.conf"
-digester = "xml"
-hash     = "4a620749a1b62fb229cd564e2ddafdd59e0302702c57ad7ac76ec5f56429f48b"
 
 [[FileDigestGroup]]
 package  = "lightdm-kde-greeter"
