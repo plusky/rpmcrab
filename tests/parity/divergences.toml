@@ -1621,3 +1621,17 @@ check = "LibraryDependencyCheck"
 kind = "behaviour"
 reason = "Symlink chains inside the devel package are resolved to the real file before the dependency check (any intermediate link, not just `.so` ones; targets are joined but not path-normalised, so a `..` in a link target silently stops resolution); the reference records the one-hop target, which misfires no-library-dependency-for on intermediate links the devel ships itself (Imath: libImath.so -> libImath-3_2.so -> libImath-3_2.so.30). Separately, the reference driver resets cross-package state after every package, so the check is effectively silent in multi-RPM runs; rpmcrab keeps the intended accumulate-then-verify semantics."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "detail"
+reason = "The `readelf-failed` detail carries goblin's parse error text (e.g. `a.o: Invalid magic number`) rather than the reference's readelf stderr; the finding name, level and file detail are unchanged. Only the human-readable reason differs."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
+reason = "Thin ar archives (`!<thin>\n` magic) fall through to the ELF parser instead of being enumerated member-wise; host readelf exits 0 on them, so no finding is emitted either way. Only the parse path differs, not the outcome."
+since = "0.1.0"
