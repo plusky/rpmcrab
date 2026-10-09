@@ -2996,4 +2996,19 @@ Patch0: foo.patch
         // inside %prep stays quiet there too.
         assert!(!has(&results, "setup-not-in-prep"), "results: {results:?}");
     }
+
+    #[test]
+    fn removed_conditional_source_or_patch_stays_quiet() {
+        // Both fixtures used to warn conditional-source-or-patch (#352).
+        let results = run_mini("Name: foo\n%if 0%{?suse_version}\nSource0: a.tar.gz\n%endif\n");
+        assert!(
+            !has(&results, "conditional-source-or-patch"),
+            "results: {results:?}"
+        );
+        let results = run_mini("Name: foo\n%ifarch x86_64\nPatch1: b.patch\n%endif\n");
+        assert!(
+            !has(&results, "conditional-source-or-patch"),
+            "results: {results:?}"
+        );
+    }
 }
