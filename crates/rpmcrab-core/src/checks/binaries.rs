@@ -152,6 +152,9 @@ struct ReadelfInfo {
     functions: Vec<String>,
     is_shlib: bool,
     is_debug: bool,
+    /// True when the binary was produced by the Rust toolchain.
+    /// Computed during parse; see `detect_rust_binary`.
+    is_rust: bool,
     soname: Option<String>,
     needed: Vec<String>,
     runpaths: Vec<String>,
@@ -182,6 +185,7 @@ impl ReadelfInfo {
             // binary is ET_DYN but is not a shared library for these checks.
             is_shlib: so_regex().is_match(name).unwrap_or(false),
             is_debug: name.ends_with(".debug"),
+            is_rust: false,
             soname: None,
             needed: Vec::new(),
             runpaths: Vec::new(),
@@ -219,7 +223,7 @@ impl ReadelfInfo {
                 return info;
             }
         };
-        info.fill_from_elf(&elf);
+        info.fill_from_elf(&elf, &data);
         info.elf_type = elf.header.e_type;
         info
     }
@@ -249,7 +253,7 @@ impl ReadelfInfo {
                 }
             };
             match parse_elf(bytes) {
-                Ok(elf) => info.fill_from_elf(&elf),
+                Ok(elf) => info.fill_from_elf(&elf, bytes),
                 Err(e) => {
                     info.failed = Some(format!("{}: {e}", member.extended_name()));
                     return info;
@@ -262,7 +266,7 @@ impl ReadelfInfo {
     /// Merge one parsed ELF's metadata, mirroring readelf's output.
     /// Archive members are merged by appending: each member's sections
     /// land in `sections` the same way readelf's per-member output does.
-    fn fill_from_elf(&mut self, elf: &goblin::elf::Elf) {
+    fn fill_from_elf(&mut self, elf: &goblin::elf::Elf, data: &[u8]) {
         // Sections
         for sh in &elf.section_headers {
             let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("").to_string();
@@ -364,6 +368,8 @@ impl ReadelfInfo {
                 }
             }
         }
+        // OR across archive members: any Rust member marks the whole file.
+        self.is_rust = self.is_rust || detect_rust_binary(elf, data, &self.functions);
     }
     fn has_function_matching(&self, regex: &fancy_regex::Regex) -> bool {
         self.functions
@@ -380,6 +386,64 @@ impl ReadelfInfo {
             .flatten()
             .any(|s| s.name == ".note.go.buildid")
     }
+
+    /// Rust toolchain output carries none of the C-hardening artifacts:
+    /// `_FORTIFY_SOURCE` is a glibc C-header feature rustc does not
+    /// implement, and stack-protector instrumentation is not default
+    /// rustc behavior.
+    fn is_rust_binary(&self) -> bool {
+        self.is_rust
+    }
+}
+
+/// True when the ELF was produced by the Rust toolchain. No single
+/// signal survives every strip level, so several are combined:
+/// `.rustc` section (only rustc emits it; gone after any strip),
+/// Rust runtime symbols, `.debug_gdb_scripts` containing "rust"
+/// (rustc's GDB pretty-printer hook; gone after `strip -g`), and
+/// `.rodata` containing `panicked at` (rustc's panic location format,
+/// which survives even a full strip). Conservative on purpose: an
+/// unrecognized binary is treated as C, so a missed detection only
+/// keeps the current behavior.
+/// A Rust toolchain symbol: runtime entry points, never emitted for
+/// C/C++ code. `_ZN` alone is not enough (Itanium C++ mangling shares
+/// the prefix), so only unambiguous Rust runtime names count here.
+fn is_rust_symbol(name: &str) -> bool {
+    name == "rust_begin_unwind" || name == "rust_eh_personality" || name.starts_with("__rust_")
+}
+
+fn detect_rust_binary(elf: &goblin::elf::Elf, data: &[u8], functions: &[String]) -> bool {
+    if functions.iter().any(|s| is_rust_symbol(s)) {
+        return true;
+    }
+    for sh in &elf.section_headers {
+        let sec_name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
+        if sec_name == ".rustc" {
+            return true;
+        }
+        let is_gdb_scripts = sec_name == ".debug_gdb_scripts";
+        let is_rodata = sec_name == ".rodata" || sec_name.starts_with(".rodata.");
+        if !is_gdb_scripts && !is_rodata {
+            continue;
+        }
+        let start = sh.sh_offset as usize;
+        let end = start.saturating_add(sh.sh_size as usize);
+        let bytes = match data.get(start..end) {
+            Some(b) => b,
+            None => continue,
+        };
+        if is_gdb_scripts {
+            if bytes.windows(4).any(|w| w.eq_ignore_ascii_case(b"rust")) {
+                return true;
+            }
+        } else if bytes
+            .windows(b"panicked at".len())
+            .any(|w| w == b"panicked at")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 struct LddInfo {
@@ -1226,7 +1290,9 @@ impl BinariesCheck {
     /// for shared objects, so the check only makes sense for executables.
     ///
     /// Go binaries are skipped: the Go toolchain emits none of these
-    /// C-hardening artifacts, so every finding would be noise.
+    /// C-hardening artifacts, so every finding would be noise. Rust
+    /// binaries skip only the two C-compiler findings below (see
+    /// `is_rust_binary`); the linker-level RELRO checks still apply.
     fn check_hardening(&self, pkg: &Pkg, pkgfile: &PkgFile, info: &ReadelfInfo, out: &mut Filter) {
         use goblin::elf::header::{ET_DYN, ET_EXEC};
         if self.is_archive || info.is_go_binary() {
@@ -1235,7 +1301,11 @@ impl BinariesCheck {
         if info.elf_type != ET_EXEC && info.elf_type != ET_DYN {
             return;
         }
-        if !info.functions.iter().any(|s| is_fortify_symbol(s)) {
+        // Rust emits neither `_FORTIFY_SOURCE` instrumentation nor
+        // default stack-protector instrumentation: both findings would
+        // be noise. When in doubt the binary is treated as C.
+        let is_rust = info.is_rust_binary();
+        if !is_rust && !info.functions.iter().any(|s| is_fortify_symbol(s)) {
             add_info(
                 out,
                 Level::Warning,
@@ -1244,7 +1314,7 @@ impl BinariesCheck {
                 &[&pkgfile.name],
             );
         }
-        if !info.functions.iter().any(|s| is_stack_protector_symbol(s)) {
+        if !is_rust && !info.functions.iter().any(|s| is_stack_protector_symbol(s)) {
             add_info(
                 out,
                 Level::Warning,
@@ -2478,6 +2548,182 @@ mod tests {
         );
     }
 
+    /// Minimal ET_EXEC ELF with the given `(name, data)` sections, for
+    /// language-detection tests. Only section headers are emitted.
+    fn craft_elf_sections(sections: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut shstrtab = vec![0u8];
+        let mut name_offs = Vec::new();
+        for (name, _) in sections {
+            name_offs.push(shstrtab.len() as u32);
+            shstrtab.extend_from_slice(name.as_bytes());
+            shstrtab.push(0);
+        }
+        let shstrtab_name_off = shstrtab.len() as u32;
+        shstrtab.extend_from_slice(b".shstrtab\0");
+
+        let mut buf = vec![0u8; 64]; // ELF header placeholder
+        let mut offs = Vec::new();
+        for (_, data) in sections {
+            offs.push(buf.len() as u64);
+            buf.extend_from_slice(data);
+        }
+        let shstrtab_off = buf.len() as u64;
+        buf.extend_from_slice(&shstrtab);
+        while !buf.len().is_multiple_of(8) {
+            buf.push(0);
+        }
+        let shoff = buf.len() as u64;
+
+        // Section headers: NULL + sections + shstrtab.
+        let mut shdrs = vec![0u8; 64];
+        for (i, (_, data)) in sections.iter().enumerate() {
+            let mut h = vec![0u8; 64];
+            h[0..4].copy_from_slice(&name_offs[i].to_le_bytes());
+            h[4..8].copy_from_slice(&1u32.to_le_bytes()); // SHT_PROGBITS
+            h[24..32].copy_from_slice(&offs[i].to_le_bytes());
+            h[32..40].copy_from_slice(&(data.len() as u64).to_le_bytes());
+            h[48..56].copy_from_slice(&1u64.to_le_bytes());
+            shdrs.extend(h);
+        }
+        {
+            let mut h = vec![0u8; 64];
+            h[0..4].copy_from_slice(&shstrtab_name_off.to_le_bytes());
+            h[4..8].copy_from_slice(&3u32.to_le_bytes()); // SHT_STRTAB
+            h[24..32].copy_from_slice(&shstrtab_off.to_le_bytes());
+            h[32..40].copy_from_slice(&(shstrtab.len() as u64).to_le_bytes());
+            h[48..56].copy_from_slice(&1u64.to_le_bytes());
+            shdrs.extend(h);
+        }
+        buf.extend(shdrs);
+
+        let shnum = (sections.len() + 2) as u16;
+        let mut ehdr = vec![0u8; 64];
+        ehdr[0..4].copy_from_slice(b"\x7fELF");
+        ehdr[4] = 2; // ELFCLASS64
+        ehdr[5] = 1; // ELFDATA2LSB
+        ehdr[6] = 1; // EV_CURRENT
+        ehdr[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+        ehdr[18..20].copy_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+        ehdr[20..24].copy_from_slice(&1u32.to_le_bytes());
+        ehdr[40..48].copy_from_slice(&shoff.to_le_bytes());
+        ehdr[58..60].copy_from_slice(&64u16.to_le_bytes()); // shentsize
+        ehdr[60..62].copy_from_slice(&shnum.to_le_bytes());
+        ehdr[62..64].copy_from_slice(&(shnum - 1).to_le_bytes()); // shstrndx
+        buf[0..64].copy_from_slice(&ehdr);
+        buf
+    }
+
+    fn parse_crafted_sections(tag: &str, sections: &[(&str, &[u8])]) -> ReadelfInfo {
+        let bytes = craft_elf_sections(sections);
+        // Unique per test: parallel cargo test threads share the process.
+        let path = std::env::temp_dir().join(format!(
+            "rpmcrab-rust-detect-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        std::fs::write(&path, &bytes).unwrap();
+        let info = ReadelfInfo::parse(path.to_str().unwrap(), "/usr/bin/probe");
+        assert!(info.failed.is_none(), "crafted ELF must parse");
+        std::fs::remove_file(&path).ok();
+        info
+    }
+
+    #[test]
+    fn rust_detection_rustc_section() {
+        let info = parse_crafted_sections("rustc", &[(".rustc", b"rustc version 1.0")]);
+        assert!(info.is_rust_binary(), ".rustc section must detect Rust");
+    }
+
+    #[test]
+    fn rust_detection_rodata_panic_string() {
+        // Fully-stripped Rust binary: no .rustc, no symbols; only the
+        // panic location format string survives in .rodata.
+        let info = parse_crafted_sections(
+            "rodata",
+            &[(".rodata", b"\0panicked at 'oops', src/main.rs:1:1\0")],
+        );
+        assert!(
+            info.is_rust_binary(),
+            ".rodata panic string must detect Rust"
+        );
+    }
+
+    #[test]
+    fn rust_detection_debug_gdb_scripts() {
+        let info = parse_crafted_sections(
+            "gdb",
+            &[(
+                ".debug_gdb_scripts",
+                b"\x01gdb_load_rust_pretty_printers.py\0",
+            )],
+        );
+        assert!(info.is_rust_binary(), "rust gdb scripts must detect Rust");
+    }
+
+    #[test]
+    fn rust_detection_negative_plain_elf() {
+        let info = parse_crafted_sections("plain", &[(".text", b"\0"), (".rodata", b"hello\0")]);
+        assert!(!info.is_rust_binary(), "plain ELF must not detect Rust");
+    }
+
+    #[test]
+    fn rust_symbol_detection() {
+        assert!(is_rust_symbol("rust_begin_unwind"));
+        assert!(is_rust_symbol("rust_eh_personality"));
+        assert!(is_rust_symbol("__rust_alloc"));
+        // `_ZN` alone is Itanium C++ mangling too; only unambiguous
+        // Rust runtime names count.
+        assert!(!is_rust_symbol("_ZN3foo3barE"));
+        assert!(!is_rust_symbol("memcpy"));
+        assert!(!is_rust_symbol("__stack_chk_fail"));
+    }
+
+    fn hardening_results_for(is_rust: bool) -> Vec<(String, String)> {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/bin/probe", "ELF 64-bit LSB pie executable");
+        let mut info = syn_info();
+        info.is_rust = is_rust;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_hardening(&pkg, &pkgfile, &info, &mut out);
+        out.results().to_vec()
+    }
+
+    #[test]
+    fn hardening_rust_binary_skips_fortify_and_ssp() {
+        let results = hardening_results_for(true);
+        assert!(
+            lines_for(&results, "missing-fortify").is_empty(),
+            "missing-fortify must not fire for Rust: {results:?}"
+        );
+        assert!(
+            lines_for(&results, "missing-stack-protector").is_empty(),
+            "missing-stack-protector must not fire for Rust: {results:?}"
+        );
+        // Linker-level RELRO checks still apply to Rust binaries.
+        assert_eq!(
+            lines_for(&results, "missing-relro").len(),
+            1,
+            "missing-relro must still fire for Rust: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_c_binary_still_fires_fortify_and_ssp() {
+        let results = hardening_results_for(false);
+        assert_eq!(
+            lines_for(&results, "missing-fortify").len(),
+            1,
+            "missing-fortify must fire for C: {results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-stack-protector").len(),
+            1,
+            "missing-stack-protector must fire for C: {results:?}"
+        );
+    }
+
     /// Deliberate divergence (divergences.toml, `case = "global"`, rpmcrab#17):
     /// the frozen reference emits no hardening findings, so each captured case
     /// gains exactly one port-only `W: missing-fortify` line:
@@ -3123,6 +3369,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 elf_type: goblin::elf::header::ET_DYN,
                 bind_now: false,
                 failed: None,
+                is_rust: false,
             };
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
             check.check_hash_sections(&pkg, &pkgfile, &info, &mut out);
@@ -3252,6 +3499,7 @@ description = "explicit priority string bypasses the system crypto policy"
             elf_type: goblin::elf::header::ET_EXEC,
             bind_now: false,
             failed: None,
+            is_rust: false,
         }
     }
 

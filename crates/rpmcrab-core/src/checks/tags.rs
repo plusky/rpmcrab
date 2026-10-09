@@ -15,7 +15,7 @@ use fancy_regex::Regex;
 use librpm::Tag;
 
 use super::is_match;
-use super::shared::{devel_infix_regex, devel_regex, lib_package_regex, macro_regex};
+use super::shared::{devel_infix_regex, devel_regex, explicit_lib_package_regex, macro_regex};
 use super::spdx::suggest_licenses;
 use crate::check::{Check, add_info};
 use crate::config::Config;
@@ -151,7 +151,7 @@ impl TagsCheck {
             valid_license_exceptions: get_strings("ValidLicenseExceptions"),
             macro_re: macro_regex().clone(),
             devel_re: devel_regex().clone(),
-            lib_package_re: lib_package_regex().clone(),
+            lib_package_re: explicit_lib_package_regex().clone(),
             invalid_version_re: invalid_version_regex().clone(),
             changelog_version_re: Regex::new(r"[^>]([^ >]+)\s*$").expect("static regex"),
             changelog_text_version_re: Regex::new(r"^\s*-\s*((\d+:)?[\w\.]+-[\w\.]+)").expect("static regex"),
@@ -420,7 +420,13 @@ impl TagsCheck {
                         add_info(out, Level::Error, pkg, "devel-dependency", &[&leaf.name]);
                         devel_depend = true;
                     }
-                    // Issue #1091: replicate the fuzzy lib heuristic exactly.
+                    // Deliberate narrowing of the #1091 fuzzy lib heuristic:
+                    // the reference's unanchored suffix alternative fires on
+                    // any name ending in "lib" (e.g. appstream-glib), which
+                    // is not a library. openSUSE names library packages
+                    // lib*, so only lib*-prefixed names count here; this
+                    // knowingly silences non-lib* true positives like
+                    // Requires: zlib, where the reference is right.
                     // Biarch/flavored devel requirers are devel packages, so
                     // their lib requirements must not trip this either.
                     if !requirer_is_biarch_devel
@@ -2912,6 +2918,19 @@ mod rich_dep_emission_tests {
         // explicit unversioned lib dependency.
         let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
         pkg.requires = vec![plain_dep("libexplicit.so.2")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "explicit-lib-dependency").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_lib_dependency_non_lib_suffix_is_silent() {
+        // appstream-glib is required for its appstream-util binary, not
+        // its library; the reference fires on the "lib" suffix, we do not.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![plain_dep("appstream-glib")];
         let results = run(&pkg, &rich_test_config(&[], false));
         assert!(
             named(&results, "explicit-lib-dependency").is_empty(),
