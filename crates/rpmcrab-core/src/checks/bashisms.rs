@@ -171,6 +171,9 @@ impl Check for BashismsCheck {
 mod tests {
     use super::*;
 
+    use crate::color::Color;
+    use crate::pkg::pkgfile::PkgFile;
+
     #[cfg(unix)]
     fn fake_tool(dir: &std::path::Path, name: &str, body: &str) {
         use std::os::unix::fs::PermissionsExt;
@@ -279,5 +282,63 @@ mod tests {
         // reference's FileNotFoundError path yields no findings either.
         assert!(BashismsCheck::classify_bashisms(Some(127), Some(1)).is_empty());
         assert!(BashismsCheck::classify_bashisms(None, Some(1)).is_empty());
+    }
+
+    #[test]
+    fn dash_syntax_error_without_checkbashisms() {
+        // checkbashisms absent (None exit code): bin-sh-syntax-error still
+        // fires from `dash -n` alone.
+        assert_eq!(
+            BashismsCheck::classify_bashisms(Some(2), None),
+            vec!["bin-sh-syntax-error"]
+        );
+    }
+
+    #[test]
+    fn clean_dash_without_checkbashisms() {
+        assert!(BashismsCheck::classify_bashisms(Some(0), None).is_empty());
+    }
+
+    /// Dash-only emission: a fake `dash` exiting 2 with no `checkbashisms`
+    /// in the tool dir emits exactly one `bin-sh-syntax-error` finding
+    /// (W, naming the script) and no `potential-bashisms`.
+    #[test]
+    #[cfg(unix)]
+    fn dash_only_emits_syntax_error() {
+        let tools = tempfile::tempdir().expect("tmpdir");
+        fake_tool(tools.path(), "dash", "exit 2");
+        let scripts = tempfile::tempdir().expect("tmpdir");
+        let script = scripts.path().join("bad.sh");
+        std::fs::write(&script, "#!/bin/sh\nif then\n").expect("write script");
+        let mut pkg = Pkg::open(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm"),
+            &std::env::temp_dir(),
+            true,
+        )
+        .expect("open fixture pkg");
+        pkg.name = "bashisms-test".to_string();
+        pkg.files.clear();
+        pkg.files.push(PkgFile {
+            name: "/usr/bin/bad.sh".to_string(),
+            path: script.to_string_lossy().into_owned(),
+            mode: 0o100755,
+            magic: "POSIX shell script".to_string(),
+            ..Default::default()
+        });
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = BashismsCheck::with_tool_dir(Some(tools.path()));
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(results.len(), 1, "one finding expected: {results:?}");
+        let (name, line) = &results[0];
+        assert_eq!(name, "bin-sh-syntax-error");
+        assert!(line.contains("/usr/bin/bad.sh"), "detail lost: {line}");
+        assert_eq!(out.result_levels(), &[Level::Warning]);
+        assert!(
+            results.iter().all(|(n, _)| n != "potential-bashisms"),
+            "checkbashisms absent, yet potential-bashisms fired: {results:?}"
+        );
     }
 }

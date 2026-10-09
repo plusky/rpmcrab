@@ -258,7 +258,7 @@ since = "0.1.0"
 case = "global"
 check = "bashisms"
 kind = "behaviour"
-reason = "When checkbashisms is absent the reference (BashismsCheck._detect_early_fail_option) runs `checkbashisms --help` via subprocess.check_output at init, which raises and kills the whole run; the port's detect_tools() degrades to a no-op (no findings) instead. A missing optional tool must not abort the lint."
+reason = "When checkbashisms is absent the reference (BashismsCheck._detect_early_fail_option) runs `checkbashisms --help` via subprocess.check_output at init, which raises and kills the whole run; the port degrades gracefully instead: without dash the check is a no-op, without checkbashisms only `potential-bashisms` is suppressed (`bin-sh-syntax-error` still fires via `dash -n`). A missing optional tool must not abort the lint."
 since = "0.1.0"
 
 [[divergence]]
