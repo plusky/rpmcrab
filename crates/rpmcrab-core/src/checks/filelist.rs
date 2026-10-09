@@ -494,4 +494,59 @@ mod tests {
         assert!(good.matches("/etc/sysconfig/scripts/rc.d"));
         assert!(!good.matches("/opt/x/etc/sysconfig/scripts/rc.d"));
     }
+
+    // Issue #386: the MinGW cross-toolchain sysroots are permitted by the
+    // MinGW packaging guidelines (the reference only stays silent via
+    // Filters shipped by mingw32/64-filesystem), so files under them — and
+    // the sysroot dirs themselves — must not raise
+    // filelist-forbidden-fhs23. A genuinely non-FHS dir still does.
+    #[test]
+    fn mingw_sysroots_are_good_fhs_prefixes() {
+        let rpm = format!(
+            "{}/../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut pkg = Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture shell");
+        pkg.files = vec![
+            PkgFile {
+                name: "/usr/i686-w64-mingw32/bin/i686-w64-mingw32-ld.exe".to_string(),
+                path: "/usr/i686-w64-mingw32/bin/i686-w64-mingw32-ld.exe".to_string(),
+                mode: 0o100755,
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/x86_64-w64-mingw32/lib/libz.dll.a".to_string(),
+                path: "/usr/x86_64-w64-mingw32/lib/libz.dll.a".to_string(),
+                mode: 0o100644,
+                ..Default::default()
+            },
+            // The sysroot directory itself, as the real packages list it.
+            PkgFile {
+                name: "/usr/i686-w64-mingw32".to_string(),
+                path: "/usr/i686-w64-mingw32".to_string(),
+                mode: 0o040755,
+                ..Default::default()
+            },
+        ];
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        assert!(
+            lines_for(&results, "filelist-forbidden-fhs23").is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn non_fhs_dir_still_fires_fhs23() {
+        let pkg = pkg_with_files(&["/usr/foobar/bin/tool"]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "filelist-forbidden-fhs23");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("E: filelist-forbidden-fhs23 /usr/foobar"),
+            "name, level and detail: {}",
+            lines[0]
+        );
+    }
 }

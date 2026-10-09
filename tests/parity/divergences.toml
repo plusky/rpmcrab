@@ -459,6 +459,13 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "filelist-forbidden-fhs23"
+kind = "behaviour"
+reason = "The bundled GoodPrefixes additionally whitelist the MinGW cross-toolchain sysroots /usr/i686-w64-mingw32/ and /usr/x86_64-w64-mingw32/, which the MinGW packaging guidelines permit. The reference only stays silent via Filters shipped by the mingw32/64-filesystem packages; without those configs it emits the finding, so silencing it unconditionally is a deliberate false-positive fix (issue #386)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "filelist-forbidden-opt"
 kind = "behaviour"
 reason = "Same shape as filelist-forbidden-fhs23: the reference emits once per matching Bad pattern iterating a Python set (FilelistCheck.py:127); the port emits one finding per directory in sorted order."

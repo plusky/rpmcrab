@@ -20,6 +20,11 @@ GoodPrefixes = [
     "/usr/libexec/",
     "/usr/sbin/",
     "/usr/share/",
+    # MinGW cross-toolchain sysroots: permitted by the MinGW packaging
+    # guidelines (openSUSE ships rpmlint Filters for exactly these via
+    # mingw32/64-filesystem); legitimate despite not being FHS dirs.
+    "/usr/i686-w64-mingw32/",
+    "/usr/x86_64-w64-mingw32/",
     # actually only linux is allowed by fhs
     "/usr/src/linux",
     "/usr/src/debug/",
