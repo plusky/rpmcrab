@@ -171,6 +171,9 @@ struct ReadelfInfo {
     /// True when the binary was produced by the Rust toolchain.
     /// Computed during parse; see `detect_rust_binary`.
     is_rust: bool,
+    /// True when the binary was produced by the Zig toolchain.
+    /// Computed during parse; see `detect_zig_binary`.
+    is_zig: bool,
     soname: Option<String>,
     needed: Vec<String>,
     runpaths: Vec<String>,
@@ -213,6 +216,7 @@ impl ReadelfInfo {
             is_shlib: so_regex().is_match(name).unwrap_or(false),
             is_debug: name.ends_with(".debug"),
             is_rust: false,
+            is_zig: false,
             soname: None,
             needed: Vec::new(),
             runpaths: Vec::new(),
@@ -424,6 +428,7 @@ impl ReadelfInfo {
         }
         // OR across archive members: any Rust member marks the whole file.
         self.is_rust = self.is_rust || detect_rust_binary(elf, data, &self.functions);
+        self.is_zig = self.is_zig || detect_zig_binary(elf, data);
     }
     fn has_function_matching(&self, regex: &fancy_regex::Regex) -> bool {
         self.functions
@@ -449,6 +454,15 @@ impl ReadelfInfo {
     /// rustc behavior.
     fn is_rust_binary(&self) -> bool {
         self.is_rust
+    }
+
+    /// Zig toolchain output carries none of the C-hardening artifacts
+    /// either: `_FORTIFY_SOURCE` is a glibc C-header feature Zig does not
+    /// implement, and stack-protector instrumentation requires libc
+    /// (`-fstack-protector` errors with "enabling stack protection
+    /// requires libc"), which the default static Zig build does not link.
+    fn is_zig_binary(&self) -> bool {
+        self.is_zig
     }
 
     /// A shared object for which an empty DT_NEEDED is legitimate, not
@@ -512,6 +526,37 @@ fn detect_rust_binary(elf: &goblin::elf::Elf, data: &[u8], functions: &[String])
         } else if bytes
             .windows(b"panicked at".len())
             .any(|w| w == b"panicked at")
+        {
+            return true;
+        }
+    }
+    false
+}
+/// True when the ELF was produced by the Zig toolchain. Two signals are
+/// combined: the .comment section identifying Zigs LLD fork, and .rodata
+/// containing the Zig panic message for unreachable, which survives strip.
+/// Conservative on purpose: an unrecognized binary is treated as C.
+fn detect_zig_binary(elf: &goblin::elf::Elf, data: &[u8]) -> bool {
+    for sh in &elf.section_headers {
+        let sec_name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
+        let is_comment = sec_name == ".comment";
+        let is_rodata = sec_name == ".rodata" || sec_name.starts_with(".rodata.");
+        if !is_comment && !is_rodata {
+            continue;
+        }
+        let start = sh.sh_offset as usize;
+        let end = start.saturating_add(sh.sh_size as usize);
+        let bytes = match data.get(start..end) {
+            Some(b) => b,
+            None => continue,
+        };
+        if is_comment {
+            if bytes.windows(b"ziglang".len()).any(|w| w == b"ziglang") {
+                return true;
+            }
+        } else if bytes
+            .windows(b"reached unreachable".len())
+            .any(|w| w == b"reached unreachable")
         {
             return true;
         }
@@ -1368,8 +1413,9 @@ impl BinariesCheck {
     ///
     /// Go binaries are skipped: the Go toolchain emits none of these
     /// C-hardening artifacts, so every finding would be noise. Rust
-    /// binaries skip only the two C-compiler findings below (see
-    /// `is_rust_binary`); the linker-level RELRO checks still apply.
+    /// and Zig binaries skip only the two C-compiler findings below
+    /// (see `is_rust_binary`, `is_zig_binary`); the linker-level RELRO
+    /// checks still apply.
     fn check_hardening(&self, pkg: &Pkg, pkgfile: &PkgFile, info: &ReadelfInfo, out: &mut Filter) {
         use goblin::elf::header::{ET_DYN, ET_EXEC};
         if self.is_archive || info.is_go_binary() {
@@ -1388,8 +1434,11 @@ impl BinariesCheck {
         // Rust emits neither `_FORTIFY_SOURCE` instrumentation nor
         // default stack-protector instrumentation: both findings would
         // be noise. When in doubt the binary is treated as C.
+        // Zig is the same: no `_FORTIFY_SOURCE`, and `-fstack-protector`
+        // requires libc, which the default static Zig build does not link.
         let is_rust = info.is_rust_binary();
-        if !is_rust && !info.functions.iter().any(|s| is_fortify_symbol(s)) {
+        let is_zig = info.is_zig_binary();
+        if !is_rust && !is_zig && !info.functions.iter().any(|s| is_fortify_symbol(s)) {
             add_info(
                 out,
                 Level::Warning,
@@ -1398,7 +1447,7 @@ impl BinariesCheck {
                 &[&pkgfile.name],
             );
         }
-        if !is_rust && !info.functions.iter().any(|s| is_stack_protector_symbol(s)) {
+        if !is_rust && !is_zig && !info.functions.iter().any(|s| is_stack_protector_symbol(s)) {
             add_info(
                 out,
                 Level::Warning,
@@ -3062,6 +3111,36 @@ mod tests {
     }
 
     #[test]
+    fn zig_detection_comment_section() {
+        let info = parse_crafted_sections(
+            "zigcomment",
+            &[(
+                ".comment",
+                b"Linker: LLD 20.1.2 (https://github.com/ziglang/zig-bootstrap 7ef74e6)\0",
+            )],
+        );
+        assert!(info.is_zig_binary(), ".comment ziglang must detect Zig");
+    }
+
+    #[test]
+    fn zig_detection_rodata_unreachable_string() {
+        // Fully-stripped Zig binary: no .comment, no symbols; only the
+        // panic message for `unreachable` survives in .rodata.
+        let info = parse_crafted_sections("zigrodata", &[(".rodata", b"\0reached unreachable\0")]);
+        assert!(
+            info.is_zig_binary(),
+            ".rodata unreachable string must detect Zig"
+        );
+    }
+
+    #[test]
+    fn zig_detection_negative_plain_elf() {
+        let info = parse_crafted_sections("zigplain", &[(".text", b"\0"), (".rodata", b"hello\0")]);
+        assert!(!info.is_zig_binary(), "plain ELF must not detect Zig");
+        assert!(!info.is_rust_binary(), "plain ELF must not detect Rust");
+    }
+
+    #[test]
     fn rust_symbol_detection() {
         assert!(is_rust_symbol("rust_begin_unwind"));
         assert!(is_rust_symbol("rust_eh_personality"));
@@ -3077,13 +3156,14 @@ mod tests {
         assert!(!is_rust_symbol("memcpy@GLIBC_2.17"));
     }
 
-    fn hardening_results_for(is_rust: bool) -> Vec<(String, String)> {
+    fn hardening_results_for(is_rust: bool, is_zig: bool) -> Vec<(String, String)> {
         let config = test_config();
         let check = BinariesCheck::with_tool_dir(&config, None);
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
         let pkgfile = syn_file("/usr/bin/probe", "ELF 64-bit LSB pie executable");
         let mut info = syn_info();
         info.is_rust = is_rust;
+        info.is_zig = is_zig;
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_hardening(&pkg, &pkgfile, &info, &mut out);
         out.results().to_vec()
@@ -3125,7 +3205,7 @@ mod tests {
 
     #[test]
     fn hardening_rust_binary_skips_fortify_and_ssp() {
-        let results = hardening_results_for(true);
+        let results = hardening_results_for(true, false);
         assert!(
             lines_for(&results, "missing-fortify").is_empty(),
             "missing-fortify must not fire for Rust: {results:?}"
@@ -3204,11 +3284,29 @@ mod tests {
                 "{finding} must still fire for static binaries: {results:?}"
             );
         }
+
+    #[test]
+fn hardening_zig_binary_skips_fortify_and_ssp() {
+        let results = hardening_results_for(false, true);
+        assert!(
+            lines_for(&results, "missing-fortify").is_empty(),
+            "missing-fortify must not fire for Zig: {results:?}"
+        );
+        assert!(
+            lines_for(&results, "missing-stack-protector").is_empty(),
+            "missing-stack-protector must not fire for Zig: {results:?}"
+        );
+        // Linker-level RELRO checks still apply to Zig binaries.
+        assert_eq!(
+            lines_for(&results, "missing-relro").len(),
+            1,
+            "missing-relro must still fire for Zig: {results:?}"
+        );
     }
 
     #[test]
     fn hardening_c_binary_still_fires_fortify_and_ssp() {
-        let results = hardening_results_for(false);
+        let results = hardening_results_for(false, false);
         assert_eq!(
             lines_for(&results, "missing-fortify").len(),
             1,
@@ -3870,6 +3968,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 has_dynamic: false,
                 failed: None,
                 is_rust: false,
+                is_zig: false,
             };
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
             check.check_hash_sections(&pkg, &pkgfile, &info, &mut out);
@@ -4003,6 +4102,7 @@ description = "explicit priority string bypasses the system crypto policy"
             has_dynamic: true,
             failed: None,
             is_rust: false,
+            is_zig: false,
         }
     }
 
