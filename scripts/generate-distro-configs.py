@@ -594,8 +594,13 @@ def _leap16_binary_names():
             with urllib.request.urlopen(_get(primary_url), timeout=600) as resp:
                 shutil.copyfileobj(resp, tmp)
             tmp.flush()
+            # Hash in chunks: the download is ~58 MB, no need to hold it
+            # all in memory.
+            hasher = hashlib.sha512()
             with open(tmp.name, "rb") as f:
-                actual_sha512 = hashlib.sha512(f.read()).hexdigest()
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    hasher.update(chunk)
+            actual_sha512 = hasher.hexdigest()
             if actual_sha512 != expected_sha512:
                 raise RuntimeError(
                     f"sha512 mismatch on {primary_url} (truncated download?)"
