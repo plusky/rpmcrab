@@ -310,6 +310,36 @@ impl<'a> Extractor<'a> {
         Ok(())
     }
 
+    /// Fail-closed symlink guard: entries are never materialized *through* a
+    /// symlink. Every ancestor strictly below the extraction root is checked
+    /// with no-follow metadata — `a -> /tmp` in the archive must not let a
+    /// later `a/b` entry write outside the root — and a non-symlink entry may
+    /// not land on a live symlink final component, where `File::create`
+    /// would truncate through the link (link entry first, file entry
+    /// second). Only `S_IFLNK` entries may replace a live symlink:
+    /// `remove_file` unlinks the link itself, never its target.
+    fn reject_symlink_escape(&self, path: &Path, is_link: bool) -> Result<(), ExtractError> {
+        let is_symlink = |p: &Path| {
+            fs::symlink_metadata(p)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+        };
+        let mut cur = path;
+        while let Some(parent) = cur.parent() {
+            if parent == self.dir || parent.as_os_str().is_empty() {
+                break;
+            }
+            if is_symlink(parent) {
+                return Err(ExtractError::UnsafePath(parent.to_path_buf()));
+            }
+            cur = parent;
+        }
+        if !is_link && is_symlink(path) {
+            return Err(ExtractError::UnsafePath(path.to_path_buf()));
+        }
+        Ok(())
+    }
+
     fn record(&mut self, path: PathBuf, perm: u32, mtime: Option<u32>, is_dir: bool) {
         // An explicit entry replaces the implicit record for the same path.
         if let Some(f) = self.fixups.iter_mut().find(|f| f.path == path) {
@@ -333,6 +363,10 @@ impl<'a> Extractor<'a> {
             return skip_data(r, e.size);
         }
         let path = self.dir.join(&rel);
+        // #354 stopped following symlinks at the final component; the parent
+        // components and the link-then-file order get the same fail-closed
+        // treatment here.
+        self.reject_symlink_escape(&path, e.mode & S_IFMT == S_IFLNK)?;
         match e.mode & S_IFMT {
             S_IFDIR => {
                 self.ensure_dir_all(&path)?;
@@ -890,6 +924,124 @@ mod tests {
             ),
             other => panic!("oversized symlink target must be an Entry error, got {other:?}"),
         }
+    }
+
+    /// Pad entry data to the 4-byte cpio alignment `materialize` expects.
+    fn padded(bytes: &[u8]) -> Vec<u8> {
+        let mut v = bytes.to_vec();
+        while !v.len().is_multiple_of(4) {
+            v.push(0);
+        }
+        v
+    }
+
+    fn extractor_for(dir: &Path) -> Extractor<'_> {
+        Extractor {
+            dir,
+            hardlinks: HashMap::new(),
+            fixups: Vec::new(),
+        }
+    }
+
+    fn cpio_entry(name: &[u8], mode: u32, size: u64) -> CpioEntry {
+        CpioEntry {
+            ino: 1,
+            mode,
+            nlink: 1,
+            mtime: 0,
+            size,
+            dev_major: 0,
+            dev_minor: 0,
+            name: name.to_vec(),
+        }
+    }
+
+    /// Nit 1 from the #354 review: a symlink parent must not redirect a later
+    /// entry outside the extraction root. `a -> <outside>` followed by a
+    /// regular file `a/b` fails loudly with `UnsafePath` and writes nothing
+    /// outside. Without the parent walk, `File::create` follows the link and
+    /// the payload lands in `<outside>/b`.
+    #[test]
+    fn symlink_parent_escape_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mut ex = extractor_for(root.path());
+        // The symlink entry itself is the #354-accepted case: creating the
+        // link never follows anything.
+        let target = outside.path().as_os_str().as_bytes().to_vec();
+        let link = cpio_entry(b"a", S_IFLNK | 0o777, target.len() as u64);
+        let raw = padded(&target);
+        let mut data = &raw[..];
+        ex.materialize(&mut data, &link).unwrap();
+
+        let reg = cpio_entry(b"a/b", S_IFREG | 0o644, 5);
+        let mut fdata = &b"hello\0\0\0"[..];
+        let err = ex.materialize(&mut fdata, &reg).unwrap_err();
+        assert!(
+            matches!(err, ExtractError::UnsafePath(_)),
+            "symlink parent escape must be UnsafePath, got {err:?}"
+        );
+        assert!(
+            !outside.path().join("b").exists(),
+            "nothing may be written outside the extraction root"
+        );
+    }
+
+    /// Nit 2 from the #354 review, reverse payload order: a symlink entry
+    /// preceding a regular file at the same path must not let `File::create`
+    /// truncate through the link. Fails loudly with `UnsafePath`, and the
+    /// link target keeps its bytes.
+    #[test]
+    fn link_then_file_truncation_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        std::fs::write(&victim, b"original").unwrap();
+        let mut ex = extractor_for(root.path());
+        let target = victim.as_os_str().as_bytes().to_vec();
+        let link = cpio_entry(b"link", S_IFLNK | 0o777, target.len() as u64);
+        let raw = padded(&target);
+        let mut data = &raw[..];
+        ex.materialize(&mut data, &link).unwrap();
+
+        let reg = cpio_entry(b"link", S_IFREG | 0o644, 5);
+        let mut fdata = &b"pwned\0\0\0"[..];
+        let err = ex.materialize(&mut fdata, &reg).unwrap_err();
+        assert!(
+            matches!(err, ExtractError::UnsafePath(_)),
+            "link-then-file truncation must be UnsafePath, got {err:?}"
+        );
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"original",
+            "the link target must not be truncated through the link"
+        );
+    }
+
+    /// A symlink entry is still an entry: planting it under a live symlink
+    /// parent would create the link outside the root, so it is rejected too.
+    #[test]
+    fn symlink_entry_under_symlink_parent_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mut ex = extractor_for(root.path());
+        let target = outside.path().as_os_str().as_bytes().to_vec();
+        let parent = cpio_entry(b"a", S_IFLNK | 0o777, target.len() as u64);
+        let raw = padded(&target);
+        let mut data = &raw[..];
+        ex.materialize(&mut data, &parent).unwrap();
+
+        let child = cpio_entry(b"a/b", S_IFLNK | 0o777, 1);
+        let mut cdata = &b"x\0\0\0"[..];
+        let err = ex.materialize(&mut cdata, &child).unwrap_err();
+        assert!(
+            matches!(err, ExtractError::UnsafePath(_)),
+            "symlink under a symlink parent must be UnsafePath, got {err:?}"
+        );
+        assert!(
+            !outside.path().join("b").exists(),
+            "no link may be planted outside the extraction root"
+        );
     }
 
     /// The stripped-cpio path exists exactly for >4GB entries: a large
