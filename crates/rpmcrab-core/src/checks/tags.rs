@@ -2665,11 +2665,14 @@ mod rich_dep_emission_tests {
         pkg.requires = vec![plain_dep("somelib-devel")];
         let config = rich_test_config(&[], false);
         let results = run(&pkg, &config);
-        assert_eq!(
-            named(&results, "devel-dependency").len(),
-            1,
-            "all: {results:?}"
+        let hits = named(&results, "devel-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": E: devel-dependency"),
+            "line: {}",
+            hits[0].1
         );
+        assert!(hits[0].1.ends_with(" somelib-devel"), "line: {}", hits[0].1);
     }
 
     #[test]
