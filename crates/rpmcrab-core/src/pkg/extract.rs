@@ -11,7 +11,7 @@
 //! bzip2 payloads are rejected with a clear error: no pure-Rust decoder is
 //! available and the last RPMs using bzip2 payloads predate 2010.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
@@ -282,6 +282,9 @@ struct Extractor<'a> {
     /// already-recorded path; a linear scan per entry is O(n^2) in the
     /// number of files (rocksndiamonds-data ships 108k of them).
     fixup_index: HashMap<PathBuf, usize>,
+    /// Sanitized payload paths already materialized, to tell an intentional
+    /// same-path replace apart from a case-insensitive collision.
+    seen: HashSet<PathBuf>,
 }
 
 impl<'a> Extractor<'a> {
@@ -409,6 +412,7 @@ impl<'a> Extractor<'a> {
         // components and the link-then-file order get the same fail-closed
         // treatment here.
         self.reject_symlink_escape(&path, e.mode & S_IFMT == S_IFLNK)?;
+        let is_duplicate = !self.seen.insert(rel.clone());
         match e.mode & S_IFMT {
             S_IFDIR => {
                 // ensure_dir_all doubles as the collision check for the entry
@@ -453,6 +457,20 @@ impl<'a> Extractor<'a> {
                 r.read_exact(&mut target)
                     .map_err(|e| entry_error(format!("truncated symlink target: {e}")))?;
                 skip_pad(r, e.size)?;
+                // A symlink entry must not clobber an existing non-symlink
+                // it did not itself replace: on a case-insensitive
+                // filesystem two payload paths can collide (e.g. 4pane's
+                // file `4Pane` and symlink `4pane -> 4Pane`), and replacing
+                // the file with the link creates a self-loop that breaks
+                // every later read with ELOOP. An exact same-path duplicate
+                // is an intentional replace (tar semantics) and still wins.
+                // Either way the header metadata describes the symlink for
+                // the checks.
+                if !is_duplicate
+                    && fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_symlink())
+                {
+                    return Ok(());
+                }
                 let _ = fs::remove_file(&path);
                 symlink(OsStr::from_bytes(&target), &path).map_err(|e| io_error(&path, e))?;
                 // Symlink modes/mtimes are OS-determined; tar leaves them too.
@@ -663,6 +681,7 @@ pub fn extract(rpm: &Path, dir: &Path, _suppress_stderr: bool) -> Result<(), Ext
         // Reserve for the known entry count: the index holds one slot per
         // fixup, bounded by the number of file entries (108k in the wild).
         fixup_index: HashMap::with_capacity(file_entries.len()),
+        seen: HashSet::new(),
     };
     while let Some(entry) = read_entry(&mut payload, &file_entries)? {
         extractor.materialize(&mut payload, &entry)?;
@@ -963,6 +982,7 @@ mod tests {
             hardlinks: HashMap::new(),
             fixups: Vec::new(),
             fixup_index: HashMap::new(),
+            seen: HashSet::new(),
         };
         let entry = CpioEntry {
             ino: 1,
@@ -1001,6 +1021,7 @@ mod tests {
             hardlinks: HashMap::new(),
             fixups: Vec::new(),
             fixup_index: HashMap::new(),
+            seen: HashSet::new(),
         }
     }
 
@@ -1105,6 +1126,52 @@ mod tests {
         );
     }
 
+    /// Regression for #363: a symlink entry must not delete an existing
+    /// file. On a case-insensitive filesystem the 4pane payload's file
+    /// `4Pane` and symlink `4pane -> 4Pane` collide; replacing the file
+    /// with the link creates a self-loop, and every later read fails with
+    /// ELOOP (surfacing as `readelf-failed`). The entry is skipped and
+    /// the file survives.
+    #[test]
+    fn symlink_entry_does_not_clobber_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // Pre-create the file, as if an earlier payload entry materialized it.
+        let path = dir.path().join("usr/bin/tool");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"binary\n").unwrap();
+
+        let mut ex = Extractor {
+            dir: dir.path(),
+            hardlinks: HashMap::new(),
+            fixups: Vec::new(),
+            fixup_index: HashMap::new(),
+            seen: HashSet::new(),
+        };
+        // Symlink entry for the colliding on-disk path.
+        let target = b"tool";
+        let entry = CpioEntry {
+            ino: 2,
+            mode: S_IFLNK | 0o777,
+            nlink: 1,
+            mtime: 0,
+            size: target.len() as u64,
+            dev_major: 0,
+            dev_minor: 0,
+            name: b"usr/bin/tool".to_vec(),
+        };
+        let mut data = &target[..];
+        ex.materialize(&mut data, &entry).unwrap();
+
+        // The file survives; no symlink loop is created.
+        assert_eq!(std::fs::read(&path).unwrap(), b"binary\n");
+        assert!(
+            !std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
     /// The stripped-cpio path exists exactly for >4GB entries: a large
     /// LONGFILESIZES size must survive as u64, never truncate to u32.
     /// The header is built tiny and fast, then surgically given a
@@ -1194,6 +1261,7 @@ mod tests {
             hardlinks: HashMap::new(),
             fixups: Vec::new(),
             fixup_index: HashMap::new(),
+            seen: HashSet::new(),
         };
         let entry = CpioEntry {
             ino: 7,
@@ -1223,6 +1291,7 @@ mod tests {
             hardlinks: HashMap::new(),
             fixups: Vec::new(),
             fixup_index: HashMap::new(),
+            seen: HashSet::new(),
         };
         let entry = CpioEntry {
             ino: 9,
@@ -1378,6 +1447,7 @@ mod tests {
             hardlinks: HashMap::new(),
             fixups: Vec::new(),
             fixup_index: HashMap::new(),
+            seen: HashSet::new(),
         }
     }
 
