@@ -466,6 +466,18 @@ impl<'a> Extractor<'a> {
     /// sticky bits everywhere, matching the reference (GNU tar) on Linux.
     fn fixup(&self) -> Result<(), ExtractError> {
         for f in &self.fixups {
+            // A later entry may have replaced this path with a symlink
+            // (duplicate paths, or case collisions on case-insensitive
+            // filesystems): the recorded mode/mtime belongs to the old file,
+            // and following the link — possibly a self-loop — would ELOOP and
+            // abort the whole extraction. tar's delayed mode restore and the
+            // reference's `chmod -R +rX` never follow symlinks, so skip these.
+            let is_link = fs::symlink_metadata(&f.path)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+            if is_link {
+                continue;
+            }
             let mut perm = f.perm | 0o444;
             if f.is_dir || f.perm & 0o111 != 0 {
                 perm |= 0o111;
@@ -1026,5 +1038,99 @@ mod tests {
             err,
             ExtractError::UnsupportedCompressor(CompressionType::Bzip2)
         ));
+    }
+
+    /// Regression: a symlink entry replacing an earlier regular file at the
+    /// same path (duplicate paths, or case collisions on case-insensitive
+    /// filesystems) must not abort extraction. The stale fixup recorded for
+    /// the old file is skipped, not followed: the link may be a self-loop,
+    /// and the reference (tar's delayed restore, `chmod -R +rX`) never
+    /// follows symlinks.
+    #[test]
+    fn extract_symlink_replacing_file_succeeds() {
+        // `rpm`'s PackageBuilder rejects duplicate destinations, so the
+        // duplicate path is hand-written as raw newc entries: 110-byte header
+        // (magic + 13 8-char hex fields), NUL-terminated name padded to 4,
+        // then data padded to 4.
+        fn newc_entry(name: &str, mode: u32, mtime: u32, data: &[u8]) -> Vec<u8> {
+            let mut out = Vec::new();
+            out.extend_from_slice(b"070701");
+            for f in [
+                1u32, // ino
+                mode,
+                0, // uid
+                0, // gid
+                1, // nlink
+                mtime,
+                data.len() as u32,       // filesize
+                0,                       // devmajor
+                0,                       // devminor
+                0,                       // rdevmajor
+                0,                       // rdevminor
+                (name.len() + 1) as u32, // namesize (incl. NUL)
+                0,                       // check
+            ] {
+                out.extend_from_slice(format!("{f:08X}").as_bytes());
+            }
+            out.extend_from_slice(name.as_bytes());
+            out.push(0);
+            while out.len() % 4 != 0 {
+                out.push(0);
+            }
+            out.extend_from_slice(data);
+            while out.len() % 4 != 0 {
+                out.push(0);
+            }
+            out
+        }
+
+        let mut payload = newc_entry("usr/bin/tool", 0o100_644, 1_577_922_245, b"hello\n");
+        // Duplicate path: a symlink entry at the same path, pointing at
+        // itself. The regular file wins extraction order, the link wins the
+        // path; the recorded fixup for the old file must not follow it.
+        payload.extend(newc_entry(
+            "usr/bin/tool",
+            0o120_777,
+            1_577_922_245,
+            b"tool",
+        ));
+        payload.extend(newc_entry("TRAILER!!!", 0, 0, b""));
+
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut enc, &payload).unwrap();
+        let gz = enc.finish().unwrap();
+
+        // A real rpm container for the hand-rolled payload: the builder needs
+        // at least one file, and the signature digests are not verified by
+        // `extract`, so splicing the payload after the header is enough.
+        use rpm::{BuildConfig, FileMode, FileOptions, PackageBuilder, Timestamp};
+        let src = tempfile::tempdir().unwrap();
+        let rpm_path = src.path().join("dupprobe.rpm");
+        let mut b = PackageBuilder::new("dupprobe", "1.0", "MIT", "x86_64", "probe");
+        b.using_config(BuildConfig::default().source_date(Timestamp(1_577_922_245)));
+        b.with_file_contents(
+            b"keep\n".to_vec(),
+            FileOptions::new("/usr/share/keepme").mode(FileMode::regular(0o644)),
+        )
+        .unwrap();
+        let pkg = b.build().unwrap();
+        pkg.write(&mut File::create(&rpm_path).unwrap()).unwrap();
+
+        let at = payload_offset(&mut BufReader::new(File::open(&rpm_path).unwrap())).unwrap();
+        let mut rpm = std::fs::read(&rpm_path).unwrap();
+        rpm.truncate(at as usize);
+        rpm.extend_from_slice(&gz);
+        std::fs::write(&rpm_path, &rpm).unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        // Pre-fix this fails: the fixup follows the self-loop, ELOOPs, and
+        // aborts the whole extraction with an Io error.
+        extract(&rpm_path, out.path(), true).unwrap();
+
+        // The symlink won the path; its target round-trips.
+        assert_eq!(
+            std::fs::read_link(out.path().join("usr/bin/tool")).unwrap(),
+            PathBuf::from("tool")
+        );
     }
 }
