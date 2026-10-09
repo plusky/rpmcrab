@@ -1664,3 +1664,17 @@ check = "hidden-file-or-dir"
 kind = "behaviour"
 reason = "Upstream emits hidden-file-or-dir twice for a hidden directory: once from the per-file _check_file_hidden_file_or_dir and again from _check_file_dir (which carries only the /.build-id exception). rpmcrab emits it once per path; the duplicate line is upstream redundancy with no consumer value. Measured 2026-10-09 on the openSUSE:Factory bazel-skylib rpmlint.log: /usr/src/bazel-skylib/.bcr, .bazelci and .github each carry two identical W lines, while hidden files (.bazelignore, .bazelversion, .gitignore) carry one."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "PolkitCheck"
+kind = "behaviour"
+reason = "The whitelist is environment-dependent: the port reads the live polkit-default-privs standard profile (PolkitPrivsFiles, default /usr/etc/polkit-default-privs/profiles/standard) and a missing file is silently skipped, so on hosts without the profile (e.g. the Mac audit host) privs is empty and every clean-settings action emits polkit-untracked-privilege (every non-clean one polkit-user-privilege), while the reference log from OBS build hosts -- which ship the profile -- stays silent on whitelisted actions. With the Factory profile supplied the port is fully silent (measured on NetworkManager-1.58.1-1.1.x86_64.rpm: zero polkit findings, exact parity). Not a port bug: supply the profile to rpmcrab on non-openSUSE hosts for parity."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "MenuXDGCheck"
+kind = "behaviour"
+reason = "invalid-desktopfile findings come from the external desktop-file-validate tool, which the port probes for and gracefully skips when absent (menu_xdg.rs external_validate returns empty when unprobed). On hosts without the tool (e.g. the Mac audit host) the validator findings are missing vs the reference log, while native INI-parse findings still fire. Not a port bug: install desktop-file-validate on the scan host for parity."
+since = "0.1.0"
