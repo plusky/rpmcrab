@@ -1482,10 +1482,12 @@ impl FilesCheck {
     fn check_file_hidden_file_or_dir(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
         // Upstream hidden_file_regex is r'/\.[^/]*$': only the final path
         // component is tested, so files under a hidden dir are not flagged.
+        // The '/' before the dot is required (a slashless name never matches)
+        // and [^/]* may be empty (a bare '.' component matches).
         let is_hidden = fname
             .rsplit('/')
             .next()
-            .is_some_and(|c| c.starts_with('.') && c.len() > 1);
+            .is_some_and(|c| c.starts_with('.') && fname.contains('/'));
         if is_hidden
             && !fname.starts_with("/etc/skel/")
             && !fname.ends_with("/.build-id")
@@ -3100,6 +3102,53 @@ mod tests {
             !flagged.iter().any(|f| f.contains("README")),
             "normal file must not be flagged, got: {flagged:?}"
         );
+    }
+
+    #[test]
+    fn hidden_file_or_dir_final_component_edges() {
+        // Exact upstream r'/\.[^/]*$' parity: a hidden file nested under a
+        // hidden dir is still flagged (only the final component is tested);
+        // the three upstream exceptions suppress the finding; a bare '.'
+        // final component matches ([^/]* may be empty).
+        let extra = [
+            ("/srv/data/.cache/.index", true), // hidden file under hidden dir
+            ("/srv/data/.cache/obj/blob", false), // nested under two hidden dirs
+            ("/etc/skel/.profile", false),     // /etc/skel/ exception
+            ("/usr/lib/.build-id", false),     // /.build-id exception
+            (
+                "/usr/lib/python3.13/site-packages/pkg/.cargo-checksum.json",
+                false,
+            ), // /.cargo-checksum.json exception
+            ("/var/tmp/.", true),              // bare '.' matches upstream
+        ];
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = extra
+            .iter()
+            .map(|(name, _)| PkgFile {
+                name: (*name).to_string(),
+                path: (*name).to_string(),
+                ..Default::default()
+            })
+            .collect();
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let flagged: Vec<&str> = out
+            .results()
+            .iter()
+            .filter(|(n, _)| n == "hidden-file-or-dir")
+            .map(|(_, line)| line.as_str())
+            .collect();
+        for (name, want) in &extra {
+            let got = flagged.iter().any(|f| f.contains(name));
+            assert_eq!(
+                got, *want,
+                "hidden-file-or-dir for {name}: want flagged={want}, got lines {flagged:?}"
+            );
+        }
     }
 
     #[test]
