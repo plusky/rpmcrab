@@ -293,6 +293,101 @@ def test_unknown_flavor_names_valid_flavors():
         raise AssertionError("unknown flavor did not raise")
 
 
+
+# ---------------------------------------------------------------------------
+# Leap 16.0 repomd sha512 verification (follow-up to #334)
+# ---------------------------------------------------------------------------
+
+_LEAP16_REPOMD_TMPL = (
+    '<?xml version="1.0"?>'
+    '<repomd><data type="primary">'
+    '{checksum}'
+    '<location href="repodata/primary.xml.zst"/>'
+    '</data></repomd>'
+)
+
+_LEAP16_PRIMARY_PAYLOAD = b"fake primary.xml payload"
+_LEAP16_PRIMARY_XML = b"<name>foo</name><name>bar</name>"
+
+
+def _leap16_repomd(checksum_hex=None):
+    checksum = (
+        f'<checksum type="sha512">{checksum_hex}</checksum>'
+        if checksum_hex else ''
+    )
+    return _LEAP16_REPOMD_TMPL.format(checksum=checksum).encode('utf-8')
+
+
+def _read_once(data):
+    resp = mock.MagicMock()
+    resp.read = mock.Mock(side_effect=[data, b''])
+    resp.__enter__.return_value = resp
+    resp.__exit__.return_value = False
+    return resp
+
+
+class _FakeZstdStdout:
+    def __init__(self, data):
+        self._data = data
+
+    def read(self, n=-1):
+        chunk, self._data = self._data[:n], self._data[n:]
+        return chunk
+
+    def close(self):
+        pass
+
+
+class _FakeZstd:
+    returncode = 0
+
+    def __init__(self, xml):
+        self.stdout = _FakeZstdStdout(xml)
+
+    def wait(self):
+        return 0
+
+
+def _leap16_run(repomd, payload):
+    """Run _leap16_binary_names with mocked network and zstd."""
+    gen._leap16_binary_names_cache = None
+    with mock.patch.object(gen.shutil, 'which', return_value='/usr/bin/zstd'), \
+            mock.patch.object(gen.urllib.request, 'urlopen',
+                              side_effect=[_read_once(repomd),
+                                            _read_once(payload)]), \
+            mock.patch.object(gen.subprocess, 'Popen',
+                              lambda *a, **k: _FakeZstd(_LEAP16_PRIMARY_XML)):
+        return gen._leap16_binary_names()
+
+
+def test_leap16_sha512_good_returns_names():
+    """A matching sha512 lets the names through."""
+    import hashlib
+    sha = hashlib.sha512(_LEAP16_PRIMARY_PAYLOAD).hexdigest()
+    names = _leap16_run(_leap16_repomd(sha), _LEAP16_PRIMARY_PAYLOAD)
+    assert names == {'foo', 'bar'}, names
+
+
+def test_leap16_sha512_corrupt_raises():
+    """A tampered download must raise, never silently verify."""
+    try:
+        _leap16_run(_leap16_repomd('0' * 128), _LEAP16_PRIMARY_PAYLOAD)
+    except RuntimeError as e:
+        assert 'sha512 mismatch' in str(e), str(e)
+    else:
+        raise AssertionError('corrupt download did not raise')
+
+
+def test_leap16_sha512_missing_raises():
+    """A repomd without the checksum must raise, not skip verification."""
+    try:
+        _leap16_run(_leap16_repomd(), _LEAP16_PRIMARY_PAYLOAD)
+    except RuntimeError as e:
+        assert 'sha512' in str(e), str(e)
+    else:
+        raise AssertionError('missing sha512 did not raise')
+
+
 def main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]
