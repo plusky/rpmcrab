@@ -168,6 +168,14 @@ struct ReadelfInfo {
     /// DF_BIND_NOW (DT_FLAGS) or DF_1_NOW (DT_FLAGS_1). Together with a
     /// GNU_RELRO segment this is the full-versus-partial RELRO distinction.
     bind_now: bool,
+    /// A non-weak undefined dynamic symbol exists: the object really
+    /// references external code, so an empty DT_NEEDED is suspicious.
+    /// Weak-only undefined symbols are the optional crt references that
+    /// resolve to NULL; they are not real dependencies.
+    has_nonweak_undefined: bool,
+    /// The dynamic symbol table defines `main`: an executable-entry shim
+    /// linked into binaries, not a regular shared library.
+    defines_main: bool,
     failed: Option<String>,
 }
 
@@ -190,6 +198,8 @@ impl ReadelfInfo {
             needed: Vec::new(),
             runpaths: Vec::new(),
             has_textrel: false,
+            has_nonweak_undefined: false,
+            defines_main: false,
             elf_type: goblin::elf::header::ET_NONE,
             bind_now: false,
             failed: None,
@@ -334,6 +344,29 @@ impl ReadelfInfo {
             }
         }
 
+        // Undefined-symbol shape for the shared-library dependency check.
+        // Only the binding matters, not the type. Entry 0 is the null
+        // symbol, not a real reference.
+        for (i, sym) in elf.dynsyms.iter().enumerate() {
+            if i == 0 {
+                continue;
+            }
+            if sym.st_shndx == 0 {
+                if sym.st_bind() != goblin::elf::sym::STB_WEAK {
+                    self.has_nonweak_undefined = true;
+                }
+            } else if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
+                // Dynamic table only, deliberately: only an exported `main`
+                // marks the object as an executable entry to the loader,
+                // while a symtab-only (hidden-visibility) `main` is an
+                // internal detail -- and `.symtab` is stripped from shipped
+                // binaries anyway.
+                if name == "main" {
+                    self.defines_main = true;
+                }
+            }
+        }
+
         // Dynamic section
         if let Some(dynamic) = &elf.dynamic {
             // BIND_NOW lives in DT_FLAGS or DT_FLAGS_1; goblin folds both
@@ -393,6 +426,15 @@ impl ReadelfInfo {
     /// rustc behavior.
     fn is_rust_binary(&self) -> bool {
         self.is_rust
+    }
+
+    /// A shared object for which an empty DT_NEEDED is legitimate, not
+    /// "missing dependency information": a dlopen-only plugin (no
+    /// DT_SONAME, so never DT_NEEDED-linked), a fully self-contained
+    /// object (no non-weak undefined symbols), or an executable-entry
+    /// shim (defines `main`).
+    fn is_plugin_like(&self) -> bool {
+        self.soname.is_none() || !self.has_nonweak_undefined || self.defines_main
     }
 }
 
@@ -1620,9 +1662,10 @@ impl BinariesCheck {
                     "statically-linked-binary",
                     &[&pkgfile.name],
                 );
-            } else if !info.is_go_binary() {
-                // Go binaries are ET_DYN with no DT_NEEDED; only genuine
-                // shared objects are missing dependency information here.
+            } else if !info.is_go_binary() && !info.is_plugin_like() {
+                // Go binaries are ET_DYN with no DT_NEEDED, and plugin-like
+                // objects legitimately carry none; only genuine shared
+                // objects are missing dependency information here.
                 add_info(
                     out,
                     Level::Error,
@@ -2087,13 +2130,21 @@ mod tests {
     /// Craft a minimal ET_DYN ELF64 for `ReadelfInfo::parse`.
     ///
     /// `go_note` adds a `.note.go.buildid` section (the Go toolchain
-    /// marker). `needed` adds a PT_LOAD + PT_DYNAMIC pair exposing one
-    /// DT_NEEDED entry, so `ReadelfInfo.needed` fills the way goblin
-    /// fills it for real linked libraries.
-    fn craft_shlib_elf(go_note: bool, needed: Option<&str>) -> Vec<u8> {
-        const SHSTRTAB: &[u8] = b"\0.shstrtab\0.dynamic\0.dynstr\0.note.go.buildid\0";
+    /// marker). `needed` adds a DT_NEEDED entry, `soname` a DT_SONAME
+    /// entry, and `dynsyms` a `.dynsym` section plus the DT_SYMTAB /
+    /// DT_HASH trio goblin needs to expose it, so `ReadelfInfo` fills
+    /// the way goblin fills it for real linked libraries.
+    /// Each dynsym is (name, bind, type, shndx); shndx 0 is an import.
+    fn craft_shlib_elf(
+        go_note: bool,
+        needed: Option<&str>,
+        soname: Option<&str>,
+        dynsyms: &[(&str, u8, u8, u16)],
+    ) -> Vec<u8> {
+        const SHSTRTAB: &[u8] =
+            b"\0.shstrtab\0.dynamic\0.dynstr\0.note.go.buildid\0.dynsym\0.hash\0";
         // SHSTRTAB name offsets: .shstrtab=1, .dynamic=11, .dynstr=20,
-        // .note.go.buildid=28.
+        // .note.go.buildid=28, .dynsym=45, .hash=53.
         struct Sec {
             name_off: u32,
             stype: u32,
@@ -2101,6 +2152,8 @@ mod tests {
             data: Vec<u8>,
             align: u64,
             link: u32,
+            info: u32,
+            entsize: u64,
         }
         let mut secs: Vec<Sec> = vec![Sec {
             name_off: 1,
@@ -2109,28 +2162,97 @@ mod tests {
             data: SHSTRTAB.to_vec(),
             align: 1,
             link: 0,
+            info: 0,
+            entsize: 0,
         }];
-        if let Some(lib) = needed {
-            let mut dynstr = vec![0u8];
-            dynstr.extend_from_slice(lib.as_bytes());
+
+        // .dynstr carries the soname, the DT_NEEDED entry and every dynamic
+        // symbol name; their offsets feed the .dynamic and .dynsym sections.
+        let mut dynstr = vec![0u8];
+        let mut push_str = |s: &str| {
+            let off = dynstr.len();
+            dynstr.extend_from_slice(s.as_bytes());
             dynstr.push(0);
+            off
+        };
+        let soname_off = soname.map(&mut push_str);
+        let needed_off = needed.map(&mut push_str);
+        let sym_name_offs: Vec<usize> = dynsyms.iter().map(|(n, _, _, _)| push_str(n)).collect();
+        secs.push(Sec {
+            name_off: 20,
+            stype: 3,
+            flags: 0,
+            data: dynstr,
+            align: 1,
+            link: 0,
+            info: 0,
+            entsize: 0,
+        });
+        // Section-header index of .dynstr (NULL entry is index 0).
+        let dynstr_idx = secs.len() as u32;
+
+        // .dynamic; entries are patched once section offsets are known.
+        // Pre-sized: DT_SONAME?, DT_NEEDED?, DT_HASH?, DT_SYMTAB?,
+        // DT_SYMENT?, DT_STRTAB, DT_STRSZ, DT_NULL.
+        let dynamic_idx = secs.len();
+        let dynamic_entries = 3
+            + soname.is_some() as usize
+            + needed.is_some() as usize
+            + if dynsyms.is_empty() { 0 } else { 3 };
+        secs.push(Sec {
+            name_off: 11,
+            stype: 6, // SHT_DYNAMIC
+            flags: 2, // SHF_ALLOC
+            data: vec![0u8; 16 * dynamic_entries],
+            align: 8,
+            link: dynstr_idx,
+            info: 0,
+            entsize: 16,
+        });
+
+        // .dynsym: null entry plus one 24-byte entry per symbol.
+        // (name, bind, type, shndx); shndx 0 is SHN_UNDEF, an import.
+        let mut dynsym_idx: u32 = 0;
+        if !dynsyms.is_empty() {
+            let mut symtab = vec![0u8; 24];
+            for (i, (_, bind, typ, shndx)) in dynsyms.iter().enumerate() {
+                let mut e = vec![0u8; 24];
+                e[0..4].copy_from_slice(&(sym_name_offs[i] as u32).to_le_bytes());
+                e[4] = (bind << 4) | typ;
+                e[6..8].copy_from_slice(&shndx.to_le_bytes());
+                symtab.extend(e);
+            }
+            dynsym_idx = secs.len() as u32;
             secs.push(Sec {
-                name_off: 20,
-                stype: 3,
-                flags: 0,
-                data: dynstr,
-                align: 1,
-                link: 0,
-            });
-            // Section-header index of .dynstr (NULL entry is index 0).
-            let dynstr_idx = secs.len() as u32;
-            secs.push(Sec {
-                name_off: 11,
-                stype: 6, // SHT_DYNAMIC
-                flags: 2, // SHF_ALLOC
-                data: vec![0u8; 64],
+                name_off: 45,
+                stype: 11, // SHT_DYNSYM
+                flags: 2,  // SHF_ALLOC
+                data: symtab,
                 align: 8,
                 link: dynstr_idx,
+                info: 1, // one local symbol: the null entry
+                entsize: 24,
+            });
+            // SysV hash so goblin finds the symbol count via DT_HASH;
+            // without it goblin leaves elf.dynsyms empty.
+            let n = 1 + dynsyms.len();
+            let mut hash = Vec::new();
+            hash.extend_from_slice(&1u32.to_le_bytes()); // nbucket
+            hash.extend_from_slice(&(n as u32).to_le_bytes()); // nchain
+            hash.extend_from_slice(&1u32.to_le_bytes()); // bucket[0]
+            for i in 0..n {
+                let next = if i + 1 < n { (i + 1) as u32 } else { 0 };
+                hash.extend_from_slice(&next.to_le_bytes());
+            }
+            secs.push(Sec {
+                name_off: 53,
+                stype: 5, // SHT_HASH
+                flags: 2, // SHF_ALLOC
+                data: hash,
+                align: 4,
+                link: dynsym_idx,
+                info: 0,
+                entsize: 4,
             });
         }
         if go_note {
@@ -2147,13 +2269,14 @@ mod tests {
                 data: note,
                 align: 4,
                 link: 0,
+                info: 0,
+                entsize: 0,
             });
         }
 
         let mut buf: Vec<u8> = vec![0; 64]; // ELF header placeholder
-        let phnum: u16 = if needed.is_some() { 2 } else { 0 };
         let phoff = buf.len() as u64;
-        buf.extend(vec![0u8; 56 * phnum as usize]);
+        buf.extend(vec![0u8; 56 * 2]); // PT_LOAD + PT_DYNAMIC
 
         // Section data blobs, in section order.
         let mut offs: Vec<u64> = Vec::new();
@@ -2163,21 +2286,35 @@ mod tests {
         }
 
         // Patch .dynamic now that the .dynstr file offset is known.
-        if needed.is_some() {
-            let dyn_i = secs.iter().position(|s| s.name_off == 11).unwrap();
-            let str_i = secs.iter().position(|s| s.name_off == 20).unwrap();
-            let mut dyns: Vec<u8> = Vec::new();
-            let mut entry = |tag: i64, val: u64| {
-                dyns.extend_from_slice(&tag.to_le_bytes());
-                dyns.extend_from_slice(&val.to_le_bytes());
-            };
-            entry(1, 1); // DT_NEEDED -> dynstr[1]
-            entry(5, offs[str_i]); // DT_STRTAB
-            entry(10, secs[str_i].data.len() as u64); // DT_STRSZ
-            entry(0, 0); // DT_NULL
-            let at = offs[dyn_i] as usize;
-            buf[at..at + 64].copy_from_slice(&dyns);
+        // PT_LOAD maps VA == file offset, so DT_STRTAB takes it directly.
+        let mut dyns: Vec<u8> = Vec::new();
+        let mut entry = |tag: i64, val: u64| {
+            dyns.extend_from_slice(&tag.to_le_bytes());
+            dyns.extend_from_slice(&val.to_le_bytes());
+        };
+        if let Some(off) = soname_off {
+            entry(14, off as u64); // DT_SONAME
         }
+        if let Some(off) = needed_off {
+            entry(1, off as u64); // DT_NEEDED
+        }
+        if !dynsyms.is_empty() {
+            // .hash is the last section pushed above when dynsyms exist.
+            let hash_idx = secs.len() - 1;
+            entry(4, offs[hash_idx]); // DT_HASH
+            entry(6, offs[dynsym_idx as usize]); // DT_SYMTAB
+            entry(11, 24); // DT_SYMENT
+        }
+        entry(5, offs[dynstr_idx as usize - 1]); // DT_STRTAB
+        entry(10, secs[dynstr_idx as usize - 1].data.len() as u64); // DT_STRSZ
+        entry(0, 0); // DT_NULL
+        let at = offs[dynamic_idx] as usize;
+        assert_eq!(
+            dyns.len(),
+            16 * dynamic_entries,
+            "dynamic entry count drifted from pre-sized blob"
+        );
+        buf[at..at + dyns.len()].copy_from_slice(&dyns);
 
         while !buf.len().is_multiple_of(8) {
             buf.push(0);
@@ -2188,26 +2325,23 @@ mod tests {
 
         // Program headers. PT_LOAD covers the whole file so goblin's
         // vm_to_offset resolves DT_STRTAB to a file offset.
-        if needed.is_some() {
-            let ph = |ptype: u32, flags: u32, off: u64, filesz: u64| {
-                let mut h = Vec::new();
-                h.extend_from_slice(&ptype.to_le_bytes());
-                h.extend_from_slice(&flags.to_le_bytes());
-                h.extend_from_slice(&off.to_le_bytes()); // p_offset
-                h.extend_from_slice(&off.to_le_bytes()); // p_vaddr
-                h.extend_from_slice(&0u64.to_le_bytes()); // p_paddr
-                h.extend_from_slice(&filesz.to_le_bytes());
-                h.extend_from_slice(&filesz.to_le_bytes()); // p_memsz
-                h.extend_from_slice(&0x1000u64.to_le_bytes());
-                h
-            };
-            let dyn_i = secs.iter().position(|s| s.name_off == 11).unwrap();
-            let load = ph(1, 5, 0, total);
-            let dynamic = ph(2, 6, offs[dyn_i], 64);
-            let at = phoff as usize;
-            buf[at..at + 56].copy_from_slice(&load);
-            buf[at + 56..at + 112].copy_from_slice(&dynamic);
-        }
+        let ph = |ptype: u32, flags: u32, off: u64, filesz: u64| {
+            let mut h = Vec::new();
+            h.extend_from_slice(&ptype.to_le_bytes());
+            h.extend_from_slice(&flags.to_le_bytes());
+            h.extend_from_slice(&off.to_le_bytes()); // p_offset
+            h.extend_from_slice(&off.to_le_bytes()); // p_vaddr
+            h.extend_from_slice(&0u64.to_le_bytes()); // p_paddr
+            h.extend_from_slice(&filesz.to_le_bytes());
+            h.extend_from_slice(&filesz.to_le_bytes()); // p_memsz
+            h.extend_from_slice(&0x1000u64.to_le_bytes());
+            h
+        };
+        let load = ph(1, 5, 0, total);
+        let dynamic = ph(2, 6, offs[dynamic_idx], dyns.len() as u64);
+        let at = phoff as usize;
+        buf[at..at + 56].copy_from_slice(&load);
+        buf[at + 56..at + 112].copy_from_slice(&dynamic);
 
         // Section headers; entry 0 is NULL.
         let mut shdrs: Vec<u8> = vec![0; 64];
@@ -2219,10 +2353,9 @@ mod tests {
             h[24..32].copy_from_slice(&offs[i].to_le_bytes());
             h[32..40].copy_from_slice(&(s.data.len() as u64).to_le_bytes());
             h[40..44].copy_from_slice(&s.link.to_le_bytes());
+            h[44..48].copy_from_slice(&s.info.to_le_bytes());
             h[48..56].copy_from_slice(&s.align.to_le_bytes());
-            if s.stype == 6 {
-                h[56..64].copy_from_slice(&16u64.to_le_bytes());
-            }
+            h[56..64].copy_from_slice(&s.entsize.to_le_bytes());
             shdrs.extend(h);
         }
         buf.extend(shdrs);
@@ -2240,7 +2373,7 @@ mod tests {
         ehdr[40..48].copy_from_slice(&shoff.to_le_bytes());
         ehdr[52..54].copy_from_slice(&64u16.to_le_bytes());
         ehdr[54..56].copy_from_slice(&56u16.to_le_bytes());
-        ehdr[56..58].copy_from_slice(&phnum.to_le_bytes());
+        ehdr[56..58].copy_from_slice(&2u16.to_le_bytes()); // phnum
         ehdr[58..60].copy_from_slice(&64u16.to_le_bytes());
         ehdr[60..62].copy_from_slice(&(shnum as u16).to_le_bytes());
         ehdr[62..64].copy_from_slice(&1u16.to_le_bytes()); // .shstrtab
@@ -2249,9 +2382,12 @@ mod tests {
     }
 
     fn shlib_libdep_results(
+        id: &str,
         go_note: bool,
         needed: Option<&str>,
         is_shobj: bool,
+        soname: Option<&str>,
+        dynsyms: &[(&str, u8, u8, u16)],
     ) -> Vec<(String, String)> {
         let config = test_config();
         let mut check = BinariesCheck::with_tool_dir(&config, None);
@@ -2261,19 +2397,13 @@ mod tests {
             name: "/usr/lib64/libnodep.so.1".to_string(),
             ..Default::default()
         };
-        let bytes = craft_shlib_elf(go_note, needed);
-        // Each caller gets its own fixture file: the flags and pid in
-        // the name keep parallel `cargo test` runners from racing
+        let bytes = craft_shlib_elf(go_note, needed, soname, dynsyms);
+        // Each caller gets its own fixture file: the id and pid in the
+        // name keep parallel `cargo test` runners from racing
         // write/parse/delete on a shared path (a fixed-/tmp- collision
-        // flake). All four callers pass distinct flag tuples; the pid
-        // keeps separate test processes from colliding too.
-        let path = std::env::temp_dir().join(format!(
-            "rpmcrab-shlib-nodep-{}-{}-{}-{}",
-            go_note,
-            needed.is_some(),
-            is_shobj,
-            std::process::id()
-        ));
+        // flake).
+        let path =
+            std::env::temp_dir().join(format!("rpmcrab-shlib-nodep-{id}-{}", std::process::id()));
         std::fs::write(&path, &bytes).unwrap();
         let info = ReadelfInfo::parse(path.to_str().unwrap(), &pkgfile.name);
         // The crafted bytes must parse the way the check consumes them;
@@ -2288,6 +2418,14 @@ mod tests {
             ),
             None => assert!(info.needed.is_empty(), "no DT_NEEDED"),
         }
+        match soname {
+            Some(s) => assert_eq!(
+                info.soname.as_deref(),
+                Some(s),
+                "DT_SONAME visible through goblin"
+            ),
+            None => assert!(info.soname.is_none(), "no DT_SONAME"),
+        }
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_library_dependency(&pkg, &pkgfile, &info, &mut out);
         let results = out.results().to_vec();
@@ -2297,7 +2435,21 @@ mod tests {
 
     #[test]
     fn shlib_without_dependency_information_fires() {
-        let results = shlib_libdep_results(false, None, true);
+        // Genuine shape: linkable library (DT_SONAME) with a real
+        // external reference and no DT_NEEDED.
+        let results = shlib_libdep_results(
+            "fires",
+            false,
+            None,
+            true,
+            Some("libnodep.so.1"),
+            &[(
+                "external_func",
+                goblin::elf::sym::STB_GLOBAL,
+                goblin::elf::sym::STT_FUNC,
+                0,
+            )],
+        );
         let lines = lines_for(&results, "shared-library-without-dependency-information");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
         assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
@@ -2311,15 +2463,115 @@ mod tests {
     #[test]
     fn shlib_without_dependency_information_skips_go() {
         // Go binaries are ET_DYN with no DT_NEEDED; the exemption keeps
-        // them quiet instead of flagging them as dependency-less.
-        let results = shlib_libdep_results(true, None, true);
+        // them quiet instead of flagging them as dependency-less. SONAME
+        // plus a real non-weak undefined import (and no `main`) means the
+        // plugin-like path cannot silence this fixture -- only the Go
+        // marker can.
+        let results = shlib_libdep_results(
+            "go",
+            true,
+            None,
+            true,
+            Some("libnodep.so.1"),
+            &[(
+                "external_func",
+                goblin::elf::sym::STB_GLOBAL,
+                goblin::elf::sym::STT_FUNC,
+                0,
+            )],
+        );
         assert_lacks(&results, "shared-library-without-dependency-information");
         assert!(results.is_empty(), "Go shlib must be quiet: {results:?}");
     }
 
     #[test]
+    fn shlib_without_dependency_information_skips_self_contained() {
+        // Only the optional crt weak references: genuinely self-contained,
+        // there is no dependency information to be missing.
+        let results = shlib_libdep_results(
+            "weak",
+            false,
+            None,
+            true,
+            Some("libnodep.so.1"),
+            &[(
+                "__cxa_finalize",
+                goblin::elf::sym::STB_WEAK,
+                goblin::elf::sym::STT_NOTYPE,
+                0,
+            )],
+        );
+        assert_lacks(&results, "shared-library-without-dependency-information");
+        assert!(
+            results.is_empty(),
+            "self-contained shlib must be quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn shlib_without_dependency_information_skips_soname_less_plugin() {
+        // No DT_SONAME: a dlopen-only plugin, never DT_NEEDED-linked.
+        let results = shlib_libdep_results(
+            "nosoname",
+            false,
+            None,
+            true,
+            None,
+            &[(
+                "external_func",
+                goblin::elf::sym::STB_GLOBAL,
+                goblin::elf::sym::STT_FUNC,
+                0,
+            )],
+        );
+        assert_lacks(&results, "shared-library-without-dependency-information");
+        assert!(
+            results.is_empty(),
+            "soname-less plugin must be quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn shlib_without_dependency_information_skips_main_shim() {
+        // Defines `main`: an executable-entry shim linked into binaries,
+        // not a regular shared library. The real non-weak undefined import
+        // means only the `defines_main` disjunct can silence this fixture --
+        // dropping that disjunct must fail this test.
+        let results = shlib_libdep_results(
+            "main",
+            false,
+            None,
+            true,
+            Some("libnodep.so.1"),
+            &[
+                (
+                    "main",
+                    goblin::elf::sym::STB_GLOBAL,
+                    goblin::elf::sym::STT_FUNC,
+                    1,
+                ),
+                (
+                    "external_func",
+                    goblin::elf::sym::STB_GLOBAL,
+                    goblin::elf::sym::STT_FUNC,
+                    0,
+                ),
+            ],
+        );
+        assert_lacks(&results, "shared-library-without-dependency-information");
+        assert!(results.is_empty(), "main shim must be quiet: {results:?}");
+    }
+
+    #[test]
     fn shlib_with_needed_stays_quiet() {
-        let results = shlib_libdep_results(false, Some("libc.so.6"), true);
+        let results = shlib_libdep_results(
+            "needed",
+            false,
+            Some("libc.so.6"),
+            true,
+            Some("libnodep.so.1"),
+            &[],
+        );
         assert_lacks(&results, "shared-library-without-dependency-information");
         assert_lacks(&results, "statically-linked-binary");
     }
@@ -2327,7 +2579,7 @@ mod tests {
     #[test]
     fn non_shlib_without_needed_still_statically_linked() {
         // Existing behavior for non-shared objects is unchanged.
-        let results = shlib_libdep_results(false, None, false);
+        let results = shlib_libdep_results("nonshlib", false, None, false, None, &[]);
         let lines = lines_for(&results, "statically-linked-binary");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
         assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
@@ -3391,6 +3643,8 @@ description = "explicit priority string bypasses the system crypto policy"
                 needed: Vec::new(),
                 runpaths: Vec::new(),
                 has_textrel: false,
+                has_nonweak_undefined: false,
+                defines_main: false,
                 elf_type: goblin::elf::header::ET_DYN,
                 bind_now: false,
                 failed: None,
@@ -3521,6 +3775,8 @@ description = "explicit priority string bypasses the system crypto policy"
             needed: Vec::new(),
             runpaths: Vec::new(),
             has_textrel: false,
+            has_nonweak_undefined: false,
+            defines_main: false,
             elf_type: goblin::elf::header::ET_EXEC,
             bind_now: false,
             failed: None,
@@ -4151,8 +4407,8 @@ description = "explicit priority string bypasses the system crypto policy"
         // Regression: archives used to fail as a whole with goblin's
         // "Invalid magic number" (readelf-failed); the reference runs
         // readelf over the archive and readelf iterates the members.
-        let m1 = craft_shlib_elf(false, Some("liba.so.1"));
-        let m2 = craft_shlib_elf(false, None);
+        let m1 = craft_shlib_elf(false, Some("liba.so.1"), None, &[]);
+        let m2 = craft_shlib_elf(false, None, None, &[]);
         let archive = craft_ar_archive(&[("a.o", &m1), ("b.o", &m2)]);
         let path = std::env::temp_dir().join(format!("rpmcrab-ar-{}", std::process::id()));
         std::fs::write(&path, &archive).unwrap();
@@ -4205,7 +4461,7 @@ description = "explicit priority string bypasses the system crypto policy"
     fn archive_with_non_elf_member_fails_like_readelf() {
         // The reference's readelf exits nonzero when any member is not an
         // ELF object, failing the whole file.
-        let m1 = craft_shlib_elf(false, None);
+        let m1 = craft_shlib_elf(false, None, None, &[]);
         let archive = craft_ar_archive(&[("a.o", &m1), ("note.txt", b"hello\n")]);
         let path = std::env::temp_dir().join(format!("rpmcrab-ar-mixed-{}", std::process::id()));
         std::fs::write(&path, &archive).unwrap();
@@ -4285,8 +4541,8 @@ description = "explicit priority string bypasses the system crypto policy"
     fn gnu_ar_archive_with_symbol_index_parses() {
         // The `/` symbol-index member that `ar rcs` emits must not break
         // member-wise parsing: goblin skips it, sections still merge.
-        let m1 = craft_shlib_elf(false, Some("liba.so.1"));
-        let m2 = craft_shlib_elf(false, None);
+        let m1 = craft_shlib_elf(false, Some("liba.so.1"), None, &[]);
+        let m2 = craft_shlib_elf(false, None, None, &[]);
         let archive = craft_gnu_ar_archive(&[("a.o", &m1), ("b.o", &m2)]);
         let path = std::env::temp_dir().join(format!("rpmcrab-ar-gnu-{}", std::process::id()));
         std::fs::write(&path, &archive).unwrap();
@@ -4747,7 +5003,7 @@ description = "explicit priority string bypasses the system crypto policy"
     fn killed_library_package_findings_stay_absent() {
         let dir = tempfile::tempdir().expect("tmpdir");
         let so_path = dir.path().join("libfoo.so");
-        std::fs::write(&so_path, craft_shlib_elf(false, None)).expect("write so");
+        std::fs::write(&so_path, craft_shlib_elf(false, None, None, &[])).expect("write so");
         let config = test_config();
         let mut check = BinariesCheck::with_tool_dir(&config, None);
         let mut so_file = syn_file("/usr/lib64/libfoo.so", "ELF 64-bit LSB shared object");
