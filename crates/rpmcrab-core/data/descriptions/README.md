@@ -58,10 +58,9 @@ Provenance, verified against the pinned reference (`84848c0`):
   (entries byte-identical); the port merged the two reference checks into
   one, so a single file named after the port check keeps the check-name to
   TOML mapping total. Ledgered in `tests/parity/divergences.toml`.
-- `SpecCheck.toml` — the reference file, plus two port-only entries:
-  `conditional-source-or-patch` (upstream rpmlint#45) and
+- `SpecCheck.toml` — the reference file, plus one port-only entry:
   `translated-description` (upstream rpmlint#2). The reference has no
-  such findings, so `--explain` would print `Unknown message` for them;
+  such finding, so `--explain` would print `Unknown message` for it;
   minus the six entries dropped with their deliberately-removed findings
   (`no-buildroot-tag`, `hardcoded-path-in-buildroot-tag`,
   `%ifarch-applied-patch`, `unversioned-explicit-provides`,
@@ -73,7 +72,7 @@ Provenance, verified against the pinned reference (`84848c0`):
   `FilesCheck.toml`, `KMPPolicyCheck.toml`,
   `LogrotateCheck.toml`, `MenuCheck.toml`, `MenuXDGCheck.toml`,
   `PythonCheck.toml`, `SharedLibraryPolicyCheck.toml`, `SpecCheck.toml`
-  (besides its two port-only entries above, minus the dropped
+  (besides its one port-only entry above, minus the dropped
   `hardcoded-prefix-tag` entry), `SystemdTmpfilesCheck.toml`,
   `TagsCheck.toml` (minus the dropped `invalid-build-requires` and
   `no-provides` entries) — the reference files with English/logic fixes to
