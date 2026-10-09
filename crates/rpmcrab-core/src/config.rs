@@ -257,9 +257,8 @@ impl Config {
     /// # Errors
     /// Returns a diagnostic if the key is present but not a list of strings.
     /// Only reachable from a `*.override.*` file: on the normal and XDG paths
-    /// merge_into has already appended the scalar's CHARACTERS to the list
-    /// (config.py:109-112 iterates a string by character), so this sees an
-    /// Array.
+    /// merge_into appends a scalar string as a single list item, so this
+    /// sees an Array.
     fn get_strings(&self, key: &str) -> Result<Vec<String>, String> {
         match self.configuration.get(key) {
             None => Ok(Vec::new()),
@@ -301,7 +300,9 @@ fn sort_key(is_defaults: bool, name: &str) -> u8 {
 
 /// rpmlint's `_merge_dictionaries`: recursive; lists union-append+dedup for
 /// normal configs but are replaced wholesale for `*.override.*`; scalars are
-/// overwritten by the later file.
+/// overwritten by the later file. One deliberate divergence: a scalar string
+/// merged into a list is kept whole as a single item instead of being
+/// shredded into characters (see the `String` arm below).
 fn merge_into(dest: &mut toml::Table, source: &toml::Table, override_: bool) {
     for (k, v) in source {
         match (dest.get_mut(k), v) {
@@ -319,11 +320,13 @@ fn merge_into(dest: &mut toml::Table, source: &toml::Table, override_: bool) {
                         .keys()
                         .map(|s| toml::Value::String(s.to_string()))
                         .collect(),
-                    // `for item in "xyz"` walks the characters; the reference does not raise.
-                    toml::Value::String(s) => s
-                        .chars()
-                        .map(|c| toml::Value::String(c.to_string()))
-                        .collect(),
+                    // Deliberate divergence from the reference: a scalar string is
+                    // one list item, not its characters. The reference iterates
+                    // a string by character, so a scalar pattern used to be
+                    // shredded -- and a single-character regex matches nearly
+                    // every path, silently skipping almost everything on a
+                    // misconfigured config.
+                    toml::Value::String(s) => vec![toml::Value::String(s.clone())],
                     other => panic!(
                         "config: array key '{k}' is merged with a {other:?}, which the \
                          reference cannot iterate either (TypeError)"
@@ -763,6 +766,25 @@ mod tests {
     }
 
     #[test]
+    fn merge_keeps_scalar_string_whole_when_merging_into_a_list() {
+        // The reference iterates a string by character, so a scalar
+        // pattern used to be shredded -- and a single-character regex
+        // matches nearly every path, silently skipping almost everything
+        // on a misconfigured config. Deliberate divergence: a scalar
+        // string is one pattern, kept whole.
+        let mut dest = table("P = [\"a\"]");
+        let src = table("P = \"foo\"");
+        merge_into(&mut dest, &src, false);
+        assert_eq!(
+            dest["P"].as_array().unwrap(),
+            &["a", "foo"]
+                .into_iter()
+                .map(|s| toml::Value::String(s.to_string()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn merge_appends_table_keys_in_document_order() {
         // The reference walks dict keys in insertion order, not sorted order.
         // Needs more than one key to discriminate the two.
@@ -772,21 +794,6 @@ mod tests {
         assert_eq!(
             dest["W"].as_array().unwrap(),
             &["a", "z", "b", "m"]
-                .into_iter()
-                .map(|s| toml::Value::String(s.to_string()))
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn merge_appends_characters_of_a_later_string() {
-        // `for item in "xyz"` walks the characters; the reference does not raise.
-        let mut dest = table("W = [\"a\"]");
-        let src = table("W = \"xyz\"");
-        merge_into(&mut dest, &src, false);
-        assert_eq!(
-            dest["W"].as_array().unwrap(),
-            &["a", "x", "y", "z"]
                 .into_iter()
                 .map(|s| toml::Value::String(s.to_string()))
                 .collect::<Vec<_>>()
@@ -843,10 +850,10 @@ mod tests {
     /// flavour values (rpmcrab's defaults are the openSUSE flavour).
     /// A scalar reaching a list key fails loudly rather than silently disabling
     /// the key. Only a `*.override.*` file can produce this state -- it inserts
-    /// into `configuration` directly, bypassing the character-shred that
-    /// merge_into applies on the normal and XDG paths (see the ledger entry for
-    /// `config`). The on-disk path it models is covered by the `-c
-    /// *.override.toml` case in the CLI tests.
+    /// into `configuration` directly, bypassing merge_into (which keeps a
+    /// scalar string whole as a single list item on the normal and XDG paths;
+    /// see the ledger entry for `config`). The on-disk path it models is
+    /// covered by the `-c *.override.toml` case in the CLI tests.
     #[test]
     fn finalize_rejects_a_scalar_where_a_list_is_expected() {
         let mut cfg = Config::default();
