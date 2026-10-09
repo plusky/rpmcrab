@@ -1635,3 +1635,17 @@ check = "BinariesCheck"
 kind = "behaviour"
 reason = "Thin ar archives (`!<thin>\n` magic) fall through to the ELF parser instead of being enumerated member-wise; host readelf exits 0 on them, so no finding is emitted either way. Only the parse path differs, not the outcome."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "devel-dependency"
+kind = "behaviour"
+reason = "Biarch/flavored devel packages (`-devel-32bit`, `-devel-doc`, `-debug-libs`, ...) are recognized as devel packages: the devel keyword may be a hyphen-delimited component, not just a name suffix. The reference only matches the suffix form and misfires devel-dependency on 242 such packages in Tumbleweed (measured 2026-10-08 against the TW oss primary.xml). This is the requirer-side class; the dependency-side class from plusky/rpmcrab#283 (DevelNumberExceptions list / word-boundary regex for required names, e.g. `python310-sortinghat` requiring `python310-django-cors-headers`) remains open."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "explicit-lib-dependency"
+kind = "behaviour"
+reason = "Same requirer-side class as the devel-dependency entry: biarch/flavored devel packages (`-devel-32bit`, `-devel-doc`, `-debug-libs`, ...) are recognized as devel packages, so their lib requirements do not trip explicit-lib-dependency. The reference only matches the devel-name suffix form and treats these requirers as runtime packages."
+since = "0.1.0"
