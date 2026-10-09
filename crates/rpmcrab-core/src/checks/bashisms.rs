@@ -3,9 +3,10 @@
 //! Ported from `rpmlint/checks/BashismsCheck.py`. Two findings:
 //! `bin-sh-syntax-error` and `potential-bashisms`.
 //!
-//! The reference shells out to `dash -n` and `checkbashisms`; this port does
-//! the same when the tools exist and skips the file (debug-logged) when they
-//! do not, rather than crashing at init like the reference.
+//! The reference shells out to `dash -n` and `checkbashisms`; this port runs
+//! `dash -n` when dash exists and skips the file (debug-logged) when it does
+//! not, rather than crashing at init like the reference. `checkbashisms` is
+//! optional: without it only `potential-bashisms` is suppressed.
 
 use std::path::Path;
 
@@ -30,8 +31,9 @@ impl BashismsCheck {
     }
 
     /// Probe for `dash` and `checkbashisms` under `source`. The reference
-    /// crashes when `checkbashisms` is absent; we degrade to a no-op check
-    /// instead.
+    /// crashes when `checkbashisms` is absent; we degrade gracefully instead:
+    /// without dash the check is a no-op, without checkbashisms only
+    /// `potential-bashisms` is suppressed.
     pub fn with_tool_source(source: ToolSource) -> Self {
         let (dash, _) = Tool::probe(&source, "dash", &["--version"]);
         let (checkbashisms, help) = Tool::probe(&source, "checkbashisms", &["--help"]);
@@ -59,14 +61,15 @@ impl BashismsCheck {
         Self::with_tool_source(test_source(bin_dir))
     }
 
-    /// `(have_tools, use_early_fail)`, kept for the probe tests.
+    /// `(have_dash, use_early_fail)`, kept for the probe tests.
     pub fn detect_tools(bin_dir: Option<&Path>) -> (bool, bool) {
         let check = Self::with_tool_dir(bin_dir);
-        (check.have_tools(), check.use_early_fail)
+        (check.have_dash(), check.use_early_fail)
     }
 
-    fn have_tools(&self) -> bool {
-        self.dash.is_present() && self.checkbashisms.is_present()
+    /// `bin-sh-syntax-error` needs only `dash -n`; `checkbashisms` is optional.
+    fn have_dash(&self) -> bool {
+        self.dash.is_present()
     }
 
     /// The warnings for one script file: `bin-sh-syntax-error` and/or
@@ -123,8 +126,8 @@ impl Check for BashismsCheck {
     }
 
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
-        if !self.have_tools() {
-            log::debug!("BashismsCheck: dash/checkbashisms not found, skipping");
+        if !self.have_dash() {
+            log::debug!("BashismsCheck: dash not found, skipping");
             return;
         }
         // Cache by md5 like the reference (kernel-source ships the same
@@ -168,6 +171,9 @@ impl Check for BashismsCheck {
 mod tests {
     use super::*;
 
+    use crate::color::Color;
+    use crate::pkg::pkgfile::PkgFile;
+
     #[cfg(unix)]
     fn fake_tool(dir: &std::path::Path, name: &str, body: &str) {
         use std::os::unix::fs::PermissionsExt;
@@ -208,13 +214,24 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn detect_tools_reports_missing_tools() {
+    fn detect_tools_reports_missing_checkbashisms() {
         let dir = tempfile::tempdir().expect("tmpdir");
         fake_tool(dir.path(), "dash", "echo 'dash 0.5.12'");
-        assert_eq!(
-            BashismsCheck::detect_tools(Some(dir.path())),
-            (false, false)
+        // dash alone suffices for bin-sh-syntax-error; only the
+        // checkbashisms-dependent early-fail probe is negative.
+        assert_eq!(BashismsCheck::detect_tools(Some(dir.path())), (true, false));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn detect_tools_reports_missing_dash() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        fake_tool(
+            dir.path(),
+            "checkbashisms",
+            "echo 'usage: checkbashisms [-e] file'",
         );
+        assert_eq!(BashismsCheck::detect_tools(Some(dir.path())), (false, true));
     }
 
     #[test]
@@ -265,5 +282,63 @@ mod tests {
         // reference's FileNotFoundError path yields no findings either.
         assert!(BashismsCheck::classify_bashisms(Some(127), Some(1)).is_empty());
         assert!(BashismsCheck::classify_bashisms(None, Some(1)).is_empty());
+    }
+
+    #[test]
+    fn dash_syntax_error_without_checkbashisms() {
+        // checkbashisms absent (None exit code): bin-sh-syntax-error still
+        // fires from `dash -n` alone.
+        assert_eq!(
+            BashismsCheck::classify_bashisms(Some(2), None),
+            vec!["bin-sh-syntax-error"]
+        );
+    }
+
+    #[test]
+    fn clean_dash_without_checkbashisms() {
+        assert!(BashismsCheck::classify_bashisms(Some(0), None).is_empty());
+    }
+
+    /// Dash-only emission: a fake `dash` exiting 2 with no `checkbashisms`
+    /// in the tool dir emits exactly one `bin-sh-syntax-error` finding
+    /// (W, naming the script) and no `potential-bashisms`.
+    #[test]
+    #[cfg(unix)]
+    fn dash_only_emits_syntax_error() {
+        let tools = tempfile::tempdir().expect("tmpdir");
+        fake_tool(tools.path(), "dash", "exit 2");
+        let scripts = tempfile::tempdir().expect("tmpdir");
+        let script = scripts.path().join("bad.sh");
+        std::fs::write(&script, "#!/bin/sh\nif then\n").expect("write script");
+        let mut pkg = Pkg::open(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm"),
+            &std::env::temp_dir(),
+            true,
+        )
+        .expect("open fixture pkg");
+        pkg.name = "bashisms-test".to_string();
+        pkg.files.clear();
+        pkg.files.push(PkgFile {
+            name: "/usr/bin/bad.sh".to_string(),
+            path: script.to_string_lossy().into_owned(),
+            mode: 0o100755,
+            magic: "POSIX shell script".to_string(),
+            ..Default::default()
+        });
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = BashismsCheck::with_tool_dir(Some(tools.path()));
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(results.len(), 1, "one finding expected: {results:?}");
+        let (name, line) = &results[0];
+        assert_eq!(name, "bin-sh-syntax-error");
+        assert!(line.contains("/usr/bin/bad.sh"), "detail lost: {line}");
+        assert_eq!(out.result_levels(), &[Level::Warning]);
+        assert!(
+            results.iter().all(|(n, _)| n != "potential-bashisms"),
+            "checkbashisms absent, yet potential-bashisms fired: {results:?}"
+        );
     }
 }
