@@ -1977,6 +1977,7 @@ Requires:       foo<bar\n";
         // boolean dependencies stay silent.
         assert_eq!(lines.len(), 1, "{results:?}");
         assert!(lines[0].contains("foo<bar"), "{results:?}");
+        assert!(lines[0].contains("W:"), "{results:?}");
     }
 
     #[test]
@@ -1986,10 +1987,9 @@ Requires:       foo<bar\n";
         let results = run_mini(
             "Name:           wobble\nVersion:        1.0\nRelease:        1\nSummary:        Wobble\nLicense:        MIT\nRequires:       foo>=1.0\n",
         );
-        assert!(
-            has(&results, "comparison-operator-in-deptoken"),
-            "{results:?}"
-        );
+        let lines = lines_for(&results, "comparison-operator-in-deptoken");
+        assert_eq!(lines.len(), 1, "{results:?}");
+        assert!(lines[0].contains("W:"), "{results:?}");
     }
 
     #[test]

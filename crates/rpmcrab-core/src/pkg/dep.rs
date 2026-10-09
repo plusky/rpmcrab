@@ -761,6 +761,10 @@ pub fn is_rich_dep_expr(s: &str) -> bool {
 /// `comparison-operator-in-deptoken` check false-positives on operators that
 /// are legitimate boolean-expression syntax. Malformed tokens like `(foo<bar)`
 /// still warn, exactly like the reference.
+///
+/// Only a single paren layer is unwrapped: `((a >= 1))` would need a
+/// loop-strip, but double-wrapped tokens cannot arise from real spec
+/// dependency lists, so they are left to warn.
 pub fn is_parenthesized_versioned(s: &str) -> bool {
     let Some(inner) = s.strip_prefix('(').and_then(|t| t.strip_suffix(')')) else {
         return false;
