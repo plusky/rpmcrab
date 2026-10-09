@@ -752,9 +752,9 @@ pub struct BinariesCheck {
     is_nonstandard_archive: bool,
 }
 
-/// A `_FORTIFY_SOURCE` wrapper from libc (`__memcpy_chk`,
-/// `__sprintf_chk`, ...). Symbol names may carry a `@VERSION` suffix in
-/// `.dynsym`; strip it before matching.
+/// A `_FORTIFY_SOURCE` wrapper from libc, i.e. a `__foo_chk` symbol
+/// (`__memcpy_chk`, `__sprintf_chk`, ...). Symbol names may carry a
+/// `@VERSION` suffix in `.dynsym`; strip it before matching.
 /// The `__*_chk` shape is deliberately broad: glibc fortifies any
 /// function, present or future, so an allowlist would rot. The failure
 /// mode of over-matching is a missed warning on the package's own
