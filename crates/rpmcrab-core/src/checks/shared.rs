@@ -24,6 +24,19 @@ pub fn devel_regex() -> &'static Regex {
     })
 }
 
+/// Devel keyword as a hyphen-delimited component (`-devel-32bit`,
+/// `-devel-doc`, `-debug-libs`, ...) rather than a name suffix.
+/// Biarch/flavored devel packages are devel packages, so their own
+/// requirements must not trip `devel-dependency` or
+/// `explicit-lib-dependency`; the reference only matches the suffix form.
+static DEVEL_INFIX_REGEX: OnceLock<Regex> = OnceLock::new();
+pub fn devel_infix_regex() -> &'static Regex {
+    DEVEL_INFIX_REGEX.get_or_init(|| {
+        Regex::new(r"(.*)-(debug(info|source)?|devel|headers|source|static|prof)-")
+            .expect("static regex")
+    })
+}
+
 /// `lib_package_regex`: `(?:^(?:compat-)?lib.*?(\.so.*)?|libs?[\d-]*)$`, case-insensitive.
 static LIB_PACKAGE_REGEX: OnceLock<Regex> = OnceLock::new();
 pub fn lib_package_regex() -> &'static Regex {
