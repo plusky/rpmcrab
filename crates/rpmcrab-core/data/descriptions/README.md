@@ -72,7 +72,7 @@ Provenance, verified against the pinned reference (`84848c0`):
   `FilesCheck.toml`, `KMPPolicyCheck.toml`,
   `LogrotateCheck.toml`, `MenuCheck.toml`, `MenuXDGCheck.toml`,
   `PythonCheck.toml`, `SharedLibraryPolicyCheck.toml`, `SpecCheck.toml`
-  (besides its two port-only entries above, minus the dropped
+  (besides its one port-only entry above, minus the dropped
   `hardcoded-prefix-tag` entry), `SystemdTmpfilesCheck.toml`,
   `TagsCheck.toml` (minus the dropped `invalid-build-requires` and
   `no-provides` entries) — the reference files with English/logic fixes to
