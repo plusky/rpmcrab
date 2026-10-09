@@ -41,6 +41,22 @@ fn usr_lib_regex() -> &'static Regex {
     USR_LIB_REGEX.get_or_init(|| Regex::new(r"^/usr/lib(64)?/").expect("static regex"))
 }
 
+/// Lexically collapse `.` and `..` components of an absolute path, mirroring
+/// `pathlib.Path.resolve()` for paths that need not exist on disk.
+fn normalize_dotdot(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for comp in path.split('/') {
+        match comp {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            c => parts.push(c),
+        }
+    }
+    format!("/{}", parts.join("/"))
+}
+
 static LDSO_SONAME_REGEX: OnceLock<Regex> = OnceLock::new();
 fn ldso_soname_regex() -> &'static Regex {
     LDSO_SONAME_REGEX
@@ -1623,6 +1639,12 @@ impl BinariesCheck {
 
     fn check_rpath(&self, pkg: &Pkg, pkgfile: &PkgFile, info: &ReadelfInfo, out: &mut Filter) {
         for runpaths in &info.runpaths {
+            // The reference readelf parser only records non-empty
+            // `Library runpath: [...]` matches, so an empty entry never
+            // reaches its check.
+            if runpaths.is_empty() {
+                continue;
+            }
             for runpath in runpaths.split(':') {
                 let mut rp = runpath.to_string();
                 if rp.contains("$ORIGIN") {
@@ -1631,6 +1653,9 @@ impl BinariesCheck {
                         .and_then(|p| p.to_str())
                         .unwrap_or("");
                     rp = rp.replace("$ORIGIN", parent);
+                    // Mirror the reference `Path(runpath).resolve()`: collapse
+                    // `.` and `..` lexically, without touching the filesystem.
+                    rp = normalize_dotdot(&rp);
                 }
                 let starts_system = self.system_lib_paths.iter().any(|p| rp.starts_with(p));
                 if !starts_system && !usr_lib_regex().is_match(&rp).unwrap_or(false) {
@@ -2734,6 +2759,79 @@ mod tests {
         // so the check returns before touching DWARF.
         assert_lacks(&results, "unused-direct-shlib-dependency");
         assert_lacks(&results, "missing-mandatory-optflags");
+    }
+
+    // $ORIGIN-relative RUNPATHs that resolve into system library paths stay
+    // silent, mirroring the reference Path.resolve() after $ORIGIN
+    // substitution; empty RUNPATH entries stay silent, mirroring the reference
+    // readelf parser which only records non-empty Library runpath matches.
+    // (#383)
+    #[test]
+    fn rpath_origin_dotdot_and_empty_are_silent() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg =
+            Pkg::open(std::path::Path::new(&rpm_path), dir.path(), true).expect("open fixture");
+
+        let run = |name: &str, runpaths: Vec<String>| {
+            let info = ReadelfInfo {
+                sections: Vec::new(),
+                program_headers: Vec::new(),
+                functions: Vec::new(),
+                is_shlib: false,
+                is_debug: false,
+                is_rust: false,
+                soname: None,
+                needed: Vec::new(),
+                runpaths,
+                has_textrel: false,
+                has_nonweak_undefined: false,
+                defines_main: false,
+                elf_type: goblin::elf::header::ET_EXEC,
+                bind_now: false,
+                failed: None,
+            };
+            let pkgfile = PkgFile {
+                name: name.to_string(),
+                ..Default::default()
+            };
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_rpath(&pkg, &pkgfile, &info, &mut out);
+            out.results().to_vec()
+        };
+
+        // Real Factory shapes: $ORIGIN/../lib64 from /usr/bin/* resolves to
+        // /usr/lib64, a system path.
+        for rp in [
+            "$ORIGIN/../lib64",
+            "$ORIGIN/../lib",
+            "$ORIGIN/../lib64/",
+            "$ORIGIN/../lib64/audacity",
+            "$ORIGIN/../lib:/usr/lib64",
+        ] {
+            let results = run("/usr/bin/adios2_remote_server", vec![rp.to_string()]);
+            assert_lacks(&results, "binary-or-shlib-defines-rpath");
+        }
+        // Empty RUNPATH entry (meson links -rpath with an empty value): silent.
+        let results = run("/usr/libexec/x.so", vec!["".to_string()]);
+        assert_lacks(&results, "binary-or-shlib-defines-rpath");
+
+        // Bare $ORIGIN resolving outside system paths still fires.
+        let results = run("/usr/bin/foo", vec!["$ORIGIN".to_string()]);
+        assert_eq!(
+            lines_for(&results, "binary-or-shlib-defines-rpath").len(),
+            1,
+            "bare $ORIGIN under /usr/bin should fire: {results:?}"
+        );
+        // Genuinely non-system rpath still fires.
+        let results = run("/usr/bin/foo", vec!["/opt/foo/lib".to_string()]);
+        assert_eq!(
+            lines_for(&results, "binary-or-shlib-defines-rpath").len(),
+            1,
+            "/opt/foo/lib rpath should fire: {results:?}"
+        );
     }
     /// rpmcrab#17: checksec-style hardening verification. Each fixture
     /// binary misses exactly one protection; hardenedbin misses none.
