@@ -158,7 +158,9 @@ struct ReadelfInfo {
     has_textrel: bool,
     /// Raw `e_type` from the ELF header. ET_EXEC versus ET_DYN is the
     /// ground truth for the hardening checks where the file name cannot
-    /// tell a PIE executable from a shared object.
+    /// tell a PIE executable from a shared object. An ar archive carries
+    /// no single `e_type`: members can mix types, so it stays `ET_NONE`
+    /// (first-member or unanimous would invent semantics).
     elf_type: u16,
     /// DF_BIND_NOW (DT_FLAGS) or DF_1_NOW (DT_FLAGS_1). Together with a
     /// GNU_RELRO segment this is the full-versus-partial RELRO distinction.
@@ -753,6 +755,10 @@ pub struct BinariesCheck {
 /// A `_FORTIFY_SOURCE` wrapper from libc (`__memcpy_chk`,
 /// `__sprintf_chk`, ...). Symbol names may carry a `@VERSION` suffix in
 /// `.dynsym`; strip it before matching.
+/// The `__*_chk` shape is deliberately broad: glibc fortifies any
+/// function, present or future, so an allowlist would rot. The failure
+/// mode of over-matching is a missed warning on the package's own
+/// binary, which is low severity.
 fn is_fortify_symbol(name: &str) -> bool {
     let base = name.split('@').next().unwrap_or(name);
     base.starts_with("__") && base.ends_with("_chk")
