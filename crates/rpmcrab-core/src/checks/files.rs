@@ -3076,30 +3076,43 @@ mod tests {
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = FilesCheck::new(&config);
         check.check(&pkg, &config, &mut out);
-        let flagged: Vec<&str> = out
+        // Keep (finding, level) pairs: a bare name-contains filter cannot
+        // distinguish the hidden dir itself from files nested under it, so
+        // assert the exact count and the levels to pin the intent.
+        let flagged: Vec<(&str, Level)> = out
             .results()
             .iter()
-            .filter(|(n, _)| n == "hidden-file-or-dir")
-            .map(|(_, line)| line.as_str())
+            .zip(out.result_levels())
+            .filter(|((n, _), _)| *n == "hidden-file-or-dir")
+            .map(|((_, line), level)| (line.as_str(), *level))
             .collect();
+        assert_eq!(
+            flagged.len(),
+            2,
+            "exactly the hidden dir and the hidden file should be flagged, got: {flagged:?}"
+        );
+        assert!(
+            flagged.iter().all(|(_, l)| *l == Level::Warning),
+            "hidden-file-or-dir findings are warnings, got: {flagged:?}"
+        );
         assert!(
             flagged
                 .iter()
-                .any(|f| f.contains("/usr/src/bazel-skylib/.bcr")),
+                .any(|(f, _)| f.contains("/usr/src/bazel-skylib/.bcr")),
             "hidden dir itself should be flagged, got: {flagged:?}"
         );
         assert!(
             flagged
                 .iter()
-                .any(|f| f.contains("/usr/share/doc/pkg/.hidden-note")),
+                .any(|(f, _)| f.contains("/usr/share/doc/pkg/.hidden-note")),
             "hidden file should be flagged, got: {flagged:?}"
         );
         assert!(
-            !flagged.iter().any(|f| f.contains("dep.json")),
+            !flagged.iter().any(|(f, _)| f.contains("dep.json")),
             "file under hidden dir must not be flagged, got: {flagged:?}"
         );
         assert!(
-            !flagged.iter().any(|f| f.contains("README")),
+            !flagged.iter().any(|(f, _)| f.contains("README")),
             "normal file must not be flagged, got: {flagged:?}"
         );
     }
