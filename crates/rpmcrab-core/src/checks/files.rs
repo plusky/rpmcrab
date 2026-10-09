@@ -3076,31 +3076,34 @@ mod tests {
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = FilesCheck::new(&config);
         check.check(&pkg, &config, &mut out);
-        let flagged: Vec<&str> = out
+        let findings: Vec<(Level, String)> = out
             .results()
             .iter()
-            .filter(|(n, _)| n == "hidden-file-or-dir")
-            .map(|(_, line)| line.as_str())
+            .zip(out.result_levels().iter())
+            .filter(|((name, _), _)| *name == "hidden-file-or-dir")
+            .map(|((_, line), level)| (*level, line.clone()))
             .collect();
-        assert!(
-            flagged
-                .iter()
-                .any(|f| f.contains("/usr/src/bazel-skylib/.bcr")),
-            "hidden dir itself should be flagged, got: {flagged:?}"
+        assert_eq!(
+            findings.len(),
+            2,
+            "exactly the hidden dir and the hidden file flagged: {findings:?}"
         );
         assert!(
-            flagged
-                .iter()
-                .any(|f| f.contains("/usr/share/doc/pkg/.hidden-note")),
-            "hidden file should be flagged, got: {flagged:?}"
+            findings.iter().all(|(level, _)| *level == Level::Warning),
+            "both findings are warnings: {findings:?}"
+        );
+        // Suffix match, not `contains`: the unflagged dep.json line contains
+        // "/usr/src/bazel-skylib/.bcr" as a path prefix, so `contains` cannot
+        // tell the flagged dir from its unflagged child.
+        let mut details: Vec<&str> = findings.iter().map(|(_, line)| line.as_str()).collect();
+        details.sort_unstable();
+        assert!(
+            details[0].ends_with("/usr/share/doc/pkg/.hidden-note"),
+            "hidden file flagged: {details:?}"
         );
         assert!(
-            !flagged.iter().any(|f| f.contains("dep.json")),
-            "file under hidden dir must not be flagged, got: {flagged:?}"
-        );
-        assert!(
-            !flagged.iter().any(|f| f.contains("README")),
-            "normal file must not be flagged, got: {flagged:?}"
+            details[1].ends_with("/usr/src/bazel-skylib/.bcr"),
+            "hidden dir itself flagged: {details:?}"
         );
     }
 
