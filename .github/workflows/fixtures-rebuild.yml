@@ -1,0 +1,113 @@
+---
+# Rebuilds every test fixture RPM from scratch and fails if a rebuild
+# breaks or the rebuilt package differs from the committed one.
+#
+# Fixture build scripts bit-rot silently: the committed RPM masks a broken
+# script (binaries-check/build.sh once ran its container to exit 0 without
+# rpmbuild ever running, and nobody noticed because the stale RPM was still
+# there). Rebuilding on fixture changes and weekly keeps the scripts honest.
+#
+# Comparison depth is per fixture:
+# - binaries-check (arch-specific ELF payloads): the RPM arch follows the
+#   build host (`BuildArch: %{_target_cpu}`), so on x86_64 CI the payload
+#   bytes legitimately differ from the committed aarch64 RPM -- the file
+#   list must match and the RPM must be fresh/non-empty.
+# - nonutf8-basename (noarch, host-built): fully deterministic, so the
+#   per-file metadata (names, sizes, modes, owners, digests -- no mtimes)
+#   must match the committed RPM too.
+
+name: fixtures-rebuild
+
+on:
+  pull_request:
+    paths:
+      - 'tests/fixtures/**'
+  push:
+    branches: [main]
+    paths:
+      - 'tests/fixtures/**'
+  schedule:
+    - cron: '0 4 * * 1' # Mondays 04:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # build.sh needs podman for the containerized fixtures; rpm compares
+      # the rebuilt packages against the committed ones. Plain apt: this job
+      # runs weekly and on fixture changes, not on every PR, so the
+      # cache-apt-pkgs-action machinery the ci job uses is not worth it.
+      - name: Install podman and rpm
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q podman rpm
+      - name: Rebuild fixtures and compare against committed RPMs
+        run: |
+          set -euo pipefail
+          fail() { echo "fixtures-rebuild: $*" >&2; exit 1; }
+
+          # $1: build script (repo-root-relative), $2: expected RPM basename
+          # pattern, $3: strict|filelist
+          check_fixture() {
+            local script="$1" pattern="$2" mode="$3"
+            local dir
+            dir=$(dirname "$script")
+            echo "--- $script"
+            # The freshness check below compares against this timestamp, so
+            # give the filesystem a full second of headroom.
+            local start
+            start=$(date +%s)
+            sleep 1
+            bash "$script" || fail "$script exited non-zero"
+            local fresh
+            fresh=$(find "$dir/input" -name "$pattern" -newermt "@$start" -print -quit)
+            [ -n "$fresh" ] || fail "$script left no fresh RPM behind (a stale committed RPM would mask the breakage)"
+            [ -s "$fresh" ] || fail "$fresh is empty"
+            local committed=/tmp/fixtures-rebuild-committed.rpm
+            # The rebuilt RPM's arch follows the build host, so its name need
+            # not match the committed one's: find the committed RPM by pattern.
+            # Match by bash glob (not regex) to avoid metacharacter issues;
+            # fail if zero or multiple files match.
+            local committed_name=""
+            local match_count=0
+            local f
+            while IFS= read -r f; do
+                # shellcheck disable=SC2254
+                # (pattern is intentionally a glob)
+                case "${f##*/}" in
+                    $pattern)
+                        committed_name="$f"
+                        match_count=$((match_count + 1))
+                        ;;
+                esac
+            done < <(git ls-tree -r --name-only HEAD "$dir/input/")
+            [ "$match_count" -gt 0 ] || fail "no committed RPM matches $pattern in $dir/input/"
+            [ "$match_count" -eq 1 ] || fail "multiple committed RPMs match $pattern in $dir/input/"
+            git show "HEAD:$committed_name" > "$committed" \
+              || fail "cannot read committed RPM $committed_name"
+            diff <(rpm -qlp "$fresh" | sort) <(rpm -qlp "$committed" | sort) \
+              || fail "$fresh file list differs from the committed RPM"
+            if [ "$mode" = strict ]; then
+              # Per-file metadata without mtimes (build-time dependent).
+              local qf='[%{FILENAMES}|%{FILESIZES}|%{FILEMODES}|%{FILEUSERNAME}|%{FILEGROUPNAME}|%{FILEDIGESTS}\n]'
+              diff <(rpm -qp --qf "$qf" "$fresh" | sort) <(rpm -qp --qf "$qf" "$committed" | sort) \
+                || fail "$fresh per-file metadata differs from the committed RPM"
+            fi
+            echo "ok: $fresh"
+          }
+
+          check_fixture tests/fixtures/binaries-check/build.sh 'rpmcrab-binaries-fixture-*.rpm' filelist
+          check_fixture tests/fixtures/binaries-check/build-dangling-gnuhash.sh 'rpmcrab-binaries-dangling-gnuhash-*.rpm' filelist
+          check_fixture tests/fixtures/nonutf8-basename/build.sh 'rpmcrab-nonutf8-*.rpm' strict

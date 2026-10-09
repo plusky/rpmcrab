@@ -1975,6 +1975,7 @@ impl FilesCheck {
         self.check_normal_perl_temp(pkg, fname, out);
         self.check_normal_rpaths_in_buildconfig(pkg, fname, &fd, out);
         self.check_normal_bin(pkg, fname, pkgfile, st, out);
+        self.check_normal_devel(pkg, fname, st, &fd, out);
         self.check_normal_non_readable(pkg, fname, pkgfile, out);
         self.check_normal_zero_length(pkg, fname, pkgfile, out);
         self.check_normal_world_w(pkg, fname, pkgfile, out);
@@ -2112,6 +2113,36 @@ impl FilesCheck {
                 Level::Error,
                 pkg,
                 "non-devel-file-in-devel-package",
+                &[fname],
+            );
+        }
+    }
+
+    fn check_normal_devel(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        st: &PkgState,
+        fd: &FileData,
+        out: &mut Filter,
+    ) {
+        // FilesCheck.py:1174, _check_file_normal_file_devel. The .so
+        // symlink half already lives in check_file_link; this is the
+        // normal-file half: headers, static libs and build config files
+        // (the latter only when the file is text, via fd.is_buildconfig)
+        // in a non-devel package, excluding listed documentation.
+        let is_doc = pkg.doc_files.iter().any(|d| d == fname);
+        if !st.devel_pkg
+            && !is_doc
+            && (fd.is_buildconfig
+                || is_match(&self.includefile_re, fname)
+                || is_match(&self.develfile_re, fname))
+        {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "devel-file-in-non-devel-package",
                 &[fname],
             );
         }
@@ -4004,6 +4035,98 @@ mod tests {
             lines[0].contains(": W: devel-file-in-non-devel-package /usr/lib64/libfoo.so"),
             "name, level and detail: {}",
             lines[0]
+        );
+    }
+
+    #[test]
+    fn devel_file_in_non_devel_package_fires_for_normal_files() {
+        // Mass-build audit: the reference warns on .h/.a/.pc files in
+        // non-devel packages, but the normal-file half of the check
+        // (_check_file_normal_file_devel) was never ported, so rpmcrab
+        // stayed silent. Drive through check_binary.
+        let (mut pkg, dir) = pkg_with_files(vec![
+            PkgFile {
+                ..mkfile("/usr/include/foo.h", 0o100644, 71)
+            },
+            PkgFile {
+                ..mkfile("/usr/lib64/libfoo.a", 0o100644, 72)
+            },
+            PkgFile {
+                ..mkfile("/usr/bin/foo", 0o100755, 73)
+            },
+        ]);
+        // .pc files only count when the file is text: materialize one so
+        // fd.is_buildconfig is true, mirroring the reference's peek.
+        let pc_path = dir.path().join("foo.pc");
+        std::fs::write(
+            &pc_path,
+            "prefix=/usr
+",
+        )
+        .expect("write pc fixture");
+        pkg.files.push(PkgFile {
+            path: pc_path.to_string_lossy().into_owned(),
+            ..mkfile("/usr/lib64/pkgconfig/foo.pc", 0o100644, 74)
+        });
+        let results = run_check_binary(&pkg);
+        for f in [
+            "/usr/include/foo.h",
+            "/usr/lib64/libfoo.a",
+            "/usr/lib64/pkgconfig/foo.pc",
+        ] {
+            assert!(
+                results
+                    .iter()
+                    .any(|(n, d)| n == "devel-file-in-non-devel-package" && d.contains(f)),
+                "missing finding for {f}: {results:?}"
+            );
+        }
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "devel-file-in-non-devel-package" && d.contains("/usr/bin/foo")),
+            "false positive on regular file: {results:?}"
+        );
+        let lines: Vec<&String> = results
+            .iter()
+            .filter(|(n, _)| n == "devel-file-in-non-devel-package")
+            .map(|(_, l)| l)
+            .collect();
+        assert_eq!(lines.len(), 3, "unexpected: {results:?}");
+        for line in &lines {
+            assert!(
+                line.contains(": W: devel-file-in-non-devel-package"),
+                "level: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn devel_file_quiet_in_devel_package_and_doc_files() {
+        // True negatives: a -devel package may ship headers, and a header
+        // listed as %doc is exempt, per the reference.
+        let (mut pkg, _dir) = pkg_with_files(vec![PkgFile {
+            ..mkfile("/usr/include/foo.h", 0o100644, 75)
+        }]);
+        pkg.name = "foo-devel".to_string();
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, _)| n == "devel-file-in-non-devel-package"),
+            "false positive in -devel package: {results:?}"
+        );
+
+        let (mut pkg, _dir) = pkg_with_files(vec![PkgFile {
+            ..mkfile("/usr/include/bar.h", 0o100644, 76)
+        }]);
+        pkg.doc_files = vec!["/usr/include/bar.h".to_string()];
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, _)| n == "devel-file-in-non-devel-package"),
+            "false positive on doc-listed header: {results:?}"
         );
     }
 

@@ -159,9 +159,12 @@ struct ReadelfInfo {
     failed: Option<String>,
 }
 
+/// ar archive magic: `!<arch>` followed by a newline.
+const AR_MAGIC: &[u8; 8] = b"!<arch>\n";
+
 impl ReadelfInfo {
-    fn parse(path: &str, name: &str) -> Self {
-        let mut info = ReadelfInfo {
+    fn empty(name: &str) -> Self {
+        ReadelfInfo {
             sections: Vec::new(),
             program_headers: Vec::new(),
             functions: Vec::new(),
@@ -175,7 +178,11 @@ impl ReadelfInfo {
             runpaths: Vec::new(),
             has_textrel: false,
             failed: None,
-        };
+        }
+    }
+
+    fn parse(path: &str, name: &str) -> Self {
+        let mut info = Self::empty(name);
 
         let data = match std::fs::read(path) {
             Ok(d) => d,
@@ -185,6 +192,15 @@ impl ReadelfInfo {
             }
         };
 
+        // Archives are containers, not ELFs: the reference runs readelf
+        // over the whole file and readelf iterates the members itself.
+        // goblin would reject the archive magic ("Invalid magic number"),
+        // so enumerate the members explicitly and merge their metadata
+        // the way readelf's per-member output merges.
+        if data.starts_with(AR_MAGIC) {
+            return Self::parse_archive(&data, name);
+        }
+
         let elf = match parse_elf(&data) {
             Ok(e) => e,
             Err(e) => {
@@ -192,11 +208,53 @@ impl ReadelfInfo {
                 return info;
             }
         };
+        info.fill_from_elf(&elf);
+        info
+    }
 
+    /// Parse an ar archive member by member, mirroring readelf run over
+    /// the archive. A member that is not a parseable ELF fails the whole
+    /// file, exactly like readelf's nonzero exit does for the reference.
+    fn parse_archive(data: &[u8], name: &str) -> Self {
+        let mut info = Self::empty(name);
+        let archive = match goblin::archive::Archive::parse(data) {
+            Ok(a) => a,
+            Err(e) => {
+                info.failed = Some(e.to_string());
+                return info;
+            }
+        };
+        for i in 0..archive.len() {
+            let Some(member) = archive.get_at(i) else {
+                continue;
+            };
+            let end = member.offset.saturating_add(member.size() as u64) as usize;
+            let bytes = match data.get(member.offset as usize..end) {
+                Some(b) => b,
+                None => {
+                    info.failed = Some(format!("{}: member out of range", member.extended_name()));
+                    return info;
+                }
+            };
+            match parse_elf(bytes) {
+                Ok(elf) => info.fill_from_elf(&elf),
+                Err(e) => {
+                    info.failed = Some(format!("{}: {e}", member.extended_name()));
+                    return info;
+                }
+            }
+        }
+        info
+    }
+
+    /// Merge one parsed ELF's metadata, mirroring readelf's output.
+    /// Archive members are merged by appending: each member's sections
+    /// land in `sections` the same way readelf's per-member output does.
+    fn fill_from_elf(&mut self, elf: &goblin::elf::Elf) {
         // Sections
         for sh in &elf.section_headers {
             let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("").to_string();
-            info.sections.push(vec![ElfSection {
+            self.sections.push(vec![ElfSection {
                 name: name.clone(),
                 size: sh.sh_size,
             }]);
@@ -233,7 +291,7 @@ impl ReadelfInfo {
             } else {
                 flags.push(' ');
             }
-            info.program_headers.push(ElfProgramHeader { name, flags });
+            self.program_headers.push(ElfProgramHeader { name, flags });
         }
 
         // Function symbols from both tables, mirroring the reference
@@ -242,7 +300,7 @@ impl ReadelfInfo {
             if sym.st_type() == goblin::elf::sym::STT_FUNC {
                 if let Some(name) = elf.strtab.get_at(sym.st_name) {
                     if !name.is_empty() {
-                        info.functions.push(name.to_string());
+                        self.functions.push(name.to_string());
                     }
                 }
             }
@@ -254,7 +312,7 @@ impl ReadelfInfo {
             if sym.st_type() == goblin::elf::sym::STT_FUNC {
                 if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
                     if !name.is_empty() {
-                        info.functions.push(name.to_string());
+                        self.functions.push(name.to_string());
                     }
                 }
             }
@@ -267,30 +325,27 @@ impl ReadelfInfo {
                 match d.d_tag {
                     goblin::elf::dynamic::DT_SONAME => {
                         if let Some(s) = dynstrtab.get_at(d.d_val as usize) {
-                            info.soname = Some(s.to_string());
+                            self.soname = Some(s.to_string());
                         }
                     }
                     goblin::elf::dynamic::DT_NEEDED => {
                         if let Some(s) = dynstrtab.get_at(d.d_val as usize) {
-                            info.needed.push(s.to_string());
+                            self.needed.push(s.to_string());
                         }
                     }
                     goblin::elf::dynamic::DT_RUNPATH | goblin::elf::dynamic::DT_RPATH => {
                         if let Some(s) = dynstrtab.get_at(d.d_val as usize) {
-                            info.runpaths.push(s.to_string());
+                            self.runpaths.push(s.to_string());
                         }
                     }
                     goblin::elf::dynamic::DT_TEXTREL => {
-                        info.has_textrel = true;
+                        self.has_textrel = true;
                     }
                     _ => {}
                 }
             }
         }
-
-        info
     }
-
     fn has_function_matching(&self, regex: &fancy_regex::Regex) -> bool {
         self.functions
             .iter()
@@ -1231,20 +1286,26 @@ impl BinariesCheck {
         if self.is_archive || info.is_debug {
             return;
         }
+        // undefined-non-weak-symbol is meaningful for shared libraries only:
+        // in an executable the undefined symbols resolve at load time, so the
+        // reference's `ldd -r` stays silent there while a raw UND scan fires
+        // hundreds of bogus hits.
+        if info.is_shlib {
+            for symbol in &ldd.undefined_symbols {
+                add_info(
+                    out,
+                    Level::Error,
+                    pkg,
+                    "undefined-non-weak-symbol",
+                    &[&pkgfile.name, symbol],
+                );
+            }
+        }
         let info_type = if info.is_shlib {
             Level::Error
         } else {
             Level::Warning
         };
-        for symbol in &ldd.undefined_symbols {
-            add_info(
-                out,
-                info_type,
-                pkg,
-                "undefined-non-weak-symbol",
-                &[&pkgfile.name, symbol],
-            );
-        }
         for dep in &ldd.unused_dependencies {
             add_info(
                 out,
@@ -3541,6 +3602,195 @@ description = "explicit priority string bypasses the system crypto policy"
         }
     }
 
+    /// Build a minimal SysV ar archive from (name, bytes) members.
+    fn craft_ar_archive(members: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out = b"!<arch>\n".to_vec();
+        for (name, data) in members {
+            // 60-byte member header: name(16) mtime(12) uid(6) gid(6)
+            // mode(8) size(10) ending in "`\n". Short SysV names end with '/'.
+            let mut header = [b' '; 60];
+            let name_field = format!("{name}/");
+            let name_len = name_field.len().min(16);
+            header[..name_len].copy_from_slice(&name_field.as_bytes()[..name_len]);
+            let size_field = data.len().to_string();
+            header[48..48 + size_field.len()].copy_from_slice(size_field.as_bytes());
+            header[58] = b'`';
+            header[59] = b'\n';
+            out.extend_from_slice(&header);
+            out.extend_from_slice(data);
+            if data.len() % 2 == 1 {
+                out.push(b'\n');
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn archive_members_parse_like_readelf() {
+        // Regression: archives used to fail as a whole with goblin's
+        // "Invalid magic number" (readelf-failed); the reference runs
+        // readelf over the archive and readelf iterates the members.
+        let m1 = craft_shlib_elf(false, Some("liba.so.1"));
+        let m2 = craft_shlib_elf(false, None);
+        let archive = craft_ar_archive(&[("a.o", &m1), ("b.o", &m2)]);
+        let path = std::env::temp_dir().join(format!("rpmcrab-ar-{}", std::process::id()));
+        std::fs::write(&path, &archive).unwrap();
+
+        let info = ReadelfInfo::parse(path.to_str().unwrap(), "/usr/lib64/libfoo.a");
+        // This is the readelf-failed gate in run_elf_checks: any failure
+        // here becomes the finding.
+        assert!(
+            info.failed.is_none(),
+            "archive must parse member-wise: {:?}",
+            info.failed
+        );
+        // Sections of both members merged, like readelf's per-member output.
+        let names: Vec<&str> = info
+            .sections
+            .iter()
+            .flatten()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&".dynamic"),
+            "member sections merged: {names:?}"
+        );
+        assert_eq!(
+            names.iter().filter(|n| **n == ".shstrtab").count(),
+            2,
+            "both members parsed: {names:?}"
+        );
+
+        // The archive checks now see real member data instead of being
+        // skipped: the members carry no .text.
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib64/libfoo.a", "current ar archive");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_no_text_in_archive(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(
+            lines_for(&results, "lto-no-text-in-archive").len(),
+            1,
+            "archive checks run on parsed members: {results:?}"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn archive_with_non_elf_member_fails_like_readelf() {
+        // The reference's readelf exits nonzero when any member is not an
+        // ELF object, failing the whole file.
+        let m1 = craft_shlib_elf(false, None);
+        let archive = craft_ar_archive(&[("a.o", &m1), ("note.txt", b"hello\n")]);
+        let path = std::env::temp_dir().join(format!("rpmcrab-ar-mixed-{}", std::process::id()));
+        std::fs::write(&path, &archive).unwrap();
+
+        let info = ReadelfInfo::parse(path.to_str().unwrap(), "/usr/lib64/libfoo.a");
+        assert!(
+            info.failed.is_some(),
+            "non-ELF member must fail the whole archive"
+        );
+
+        // Drive the emission path: run_elf_checks must surface the failure
+        // as E: readelf-failed, not just record it on the struct.
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = PkgFile {
+            name: "/usr/lib64/libfoo.a".to_string(),
+            path: path.to_str().unwrap().to_string(),
+            magic: "current ar archive".to_string(),
+            mode: 0o100644,
+            ..Default::default()
+        };
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let analysis =
+            ElfAnalysis::wants_analysis(&pkgfile, false).then(|| ElfAnalysis::parse(&pkgfile));
+        check.run_elf_checks(&pkg, &pkgfile, &config, &mut out, analysis.as_ref());
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "readelf-failed");
+        assert_eq!(lines.len(), 1, "exactly one readelf-failed: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/lib64/libfoo.a"),
+            "detail names the archive: {}",
+            lines[0]
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Build a GNU-style ar archive with a `/` symbol-index member,
+    /// the shape `ar rcs` produces. `craft_ar_archive` above omits it;
+    /// goblin's Archive::parse must skip it (and the `//` extended-name
+    /// table). A refactor walking raw members would emit readelf-failed
+    /// on every shipped .a and stay green without this.
+    fn craft_gnu_ar_archive(members: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out = b"!<arch>\n".to_vec();
+        // Minimal `/` symbol table: zero symbols (4-byte big-endian count).
+        let symtab: &[u8] = &0u32.to_be_bytes();
+        let mut header = [b' '; 60];
+        header[..1].copy_from_slice(b"/");
+        let size_field = symtab.len().to_string();
+        header[48..48 + size_field.len()].copy_from_slice(size_field.as_bytes());
+        header[58] = b'`';
+        header[59] = b'\n';
+        out.extend_from_slice(&header);
+        out.extend_from_slice(symtab);
+        for (name, data) in members {
+            let mut header = [b' '; 60];
+            let name_field = format!("{name}/");
+            let name_len = name_field.len().min(16);
+            header[..name_len].copy_from_slice(&name_field.as_bytes()[..name_len]);
+            let size_field = data.len().to_string();
+            header[48..48 + size_field.len()].copy_from_slice(size_field.as_bytes());
+            header[58] = b'`';
+            header[59] = b'\n';
+            out.extend_from_slice(&header);
+            out.extend_from_slice(data);
+            if data.len() % 2 == 1 {
+                out.push(b'\n');
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn gnu_ar_archive_with_symbol_index_parses() {
+        // The `/` symbol-index member that `ar rcs` emits must not break
+        // member-wise parsing: goblin skips it, sections still merge.
+        let m1 = craft_shlib_elf(false, Some("liba.so.1"));
+        let m2 = craft_shlib_elf(false, None);
+        let archive = craft_gnu_ar_archive(&[("a.o", &m1), ("b.o", &m2)]);
+        let path = std::env::temp_dir().join(format!("rpmcrab-ar-gnu-{}", std::process::id()));
+        std::fs::write(&path, &archive).unwrap();
+
+        let info = ReadelfInfo::parse(path.to_str().unwrap(), "/usr/lib64/libfoo.a");
+        assert!(
+            info.failed.is_none(),
+            "GNU ar archive must parse member-wise: {:?}",
+            info.failed
+        );
+        let names: Vec<&str> = info
+            .sections
+            .iter()
+            .flatten()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(
+            names.iter().filter(|n| **n == ".shstrtab").count(),
+            2,
+            "both members parsed, symbol index skipped: {names:?}"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
     #[test]
     fn static_library_without_symtab() {
         let config = test_config();
@@ -3685,14 +3935,18 @@ description = "explicit priority string bypasses the system crypto policy"
             lines[0]
         );
 
-        // The same in a plain executable -> Warning.
+        // The same undefined symbols in a plain executable stay quiet:
+        // they resolve at load time, so the reference's `ldd -r` never
+        // reports them (this fired hundreds of bogus hits, e.g. on
+        // amberol's /usr/bin/amberol).
         let info = syn_info();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_dependency(&pkg, &pkgfile, &info, &ldd, &mut out);
         let results = out.results().to_vec();
-        let lines = lines_for(&results, "undefined-non-weak-symbol");
-        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
-        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "executable must stay quiet: {results:?}"
+        );
 
         // Not dynamically linked -> quiet.
         check.is_dynamically_linked = false;

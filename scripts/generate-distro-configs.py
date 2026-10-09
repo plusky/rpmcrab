@@ -29,14 +29,17 @@ Usage:
 
 import argparse
 import difflib
+import hashlib
 import json
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import urllib.error
+import http.client
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -164,6 +167,13 @@ PRUNE_SCOPED = {
 # so the vendored config always matches reality. A package that reappears is
 # kept and logged — reintroduced software gets a fresh audit, never a silent
 # free pass on a stale stanza.
+# Entries name binary packages: that is the namespace whitelist `package =`
+# entries match against at lint time. Presence is checked per flavor (see
+# package_present()): via the OBS source-package API for openSUSE:Factory,
+# via the published Leap 16.0 binary repodata for the slfo flavor. An entry
+# whose source package has a different name would wrongly prune on the Factory
+# side, so keep entries to packages where both names agree. (All entries
+# below were verified absent in both namespaces for the flavor they prune.)
 PRUNE_PACKAGES = {
     # package: reason
     "snapd": "removed from Factory (bsc#1256175, bsc#1248682, bsc#1261739)",
@@ -181,6 +191,36 @@ PRUNE_PACKAGES = {
     "scmon": "removed from Factory; legacy: not audited",
     "pam_csync": "removed from Factory; legacy: not audited",
     "pcfclock": "removed from Factory; not in SLE 16",
+    "rpmlint-integration-test": "rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap",
+    # Dead in Leap 16.0 (absent as source package and as binaries, verified
+    # 2026-10-08 against openSUSE:Leap:16.0): pruned from the slfo flavor
+    # only; kept for the opensuse flavor where the package still ships.
+    "pulseaudio": "not shipped in Leap 16.0 (PipeWire-only)",
+    "pommed": "not shipped in Leap 16.0; legacy: not audited",
+    "neard": "not shipped in Leap 16.0",
+    "xpra": "not shipped in Leap 16.0",
+    "iwd": "not shipped in Leap 16.0",
+    "udev-mini": "not shipped in Leap 16.0 (no -mini variants built)",
+    "low-memory-monitor": "not shipped in Leap 16.0",
+    "transactional-update-notifier": "not shipped in Leap 16.0",
+    "libgpiod-manager": "not shipped in Leap 16.0",
+    "pam_ccreds": "not shipped in Leap 16.0; legacy: not audited",
+    "nss-pam-ldapd": "not shipped in Leap 16.0; legacy: not audited",
+    "pam_passwdqc": "not shipped in Leap 16.0; legacy: not audited",
+    "pam_mktemp": "not shipped in Leap 16.0; legacy: not audited",
+    "pam_chroot": "not shipped in Leap 16.0; legacy: not audited",
+    "pam_yubico": "not shipped in Leap 16.0",
+    "pam_saslauthd": "not shipped in Leap 16.0",
+    "libcgroup-pam": "not shipped in Leap 16.0",
+    "libcgroup-tools": "not shipped in Leap 16.0",
+    "gnome-branding-Aeon": "not shipped in Leap 16.0 (Tumbleweed-only desktop branding)",
+    "plasma-branding-Kalpa": "not shipped in Leap 16.0 (Tumbleweed-only desktop branding)",
+    "monitoring-plugins-smart": "not shipped in Leap 16.0",
+    "cscreen": "not shipped in Leap 16.0",
+    "leafnode": "not shipped in Leap 16.0",
+    "soapy-remote-server": "not shipped in Leap 16.0",
+    "rubygem-passenger": "not shipped in Leap 16.0",
+    "parallel-printer-support": "not shipped in Leap 16.0",
 }
 
 # Stale pie-executables paths: each entry is (owning package, kind, reason),
@@ -190,11 +230,17 @@ PRUNE_PACKAGES = {
 # package is checked live at generation time: a reintroduced "removed"
 # package - or a vanished "moved" package, whose relocation evidence is then
 # stale - keeps the path and logs loudly, so the drift check fails for a
-# fresh audit instead of the path staying silently pruned.
+# fresh audit instead of the path staying silently pruned. "moved" entries are
+# additionally checked at filelist level at generation time: an old path that
+# still ships in the current Factory filelist is kept with a loud log, and
+# the Leap 16.0 filelists are checked the same way as the SLES proxy (Leap
+# 16 is SLES-based and public; SLE sources sit behind Customer Center auth).
 # Verified 2026-10-07 against the openSUSE:Factory filelists (97 paths shipped
-# by no TW package). Pruning is scoped to the opensuse flavor: the evidence
-# is Factory-only, and the SLE 16 codebase behind the slfo flavor has no
-# public per-package query to verify against.
+# by no TW package), and 2026-10-08 against the Leap 16.0 binary repodata
+# for the slfo flavor (same upstream removals apply). Pruning runs per-flavor:
+# each entry's owning package is checked live against the flavor's own
+# codebase at generation time (OBS source API for openSUSE:Factory, published
+# binary repodata for Leap 16.0 — see package_present()).
 PRUNE_PIE_PATHS = {
     "/usr/bin/achfile": ("netatalk", "removed", "netatalk removed from Factory"),
     "/usr/bin/adv1tov2": ("netatalk", "removed", "netatalk removed from Factory"),
@@ -224,6 +270,7 @@ PRUNE_PIE_PATHS = {
     "/usr/bin/rsh": ("rsh", "removed", "rsh removed from Factory"),
     "/usr/bin/showppd": ("cups", "moved", "cups dropped the 1.x tools"),
     "/usr/bin/testprns": ("cups", "moved", "cups dropped the 1.x tools"),
+    "/usr/bin/uniconv": ("uniconv", "removed", "uniconv removed from Factory and Leap 16.0"),
     "/usr/lib/mit/bin/gss-client": ("krb5", "moved", "krb5 installs to /usr/bin, not /usr/lib/mit"),
     "/usr/lib/mit/bin/kdestroy": ("krb5", "moved", "krb5 installs to /usr/bin, not /usr/lib/mit"),
     "/usr/lib/mit/bin/kinit": ("krb5", "moved", "krb5 installs to /usr/bin, not /usr/lib/mit"),
@@ -466,26 +513,307 @@ FLAVOR_PROJECTS = {
 }
 
 
-def package_present(pkg, flavor):
-    """True if the package exists in the flavor's distro codebase."""
-    key = (pkg, flavor)
-    if key not in _package_presence_cache:
-        present = False
-        for project in FLAVOR_PROJECTS[flavor]:
-            url = f"https://api.opensuse.org/public/source/{project}/{pkg}"
-            req = urllib.request.Request(
+# The Leap 16.0 codebase behind the slfo flavor: its SLE-derived sources are
+# not visible via the OBS source API (openSUSE:Leap:16.0 only hosts
+# Leap-specific sources — e.g. krb5, sudo, samba 404 there while shipping in
+# the distro), so package presence for slfo is checked against the published
+# binary repodata instead. Whitelist `package =` entries match the binary
+# package name being linted, so binary presence is the right signal there.
+LEAP16_OSS_REPOMD_URL = (
+    "https://download.opensuse.org/distribution/leap/16.0/repo/oss"
+    "/repodata/repomd.xml"
+)
+_leap16_binary_names_cache = None
+
+
+def _scan_binary_names(stdout):
+    """Collect <name> tag values from a zstd -dc pipe.
+
+    A tag may span chunk boundaries no matter how long it is: the tail is
+    kept from the last tag start instead of a fixed byte count.
+    """
+    name_re = re.compile(rb"<name>([^<]*)</name>")
+    names = set()
+    buf = b""
+    while True:
+        chunk = stdout.read(1 << 16)
+        data = buf + chunk if chunk else buf
+        end = len(data)
+        for match in name_re.finditer(data):
+            if chunk and match.end() == end:
+                # Tag may be split across chunks; re-scan it with the
+                # next chunk (kept in the tail).
+                continue
+            names.add(match.group(1).decode("utf-8", "replace"))
+        if not chunk:
+            break
+        idx = data.rfind(b"<name")
+        if idx < 0:
+            # Chunk split landed inside the opening tag itself.
+            idx = data.rfind(b"<")
+        buf = data[idx:] if idx >= 0 else b""
+    return names
+
+
+def _leap16_binary_names():
+    """Binary package names shipped in Leap 16.0 (oss), fetched once, cached."""
+    global _leap16_binary_names_cache
+    if _leap16_binary_names_cache is None:
+        zstd = shutil.which("zstd")
+        if zstd is None:
+            raise RuntimeError(
+                "the 'zstd' CLI is required to read the Leap 16.0 repodata "
+                "(install zstd and re-run)"
+            )
+
+        def _get(url):
+            return urllib.request.Request(
                 url, headers={"User-Agent": "rpmcrab-distro-config-sync"}
             )
+
+        with urllib.request.urlopen(_get(LEAP16_OSS_REPOMD_URL), timeout=60) as resp:
+            repomd = resp.read().decode("utf-8")
+        m = re.search(
+            r'<data type="primary">.*?<checksum type="sha512">([0-9a-f]+)</checksum>'
+            r'.*?<location href="([^"]*primary\.xml\.[^"]*)"',
+            repomd,
+            re.DOTALL,
+        )
+        if not m:
+            raise RuntimeError(
+                "primary.xml location/sha512 not found in Leap 16.0 repomd.xml"
+            )
+        expected_sha512, primary_url = m.group(1), (
+            "https://download.opensuse.org/distribution/leap/16.0/repo/oss/"
+            + m.group(2)
+        )
+        names = set()
+        # A 58 MB download: keep it out of TMPDIR, which is a small tmpfs on
+        # some build machines.
+        with tempfile.NamedTemporaryFile(suffix=".xml.zst", dir=".") as tmp:
+            with urllib.request.urlopen(_get(primary_url), timeout=600) as resp:
+                shutil.copyfileobj(resp, tmp)
+            tmp.flush()
+            with open(tmp.name, "rb") as f:
+                actual_sha512 = hashlib.sha512(f.read()).hexdigest()
+            if actual_sha512 != expected_sha512:
+                raise RuntimeError(
+                    f"sha512 mismatch on {primary_url} (truncated download?)"
+                )
+            proc = subprocess.Popen([zstd, "-dc", tmp.name], stdout=subprocess.PIPE)
             try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    if resp.status == 200:
-                        present = True
-                        break
-            except urllib.error.HTTPError as e:
-                if e.code != 404:
-                    raise
+                names = _scan_binary_names(proc.stdout)
+            finally:
+                proc.stdout.close()
+                proc.wait()
+            if proc.returncode != 0:
+                raise RuntimeError(f"zstd -dc failed on {primary_url}")
+        _leap16_binary_names_cache = names
+    return _leap16_binary_names_cache
+
+
+def package_present(pkg, flavor):
+    """True if the package exists in the flavor's distro codebase.
+
+    For the opensuse flavor this queries the OBS source-package API
+    (openSUSE:Factory hosts all its sources). For the slfo flavor the
+    SLE-derived sources are not visible via the source API, so presence is
+    checked against the binary names in the published Leap 16.0 repodata.
+    """
+    key = (pkg, flavor)
+    if key not in _package_presence_cache:
+        if flavor == "slfo":
+            present = pkg in _leap16_binary_names()
+        else:
+            present = False
+            for project in FLAVOR_PROJECTS[flavor]:
+                url = f"https://api.opensuse.org/public/source/{project}/{pkg}"
+                req = urllib.request.Request(
+                    url, headers={"User-Agent": "rpmcrab-distro-config-sync"}
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        if resp.status == 200:
+                            present = True
+                            break
+                except urllib.error.HTTPError as e:
+                    if e.code != 404:
+                        raise
         _package_presence_cache[key] = present
     return _package_presence_cache[key]
+
+
+_filelist_cache_tw = {}
+_filelist_cache_leap = {}
+
+# Attempts for the repomd.xml fetch before giving up.
+_REPOMD_ATTEMPTS = 4
+# Backoff sleeps between repomd fetch attempts (seconds); no sleep after
+# the final attempt.
+_REPOMD_BACKOFF = [15, 30, 45]
+
+
+def _filelist_hits(paths, repomd_url, repo_base, cache, label):
+    """Subset of `paths` still shipped by some package in a repo's filelists.
+
+    Streams the repo's oss filelists through one ``curl | zstd -dc | grep``
+    pass, matching ``>path<`` against ``<file>path</file>`` entries so
+    only exact paths hit. Results are cached per path for the run.
+    Raises on download/decompression/grep failure: an unverifiable guard
+    must fail loudly, never prune silently.
+    """
+    paths = sorted(set(paths))
+    missing = [p for p in paths if p not in cache]
+    if missing:
+        req = urllib.request.Request(
+            repomd_url, headers={"User-Agent": "rpmcrab-distro-config-sync"}
+        )
+        # Transient mirror failures (5xx, network errors, timeouts) are
+        # retried: a single failed fetch must not fail the whole run when
+        # the mirror is briefly down. The backoff sleeps only between
+        # attempts - the last attempt raises immediately instead of
+        # sleeping pointlessly before the error.
+        repomd = None
+        last_err = None
+        for attempt in range(_REPOMD_ATTEMPTS):
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    repomd = resp.read().decode("utf-8")
+                break
+            except urllib.error.HTTPError as e:
+                if e.code < 500:
+                    raise
+                last_err = e
+            except (
+                urllib.error.URLError,
+                TimeoutError,
+                http.client.IncompleteRead,
+                ConnectionResetError,
+            ) as e:
+                last_err = e
+            if attempt + 1 < _REPOMD_ATTEMPTS:
+                time.sleep(_REPOMD_BACKOFF[attempt])
+        if repomd is None:
+            raise RuntimeError(
+                "repomd.xml fetch failed for %s after retries: %s" % (label, last_err)
+            )
+        m = re.search(
+            r'<data type="filelists">.*?<location href="([^"]+)"', repomd, re.S
+        )
+        if not m:
+            raise RuntimeError("filelists entry not found in %s repomd.xml" % label)
+        fl_url = repo_base + m.group(1)
+        args = []
+        for q in missing:
+            args += ["-e", ">%s<" % q]
+        # Every stage must succeed: checking only grep's return code lets a
+        # failed download prune everything this guard verifies. -f makes
+        # HTTP errors catchable; --show-error keeps the message (captured
+        # below) diagnosable. The speed-limit/speed-time pair stalls out a
+        # hung mirror instead of hanging the job: a transfer under 50KB/s
+        # for 60s aborts and retries, while a merely slow mirror is allowed
+        # to finish - a hard --max-time would kill legitimate slow
+        # downloads (100KB/s observed from a mirror).
+        curl = subprocess.Popen(
+            [
+                "curl",
+                "-fsSL",
+                "--show-error",
+                "--connect-timeout",
+                "60",
+                "--retry",
+                "3",
+                "--retry-all-errors",
+                "--speed-limit",
+                "50000",
+                "--speed-time",
+                "60",
+                fl_url,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        zstd = subprocess.Popen(
+            ["zstd", "-dc"],
+            stdin=curl.stdout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        curl.stdout.close()
+        grep = subprocess.run(
+            ["grep", "-F", "-o"] + args,
+            stdin=zstd.stdout,
+            capture_output=True,
+            text=True,
+        )
+        zstd.stdout.close()
+        curl_rc = curl.wait()
+        zstd_rc = zstd.wait()
+        curl_err = curl.stderr.read().decode("utf-8", "replace").strip()
+        zstd_err = zstd.stderr.read().decode("utf-8", "replace").strip()
+        if curl_rc != 0:
+            raise RuntimeError(
+                "filelist download failed (curl rc=%d) for %s: %s"
+                % (curl_rc, label, curl_err[:300])
+            )
+        if zstd_rc != 0:
+            raise RuntimeError(
+                "filelist decompression failed (zstd rc=%d) for %s: %s"
+                % (zstd_rc, label, zstd_err[:300])
+            )
+        if grep.returncode not in (0, 1):
+            raise RuntimeError(
+                "filelist grep failed (rc=%d): %s"
+                % (grep.returncode, grep.stderr[:200])
+            )
+        hits = {
+            line[1:-1]
+            for line in grep.stdout.splitlines()
+            if line.startswith(">") and line.endswith("<")
+        }
+        for q in missing:
+            cache[q] = q in hits
+    return {p for p in paths if cache[p]}
+
+
+def factory_filelist_hits(paths):
+    """Subset of `paths` still shipped by some openSUSE:Factory package.
+
+    Streams the Tumbleweed oss filelists - the same source the original
+    pie-path verification used.
+    """
+    return _filelist_hits(
+        paths,
+        "https://download.opensuse.org/tumbleweed/repo/oss/repodata/repomd.xml",
+        "https://download.opensuse.org/tumbleweed/repo/oss/",
+        _filelist_cache_tw,
+        "Tumbleweed",
+    )
+
+
+def leap_filelist_hits(paths):
+    """Subset of `paths` still shipped by some Leap 16.0 package.
+
+    Leap 16 is SLES-based, so its public filelists serve as the proxy
+    for the SLE 16 codebase behind the slfo flavor, whose own sources
+    sit behind SUSE Customer Center auth.
+    """
+    return _filelist_hits(
+        paths,
+        "https://download.opensuse.org/distribution/leap/16.0/repo/oss/repodata/repomd.xml",
+        "https://download.opensuse.org/distribution/leap/16.0/repo/oss/",
+        _filelist_cache_leap,
+        "Leap 16.0",
+    )
+
+
+# Filelist evidence per flavor: each flavor consults only its own distro
+# codebase. A flavor without an entry fails loudly instead of silently
+# misapplying another flavor's evidence.
+FLAVOR_FILELIST_SOURCES = {
+    "opensuse": (("Factory", factory_filelist_hits),),
+    "slfo": (("Leap 16.0 (SLES proxy)", leap_filelist_hits),),
+}
 
 
 _package_re = re.compile(r'^package\s*=\s*"([^"]+)"', re.MULTILINE)
@@ -559,28 +887,61 @@ def prune_pie_paths(text, pruned_log, flavor):
     package - or a vanished "moved" package, whose relocation evidence is
     then stale - keeps the path and logs loudly, so the drift check fails
     for a fresh audit instead of the path staying silently pruned.
+
+    "moved" entries get a second, filelist-level check against the
+    flavor's own distro codebase (FLAVOR_FILELIST_SOURCES): the old path
+    must not still be shipped there - the opensuse flavor checks the
+    Tumbleweed filelists, slfo checks Leap 16.0 (SLES proxy: Leap 16 is
+    SLES-based and its filelists are public, while SLE sources sit behind
+    Customer Center auth). A reappearing old path is kept with a loud log
+    for the same reason.
     """
-    out = []
+    entries = []
+    moved_paths = []
     for line in text.splitlines(keepends=True):
         m = re.fullmatch(r'"([^"]+)",?', line.strip())
         norm = _usrmerge_norm(m.group(1)) if m else None
         if m and norm in PRUNE_PIE_PATHS:
             pkg, kind, reason = PRUNE_PIE_PATHS[norm]
-            present = package_present(pkg, flavor)
-            if (kind == "removed" and present) or (kind == "moved" and not present):
-                pruned_log.append(
-                    "pie-executables: KEPT stale path %r - owning package %r "
-                    "changed state in the flavor's distro (%s), needs a fresh "
-                    "audit" % (m.group(1), pkg, reason)
-                )
-                out.append(line)
-                continue
-            pruned_log.append(
-                "pie-executables: dropped stale path %r (%s)"
-                % (m.group(1), reason)
-            )
+            entries.append((line, m.group(1), norm, pkg, kind, reason))
+            if kind == "moved":
+                moved_paths.append(norm)
+        else:
+            entries.append((line, None, None, None, None, None))
+    shipped = {}
+    if flavor not in FLAVOR_FILELIST_SOURCES:
+        raise RuntimeError(
+            "no filelist source configured for flavor %r "
+            "(known flavors: %s)"
+            % (flavor, ", ".join(sorted(FLAVOR_FILELIST_SOURCES)))
+        )
+    for label, source in FLAVOR_FILELIST_SOURCES[flavor]:
+        for path in source(moved_paths):
+            shipped.setdefault(path, label)
+    out = []
+    for line, raw, norm, pkg, kind, reason in entries:
+        if raw is None:
+            out.append(line)
             continue
-        out.append(line)
+        present = package_present(pkg, flavor)
+        if (kind == "removed" and present) or (kind == "moved" and not present):
+            pruned_log.append(
+                "pie-executables: KEPT stale path %r - owning package %r "
+                "changed state in the flavor's distro (%s), needs a fresh "
+                "audit" % (raw, pkg, reason)
+            )
+            out.append(line)
+            continue
+        if kind == "moved" and norm in shipped:
+            pruned_log.append(
+                "pie-executables: KEPT stale path %r - old path still shipped "
+                "in %s, needs a fresh audit" % (raw, shipped[norm])
+            )
+            out.append(line)
+            continue
+        pruned_log.append(
+            "pie-executables: dropped stale path %r (%s)" % (raw, reason)
+        )
     return "".join(out)
 
 
@@ -609,10 +970,11 @@ def generate(ref_dir=None, pins=None):
             assert_no_flavor_key(flavor, filename, text)
             text = prune_stale_filters(text, known, pruned_log)
             text = prune_stale_packages(text, pkg_pruned_log, flavor)
-            if filename == "pie-executables.toml" and flavor == "opensuse":
-                # Factory-only evidence (see PRUNE_PIE_PATHS): the SLE 16
-                # codebase behind the slfo flavor has no public
-                # per-package query, so slfo keeps the upstream entries.
+            if filename == "pie-executables.toml":
+                # Per-flavor evidence (see PRUNE_PIE_PATHS): the owning
+                # package is checked live against the flavor's own codebase
+                # (openSUSE:Factory / openSUSE:Leap:16.0, both publicly
+                # queryable), so both flavors prune their stale paths.
                 text = prune_pie_paths(text, pie_pruned_log, flavor)
             data["files"][filename] = text
 
@@ -657,9 +1019,8 @@ def generate(ref_dir=None, pins=None):
             provenance.append(f"#   {entry}")
     if pie_pruned_log:
         provenance.append("#")
-        provenance.append(
-            "# Pruned pie-executables paths (shipped by no Tumbleweed package):"
-        )
+        provenance.append("# Pruned pie-executables paths (shipped by no package in the")
+        provenance.append("# flavor's distro codebase):")
         for entry in pie_pruned_log:
             provenance.append(f"#   {entry}")
     if deduped:

@@ -16,6 +16,7 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
+use crate::pkg::dep::RPMSENSE_FIND_REQUIRES;
 use crate::pkg::pkgfile::{PkgFile, is_reg};
 
 /// Suffixes that must never be executable in documentation.
@@ -94,8 +95,9 @@ impl DocCheck {
 
     /// Doc files that introduce dependencies not needed by non-doc files.
     /// Returns `(doc_file, dep)` pairs. `requires_of` maps filename to its
-    /// requirement names; `core_provides` are names the package itself
-    /// provides (including all file paths).
+    /// requirement names; `core_provides` are the names that count as core:
+    /// provides, all file paths, and explicit package-level requires
+    /// (the reference get_core_reqs seeding).
     fn doc_file_dependencies(
         doc_files: &[&str],
         all_files: &[&str],
@@ -182,6 +184,14 @@ impl Check for DocCheck {
             pkg.provides.iter().map(|d| d.name.clone()).collect();
         for f in &all_refs {
             core_provides.insert(f.to_string());
+        }
+        // Explicit package-level Requires also cover doc-file deps;
+        // skip find-requires-generated entries, like the reference
+        // get_core_reqs.
+        for d in pkg.requires.iter().chain(&pkg.prereq) {
+            if d.flags & RPMSENSE_FIND_REQUIRES == 0 {
+                core_provides.insert(d.name.clone());
+            }
         }
         for (f, dep) in Self::doc_file_dependencies(
             &doc_refs,
@@ -383,6 +393,102 @@ mod tests {
         };
         let mut check = DocCheck::new(&config);
         assert!(run(&config, &mut check, &huge_docs_pkg("foo-javadoc")).is_empty());
+    }
+
+    /// NsCDE-doc shape: every file is documentation, and one doc file
+    /// carries a per-file require (`/bin/ksh`) that no non-doc file and no
+    /// package provide covers.
+    fn doc_dep_pkg(cover_dep: bool) -> Pkg {
+        use crate::pkg::dep::parse_dep_infos;
+        let mut pkg = fixture_pkg();
+        pkg.name = "nscde".to_string();
+        pkg.arch = "noarch".to_string();
+        let mut nitro = big_doc_file("/usr/share/doc/NsCDE-doc/nitrowrapper");
+        nitro.size = Some(1024);
+        nitro.requires = parse_dep_infos("/bin/ksh");
+        let mut readme = big_doc_file("/usr/share/doc/NsCDE-doc/README");
+        readme.size = Some(1024);
+        let nitro_name = nitro.name.clone();
+        let readme_name = readme.name.clone();
+        if cover_dep {
+            // A non-doc file with the same require covers the dep.
+            let mut tool = big_doc_file("/usr/bin/nitrowrapper");
+            tool.size = Some(1024);
+            tool.requires = parse_dep_infos("/bin/ksh");
+            pkg.files = vec![nitro, readme, tool];
+            pkg.doc_files = vec![nitro_name, readme_name];
+        } else {
+            pkg.files = vec![nitro, readme];
+            pkg.doc_files = vec![nitro_name, readme_name];
+        }
+        pkg
+    }
+
+    #[test]
+    fn doc_file_with_unique_per_file_require_is_flagged() {
+        let config = Config::default();
+        let mut check = DocCheck::new(&config);
+        let results = run(&config, &mut check, &doc_dep_pkg(false));
+        assert_eq!(results.len(), 1, "expected one finding, got {results:?}");
+        assert_eq!(results[0].0, "doc-file-dependency");
+        assert!(
+            results[0]
+                .1
+                .contains("/usr/share/doc/NsCDE-doc/nitrowrapper"),
+            "line: {}",
+            results[0].1
+        );
+        assert!(results[0].1.contains("/bin/ksh"), "line: {}", results[0].1);
+    }
+
+    #[test]
+    fn doc_file_require_covered_by_non_doc_file_is_quiet() {
+        let config = Config::default();
+        let mut check = DocCheck::new(&config);
+        let results = run(&config, &mut check, &doc_dep_pkg(true));
+        assert!(results.is_empty(), "expected no findings, got {results:?}");
+    }
+
+    /// A doc file whose per-file dep is also an explicit package Requires
+    /// stays quiet: the reference seeds such requires into core_reqs
+    /// (get_core_reqs), so the port must not fire doc-file-dependency.
+    /// Adversarial twin: a find-requires-generated package require does
+    /// NOT cover the dep, so the finding still fires.
+    fn doc_dep_pkg_with_package_require(flags: u32) -> Pkg {
+        use crate::pkg::dep::DepInfo;
+        let mut pkg = doc_dep_pkg(false);
+        // The seeding chains requires and prereq, so cover both paths.
+        let dep = || DepInfo {
+            name: "/bin/ksh".to_string(),
+            flags,
+            epoch: None,
+            version: None,
+            release: None,
+        };
+        pkg.requires.push(dep());
+        pkg.prereq.push(dep());
+        pkg
+    }
+
+    #[test]
+    fn doc_file_require_covered_by_explicit_package_require_is_quiet() {
+        let config = Config::default();
+        let mut check = DocCheck::new(&config);
+        let results = run(&config, &mut check, &doc_dep_pkg_with_package_require(0));
+        assert!(results.is_empty(), "expected no findings, got {results:?}");
+    }
+
+    #[test]
+    fn doc_file_require_covered_only_by_find_requires_require_still_fires() {
+        let config = Config::default();
+        let mut check = DocCheck::new(&config);
+        let results = run(
+            &config,
+            &mut check,
+            &doc_dep_pkg_with_package_require(RPMSENSE_FIND_REQUIRES),
+        );
+        assert_eq!(results.len(), 1, "expected one finding, got {results:?}");
+        assert_eq!(results[0].0, "doc-file-dependency");
     }
 
     #[test]

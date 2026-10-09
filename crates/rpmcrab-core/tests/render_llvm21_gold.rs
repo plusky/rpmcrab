@@ -1,12 +1,12 @@
 //! Integration test: a full `Lint` run over a synthetic check set must produce
-//! byte-identical output to a real openSUSE rpmlint run.
+//! the frozen report wire format (header, sorted findings, footer, exit code).
 //!
-//! This is the M1 thesis — the report pipeline (header, sorted findings,
-//! footer, exit code) reproduces the frozen wire format. The expected block
-//! below is a hand-transcribed rendering of the captured
+//! The expected block below is a hand-transcribed rendering of the captured
 //! `tests/parity/cases/llvm21-gold/expected/stdout`, with the wall-clock
 //! duration rendered as a fixed `0.1`; it is verified byte-for-byte against
-//! that capture.
+//! that capture, except for the session banner: the banner identifies rpmcrab
+//! itself (`rpmcrab: <crate version>`) rather than the emulated reference
+//! (`docs/DESIGN.md` §4.5, ledgered in `tests/parity/divergences.toml`).
 //!
 //! The package is a real one from the corpus driven through the same
 //! `check_batch` loop the binary uses; the checks themselves are synthetic, so
@@ -89,11 +89,13 @@ fn reproduces_llvm21_gold_byte_for_byte() {
     let mut lint = Lint::new(config, make_checks(), Color::for_tty(false), 80).unwrap();
     lint.check_batch(vec![Task::File(rpm)], 1, &make_checks, true);
     // version, header arg count, no -t, no -T, duration.
-    let out = lint.render_report("text", "rpmlint", "2.10.0", 1, false, 0.1);
+    let version = env!("CARGO_PKG_VERSION");
+    let out = lint.render_report("text", "rpmcrab", version, 1, false, 0.1);
 
-    let expected = "\
-============================ rpmlint session starts ============================
-rpmlint: 2.10.0
+    let expected = format!(
+        "\
+============================ rpmcrab session starts ============================
+rpmcrab: {version}
 configuration:
     <VENV>/lib64/python3.13/site-packages/rpmlint/configdefaults.toml
     <XDG>/rpmlint/cron-whitelist.toml
@@ -119,7 +121,8 @@ checks: 43, packages: 1
 llvm21-gold.aarch64: E: suse-zypp-packageand packageand(clang21:binutils)
 llvm21-gold.aarch64: E: suse-zypp-packageand packageand(clang21:binutils-gold)
 llvm21-gold.aarch64: W: no-soname /usr/lib64/LLVMgold.so
- 1 packages and 0 specfiles checked; 2 errors, 1 warnings, 1 filtered, 2 badness; has taken 0.1 s \n";
+ 1 packages and 0 specfiles checked; 2 errors, 1 warnings, 1 filtered, 2 badness; has taken 0.1 s \n",
+    );
 
     assert_eq!(out, expected);
     // openSUSE forces permissive, so two errors still exit 0 (score 2 < 999).

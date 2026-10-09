@@ -1,0 +1,11 @@
+# Provenance for the tags-group-devel fixture RPM.
+# Rebuild a byte-identical copy with:
+#   bash tests/parity/pkg/inputs/build-tags-group-devel.sh
+# Verify with:
+#   bash tests/parity/pkg/inputs/build-tags-group-devel.sh --check
+image: registry.opensuse.org/opensuse/leap:16.0@sha256:cd9aac11608afabc96a10074619cf2a65ccf60ff4b72d09d4e4e125af409035d
+rpm-build: 4.20.1-160000.3.1
+libfaketime: 0.9.10-bp160.1.10
+build_epoch: 1791216052
+build_hostname: fixture-build
+sha256: 6379fdd33f48ec68ac2c4527185569467e85613927e269c98cbba08b9e833180
