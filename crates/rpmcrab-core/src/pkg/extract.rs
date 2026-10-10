@@ -423,7 +423,7 @@ impl<'a> Extractor<'a> {
                 }
                 skip_data(r, e.size)?;
                 self.record(path, e.mode & 0o7777, Some(e.mtime), true);
-                self.seen.insert(rel.clone());
+                self.seen.insert(rel);
             }
             S_IFREG => {
                 if !self.ensure_parent(&path)? || is_existing_dir(&path) {
@@ -440,7 +440,7 @@ impl<'a> Extractor<'a> {
                     skip_pad(r, e.size)?;
                 }
                 self.record(path, e.mode & 0o7777, Some(e.mtime), false);
-                self.seen.insert(rel.clone());
+                self.seen.insert(rel);
             }
             S_IFLNK => {
                 if !self.ensure_parent(&path)? || is_existing_dir(&path) {
@@ -471,10 +471,11 @@ impl<'a> Extractor<'a> {
                 if !is_duplicate
                     && fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_symlink())
                 {
+                    self.log_skip_collision(e);
                     return Ok(());
                 }
                 // Guard passed: record the path as materialized.
-                self.seen.insert(rel.clone());
+                self.seen.insert(rel);
                 let _ = fs::remove_file(&path);
                 symlink(OsStr::from_bytes(&target), &path).map_err(|e| io_error(&path, e))?;
                 // Symlink modes/mtimes are OS-determined; tar leaves them too.
@@ -490,7 +491,7 @@ impl<'a> Extractor<'a> {
                 // No mtime: opening a fifo for writing (as set_modified does)
                 // blocks until a reader appears.
                 self.record(path, e.mode & 0o7777, None, false);
-                self.seen.insert(rel.clone());
+                self.seen.insert(rel);
             }
             S_IFCHR | S_IFBLK => {
                 // Device nodes are skipped: creating them needs privilege the
@@ -1141,30 +1142,20 @@ mod tests {
     fn symlink_entry_does_not_clobber_existing_file() {
         let dir = tempfile::tempdir().unwrap();
         // Pre-create the file, as if an earlier payload entry materialized it.
+        // Seed `seen` with the different-case rel the file entry used, so the
+        // test distinguishes the case-collision from an exact duplicate.
         let path = dir.path().join("usr/bin/tool");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"binary\n").unwrap();
 
-        let mut ex = Extractor {
-            dir: dir.path(),
-            hardlinks: HashMap::new(),
-            fixups: Vec::new(),
-            fixup_index: HashMap::new(),
-            seen: HashSet::new(),
-        };
+        let mut ex = extractor_for(dir.path());
+        ex.seen.insert(PathBuf::from("usr/bin/TOOL"));
+
         // Symlink entry for the colliding on-disk path.
         let target = b"tool";
-        let entry = CpioEntry {
-            ino: 2,
-            mode: S_IFLNK | 0o777,
-            nlink: 1,
-            mtime: 0,
-            size: target.len() as u64,
-            dev_major: 0,
-            dev_minor: 0,
-            name: b"usr/bin/tool".to_vec(),
-        };
-        let mut data = &target[..];
+        let entry = cpio_entry(b"usr/bin/tool", S_IFLNK | 0o777, target.len() as u64);
+        let raw = padded(target);
+        let mut data = &raw[..];
         ex.materialize(&mut data, &entry).unwrap();
 
         // The file survives; no symlink loop is created.
@@ -1184,35 +1175,25 @@ mod tests {
     fn duplicate_skipped_symlink_does_not_bypass_guard() {
         let dir = tempfile::tempdir().unwrap();
         // Pre-create the file, as if an earlier payload entry materialized it.
+        // Seed `seen` with the different-case rel the file entry used.
         let path = dir.path().join("usr/bin/tool");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"binary\n").unwrap();
 
-        let mut ex = Extractor {
-            dir: dir.path(),
-            hardlinks: HashMap::new(),
-            fixups: Vec::new(),
-            fixup_index: HashMap::new(),
-            seen: HashSet::new(),
-        };
+        let mut ex = extractor_for(dir.path());
+        ex.seen.insert(PathBuf::from("usr/bin/TOOL"));
+
         // Symlink entry for the colliding on-disk path.
         let target = b"tool";
-        let entry = CpioEntry {
-            ino: 2,
-            mode: S_IFLNK | 0o777,
-            nlink: 1,
-            mtime: 0,
-            size: target.len() as u64,
-            dev_major: 0,
-            dev_minor: 0,
-            name: b"usr/bin/tool".to_vec(),
-        };
+        let entry = cpio_entry(b"usr/bin/tool", S_IFLNK | 0o777, target.len() as u64);
         // First entry: guard fires (path exists as non-symlink), skipped.
-        let mut data = &target[..];
+        let raw = padded(target);
+        let mut data = &raw[..];
         ex.materialize(&mut data, &entry).unwrap();
         // Second entry: exact duplicate. Must hit the guard again, not
         // bypass it via is_duplicate=true.
-        let mut data = &target[..];
+        let raw = padded(target);
+        let mut data = &raw[..];
         ex.materialize(&mut data, &entry).unwrap();
 
         // The file survives; no symlink loop is created.
@@ -1222,6 +1203,40 @@ mod tests {
                 .unwrap()
                 .file_type()
                 .is_symlink()
+        );
+    }
+
+    /// Companion to the guard tests: an exact-duplicate symlink entry for a
+    /// path the extractor itself materialized is an intentional replace
+    /// (tar semantics) and still wins.
+    #[test]
+    fn exact_duplicate_symlink_still_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ex = extractor_for(dir.path());
+
+        let target1 = b"first";
+        let entry = cpio_entry(b"usr/bin/link", S_IFLNK | 0o777, target1.len() as u64);
+        let raw = padded(target1);
+        let mut data = &raw[..];
+        ex.materialize(&mut data, &entry).unwrap();
+
+        let path = dir.path().join("usr/bin/link");
+        assert_eq!(
+            std::fs::read_link(&path).unwrap().as_os_str().as_bytes(),
+            b"first"
+        );
+
+        // Exact duplicate with a new target: replaces the link.
+        let target2 = b"second";
+        let entry = cpio_entry(b"usr/bin/link", S_IFLNK | 0o777, target2.len() as u64);
+        let raw = padded(target2);
+        let mut data = &raw[..];
+        ex.materialize(&mut data, &entry).unwrap();
+
+        assert_eq!(
+            std::fs::read_link(&path).unwrap().as_os_str().as_bytes(),
+            b"second",
+            "exact-duplicate symlink must replace the previous link"
         );
     }
 
