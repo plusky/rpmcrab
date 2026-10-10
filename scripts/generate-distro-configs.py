@@ -678,12 +678,44 @@ _REPOMD_BACKOFF = [15, 30, 45]
 # filelist download fails. Each cycle re-fetches repomd.xml, so a fresh
 # MirrorBrain redirect can land on a healthy mirror when the previous one
 # was stale (its repomd referenced filelists not yet synced to it).
-# download.opensuse.org itself only ever redirects, so there is no direct
-# origin to fall back to - rotating the mirror pick is the fallback.
 _FILELIST_CYCLES = 3
 # Backoff sleeps between filelist cycles (seconds); no sleep after the
 # final cycle.
 _FILELIST_BACKOFF = [30, 60]
+
+# Direct mirror used as a last resort when every MirrorBrain cycle fails:
+# retrying cannot help if each fresh redirect lands on the same stale
+# mirror. GWDG mirrors download.opensuse.org's path layout verbatim, so
+# the fallback is a pure prefix swap of both URLs.
+_DOWNLOAD_O_O = "https://download.opensuse.org/"
+_FALLBACK_MIRROR = "https://ftp.gwdg.de/pub/opensuse/"
+
+
+def _fallback_mirror_urls(repomd_url, repo_base):
+    """(repomd_url, repo_base) on the fallback mirror, or (None, None).
+
+    Only download.opensuse.org URLs have a known-good fallback layout;
+    anything else keeps the old raise-after-cycles behavior.
+    """
+    if not (repomd_url.startswith(_DOWNLOAD_O_O)
+            and repo_base.startswith(_DOWNLOAD_O_O)):
+        return None, None
+    return (
+        repomd_url.replace(_DOWNLOAD_O_O, _FALLBACK_MIRROR, 1),
+        repo_base.replace(_DOWNLOAD_O_O, _FALLBACK_MIRROR, 1),
+    )
+
+
+def _filelist_url(repomd, repo_base, label):
+    """Filelist archive URL from a repomd.xml body."""
+    m = re.search(
+        r'<data type="filelists">.*?<location href="([^"]+)"', repomd, re.S
+    )
+    if not m:
+        raise RuntimeError(
+            "filelists entry not found in %s repomd.xml" % label
+        )
+    return repo_base + m.group(1)
 
 
 def _fetch_repomd_xml(repomd_url, label):
@@ -823,9 +855,12 @@ def _filelist_hits(paths, repomd_url, repo_base, cache, label):
     fetched fine but the filelists it references 404 because the mirror
     has not synced them yet - is retried with backoff over fresh repomd
     fetches, each with its own MirrorBrain redirect that may land on a
-    healthy mirror. Only raises once every cycle is exhausted. A
-    deterministic grep failure (GrepError) is not retried: it raises
-    through immediately, since backoff cannot fix it.
+    healthy mirror. If every cycle still fails, one final cycle runs
+    against a hardcoded fallback mirror, since retries cannot help when
+    MirrorBrain keeps redirecting to the same broken host. Only raises
+    once the fallback is exhausted too. A deterministic grep failure
+    (GrepError) is not retried: it raises through immediately, since
+    backoff cannot fix it.
     """
     paths = sorted(set(paths))
     missing = [p for p in paths if p not in cache]
@@ -837,14 +872,7 @@ def _filelist_hits(paths, repomd_url, repo_base, cache, label):
         last_err = None
         for cycle in range(_FILELIST_CYCLES):
             repomd = _fetch_repomd_xml(repomd_url, label)
-            m = re.search(
-                r'<data type="filelists">.*?<location href="([^"]+)"', repomd, re.S
-            )
-            if not m:
-                raise RuntimeError(
-                    "filelists entry not found in %s repomd.xml" % label
-                )
-            fl_url = repo_base + m.group(1)
+            fl_url = _filelist_url(repomd, repo_base, label)
             try:
                 hits = _download_filelist_hits(fl_url, args, label)
                 break
@@ -854,6 +882,17 @@ def _filelist_hits(paths, repomd_url, repo_base, cache, label):
                 last_err = e
                 if cycle + 1 < _FILELIST_CYCLES:
                     time.sleep(_FILELIST_BACKOFF[cycle])
+        if hits is None:
+            fb_repomd_url, fb_repo_base = _fallback_mirror_urls(
+                repomd_url, repo_base)
+            if fb_repomd_url is not None:
+                fb_label = label + " (fallback mirror)"
+                repomd = _fetch_repomd_xml(fb_repomd_url, fb_label)
+                fl_url = _filelist_url(repomd, fb_repo_base, fb_label)
+                try:
+                    hits = _download_filelist_hits(fl_url, args, fb_label)
+                except RuntimeError as e:
+                    last_err = e
         if hits is None:
             raise RuntimeError(
                 "filelist download failed for %s after %d attempts: %s"

@@ -563,5 +563,117 @@ def main():
     return 1 if failed else 0
 
 
+# ---------------------------------------------------------------------------
+# fallback mirror: MirrorBrain keeps redirecting to the same stale mirror
+# ---------------------------------------------------------------------------
+
+def _doso_filelist_hits(paths, cache):
+    return gen._filelist_hits(
+        paths,
+        "https://download.opensuse.org/tumbleweed/repo/oss/repodata/repomd.xml",
+        "https://download.opensuse.org/tumbleweed/repo/oss/",
+        cache,
+        "Tumbleweed",
+    )
+
+
+def test_filelist_fallback_mirror_after_cycles_exhausted():
+    """Persistent MirrorBrain 404s fall back to the hardcoded mirror.
+
+    The repomd fetch succeeds everywhere (only the filelist 404s), so the
+    failure is the stale-mirror signature; after the retry cycles are
+    exhausted one cycle runs against ftp.gwdg.de and succeeds.
+    """
+    curl_urls = []
+
+    def fake_popen(argv, **kwargs):
+        assert argv[0] in ("curl", "zstd"), argv
+        if argv[0] == "curl":
+            url = argv[-1]
+            curl_urls.append(url)
+            if "ftp.gwdg.de" in url:
+                return _FakePopen(0)
+            return _FakePopen(
+                22, stderr=b"curl: (22) The requested URL returned error: 404")
+        return _FakePopen(0)
+
+    grep_result = mock.Mock()
+    grep_result.returncode = 0
+    grep_result.stdout = ">/usr/bin/foo<\n"
+    grep_result.stderr = ""
+
+    with mock.patch.object(gen.urllib.request, "urlopen",
+                           return_value=_repomd_response()), \
+            mock.patch.object(gen.subprocess, "Popen", fake_popen), \
+            mock.patch.object(gen.subprocess, "run",
+                              return_value=grep_result), \
+            mock.patch.object(gen.time, "sleep"):
+        hits = _doso_filelist_hits(["/usr/bin/foo"], {})
+    assert hits == {"/usr/bin/foo"}, hits
+    # all MirrorBrain cycles failed before the fallback was tried
+    assert curl_urls.count(
+        "https://download.opensuse.org/tumbleweed/repo/oss/"
+        "repodata/abc-filelists.xml.zst") == gen._FILELIST_CYCLES, curl_urls
+    assert any("ftp.gwdg.de" in u for u in curl_urls), curl_urls
+
+
+def test_filelist_fallback_mirror_failure_still_raises():
+    """A broken fallback mirror still fails loudly, never prunes silently."""
+    def fake_popen(argv, **kwargs):
+        assert argv[0] in ("curl", "zstd"), argv
+        if argv[0] == "curl":
+            return _FakePopen(
+                22, stderr=b"curl: (22) The requested URL returned error: 404")
+        return _FakePopen(0)
+
+    grep_result = mock.Mock()
+    grep_result.returncode = 1
+    grep_result.stdout = ""
+    grep_result.stderr = ""
+
+    with mock.patch.object(gen.urllib.request, "urlopen",
+                           return_value=_repomd_response()), \
+            mock.patch.object(gen.subprocess, "Popen", fake_popen), \
+            mock.patch.object(gen.subprocess, "run",
+                              return_value=grep_result), \
+            mock.patch.object(gen.time, "sleep"):
+        try:
+            _doso_filelist_hits(["/usr/bin/foo"], {})
+        except RuntimeError as e:
+            msg = str(e)
+            assert "after %d attempts" % gen._FILELIST_CYCLES in msg, msg
+            assert "curl rc=22" in msg, msg
+        else:
+            raise AssertionError("broken fallback mirror did not raise")
+
+
+def test_filelist_no_fallback_for_unknown_base():
+    """Non-download.opensuse.org bases keep raise-after-cycles behavior."""
+    def fake_popen(argv, **kwargs):
+        assert argv[0] in ("curl", "zstd"), argv
+        if argv[0] == "curl":
+            return _FakePopen(
+                22, stderr=b"curl: (22) The requested URL returned error: 404")
+        return _FakePopen(0)
+
+    grep_result = mock.Mock()
+    grep_result.returncode = 1
+    grep_result.stdout = ""
+    grep_result.stderr = ""
+
+    with mock.patch.object(gen.urllib.request, "urlopen",
+                           return_value=_repomd_response()), \
+            mock.patch.object(gen.subprocess, "Popen", fake_popen), \
+            mock.patch.object(gen.subprocess, "run",
+                              return_value=grep_result), \
+            mock.patch.object(gen.time, "sleep"):
+        try:
+            gen._filelist_hits(["/usr/bin/foo"], "http://r/repomd.xml",
+                               "http://r/", {}, "Tumbleweed")
+        except RuntimeError as e:
+            assert "after %d attempts" % gen._FILELIST_CYCLES in str(e), e
+        else:
+            raise AssertionError("did not raise")
+
 if __name__ == "__main__":
     sys.exit(main())
