@@ -277,10 +277,14 @@ impl PythonCheck {
     fn marker_holds(marker: &str, python_version: &str) -> bool {
         let marker = marker.trim();
         // `extra == "..."` means an optional dependency: skip it.
+        // The reference skips any requirement whose marker mentions `extra`.
         if marker.contains("extra") {
             return false;
         }
-        Self::marker_atom_holds(marker, python_version)
+        // Evaluate the full boolean expression (`and`/`or`/`not`), not just
+        // the first atom: e.g. `python_version >= "3.0" and
+        // python_version < "3.11"` must be false on 3.13.
+        Self::eval_marker_expr(marker, python_version)
     }
 
     /// Detect a malformed marker: unbalanced parentheses or unterminated
@@ -344,15 +348,36 @@ impl PythonCheck {
                 _ => true,
             };
         }
+        // `python_version in "..."` / `not in`: `packaging` does a string
+        // containment check, e.g. `python_version in "2.6 2.7"` is false on
+        // 3.13.
+        static PV_IN_RE: OnceLock<Regex> = OnceLock::new();
+        let pv_in_re = PV_IN_RE.get_or_init(|| {
+            Regex::new(r#"python_version\s+(not\s+in|in)\s+["']([^"']*)["']"#)
+                .expect("static regex")
+        });
+        if let Some(caps) = pv_in_re.captures(atom).ok().flatten() {
+            let op = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            let want = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+            let contains = want.split_whitespace().any(|v| v == python_version)
+                || want.contains(python_version);
+            return if op.starts_with("not") {
+                !contains
+            } else {
+                contains
+            };
+        }
         // `extra` is never provided: `packaging` evaluates markers with
         // `extra == ""`, so only `extra == ""` holds.
         if let Some(holds) = Self::string_marker_holds(atom, "extra", "") {
             return holds;
         }
-        // sys_platform, e.g. `sys_platform != "win32"`.
-        if atom.contains("sys_platform") {
-            // We are always on Linux here.
-            return !atom.contains("win32") || atom.contains("!=");
+        // sys_platform: we are always on Linux here, mirroring the
+        // reference's environment. Evaluate properly instead of the old
+        // win32-only heuristic, which wrongly treated
+        // `sys_platform == "darwin"` as holding.
+        if let Some(holds) = Self::string_marker_holds(atom, "sys_platform", "linux") {
+            return holds;
         }
         // The port only ever runs on Linux, mirroring the reference's
         // pinned environment.
@@ -1310,5 +1335,82 @@ mod tests {
         );
         let findings = check_requirements_findings(&reqs, &[]);
         assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+    }
+
+    #[test]
+    fn extras_with_version_specifier_parse_correctly() {
+        // Issue #382: `Twisted[tls]>=14.0` must yield extras `["tls"]`,
+        // not `["tls]>=14.0"]`.
+        let req = PythonCheck::split_marker("Twisted[tls]>=14.0");
+        assert_eq!(req.name, "Twisted");
+        assert_eq!(req.extras, vec!["tls".to_string()]);
+        let req = PythonCheck::split_marker("jsonschema[format-nongpl]>=4.18.0");
+        assert_eq!(req.extras, vec!["format-nongpl".to_string()]);
+    }
+
+    #[test]
+    fn sys_platform_darwin_does_not_hold_on_linux() {
+        // Issue #382: `sys_platform == "darwin"` must not hold on Linux.
+        assert!(!PythonCheck::marker_holds(
+            "sys_platform == 'darwin'",
+            "3.13"
+        ));
+        assert!(!PythonCheck::marker_holds(
+            "sys_platform == \"darwin\"",
+            "3.13"
+        ));
+        assert!(!PythonCheck::marker_holds(
+            "sys_platform == 'emscripten'",
+            "3.13"
+        ));
+        assert!(PythonCheck::marker_holds("sys_platform == 'linux'", "3.13"));
+        assert!(PythonCheck::marker_holds("sys_platform != 'win32'", "3.13"));
+        assert!(!PythonCheck::marker_holds(
+            "sys_platform == 'win32'",
+            "3.13"
+        ));
+    }
+
+    #[test]
+    fn boolean_markers_evaluate_fully() {
+        // Issue #382: `marker_holds` must evaluate the whole boolean
+        // expression, not just the first atom.
+        assert!(!PythonCheck::marker_holds(
+            "python_version >= \"3.0\" and python_version < \"3.11\"",
+            "3.13"
+        ));
+        assert!(PythonCheck::marker_holds(
+            "python_version >= \"3.0\" and python_version < \"3.14\"",
+            "3.13"
+        ));
+        assert!(!PythonCheck::marker_holds(
+            "sys_platform == \"win32\" and python_version >= \"3.8\"",
+            "3.13"
+        ));
+    }
+
+    #[test]
+    fn python_version_in_marker() {
+        // Issue #382: `python_version in "..."` must be evaluated.
+        assert!(!PythonCheck::marker_holds(
+            "python_version in \"2.6 2.7 3.2 3.3\"",
+            "3.13"
+        ));
+        assert!(PythonCheck::marker_holds(
+            "python_version in \"3.13 3.14\"",
+            "3.13"
+        ));
+    }
+
+    #[test]
+    fn extras_match_subpackage_requires() {
+        // Issue #382: `Twisted[tls]` must match `python313-Twisted-tls`.
+        let req = PythonCheck::split_marker("Twisted[tls]>=14.0");
+        let req_names = vec!["python313-Twisted-tls >= 14.0.0".to_string()];
+        assert!(PythonCheck::require_satisfied(&req_names, &req));
+        // And `dask[array]` must match `python313-dask-array`.
+        let req = PythonCheck::split_marker("dask[array]>=2022.2.0");
+        let req_names = vec!["python313-dask-array >= 2022.2.0".to_string()];
+        assert!(PythonCheck::require_satisfied(&req_names, &req));
     }
 }
