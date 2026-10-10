@@ -600,7 +600,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/pull/1592"
 case = "global"
 check = "config"
 kind = "behaviour"
-reason = "Deliberate fix of a reference bug (Tom 2026-10-09): config.py:109-112 merges a list destination with `for item in v`, and a Python string iterates by CHARACTER, so a normal or XDG `SkipPackagePatterns = 'foo'` used to append 'f', 'o', 'o' to the destination -- and 'f' as a regex matches nearly every path, silently skipping almost everything on a misconfigured config. rpmcrab keeps a scalar string whole as a single list item instead. Only a `*.override.*` file replaces wholesale, which leaves the scalar intact for finalize() to reject with exit 1, unchanged."
+reason = "Deliberate fix of a reference bug (#83): config.py:109-112 merges a list destination with `for item in v`, and a Python string iterates by CHARACTER, so a normal or XDG `SkipPackagePatterns = 'foo'` used to append 'f', 'o', 'o' to the destination -- and 'f' as a regex matches nearly every path, silently skipping almost everything on a misconfigured config. rpmcrab keeps a scalar string whole as a single list item instead. Only a `*.override.*` file replaces wholesale, which leaves the scalar intact for finalize() to reject with exit 1, unchanged."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/pull/1592"
 
