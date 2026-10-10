@@ -211,6 +211,10 @@ fn split_dep_tokens(line: &str) -> Vec<&str> {
 /// The forbidden-controlchar check only ever examines this token, so the
 /// comparison-operator fast path in the spec checks can probe it cheaply
 /// when the raw line carries no comparison operator.
+///
+/// `pub` (rather than `pub(crate)`) solely so the external benchmark
+/// `benches/dep_first_token.rs` can call it.
+#[doc(hidden)]
 pub fn first_dep_token(line: &str) -> Option<&str> {
     let mut start: Option<usize> = None;
     let mut depth = 0u32;
