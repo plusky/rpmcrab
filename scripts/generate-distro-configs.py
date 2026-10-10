@@ -92,6 +92,23 @@ FILES = {
 }
 FILES["slfo"] = [f for f in FILES["opensuse"] if f != "varlink-whitelist.toml"]
 
+# Extra Filters appended to the openSUSE config that do not come from upstream
+# rpmlint's configs/openSUSE/*.toml. The reference loads these from
+# /opt/testing/share/rpmlint/mingw32.toml and mingw64.toml, which are shipped
+# by the mingw32-filesystem and mingw64-filesystem packages (converted from
+# their mingw{32,64}-rpmlintrc sources at package build time). They are part
+# of the reference's effective distro config for mingw packages, so rpmcrab
+# vendors them here to match. Kept minimal: only the filters for findings
+# rpmcrab actually emits are included; the rest (e.g. devel-file-in-non-devel,
+# mono-versioned-deps-missing) are added if their findings start diverging.
+EXTRA_OPENSUSE_FILTERS = [
+    # *.dll.a and *.a files are permitted arch-independent objects
+    # (mingw32-filesystem's mingw32-rpmlintrc).
+    r"^mingw32-.*arch-independent-package-contains-binary-or-object.*\.a$",
+    # Same for mingw64 (mingw64-filesystem's mingw64-rpmlintrc).
+    r"^mingw64-.*arch-independent-package-contains-binary-or-object.*\.a$",
+]
+
 # Findings rpmcrab deliberately killed (see tests/parity/divergences.toml).
 # A Filters/BlockedFilters entry that references *only* one of these findings
 # is pruned — but ONLY when the finding is actually gone from the tree, so the
@@ -950,6 +967,41 @@ def prune_pie_paths(text, pruned_log, flavor):
     return "".join(out)
 
 
+def append_extra_filters(text, filters):
+    """Append regexes to the `Filters = [...]` list in a TOML document.
+
+    Used for distro-config filters that do not come from upstream rpmlint
+    (see EXTRA_OPENSUSE_FILTERS). Inserted before the list's closing bracket
+    so the monthly sync re-emits them deterministically.
+    """
+    lines = text.splitlines(keepends=True)
+    out = []
+    in_list = False
+    done = False
+    for line in lines:
+        stripped = line.strip()
+        if not done and re.match(r"^Filters\s*=\s*\[", stripped):
+            in_list = True
+            out.append(line)
+            continue
+        if in_list and stripped.startswith("]"):
+            out.append("\n")
+            out.append("    # Extra: *.dll.a and *.a files are permitted arch-independent objects.\n")
+            out.append("    # From mingw32-filesystem's mingw32-rpmlintrc (shipped as\n")
+            out.append("    # /opt/testing/share/rpmlint/mingw32.toml); see EXTRA_OPENSUSE_FILTERS\n")
+            out.append("    # in scripts/generate-distro-configs.py.\n")
+            out.append("    '%s',\n" % filters[0])
+            out.append("    # Same for mingw64 (mingw64-filesystem's mingw64-rpmlintrc).\n")
+            out.append("    '%s',\n" % filters[1])
+            in_list = False
+            done = True
+            out.append(line)
+            continue
+        out.append(line)
+    assert done, "no Filters list found to append to"
+    return "".join(out)
+
+
 def generate(ref_dir=None, pins=None):
     """Return {flavor: {filename: text}} and the provenance text."""
     pins = pins or {}
@@ -981,6 +1033,8 @@ def generate(ref_dir=None, pins=None):
                 # (openSUSE:Factory / openSUSE:Leap:16.0, both publicly
                 # queryable), so both flavors prune their stale paths.
                 text = prune_pie_paths(text, pie_pruned_log, flavor)
+            if flavor == "opensuse" and filename == "opensuse.toml":
+                text = append_extra_filters(text, EXTRA_OPENSUSE_FILTERS)
             data["files"][filename] = text
 
     # Dedupe: an SLFO file byte-identical to its openSUSE counterpart (after
@@ -1005,6 +1059,10 @@ def generate(ref_dir=None, pins=None):
     ]
     for flavor, data in result.items():
         provenance.append(f"# {flavor}: {data['branch']} @ {data['sha']} ({data['date']})")
+    provenance.append("#")
+    provenance.append("# Extra Filters appended (not from upstream; see EXTRA_OPENSUSE_FILTERS):")
+    for f in EXTRA_OPENSUSE_FILTERS:
+        provenance.append(f"#   Filters: added {f!r} (mingw -filesystem packages' rpmlintrc)")
     if pruned_log:
         provenance.append("#")
         provenance.append("# Pruned Filters entries (findings rpmcrab killed):")
