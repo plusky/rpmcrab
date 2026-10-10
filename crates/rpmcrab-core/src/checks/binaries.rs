@@ -3051,6 +3051,15 @@ mod tests {
                 "{finding} must not fire for static binaries: {results:?}"
             );
         }
+        // Fortify and stack-protector are compile-time instrumentations,
+        // not dynamic-linker features, so they still fire for static.
+        for finding in ["missing-fortify", "missing-stack-protector"] {
+            assert_eq!(
+                lines_for(&results, finding).len(),
+                1,
+                "{finding} must still fire for static binaries: {results:?}"
+            );
+        }
     }
 
     #[test]
