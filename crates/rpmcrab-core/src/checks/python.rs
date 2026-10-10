@@ -320,7 +320,7 @@ impl PythonCheck {
     /// pinning `os_name='posix'` and `platform_system='Linux'`
     /// (`PythonCheck.py:139-143`); the port mirrors that for the keys it
     /// knows and fails closed for the remaining `default_environment()`
-    /// keys (ledgered in `divergences.toml`). A variable that is not a PEP
+    /// keys. A variable that is not a PEP
     /// 508 environment key is still treated as holding. Malformed markers
     /// are fail-closed (false), matching `packaging`.
     fn marker_atom_holds(atom: &str, python_version: &str) -> bool {
@@ -386,16 +386,27 @@ impl PythonCheck {
         if let Some(holds) = Self::string_marker_holds(atom, "platform_system", "Linux") {
             return holds;
         }
+        // platform_machine: pinned to x86_64, mirroring the reference's
+        // build environment (the audit's python3-cffi FP came from failing
+        // closed on `platform_machine != 'aarch64'`).
+        if let Some(holds) = Self::string_marker_holds(atom, "platform_machine", "x86_64") {
+            return holds;
+        }
+        // platform_python_implementation: pinned to CPython, mirroring the
+        // reference environment.
+        if let Some(holds) =
+            Self::string_marker_holds(atom, "platform_python_implementation", "CPython")
+        {
+            return holds;
+        }
         // The remaining `default_environment()` keys are not evaluated:
         // fail closed rather than guess.
         for key in [
             "implementation_name",
             "implementation_version",
-            "platform_machine",
             "platform_release",
             "platform_version",
             "python_full_version",
-            "platform_python_implementation",
         ] {
             if atom.contains(key) {
                 return false;
@@ -404,14 +415,17 @@ impl PythonCheck {
         true
     }
 
-    /// Evaluate a `var == "value"` / `var != "value"` comparison against a
-    /// pinned value. Returns `None` when the atom is not such a comparison.
+    /// Evaluate a `var == "value"` / `var != "value"` / `var in "value"` /
+    /// `var not in "value"` comparison against a pinned value. Returns `None`
+    /// when the atom is not such a comparison.
     fn string_marker_holds(atom: &str, var: &str, pinned: &str) -> Option<bool> {
         // Per-`var` cached regexes: the pattern varies only with `var`,
         // which comes from a small fixed set of call sites.
-        static STRING_MARKER_RES: [(&str, OnceLock<Regex>); 4] = [
+        static STRING_MARKER_RES: [(&str, OnceLock<Regex>); 6] = [
             ("extra", OnceLock::new()),
             ("os_name", OnceLock::new()),
+            ("platform_machine", OnceLock::new()),
+            ("platform_python_implementation", OnceLock::new()),
             ("platform_system", OnceLock::new()),
             ("sys_platform", OnceLock::new()),
         ];
@@ -425,14 +439,21 @@ impl PythonCheck {
         );
         let cell = cell?;
         let re = cell.get_or_init(|| {
-            Regex::new(&format!(r#"{var}\s*(==|!=)\s*["']([^"']*)["']"#)).expect("static regex")
+            Regex::new(&format!(
+                r#"{var}\s*(==|!=|\bin\b|not\s+in)\s*["']([^"']*)["']"#
+            ))
+            .expect("static regex")
         });
         let caps = re.captures(atom).ok().flatten()?;
         let op = caps.get(1).map(|m| m.as_str()).unwrap_or("");
         let want = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-        match op {
+        // Normalize the operator (e.g. "not  in" -> "not in").
+        let op_norm: String = op.split_whitespace().collect::<Vec<_>>().join(" ");
+        match op_norm.as_str() {
             "==" => Some(want == pinned),
             "!=" => Some(want != pinned),
+            "in" => Some(want.contains(pinned)),
+            "not in" => Some(!want.contains(pinned)),
             _ => None,
         }
     }
@@ -966,6 +987,43 @@ mod tests {
     }
 
     #[test]
+    fn marker_pinned_machine_and_implementation() {
+        assert!(PythonCheck::marker_atom_holds(
+            "platform_machine == \"x86_64\"",
+            "3.12"
+        ));
+        assert!(!PythonCheck::marker_atom_holds(
+            "platform_machine == \"aarch64\"",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_atom_holds(
+            "platform_python_implementation == \"CPython\"",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_holds_leftover(
+            "platform_machine != 'aarch64' or platform_python_implementation != 'PyPy' or sys_platform != 'linux'",
+            "3.12"
+        ));
+        // `in` / `not in` on the newly pinned keys.
+        assert!(PythonCheck::marker_atom_holds(
+            "platform_machine in \"x86_64\"",
+            "3.12"
+        ));
+        assert!(!PythonCheck::marker_atom_holds(
+            "platform_machine in \"aarch64\"",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_atom_holds(
+            "platform_machine not in \"aarch64\"",
+            "3.12"
+        ));
+        assert!(!PythonCheck::marker_atom_holds(
+            "platform_python_implementation not in \"CPython PyPy\"",
+            "3.12"
+        ));
+    }
+
+    #[test]
     fn marker_pinned_linux_environment() {
         // The reference pins `os_name='posix'` and `platform_system='Linux'`
         // (`PythonCheck.py:139-143`); the port only ever runs on Linux.
@@ -986,10 +1044,6 @@ mod tests {
             "3.12"
         ));
         // The remaining `default_environment()` keys fail closed.
-        assert!(!PythonCheck::marker_atom_holds(
-            "platform_machine == \"x86_64\"",
-            "3.12"
-        ));
         assert!(!PythonCheck::marker_atom_holds(
             "python_full_version == \"3.12.1\"",
             "3.12"
