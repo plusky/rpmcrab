@@ -703,6 +703,14 @@ upstream = "https://github.com/plusky/rpmcrab/issues/142"
 
 [[divergence]]
 case = "global"
+check = "AppDataCheck"
+kind = "behaviour"
+reason = "When `appstream-util` is present both rpmcrab and the reference defer to `appstream-util validate-relax --nonet` (reference parity), but the tool only runs where the environment provides it: rpmcrab's package Requires `appstream-glib`, while the Factory reference environment in the audit evidently lacks it -- the reference stayed silent on files the real validator rejects, which is only consistent with its no-tool bare well-formedness fallback. Genuinely invalid but well-formed files under `/usr/share/appdata/` (e.g. frozen-bubble's deprecated `<application>` root instead of `<component>`, failing `appstream-util validate-relax --nonet`) are therefore flagged by rpmcrab and missed by the reference. Measured 2026-10-10 on the full Factory audit: 7 packages in this class, all legitimate findings; the 61 `/usr/share/metainfo/` hits are the separate metainfo-scan divergence above."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/142"
+
+[[divergence]]
+case = "global"
 check = "TagsCheck"
 kind = "behaviour"
 reason = "Rich `(a or b)` expressions (RPM >= 4.13) are parsed into their leaves and the name/version analyses run against each leaf, so `Requires: (any or goodpkg)` emits `E: invalid-dependency any` where the reference emits nothing: its `parse_deps` (pkg.py:294, `re.split(r'[\\s,]+')`) shreds the expression into `(any`, `or`, `goodpkg)` and the `^any$` invalid-requires pattern never matches a fragment. Flagging the real leaf is the intended analysis, not shredded-string noise; treating the expression as one opaque token would hide genuinely invalid dependencies. Pinned by emission-path tests in tags.rs."
