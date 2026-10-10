@@ -1671,3 +1671,10 @@ check = "pkg-layer"
 kind = "behaviour"
 reason = "Extraction skips payload entries colliding with an incompatible existing path (a file where a directory entry lands or vice versa, e.g. case-colliding names on case-insensitive filesystems) and logs a warning, instead of aborting the whole package on the resulting ENOTDIR/EISDIR as before."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SharedLibraryPolicyCheck"
+kind = "behaviour"
+reason = "shlib-fixed-dependency skips `=` dependencies where the required package name is a proper prefix of the requiring package name (e.g. `libfoo-x86-64-v3` requires `libfoo = 1.0`): a flavor package pinning its own co-built base is version lockstep, not a shared-library-policy violation. The reference would fire on such inputs (same code, no exemption); it never does in practice because it never sees the -x86-64-v3 flavor binaries (0 emissions in 17k Factory packages)."
+since = "0.1.0"
