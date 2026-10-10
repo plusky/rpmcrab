@@ -541,6 +541,10 @@ LEAP16_OSS_REPOMD_URL = (
     "/repodata/repomd.xml"
 )
 _leap16_binary_names_cache = None
+TW_OSS_REPOMD_URL = (
+    "https://download.opensuse.org/tumbleweed/repo/oss/repodata/repomd.xml"
+)
+_tw_binary_names_cache = None
 
 
 def _scan_binary_names(stdout):
@@ -634,13 +638,72 @@ def _leap16_binary_names():
     return _leap16_binary_names_cache
 
 
+def _tw_binary_names():
+    """Binary package names shipped in Tumbleweed (oss), fetched once, cached.
+
+    Mirrors _leap16_binary_names() for the opensuse flavor: whitelist
+    `package =` entries name the binary being linted, but the OBS source
+    API 404s on binary-only names (e.g. udev-mini, libcgroup-tools are
+    subpackages of another source). The published repodata is the ground
+    truth for binary presence.
+    """
+    global _tw_binary_names_cache
+    if _tw_binary_names_cache is None:
+        zstd = shutil.which("zstd")
+        if zstd is None:
+            raise RuntimeError(
+                "the 'zstd' CLI is required to read the Tumbleweed repodata "
+                "(install zstd and re-run)"
+            )
+
+        def _get(url):
+            return urllib.request.Request(
+                url, headers={"User-Agent": "rpmcrab-distro-config-sync"}
+            )
+
+        with urllib.request.urlopen(_get(TW_OSS_REPOMD_URL), timeout=60) as resp:
+            repomd = resp.read().decode("utf-8")
+        m = re.search(
+            r'<data type="primary">.*?<location href="([^"]*primary\.xml\.[^"]*)"',
+            repomd,
+            re.DOTALL,
+        )
+        if not m:
+            raise RuntimeError(
+                "primary.xml location not found in Tumbleweed repomd.xml"
+            )
+        primary_url = (
+            "https://download.opensuse.org/tumbleweed/repo/oss/" + m.group(1)
+        )
+        # Keep the download out of TMPDIR, which is a small tmpfs on
+        # some build machines.
+        with tempfile.NamedTemporaryFile(suffix=".xml.zst", dir=".") as tmp:
+            with urllib.request.urlopen(_get(primary_url), timeout=600) as resp:
+                shutil.copyfileobj(resp, tmp)
+            tmp.flush()
+            proc = subprocess.Popen([zstd, "-dc", tmp.name], stdout=subprocess.PIPE)
+            try:
+                names = _scan_binary_names(proc.stdout)
+            finally:
+                proc.stdout.close()
+                proc.wait()
+            if proc.returncode != 0:
+                raise RuntimeError(f"zstd -dc failed on {primary_url}")
+        _tw_binary_names_cache = names
+    return _tw_binary_names_cache
+
+
 def package_present(pkg, flavor):
     """True if the package exists in the flavor's distro codebase.
 
     For the opensuse flavor this queries the OBS source-package API
-    (openSUSE:Factory hosts all its sources). For the slfo flavor the
-    SLE-derived sources are not visible via the source API, so presence is
-    checked against the binary names in the published Leap 16.0 repodata.
+    (openSUSE:Factory hosts all its sources), falling back to the
+    Tumbleweed binary repodata: whitelist `package =` entries name the
+    binary being linted, and the source API 404s on binary-only names
+    (e.g. udev-mini, libcgroup-tools are subpackages of another source).
+    For the slfo flavor the SLE-derived sources are not visible via the
+    source API, so presence is checked against the binary names in the
+    published Leap 16.0 repodata.
     """
     key = (pkg, flavor)
     if key not in _package_presence_cache:
@@ -661,6 +724,10 @@ def package_present(pkg, flavor):
                 except urllib.error.HTTPError as e:
                     if e.code != 404:
                         raise
+            if not present:
+                # Binary-only name (subpackage of another source): the
+                # source API 404s, so check the published binary repodata.
+                present = pkg in _tw_binary_names()
         _package_presence_cache[key] = present
     return _package_presence_cache[key]
 
