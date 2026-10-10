@@ -927,11 +927,48 @@ mod tests {
             ..Default::default()
         });
         let results = findings_for(&pkg);
-        assert!(
-            !results
-                .iter()
-                .any(|(n, d)| n == "libalternatives-conf-not-found" && d.contains("nodir")),
+        let not_found: Vec<&(String, String)> = results
+            .iter()
+            .filter(|(n, _)| n == "libalternatives-conf-not-found")
+            .collect();
+        assert_eq!(
+            not_found.len(),
+            0,
             "conf-not-found must not fire when the parent dir was not extracted: {results:?}"
+        );
+    }
+
+    /// Ghost variant: the extraction-artifact guard `continue`s before the
+    /// `is_ghost()` branch, so a ghost conf whose parent dir is also missing
+    /// is skipped rather than reported as Info.
+    #[test]
+    fn libalternatives_conf_not_found_skipped_for_ghost_when_parent_dir_missing() {
+        use crate::pkg::pkgfile::RPMFILE_GHOST;
+
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let mut pkg =
+            libalternatives_pkg(dir.path(), &[("dummy.conf", "binary = /usr/bin/dummy\n")]);
+        // The ghost conf path and its parent directory both do not exist.
+        let missing_dir = dir.path().join("no-such-dir");
+        pkg.files.push(PkgFile {
+            name: "/usr/share/libalternatives/nodir-ghost/nodir-ghost.conf".to_string(),
+            path: missing_dir
+                .join("nodir-ghost.conf")
+                .to_string_lossy()
+                .into_owned(),
+            mode: 0o100644,
+            flags: RPMFILE_GHOST,
+            ..Default::default()
+        });
+        let results = findings_for(&pkg);
+        let not_found: Vec<&(String, String)> = results
+            .iter()
+            .filter(|(n, _)| n == "libalternatives-conf-not-found")
+            .collect();
+        assert_eq!(
+            not_found.len(),
+            0,
+            "ghost conf-not-found must not fire when the parent dir was not extracted: {results:?}"
         );
     }
 
