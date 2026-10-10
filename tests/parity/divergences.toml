@@ -1728,3 +1728,10 @@ check = "SharedLibraryPolicyCheck"
 kind = "behaviour"
 reason = "shlib-fixed-dependency skips `=` dependencies where the required package name is a proper prefix of the requiring package name (e.g. `libfoo-x86-64-v3` requires `libfoo = 1.0`): a flavor package pinning its own co-built base is version lockstep, not a shared-library-policy violation. The reference would fire on such inputs (same code, no exemption); it never does in practice because it never sees the -x86-64-v3 flavor binaries (0 emissions in 17k Factory packages)."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "script-without-shebang"
+kind = "behaviour"
+reason = "The reference flags any executable file lacking a shebang, including non-scripts: data files with wrong permissions (moka-icon-theme index.theme, COPYING), shell fragment templates (kernel scripts/atomic/fallbacks/*), Python modules (idlelib/pyshell.py), and build templates (syclcc-launch.rule.in). rpmcrab only emits script-without-shebang for files in script paths (bin/, sbin/, init.d, cron.*) or otherwise identified as scripts; a non-script file with the executable bit fires spurious-executable-perm instead (extended to data files in #426). The extension is gated on the file being text: the reference early-returns on non-text in the same code path and stays silent there (verified with a 120-control-byte probe), so the port warns nowhere the reference is silent. Badness note: the reference finding carries the default badness 1, while spurious-executable-perm is scored 50 in the openSUSE/SLFO Scoring tables (promoting it to Error) -- the same files now contribute 50x the badness, so packages near the badness abort threshold can newly abort. The reference findings on these 9 packages are false positives under the wrong check name."
+since = "0.1.0"
