@@ -819,6 +819,10 @@ mod tests {
         let reqs = PythonCheck::parse_requirements(content, true, "3.12");
         let findings = check_requirements_findings(&reqs, &["python3-dask-dataframe"]);
         assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+
+        // Unclosed-bracket fallback: `foo[bar` still yields `bar` as extra.
+        let req = PythonCheck::split_marker("foo[bar");
+        assert_eq!(req.extras, vec!["bar".to_string()]);
     }
 
     #[test]
