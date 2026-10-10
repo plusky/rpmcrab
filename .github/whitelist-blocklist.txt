@@ -1,0 +1,37 @@
+# Entries that must NEVER be auto-synced from upstream rpmlint.
+# These were deliberately dropped from rpmcrab and must stay dropped.
+# The upstream-whitelist-sync workflow checks this list before porting.
+#
+# Format: one package/entry name per line. Lines starting with # are comments.
+# Matching is done against the `package = "..."` value in TOML stanzas.
+#
+# Sources: PR #328 (integration-test fixtures), PR #312 (Tumbleweed-removed
+# packages), PR #331 (dead slfo stanzas), and the PRUNE_PACKAGES dict in
+# scripts/generate-distro-configs.py.
+
+# PR #328: rpmlint's own synthetic integration-test package.
+# Not real distro policy, not shipped in Factory or Leap.
+rpmlint-integration-test
+
+# PR #312 / PRUNE_PACKAGES: stale allowances for removed packages.
+# Reintroduced software gets a fresh audit, never a silent free pass.
+snapd
+lxd
+nscd
+foomuuri
+foomuuri-firewalld
+sddm-kalpa
+txnupd-maintenance-tools
+pam-ssh-agent
+pam_userpass
+deepin-api
+kcm_sddm
+passim
+scmon
+pam_csync
+pcfclock
+
+# PRUNE_PACKAGES (slfo flavor only): not shipped in Leap 16.0.
+# The sync script applies these to the slfo flavor; they are kept for opensuse.
+# (Handled via flavor-specific logic; listed here for documentation.)
+# pulseaudio, pommed, neard, xpra, iwd, udev-mini

@@ -1,0 +1,94 @@
+---
+# Daily sync of whitelist/config stanzas from upstream rpmlint branches.
+#
+# The SUSE security team commits whitelist updates to the `opensuse` branch
+# of rpm-software-management/rpmlint (and related branches). This job merges
+# genuinely new stanzas into rpmcrab's vendored TOML copies.
+#
+# This is a SMART merge, not a blind copy (see scripts/sync-upstream-whitelists.py):
+# - New stanzas (by `package = "..."`) not present locally are appended.
+# - Stanzas naming blocklisted packages (.github/whitelist-blocklist.txt)
+#   are never (re)introduced.
+# - Flavor-specific prunes (e.g. packages absent from Leap 16.0) are respected.
+# - rpmcrab-specific stanzas are never deleted.
+# - Existing stanzas are never modified (upstream hash updates come through
+#   the monthly distro-config-sync generator, not this job).
+#
+# No-op days produce no PR.
+
+name: upstream-whitelist-sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * *" # daily 06:00 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-whitelist-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: true
+
+      - name: Sync whitelists from upstream branches
+        id: sync
+        run: |
+          set -euo pipefail
+          python3 scripts/sync-upstream-whitelists.py > /tmp/sync.log 2>&1 || true
+          cat /tmp/sync.log
+          if git diff --quiet -- crates/rpmcrab-core/data/distro; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          # Capture the added entries for the PR body
+          grep "^  + " /tmp/sync.log > /tmp/added.txt || true
+          grep "^  - " /tmp/sync.log > /tmp/skipped.txt || true
+
+      - name: Open sync PR
+        if: steps.sync.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          date=$(date -u +%F)
+          branch="upstream-whitelist-sync-${date}"
+          git -c user.name=github-actions -c user.email=github-actions@github.com \
+            checkout -B "$branch"
+          git add crates/rpmcrab-core/data/distro
+          git -c user.name=github-actions -c user.email=github-actions@github.com \
+            commit -m "Sync upstream whitelist stanzas (${date})"
+          git push -u origin "$branch"
+          if [ -z "$(gh pr list --head "$branch" --json number --jq '.[].number')" ]; then
+            added=$(cat /tmp/added.txt)
+            skipped=$(cat /tmp/skipped.txt)
+            body="New whitelist stanzas from upstream rpmlint branches.
+
+          Added entries:
+          ${added:-none}
+
+          Skipped (blocklisted):
+          ${skipped:-none}
+
+          Sources: opensuse branch (security team updates), opensuse-slfo-main.
+          Blocklist: .github/whitelist-blocklist.txt
+
+          Produced by the daily upstream-whitelist-sync job. This is a smart
+          merge: only new non-blocklisted stanzas are added; rpmcrab-specific
+          entries are never deleted and existing stanzas are never modified."
+            gh pr create --base main --head "$branch" \
+              --title "Sync upstream whitelist stanzas (${date})" \
+              --body "$body"
+          fi
