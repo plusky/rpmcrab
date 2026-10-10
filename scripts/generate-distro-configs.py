@@ -1092,12 +1092,11 @@ def append_extra_filters(text, filters):
         if in_list and stripped.startswith("]"):
             out.append("\n")
             out.append("    # Extra: *.dll.a and *.a files are permitted arch-independent objects.\n")
-            out.append("    # From mingw32-filesystem's mingw32-rpmlintrc (shipped as\n")
-            out.append("    # /opt/testing/share/rpmlint/mingw32.toml); see EXTRA_OPENSUSE_FILTERS\n")
+            out.append("    # From mingw{32,64}-filesystem's mingw{32,64}-rpmlintrc (shipped as\n")
+            out.append("    # /opt/testing/share/rpmlint/mingw{32,64}.toml); see EXTRA_OPENSUSE_FILTERS\n")
             out.append("    # in scripts/generate-distro-configs.py.\n")
-            out.append("    '%s',\n" % filters[0])
-            out.append("    # Same for mingw64 (mingw64-filesystem's mingw64-rpmlintrc).\n")
-            out.append("    '%s',\n" % filters[1])
+            for f in filters:
+                out.append(f"    '{f}',\n")
             in_list = False
             done = True
             out.append(line)
