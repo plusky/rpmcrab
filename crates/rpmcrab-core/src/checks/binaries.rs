@@ -2841,6 +2841,7 @@ mod tests {
                 is_shlib: false,
                 is_debug: false,
                 is_rust: false,
+                is_zig: false,
                 soname: None,
                 needed: Vec::new(),
                 runpaths,
@@ -3299,9 +3300,7 @@ mod tests {
                 "{finding} must still fire for static binaries: {results:?}"
             );
         }
-
-    #[test]
-fn hardening_zig_binary_skips_fortify_and_ssp() {
+    }
 
     #[test]
     fn hardening_zig_binary_skips_everything() {
@@ -3323,7 +3322,9 @@ fn hardening_zig_binary_skips_fortify_and_ssp() {
     }
 
     #[test]
-    fn hardening_c_binary_still_fires_fortify_and_ssp() {
+    fn hardening_c_binary_still_fires() {
+        // Negative case for the Zig skip pin: a plain non-Zig ELF must
+        // still produce every hardening finding the fixture can emit.
         let results = hardening_results_for(false, false);
         assert_eq!(
             lines_for(&results, "missing-fortify").len(),
@@ -3334,6 +3335,13 @@ fn hardening_zig_binary_skips_fortify_and_ssp() {
             lines_for(&results, "missing-stack-protector").len(),
             1,
             "missing-stack-protector must fire for C: {results:?}"
+        );
+        // Linker-level RELRO checks apply to plain C binaries too; the
+        // Zig skip must not swallow them for non-Zig input.
+        assert_eq!(
+            lines_for(&results, "missing-relro").len(),
+            1,
+            "missing-relro must fire for C: {results:?}"
         );
     }
 
