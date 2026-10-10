@@ -320,7 +320,7 @@ impl PythonCheck {
     /// pinning `os_name='posix'` and `platform_system='Linux'`
     /// (`PythonCheck.py:139-143`); the port mirrors that for the keys it
     /// knows and fails closed for the remaining `default_environment()`
-    /// keys. A variable that is not a PEP
+    /// keys (ledgered in divergences.toml). A variable that is not a PEP
     /// 508 environment key is still treated as holding. Malformed markers
     /// are fail-closed (false), matching `packaging`.
     fn marker_atom_holds(atom: &str, python_version: &str) -> bool {
