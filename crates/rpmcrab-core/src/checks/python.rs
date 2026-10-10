@@ -407,8 +407,8 @@ impl PythonCheck {
     /// Evaluate a `var == "value"` / `var != "value"` comparison against a
     /// pinned value. Returns `None` when the atom is not such a comparison.
     fn string_marker_holds(atom: &str, var: &str, pinned: &str) -> Option<bool> {
-        /// Per-`var` cached regexes: the pattern varies only with `var`,
-        /// which comes from a small fixed set of call sites.
+        // Per-`var` cached regexes: the pattern varies only with `var`,
+        // which comes from a small fixed set of call sites.
         static STRING_MARKER_RES: [(&str, OnceLock<Regex>); 4] = [
             ("extra", OnceLock::new()),
             ("os_name", OnceLock::new()),
@@ -418,7 +418,12 @@ impl PythonCheck {
         let cell = STRING_MARKER_RES
             .iter()
             .find(|(v, _)| *v == var)
-            .map(|(_, cell)| cell)?;
+            .map(|(_, cell)| cell);
+        debug_assert!(
+            cell.is_some(),
+            "string_marker_holds called with unexpected var: {var}"
+        );
+        let cell = cell?;
         let re = cell.get_or_init(|| {
             Regex::new(&format!(r#"{var}\s*(==|!=)\s*["']([^"']*)["']"#)).expect("static regex")
         });
@@ -1358,6 +1363,32 @@ mod tests {
         assert_eq!(req.extras, vec!["tls".to_string()]);
         let req = PythonCheck::split_marker("jsonschema[format-nongpl]>=4.18.0");
         assert_eq!(req.extras, vec!["format-nongpl".to_string()]);
+    }
+
+    #[test]
+    fn string_marker_regexes_are_keyed_by_var() {
+        // The OnceLock table in `string_marker_holds` keys the cached
+        // regex by `var`: an atom naming a different variable must not
+        // match, even when another var's regex was compiled first.
+        for var in ["extra", "os_name", "platform_system", "sys_platform"] {
+            let pinned = match var {
+                "extra" => "",
+                "os_name" => "posix",
+                "platform_system" => "Linux",
+                "sys_platform" => "linux",
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                PythonCheck::string_marker_holds(&format!("{var} == '{pinned}'"), var, pinned),
+                Some(true),
+                "own-var atom must match for {var}"
+            );
+            assert_eq!(
+                PythonCheck::string_marker_holds("extra == ''", var, pinned),
+                if var == "extra" { Some(true) } else { None },
+                "other-var atom must not match for {var}"
+            );
+        }
     }
 
     #[test]
