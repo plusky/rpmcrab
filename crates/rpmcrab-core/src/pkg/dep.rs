@@ -204,12 +204,41 @@ fn split_dep_tokens(line: &str) -> Vec<&str> {
     tokens
 }
 
-/// First token of a dependency line, without the `parse_deps` allocation.
+/// First token of a dependency line, without tokenizing the rest of the line.
+///
+/// Same token boundaries as [`split_dep_tokens`], but the scan stops at the
+/// end of the first token instead of allocating a `Vec` for the whole line.
 /// The forbidden-controlchar check only ever examines this token, so the
 /// comparison-operator fast path in the spec checks can probe it cheaply
 /// when the raw line carries no comparison operator.
-pub(crate) fn first_dep_token(line: &str) -> Option<&str> {
-    split_dep_tokens(line).into_iter().next()
+///
+/// `pub` (rather than `pub(crate)`) solely so the external benchmark
+/// `benches/dep_first_token.rs` can call it.
+#[doc(hidden)]
+pub fn first_dep_token(line: &str) -> Option<&str> {
+    let mut start: Option<usize> = None;
+    let mut depth = 0u32;
+    for (i, c) in line.char_indices() {
+        match c {
+            '(' => {
+                start.get_or_insert(i);
+                depth += 1;
+            }
+            ')' => {
+                start.get_or_insert(i);
+                depth = depth.saturating_sub(1);
+            }
+            _ if (c.is_whitespace() || c == ',') && depth == 0 => {
+                if let Some(s) = start.take() {
+                    return Some(&line[s..i]);
+                }
+            }
+            _ => {
+                start.get_or_insert(i);
+            }
+        }
+    }
+    start.map(|s| &line[s..])
 }
 
 pub fn parse_deps(line: &str) -> Vec<(String, Option<String>)> {
@@ -1315,5 +1344,40 @@ mod rich_dep_tests {
                 ("other".to_string(), Some("1.0".to_string())),
             ]
         );
+    }
+
+    #[test]
+    fn first_dep_token_matches_full_tokenizer() {
+        // The manual first-token scan must return exactly the token the full
+        // `split_dep_tokens` tokenizer would yield first, on every line shape.
+        let lines = [
+            "",
+            "   ",
+            "foo",
+            "  foo  ",
+            "foo >= 1.2",
+            "foo,bar",
+            "foo, bar, baz",
+            "foo,",
+            ",foo",
+            "(a or b)",
+            "  (a or b) >= 2.0",
+            "(a or b), (c and d)",
+            "(a (b or c))",
+            "(unbalanced",
+            "unbalanced)",
+            "()",
+            "(a or b)trailing",
+            "libfoo.so.1()(64bit) >= 2.0, other",
+            "name-with-dash_and.dot:plus~tilde",
+            "tab\tseparated",
+        ];
+        for line in lines {
+            assert_eq!(
+                first_dep_token(line),
+                split_dep_tokens(line).into_iter().next(),
+                "line: {line:?}"
+            );
+        }
     }
 }

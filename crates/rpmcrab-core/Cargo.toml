@@ -109,3 +109,7 @@ librpm = { version = "0.6", default-features = false }
 [[bench]]
 name = "regex_hot_path"
 harness = false
+
+[[bench]]
+name = "dep_first_token"
+harness = false
