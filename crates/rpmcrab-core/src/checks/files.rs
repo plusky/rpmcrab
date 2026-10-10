@@ -2639,7 +2639,18 @@ impl FilesCheck {
                     || is_match(&self.compr_re, fname)
                     || is_match(&self.includefile_re, fname)
                     || is_match(&self.develfile_re, fname)
-                    || fname.starts_with("/etc/logrotate.d/");
+                    || fname.starts_with("/etc/logrotate.d/")
+                    // Data file with spurious executable bit: a text file
+                    // with no shebang, not an ELF binary, and not in a
+                    // script path (those keep script-without-shebang). The
+                    // istext gate matches the reference, which early-returns
+                    // on non-text in the same code path and stays silent
+                    // there, so the port warns nowhere the reference is
+                    // silent.
+                    || (fd.istext
+                        && fd.interpreter.is_none()
+                        && !pkgfile.magic.starts_with("ELF")
+                        && !is_match(&self.script_re, fname));
             }
             if fd.nonexec_file {
                 add_info(
@@ -3319,6 +3330,130 @@ mod tests {
         assert_has(&names, "dir-or-file-in-opt");
         // no read errors: extraction works
         assert_lacks(&names, "read-error");
+    }
+
+    /// Build a package of executable files with real on-disk content (so
+    /// peek/istext run for real), mirroring the appdata_pkg helper.
+    fn spurious_exec_pkg(dir: &tempfile::TempDir, files: &[(&str, &str, &[u8])]) -> Pkg {
+        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
+        let mut pkg =
+            Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        pkg.name = "spurious-test".to_string();
+        pkg.files = files
+            .iter()
+            .map(|(name, magic, content)| {
+                let path = dir.path().join(name.trim_start_matches('/'));
+                std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+                std::fs::write(&path, content).expect("write temp file");
+                PkgFile {
+                    name: name.to_string(),
+                    path: path.to_string_lossy().into_owned(),
+                    mode: 0o100755,
+                    magic: magic.to_string(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        pkg
+    }
+
+    /// (name, Level, detail) triples for the two findings in play here.
+    fn spurious_script_findings(out: &Filter) -> Vec<(String, Level, String)> {
+        out.results()
+            .iter()
+            .zip(out.result_levels().iter())
+            .filter(|((name, _), _)| {
+                *name == "spurious-executable-perm" || *name == "script-without-shebang"
+            })
+            .map(|((name, detail), level)| (name.clone(), *level, detail.clone()))
+            .collect()
+    }
+
+    fn check_spurious_script(pkg: &Pkg, config: &Config) -> Vec<(String, Level, String)> {
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(config);
+        check.check(pkg, config, &mut out);
+        spurious_script_findings(&out)
+    }
+
+    #[test]
+    fn spurious_executable_perm_fires_for_text_data_file() {
+        // Text data file with the executable bit but no shebang: not a
+        // script, not an ELF binary, not in a script path ->
+        // spurious-executable-perm. Pinned at Warning: the test config
+        // carries no Scoring table, so the openSUSE 50-point promotion to
+        // Error does not apply here.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = spurious_exec_pkg(
+            &dir,
+            &[(
+                "/usr/share/themes/foo/index.theme",
+                "ASCII text",
+                b"[Icon Theme]\nName=Foo\n",
+            )],
+        );
+        let findings = check_spurious_script(&pkg, &config);
+        assert_eq!(
+            findings,
+            [(
+                "spurious-executable-perm".to_string(),
+                Level::Warning,
+                "spurious-test.noarch: W: spurious-executable-perm \
+                 /usr/share/themes/foo/index.theme"
+                    .to_string(),
+            )],
+            "exactly one pinned (name, Level, detail) triple"
+        );
+    }
+
+    #[test]
+    fn spurious_executable_perm_silent_for_nontext_data() {
+        // Non-text data (120 control bytes, like the nul.bin probe): the
+        // reference early-returns on non-text in the same code path and
+        // stays silent, so the istext gate keeps the port silent too.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = spurious_exec_pkg(&dir, &[("/usr/share/data/nul.bin", "data", &[0x01; 120])]);
+        let findings = check_spurious_script(&pkg, &config);
+        assert_eq!(findings, [], "no finding where the reference is silent");
+    }
+
+    #[test]
+    fn spurious_executable_perm_silent_for_elf_in_non_script_path() {
+        // ELF binaries are executable by design, even outside script paths.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = spurious_exec_pkg(
+            &dir,
+            &[(
+                "/usr/share/games/foo/game",
+                "ELF 64-bit LSB executable",
+                b"\x7fELF\x02\x01\x01\x00",
+            )],
+        );
+        let findings = check_spurious_script(&pkg, &config);
+        assert_eq!(findings, [], "ELF exemption holds outside script paths");
+    }
+
+    #[test]
+    fn script_path_keeps_script_without_shebang() {
+        // Control: a shebang-less executable in a script path keeps the old
+        // script-without-shebang Error and must not flip to
+        // spurious-executable-perm.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = spurious_exec_pkg(&dir, &[("/usr/bin/noshebang", "ASCII text", b"echo hi\n")]);
+        let findings = check_spurious_script(&pkg, &config);
+        assert_eq!(
+            findings,
+            [(
+                "script-without-shebang".to_string(),
+                Level::Error,
+                "spurious-test.noarch: E: script-without-shebang /usr/bin/noshebang".to_string(),
+            )],
+            "script paths keep script-without-shebang, not spurious"
+        );
     }
 
     #[test]
