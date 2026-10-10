@@ -727,12 +727,24 @@ def _fetch_repomd_xml(repomd_url, label):
     return repomd
 
 
+class GrepError(Exception):
+    """The grep stage of the filelist pipeline failed deterministically.
+
+    Deliberately not a RuntimeError: the stale-mirror retry loop in
+    _filelist_hits retries RuntimeError (transient curl/zstd conditions
+    that a fresh mirror may fix), so a deterministic grep failure - e.g.
+    rc=2, which no retry can fix - raises through immediately instead of
+    burning the 30s/60s backoff on a certain failure.
+    """
+
+
 def _download_filelist_hits(fl_url, args, label):
     """Download a filelists archive, grep it, and return the hit set.
 
     Streams the file through one ``curl | zstd -dc | grep`` pass, matching
     ``>path<`` against ``<file>path</file>`` entries so only exact paths
-    hit. Raises RuntimeError on download/decompression/grep failure.
+    hit. Raises RuntimeError on download/decompression failure, GrepError
+    on grep failure.
     """
     # Every stage must succeed: checking only grep's return code lets a
     # failed download prune everything this guard verifies. -f makes
@@ -790,7 +802,9 @@ def _download_filelist_hits(fl_url, args, label):
             % (zstd_rc, label, zstd_err[:300])
         )
     if grep.returncode not in (0, 1):
-        raise RuntimeError(
+        # GrepError, not RuntimeError: deterministic, so the stale-mirror
+        # retry loop lets it raise through without backoff.
+        raise GrepError(
             "filelist grep failed (rc=%d): %s"
             % (grep.returncode, grep.stderr[:200])
         )
@@ -809,7 +823,9 @@ def _filelist_hits(paths, repomd_url, repo_base, cache, label):
     fetched fine but the filelists it references 404 because the mirror
     has not synced them yet - is retried with backoff over fresh repomd
     fetches, each with its own MirrorBrain redirect that may land on a
-    healthy mirror. Only raises once every cycle is exhausted.
+    healthy mirror. Only raises once every cycle is exhausted. A
+    deterministic grep failure (GrepError) is not retried: it raises
+    through immediately, since backoff cannot fix it.
     """
     paths = sorted(set(paths))
     missing = [p for p in paths if p not in cache]
@@ -833,6 +849,8 @@ def _filelist_hits(paths, repomd_url, repo_base, cache, label):
                 hits = _download_filelist_hits(fl_url, args, label)
                 break
             except RuntimeError as e:
+                # GrepError is not a RuntimeError: deterministic grep
+                # failures raise through here without burning the backoff.
                 last_err = e
                 if cycle + 1 < _FILELIST_CYCLES:
                     time.sleep(_FILELIST_BACKOFF[cycle])
