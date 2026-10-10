@@ -11,7 +11,7 @@
 //! bzip2 payloads are rejected with a clear error: no pure-Rust decoder is
 //! available and the last RPMs using bzip2 payloads predate 2010.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
@@ -282,6 +282,9 @@ struct Extractor<'a> {
     /// already-recorded path; a linear scan per entry is O(n^2) in the
     /// number of files (rocksndiamonds-data ships 108k of them).
     fixup_index: HashMap<PathBuf, usize>,
+    /// Sanitized payload paths already materialized, to tell an intentional
+    /// same-path replace apart from a case-insensitive collision.
+    seen: HashSet<PathBuf>,
 }
 
 impl<'a> Extractor<'a> {
@@ -409,6 +412,7 @@ impl<'a> Extractor<'a> {
         // components and the link-then-file order get the same fail-closed
         // treatment here.
         self.reject_symlink_escape(&path, e.mode & S_IFMT == S_IFLNK)?;
+        let is_duplicate = self.seen.contains(&rel);
         match e.mode & S_IFMT {
             S_IFDIR => {
                 // ensure_dir_all doubles as the collision check for the entry
@@ -419,6 +423,7 @@ impl<'a> Extractor<'a> {
                 }
                 skip_data(r, e.size)?;
                 self.record(path, e.mode & 0o7777, Some(e.mtime), true);
+                self.seen.insert(rel);
             }
             S_IFREG => {
                 if !self.ensure_parent(&path)? || is_existing_dir(&path) {
@@ -435,6 +440,7 @@ impl<'a> Extractor<'a> {
                     skip_pad(r, e.size)?;
                 }
                 self.record(path, e.mode & 0o7777, Some(e.mtime), false);
+                self.seen.insert(rel);
             }
             S_IFLNK => {
                 if !self.ensure_parent(&path)? || is_existing_dir(&path) {
@@ -453,6 +459,23 @@ impl<'a> Extractor<'a> {
                 r.read_exact(&mut target)
                     .map_err(|e| entry_error(format!("truncated symlink target: {e}")))?;
                 skip_pad(r, e.size)?;
+                // A symlink entry must not clobber an existing non-symlink
+                // it did not itself replace: on a case-insensitive
+                // filesystem two payload paths can collide (e.g. 4pane's
+                // file `4Pane` and symlink `4pane -> 4Pane`), and replacing
+                // the file with the link creates a self-loop that breaks
+                // every later read with ELOOP. An exact same-path duplicate
+                // is an intentional replace (tar semantics) and still wins.
+                // Either way the header metadata describes the symlink for
+                // the checks.
+                if !is_duplicate
+                    && fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_symlink())
+                {
+                    self.log_skip_collision(e);
+                    return Ok(());
+                }
+                // Guard passed: record the path as materialized.
+                self.seen.insert(rel);
                 let _ = fs::remove_file(&path);
                 symlink(OsStr::from_bytes(&target), &path).map_err(|e| io_error(&path, e))?;
                 // Symlink modes/mtimes are OS-determined; tar leaves them too.
@@ -468,6 +491,7 @@ impl<'a> Extractor<'a> {
                 // No mtime: opening a fifo for writing (as set_modified does)
                 // blocks until a reader appears.
                 self.record(path, e.mode & 0o7777, None, false);
+                self.seen.insert(rel);
             }
             S_IFCHR | S_IFBLK => {
                 // Device nodes are skipped: creating them needs privilege the
@@ -663,6 +687,7 @@ pub fn extract(rpm: &Path, dir: &Path, _suppress_stderr: bool) -> Result<(), Ext
         // Reserve for the known entry count: the index holds one slot per
         // fixup, bounded by the number of file entries (108k in the wild).
         fixup_index: HashMap::with_capacity(file_entries.len()),
+        seen: HashSet::new(),
     };
     while let Some(entry) = read_entry(&mut payload, &file_entries)? {
         extractor.materialize(&mut payload, &entry)?;
@@ -963,6 +988,7 @@ mod tests {
             hardlinks: HashMap::new(),
             fixups: Vec::new(),
             fixup_index: HashMap::new(),
+            seen: HashSet::new(),
         };
         let entry = CpioEntry {
             ino: 1,
@@ -1001,6 +1027,7 @@ mod tests {
             hardlinks: HashMap::new(),
             fixups: Vec::new(),
             fixup_index: HashMap::new(),
+            seen: HashSet::new(),
         }
     }
 
@@ -1105,6 +1132,114 @@ mod tests {
         );
     }
 
+    /// Regression for #363: a symlink entry must not delete an existing
+    /// file. On a case-insensitive filesystem the 4pane payload's file
+    /// `4Pane` and symlink `4pane -> 4Pane` collide; replacing the file
+    /// with the link creates a self-loop, and every later read fails with
+    /// ELOOP (surfacing as `readelf-failed`). The entry is skipped and
+    /// the file survives.
+    #[test]
+    fn symlink_entry_does_not_clobber_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // Pre-create the file, as if an earlier payload entry materialized it.
+        // Seed `seen` with the different-case rel the file entry used, so the
+        // test distinguishes the case-collision from an exact duplicate.
+        let path = dir.path().join("usr/bin/tool");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"binary\n").unwrap();
+
+        let mut ex = extractor_for(dir.path());
+        ex.seen.insert(PathBuf::from("usr/bin/TOOL"));
+
+        // Symlink entry for the colliding on-disk path.
+        let target = b"tool";
+        let entry = cpio_entry(b"usr/bin/tool", S_IFLNK | 0o777, target.len() as u64);
+        let raw = padded(target);
+        let mut data = &raw[..];
+        ex.materialize(&mut data, &entry).unwrap();
+
+        // The file survives; no symlink loop is created.
+        assert_eq!(std::fs::read(&path).unwrap(), b"binary\n");
+        assert!(
+            !std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    /// A skipped symlink must not poison `seen`: an exact-duplicate symlink
+    /// entry after a guard-fired skip must hit the guard again, not bypass
+    /// it via `is_duplicate=true` and recreate the ELOOP self-loop.
+    #[test]
+    fn duplicate_skipped_symlink_does_not_bypass_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        // Pre-create the file, as if an earlier payload entry materialized it.
+        // Seed `seen` with the different-case rel the file entry used.
+        let path = dir.path().join("usr/bin/tool");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"binary\n").unwrap();
+
+        let mut ex = extractor_for(dir.path());
+        ex.seen.insert(PathBuf::from("usr/bin/TOOL"));
+
+        // Symlink entry for the colliding on-disk path.
+        let target = b"tool";
+        let entry = cpio_entry(b"usr/bin/tool", S_IFLNK | 0o777, target.len() as u64);
+        // First entry: guard fires (path exists as non-symlink), skipped.
+        let raw = padded(target);
+        let mut data = &raw[..];
+        ex.materialize(&mut data, &entry).unwrap();
+        // Second entry: exact duplicate. Must hit the guard again, not
+        // bypass it via is_duplicate=true.
+        let raw = padded(target);
+        let mut data = &raw[..];
+        ex.materialize(&mut data, &entry).unwrap();
+
+        // The file survives; no symlink loop is created.
+        assert_eq!(std::fs::read(&path).unwrap(), b"binary\n");
+        assert!(
+            !std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    /// Companion to the guard tests: an exact-duplicate symlink entry for a
+    /// path the extractor itself materialized is an intentional replace
+    /// (tar semantics) and still wins.
+    #[test]
+    fn exact_duplicate_symlink_still_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ex = extractor_for(dir.path());
+
+        let target1 = b"first";
+        let entry = cpio_entry(b"usr/bin/link", S_IFLNK | 0o777, target1.len() as u64);
+        let raw = padded(target1);
+        let mut data = &raw[..];
+        ex.materialize(&mut data, &entry).unwrap();
+
+        let path = dir.path().join("usr/bin/link");
+        assert_eq!(
+            std::fs::read_link(&path).unwrap().as_os_str().as_bytes(),
+            b"first"
+        );
+
+        // Exact duplicate with a new target: replaces the link.
+        let target2 = b"second";
+        let entry = cpio_entry(b"usr/bin/link", S_IFLNK | 0o777, target2.len() as u64);
+        let raw = padded(target2);
+        let mut data = &raw[..];
+        ex.materialize(&mut data, &entry).unwrap();
+
+        assert_eq!(
+            std::fs::read_link(&path).unwrap().as_os_str().as_bytes(),
+            b"second",
+            "exact-duplicate symlink must replace the previous link"
+        );
+    }
+
     /// The stripped-cpio path exists exactly for >4GB entries: a large
     /// LONGFILESIZES size must survive as u64, never truncate to u32.
     /// The header is built tiny and fast, then surgically given a
@@ -1194,6 +1329,7 @@ mod tests {
             hardlinks: HashMap::new(),
             fixups: Vec::new(),
             fixup_index: HashMap::new(),
+            seen: HashSet::new(),
         };
         let entry = CpioEntry {
             ino: 7,
@@ -1223,6 +1359,7 @@ mod tests {
             hardlinks: HashMap::new(),
             fixups: Vec::new(),
             fixup_index: HashMap::new(),
+            seen: HashSet::new(),
         };
         let entry = CpioEntry {
             ino: 9,
@@ -1378,6 +1515,7 @@ mod tests {
             hardlinks: HashMap::new(),
             fixups: Vec::new(),
             fixup_index: HashMap::new(),
+            seen: HashSet::new(),
         }
     }
 
