@@ -651,7 +651,9 @@ pub fn extract(rpm: &Path, dir: &Path, _suppress_stderr: bool) -> Result<(), Ext
         dir,
         hardlinks: HashMap::new(),
         fixups: Vec::new(),
-        fixup_index: HashMap::new(),
+        // Reserve for the known entry count: the index holds one slot per
+        // fixup, bounded by the number of file entries (108k in the wild).
+        fixup_index: HashMap::with_capacity(file_entries.len()),
     };
     while let Some(entry) = read_entry(&mut payload, &file_entries)? {
         extractor.materialize(&mut payload, &entry)?;
