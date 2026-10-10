@@ -359,8 +359,7 @@ impl PythonCheck {
         if let Some(caps) = pv_in_re.captures(atom).ok().flatten() {
             let op = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let want = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-            let contains = want.split_whitespace().any(|v| v == python_version)
-                || want.contains(python_version);
+            let contains = want.contains(python_version);
             return if op.starts_with("not") {
                 !contains
             } else {
