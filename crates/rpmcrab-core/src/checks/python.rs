@@ -407,8 +407,21 @@ impl PythonCheck {
     /// Evaluate a `var == "value"` / `var != "value"` comparison against a
     /// pinned value. Returns `None` when the atom is not such a comparison.
     fn string_marker_holds(atom: &str, var: &str, pinned: &str) -> Option<bool> {
-        let pattern = format!(r#"{var}\s*(==|!=)\s*["']([^"']*)["']"#);
-        let re = Regex::new(&pattern).expect("static regex");
+        /// Per-`var` cached regexes: the pattern varies only with `var`,
+        /// which comes from a small fixed set of call sites.
+        static STRING_MARKER_RES: [(&str, OnceLock<Regex>); 4] = [
+            ("extra", OnceLock::new()),
+            ("os_name", OnceLock::new()),
+            ("platform_system", OnceLock::new()),
+            ("sys_platform", OnceLock::new()),
+        ];
+        let cell = STRING_MARKER_RES
+            .iter()
+            .find(|(v, _)| *v == var)
+            .map(|(_, cell)| cell)?;
+        let re = cell.get_or_init(|| {
+            Regex::new(&format!(r#"{var}\s*(==|!=)\s*["']([^"']*)["']"#)).expect("static regex")
+        });
         let caps = re.captures(atom).ok().flatten()?;
         let op = caps.get(1).map(|m| m.as_str()).unwrap_or("");
         let want = caps.get(2).map(|m| m.as_str()).unwrap_or("");
