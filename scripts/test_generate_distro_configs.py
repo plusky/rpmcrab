@@ -166,10 +166,40 @@ def test_grep_failure_raises():
             popen_patch, run_patch:
         try:
             _filelist_hits(["/usr/bin/foo"], {})
-        except RuntimeError as e:
+        except gen.GrepError as e:
             assert "grep failed (rc=2)" in str(e), str(e)
         else:
             raise AssertionError("grep failure did not raise")
+
+
+def test_grep_failure_raises_without_retry():
+    """A deterministic grep failure (rc=2) raises at once, no backoff.
+
+    GrepError is not a RuntimeError, so the stale-mirror retry loop lets
+    it through: no second repomd fetch, no sleeps - retry cannot fix a
+    failure a fresh mirror would reproduce identically.
+    """
+    popen_patch, run_patch, _ = _pipeline(grep_rc=2, grep_stderr="grep: boom")
+    urlopen_calls = []
+
+    def fake_urlopen(*args, **kwargs):
+        urlopen_calls.append(args)
+        return _repomd_response()
+
+    sleeps = []
+    with mock.patch.object(gen.urllib.request, "urlopen",
+                           side_effect=fake_urlopen), \
+            mock.patch.object(gen.time, "sleep",
+                              side_effect=lambda s: sleeps.append(s)), \
+            popen_patch, run_patch:
+        try:
+            _filelist_hits(["/usr/bin/foo"], {})
+        except gen.GrepError as e:
+            assert "grep failed (rc=2)" in str(e), str(e)
+        else:
+            raise AssertionError("grep failure did not raise")
+    assert len(urlopen_calls) == 1, urlopen_calls
+    assert sleeps == [], sleeps
 
 
 def test_repomd_without_filelists_raises():
