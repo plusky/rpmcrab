@@ -2791,6 +2791,7 @@ mod tests {
                 defines_main: false,
                 elf_type: goblin::elf::header::ET_EXEC,
                 bind_now: false,
+                has_dynamic: false,
                 failed: None,
             };
             let pkgfile = PkgFile {
