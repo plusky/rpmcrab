@@ -870,8 +870,10 @@ def _filelist_hits(paths, repomd_url, repo_base, cache, label):
             args += ["-e", ">%s<" % q]
         hits = None
         last_err = None
+        attempts = 0
         for cycle in range(_FILELIST_CYCLES):
             repomd = _fetch_repomd_xml(repomd_url, label)
+            attempts += 1
             fl_url = _filelist_url(repomd, repo_base, label)
             try:
                 hits = _download_filelist_hits(fl_url, args, label)
@@ -888,6 +890,7 @@ def _filelist_hits(paths, repomd_url, repo_base, cache, label):
             if fb_repomd_url is not None:
                 fb_label = label + " (fallback mirror)"
                 repomd = _fetch_repomd_xml(fb_repomd_url, fb_label)
+                attempts += 1
                 fl_url = _filelist_url(repomd, fb_repo_base, fb_label)
                 try:
                     hits = _download_filelist_hits(fl_url, args, fb_label)
@@ -896,7 +899,7 @@ def _filelist_hits(paths, repomd_url, repo_base, cache, label):
         if hits is None:
             raise RuntimeError(
                 "filelist download failed for %s after %d attempts: %s"
-                % (label, _FILELIST_CYCLES, last_err)
+                % (label, attempts, last_err)
             )
         for q in missing:
             cache[q] = q in hits
