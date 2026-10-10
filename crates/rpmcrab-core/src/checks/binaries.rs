@@ -168,6 +168,9 @@ struct ReadelfInfo {
     /// DF_BIND_NOW (DT_FLAGS) or DF_1_NOW (DT_FLAGS_1). Together with a
     /// GNU_RELRO segment this is the full-versus-partial RELRO distinction.
     bind_now: bool,
+    /// The ELF has a dynamic section (PT_DYNAMIC). Static binaries do not;
+    /// RELRO/BIND_NOW are dynamic-linker features meaningless without one.
+    has_dynamic: bool,
     /// A non-weak undefined dynamic symbol exists: the object really
     /// references external code, so an empty DT_NEEDED is suspicious.
     /// Weak-only undefined symbols are the optional crt references that
@@ -202,6 +205,7 @@ impl ReadelfInfo {
             defines_main: false,
             elf_type: goblin::elf::header::ET_NONE,
             bind_now: false,
+            has_dynamic: false,
             failed: None,
         }
     }
@@ -369,6 +373,7 @@ impl ReadelfInfo {
 
         // Dynamic section
         if let Some(dynamic) = &elf.dynamic {
+            self.has_dynamic = true;
             // BIND_NOW lives in DT_FLAGS or DT_FLAGS_1; goblin folds both
             // into DynamicInfo during the parse.
             if dynamic.info.flags & goblin::elf::dynamic::DF_BIND_NOW != 0
@@ -410,14 +415,16 @@ impl ReadelfInfo {
             .any(|s| regex.is_match(s).unwrap_or(false))
     }
 
-    /// Go toolchain output carries a `.note.go.buildid` section. Go
-    /// binaries are ET_DYN with no DT_NEEDED, but they are not shared
+    /// Go toolchain output carries a `.note.go.buildid` section, but
+    /// some builds (e.g. openSUSE Go packages) lack it. `.gopclntab`
+    /// (the runtime function table) is present in every Go binary.
+    /// Go binaries are ET_DYN with no DT_NEEDED, but they are not shared
     /// objects missing dependency information.
     fn is_go_binary(&self) -> bool {
         self.sections
             .iter()
             .flatten()
-            .any(|s| s.name == ".note.go.buildid")
+            .any(|s| s.name == ".note.go.buildid" || s.name == ".gopclntab")
     }
 
     /// Rust toolchain output carries none of the C-hardening artifacts:
@@ -1373,11 +1380,16 @@ impl BinariesCheck {
                 &[&pkgfile.name],
             );
         }
-        let has_relro = info.program_headers.iter().any(|h| h.name == "GNU_RELRO");
-        if !has_relro {
-            add_info(out, Level::Warning, pkg, "missing-relro", &[&pkgfile.name]);
-        } else if !info.bind_now {
-            add_info(out, Level::Warning, pkg, "partial-relro", &[&pkgfile.name]);
+        // RELRO and BIND_NOW are dynamic-linker features: a static binary
+        // has no lazy binding for them to protect, so neither finding is
+        // meaningful without a dynamic section.
+        if info.has_dynamic {
+            let has_relro = info.program_headers.iter().any(|h| h.name == "GNU_RELRO");
+            if !has_relro {
+                add_info(out, Level::Warning, pkg, "missing-relro", &[&pkgfile.name]);
+            } else if !info.bind_now {
+                add_info(out, Level::Warning, pkg, "partial-relro", &[&pkgfile.name]);
+            }
         }
     }
 
@@ -2987,6 +2999,70 @@ mod tests {
     }
 
     #[test]
+    fn hardening_go_binary_without_buildid_note_is_skipped() {
+        // openSUSE Go packages (e.g. kind) lack `.note.go.buildid`;
+        // `.gopclntab` is the universal Go marker. The whole hardening
+        // check must stay silent for them.
+        let info = parse_crafted_sections(
+            "go-pclntab",
+            &[(".gopclntab", b"\x00\x01\x02"), (".text", b"\x90")],
+        );
+        assert!(info.is_go_binary(), "gopclntab must mark Go");
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/bin/goprog", "ELF 64-bit LSB pie executable");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_hardening(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        for finding in [
+            "missing-fortify",
+            "missing-stack-protector",
+            "missing-relro",
+            "partial-relro",
+        ] {
+            assert!(
+                lines_for(&results, finding).is_empty(),
+                "{finding} must not fire for Go: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hardening_static_binary_skips_relro() {
+        // A static binary has no dynamic section: BIND_NOW is meaningless
+        // and RELRO findings would be unactionable noise.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/sbin/staticbin", "ELF 64-bit LSB executable");
+        let mut info = syn_info();
+        info.has_dynamic = false;
+        info.program_headers = vec![ElfProgramHeader {
+            name: "GNU_RELRO".to_string(),
+            flags: "R".to_string(),
+        }];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_hardening(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        for finding in ["missing-relro", "partial-relro"] {
+            assert!(
+                lines_for(&results, finding).is_empty(),
+                "{finding} must not fire for static binaries: {results:?}"
+            );
+        }
+        // Fortify and stack-protector are compile-time instrumentations,
+        // not dynamic-linker features, so they still fire for static.
+        for finding in ["missing-fortify", "missing-stack-protector"] {
+            assert_eq!(
+                lines_for(&results, finding).len(),
+                1,
+                "{finding} must still fire for static binaries: {results:?}"
+            );
+        }
+    }
+
+    #[test]
     fn hardening_c_binary_still_fires_fortify_and_ssp() {
         let results = hardening_results_for(false);
         assert_eq!(
@@ -3647,6 +3723,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 defines_main: false,
                 elf_type: goblin::elf::header::ET_DYN,
                 bind_now: false,
+                has_dynamic: false,
                 failed: None,
                 is_rust: false,
             };
@@ -3779,6 +3856,7 @@ description = "explicit priority string bypasses the system crypto policy"
             defines_main: false,
             elf_type: goblin::elf::header::ET_EXEC,
             bind_now: false,
+            has_dynamic: true,
             failed: None,
             is_rust: false,
         }
