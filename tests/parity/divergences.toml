@@ -774,7 +774,7 @@ since = "0.1.0"
 case = "global"
 check = "PythonCheck"
 kind = "behaviour"
-reason = "Environment markers for PEP 508 `default_environment()` keys the port does not evaluate (`implementation_name`, `implementation_version`, `platform_machine`, `platform_release`, `platform_version`, `python_full_version`, `platform_python_implementation`) fail closed: the requirement is treated as not wanted, which can emit `python-leftover-require` where the reference - evaluating the real environment - stays quiet. `python_version`, `sys_platform`, `os_name` ('posix'), `platform_system` ('Linux') and `extra` (evaluated against \"\") match the reference exactly (`PythonCheck.py:139-143`). Pinned by `marker_pinned_linux_environment`."
+reason = "Environment markers for PEP 508 `default_environment()` keys the port does not evaluate (`implementation_name`, `implementation_version`, `platform_release`, `platform_version`, `python_full_version`) fail closed: the requirement is treated as not wanted, which can emit `python-leftover-require` where the reference - evaluating the real environment - stays quiet. `python_version`, `sys_platform`, `os_name` ('posix'), `platform_system` ('Linux'), `platform_machine` ('x86_64'), `platform_python_implementation` ('CPython') and `extra` (evaluated against \"\") match the reference exactly (`PythonCheck.py:139-143`). Pinned by `marker_pinned_linux_environment` and `marker_pinned_machine_and_implementation`."
 since = "0.1.0"
 
 [[divergence]]
