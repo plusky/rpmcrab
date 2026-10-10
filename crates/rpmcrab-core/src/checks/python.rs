@@ -359,8 +359,7 @@ impl PythonCheck {
         if let Some(caps) = pv_in_re.captures(atom).ok().flatten() {
             let op = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let want = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-            let contains = want.split_whitespace().any(|v| v == python_version)
-                || want.contains(python_version);
+            let contains = want.contains(python_version);
             return if op.starts_with("not") {
                 !contains
             } else {
@@ -408,8 +407,26 @@ impl PythonCheck {
     /// Evaluate a `var == "value"` / `var != "value"` comparison against a
     /// pinned value. Returns `None` when the atom is not such a comparison.
     fn string_marker_holds(atom: &str, var: &str, pinned: &str) -> Option<bool> {
-        let pattern = format!(r#"{var}\s*(==|!=)\s*["']([^"']*)["']"#);
-        let re = Regex::new(&pattern).expect("static regex");
+        // Per-`var` cached regexes: the pattern varies only with `var`,
+        // which comes from a small fixed set of call sites.
+        static STRING_MARKER_RES: [(&str, OnceLock<Regex>); 4] = [
+            ("extra", OnceLock::new()),
+            ("os_name", OnceLock::new()),
+            ("platform_system", OnceLock::new()),
+            ("sys_platform", OnceLock::new()),
+        ];
+        let cell = STRING_MARKER_RES
+            .iter()
+            .find(|(v, _)| *v == var)
+            .map(|(_, cell)| cell);
+        debug_assert!(
+            cell.is_some(),
+            "string_marker_holds called with unexpected var: {var}"
+        );
+        let cell = cell?;
+        let re = cell.get_or_init(|| {
+            Regex::new(&format!(r#"{var}\s*(==|!=)\s*["']([^"']*)["']"#)).expect("static regex")
+        });
         let caps = re.captures(atom).ok().flatten()?;
         let op = caps.get(1).map(|m| m.as_str()).unwrap_or("");
         let want = caps.get(2).map(|m| m.as_str()).unwrap_or("");
@@ -1346,6 +1363,32 @@ mod tests {
         assert_eq!(req.extras, vec!["tls".to_string()]);
         let req = PythonCheck::split_marker("jsonschema[format-nongpl]>=4.18.0");
         assert_eq!(req.extras, vec!["format-nongpl".to_string()]);
+    }
+
+    #[test]
+    fn string_marker_regexes_are_keyed_by_var() {
+        // The OnceLock table in `string_marker_holds` keys the cached
+        // regex by `var`: an atom naming a different variable must not
+        // match, even when another var's regex was compiled first.
+        for var in ["extra", "os_name", "platform_system", "sys_platform"] {
+            let pinned = match var {
+                "extra" => "",
+                "os_name" => "posix",
+                "platform_system" => "Linux",
+                "sys_platform" => "linux",
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                PythonCheck::string_marker_holds(&format!("{var} == '{pinned}'"), var, pinned),
+                Some(true),
+                "own-var atom must match for {var}"
+            );
+            assert_eq!(
+                PythonCheck::string_marker_holds("extra == ''", var, pinned),
+                if var == "extra" { Some(true) } else { None },
+                "other-var atom must not match for {var}"
+            );
+        }
     }
 
     #[test]

@@ -1640,7 +1640,7 @@ since = "0.1.0"
 case = "global"
 check = "session-header"
 kind = "behaviour"
-reason = "The session banner identifies rpmcrab itself ('rpmcrab: X.Y.Z', the crate's own version) instead of emulating the reference's banner ('rpmlint: 2.10.0'). The banner is not grepped by build tooling, so the reference emulation was dropped (Tom's call 2026-10-08); the abort banner, footer, sort order and exit codes are untouched."
+reason = "The session banner identifies rpmcrab itself ('rpmcrab: X.Y.Z', the crate's own version) instead of emulating the reference's banner ('rpmlint: 2.10.0'). The banner is not grepped by build tooling, so the reference emulation was dropped (see `docs/DESIGN.md` §4.5); the abort banner, footer, sort order and exit codes are untouched."
 since = "0.1.0"
 
 [[divergence]]
