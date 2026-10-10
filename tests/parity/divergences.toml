@@ -1713,10 +1713,3 @@ check = "SharedLibraryPolicyCheck"
 kind = "behaviour"
 reason = "shlib-fixed-dependency skips `=` dependencies where the required package name is a proper prefix of the requiring package name (e.g. `libfoo-x86-64-v3` requires `libfoo = 1.0`): a flavor package pinning its own co-built base is version lockstep, not a shared-library-policy violation. The reference would fire on such inputs (same code, no exemption); it never does in practice because it never sees the -x86-64-v3 flavor binaries (0 emissions in 17k Factory packages)."
 since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "unused-rpmlintrc-filter"
-kind = "behaviour"
-reason = "rpmcrab audits rpmlintrc filters after the run and reports any that never matched as an error. The reference Python rpmlint has no such audit; unused filters stay silent. This is a deliberate rpmcrab addition to catch stale filters."
-since = "0.1.0"
