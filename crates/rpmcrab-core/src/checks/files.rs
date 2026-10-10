@@ -67,7 +67,8 @@ fn kernel_package_regex() -> &'static Regex {
 
 static DEBUGINFO_PACKAGE_REGEX: OnceLock<Regex> = OnceLock::new();
 fn debuginfo_package_regex() -> &'static Regex {
-    DEBUGINFO_PACKAGE_REGEX.get_or_init(|| Regex::new(r"-debuginfo$").expect("static regex"))
+    DEBUGINFO_PACKAGE_REGEX
+        .get_or_init(|| Regex::new(r"-(debuginfo|debug)$").expect("static regex"))
 }
 
 static DEBUGSOURCE_PACKAGE_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -5086,6 +5087,41 @@ mod tests {
                 .iter()
                 .any(|(n, _)| n == "debug-files-in-non-debug-package"),
             "debuginfo packages must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn debug_files_in_legacy_debug_package_are_quiet() {
+        // Legacy -debug suffix (e.g. qemu-ovmf-x86_64-debug) must also be
+        // recognized as a debuginfo package.
+        let (mut pkg, _dir) =
+            pkg_with_files(vec![mkfile("/usr/lib/debug/foo.debug", 0o100644, 21)]);
+        pkg.name = "foo-debug".to_string();
+        let results = run_check_binary(&pkg);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|(n, _)| n == "debug-files-in-non-debug-package")
+                .count(),
+            0,
+            "legacy -debug packages must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn empty_debuginfo_package_fires_for_legacy_debug_suffix() {
+        // The empty-debuginfo-package side effect also applies to the legacy
+        // -debug suffix, not only to -debuginfo.
+        let (mut pkg, _dir) = pkg_with_files(vec![]);
+        pkg.name = "foo-debug".to_string();
+        let results = run_check_binary(&pkg);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|(n, _)| n == "empty-debuginfo-package")
+                .count(),
+            1,
+            "empty legacy -debug package must fire empty-debuginfo-package: {results:?}"
         );
     }
 
