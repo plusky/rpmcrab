@@ -237,10 +237,13 @@ impl PythonCheck {
     fn split_marker(req: &str) -> Requirement {
         let mut parts = req.splitn(2, ';');
         let name = parts.next().unwrap_or("").trim();
+        // Extras live between `[` and the first `]`; the version specifier
+        // follows the closing bracket (`Twisted[tls]>=14.0`), so split on
+        // `]` instead of trimming a trailing one that may not be there.
         let (name, extras) = match name.split_once('[') {
             Some((n, rest)) => {
-                let extras = rest
-                    .trim_end_matches(']')
+                let (extra_part, _) = rest.split_once(']').unwrap_or((rest, ""));
+                let extras = extra_part
                     .split(',')
                     .map(|e| e.trim().to_string())
                     .filter(|e| !e.is_empty())
@@ -787,6 +790,39 @@ mod tests {
         let reqs = PythonCheck::parse_requirements(content, true, "3.12");
         let findings = check_requirements_findings(&reqs, &["python3-w6extra"]);
         assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+    }
+
+    #[test]
+    fn leftover_extras_with_version_specifier_match() {
+        // `Twisted[tls]>=14.0`: the version specifier follows the closing
+        // bracket, so extras must be split on `]` — trimming a trailing
+        // `]` left `tls]>=14.0` as the extra and emitted a bogus
+        // `python-leftover-require` for `python3-Twisted-tls` (issue #381,
+        // e.g. python-TxSNI, python-ldaptor, python-dask-ml).
+        let req = PythonCheck::split_marker("Twisted[tls]>=14.0");
+        assert_eq!(req.name, "Twisted");
+        assert_eq!(req.extras, vec!["tls".to_string()]);
+
+        let content = "Metadata-Version: 2.1\nRequires-Dist: Twisted[tls]>=14.0\n";
+        let reqs = PythonCheck::parse_requirements(content, true, "3.12");
+        let findings = check_requirements_findings(&reqs, &["python3-Twisted-tls"]);
+        assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+
+        // Multiple extras with a version: `dask[array,dataframe]>=2025.1.0`.
+        let req = PythonCheck::split_marker("dask[array,dataframe]>=2025.1.0");
+        assert_eq!(req.name, "dask");
+        assert_eq!(
+            req.extras,
+            vec!["array".to_string(), "dataframe".to_string()]
+        );
+        let content = "Metadata-Version: 2.1\nRequires-Dist: dask[array,dataframe]>=2025.1.0\n";
+        let reqs = PythonCheck::parse_requirements(content, true, "3.12");
+        let findings = check_requirements_findings(&reqs, &["python3-dask-dataframe"]);
+        assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+
+        // Unclosed-bracket fallback: `foo[bar` still yields `bar` as extra.
+        let req = PythonCheck::split_marker("foo[bar");
+        assert_eq!(req.extras, vec!["bar".to_string()]);
     }
 
     #[test]
