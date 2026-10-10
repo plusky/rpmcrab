@@ -31,6 +31,3 @@ pedantic = { level = "allow", priority = -1 }
 [profile.release]
 lto = "fat"
 codegen-units = 1
-# DWARF goes to -debuginfo, symtab stripped; brp-strip only does -g
-debug = true
-strip = "symbols"
