@@ -527,8 +527,9 @@ impl DepExpr {
                 // `if`/`unless` list `then` before `cond`, preserving the
                 // original recursive order.
                 DepExpr::And(v) | DepExpr::Or(v) => stack.extend(v.iter().rev()),
-                DepExpr::If { cond, then } | DepExpr::Unless { cond, then } => {
-                    stack.push(cond);
+                // `if`/`unless`: the condition is a predicate, not a
+                // dependency; only the `then` branch is a real requirement.
+                DepExpr::If { then, .. } | DepExpr::Unless { then, .. } => {
                     stack.push(then);
                 }
                 DepExpr::With { lhs, rhs } | DepExpr::Without { lhs, rhs } => {
@@ -1293,6 +1294,18 @@ mod rich_dep_tests {
         let expr = parse_dep_expr("(outer and (inner1 or inner2))");
         let names: Vec<String> = expr.leaves().iter().map(|l| l.name.clone()).collect();
         assert_eq!(names, vec!["outer", "inner1", "inner2"]);
+    }
+
+    #[test]
+    fn leaves_if_unless_yield_only_then() {
+        for expr_str in [
+            "(gtk3-tools if libgtk-3-0)",
+            "(gtk3-tools unless libgtk-4-1)",
+        ] {
+            let expr = parse_dep_expr(expr_str);
+            let names: Vec<String> = expr.leaves().iter().map(|l| l.name.clone()).collect();
+            assert_eq!(names, vec!["gtk3-tools"]);
+        }
     }
 
     #[test]
