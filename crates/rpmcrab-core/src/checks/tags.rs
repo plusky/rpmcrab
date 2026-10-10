@@ -3033,4 +3033,30 @@ mod rich_dep_emission_tests {
             hits[0].1
         );
     }
+
+    #[test]
+    fn explicit_lib_dependency_cond_is_lib_is_silent() {
+        // (gtk3-tools if libgtk-3-0): the condition libgtk-3-0 is a predicate,
+        // not a requirement, so explicit-lib-dependency must not fire for it.
+        // The then-branch gtk3-tools is not a lib, so no finding at all.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![plain_dep("(gtk3-tools if libgtk-3-0)")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "explicit-lib-dependency").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_lib_dependency_then_is_lib_fires() {
+        // (libfoo if bar): the then-branch libfoo IS a real conditional
+        // requirement, so explicit-lib-dependency fires (ledgered divergence
+        // from the reference, which is silent on the whole string).
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![plain_dep("(libfoo if bar)")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "explicit-lib-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+    }
 }

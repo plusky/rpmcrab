@@ -527,8 +527,9 @@ impl DepExpr {
                 // `if`/`unless` list `then` before `cond`, preserving the
                 // original recursive order.
                 DepExpr::And(v) | DepExpr::Or(v) => stack.extend(v.iter().rev()),
-                DepExpr::If { cond, then } | DepExpr::Unless { cond, then } => {
-                    stack.push(cond);
+                // `if`/`unless`: the condition is a predicate, not a
+                // dependency; only the `then` branch is a real requirement.
+                DepExpr::If { then, .. } | DepExpr::Unless { then, .. } => {
                     stack.push(then);
                 }
                 DepExpr::With { lhs, rhs } | DepExpr::Without { lhs, rhs } => {
@@ -1293,6 +1294,60 @@ mod rich_dep_tests {
         let expr = parse_dep_expr("(outer and (inner1 or inner2))");
         let names: Vec<String> = expr.leaves().iter().map(|l| l.name.clone()).collect();
         assert_eq!(names, vec!["outer", "inner1", "inner2"]);
+    }
+
+    #[test]
+    fn leaves_if_unless_yield_only_then() {
+        for expr_str in [
+            "(gtk3-tools if libgtk-3-0)",
+            "(gtk3-tools unless libgtk-4-1)",
+        ] {
+            let expr = parse_dep_expr(expr_str);
+            let names: Vec<String> = expr.leaves().iter().map(|l| l.name.clone()).collect();
+            assert_eq!(names, vec!["gtk3-tools"]);
+        }
+    }
+
+    #[test]
+    fn leaves_if_unless_then_is_lib() {
+        // The then-branch is a real requirement even when it looks like a lib.
+        for (expr_str, expected) in [
+            ("(libfoo if bar)", vec!["libfoo"]),
+            ("(libfoo unless bar)", vec!["libfoo"]),
+            ("(foo-devel if bar)", vec!["foo-devel"]),
+        ] {
+            let expr = parse_dep_expr(expr_str);
+            let names: Vec<String> = expr.leaves().iter().map(|l| l.name.clone()).collect();
+            assert_eq!(names, expected, "for {expr_str}");
+        }
+    }
+
+    #[test]
+    fn leaves_nested_if_unless() {
+        // Nested rich expressions: if/unless inside or, or inside if/unless.
+        for (expr_str, expected) in [
+            ("((a if b) or c)", vec!["a", "c"]),
+            ("((a or b) if c)", vec!["a", "b"]),
+            ("((a unless b) or c)", vec!["a", "c"]),
+            ("((a or b) unless c)", vec!["a", "b"]),
+        ] {
+            let expr = parse_dep_expr(expr_str);
+            let names: Vec<String> = expr.leaves().iter().map(|l| l.name.clone()).collect();
+            assert_eq!(names, expected, "for {expr_str}");
+        }
+    }
+
+    #[test]
+    fn leaves_with_without_unchanged() {
+        // With/Without yield both sides (unchanged by the if/unless fix).
+        for (expr_str, expected) in [
+            ("(a with b)", vec!["a", "b"]),
+            ("(a without b)", vec!["a", "b"]),
+        ] {
+            let expr = parse_dep_expr(expr_str);
+            let names: Vec<String> = expr.leaves().iter().map(|l| l.name.clone()).collect();
+            assert_eq!(names, expected, "for {expr_str}");
+        }
     }
 
     #[test]
