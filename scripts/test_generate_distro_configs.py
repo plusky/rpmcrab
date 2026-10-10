@@ -45,6 +45,25 @@ def _repomd_response():
     return resp
 
 
+def _repomd_with_href(href):
+    """A repomd.xml response with the given filelists href.
+
+    Lets a test vary the href per fetch: with a constant href the
+    stale-mirror tests only prove the repomd *fetch* counts, not that the
+    retry loop actually uses each cycle's fresh href.
+    """
+    resp = mock.MagicMock()
+    resp.read.return_value = (
+        '<?xml version="1.0"?>'
+        '<repomd><data type="filelists">'
+        '<location href="%s"/>'
+        "</data></repomd>" % href
+    ).encode("utf-8")
+    resp.__enter__.return_value = resp
+    resp.__exit__.return_value = False
+    return resp
+
+
 def _http_error(code):
     return urllib.error.HTTPError("http://r/repomd.xml", code, "err", {}, None)
 
@@ -401,20 +420,29 @@ def test_filelist_stale_mirror_retries_with_fresh_repomd():
     """A 404ing filelist is retried with a fresh repomd fetch per cycle.
 
     Each cycle's repomd fetch gets its own MirrorBrain redirect, so the
-    retry can land on a synced mirror; the href is re-parsed from the
-    fresh repomd.
+    retry can land on a synced mirror. The href varies per cycle and the
+    curl URL list is asserted, proving the fresh href is actually *used*
+    rather than the fetch count just going up.
     """
-    popen_calls = []
+    hrefs = ["repodata/cycle-1-filelists.xml.zst",
+             "repodata/cycle-2-filelists.xml.zst"]
+    curl_urls = []
 
     def fake_popen(argv, **kwargs):
-        popen_calls.append(argv[0])
         if argv[0] == "curl":
-            if popen_calls.count("curl") == 1:
+            curl_urls.append(argv[-1])
+            if len(curl_urls) == 1:
                 return _FakePopen(
                     22, stderr=b"curl: (22) The requested URL returned error: 404")
             return _FakePopen(0)
         assert argv[0] == "zstd", argv
         return _FakePopen(0)
+
+    urlopen_calls = []
+
+    def fake_urlopen(*args, **kwargs):
+        urlopen_calls.append(args)
+        return _repomd_with_href(hrefs[len(urlopen_calls) - 1])
 
     grep_result = mock.Mock()
     grep_result.returncode = 0
@@ -423,7 +451,7 @@ def test_filelist_stale_mirror_retries_with_fresh_repomd():
 
     sleeps = []
     with mock.patch.object(gen.urllib.request, "urlopen",
-                           return_value=_repomd_response()) as urlopen_mock, \
+                           side_effect=fake_urlopen) as urlopen_mock, \
             mock.patch.object(gen.subprocess, "Popen", fake_popen), \
             mock.patch.object(gen.subprocess, "run",
                               return_value=grep_result), \
@@ -431,22 +459,35 @@ def test_filelist_stale_mirror_retries_with_fresh_repomd():
                               side_effect=lambda s: sleeps.append(s)):
         hits = _filelist_hits(["/usr/bin/foo"], {})
     assert hits == {"/usr/bin/foo"}, hits
-    assert popen_calls.count("curl") == 2, popen_calls
     # fresh repomd.xml fetch per cycle (new mirror redirect)
     assert urlopen_mock.call_count == 2, urlopen_mock.call_count
+    # ... and each cycle's curl used that cycle's fresh href
+    assert curl_urls == ["http://r/" + h for h in hrefs], curl_urls
     assert sleeps == [gen._FILELIST_BACKOFF[0]], sleeps
 
 
 def test_filelist_stale_mirror_exhausts_cycles_then_raises():
-    """Persistent filelist 404s raise only after every cycle is exhausted."""
-    popen_calls = []
+    """Persistent filelist 404s raise only after every cycle is exhausted.
+
+    The href varies per cycle so the test also proves every cycle
+    re-parsed and used its own fresh repomd's href.
+    """
+    hrefs = ["repodata/cycle-%d-filelists.xml.zst" % n
+             for n in range(1, gen._FILELIST_CYCLES + 1)]
+    curl_urls = []
 
     def fake_popen(argv, **kwargs):
-        popen_calls.append(argv[0])
         if argv[0] == "curl":
+            curl_urls.append(argv[-1])
             return _FakePopen(
                 22, stderr=b"curl: (22) The requested URL returned error: 404")
         return _FakePopen(0)
+
+    urlopen_calls = []
+
+    def fake_urlopen(*args, **kwargs):
+        urlopen_calls.append(args)
+        return _repomd_with_href(hrefs[len(urlopen_calls) - 1])
 
     grep_result = mock.Mock()
     grep_result.returncode = 1
@@ -455,7 +496,7 @@ def test_filelist_stale_mirror_exhausts_cycles_then_raises():
 
     sleeps = []
     with mock.patch.object(gen.urllib.request, "urlopen",
-                           return_value=_repomd_response()), \
+                           side_effect=fake_urlopen), \
             mock.patch.object(gen.subprocess, "Popen", fake_popen), \
             mock.patch.object(gen.subprocess, "run",
                               return_value=grep_result), \
@@ -469,7 +510,8 @@ def test_filelist_stale_mirror_exhausts_cycles_then_raises():
             assert "curl rc=22" in msg, msg
         else:
             raise AssertionError("exhausted filelist cycles did not raise")
-    assert popen_calls.count("curl") == gen._FILELIST_CYCLES, popen_calls
+    assert len(curl_urls) == gen._FILELIST_CYCLES, curl_urls
+    assert curl_urls == ["http://r/" + h for h in hrefs], curl_urls
     assert sleeps == gen._FILELIST_BACKOFF, sleeps
 
 def main():
