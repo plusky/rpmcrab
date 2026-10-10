@@ -188,6 +188,15 @@ impl AlternativesCheck {
             // The reference checks existence, not readability: a read error
             // on an existing file is not "not found".
             if !Path::new(&pkgfile.path).exists() {
+                // If the parent directory was not extracted either, the whole
+                // subtree is missing — an extraction artifact (e.g. ENOSPC),
+                // not a packaging error. Skip instead of firing a false
+                // positive (issue #406).
+                if let Some(parent) = Path::new(&pkgfile.path).parent()
+                    && !parent.exists()
+                {
+                    continue;
+                }
                 let level = if pkgfile.is_ghost() {
                     Level::Info
                 } else {
@@ -894,6 +903,35 @@ mod tests {
                 .starts_with("alternatives-test.noarch: I: libalternatives-conf-not-found"),
             "ghost file is Info: {}",
             ghost.1
+        );
+    }
+
+    /// `libalternatives-conf-not-found` does NOT fire when the parent
+    /// directory is also missing from disk: the whole subtree failed to
+    /// extract (e.g. ENOSPC during the container audit, issue #406), so the
+    /// missing conf is an extraction artifact, not a packaging error.
+    #[test]
+    fn libalternatives_conf_not_found_skipped_when_parent_dir_missing() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let mut pkg =
+            libalternatives_pkg(dir.path(), &[("dummy.conf", "binary = /usr/bin/dummy\n")]);
+        // The conf path and its parent directory both do not exist on disk.
+        let missing_dir = dir.path().join("no-such-dir");
+        pkg.files.push(PkgFile {
+            name: "/usr/share/libalternatives/nodir/nodir.conf".to_string(),
+            path: missing_dir
+                .join("nodir.conf")
+                .to_string_lossy()
+                .into_owned(),
+            mode: 0o100644,
+            ..Default::default()
+        });
+        let results = findings_for(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "libalternatives-conf-not-found" && d.contains("nodir")),
+            "conf-not-found must not fire when the parent dir was not extracted: {results:?}"
         );
     }
 
