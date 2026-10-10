@@ -494,6 +494,13 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "libalternatives-conf-not-found"
+kind = "behaviour"
+reason = "Deliberate false-positive fix (issue #406): when the parent directory of the conf path is also absent from disk, the whole subtree failed to extract (e.g. ENOSPC), so the missing conf is an extraction artifact, not a packaging error, and the finding is skipped. AlternativesCheck.py has no parent check and fires whenever the conf is absent."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
 check = "buildarch-instead-of-exclusivearch-tag"
 kind = "behaviour"
 reason = "Fixed behaviour per unmerged rpmlint#1600 (fixes rpmlint#698): a trailing line-continuation backslash is stripped before comparing, so 'BuildArch: noarch \\' inside a multi-line macro is not reported as a real architecture. The frozen 2.10.0 reference reports it."
