@@ -49,9 +49,11 @@ pub fn lib_package_regex() -> &'static Regex {
 /// `lib_package_regex`, for `explicit-lib-dependency` only. The
 /// reference's unanchored `libs?[\d-]*` alternative matches any
 /// dependency name *ending* in "lib" (e.g. `appstream-glib`), which is
-/// not a library at all; the check's documented intent is
-/// `Requires: lib*`. Anchoring keeps genuine `libfoo` findings while
-/// silencing the suffix false positives.
+/// not a library at all. Per openSUSE naming policy library packages
+/// are named `lib*`; anchoring to that prefix keeps genuine `libfoo`
+/// findings while silencing the suffix false positives. This knowingly
+/// silences non-`lib*` true positives like `Requires: zlib`, where the
+/// reference is right.
 static EXPLICIT_LIB_PACKAGE_REGEX: OnceLock<Regex> = OnceLock::new();
 pub fn explicit_lib_package_regex() -> &'static Regex {
     EXPLICIT_LIB_PACKAGE_REGEX.get_or_init(|| {
