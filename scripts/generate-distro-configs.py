@@ -1345,6 +1345,27 @@ def write_all(result, provenance, deduped):
     GENERATED_RS.write_text(emit_rs(deduped), encoding="utf-8")
 
 
+DIFF_MAX_LINES = 50
+
+
+def _diff_text(have_label, have_text, want_label, want_text, max_lines=DIFF_MAX_LINES):
+    """Unified diff of have -> want, truncated to max_lines lines."""
+    lines = list(
+        difflib.unified_diff(
+            have_text.splitlines(),
+            want_text.splitlines(),
+            fromfile=have_label,
+            tofile=want_label,
+            lineterm="",
+        )
+    )
+    if len(lines) > max_lines:
+        lines = lines[:max_lines] + [
+            f"... (truncated, {len(lines) - max_lines} more lines)"
+        ]
+    return "\n".join(lines)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--check", action="store_true", help="diff against the repo")
@@ -1382,6 +1403,7 @@ def main():
 
     if args.check:
         failures = []
+        diffs = []  # (label, unified-diff text) for drifted files
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
             for flavor, data in result.items():
@@ -1389,10 +1411,25 @@ def main():
                     (tmpdir / flavor).mkdir(exist_ok=True)
                     (tmpdir / flavor / filename).write_text(text, encoding="utf-8")
             (tmpdir / "PROVENANCE").write_text(provenance, encoding="utf-8")
-            if not GENERATED_RS.exists() or (
-                GENERATED_RS.read_text(encoding="utf-8") != emit_rs(deduped)
-            ):
+            want_rs = emit_rs(deduped)
+            have_rs = (
+                GENERATED_RS.read_text(encoding="utf-8")
+                if GENERATED_RS.exists()
+                else ""
+            )
+            if have_rs != want_rs:
                 failures.append("drift: src/distro_files_generated.rs")
+                diffs.append(
+                    (
+                        "src/distro_files_generated.rs",
+                        _diff_text(
+                            "vendored/src/distro_files_generated.rs",
+                            have_rs,
+                            "generated/src/distro_files_generated.rs",
+                            want_rs,
+                        ),
+                    )
+                )
             for flavor, data in result.items():
                 for filename in data["files"]:
                     want = tmpdir / flavor / filename
@@ -1401,16 +1438,44 @@ def main():
                         failures.append(f"missing vendored file: {flavor}/{filename}")
                     elif want.read_text() != have.read_text():
                         failures.append(f"drift: {flavor}/{filename}")
+                        diffs.append(
+                            (
+                                f"{flavor}/{filename}",
+                                _diff_text(
+                                    f"vendored/{flavor}/{filename}",
+                                    have.read_text(encoding="utf-8"),
+                                    f"generated/{flavor}/{filename}",
+                                    want.read_text(encoding="utf-8"),
+                                ),
+                            )
+                        )
             want_prov = tmpdir / "PROVENANCE"
             have_prov = DISTRO_DIR / "PROVENANCE"
             if not have_prov.exists():
                 failures.append("missing vendored file: PROVENANCE")
             elif want_prov.read_text() != have_prov.read_text():
                 failures.append("drift: PROVENANCE")
+                diffs.append(
+                    (
+                        "PROVENANCE",
+                        _diff_text(
+                            "vendored/PROVENANCE",
+                            have_prov.read_text(encoding="utf-8"),
+                            "generated/PROVENANCE",
+                            want_prov.read_text(encoding="utf-8"),
+                        ),
+                    )
+                )
         if failures:
             print("distro config drift detected:", file=sys.stderr)
             for f in failures:
                 print(f"  {f}", file=sys.stderr)
+            for label, diff in diffs:
+                print(
+                    f"\n--- diff: {label} (first {DIFF_MAX_LINES} lines) ---",
+                    file=sys.stderr,
+                )
+                print(diff, file=sys.stderr)
             return 1
         print("distro configs match the pinned upstream (plus documented prunes).")
         return 0
