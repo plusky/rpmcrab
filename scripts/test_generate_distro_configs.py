@@ -585,6 +585,11 @@ def test_filelist_fallback_mirror_after_cycles_exhausted():
     exhausted one cycle runs against ftp.gwdg.de and succeeds.
     """
     curl_urls = []
+    repomd_urls = []
+
+    def fake_urlopen(req, **kwargs):
+        repomd_urls.append(req.full_url)
+        return _repomd_response()
 
     def fake_popen(argv, **kwargs):
         assert argv[0] in ("curl", "zstd"), argv
@@ -602,8 +607,7 @@ def test_filelist_fallback_mirror_after_cycles_exhausted():
     grep_result.stdout = ">/usr/bin/foo<\n"
     grep_result.stderr = ""
 
-    with mock.patch.object(gen.urllib.request, "urlopen",
-                           return_value=_repomd_response()), \
+    with mock.patch.object(gen.urllib.request, "urlopen", fake_urlopen), \
             mock.patch.object(gen.subprocess, "Popen", fake_popen), \
             mock.patch.object(gen.subprocess, "run",
                               return_value=grep_result), \
@@ -615,13 +619,18 @@ def test_filelist_fallback_mirror_after_cycles_exhausted():
         "https://download.opensuse.org/tumbleweed/repo/oss/"
         "repodata/abc-filelists.xml.zst") == gen._FILELIST_CYCLES, curl_urls
     assert any("ftp.gwdg.de" in u for u in curl_urls), curl_urls
+    # the repomd re-fetch for the fallback cycle went to the GWDG mirror
+    assert any("ftp.gwdg.de" in u for u in repomd_urls), repomd_urls
 
 
 def test_filelist_fallback_mirror_failure_still_raises():
     """A broken fallback mirror still fails loudly, never prunes silently."""
+    curl_urls = []
+
     def fake_popen(argv, **kwargs):
         assert argv[0] in ("curl", "zstd"), argv
         if argv[0] == "curl":
+            curl_urls.append(argv[-1])
             return _FakePopen(
                 22, stderr=b"curl: (22) The requested URL returned error: 404")
         return _FakePopen(0)
@@ -641,8 +650,11 @@ def test_filelist_fallback_mirror_failure_still_raises():
             _doso_filelist_hits(["/usr/bin/foo"], {})
         except RuntimeError as e:
             msg = str(e)
-            assert "after %d attempts" % gen._FILELIST_CYCLES in msg, msg
+            # the fallback counts as an attempt too
+            assert "after %d attempts" % (gen._FILELIST_CYCLES + 1) in msg, msg
             assert "curl rc=22" in msg, msg
+            # the fallback mirror was actually tried before giving up
+            assert any("ftp.gwdg.de" in u for u in curl_urls), curl_urls
         else:
             raise AssertionError("broken fallback mirror did not raise")
 
