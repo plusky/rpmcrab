@@ -1375,6 +1375,13 @@ impl BinariesCheck {
         if self.is_archive || info.is_go_binary() {
             return;
         }
+        // Separate debuginfo files are never executed or loaded by the
+        // dynamic linker: hardening findings on them are unactionable noise.
+        // `is_debug` covers the `.debug` name suffix; the path covers the
+        // rest of the canonical debuginfo location (e.g. ovmf's GdbSyms.dll).
+        if info.is_debug || pkgfile.name.starts_with("/usr/lib/debug/") {
+            return;
+        }
         if info.elf_type != ET_EXEC && info.elf_type != ET_DYN {
             return;
         }
@@ -3080,6 +3087,40 @@ mod tests {
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_hardening(&pkg, &pkgfile, &info, &mut out);
         out.results().to_vec()
+    }
+
+    #[test]
+    fn hardening_debuginfo_file_is_skipped() {
+        // Separate debuginfo files are never executed or loaded by the
+        // dynamic linker: hardening findings on them (e.g. ovmf's 568
+        // missing-relro lines) are unactionable noise. `is_debug` is what
+        // `ReadelfInfo::parse` derives from the `.debug` name suffix; the
+        // /usr/lib/debug path covers the rest (e.g. ovmf's GdbSyms.dll).
+        for (name, is_debug) in [
+            ("/usr/lib/debug/usr/bin/probe.debug", true),
+            ("/usr/lib/debug/ovmf-x86_64/DEBUG/GdbSyms.dll", false),
+        ] {
+            let config = test_config();
+            let check = BinariesCheck::with_tool_dir(&config, None);
+            let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+            let pkgfile = syn_file(name, "ELF 64-bit LSB executable");
+            let mut info = syn_info();
+            info.is_debug = is_debug;
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_hardening(&pkg, &pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            for finding in [
+                "missing-fortify",
+                "missing-stack-protector",
+                "missing-relro",
+                "partial-relro",
+            ] {
+                assert!(
+                    lines_for(&results, finding).is_empty(),
+                    "{finding} must not fire for debuginfo {name}: {results:?}"
+                );
+            }
+        }
     }
 
     #[test]
