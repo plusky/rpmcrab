@@ -1137,6 +1137,17 @@ def generate(ref_dir=None, pins=None):
                 # (openSUSE:Factory / openSUSE:Leap:16.0, both publicly
                 # queryable), so both flavors prune their stale paths.
                 text = prune_pie_paths(text, pie_pruned_log, flavor)
+            # SLFO is currently excluded from the extra filters: the gate
+            # below appends only for flavor=="opensuse", and the vendored
+            # slfo/opensuse.toml has zero mingw hits. That exclusion is a
+            # known gap, not a deliberate choice -- checked 2026-10-10,
+            # openSUSE:Leap:16.0 (the SLFO codebase) ships mingw32-filesystem
+            # and mingw64-filesystem, and both ship the same
+            # mingw{32,64}-rpmlintrc containing the identical
+            # arch-independent-package-contains-binary-or-object filter, so
+            # the reference effective SLFO config includes it for mingw
+            # packages too. Extending this gate to the slfo flavor is the
+            # natural fix; kept separate for review (follow-up to #412).
             if flavor == "opensuse" and filename == "opensuse.toml":
                 text = append_extra_filters(text, EXTRA_OPENSUSE_FILTERS)
             data["files"][filename] = text
