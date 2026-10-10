@@ -349,6 +349,15 @@ impl<'a> Extractor<'a> {
     /// would truncate through the link (link entry first, file entry
     /// second). Only `S_IFLNK` entries may replace a live symlink:
     /// `remove_file` unlinks the link itself, never its target.
+    ///
+    /// Ordering contract with path-collision skips (#356): this guard runs
+    /// first and fails closed -- a non-symlink entry landing on a live
+    /// symlink, or any entry beneath one, is UnsafePath; a symlink entry
+    /// colliding with an existing directory skips with a warning like other
+    /// plain collisions. Plain file/directory collisions with an
+    /// incompatible existing object skip with a warning instead of aborting.
+    /// Coherent by design: symlinks can escape the extraction root, plain
+    /// files cannot.
     fn reject_symlink_escape(&self, path: &Path, is_link: bool) -> Result<(), ExtractError> {
         let is_symlink = |p: &Path| {
             fs::symlink_metadata(p)
