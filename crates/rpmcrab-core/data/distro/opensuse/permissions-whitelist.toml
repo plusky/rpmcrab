@@ -1,14 +1,4 @@
 [[FileDigestGroup]]
-packages = ["postfix", "postfix-bdb"]
-type = "permissions"
-[[FileDigestGroup.digests]]
-path = "/usr/share/permissions/permissions.d/postfix"
-hash = "6f2e5d01189c05662083125ae3addab8b7273f6a57eae8369bc34b08a9a1d638"
-[[FileDigestGroup.digests]]
-path = "/usr/share/permissions/permissions.d/postfix.paranoid"
-hash = "54d194477fc688076940c93bfd201680b5cc0fd6079bba10bd0101fb986a2231"
-
-[[FileDigestGroup]]
 package = "sendmail"
 bugs = ["bsc#1219339", "bsc#1256160"]
 type = "permissions"
@@ -21,6 +11,15 @@ hash = "544b91b15ce1dd54659a2d98a66ce945db2ca99134acb97f8a0a196612c57bb6"
 [[FileDigestGroup.digests]]
 path = "/usr/share/permissions/permissions.d/sendmail.paranoid"
 hash = "7a593f6678ab48c4eab010bb885989bd06e5a73a307575399d71a2d7c3d3f0c3"
+
+[[FileDigestGroup]]
+package  = "libcgroup-tools"
+note     = "this is for a setgid binary 'cgexec', running with 'cgred' group privs"
+bug      = "bsc#1231381"
+type     = "permissions"
+[[FileDigestGroup.digests]]
+path     = "/usr/share/permissions/permissions.d/libcgroup"
+hash     = "6d3a669b10b2449484dcad1c6d932f5897666bcbeef2a45d9608ef63a1e43188"
 
 [[FileDigestGroup]]
 package  = "sssd"
@@ -67,10 +66,11 @@ digester = "shell"
 hash     = "376852944deadff2ed60413d61806f9fc791d33b0913bb301ecc4b43de70338c"
 
 [[FileDigestGroup]]
-package  = "libcgroup-tools"
-note     = "this is for a setgid binary 'cgexec', running with 'cgred' group privs"
-bug      = "bsc#1231381"
-type     = "permissions"
+packages = ["postfix", "postfix-bdb"]
+type = "permissions"
 [[FileDigestGroup.digests]]
-path     = "/usr/share/permissions/permissions.d/libcgroup"
-hash     = "6d3a669b10b2449484dcad1c6d932f5897666bcbeef2a45d9608ef63a1e43188"
+path = "/usr/share/permissions/permissions.d/postfix"
+hash = "6f2e5d01189c05662083125ae3addab8b7273f6a57eae8369bc34b08a9a1d638"
+[[FileDigestGroup.digests]]
+path = "/usr/share/permissions/permissions.d/postfix.paranoid"
+hash = "54d194477fc688076940c93bfd201680b5cc0fd6079bba10bd0101fb986a2231"

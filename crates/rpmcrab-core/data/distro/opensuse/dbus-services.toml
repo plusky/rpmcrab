@@ -47,15 +47,14 @@ hash = "00d25f898cf4c78cf45d68000ee00be27b0aa15b7ebe22c4ba86bc1b5f33b898"
 
 [[FileDigestGroup]]
 package  = "gdm"
-type     = "dbus"
 note     = "D-Bus interface for managing GDM sessions"
-bugs     = ["bsc#1204052", "bsc#1218922", "bsc#1230466", "bsc#1248881"]
+bug      = "bsc#1258025"
+type     = "dbus"
 [[FileDigestGroup.digests]]
 path     = "/usr/share/dbus-1/system.d/gdm.conf"
 digester = "xml"
-hash     = "cf4cb93af82aacc9b4a0fc600c602af5089e001df10282a35287b6f27199f7ea"
+hash     = "a46c9af0b5702e1d4cfa643b8f74ca878c3aa9cdd2d6e42d53ba160d64fc8e20"
 
-# TODO: merge with entry above once GDM 50 enters Factory
 [[FileDigestGroup]]
 package  = "gdm"
 note     = "D-Bus interface for managing GDM sessions"
@@ -79,52 +78,6 @@ hash = "dec4c90801858db84388b1a0290d83af306a7ba822f614bb3a10fa9fe9709408"
 path = "/usr/share/dbus-1/system.d/org.freedesktop.UDisks2.conf"
 digester = "xml"
 hash = "610b7e9a59c724100f907184dbf009846ebbd22b40326675a1bad481c685776d"
-
-[[FileDigestGroup]]
-packages = ["systemd", "systemd-mini"]
-type = "dbus"
-note = "imported from rpmlint1 DBUSServices.WhiteList"
-bugs = ["bsc#641924", "bsc#1257388"]
-[[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system-services/org.freedesktop.systemd1.service"
-digester = "shell"
-hash = "78e857a4bab8d98b5c2b51532721da8468e69a19ed39cb05bbbfcfa0e6b5482c"
-[[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system.d/org.freedesktop.systemd1.conf"
-digester = "xml"
-hash = "59e55b6a9633c59d762fd5b6fa00b59f1a699801bf7b46f2d8a2467f43b78bc7"
-[[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system-services/org.freedesktop.hostname1.service"
-digester = "shell"
-hash = "4a71245aee9271bd799986068fc10dcf8ce947e9d805f9d36d78afc98d89f9ff"
-[[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system.d/org.freedesktop.hostname1.conf"
-digester = "xml"
-hash = "0f7acce75537038da343267ce42b3d3e149acf5ace347c9c1e1283c058a6856d"
-[[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system.d/org.freedesktop.login1.conf"
-digester = "xml"
-hash = "696228908a84b847c7d87ec6edd59f28e883e5ddb26e2aba0bc80f7b22692eea"
-[[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system-services/org.freedesktop.login1.service"
-digester = "shell"
-hash = "7f767528b2429c4808cfe59ffade85b273a9dc7ce7bbf95da0944d0bd8b8cbe0"
-[[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system.d/org.freedesktop.timedate1.conf"
-digester = "xml"
-hash = "aa1cf5b246c699689f042b213b216287531c88dd1eb439899049d18ae17bdecc"
-[[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system-services/org.freedesktop.timedate1.service"
-digester = "shell"
-hash = "fc8a347caf22417b9d322b46667d41005789fa3b143babf26dfc19ff242401cd"
-[[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system.d/org.freedesktop.locale1.conf"
-digester = "xml"
-hash = "1b6b560ca97885664082bc0692557ff9ac31a1042120d35bfa4cca691c00bbf3"
-[[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system-services/org.freedesktop.locale1.service"
-digester = "shell"
-hash = "7efe10e36cb88260293fc66232b5a8de7b9bcf38d8af40159604b60ee218c396"
 
 [[FileDigestGroup]]
 package = "system-config-printer-applet"
@@ -163,11 +116,16 @@ hash     = "8a90ad6824da4bc87d770b552f83212e47b8343afb0dccee828ba3e63b099267"
 [[FileDigestGroup]]
 package = "wpa_supplicant"
 type = "dbus"
-note = "legacy: not audited"
+note = "imported from rpmlint1 DBUSServices.WhiteList"
+bugs = ["bsc#681116", "bsc#1200342"]
 [[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system-services/fi.epitest.hostap.WPASupplicant.service"
+path = "/usr/share/dbus-1/system-services/fi.w1.wpa_supplicant1.service"
 digester = "shell"
-hash = "601ce02347339b2fdfde893754f864b0318adf0dd39e352d39068b4b89c6e1d0"
+hash = "cca1385e218f35305bf4c4f9982b90cf7e1bbe013f0404977b464d2034bcd3ce"
+[[FileDigestGroup.digests]]
+path = "/usr/share/dbus-1/system.d/wpa_supplicant.conf"
+digester = "xml"
+hash = "2986f210d55588e8c556e3b81e9eeee94668ebb2be6024fb68f8a2f4fcae8469"
 
 [[FileDigestGroup]]
 package = "wpa_supplicant"
@@ -261,25 +219,30 @@ hash = "0a40412a45af1c17710c82dd800d57f3c9b0a2515bb21fbcebe10065603e5d31"
 [[FileDigestGroup]]
 package = "NetworkManager"
 type = "dbus"
-note = "legacy: not audited"
+note = "privilege separation helper that does not provide a public API"
+bug = "bsc#1194799"
 [[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system.d/nm-dispatcher.conf"
-digester = "xml"
-hash = "540310497cbfaca7dff478599852c4423b9ae708ef86a1bd489c3f1def41f540"
-[[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system-services/org.freedesktop.nm_dispatcher.service"
+path = "/usr/share/dbus-1/system-services/org.freedesktop.nm_priv_helper.service"
 digester = "shell"
-hash = "15b426ade96ee8abca53b614cb8837ea7ca4cc0a85cf6fe53f54275835af040a"
+hash = "77bc536d4f275958c639943415524ef88557e42efe7bdf4f4363fe6284eb1a18"
+[[FileDigestGroup.digests]]
+path = "/usr/share/dbus-1/system.d/nm-priv-helper.conf"
+digester = "xml"
+hash = "7a257ae283efe2d6c592b13e2ab6541b8bc364be7866555700f8f550601f6687"
 
 [[FileDigestGroup]]
 package = "NetworkManager"
 type = "dbus"
-note = "imported from rpmlint1 DBUSServices.WhiteList"
-bug = "bsc#747780"
+note = "privilege separation helper that does not provide a public API"
+bug = "bsc#1194799"
 [[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system.d/org.freedesktop.NetworkManager.conf"
+path = "/usr/share/dbus-1/system-services/org.freedesktop.nm_priv_helper.service"
+digester = "shell"
+hash = "77bc536d4f275958c639943415524ef88557e42efe7bdf4f4363fe6284eb1a18"
+[[FileDigestGroup.digests]]
+path = "/usr/share/dbus-1/system.d/nm-priv-helper.conf"
 digester = "xml"
-hash = "7e39fec66d71fd41f678eea57f0b566a4347a341f9ced852d0b3215e8b5dd82e"
+hash = "7a257ae283efe2d6c592b13e2ab6541b8bc364be7866555700f8f550601f6687"
 
 [[FileDigestGroup]]
 package = "NetworkManager"
@@ -587,15 +550,15 @@ hash = "c8784129137498425fb70ddd5d2efe24723b522794ea942ab9d0dd463bd65d58"
 package = "systemd-container"
 type = "dbus"
 note = "imported from rpmlint1 DBUSServices.WhiteList"
-bugs = ["bsc#828207", "bsc#1192033", "bsc#1257388", "bsc#1255368", "bsc#1259318"]
+bugs = ["bsc#964935", "bsc#1259318"]
 [[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system-services/org.freedesktop.machine1.service"
+path = "/usr/share/dbus-1/system-services/org.freedesktop.import1.service"
 digester = "shell"
-hash = "049c2e5c14f53c6d34f1c033b7bf1a14566d4380143920090c076a8ce6348e5b"
+hash = "7abbbe8d99e3134d7cb0e93f657671f80ab430cf06259a1bb07d0de0142e7e6f"
 [[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system.d/org.freedesktop.machine1.conf"
+path = "/usr/share/dbus-1/system.d/org.freedesktop.import1.conf"
 digester = "xml"
-hash = "ba1ed5dc253c52e7664fdd5a8e92016ab4d3ebacd444f9f51fcac7ea0a8e3f9b"
+hash = "426f75e9a68216b346ba6421a35b2d0645b3fb52a2865328e351959193ffddb3"
 
 [[FileDigestGroup]]
 package = "systemd-container"
@@ -615,15 +578,11 @@ hash = "426f75e9a68216b346ba6421a35b2d0645b3fb52a2865328e351959193ffddb3"
 package = "geoclue2"
 type = "dbus"
 note = "imported from rpmlint1 DBUSServices.WhiteList"
-bugs = ["bsc#838360", "bsc#1204054"]
+bugs = ["bsc#862216", "bsc#1204054"]
 [[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system.d/org.freedesktop.GeoClue2.conf"
+path = "/usr/share/dbus-1/system.d/org.freedesktop.GeoClue2.Agent.conf"
 digester = "xml"
-hash = "05e274fe5cc5ee2653b3dcd37f600800a0bfbc9b4b9c4329e4a7f8894fcaa1b1"
-[[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system-services/org.freedesktop.GeoClue2.service"
-digester = "shell"
-hash = "2b462a23384343646bbf6c46305f90379bd705c6e89b740b9e446d260aa6b6ec"
+hash = "fd364cc370bb15f3af04b03f6320ba18ab12af5be293b335fddf5c356a86daa5"
 
 [[FileDigestGroup]]
 package = "geoclue2"
@@ -1088,6 +1047,20 @@ digester = "xml"
 hash = "feecf1770babd5649face9cd0eb879fef642153ca87995b35b90897413b022a4"
 
 [[FileDigestGroup]]
+package = "udev-mini"
+type = "dbus"
+note = "imported from rpmlint1 DBUSServices.WhiteList. later moved to udev"
+bugs = ["bsc#1111254", "bsc#1213292"]
+[[FileDigestGroup.digests]]
+path = "/usr/share/dbus-1/system-services/org.freedesktop.timesync1.service"
+digester = "shell"
+hash = "1319308c6b4c72399d29ff75fe9fd8b08a0fde71297c0eccdd0badc395e7e178"
+[[FileDigestGroup.digests]]
+path = "/usr/share/dbus-1/system.d/org.freedesktop.timesync1.conf"
+digester = "xml"
+hash = "feecf1770babd5649face9cd0eb879fef642153ca87995b35b90897413b022a4"
+
+[[FileDigestGroup]]
 package = "keepalived"
 type = "dbus"
 note = "imported from rpmlint1 DBUSServices.WhiteList"
@@ -1220,18 +1193,18 @@ digester = "shell"
 hash = "9ae44bd6f4c16417e6752581fe7513f791d5660b849747bbed4307e25444606b"
 
 [[FileDigestGroup]]
-package = "kde-inotify-survey"
-type = "dbus"
-note = "KDE tooling for monitoring inotify limits"
-bugs = ["bsc#1208689"]
+package  = "kde-inotify-survey"
+note     = "KDE tooling for monitoring inotify limits (kde6 update)"
+bugs     = ["bsc#1217191"]
+type     = "dbus"
 [[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system.d/org.kde.kded.inotify.conf"
-digester = "xml"
-hash = "4eb68f2c3bc75842df0f3d67874588fc672ec540769db09c3a71cbb292a989f7"
-[[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system-services/org.kde.kded.inotify.service"
+path     = "/usr/share/dbus-1/system-services/org.kde.kded.inotify.service"
 digester = "shell"
-hash = "89a2ce5a4c6ebd7cb471f820a28fbd2dd418e377cb2ed0eaea1af59840c1dabd"
+hash     = "e56b75bc5cbaa9e4dfb5829dcb5c0d5d871c0533076b83ea2c0f363c00318ad4"
+[[FileDigestGroup.digests]]
+path     = "/usr/share/dbus-1/system.d/org.kde.kded.inotify.conf"
+digester = "xml"
+hash     = "7dd017f2535dabd623fdb59ecb6362ac60fa836e9a146243c2a450b04d9aee5d"
 
 [[FileDigestGroup]]
 package  = "kde-inotify-survey"
@@ -1248,20 +1221,19 @@ digester = "xml"
 hash     = "7dd017f2535dabd623fdb59ecb6362ac60fa836e9a146243c2a450b04d9aee5d"
 
 [[FileDigestGroup]]
-package = "systemd-homed"
-type = "dbus"
-note = "systemd-homed helper service for providing portable home directory containers"
-bugs = ["bsc#1185285", "bsc#1213692", "bsc#1219916", "bsc#1225317"]
+package  = "systemd-homed"
+note     = "systemd-homed v258 changes"
+bug      = "bsc#1250884"
+type     = "dbus"
 [[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system.d/org.freedesktop.home1.conf"
+path     = "/usr/share/dbus-1/system.d/org.freedesktop.home1.conf"
 digester = "xml"
-hash = "0bdd8a388268b3c8d187433b2192ca1b682184881d4b4cb4056a81b757c5ab04"
+hash     = "1f5955ba5955830ca518f206d751401adb6caec36d82c6434b60ab5398d17a0b"
 [[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system-services/org.freedesktop.home1.service"
+path     = "/usr/share/dbus-1/system-services/org.freedesktop.home1.service"
 digester = "shell"
-hash = "c4281ad74af8c43a963806142e2770751b153df8c1217da4edf212b334ecddcf"
+hash     = "c4281ad74af8c43a963806142e2770751b153df8c1217da4edf212b334ecddcf"
 
-# TODO: merge with entry above once v258 reaches Factory
 [[FileDigestGroup]]
 package  = "systemd-homed"
 note     = "systemd-homed v258 changes"
@@ -1277,18 +1249,18 @@ digester = "shell"
 hash     = "c4281ad74af8c43a963806142e2770751b153df8c1217da4edf212b334ecddcf"
 
 [[FileDigestGroup]]
-package = "systemd-experimental"
-type = "dbus"
-note = "systemd-oomd out-of memory userspace handler based on control groups and PMI"
-bug = "bsc#1202454"
+package  = "systemd-experimental"
+note     = "update management of operating system assets like containers"
+bugs     = ["bsc#1237106", "bsc#1259318"]
+type     = "dbus"
 [[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system.d/org.freedesktop.oom1.conf"
+path     = "/usr/share/dbus-1/system.d/org.freedesktop.sysupdate1.conf"
 digester = "xml"
-hash = "c19a51f808ce54488bc12c712e481bc3b97fda072bfb884cdc0d2b49cb6cd9a0"
+hash     = "db654b66f9731235bc34eabd313146ce67f87ba1a4870b61c6efb5ef669bd3b1"
 [[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system-services/org.freedesktop.oom1.service"
+path     = "/usr/share/dbus-1/system-services/org.freedesktop.sysupdate1.service"
 digester = "shell"
-hash = "20dbcf394e1f6cf471c4a397311eb81e364094915e8766c9811408918f3eeaa2"
+hash     = "4a701606779f994b80610d017eb798b51375f61f9a1b36549620a30dd0bc70f9"
 
 [[FileDigestGroup]]
 package  = "systemd-experimental"
@@ -1542,18 +1514,17 @@ hash     = "8dff187bd14e516fd976731fb4ab3996bb92b36dfa944733655641a6aec215e1"
 [[FileDigestGroup]]
 package  = "gnome-remote-desktop"
 note     = "system wide remote desktop access to the display manager"
-bugs     = ["bsc#1222159", "bsc#1230406"]
+bug      = "bsc#1258407"
 type     = "dbus"
 [[FileDigestGroup.digests]]
 path     = "/usr/share/dbus-1/system.d/org.gnome.RemoteDesktop.conf"
 digester = "xml"
-hash     = "d28ae537328593ac6462af9ec6bab63c49f9a6851190e7a4f13fe8dd48fd88b6"
+hash     = "cdefbd06ed5538f29c46f01a6143202c2f4ef7e42a209313bcdf680e26049d95"
 [[FileDigestGroup.digests]]
 path     = "/usr/share/dbus-1/system-services/org.gnome.RemoteDesktop.Configuration.service"
 digester = "shell"
 hash     = "ecc8ae6fe29a9ddc6c1f598c8558245b16d8280cd99caecc3ab268c428e1f8ff"
 
-# TODO: merge this with the entry above once grd-50 is in Factory
 [[FileDigestGroup]]
 package  = "gnome-remote-desktop"
 note     = "system wide remote desktop access to the display manager"
@@ -1623,6 +1594,16 @@ hash     = "27fe3098931a301fcbe871e319f8fd6e50138447dec1080935151c41b29703c9"
 path     = "/usr/share/dbus-1/system-services/org.kde.kio.admin.service"
 digester = "shell"
 hash     = "ce9ed24db3c3654551bada756eb9aac5a58358364b41827b8154d0f73d6dc506"
+
+[[FileDigestGroup]]
+package  = "libgpiod-manager"
+note     = "GPIO character device management daemon"
+bug      = "bsc#1244702"
+type     = "dbus"
+[[FileDigestGroup.digests]]
+path     = "/etc/dbus-1/system.d/io.gpiod1.conf"
+digester = "xml"
+hash     = "4a620749a1b62fb229cd564e2ddafdd59e0302702c57ad7ac76ec5f56429f48b"
 
 [[FileDigestGroup]]
 package  = "lightdm-kde-greeter"
@@ -1747,25 +1728,47 @@ digester = "xml"
 hash     = "11cc8aa9c1b4486369700620d1112ab9cb43649b73ab9cc511574bf7dcefce90"
 
 [[FileDigestGroup]]
-package = "udev-mini"
+packages = ["systemd", "systemd-mini"]
 type = "dbus"
-note = "imported from rpmlint1 DBUSServices.WhiteList. later moved to udev"
-bugs = ["bsc#1111254", "bsc#1213292"]
+note = "imported from rpmlint1 DBUSServices.WhiteList"
+bugs = ["bsc#641924", "bsc#1257388"]
 [[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system-services/org.freedesktop.timesync1.service"
+path = "/usr/share/dbus-1/system-services/org.freedesktop.systemd1.service"
 digester = "shell"
-hash = "1319308c6b4c72399d29ff75fe9fd8b08a0fde71297c0eccdd0badc395e7e178"
+hash = "78e857a4bab8d98b5c2b51532721da8468e69a19ed39cb05bbbfcfa0e6b5482c"
 [[FileDigestGroup.digests]]
-path = "/usr/share/dbus-1/system.d/org.freedesktop.timesync1.conf"
+path = "/usr/share/dbus-1/system.d/org.freedesktop.systemd1.conf"
 digester = "xml"
-hash = "feecf1770babd5649face9cd0eb879fef642153ca87995b35b90897413b022a4"
-
-[[FileDigestGroup]]
-package  = "libgpiod-manager"
-note     = "GPIO character device management daemon"
-bug      = "bsc#1244702"
-type     = "dbus"
+hash = "59e55b6a9633c59d762fd5b6fa00b59f1a699801bf7b46f2d8a2467f43b78bc7"
 [[FileDigestGroup.digests]]
-path     = "/etc/dbus-1/system.d/io.gpiod1.conf"
+path = "/usr/share/dbus-1/system-services/org.freedesktop.hostname1.service"
+digester = "shell"
+hash = "4a71245aee9271bd799986068fc10dcf8ce947e9d805f9d36d78afc98d89f9ff"
+[[FileDigestGroup.digests]]
+path = "/usr/share/dbus-1/system.d/org.freedesktop.hostname1.conf"
 digester = "xml"
-hash     = "4a620749a1b62fb229cd564e2ddafdd59e0302702c57ad7ac76ec5f56429f48b"
+hash = "0f7acce75537038da343267ce42b3d3e149acf5ace347c9c1e1283c058a6856d"
+[[FileDigestGroup.digests]]
+path = "/usr/share/dbus-1/system.d/org.freedesktop.login1.conf"
+digester = "xml"
+hash = "696228908a84b847c7d87ec6edd59f28e883e5ddb26e2aba0bc80f7b22692eea"
+[[FileDigestGroup.digests]]
+path = "/usr/share/dbus-1/system-services/org.freedesktop.login1.service"
+digester = "shell"
+hash = "7f767528b2429c4808cfe59ffade85b273a9dc7ce7bbf95da0944d0bd8b8cbe0"
+[[FileDigestGroup.digests]]
+path = "/usr/share/dbus-1/system.d/org.freedesktop.timedate1.conf"
+digester = "xml"
+hash = "aa1cf5b246c699689f042b213b216287531c88dd1eb439899049d18ae17bdecc"
+[[FileDigestGroup.digests]]
+path = "/usr/share/dbus-1/system-services/org.freedesktop.timedate1.service"
+digester = "shell"
+hash = "fc8a347caf22417b9d322b46667d41005789fa3b143babf26dfc19ff242401cd"
+[[FileDigestGroup.digests]]
+path = "/usr/share/dbus-1/system.d/org.freedesktop.locale1.conf"
+digester = "xml"
+hash = "1b6b560ca97885664082bc0692557ff9ac31a1042120d35bfa4cca691c00bbf3"
+[[FileDigestGroup.digests]]
+path = "/usr/share/dbus-1/system-services/org.freedesktop.locale1.service"
+digester = "shell"
+hash = "7efe10e36cb88260293fc66232b5a8de7b9bcf38d8af40159604b60ee218c396"

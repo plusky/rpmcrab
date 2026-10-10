@@ -212,6 +212,7 @@ digester = "default"
 hash     = "38aaac33cd24fca2db1bdf35389b0d52bc17741ae55f0de4ea35d16d5817cd24"
 
 # TODO: merge with entry above once GDM 50 enters Factory
+
 [[FileDigestGroup]]
 package  = "gdm"
 note     = "allows the display manager to add WiFi connections via NetworkManager, as well as creation of headless VNC displays"

@@ -107,6 +107,16 @@ digester = "shell"
 hash = "a947a84d4d883a5f14382d2698a7d5f4e8e04617ec692d76edc27eb0832818cd"
 
 [[FileDigestGroup]]
+package = "soapy-remote-server"
+type = "sysctl"
+note = "changes maximum size of socket buffers"
+bug = "bsc#1174722"
+[[FileDigestGroup.digests]]
+path = "/usr/lib/sysctl.d/SoapySDRServer.conf"
+digester = "shell"
+hash = "7ec5f6a48c24802a58ebe31c962c0fb63d5215f4562bb200111c6ef9df380a6a"
+
+[[FileDigestGroup]]
 package = "glob:kubernetes1.[3-9][0-9]-kubeadm"
 type = "sysctl"
 note = "enables IPv4 forwarding system-wide, same content for all kubeadm versions >= 1.24"
@@ -135,14 +145,3 @@ type     = "sysctl"
 path     = "/usr/lib/sysctl.d/health-checker.conf"
 digester = "shell"
 hash     = "40838811f1f8ec4f4b19ce8f049f63ab616f92a1d0a8190e29d0bbf6fe43e66a"
-
-
-[[FileDigestGroup]]
-package = "soapy-remote-server"
-type = "sysctl"
-note = "changes maximum size of socket buffers"
-bug = "bsc#1174722"
-[[FileDigestGroup.digests]]
-path = "/usr/lib/sysctl.d/SoapySDRServer.conf"
-digester = "shell"
-hash = "7ec5f6a48c24802a58ebe31c962c0fb63d5215f4562bb200111c6ef9df380a6a"
