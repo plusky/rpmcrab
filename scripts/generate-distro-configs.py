@@ -541,6 +541,10 @@ LEAP16_OSS_REPOMD_URL = (
     "/repodata/repomd.xml"
 )
 _leap16_binary_names_cache = None
+TW_OSS_REPOMD_URL = (
+    "https://download.opensuse.org/tumbleweed/repo/oss/repodata/repomd.xml"
+)
+_tw_binary_names_cache = None
 
 
 def _scan_binary_names(stdout):
@@ -634,13 +638,72 @@ def _leap16_binary_names():
     return _leap16_binary_names_cache
 
 
+def _tw_binary_names():
+    """Binary package names shipped in Tumbleweed (oss), fetched once, cached.
+
+    Mirrors _leap16_binary_names() for the opensuse flavor: whitelist
+    `package =` entries name the binary being linted, but the OBS source
+    API 404s on binary-only names (e.g. udev-mini, libcgroup-tools are
+    subpackages of another source). The published repodata is the ground
+    truth for binary presence.
+    """
+    global _tw_binary_names_cache
+    if _tw_binary_names_cache is None:
+        zstd = shutil.which("zstd")
+        if zstd is None:
+            raise RuntimeError(
+                "the 'zstd' CLI is required to read the Tumbleweed repodata "
+                "(install zstd and re-run)"
+            )
+
+        def _get(url):
+            return urllib.request.Request(
+                url, headers={"User-Agent": "rpmcrab-distro-config-sync"}
+            )
+
+        with urllib.request.urlopen(_get(TW_OSS_REPOMD_URL), timeout=60) as resp:
+            repomd = resp.read().decode("utf-8")
+        m = re.search(
+            r'<data type="primary">.*?<location href="([^"]*primary\.xml\.[^"]*)"',
+            repomd,
+            re.DOTALL,
+        )
+        if not m:
+            raise RuntimeError(
+                "primary.xml location not found in Tumbleweed repomd.xml"
+            )
+        primary_url = (
+            "https://download.opensuse.org/tumbleweed/repo/oss/" + m.group(1)
+        )
+        # Keep the download out of TMPDIR, which is a small tmpfs on
+        # some build machines.
+        with tempfile.NamedTemporaryFile(suffix=".xml.zst", dir=".") as tmp:
+            with urllib.request.urlopen(_get(primary_url), timeout=600) as resp:
+                shutil.copyfileobj(resp, tmp)
+            tmp.flush()
+            proc = subprocess.Popen([zstd, "-dc", tmp.name], stdout=subprocess.PIPE)
+            try:
+                names = _scan_binary_names(proc.stdout)
+            finally:
+                proc.stdout.close()
+                proc.wait()
+            if proc.returncode != 0:
+                raise RuntimeError(f"zstd -dc failed on {primary_url}")
+        _tw_binary_names_cache = names
+    return _tw_binary_names_cache
+
+
 def package_present(pkg, flavor):
     """True if the package exists in the flavor's distro codebase.
 
     For the opensuse flavor this queries the OBS source-package API
-    (openSUSE:Factory hosts all its sources). For the slfo flavor the
-    SLE-derived sources are not visible via the source API, so presence is
-    checked against the binary names in the published Leap 16.0 repodata.
+    (openSUSE:Factory hosts all its sources), falling back to the
+    Tumbleweed binary repodata: whitelist `package =` entries name the
+    binary being linted, and the source API 404s on binary-only names
+    (e.g. udev-mini, libcgroup-tools are subpackages of another source).
+    For the slfo flavor the SLE-derived sources are not visible via the
+    source API, so presence is checked against the binary names in the
+    published Leap 16.0 repodata.
     """
     key = (pkg, flavor)
     if key not in _package_presence_cache:
@@ -661,6 +724,10 @@ def package_present(pkg, flavor):
                 except urllib.error.HTTPError as e:
                     if e.code != 404:
                         raise
+            if not present:
+                # Binary-only name (subpackage of another source): the
+                # source API 404s, so check the published binary repodata.
+                present = pkg in _tw_binary_names()
         _package_presence_cache[key] = present
     return _package_presence_cache[key]
 
@@ -1291,6 +1358,27 @@ def write_all(result, provenance, deduped):
     GENERATED_RS.write_text(emit_rs(deduped), encoding="utf-8")
 
 
+DIFF_MAX_LINES = 50
+
+
+def _diff_text(have_label, have_text, want_label, want_text, max_lines=DIFF_MAX_LINES):
+    """Unified diff of have -> want, truncated to max_lines lines."""
+    lines = list(
+        difflib.unified_diff(
+            have_text.splitlines(),
+            want_text.splitlines(),
+            fromfile=have_label,
+            tofile=want_label,
+            lineterm="",
+        )
+    )
+    if len(lines) > max_lines:
+        lines = lines[:max_lines] + [
+            f"... (truncated, {len(lines) - max_lines} more lines)"
+        ]
+    return "\n".join(lines)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--check", action="store_true", help="diff against the repo")
@@ -1328,6 +1416,7 @@ def main():
 
     if args.check:
         failures = []
+        diffs = []  # (label, unified-diff text) for drifted files
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
             for flavor, data in result.items():
@@ -1335,10 +1424,25 @@ def main():
                     (tmpdir / flavor).mkdir(exist_ok=True)
                     (tmpdir / flavor / filename).write_text(text, encoding="utf-8")
             (tmpdir / "PROVENANCE").write_text(provenance, encoding="utf-8")
-            if not GENERATED_RS.exists() or (
-                GENERATED_RS.read_text(encoding="utf-8") != emit_rs(deduped)
-            ):
+            want_rs = emit_rs(deduped)
+            have_rs = (
+                GENERATED_RS.read_text(encoding="utf-8")
+                if GENERATED_RS.exists()
+                else ""
+            )
+            if have_rs != want_rs:
                 failures.append("drift: src/distro_files_generated.rs")
+                diffs.append(
+                    (
+                        "src/distro_files_generated.rs",
+                        _diff_text(
+                            "vendored/src/distro_files_generated.rs",
+                            have_rs,
+                            "generated/src/distro_files_generated.rs",
+                            want_rs,
+                        ),
+                    )
+                )
             for flavor, data in result.items():
                 for filename in data["files"]:
                     want = tmpdir / flavor / filename
@@ -1347,16 +1451,44 @@ def main():
                         failures.append(f"missing vendored file: {flavor}/{filename}")
                     elif want.read_text() != have.read_text():
                         failures.append(f"drift: {flavor}/{filename}")
+                        diffs.append(
+                            (
+                                f"{flavor}/{filename}",
+                                _diff_text(
+                                    f"vendored/{flavor}/{filename}",
+                                    have.read_text(encoding="utf-8"),
+                                    f"generated/{flavor}/{filename}",
+                                    want.read_text(encoding="utf-8"),
+                                ),
+                            )
+                        )
             want_prov = tmpdir / "PROVENANCE"
             have_prov = DISTRO_DIR / "PROVENANCE"
             if not have_prov.exists():
                 failures.append("missing vendored file: PROVENANCE")
             elif want_prov.read_text() != have_prov.read_text():
                 failures.append("drift: PROVENANCE")
+                diffs.append(
+                    (
+                        "PROVENANCE",
+                        _diff_text(
+                            "vendored/PROVENANCE",
+                            have_prov.read_text(encoding="utf-8"),
+                            "generated/PROVENANCE",
+                            want_prov.read_text(encoding="utf-8"),
+                        ),
+                    )
+                )
         if failures:
             print("distro config drift detected:", file=sys.stderr)
             for f in failures:
                 print(f"  {f}", file=sys.stderr)
+            for label, diff in diffs:
+                print(
+                    f"\n--- diff: {label} (first {DIFF_MAX_LINES} lines) ---",
+                    file=sys.stderr,
+                )
+                print(diff, file=sys.stderr)
             return 1
         print("distro configs match the pinned upstream (plus documented prunes).")
         return 0

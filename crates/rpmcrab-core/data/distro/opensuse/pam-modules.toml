@@ -543,6 +543,15 @@ nodigests = [
 ]
 
 [[FileDigestGroup]]
+package  = "libcgroup-pam"
+note     = "session PAM module that places the login process into a cgroup according to configuration"
+bug      = "bsc#1231381"
+type     = "pam"
+nodigests = [
+    "glob:*/security/pam_cgroup.so",
+]
+
+[[FileDigestGroup]]
 package  = "account-utils"
 note     = "pam_unix replacement for use in environments with `no_new_privs` everywhere"
 bug      = "bsc#1254218"
