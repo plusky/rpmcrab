@@ -278,6 +278,10 @@ struct Extractor<'a> {
     dir: &'a Path,
     hardlinks: HashMap<(u32, u32, u32), HardlinkGroup>,
     fixups: Vec<Fixup>,
+    /// Index of `fixups` by path. `record` replaces the entry for an
+    /// already-recorded path; a linear scan per entry is O(n^2) in the
+    /// number of files (rocksndiamonds-data ships 108k of them).
+    fixup_index: HashMap<PathBuf, usize>,
 }
 
 impl<'a> Extractor<'a> {
@@ -316,12 +320,7 @@ impl<'a> Extractor<'a> {
         }
         for d in missing.iter().rev() {
             fs::create_dir(d).map_err(|e| io_error(d, e))?;
-            self.fixups.push(Fixup {
-                path: d.clone(),
-                perm: 0o755,
-                mtime: None,
-                is_dir: true,
-            });
+            self.record(d.clone(), 0o755, None, true);
         }
         Ok(true)
     }
@@ -374,12 +373,14 @@ impl<'a> Extractor<'a> {
 
     fn record(&mut self, path: PathBuf, perm: u32, mtime: Option<u32>, is_dir: bool) {
         // An explicit entry replaces the implicit record for the same path.
-        if let Some(f) = self.fixups.iter_mut().find(|f| f.path == path) {
+        if let Some(&i) = self.fixup_index.get(&path) {
+            let f = &mut self.fixups[i];
             f.perm = perm;
             f.mtime = mtime;
             f.is_dir = is_dir;
             return;
         }
+        self.fixup_index.insert(path.clone(), self.fixups.len());
         self.fixups.push(Fixup {
             path,
             perm,
@@ -650,6 +651,9 @@ pub fn extract(rpm: &Path, dir: &Path, _suppress_stderr: bool) -> Result<(), Ext
         dir,
         hardlinks: HashMap::new(),
         fixups: Vec::new(),
+        // Reserve for the known entry count: the index holds one slot per
+        // fixup, bounded by the number of file entries (108k in the wild).
+        fixup_index: HashMap::with_capacity(file_entries.len()),
     };
     while let Some(entry) = read_entry(&mut payload, &file_entries)? {
         extractor.materialize(&mut payload, &entry)?;
@@ -949,6 +953,7 @@ mod tests {
             dir: dir.path(),
             hardlinks: HashMap::new(),
             fixups: Vec::new(),
+            fixup_index: HashMap::new(),
         };
         let entry = CpioEntry {
             ino: 1,
@@ -986,6 +991,7 @@ mod tests {
             dir,
             hardlinks: HashMap::new(),
             fixups: Vec::new(),
+            fixup_index: HashMap::new(),
         }
     }
 
@@ -1178,6 +1184,7 @@ mod tests {
             dir: dir.path(),
             hardlinks: HashMap::new(),
             fixups: Vec::new(),
+            fixup_index: HashMap::new(),
         };
         let entry = CpioEntry {
             ino: 7,
@@ -1206,6 +1213,7 @@ mod tests {
             dir: dir.path(),
             hardlinks: HashMap::new(),
             fixups: Vec::new(),
+            fixup_index: HashMap::new(),
         };
         let entry = CpioEntry {
             ino: 9,
@@ -1360,6 +1368,7 @@ mod tests {
             dir,
             hardlinks: HashMap::new(),
             fixups: Vec::new(),
+            fixup_index: HashMap::new(),
         }
     }
 
@@ -1434,6 +1443,53 @@ mod tests {
         assert_eq!(
             std::fs::read_link(dir.path().join("sub/Link")).unwrap(),
             PathBuf::from("target")
+        );
+    }
+
+    /// `record` replaces the entry for an already-recorded path instead of
+    /// pushing a duplicate: the fixup index must stay consistent with the vec.
+    #[test]
+    fn record_replaces_existing_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ex = extractor_for(dir.path());
+        let p = dir.path().join("sub/file");
+        ex.record(p.clone(), 0o644, Some(1), false);
+        ex.record(p.clone(), 0o755, Some(2), false);
+        assert_eq!(ex.fixups.len(), 1);
+        assert_eq!(ex.fixup_index.len(), 1);
+        assert_eq!(ex.fixup_index[&p], 0);
+        let f = &ex.fixups[0];
+        assert_eq!(f.path, p);
+        assert_eq!(f.perm, 0o755);
+        assert_eq!(f.mtime, Some(2));
+        assert!(!f.is_dir);
+    }
+
+    /// Regression for the rocksndiamonds-data hang: `record` used to scan
+    /// all previously recorded fixups per entry, O(n^2) path comparisons
+    /// (108k files took 277s to extract on the Mac, and timed out the
+    /// 1800s container scan). Long shared prefixes, like the real
+    /// /usr/share/rocksndiamonds/levels/... paths, make each failed
+    /// comparison walk many components before differing.
+    #[test]
+    fn record_many_distinct_paths_stays_fast() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ex = extractor_for(dir.path());
+        let start = std::time::Instant::now();
+        for i in 0..50_000 {
+            let p = dir.path().join(format!(
+                "usr/share/rocksndiamonds/levels/level{i:05}/sub/dir/file.dat"
+            ));
+            ex.record(p, 0o644, None, false);
+        }
+        let dt = start.elapsed();
+        assert_eq!(ex.fixups.len(), 50_000);
+        assert_eq!(ex.fixup_index.len(), 50_000);
+        // The old O(n^2) scan needs a minute here; the indexed version is
+        // milliseconds. Generous bound so slow CI machines don't flake.
+        assert!(
+            dt.as_secs() < 20,
+            "recording 50k paths took {dt:?}, expected linear time"
         );
     }
 }
