@@ -2873,24 +2873,35 @@ impl FilesCheck {
             let postin_prog = pkg.scriptprog(librpm::Tag::POSTINPROG);
             let postun_prog = pkg.scriptprog(librpm::Tag::POSTUNPROG);
             if !is_ldconfig(&st.postin, &postin_prog) {
-                add_info(
-                    out,
-                    Level::Error,
-                    pkg,
-                    "library-without-ldconfig-postin",
-                    &[fname],
-                );
-                add_info(out, Level::Error, pkg, "postin-without-ldconfig", &[fname]);
+                // Mirror the reference (FilesCheck._check_file_normal_file_lib):
+                // a missing scriptlet emits library-without-ldconfig-*, a
+                // present-but-ldconfig-less one emits postin-without-ldconfig.
+                // Emitting both was a port bug. A -p ldconfig interpreter
+                // satisfies the check outright via is_ldconfig above.
+                if st.postin.is_empty() {
+                    add_info(
+                        out,
+                        Level::Error,
+                        pkg,
+                        "library-without-ldconfig-postin",
+                        &[fname],
+                    );
+                } else {
+                    add_info(out, Level::Error, pkg, "postin-without-ldconfig", &[fname]);
+                }
             }
             if !is_ldconfig(&st.postun, &postun_prog) {
-                add_info(
-                    out,
-                    Level::Error,
-                    pkg,
-                    "library-without-ldconfig-postun",
-                    &[fname],
-                );
-                add_info(out, Level::Error, pkg, "postun-without-ldconfig", &[fname]);
+                if st.postun.is_empty() {
+                    add_info(
+                        out,
+                        Level::Error,
+                        pkg,
+                        "library-without-ldconfig-postun",
+                        &[fname],
+                    );
+                } else {
+                    add_info(out, Level::Error, pkg, "postun-without-ldconfig", &[fname]);
+                }
             }
         }
     }
@@ -4197,6 +4208,70 @@ mod tests {
                     && d.contains("libfoo.so.1.2.3")),
             "missing E-level finding on real .so: {results:?}"
         );
+    }
+
+    #[test]
+    fn ldconfig_missing_scriptlet_vs_ldconfig_less() {
+        // Reference parity (FilesCheck._check_file_normal_file_lib): a
+        // missing %postin emits library-without-ldconfig-postin, while a
+        // present-but-ldconfig-less %postin emits postin-without-ldconfig.
+        // Emitting both was a port bug (#375).
+        let config = test_config();
+        let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
+        let pkg = Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture");
+        let pkgfile = PkgFile {
+            name: "/usr/lib64/libfoo.so.1.2.3".to_string(),
+            path: "/usr/lib64/libfoo.so.1.2.3".to_string(),
+            mode: 0o100755,
+            size: Some(100),
+            ..Default::default()
+        };
+        let check = FilesCheck::new(&config);
+        let run = |postin: &str, postun: &str| {
+            let st = PkgState {
+                postin: postin.to_string(),
+                postun: postun.to_string(),
+                ..Default::default()
+            };
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_ldconfig(&pkg, "/usr/lib64/libfoo.so.1.2.3", &pkgfile, &st, &mut out);
+            out.results().to_vec()
+        };
+        // Pin name, level and detail explicitly: exactly the two expected
+        // Error lines, each naming the library file.
+        let pin = |results: &[(String, String)], expected: &[&str]| {
+            assert_eq!(results.len(), 2, "expected exactly 2 findings: {results:?}");
+            for (name, line) in results {
+                assert!(
+                    expected.contains(&name.as_str()),
+                    "unexpected finding {name}: {results:?}"
+                );
+                assert!(
+                    line.contains(": E: "),
+                    "finding {name} must be Error level: {line:?}"
+                );
+                assert!(
+                    line.contains("/usr/lib64/libfoo.so.1.2.3"),
+                    "finding {name} must name the file: {line:?}"
+                );
+            }
+        };
+        // No scriptlets at all: library-without-ldconfig-* only.
+        pin(
+            &run("", ""),
+            &[
+                "library-without-ldconfig-postin",
+                "library-without-ldconfig-postun",
+            ],
+        );
+        // Scriptlets present but ldconfig-less: postin/postun-without-ldconfig only.
+        pin(
+            &run("echo hi", "echo hi"),
+            &["postin-without-ldconfig", "postun-without-ldconfig"],
+        );
+        // ldconfig present: silence.
+        let results = run("/sbin/ldconfig", "/sbin/ldconfig");
+        assert!(results.is_empty(), "unexpected findings: {results:?}");
     }
 
     #[test]
