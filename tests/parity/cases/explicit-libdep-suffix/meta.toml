@@ -1,0 +1,17 @@
+kind = "synthetic"            # hand-built input AND hand-written expected/
+rpmlint = "2.10.0"           # reference version the divergence is measured against
+reference_sha = "84848c05c5571c22274a55ff9afdfe6d88c67dc9"   # the pinned rpmlint commit (see setup-rpmlint-ref.sh)
+flavour = "openSUSE"         # config flavour; see "The overlay trap" in README.md
+checks = 43                  # reference check count under the openSUSE overlay
+argv = ["explicit-libdep-probe-1.0-1.noarch.rpm"] # exactly what was passed (basenames); no config arg (see README.md)
+captured = "2026-10-09"
+
+[source]
+description = "Hand-built probe RPM (rpmbuild, noarch) for the explicit-lib-dependency suffix-narrowing (rpmcrab#365). Requires: appstream-glib is a suffix-only name (the reference fires, rpmcrab deliberately stays silent); Requires: zlib is a genuine library without the lib* prefix (a true positive the reference gets right and rpmcrab knowingly silences per openSUSE naming policy); Requires: libfoo is a genuine lib* library (both fire). expected/ is rpmcrab's hand-verified output, not a reference capture: it locks the suffix behavior, so only the libfoo finding may appear."
+
+[tools]
+present = ["rpmbuild"]       # external tools used to build the input
+
+[[input]]
+file = "explicit-libdep-probe-1.0-1.noarch.rpm"
+sha256 = "187774bce7329cf4fad38796af6fa80390760232b5c3fcb94eaa412e5472bdb2"

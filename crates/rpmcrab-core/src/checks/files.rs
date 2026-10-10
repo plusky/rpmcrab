@@ -1529,6 +1529,18 @@ impl FilesCheck {
 }
 
 impl FilesCheck {
+    /// Names from requires + recommends + suggests, mirroring the
+    /// reference's deps list used by the missing-dependency-to-*
+    /// checks.
+    fn dep_names(pkg: &Pkg) -> Vec<&str> {
+        pkg.requires
+            .iter()
+            .chain(pkg.recommends.iter())
+            .chain(pkg.suggests.iter())
+            .map(|d| d.name.as_str())
+            .collect()
+    }
+
     fn check_file_logrotate(&self, pkg: &Pkg, fname: &str, st: &mut PkgState, out: &mut Filter) {
         // logrotate_regex: /etc/logrotate.d/
         if fname.starts_with("/etc/logrotate.d/") && fname != "/etc/logrotate.d/" {
@@ -1544,7 +1556,10 @@ impl FilesCheck {
                 );
             }
         }
-        let deps: Vec<&str> = pkg.requires.iter().map(|d| d.name.as_str()).collect();
+        // The reference counts requires + recommends + suggests here; a bare
+        // Requires check false-positives on the common Recommends: logrotate
+        // pattern (#388).
+        let deps = Self::dep_names(pkg);
         if fname.starts_with("/etc/logrotate.d/")
             && !deps.contains(&"logrotate")
             && pkg.name != "logrotate"
@@ -1560,8 +1575,10 @@ impl FilesCheck {
     }
 
     fn check_file_crontab(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
-        // #552: replicate reference as-is (matches base dirs too, known bug)
-        let deps: Vec<&str> = pkg.requires.iter().map(|d| d.name.as_str()).collect();
+        // #552: replicate reference as-is (matches base dirs too, known bug).
+        // Same #388 root cause as logrotate: the reference also counts
+        // requires + recommends + suggests here.
+        let deps = Self::dep_names(pkg);
         if fname.starts_with("/etc/cron.") && !deps.contains(&"crontabs") && pkg.name != "crontabs"
         {
             add_info(
@@ -3051,6 +3068,87 @@ mod tests {
         check.check(&pkg, &config, &mut out);
         let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
         assert_lacks(&names, "missing-dependency-to-xinetd");
+    }
+
+    fn dep_named(name: &str) -> crate::pkg::dep::DepInfo {
+        crate::pkg::dep::DepInfo {
+            name: name.to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        }
+    }
+
+    /// Run the full FilesCheck over a package shipping a single file with the
+    /// given dependency sets; return the emitted finding names.
+    fn run_files_check_with_deps(
+        file_name: &str,
+        requires: Vec<crate::pkg::dep::DepInfo>,
+        recommends: Vec<crate::pkg::dep::DepInfo>,
+        suggests: Vec<crate::pkg::dep::DepInfo>,
+    ) -> Vec<String> {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = vec![PkgFile {
+            name: file_name.to_string(),
+            path: file_name.to_string(),
+            ..Default::default()
+        }];
+        pkg.requires = requires;
+        pkg.recommends = recommends;
+        pkg.suggests = suggests;
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        out.results().iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    #[test]
+    fn missing_dependency_to_logrotate_quiet_when_recommended() {
+        // #388: the reference counts requires + recommends + suggests
+        // (FilesCheck.py `_check_file_logrotate`); 30 of the 34 corpus false
+        // positives were Recommends:/Suggests: logrotate (e.g. apcupsd).
+        let names = run_files_check_with_deps(
+            "/etc/logrotate.d/fcprobe",
+            vec![],
+            vec![dep_named("logrotate")],
+            vec![],
+        );
+        assert_lacks(&names, "missing-dependency-to-logrotate");
+    }
+
+    #[test]
+    fn missing_dependency_to_logrotate_quiet_when_suggested() {
+        let names = run_files_check_with_deps(
+            "/etc/logrotate.d/fcprobe",
+            vec![],
+            vec![],
+            vec![dep_named("logrotate")],
+        );
+        assert_lacks(&names, "missing-dependency-to-logrotate");
+    }
+
+    #[test]
+    fn missing_dependency_to_logrotate_fires_without_any_dep() {
+        // Negative guard: with no logrotate dep of any kind the finding stays.
+        let names = run_files_check_with_deps("/etc/logrotate.d/fcprobe", vec![], vec![], vec![]);
+        assert_has(&names, "missing-dependency-to-logrotate");
+    }
+
+    #[test]
+    fn missing_dependency_to_crontabs_quiet_when_recommended() {
+        // Same #388 root cause in the sibling check: the reference's
+        // `_check_file_crontab` also counts requires + recommends + suggests.
+        let names = run_files_check_with_deps(
+            "/etc/cron.daily/fcprobe",
+            vec![],
+            vec![dep_named("crontabs")],
+            vec![],
+        );
+        assert_lacks(&names, "missing-dependency-to-crontabs");
     }
 
     #[test]

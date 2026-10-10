@@ -63,3 +63,6 @@ name = "w6-systemd-install"
 
 [[case]]
 name = "w6-tmpfiles"
+
+[[case]]
+name = "explicit-libdep-suffix"
