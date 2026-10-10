@@ -204,6 +204,14 @@ fn split_dep_tokens(line: &str) -> Vec<&str> {
     tokens
 }
 
+/// First token of a dependency line, without the `parse_deps` allocation.
+/// The forbidden-controlchar check only ever examines this token, so the
+/// comparison-operator fast path in the spec checks can probe it cheaply
+/// when the raw line carries no comparison operator.
+pub(crate) fn first_dep_token(line: &str) -> Option<&str> {
+    split_dep_tokens(line).into_iter().next()
+}
+
 pub fn parse_deps(line: &str) -> Vec<(String, Option<String>)> {
     let mut tokens: Vec<&str> = split_dep_tokens(line);
     // Drop a trailing line-continuation backslash from a multi-line macro
