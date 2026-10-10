@@ -626,6 +626,7 @@ mod tests {
             "/usr/lib64/glfw2/libglfw.so",
             "../libglfw.so.2.7.6",
         )];
-        assert!(run(&lib, &devel).is_empty());
+        let findings = run(&lib, &devel);
+        assert!(findings.is_empty(), "{findings:?}");
     }
 }
