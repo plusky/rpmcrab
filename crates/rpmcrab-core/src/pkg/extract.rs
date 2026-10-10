@@ -412,7 +412,7 @@ impl<'a> Extractor<'a> {
         // components and the link-then-file order get the same fail-closed
         // treatment here.
         self.reject_symlink_escape(&path, e.mode & S_IFMT == S_IFLNK)?;
-        let is_duplicate = !self.seen.insert(rel.clone());
+        let is_duplicate = self.seen.contains(&rel);
         match e.mode & S_IFMT {
             S_IFDIR => {
                 // ensure_dir_all doubles as the collision check for the entry
@@ -423,6 +423,7 @@ impl<'a> Extractor<'a> {
                 }
                 skip_data(r, e.size)?;
                 self.record(path, e.mode & 0o7777, Some(e.mtime), true);
+                self.seen.insert(rel.clone());
             }
             S_IFREG => {
                 if !self.ensure_parent(&path)? || is_existing_dir(&path) {
@@ -439,6 +440,7 @@ impl<'a> Extractor<'a> {
                     skip_pad(r, e.size)?;
                 }
                 self.record(path, e.mode & 0o7777, Some(e.mtime), false);
+                self.seen.insert(rel.clone());
             }
             S_IFLNK => {
                 if !self.ensure_parent(&path)? || is_existing_dir(&path) {
@@ -471,6 +473,8 @@ impl<'a> Extractor<'a> {
                 {
                     return Ok(());
                 }
+                // Guard passed: record the path as materialized.
+                self.seen.insert(rel.clone());
                 let _ = fs::remove_file(&path);
                 symlink(OsStr::from_bytes(&target), &path).map_err(|e| io_error(&path, e))?;
                 // Symlink modes/mtimes are OS-determined; tar leaves them too.
@@ -486,6 +490,7 @@ impl<'a> Extractor<'a> {
                 // No mtime: opening a fifo for writing (as set_modified does)
                 // blocks until a reader appears.
                 self.record(path, e.mode & 0o7777, None, false);
+                self.seen.insert(rel.clone());
             }
             S_IFCHR | S_IFBLK => {
                 // Device nodes are skipped: creating them needs privilege the
@@ -1159,6 +1164,54 @@ mod tests {
             dev_minor: 0,
             name: b"usr/bin/tool".to_vec(),
         };
+        let mut data = &target[..];
+        ex.materialize(&mut data, &entry).unwrap();
+
+        // The file survives; no symlink loop is created.
+        assert_eq!(std::fs::read(&path).unwrap(), b"binary\n");
+        assert!(
+            !std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    /// A skipped symlink must not poison `seen`: an exact-duplicate symlink
+    /// entry after a guard-fired skip must hit the guard again, not bypass
+    /// it via `is_duplicate=true` and recreate the ELOOP self-loop.
+    #[test]
+    fn duplicate_skipped_symlink_does_not_bypass_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        // Pre-create the file, as if an earlier payload entry materialized it.
+        let path = dir.path().join("usr/bin/tool");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"binary\n").unwrap();
+
+        let mut ex = Extractor {
+            dir: dir.path(),
+            hardlinks: HashMap::new(),
+            fixups: Vec::new(),
+            fixup_index: HashMap::new(),
+            seen: HashSet::new(),
+        };
+        // Symlink entry for the colliding on-disk path.
+        let target = b"tool";
+        let entry = CpioEntry {
+            ino: 2,
+            mode: S_IFLNK | 0o777,
+            nlink: 1,
+            mtime: 0,
+            size: target.len() as u64,
+            dev_major: 0,
+            dev_minor: 0,
+            name: b"usr/bin/tool".to_vec(),
+        };
+        // First entry: guard fires (path exists as non-symlink), skipped.
+        let mut data = &target[..];
+        ex.materialize(&mut data, &entry).unwrap();
+        // Second entry: exact duplicate. Must hit the guard again, not
+        // bypass it via is_duplicate=true.
         let mut data = &target[..];
         ex.materialize(&mut data, &entry).unwrap();
 
