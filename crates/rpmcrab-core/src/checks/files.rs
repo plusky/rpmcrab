@@ -4137,38 +4137,43 @@ mod tests {
             };
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
             check.check_ldconfig(&pkg, "/usr/lib64/libfoo.so.1.2.3", &pkgfile, &st, &mut out);
-            out.results()
-                .iter()
-                .map(|(n, _)| n.clone())
-                .collect::<Vec<_>>()
+            out.results().to_vec()
+        };
+        // Pin name, level and detail explicitly: exactly the two expected
+        // Error lines, each naming the library file.
+        let pin = |results: &[(String, String)], expected: &[&str]| {
+            assert_eq!(results.len(), 2, "expected exactly 2 findings: {results:?}");
+            for (name, line) in results {
+                assert!(
+                    expected.contains(&name.as_str()),
+                    "unexpected finding {name}: {results:?}"
+                );
+                assert!(
+                    line.contains(": E: "),
+                    "finding {name} must be Error level: {line:?}"
+                );
+                assert!(
+                    line.contains("/usr/lib64/libfoo.so.1.2.3"),
+                    "finding {name} must name the file: {line:?}"
+                );
+            }
         };
         // No scriptlets at all: library-without-ldconfig-* only.
-        let names = run("", "");
-        assert!(
-            names.contains(&"library-without-ldconfig-postin".to_string())
-                && names.contains(&"library-without-ldconfig-postun".to_string()),
-            "missing library-without-ldconfig: {names:?}"
-        );
-        assert!(
-            !names.contains(&"postin-without-ldconfig".to_string())
-                && !names.contains(&"postun-without-ldconfig".to_string()),
-            "spurious postin/postun-without-ldconfig: {names:?}"
+        pin(
+            &run("", ""),
+            &[
+                "library-without-ldconfig-postin",
+                "library-without-ldconfig-postun",
+            ],
         );
         // Scriptlets present but ldconfig-less: postin/postun-without-ldconfig only.
-        let names = run("echo hi", "echo hi");
-        assert!(
-            names.contains(&"postin-without-ldconfig".to_string())
-                && names.contains(&"postun-without-ldconfig".to_string()),
-            "missing postin/postun-without-ldconfig: {names:?}"
-        );
-        assert!(
-            !names.contains(&"library-without-ldconfig-postin".to_string())
-                && !names.contains(&"library-without-ldconfig-postun".to_string()),
-            "spurious library-without-ldconfig: {names:?}"
+        pin(
+            &run("echo hi", "echo hi"),
+            &["postin-without-ldconfig", "postun-without-ldconfig"],
         );
         // ldconfig present: silence.
-        let names = run("/sbin/ldconfig", "/sbin/ldconfig");
-        assert!(names.is_empty(), "unexpected findings: {names:?}");
+        let results = run("/sbin/ldconfig", "/sbin/ldconfig");
+        assert!(results.is_empty(), "unexpected findings: {results:?}");
     }
 
     #[test]
