@@ -5098,11 +5098,30 @@ mod tests {
             pkg_with_files(vec![mkfile("/usr/lib/debug/foo.debug", 0o100644, 21)]);
         pkg.name = "foo-debug".to_string();
         let results = run_check_binary(&pkg);
-        assert!(
-            !results
+        assert_eq!(
+            results
                 .iter()
-                .any(|(n, _)| n == "debug-files-in-non-debug-package"),
+                .filter(|(n, _)| n == "debug-files-in-non-debug-package")
+                .count(),
+            0,
             "legacy -debug packages must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn empty_debuginfo_package_fires_for_legacy_debug_suffix() {
+        // The empty-debuginfo-package side effect also applies to the legacy
+        // -debug suffix, not only to -debuginfo.
+        let (mut pkg, _dir) = pkg_with_files(vec![]);
+        pkg.name = "foo-debug".to_string();
+        let results = run_check_binary(&pkg);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|(n, _)| n == "empty-debuginfo-package")
+                .count(),
+            1,
+            "empty legacy -debug package must fire empty-debuginfo-package: {results:?}"
         );
     }
 
