@@ -112,6 +112,7 @@ def test_curl_failure_raises():
         curl_rc=28, curl_err=b"curl: (28) Operation timed out")
     with mock.patch.object(gen.urllib.request, "urlopen",
                            return_value=_repomd_response()), \
+            mock.patch.object(gen.time, "sleep"), \
             popen_patch, run_patch:
         try:
             _filelist_hits(["/usr/bin/foo"], {})
@@ -127,6 +128,7 @@ def test_zstd_failure_raises_with_stderr():
         zstd_rc=1, zstd_err=b"zstd: /*stdin*\\: not in zstd format")
     with mock.patch.object(gen.urllib.request, "urlopen",
                            return_value=_repomd_response()), \
+            mock.patch.object(gen.time, "sleep"), \
             popen_patch, run_patch:
         try:
             _filelist_hits(["/usr/bin/foo"], {})
@@ -141,6 +143,7 @@ def test_grep_failure_raises():
     popen_patch, run_patch, _ = _pipeline(grep_rc=2, grep_stderr="grep: boom")
     with mock.patch.object(gen.urllib.request, "urlopen",
                            return_value=_repomd_response()), \
+            mock.patch.object(gen.time, "sleep"), \
             popen_patch, run_patch:
         try:
             _filelist_hits(["/usr/bin/foo"], {})
@@ -389,6 +392,85 @@ def test_leap16_sha512_missing_raises():
     else:
         raise AssertionError('missing sha512 did not raise')
 
+
+# ---------------------------------------------------------------------------
+# stale mirror: repomd.xml fine, filelists 404 -> fresh repomd per cycle
+# ---------------------------------------------------------------------------
+
+def test_filelist_stale_mirror_retries_with_fresh_repomd():
+    """A 404ing filelist is retried with a fresh repomd fetch per cycle.
+
+    Each cycle's repomd fetch gets its own MirrorBrain redirect, so the
+    retry can land on a synced mirror; the href is re-parsed from the
+    fresh repomd.
+    """
+    popen_calls = []
+
+    def fake_popen(argv, **kwargs):
+        popen_calls.append(argv[0])
+        if argv[0] == "curl":
+            if popen_calls.count("curl") == 1:
+                return _FakePopen(
+                    22, stderr=b"curl: (22) The requested URL returned error: 404")
+            return _FakePopen(0)
+        assert argv[0] == "zstd", argv
+        return _FakePopen(0)
+
+    grep_result = mock.Mock()
+    grep_result.returncode = 0
+    grep_result.stdout = ">/usr/bin/foo<\n"
+    grep_result.stderr = ""
+
+    sleeps = []
+    with mock.patch.object(gen.urllib.request, "urlopen",
+                           return_value=_repomd_response()) as urlopen_mock, \
+            mock.patch.object(gen.subprocess, "Popen", fake_popen), \
+            mock.patch.object(gen.subprocess, "run",
+                              return_value=grep_result), \
+            mock.patch.object(gen.time, "sleep",
+                              side_effect=lambda s: sleeps.append(s)):
+        hits = _filelist_hits(["/usr/bin/foo"], {})
+    assert hits == {"/usr/bin/foo"}, hits
+    assert popen_calls.count("curl") == 2, popen_calls
+    # fresh repomd.xml fetch per cycle (new mirror redirect)
+    assert urlopen_mock.call_count == 2, urlopen_mock.call_count
+    assert sleeps == [gen._FILELIST_BACKOFF[0]], sleeps
+
+
+def test_filelist_stale_mirror_exhausts_cycles_then_raises():
+    """Persistent filelist 404s raise only after every cycle is exhausted."""
+    popen_calls = []
+
+    def fake_popen(argv, **kwargs):
+        popen_calls.append(argv[0])
+        if argv[0] == "curl":
+            return _FakePopen(
+                22, stderr=b"curl: (22) The requested URL returned error: 404")
+        return _FakePopen(0)
+
+    grep_result = mock.Mock()
+    grep_result.returncode = 1
+    grep_result.stdout = ""
+    grep_result.stderr = ""
+
+    sleeps = []
+    with mock.patch.object(gen.urllib.request, "urlopen",
+                           return_value=_repomd_response()), \
+            mock.patch.object(gen.subprocess, "Popen", fake_popen), \
+            mock.patch.object(gen.subprocess, "run",
+                              return_value=grep_result), \
+            mock.patch.object(gen.time, "sleep",
+                              side_effect=lambda s: sleeps.append(s)):
+        try:
+            _filelist_hits(["/usr/bin/foo"], {})
+        except RuntimeError as e:
+            msg = str(e)
+            assert "after %d attempts" % gen._FILELIST_CYCLES in msg, msg
+            assert "curl rc=22" in msg, msg
+        else:
+            raise AssertionError("exhausted filelist cycles did not raise")
+    assert popen_calls.count("curl") == gen._FILELIST_CYCLES, popen_calls
+    assert sleeps == gen._FILELIST_BACKOFF, sleeps
 
 def main():
     tests = [v for k, v in sorted(globals().items())

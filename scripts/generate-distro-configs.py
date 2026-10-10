@@ -674,125 +674,173 @@ _REPOMD_ATTEMPTS = 4
 # the final attempt.
 _REPOMD_BACKOFF = [15, 30, 45]
 
+# Full repomd -> filelist verification cycles before giving up when the
+# filelist download fails. Each cycle re-fetches repomd.xml, so a fresh
+# MirrorBrain redirect can land on a healthy mirror when the previous one
+# was stale (its repomd referenced filelists not yet synced to it).
+# download.opensuse.org itself only ever redirects, so there is no direct
+# origin to fall back to - rotating the mirror pick is the fallback.
+_FILELIST_CYCLES = 3
+# Backoff sleeps between filelist cycles (seconds); no sleep after the
+# final cycle.
+_FILELIST_BACKOFF = [30, 60]
+
+
+def _fetch_repomd_xml(repomd_url, label):
+    """Fetch and return a repo's repomd.xml as text.
+
+    Transient mirror failures (5xx, network errors, timeouts) are retried:
+    a single failed fetch must not fail the whole run when the mirror is
+    briefly down. The backoff sleeps only between attempts - the last
+    attempt raises immediately instead of sleeping pointlessly before the
+    error. Client errors (4xx) raise immediately: the URL itself is wrong
+    and retrying cannot help. Raises RuntimeError when the attempts are
+    exhausted.
+    """
+    req = urllib.request.Request(
+        repomd_url, headers={"User-Agent": "rpmcrab-distro-config-sync"}
+    )
+    repomd = None
+    last_err = None
+    for attempt in range(_REPOMD_ATTEMPTS):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                repomd = resp.read().decode("utf-8")
+            break
+        except urllib.error.HTTPError as e:
+            if e.code < 500:
+                raise
+            last_err = e
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            http.client.IncompleteRead,
+            ConnectionResetError,
+        ) as e:
+            last_err = e
+        if attempt + 1 < _REPOMD_ATTEMPTS:
+            time.sleep(_REPOMD_BACKOFF[attempt])
+    if repomd is None:
+        raise RuntimeError(
+            "repomd.xml fetch failed for %s after retries: %s" % (label, last_err)
+        )
+    return repomd
+
+
+def _download_filelist_hits(fl_url, args, label):
+    """Download a filelists archive, grep it, and return the hit set.
+
+    Streams the file through one ``curl | zstd -dc | grep`` pass, matching
+    ``>path<`` against ``<file>path</file>`` entries so only exact paths
+    hit. Raises RuntimeError on download/decompression/grep failure.
+    """
+    # Every stage must succeed: checking only grep's return code lets a
+    # failed download prune everything this guard verifies. -f makes
+    # HTTP errors catchable; --show-error keeps the message (captured
+    # below) diagnosable. The speed-limit/speed-time pair stalls out a
+    # hung mirror instead of hanging the job: a transfer under 50KB/s
+    # for 60s aborts and retries, while a merely slow mirror is allowed
+    # to finish - a hard --max-time would kill legitimate slow
+    # downloads (100KB/s observed from a mirror).
+    curl = subprocess.Popen(
+        [
+            "curl",
+            "-fsSL",
+            "--show-error",
+            "--connect-timeout",
+            "60",
+            "--retry",
+            "3",
+            "--retry-all-errors",
+            "--speed-limit",
+            "50000",
+            "--speed-time",
+            "60",
+            fl_url,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    zstd = subprocess.Popen(
+        ["zstd", "-dc"],
+        stdin=curl.stdout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    curl.stdout.close()
+    grep = subprocess.run(
+        ["grep", "-F", "-o"] + args,
+        stdin=zstd.stdout,
+        capture_output=True,
+        text=True,
+    )
+    zstd.stdout.close()
+    curl_rc = curl.wait()
+    zstd_rc = zstd.wait()
+    curl_err = curl.stderr.read().decode("utf-8", "replace").strip()
+    zstd_err = zstd.stderr.read().decode("utf-8", "replace").strip()
+    if curl_rc != 0:
+        raise RuntimeError(
+            "filelist download failed (curl rc=%d) for %s: %s"
+            % (curl_rc, label, curl_err[:300])
+        )
+    if zstd_rc != 0:
+        raise RuntimeError(
+            "filelist decompression failed (zstd rc=%d) for %s: %s"
+            % (zstd_rc, label, zstd_err[:300])
+        )
+    if grep.returncode not in (0, 1):
+        raise RuntimeError(
+            "filelist grep failed (rc=%d): %s"
+            % (grep.returncode, grep.stderr[:200])
+        )
+    return {
+        line[1:-1]
+        for line in grep.stdout.splitlines()
+        if line.startswith(">") and line.endswith("<")
+    }
+
 
 def _filelist_hits(paths, repomd_url, repo_base, cache, label):
     """Subset of `paths` still shipped by some package in a repo's filelists.
 
-    Streams the repo's oss filelists through one ``curl | zstd -dc | grep``
-    pass, matching ``>path<`` against ``<file>path</file>`` entries so
-    only exact paths hit. Results are cached per path for the run.
     Raises on download/decompression/grep failure: an unverifiable guard
-    must fail loudly, never prune silently.
+    must fail loudly, never prune silently. A stale mirror - repomd.xml
+    fetched fine but the filelists it references 404 because the mirror
+    has not synced them yet - is retried with backoff over fresh repomd
+    fetches, each with its own MirrorBrain redirect that may land on a
+    healthy mirror. Only raises once every cycle is exhausted.
     """
     paths = sorted(set(paths))
     missing = [p for p in paths if p not in cache]
     if missing:
-        req = urllib.request.Request(
-            repomd_url, headers={"User-Agent": "rpmcrab-distro-config-sync"}
-        )
-        # Transient mirror failures (5xx, network errors, timeouts) are
-        # retried: a single failed fetch must not fail the whole run when
-        # the mirror is briefly down. The backoff sleeps only between
-        # attempts - the last attempt raises immediately instead of
-        # sleeping pointlessly before the error.
-        repomd = None
-        last_err = None
-        for attempt in range(_REPOMD_ATTEMPTS):
-            try:
-                with urllib.request.urlopen(req, timeout=60) as resp:
-                    repomd = resp.read().decode("utf-8")
-                break
-            except urllib.error.HTTPError as e:
-                if e.code < 500:
-                    raise
-                last_err = e
-            except (
-                urllib.error.URLError,
-                TimeoutError,
-                http.client.IncompleteRead,
-                ConnectionResetError,
-            ) as e:
-                last_err = e
-            if attempt + 1 < _REPOMD_ATTEMPTS:
-                time.sleep(_REPOMD_BACKOFF[attempt])
-        if repomd is None:
-            raise RuntimeError(
-                "repomd.xml fetch failed for %s after retries: %s" % (label, last_err)
-            )
-        m = re.search(
-            r'<data type="filelists">.*?<location href="([^"]+)"', repomd, re.S
-        )
-        if not m:
-            raise RuntimeError("filelists entry not found in %s repomd.xml" % label)
-        fl_url = repo_base + m.group(1)
         args = []
         for q in missing:
             args += ["-e", ">%s<" % q]
-        # Every stage must succeed: checking only grep's return code lets a
-        # failed download prune everything this guard verifies. -f makes
-        # HTTP errors catchable; --show-error keeps the message (captured
-        # below) diagnosable. The speed-limit/speed-time pair stalls out a
-        # hung mirror instead of hanging the job: a transfer under 50KB/s
-        # for 60s aborts and retries, while a merely slow mirror is allowed
-        # to finish - a hard --max-time would kill legitimate slow
-        # downloads (100KB/s observed from a mirror).
-        curl = subprocess.Popen(
-            [
-                "curl",
-                "-fsSL",
-                "--show-error",
-                "--connect-timeout",
-                "60",
-                "--retry",
-                "3",
-                "--retry-all-errors",
-                "--speed-limit",
-                "50000",
-                "--speed-time",
-                "60",
-                fl_url,
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        zstd = subprocess.Popen(
-            ["zstd", "-dc"],
-            stdin=curl.stdout,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        curl.stdout.close()
-        grep = subprocess.run(
-            ["grep", "-F", "-o"] + args,
-            stdin=zstd.stdout,
-            capture_output=True,
-            text=True,
-        )
-        zstd.stdout.close()
-        curl_rc = curl.wait()
-        zstd_rc = zstd.wait()
-        curl_err = curl.stderr.read().decode("utf-8", "replace").strip()
-        zstd_err = zstd.stderr.read().decode("utf-8", "replace").strip()
-        if curl_rc != 0:
-            raise RuntimeError(
-                "filelist download failed (curl rc=%d) for %s: %s"
-                % (curl_rc, label, curl_err[:300])
+        hits = None
+        last_err = None
+        for cycle in range(_FILELIST_CYCLES):
+            repomd = _fetch_repomd_xml(repomd_url, label)
+            m = re.search(
+                r'<data type="filelists">.*?<location href="([^"]+)"', repomd, re.S
             )
-        if zstd_rc != 0:
+            if not m:
+                raise RuntimeError(
+                    "filelists entry not found in %s repomd.xml" % label
+                )
+            fl_url = repo_base + m.group(1)
+            try:
+                hits = _download_filelist_hits(fl_url, args, label)
+                break
+            except RuntimeError as e:
+                last_err = e
+                if cycle + 1 < _FILELIST_CYCLES:
+                    time.sleep(_FILELIST_BACKOFF[cycle])
+        if hits is None:
             raise RuntimeError(
-                "filelist decompression failed (zstd rc=%d) for %s: %s"
-                % (zstd_rc, label, zstd_err[:300])
+                "filelist download failed for %s after %d attempts: %s"
+                % (label, _FILELIST_CYCLES, last_err)
             )
-        if grep.returncode not in (0, 1):
-            raise RuntimeError(
-                "filelist grep failed (rc=%d): %s"
-                % (grep.returncode, grep.stderr[:200])
-            )
-        hits = {
-            line[1:-1]
-            for line in grep.stdout.splitlines()
-            if line.startswith(">") and line.endswith("<")
-        }
         for q in missing:
             cache[q] = q in hits
     return {p for p in paths if cache[p]}
