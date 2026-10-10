@@ -1713,3 +1713,10 @@ check = "SharedLibraryPolicyCheck"
 kind = "behaviour"
 reason = "shlib-fixed-dependency skips `=` dependencies where the required package name is a proper prefix of the requiring package name (e.g. `libfoo-x86-64-v3` requires `libfoo = 1.0`): a flavor package pinning its own co-built base is version lockstep, not a shared-library-policy violation. The reference would fire on such inputs (same code, no exemption); it never does in practice because it never sees the -x86-64-v3 flavor binaries (0 emissions in 17k Factory packages)."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "explicit-lib-dependency"
+kind = "behaviour"
+reason = "Rich `(libfoo if bar)` / `(libfoo unless bar)` dependencies yield `libfoo` as a leaf (the condition is a predicate, not a requirement, but the then-branch is real), so explicit-lib-dependency fires. The reference applies its anchored `^lib` regex to the whole `\"(libfoo if bar)\"` string, which does not match, so it stays silent. A conditional requirement is still a requirement — the divergence is intentional. Same for devel-dependency with `(foo-devel if bar)`."
+since = "0.1.0"

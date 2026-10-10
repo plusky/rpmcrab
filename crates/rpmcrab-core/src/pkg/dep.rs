@@ -1309,6 +1309,48 @@ mod rich_dep_tests {
     }
 
     #[test]
+    fn leaves_if_unless_then_is_lib() {
+        // The then-branch is a real requirement even when it looks like a lib.
+        for (expr_str, expected) in [
+            ("(libfoo if bar)", vec!["libfoo"]),
+            ("(libfoo unless bar)", vec!["libfoo"]),
+            ("(foo-devel if bar)", vec!["foo-devel"]),
+        ] {
+            let expr = parse_dep_expr(expr_str);
+            let names: Vec<String> = expr.leaves().iter().map(|l| l.name.clone()).collect();
+            assert_eq!(names, expected, "for {expr_str}");
+        }
+    }
+
+    #[test]
+    fn leaves_nested_if_unless() {
+        // Nested rich expressions: if/unless inside or, or inside if/unless.
+        for (expr_str, expected) in [
+            ("((a if b) or c)", vec!["a", "c"]),
+            ("((a or b) if c)", vec!["a", "b"]),
+            ("((a unless b) or c)", vec!["a", "c"]),
+            ("((a or b) unless c)", vec!["a", "b"]),
+        ] {
+            let expr = parse_dep_expr(expr_str);
+            let names: Vec<String> = expr.leaves().iter().map(|l| l.name.clone()).collect();
+            assert_eq!(names, expected, "for {expr_str}");
+        }
+    }
+
+    #[test]
+    fn leaves_with_without_unchanged() {
+        // With/Without yield both sides (unchanged by the if/unless fix).
+        for (expr_str, expected) in [
+            ("(a with b)", vec!["a", "b"]),
+            ("(a without b)", vec!["a", "b"]),
+        ] {
+            let expr = parse_dep_expr(expr_str);
+            let names: Vec<String> = expr.leaves().iter().map(|l| l.name.clone()).collect();
+            assert_eq!(names, expected, "for {expr_str}");
+        }
+    }
+
+    #[test]
     fn dep_info_leaves_carry_header_evr_for_plain_names() {
         let dep = DepInfo {
             name: "foo".to_string(),
