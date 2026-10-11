@@ -93,7 +93,8 @@ jobs:
           git -c user.name=github-actions -c user.email=github-actions@github.com \
             commit -m "Sync upstream whitelist stanzas (${date})"
           git push -u origin "$branch"
-          if [ -z "$(gh pr list --head "$branch" --json number --jq '.[].number')" ]; then
+          existing_pr=$(gh pr list --head "$branch" --json number --jq '.[].number') || exit 1
+          if [ -z "$existing_pr" ]; then
             summary=$(cat /tmp/summary.txt)
             shas=$(cat /tmp/shas.txt)
             added=$(cat /tmp/added.txt)
