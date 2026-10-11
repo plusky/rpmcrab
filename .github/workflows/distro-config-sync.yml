@@ -51,11 +51,11 @@ jobs:
         id: regen
         run: |
           set -euo pipefail
-          old_opensuse=$(sed -n 's|^# opensuse: main @ \([0-9a-f]*\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
+          old_opensuse=$(sed -n 's|^# opensuse: opensuse @ \([0-9a-f]*\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
           old_slfo=$(sed -n 's|^# slfo: opensuse-slfo-main @ \([0-9a-f]*\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
           python3 scripts/generate-distro-configs.py --refresh > /tmp/refresh.log 2>&1
           cat /tmp/refresh.log
-          new_opensuse=$(sed -n 's|^# opensuse: main @ \([0-9a-f]*\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
+          new_opensuse=$(sed -n 's|^# opensuse: opensuse @ \([0-9a-f]*\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
           new_slfo=$(sed -n 's|^# slfo: opensuse-slfo-main @ \([0-9a-f]*\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
           {
             echo "old_opensuse=${old_opensuse}"
@@ -92,7 +92,7 @@ jobs:
             prunes=$(cat /tmp/prunes.txt)
             body="Upstream rpmlint moved; regenerating the vendored distro configs.
 
-          opensuse: ${{ steps.regen.outputs.old_opensuse }} -> ${{ steps.regen.outputs.new_opensuse }} (main)
+          opensuse: ${{ steps.regen.outputs.old_opensuse }} -> ${{ steps.regen.outputs.new_opensuse }} (opensuse)
           slfo: ${{ steps.regen.outputs.old_slfo }} -> ${{ steps.regen.outputs.new_slfo }} (opensuse-slfo-main)
 
           Generator prune log (Filters entries dropped for findings rpmcrab no longer emits):
