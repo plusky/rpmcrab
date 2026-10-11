@@ -5,6 +5,7 @@
 # opensuse: opensuse @ 041119a7e8d14da8834184084d343eb11d5577fa (2026-10-09)
 # slfo: opensuse-slfo-main @ 5c758cf12f9be87e9487bb60b023397f1e97115e (2026-06-18)
 # opensuse-whitelists: opensuse @ 041119a7e8d14da8834184084d343eb11d5577fa (2026-10-09)
+# slfo-whitelists: opensuse-slfo-main @ 5c758cf12f9be87e9487bb60b023397f1e97115e (2026-06-18)
 #
 # Extra Filters appended (not from upstream; see EXTRA_OPENSUSE_FILTERS):
 #   Filters: added '^mingw32-.*arch-independent-package-contains-binary-or-object.*\\.a$' (mingw -filesystem packages' rpmlintrc)
