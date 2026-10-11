@@ -76,13 +76,22 @@ PACKAGES_RE = re.compile(r'^packages\s*=\s*\[(.*?)\]\s*$', re.M)
 
 
 def load_blocklist():
-    """Return the set of blocklisted package names."""
+    """Return the set of blocklisted package names.
+
+    Fails closed: the blocklist file must exist. Running without it would
+    silently skip enforcement, so a missing file is a hard error, not an
+    empty blocklist.
+    """
+    if not BLOCKLIST_FILE.exists():
+        raise RuntimeError(
+            f"blocklist file missing: {BLOCKLIST_FILE} -- "
+            "sync refuses to run without it (fail closed)"
+        )
     blocklist = set()
-    if BLOCKLIST_FILE.exists():
-        for line in BLOCKLIST_FILE.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                blocklist.add(line)
+    for line in BLOCKLIST_FILE.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            blocklist.add(line)
     return blocklist
 
 
