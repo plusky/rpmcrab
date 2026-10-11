@@ -2,8 +2,9 @@
 # Upstream owns these configs until rpmlint is fully superseded;
 # the monthly distro-config-sync CI job refreshes them.
 # upstream_repo = https://github.com/rpm-software-management/rpmlint
-# opensuse: main @ 84848c05c5571c22274a55ff9afdfe6d88c67dc9 (2026-09-28)
-# slfo: opensuse-slfo-main @ 5c758cf12f9be87e9487bb60b023397f1e97115e (2026-06-09)
+# opensuse: opensuse @ 041119a7e8d14da8834184084d343eb11d5577fa (2026-10-09)
+# slfo: opensuse-slfo-main @ 5c758cf12f9be87e9487bb60b023397f1e97115e (2026-06-18)
+# opensuse-whitelists: opensuse @ 041119a7e8d14da8834184084d343eb11d5577fa (2026-10-09)
 #
 # Extra Filters appended (not from upstream; see EXTRA_OPENSUSE_FILTERS):
 #   Filters: added '^mingw32-.*arch-independent-package-contains-binary-or-object.*\\.a$' (mingw -filesystem packages' rpmlintrc)
@@ -54,68 +55,19 @@
 #
 # Pruned whitelist stanzas (packages gone from Tumbleweed/SLE 16):
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: KEPT [[FileDigestGroup]] stanza for pulseaudio — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
-#   whitelist: KEPT [[FileDigestGroup]] stanza for pommed — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'sddm-kalpa' (removed from Factory (bsc#1232647))
-#   whitelist: KEPT [[FileDigestGroup]] stanza for neard — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
-#   whitelist: KEPT [[FileDigestGroup]] stanza for xpra — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
-#   whitelist: KEPT [[FileDigestGroup]] stanza for iwd — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'udev-mini' (not shipped in Leap 16.0 (no -mini variants built))
-#   whitelist: KEPT [[FileDigestGroup]] stanza for low-memory-monitor — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
-#   whitelist: KEPT [[FileDigestGroup]] stanza for transactional-update-notifier — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'libgpiod-manager' (not shipped in Leap 16.0)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'foomuuri' (removed from Factory (bsc#1254385))
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'foomuuri-firewalld' (removed from Factory (bsc#1254385))
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'snapd' (removed from Factory (bsc#1256175, bsc#1248682, bsc#1261739))
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'txnupd-maintenance-tools' (removed from Factory (bsc#1268577))
 #   whitelist: dropped [[DeviceFilesWhitelist]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: KEPT [[FileDigestGroup]] stanza for pam_ccreds — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
-#   whitelist: KEPT [[FileDigestGroup]] stanza for nss-pam-ldapd — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
-#   whitelist: KEPT [[FileDigestGroup]] stanza for pam_passwdqc — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'pam_userpass' (removed from Factory; legacy: not audited)
-#   whitelist: KEPT [[FileDigestGroup]] stanza for pam_mktemp — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
-#   whitelist: KEPT [[FileDigestGroup]] stanza for pam_chroot — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
-#   whitelist: KEPT [[FileDigestGroup]] stanza for pam_yubico — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
-#   whitelist: KEPT [[FileDigestGroup]] stanza for pam_saslauthd — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'libcgroup-pam' (not shipped in Leap 16.0)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'pam-ssh-agent' (removed from Factory (bsc#1274633))
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'libcgroup-tools' (not shipped in Leap 16.0)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'snapd' (removed from Factory (bsc#1256175, bsc#1248682, bsc#1261739))
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: KEPT [[FileDigestGroup]] stanza for gnome-branding-Aeon — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
-#   whitelist: KEPT [[FileDigestGroup]] stanza for plasma-branding-Kalpa — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: KEPT [[FileDigestGroup]] stanza for monitoring-plugins-smart — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
-#   whitelist: KEPT [[FileDigestGroup]] stanza for cscreen — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
-#   whitelist: KEPT [[FileDigestGroup]] stanza for leafnode — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
-#   whitelist: KEPT [[FileDigestGroup]] stanza for gnome-branding-Aeon — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
-#   whitelist: KEPT [[FileDigestGroup]] stanza for plasma-branding-Kalpa — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'lxd' (removed from Factory after the Canonical license change (replaced by incus); still in SLE 16, kept there)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'soapy-remote-server' (not shipped in Leap 16.0)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'foomuuri' (removed from Factory (bsc#1254385))
 #   whitelist: dropped [[SystemdTmpfilesWhitelist]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: KEPT [[SystemdTmpfilesWhitelist]] stanza for rubygem-passenger — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
-#   whitelist: KEPT [[SystemdTmpfilesWhitelist]] stanza for parallel-printer-support — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
 #   whitelist: dropped [[SystemdTmpfilesWhitelist]] stanza for 'snapd' (removed from Factory (bsc#1256175, bsc#1248682, bsc#1261739))
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
 #   whitelist: dropped [[WorldWritableWhitelist]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
 #   whitelist: dropped [[WorldWritableWhitelist]] stanza for 'nscd' (removed from Factory and SLE 16 (use the system resolver))
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'scmon' (removed from Factory; legacy: not audited)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'pulseaudio' (not shipped in Leap 16.0 (PipeWire-only))
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'pommed' (not shipped in Leap 16.0; legacy: not audited)
@@ -129,44 +81,26 @@
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'transactional-update-notifier' (not shipped in Leap 16.0)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'passim' (removed from Factory; not in SLE 16)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'libgpiod-manager' (not shipped in Leap 16.0)
-#   whitelist: dropped [[DeviceFilesWhitelist]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'pam_ccreds' (not shipped in Leap 16.0; legacy: not audited)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'nss-pam-ldapd' (not shipped in Leap 16.0; legacy: not audited)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'pam_passwdqc' (not shipped in Leap 16.0; legacy: not audited)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'pam_userpass' (removed from Factory; legacy: not audited)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'pam_mktemp' (not shipped in Leap 16.0; legacy: not audited)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'pam_csync' (removed from Factory; legacy: not audited)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'pam_chroot' (not shipped in Leap 16.0; legacy: not audited)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'pam_yubico' (not shipped in Leap 16.0)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'pam_saslauthd' (not shipped in Leap 16.0)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'libcgroup-pam' (not shipped in Leap 16.0)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'libcgroup-tools' (not shipped in Leap 16.0)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'gnome-branding-Aeon' (not shipped in Leap 16.0 (Tumbleweed-only desktop branding))
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'plasma-branding-Kalpa' (not shipped in Leap 16.0 (Tumbleweed-only desktop branding))
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'monitoring-plugins-smart' (not shipped in Leap 16.0)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'cscreen' (not shipped in Leap 16.0)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'leafnode' (not shipped in Leap 16.0)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'gnome-branding-Aeon' (not shipped in Leap 16.0 (Tumbleweed-only desktop branding))
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'plasma-branding-Kalpa' (not shipped in Leap 16.0 (Tumbleweed-only desktop branding))
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
 #   whitelist: KEPT [[FileDigestGroup]] stanza for lxd — package present in the flavor's distro, needs a fresh audit before any allowance is trusted
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'soapy-remote-server' (not shipped in Leap 16.0)
-#   whitelist: dropped [[SystemdTmpfilesWhitelist]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
 #   whitelist: dropped [[SystemdTmpfilesWhitelist]] stanza for 'rubygem-passenger' (not shipped in Leap 16.0)
 #   whitelist: dropped [[SystemdTmpfilesWhitelist]] stanza for 'parallel-printer-support' (not shipped in Leap 16.0)
 #   whitelist: dropped [[SystemdTmpfilesWhitelist]] stanza for 'pcfclock' (removed from Factory; not in SLE 16)
-#   whitelist: dropped [[WorldWritableWhitelist]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[WorldWritableWhitelist]] stanza for 'nscd' (removed from Factory and SLE 16 (use the system resolver))
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
 #
 # Pruned pie-executables paths (shipped by no package in the
 # flavor's distro codebase):
