@@ -84,7 +84,7 @@ hash = "610b7e9a59c724100f907184dbf009846ebbd22b40326675a1bad481c685776d"
 packages = ["systemd", "systemd-mini"]
 type = "dbus"
 note = "imported from rpmlint1 DBUSServices.WhiteList"
-bugs = ["bsc#641924", "bsc#1257388"]
+bugs = ["bsc#641924", "bsc#1257388", "bsc#1281962"]
 [[FileDigestGroup.digests]]
 path = "/usr/share/dbus-1/system-services/org.freedesktop.systemd1.service"
 digester = "shell"
@@ -92,7 +92,7 @@ hash = "78e857a4bab8d98b5c2b51532721da8468e69a19ed39cb05bbbfcfa0e6b5482c"
 [[FileDigestGroup.digests]]
 path = "/usr/share/dbus-1/system.d/org.freedesktop.systemd1.conf"
 digester = "xml"
-hash = "59e55b6a9633c59d762fd5b6fa00b59f1a699801bf7b46f2d8a2467f43b78bc7"
+hash = "9bba9ecd7af3cff60bf49cc49ea9e94df480319e1b128217e7c871c62e019f8e"
 [[FileDigestGroup.digests]]
 path = "/usr/share/dbus-1/system-services/org.freedesktop.hostname1.service"
 digester = "shell"
@@ -1088,6 +1088,20 @@ digester = "xml"
 hash = "feecf1770babd5649face9cd0eb879fef642153ca87995b35b90897413b022a4"
 
 [[FileDigestGroup]]
+package = "udev-mini"
+type = "dbus"
+note = "imported from rpmlint1 DBUSServices.WhiteList. later moved to udev"
+bugs = ["bsc#1111254", "bsc#1213292"]
+[[FileDigestGroup.digests]]
+path = "/usr/share/dbus-1/system-services/org.freedesktop.timesync1.service"
+digester = "shell"
+hash = "1319308c6b4c72399d29ff75fe9fd8b08a0fde71297c0eccdd0badc395e7e178"
+[[FileDigestGroup.digests]]
+path = "/usr/share/dbus-1/system.d/org.freedesktop.timesync1.conf"
+digester = "xml"
+hash = "feecf1770babd5649face9cd0eb879fef642153ca87995b35b90897413b022a4"
+
+[[FileDigestGroup]]
 package = "keepalived"
 type = "dbus"
 note = "imported from rpmlint1 DBUSServices.WhiteList"
@@ -1542,22 +1556,7 @@ hash     = "8dff187bd14e516fd976731fb4ab3996bb92b36dfa944733655641a6aec215e1"
 [[FileDigestGroup]]
 package  = "gnome-remote-desktop"
 note     = "system wide remote desktop access to the display manager"
-bugs     = ["bsc#1222159", "bsc#1230406"]
-type     = "dbus"
-[[FileDigestGroup.digests]]
-path     = "/usr/share/dbus-1/system.d/org.gnome.RemoteDesktop.conf"
-digester = "xml"
-hash     = "d28ae537328593ac6462af9ec6bab63c49f9a6851190e7a4f13fe8dd48fd88b6"
-[[FileDigestGroup.digests]]
-path     = "/usr/share/dbus-1/system-services/org.gnome.RemoteDesktop.Configuration.service"
-digester = "shell"
-hash     = "ecc8ae6fe29a9ddc6c1f598c8558245b16d8280cd99caecc3ab268c428e1f8ff"
-
-# TODO: merge this with the entry above once grd-50 is in Factory
-[[FileDigestGroup]]
-package  = "gnome-remote-desktop"
-note     = "system wide remote desktop access to the display manager"
-bug      = "bsc#1258407"
+bugs     = ["bsc#1222159", "bsc#1230406", "bsc#1258407", "bsc#1276523"]
 type     = "dbus"
 [[FileDigestGroup.digests]]
 path     = "/usr/share/dbus-1/system.d/org.gnome.RemoteDesktop.conf"
@@ -1567,6 +1566,14 @@ hash     = "cdefbd06ed5538f29c46f01a6143202c2f4ef7e42a209313bcdf680e26049d95"
 path     = "/usr/share/dbus-1/system-services/org.gnome.RemoteDesktop.Configuration.service"
 digester = "shell"
 hash     = "ecc8ae6fe29a9ddc6c1f598c8558245b16d8280cd99caecc3ab268c428e1f8ff"
+[[FileDigestGroup.digests]]
+path     = "/usr/share/dbus-1/system-services/org.gnome.RemoteDesktop.Pcscd.service"
+digester = "shell"
+hash     = "b4a150a668636f10e829208650d415bf8a683ba7b1ad0896a02e0a39e931429f"
+[[FileDigestGroup.digests]]
+path     = "/usr/share/dbus-1/system.d/org.gnome.RemoteDesktop.Pcscd.conf"
+digester = "xml"
+hash     = "1c8a1fa476b43c1bd7a6e44bd8b27f4ca558eeccd71bf2985472e6e213605e58"
 
 [[FileDigestGroup]]
 package  = "kdeplasma6-addons"
@@ -1623,6 +1630,16 @@ hash     = "27fe3098931a301fcbe871e319f8fd6e50138447dec1080935151c41b29703c9"
 path     = "/usr/share/dbus-1/system-services/org.kde.kio.admin.service"
 digester = "shell"
 hash     = "ce9ed24db3c3654551bada756eb9aac5a58358364b41827b8154d0f73d6dc506"
+
+[[FileDigestGroup]]
+package  = "libgpiod-manager"
+note     = "GPIO character device management daemon"
+bug      = "bsc#1244702"
+type     = "dbus"
+[[FileDigestGroup.digests]]
+path     = "/etc/dbus-1/system.d/io.gpiod1.conf"
+digester = "xml"
+hash     = "4a620749a1b62fb229cd564e2ddafdd59e0302702c57ad7ac76ec5f56429f48b"
 
 [[FileDigestGroup]]
 package  = "lightdm-kde-greeter"
