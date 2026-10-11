@@ -126,11 +126,47 @@ SYNC_OWNED_PROVENANCE_PREFIXES = (
 
 
 def strip_sync_owned_provenance(text):
-    """Drop the sync-owned whitelist pin lines for drift comparison."""
-    return "\n".join(
+    """Drop sync-influenced lines for drift comparison.
+
+    The per-flavor whitelist pins follow daily TIPs, and so does the
+    trailing SLFO-dedup section (materialize/unlink flips it); both are
+    owned day-to-day by sync-upstream-whitelists, whose own tests guard
+    them. Assumes the dedup section stays last in PROVENANCE.
+    """
+    lines = [
         line
         for line in text.splitlines()
         if not line.startswith(SYNC_OWNED_PROVENANCE_PREFIXES)
+    ]
+    # The SLFO-dedup section is always last; drop it wholesale.
+    for i, line in enumerate(lines):
+        if line.startswith("# SLFO files byte-identical") or line.startswith(
+            "# No SLFO files deduplicated"
+        ):
+            lines = lines[:i]
+            break
+    return "\n".join(lines)
+
+
+def check_rs_deduped(regen_deduped, distro_dir):
+    """Deduped set for the --check manifest comparison.
+
+    PINS-derived, except sync-managed files whose dedup follows on-disk
+    bytes (the daily sync owns them between monthly refreshes): a TIP
+    materialization must not read as manifest drift.
+    """
+    disk_managed = set()
+    for filename in SYNC_MANAGED_FILES:
+        if filename not in FILES["slfo"]:
+            continue
+        slfo_path = distro_dir / "slfo" / filename
+        base_path = distro_dir / "opensuse" / filename
+        if not slfo_path.exists() or (
+            base_path.exists() and slfo_path.read_bytes() == base_path.read_bytes()
+        ):
+            disk_managed.add(filename)
+    return [f for f in regen_deduped if f not in SYNC_MANAGED_FILES] + sorted(
+        disk_managed
     )
 
 # Extra Filters appended to the openSUSE config that do not come from upstream
@@ -1544,7 +1580,7 @@ def main():
                     (tmpdir / flavor).mkdir(exist_ok=True)
                     (tmpdir / flavor / filename).write_text(text, encoding="utf-8")
             (tmpdir / "PROVENANCE").write_text(provenance, encoding="utf-8")
-            want_rs = emit_rs(deduped)
+            want_rs = emit_rs(check_rs_deduped(deduped, DISTRO_DIR))
             have_rs = (
                 GENERATED_RS.read_text(encoding="utf-8")
                 if GENERATED_RS.exists()
@@ -1567,14 +1603,20 @@ def main():
                 for filename in data["files"]:
                     want = tmpdir / flavor / filename
                     have = DISTRO_DIR / flavor / filename
-                    if not have.exists():
-                        failures.append(f"missing vendored file: {flavor}/{filename}")
-                    elif filename in SYNC_MANAGED_FILES:
+                    if filename in SYNC_MANAGED_FILES:
                         # Owned by the daily sync-upstream-whitelists job
                         # (advanced at branch TIPs between monthly refreshes);
                         # comparing them against the monthly PINS would flag
-                        # every successful daily sync as drift.
+                        # every successful daily sync as drift. Slfo files may
+                        # additionally be absent by dedup; opensuse files must
+                        # always exist.
+                        if flavor == "opensuse" and not have.exists():
+                            failures.append(
+                                f"missing vendored file: {flavor}/{filename}"
+                            )
                         continue
+                    if not have.exists():
+                        failures.append(f"missing vendored file: {flavor}/{filename}")
                     elif want.read_text() != have.read_text():
                         failures.append(f"drift: {flavor}/{filename}")
                         diffs.append(
