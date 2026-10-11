@@ -201,6 +201,30 @@ fn time_report_flag_prints_the_report() {
     assert!(stdout.contains("Checked files"), "{stdout}");
 }
 
+/// The time report is on by default: no `-t` needed.
+#[test]
+fn time_report_on_by_default() {
+    let rpm = corpus_rpm();
+    let out = rpmcrab(&[rpm.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Check time report (>1% & >0.1s):"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Checked files"), "{stdout}");
+}
+
+/// `--no-time-report` disables the default-on time report.
+#[test]
+fn no_time_report_flag_disables() {
+    let rpm = corpus_rpm();
+    let out = rpmcrab(&["--no-time-report", rpm.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("Check time report"), "{stdout}");
+}
+
 /// `-T/--profile` is gone: the reference removed it (rpmlint#1595) because
 /// cProfile only ever covered the main process and misled; `--time-report`
 /// aggregates per-check timings instead.
@@ -379,6 +403,19 @@ fn parallel_output_matches_sequential() {
             if let Some(num_end) = s[num_start..].find(" s") {
                 s.replace_range(num_start..num_start + num_end, "N.N");
             }
+        }
+        // The time report is on by default now and per-check durations
+        // differ between -j1 and -j4, so drop the whole section (header
+        // through the TOTAL row) before comparing.
+        if let Some(start) = s.find("Check time report") {
+            let mut end = start;
+            for line in s[start..].split_inclusive('\n') {
+                end += line.len();
+                if line.trim_start().starts_with("TOTAL") {
+                    break;
+                }
+            }
+            s.replace_range(start..end, "");
         }
         s
     }
