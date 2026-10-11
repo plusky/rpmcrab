@@ -34,8 +34,9 @@ _rpmcrab() {
 '--info[Inline explanations (and re-raise internal errors)]' \
 '-p[Dump the merged configuration as TOML and exit]' \
 '--print-config[Dump the merged configuration as TOML and exit]' \
-'-t[Per-check timing report]' \
-'--time-report[Per-check timing report]' \
+'-t[Per-check timing report (on by default)]' \
+'--time-report[Per-check timing report (on by default)]' \
+'--no-time-report[Disable the per-check timing report]' \
 '--ignore-unused-rpmlintrc[Suppress the \`unused-rpmlintrc-filter\` audit]' \
 '(-P --permissive)-s[Treat all messages as errors]' \
 '(-P --permissive)--strict[Treat all messages as errors]' \
