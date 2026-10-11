@@ -401,9 +401,15 @@ impl PythonCheck {
         }
         // The remaining `default_environment()` keys are not evaluated:
         // fail closed rather than guess.
+        // The pinned keys stay in the fail-closed loop as a backstop:
+        // `string_marker_holds` above handles the valid comparison forms,
+        // anything else mentioning these keys (e.g. a reversed `in`)
+        // fails closed rather than falling through to `true`.
         for key in [
             "implementation_name",
             "implementation_version",
+            "platform_machine",
+            "platform_python_implementation",
             "platform_release",
             "platform_version",
             "python_full_version",
@@ -416,12 +422,25 @@ impl PythonCheck {
     }
 
     /// Evaluate a `var == "value"` / `var != "value"` / `var in "value"` /
-    /// `var not in "value"` comparison against a pinned value. Returns `None`
-    /// when the atom is not such a comparison.
+    /// `var not in "value"` comparison against a pinned value. Also handles
+    /// the reversed `"value" == var` / `"value" != var` form (`==`/`!=` are
+    /// symmetric). Returns `None` when the atom is not such a comparison.
     fn string_marker_holds(atom: &str, var: &str, pinned: &str) -> Option<bool> {
         // Per-`var` cached regexes: the pattern varies only with `var`,
         // which comes from a small fixed set of call sites.
         static STRING_MARKER_RES: [(&str, OnceLock<Regex>); 6] = [
+            ("extra", OnceLock::new()),
+            ("os_name", OnceLock::new()),
+            ("platform_machine", OnceLock::new()),
+            ("platform_python_implementation", OnceLock::new()),
+            ("platform_system", OnceLock::new()),
+            ("sys_platform", OnceLock::new()),
+        ];
+        // Reversed-operand patterns for `"literal" == var` /
+        // `"literal" != var`. Only `==`/`!=` are symmetric; a reversed `in`
+        // is left unmatched so the fail-closed backstop in
+        // `marker_atom_holds` handles it.
+        static STRING_MARKER_REV_RES: [(&str, OnceLock<Regex>); 6] = [
             ("extra", OnceLock::new()),
             ("os_name", OnceLock::new()),
             ("platform_machine", OnceLock::new()),
@@ -438,22 +457,40 @@ impl PythonCheck {
             "string_marker_holds called with unexpected var: {var}"
         );
         let cell = cell?;
+        // Var on the left: `var == "value"`.
         let re = cell.get_or_init(|| {
             Regex::new(&format!(
                 r#"{var}\s*(==|!=|\bin\b|not\s+in)\s*["']([^"']*)["']"#
             ))
             .expect("static regex")
         });
-        let caps = re.captures(atom).ok().flatten()?;
-        let op = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-        let want = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-        // Normalize the operator (e.g. "not  in" -> "not in").
-        let op_norm: String = op.split_whitespace().collect::<Vec<_>>().join(" ");
-        match op_norm.as_str() {
+        if let Some(caps) = re.captures(atom).ok().flatten() {
+            let op = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            let want = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+            // Normalize the operator (e.g. "not  in" -> "not in").
+            let op_norm: String = op.split_whitespace().collect::<Vec<_>>().join(" ");
+            match op_norm.as_str() {
+                "==" => return Some(want == pinned),
+                "!=" => return Some(want != pinned),
+                "in" => return Some(want.contains(pinned)),
+                "not in" => return Some(!want.contains(pinned)),
+                _ => {}
+            }
+        }
+        // Literal on the left: `"value" == var` / `"value" != var`.
+        let rev_cell = STRING_MARKER_REV_RES
+            .iter()
+            .find(|(v, _)| *v == var)
+            .map(|(_, cell)| cell)?;
+        let rev_re = rev_cell.get_or_init(|| {
+            Regex::new(&format!(r#"["']([^"']*)["']\s*(==|!=)\s*{var}\b"#)).expect("static regex")
+        });
+        let caps = rev_re.captures(atom).ok().flatten()?;
+        let want = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        let op = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+        match op {
             "==" => Some(want == pinned),
             "!=" => Some(want != pinned),
-            "in" => Some(want.contains(pinned)),
-            "not in" => Some(!want.contains(pinned)),
             _ => None,
         }
     }
@@ -1031,6 +1068,29 @@ mod tests {
         ));
         assert!(!PythonCheck::marker_atom_holds(
             "platform_python_implementation not in \"CPython PyPy\"",
+            "3.12"
+        ));
+        // Reversed operands: literal on the left. `==`/`!=` are symmetric.
+        // Verified against `packaging`: `"aarch64" == platform_machine` is
+        // false on x86_64/CPython.
+        assert!(!PythonCheck::marker_atom_holds(
+            "\"aarch64\" == platform_machine",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_atom_holds(
+            "\"x86_64\" == platform_machine",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_atom_holds(
+            "\"aarch64\" != platform_machine",
+            "3.12"
+        ));
+        assert!(!PythonCheck::marker_atom_holds(
+            "\"CPython\" != platform_python_implementation",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_atom_holds(
+            "\"PyPy\" != platform_python_implementation",
             "3.12"
         ));
     }
