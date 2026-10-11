@@ -250,6 +250,10 @@ def plan_merge(local_text, upstream_text, blocklist, flavor, leap_only_prunes):
     local_header = local_text[: m.start()] if m else local_text
     local_stanzas = split_stanzas(local_text)
     upstream_stanzas = split_stanzas(upstream_text)
+    if not upstream_stanzas:
+        raise RuntimeError(
+            "no stanzas in upstream response -- refusing to delete everything"
+        )
 
     # Flavor-specific prunes apply on top of the global blocklist, except
     # entries the generator deliberately keeps for this flavor.
@@ -286,7 +290,7 @@ def plan_merge(local_text, upstream_text, blocklist, flavor, leap_only_prunes):
                 new_stanzas.append((table, packages, stanza_text))
                 added += 1
             continue
-        if all(p in effective_blocklist for p in packages):
+        if packages and all(p in effective_blocklist for p in packages):
             # Only the actually-blocklisted members are reported; innocent
             # siblings of a skipped stanza must not read as blocklisted.
             skipped_blocklisted.extend(
@@ -330,10 +334,11 @@ def plan_merge(local_text, upstream_text, blocklist, flavor, leap_only_prunes):
     if not new_text.endswith("\n") and new_text:
         new_text += "\n"
     for _, _, stanza_text in new_stanzas:
-        # Ensure exactly one blank line between stanzas
+        # Ensure exactly one blank line between stanzas (stanzas may carry
+        # leading blank lines from comment attribution; strip those too).
         if new_text and not new_text.endswith("\n\n"):
             new_text = new_text.rstrip("\n") + "\n\n"
-        new_text += stanza_text.rstrip("\n") + "\n"
+        new_text += stanza_text.strip("\n") + "\n"
     return True, new_text, added, updated, removed, skipped_blocklisted
 
 
@@ -419,8 +424,19 @@ def main():
         if "=" in args.branch:
             # Per-flavor: "opensuse=foo,slfo=bar"
             for part in args.branch.split(","):
+                if "=" not in part:
+                    parser.error(
+                        f"bad --branch {args.branch!r}, "
+                        "want BRANCH or flavor=branch,..."
+                    )
                 flavor, branch = part.split("=", 1)
-                branch_overrides[flavor.strip()] = branch.strip()
+                flavor, branch = flavor.strip(), branch.strip()
+                if flavor not in BRANCHES:
+                    parser.error(
+                        f"bad --branch flavor {flavor!r}, "
+                        f"want one of {sorted(BRANCHES)}"
+                    )
+                branch_overrides[flavor] = branch
         else:
             # Single branch applies to opensuse only (not slfo)
             # to avoid syncing Tumbleweed stanzas into slfo/
