@@ -30,6 +30,9 @@ gen = _load("gen_distro_configs", "generate-distro-configs.py")
 _LEAP_ONLY, _MANAGED, _BY_FLAVOR = sync._load_generator_sets()
 sync.WHITELIST_FILES = _MANAGED
 
+
+SURVIVOR = '[[FileDigestGroup]]\npackage = "kept"\npath = "/y"\n'
+
 LXD = (
     '[[FileDigestGroup]]\n'
     'package = "lxd"\n'
@@ -61,7 +64,7 @@ def test_lxd_dropped_for_opensuse():
     """lxd is gone from Factory: the opensuse sync still drops it."""
     local = SYSCTL_HEADER + LXD
     changed, new, added, updated, removed, skipped = sync.plan_merge(
-        local, SYSCTL_HEADER, {"lxd"}, "opensuse", set())
+        local, SYSCTL_HEADER + SURVIVOR, {"lxd"}, "opensuse", set())
     assert changed
     assert "lxd" not in new
     assert removed == ["[[FileDigestGroup]] for lxd"]
@@ -99,7 +102,7 @@ def test_all_blocklisted_stanza_dropped_reports_only_blocklisted():
     assert sorted(skipped) == ["lxd", "snapd"]
     # Local-only blocklisted stanza: a removal, not a skip.
     changed, new, added, updated, removed, skipped = sync.plan_merge(
-        SYSCTL_HEADER + stanza, SYSCTL_HEADER, {"snapd", "lxd"},
+        SYSCTL_HEADER + stanza, SYSCTL_HEADER + SURVIVOR, {"snapd", "lxd"},
         "opensuse", set())
     assert changed
     assert removed == ["[[FileDigestGroup]] for snapd, lxd"]
@@ -141,11 +144,13 @@ def test_comment_attaches_to_following_stanza():
 def test_upstream_deletions_reported():
     """Removed stanzas are returned for the log/PR body, never silent."""
     local = SYSCTL_HEADER + LXD
+    survivor = '[[FileDigestGroup]]\npackage = "kept"\npath = "/y"\n'
     changed, new, added, updated, removed, skipped = sync.plan_merge(
-        local, SYSCTL_HEADER, set(), "opensuse", set())
+        local, SYSCTL_HEADER + survivor, set(), "opensuse", set())
     assert changed
     assert removed == ["[[FileDigestGroup]] for lxd"]
     assert updated == []
+    assert '"kept"' in new
     assert updated == []
 
 
@@ -206,6 +211,62 @@ def test_regenerate_rs_tracks_dedup():
         assert '"../data/distro/opensuse/cron-whitelist.toml"' in rs
     finally:
         gen_mod.GENERATED_RS = old_rs
+
+
+def test_empty_packages_list_is_not_blocklisted():
+    """`packages = []` matches the generator: kept, never silently dropped."""
+    stanza = "[[G]]\npackages = []\npath = \"/x\"\n"
+    changed, new, added, updated, removed, skipped = sync.plan_merge(
+        SYSCTL_HEADER, SYSCTL_HEADER + stanza, set(), "opensuse", set())
+    assert changed
+    assert added == 1
+    assert removed == [] and skipped == []
+
+
+def test_header_only_upstream_raises():
+    """Header/comment-only upstream must fail closed, not wipe the file."""
+    try:
+        sync.plan_merge(SYSCTL_HEADER + LXD, SYSCTL_HEADER, set(),
+                        "opensuse", set())
+    except RuntimeError as e:
+        assert "no stanzas" in str(e), e
+    else:
+        raise AssertionError("header-only upstream did not raise")
+
+
+def test_rewrite_keeps_single_blank_line():
+    """Rewritten files separate stanzas with exactly one blank line."""
+    local = (SYSCTL_HEADER
+             + '[[G]]\npackage = "aaa"\npath = "/x"\n'
+             + '\n# keep me with bbb\n'
+             + '[[G]]\npackage = "bbb"\npath = "/y"\n')
+    upstream = (SYSCTL_HEADER
+                + '[[G]]\npackage = "bbb"\npath = "/y"\n'
+                + '[[G]]\npackage = "ccc"\npath = "/z"\n')
+    changed, new, added, updated, removed, skipped = sync.plan_merge(
+        local, upstream, set(), "opensuse", set())
+    assert changed
+    assert "\n\n\n" not in new, repr(new)
+    assert "# keep me with bbb\n[[G]]\npackage = \"bbb\"" in new
+
+
+def test_branch_override_validation():
+    """Unknown --branch flavors fail with usage error, not silent defaults."""
+    import io
+    from contextlib import redirect_stderr
+    old_argv = sys.argv
+    try:
+        for bad in ("opensuse=a,foo=b", "opensuse=a,bar"):
+            sys.argv = ["sync", "--branch", bad, "--dry-run"]
+            try:
+                with redirect_stderr(io.StringIO()):
+                    sync.main()
+            except SystemExit as e:
+                assert e.code == 2, (bad, e.code)
+            else:
+                raise AssertionError(f"--branch {bad!r} did not fail")
+    finally:
+        sys.argv = old_argv
 
 
 def test_empty_upstream_raises():
