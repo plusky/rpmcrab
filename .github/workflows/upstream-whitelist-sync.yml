@@ -44,19 +44,17 @@ jobs:
       - name: Sync whitelists from upstream branches
         id: sync
         run: |
+          # Fail-closed by design: the script raises on network/blocklist
+          # errors, and set -euo pipefail aborts the step before any PR.
+          # A partial run therefore reds the job instead of opening a PR
+          # from half-written files.
           set -euo pipefail
           python3 scripts/sync-upstream-whitelists.py 2>&1 | tee /tmp/sync.log
-          # The script signals via GITHUB_OUTPUT; the git diff is ground
-          # truth only when the script died before writing it.
-          if ! grep -q '^changed=' "$GITHUB_OUTPUT" 2>/dev/null; then
-            if git diff --quiet -- crates/rpmcrab-core/data/distro; then
-              echo "changed=false" >> "$GITHUB_OUTPUT"
-            else
-              echo "changed=true" >> "$GITHUB_OUTPUT"
-            fi
-          fi
-          # Capture the added/removed/skipped entries for the PR body
+          # Capture the summary and sections for the PR body
+          grep "^sync-summary: " /tmp/sync.log > /tmp/summary.txt || true
+          grep -E "^(opensuse|slfo): .* @ [0-9a-f]+ " /tmp/sync.log > /tmp/shas.txt || true
           grep "^  + " /tmp/sync.log > /tmp/added.txt || true
+          grep "^  ~ " /tmp/sync.log > /tmp/updated.txt || true
           grep "^  x " /tmp/sync.log > /tmp/removed.txt || true
           grep "^  - " /tmp/sync.log > /tmp/skipped.txt || true
 
@@ -69,8 +67,9 @@ jobs:
           date=$(date -u +%F)
           # Skip when a previous sync PR is still open: every run uses a
           # unique branch, so without this guard overlapping runs pile up
-          # duplicate PRs touching the same files.
-          if [ -n "$(gh pr list --search 'Sync upstream whitelist stanzas in:title' --state open --json number --jq '.[].number')" ]; then
+          # duplicate PRs touching the same files. The state qualifier lives
+          # inside the query; --state alone is not honored as a search filter.
+          if [ -n "$(gh pr list --search 'Sync upstream whitelist stanzas in:title state:open' --state open --json number --jq '.[].number')" ]; then
             echo "A sync PR is already open; skipping to avoid pile-up."
             exit 0
           fi
@@ -80,18 +79,33 @@ jobs:
           branch="upstream-whitelist-sync-${date}-${{ github.run_id }}-${{ github.run_attempt }}"
           git -c user.name=github-actions -c user.email=github-actions@github.com \
             checkout -b "$branch"
-          git add crates/rpmcrab-core/data/distro
+          # The sync regenerates the Rust manifest when it flips slfo dedup.
+          git add crates/rpmcrab-core/data/distro crates/rpmcrab-core/src/distro_files_generated.rs
+          # Guard against committing an empty tree if the script ever signals
+          # change without staging anything.
+          if git diff --cached --quiet; then
+            echo "changed=true but nothing staged; skipping commit."
+            exit 0
+          fi
           git -c user.name=github-actions -c user.email=github-actions@github.com \
             commit -m "Sync upstream whitelist stanzas (${date})"
           git push -u origin "$branch"
           if [ -z "$(gh pr list --head "$branch" --json number --jq '.[].number')" ]; then
+            summary=$(cat /tmp/summary.txt)
+            shas=$(cat /tmp/shas.txt)
             added=$(cat /tmp/added.txt)
+            updated=$(cat /tmp/updated.txt)
             removed=$(cat /tmp/removed.txt)
             skipped=$(cat /tmp/skipped.txt)
             body="New whitelist stanzas from upstream rpmlint branches.
 
-          Added entries:
+          ${summary:-no summary}
+
+          Changed files:
           ${added:-none}
+
+          Updated in place (same stanza, new content):
+          ${updated:-none}
 
           Removed upstream (stanzas gone from upstream branches):
           ${removed:-none}
@@ -99,7 +113,8 @@ jobs:
           Skipped (blocklisted):
           ${skipped:-none}
 
-          Sources: opensuse branch (security team updates), opensuse-slfo-main.
+          Sources:
+          ${shas:-opensuse branch (security team updates), opensuse-slfo-main}
           Blocklist: .github/whitelist-blocklist.txt
 
           Produced by the daily upstream-whitelist-sync job. This is a smart

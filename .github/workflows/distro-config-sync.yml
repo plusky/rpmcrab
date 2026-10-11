@@ -51,12 +51,16 @@ jobs:
         id: regen
         run: |
           set -euo pipefail
-          old_opensuse=$(sed -n 's|^# opensuse: opensuse @ \([0-9a-f]*\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
-          old_slfo=$(sed -n 's|^# slfo: opensuse-slfo-main @ \([0-9a-f]*\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
+          old_opensuse=$(sed -n 's|^# opensuse: opensuse @ \([0-9a-f]\{40\}\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
+          old_slfo=$(sed -n 's|^# slfo: opensuse-slfo-main @ \([0-9a-f]\{40\}\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
+          if [ -z "${old_opensuse}" ] || [ -z "${old_slfo}" ]; then
+            echo "failed to parse old pins from PROVENANCE" >&2
+            exit 1
+          fi
           python3 scripts/generate-distro-configs.py --refresh > /tmp/refresh.log 2>&1
           cat /tmp/refresh.log
-          new_opensuse=$(sed -n 's|^# opensuse: opensuse @ \([0-9a-f]*\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
-          new_slfo=$(sed -n 's|^# slfo: opensuse-slfo-main @ \([0-9a-f]*\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
+          new_opensuse=$(sed -n 's|^# opensuse: opensuse @ \([0-9a-f]\{40\}\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
+          new_slfo=$(sed -n 's|^# slfo: opensuse-slfo-main @ \([0-9a-f]\{40\}\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
           {
             echo "old_opensuse=${old_opensuse}"
             echo "old_slfo=${old_slfo}"
@@ -89,11 +93,12 @@ jobs:
             commit -m "Refresh vendored distro configs to upstream ${date}"
           # Same-day reruns reset this date-named branch: force-with-lease
           # updates the existing PR instead of failing non-fast-forward
-          # (and still refuses if someone else pushed meanwhile).
+          # (and still refuses if someone else pushed meanwhile). Fetch
+          # first so the lease has a baseline on a fresh clone.
+          git fetch origin "$branch" || true
           git push --force-with-lease -u origin "$branch"
-          if [ -z "$(gh pr list --head "$branch" --json number --jq '.[].number')" ]; then
-            prunes=$(cat /tmp/prunes.txt)
-            body="Upstream rpmlint moved; regenerating the vendored distro configs.
+          prunes=$(cat /tmp/prunes.txt)
+          body="Upstream rpmlint moved; regenerating the vendored distro configs.
 
           opensuse: ${{ steps.regen.outputs.old_opensuse }} -> ${{ steps.regen.outputs.new_opensuse }} (opensuse)
           slfo: ${{ steps.regen.outputs.old_slfo }} -> ${{ steps.regen.outputs.new_slfo }} (opensuse-slfo-main)
@@ -102,7 +107,13 @@ jobs:
           ${prunes:-none}
 
           Produced by the monthly distro-config-sync job. Upstream remains the owner of these configs until rpmlint is fully superseded."
+          existing=$(gh pr list --head "$branch" --json number --jq '.[].number')
+          if [ -z "$existing" ]; then
             gh pr create --base main --head "$branch" \
               --title "Refresh vendored distro configs to upstream ${date}" \
               --body "$body"
+          else
+            # Same-day rerun: refresh the existing PR body, or it keeps
+            # describing the first run's SHAs.
+            gh pr edit "$existing" --body "$body"
           fi
