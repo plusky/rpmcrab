@@ -8,7 +8,7 @@
 // copy (see data/distro/PROVENANCE); absence from DISTRO_SLFO_FILES is
 // meaningful (SLFO deleted varlink-whitelist.toml).
 
-/// Vendored openSUSE distro configs (upstream `main` branch).
+/// Vendored openSUSE distro configs (upstream `opensuse` branch).
 /// Selected by default (`Flavor = "opensuse"`).
 const DISTRO_OPENSUSE_FILES: &[(&str, &str)] = &[
     (

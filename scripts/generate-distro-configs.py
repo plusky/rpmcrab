@@ -17,10 +17,14 @@ diverge from what this script produces at the pinned SHAs.
 
 Usage:
     scripts/generate-distro-configs.py [--check] [--ref-dir DIR]
-        [--pin opensuse=SHA:DATE] [--pin slfo=SHA:DATE]
+        [--pin opensuse=SHA:DATE] [--pin slfo=SHA:DATE] [--refresh]
 
     --check      regenerate into a temp dir and diff against the repo;
                  exit 1 with a unified diff on any divergence.
+                 Sync-managed whitelist files and their PROVENANCE pins
+                 are owned by the daily sync job and skipped here.
+    --refresh    resolve PINS to the latest upstream commits, persist them
+                 into the PINS constant above, and regenerate (monthly job).
     --ref-dir    use a local rpmlint checkout instead of fetching from
                  GitHub (both pinned SHAs must exist in it).
     --pin        override a pinned SHA for the refresh workflow; DATE is the
@@ -91,6 +95,43 @@ FILES = {
     ],
 }
 FILES["slfo"] = [f for f in FILES["opensuse"] if f != "varlink-whitelist.toml"]
+
+# Whitelist files that carry per-package stanzas. The daily
+# sync-upstream-whitelists job advances these day-to-day at branch TIPs while
+# this script regenerates everything else at the monthly PINS, so --check
+# skips them (and the per-flavor whitelist pins below): a successful daily
+# sync must never read as drift. Canonical home of this list (the sync tool
+# loads it from here; guarded by test_sync_sets_match_generator).
+SYNC_MANAGED_FILES = [
+    "cron-whitelist.toml",
+    "dbus-services.toml",
+    "device-files-whitelist.toml",
+    "pam-modules.toml",
+    "permissions-whitelist.toml",
+    "polkit-rules-whitelist.toml",
+    "sudoers-whitelist.toml",
+    "sysctl-whitelist.toml",
+    "systemd-tmpfiles.toml",
+    "varlink-whitelist.toml",
+    "world-writable-whitelist.toml",
+    "zypper-plugins.toml",
+]
+
+# PROVENANCE lines owned by the daily sync (per-flavor TIPs it merged).
+# Stripped before --check comparison; the sync keeps them accurate.
+SYNC_OWNED_PROVENANCE_PREFIXES = (
+    "# opensuse-whitelists:",
+    "# slfo-whitelists:",
+)
+
+
+def strip_sync_owned_provenance(text):
+    """Drop the sync-owned whitelist pin lines for drift comparison."""
+    return "\n".join(
+        line
+        for line in text.splitlines()
+        if not line.startswith(SYNC_OWNED_PROVENANCE_PREFIXES)
+    )
 
 # Extra Filters appended to the openSUSE config that do not come from upstream
 # rpmlint's configs/openSUSE/*.toml. The reference loads these from
@@ -1282,10 +1323,10 @@ def generate(ref_dir=None, pins=None):
     ]
     for flavor, data in result.items():
         provenance.append(f"# {flavor}: {data['branch']} @ {data['sha']} ({data['date']})")
-    opensuse_data = result["opensuse"]
-    provenance.append(
-        f"# opensuse-whitelists: {opensuse_data['branch']} @ {opensuse_data['sha']} ({opensuse_data['date']})"
-    )
+    for flavor, data in result.items():
+        provenance.append(
+            f"# {flavor}-whitelists: {data['branch']} @ {data['sha']} ({data['date']})"
+        )
     provenance.append("#")
     provenance.append("# Extra Filters appended (not from upstream; see EXTRA_OPENSUSE_FILTERS):")
     for f in EXTRA_OPENSUSE_FILTERS:
@@ -1360,7 +1401,7 @@ def emit_rs(deduped):
         "// copy (see data/distro/PROVENANCE); absence from DISTRO_SLFO_FILES is",
         "// meaningful (SLFO deleted varlink-whitelist.toml).",
         "",
-        '/// Vendored openSUSE distro configs (upstream `main` branch).',
+        '/// Vendored openSUSE distro configs (upstream `opensuse` branch).',
         '/// Selected by default (`Flavor = "opensuse"`).',
         "const DISTRO_OPENSUSE_FILES: &[(&str, &str)] = &[",
     ]
@@ -1431,6 +1472,30 @@ def _diff_text(have_label, have_text, want_label, want_text, max_lines=DIFF_MAX_
     return "\n".join(lines)
 
 
+def rewrite_pins(script_path, pins):
+    """Persist refreshed (sha, date) per flavor into the PINS constant.
+
+    Without this, --refresh would resolve new SHAs in-memory only while PINS
+    stays stale, and the refresh PR would fail its own --check drift gate
+    (which regenerates from PINS). Raises if a flavor entry is not found:
+    a silent no-op here is a stale-pin guarantee.
+    """
+    text = script_path.read_text(encoding="utf-8")
+    for flavor, (sha, date) in pins.items():
+        pat = re.compile(
+            r'("%s": \(\s*")[0-9a-f]{40}(",\s*")\d{4}-\d{2}-\d{2}(",)'
+            % re.escape(flavor)
+        )
+
+        def _sub(m, sha=sha, date=date):
+            return f"{m.group(1)}{sha}{m.group(2)}{date}{m.group(3)}"
+
+        text, n = pat.subn(_sub, text, count=1)
+        if n != 1:
+            raise RuntimeError(f"could not rewrite PINS[{flavor!r}] in {script_path}")
+    script_path.write_text(text, encoding="utf-8")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--check", action="store_true", help="diff against the repo")
@@ -1455,6 +1520,9 @@ def main():
             sha, date = latest_upstream_sha(branch)
             pins[flavor] = (sha, date)
             print(f"{flavor}: {branch} -> {sha[:12]} ({date})", file=sys.stderr)
+        # The refresh PR must carry the new pins: --check regenerates from
+        # PINS, so in-memory-only pins would fail the PR's own drift gate.
+        rewrite_pins(Path(__file__).resolve(), pins)
     for pin in args.pin:
         m = re.fullmatch(r"([a-z]+)=([0-9a-f]{40}):(\d{4}-\d{2}-\d{2})", pin)
         if not m or m.group(1) not in PINS:
@@ -1501,6 +1569,12 @@ def main():
                     have = DISTRO_DIR / flavor / filename
                     if not have.exists():
                         failures.append(f"missing vendored file: {flavor}/{filename}")
+                    elif filename in SYNC_MANAGED_FILES:
+                        # Owned by the daily sync-upstream-whitelists job
+                        # (advanced at branch TIPs between monthly refreshes);
+                        # comparing them against the monthly PINS would flag
+                        # every successful daily sync as drift.
+                        continue
                     elif want.read_text() != have.read_text():
                         failures.append(f"drift: {flavor}/{filename}")
                         diffs.append(
@@ -1518,16 +1592,22 @@ def main():
             have_prov = DISTRO_DIR / "PROVENANCE"
             if not have_prov.exists():
                 failures.append("missing vendored file: PROVENANCE")
-            elif want_prov.read_text() != have_prov.read_text():
+            elif strip_sync_owned_provenance(
+                want_prov.read_text()
+            ) != strip_sync_owned_provenance(have_prov.read_text()):
                 failures.append("drift: PROVENANCE")
                 diffs.append(
                     (
                         "PROVENANCE",
                         _diff_text(
                             "vendored/PROVENANCE",
-                            have_prov.read_text(encoding="utf-8"),
+                            strip_sync_owned_provenance(
+                                have_prov.read_text(encoding="utf-8")
+                            ),
                             "generated/PROVENANCE",
-                            want_prov.read_text(encoding="utf-8"),
+                            strip_sync_owned_provenance(
+                                want_prov.read_text(encoding="utf-8")
+                            ),
                         ),
                     )
                 )
