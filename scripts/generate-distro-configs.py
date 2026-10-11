@@ -1556,14 +1556,17 @@ def main():
             sha, date = latest_upstream_sha(branch)
             pins[flavor] = (sha, date)
             print(f"{flavor}: {branch} -> {sha[:12]} ({date})", file=sys.stderr)
-        # The refresh PR must carry the new pins: --check regenerates from
-        # PINS, so in-memory-only pins would fail the PR's own drift gate.
-        rewrite_pins(Path(__file__).resolve(), pins)
     for pin in args.pin:
         m = re.fullmatch(r"([a-z]+)=([0-9a-f]{40}):(\d{4}-\d{2}-\d{2})", pin)
         if not m or m.group(1) not in PINS:
             ap.error(f"bad --pin {pin!r}, want FLAVOR=SHA:DATE")
         pins[m.group(1)] = (m.group(2), m.group(3))
+    if args.refresh:
+        # The refresh PR must carry the final pins: --check regenerates from
+        # PINS, so file-only pins would fail the PR's own drift gate.
+        # Rewritten after --pin overrides so combined flags cannot diverge
+        # the file from the in-memory pins used below.
+        rewrite_pins(Path(__file__).resolve(), pins)
 
     ref_dir = Path(args.ref_dir) if args.ref_dir else None
     result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, deduped = generate(

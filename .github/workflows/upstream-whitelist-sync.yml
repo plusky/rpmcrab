@@ -69,7 +69,10 @@ jobs:
           # unique branch, so without this guard overlapping runs pile up
           # duplicate PRs touching the same files. The state qualifier lives
           # inside the query; --state alone is not honored as a search filter.
-          if [ -n "$(gh pr list --search 'Sync upstream whitelist stanzas in:title state:open' --state open --json number --jq '.[].number')" ]; then
+          # Assigned before the test so a gh/API failure aborts fail-closed
+          # instead of silently proceeding to push a duplicate.
+          open_sync_prs=$(gh pr list --search 'Sync upstream whitelist stanzas in:title state:open' --state open --json number --jq '.[].number') || exit 1
+          if [ -n "$open_sync_prs" ]; then
             echo "A sync PR is already open; skipping to avoid pile-up."
             exit 0
           fi
