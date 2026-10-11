@@ -50,7 +50,7 @@ def test_sync_sets_match_generator():
 def test_lxd_kept_for_slfo():
     """lxd is still shipped in SLE 16: the slfo sync must not strip it."""
     local = SYSCTL_HEADER + LXD
-    changed, new, added, removed, skipped = sync.plan_merge(
+    changed, new, added, updated, removed, skipped = sync.plan_merge(
         local, SYSCTL_HEADER + LXD, {"lxd"}, "slfo", set())
     assert not changed, (added, removed, skipped)
     assert new is None
@@ -60,11 +60,12 @@ def test_lxd_kept_for_slfo():
 def test_lxd_dropped_for_opensuse():
     """lxd is gone from Factory: the opensuse sync still drops it."""
     local = SYSCTL_HEADER + LXD
-    changed, new, added, removed, skipped = sync.plan_merge(
+    changed, new, added, updated, removed, skipped = sync.plan_merge(
         local, SYSCTL_HEADER, {"lxd"}, "opensuse", set())
     assert changed
     assert "lxd" not in new
     assert removed == ["[[FileDigestGroup]] for lxd"]
+    assert updated == []
     # A local-only stanza surfacing as a removal is not a blocklist skip.
     assert skipped == []
 
@@ -76,7 +77,7 @@ def test_partial_blocklist_stanza_kept():
         'packages = ["live-pkg", "snapd"]\n'
         'path = "/x"\n'
     )
-    changed, new, added, removed, skipped = sync.plan_merge(
+    changed, new, added, updated, removed, skipped = sync.plan_merge(
         SYSCTL_HEADER, SYSCTL_HEADER + stanza, {"snapd"}, "opensuse", set())
     assert changed
     assert added == 1
@@ -91,17 +92,18 @@ def test_all_blocklisted_stanza_dropped_reports_only_blocklisted():
         'path = "/x"\n'
     )
     # Upstream-only blocklisted stanza: skipped, never (re)introduced.
-    changed, new, added, removed, skipped = sync.plan_merge(
+    changed, new, added, updated, removed, skipped = sync.plan_merge(
         SYSCTL_HEADER, SYSCTL_HEADER + stanza, {"snapd", "lxd"},
         "opensuse", set())
     assert not changed
     assert sorted(skipped) == ["lxd", "snapd"]
     # Local-only blocklisted stanza: a removal, not a skip.
-    changed, new, added, removed, skipped = sync.plan_merge(
+    changed, new, added, updated, removed, skipped = sync.plan_merge(
         SYSCTL_HEADER + stanza, SYSCTL_HEADER, {"snapd", "lxd"},
         "opensuse", set())
     assert changed
     assert removed == ["[[FileDigestGroup]] for snapd, lxd"]
+    assert updated == []
     assert skipped == []
 
 
@@ -126,22 +128,84 @@ def test_comment_attaches_to_following_stanza():
         + '[[G]]\npackage = "bbb"\npath = "/y"\n'
     )
     upstream = SYSCTL_HEADER + '[[G]]\npackage = "bbb"\npath = "/y"\n'
-    changed, new, added, removed, skipped = sync.plan_merge(
+    changed, new, added, updated, removed, skipped = sync.plan_merge(
         local, upstream, set(), "opensuse", set())
     assert changed
     assert "# keep me with bbb" in new
     assert '"bbb"' in new
     assert '"aaa"' not in new
     assert removed == ["[[G]] for aaa"]
+    assert updated == []
 
 
 def test_upstream_deletions_reported():
     """Removed stanzas are returned for the log/PR body, never silent."""
     local = SYSCTL_HEADER + LXD
-    changed, new, added, removed, skipped = sync.plan_merge(
+    changed, new, added, updated, removed, skipped = sync.plan_merge(
         local, SYSCTL_HEADER, set(), "opensuse", set())
     assert changed
     assert removed == ["[[FileDigestGroup]] for lxd"]
+    assert updated == []
+    assert updated == []
+
+
+def test_in_place_update_is_not_a_deletion():
+    """A hash bump on the same (table, package) reads as updated, not removed."""
+    old = ("[[FileDigestGroup]]\npackage = \"foo\"\n"
+           "hash = \"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\n")
+    new_stanza = ("[[FileDigestGroup]]\npackage = \"foo\"\n"
+                  "hash = \"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\"\n")
+    changed, new, added, updated, removed, skipped = sync.plan_merge(
+        SYSCTL_HEADER + old, SYSCTL_HEADER + new_stanza,
+        set(), "opensuse", set())
+    assert changed
+    assert added == 1
+    assert removed == []
+    assert updated == ["[[FileDigestGroup]] for foo (content updated)"]
+    assert "BBBB" in new
+
+
+def test_packageless_stanza_added_is_counted():
+    """A new stanza without package info still counts as added."""
+    stanza = "[[FileDigestGroup]]\npath = \"/x\"\n"
+    changed, new, added, updated, removed, skipped = sync.plan_merge(
+        SYSCTL_HEADER, SYSCTL_HEADER + stanza, set(), "opensuse", set())
+    assert changed
+    assert added == 1
+    assert 'path = "/x"' in new
+    # ... and an identical one is not re-added.
+    changed, new, added, updated, removed, skipped = sync.plan_merge(
+        SYSCTL_HEADER + stanza, SYSCTL_HEADER + stanza,
+        set(), "opensuse", set())
+    assert not changed
+    assert added == 0
+
+
+def test_regenerate_rs_tracks_dedup():
+    """Materializing a slfo file must flip its manifest entry to slfo/."""
+    import pathlib
+    import tempfile
+    d = pathlib.Path(tempfile.mkdtemp())
+    (d / "opensuse").mkdir()
+    (d / "slfo").mkdir()
+    (d / "opensuse" / "cron-whitelist.toml").write_text("[[G]]\npackage = \"a\"\n")
+    rs_path = d / "distro_files_generated.rs"
+    rs_path.write_text("stale")
+    gen_mod = sync._load_generator_module()
+    old_rs, gen_mod.GENERATED_RS = gen_mod.GENERATED_RS, rs_path
+    try:
+        assert sync.regenerate_rs(gen_mod, d) is True  # stale -> rewritten
+        assert sync.regenerate_rs(gen_mod, d) is False  # absent == deduped
+        (d / "slfo" / "cron-whitelist.toml").write_text("[[G]]\npackage = \"b\"\n")
+        assert sync.regenerate_rs(gen_mod, d) is True
+        rs = rs_path.read_text()
+        assert '"../data/distro/slfo/cron-whitelist.toml"' in rs
+        (d / "slfo" / "cron-whitelist.toml").write_text("[[G]]\npackage = \"a\"\n")
+        assert sync.regenerate_rs(gen_mod, d) is True
+        rs = rs_path.read_text()
+        assert '"../data/distro/opensuse/cron-whitelist.toml"' in rs
+    finally:
+        gen_mod.GENERATED_RS = old_rs
 
 
 def test_empty_upstream_raises():
@@ -157,7 +221,7 @@ def test_empty_upstream_raises():
 def test_missing_slfo_stays_deduped_when_identical():
     """A deduped (absent) slfo file is materialized only on divergence."""
     base = SYSCTL_HEADER + LXD
-    changed, new, added, removed, skipped = sync.plan_merge(
+    changed, new, added, updated, removed, skipped = sync.plan_merge(
         base, SYSCTL_HEADER + LXD, set(), "slfo", set())
     assert not changed
 
@@ -214,6 +278,42 @@ def test_provenance_strip_keeps_rest():
     assert "-whitelists:" not in stripped
     assert "# opensuse: opensuse @ AAA (2026-01-01)" in stripped
     assert "# Extra Filters appended" in stripped
+
+
+def test_provenance_strip_drops_dedup_section():
+    """The TIP-flavoured dedup section is sync-owned for --check purposes."""
+    text = ("# opensuse: opensuse @ AAA (2026-01-01)\n"
+            "#\n"
+            "# Pruned Filters entries:\n"
+            "#\n"
+            "# SLFO files byte-identical to openSUSE (not vendored twice;\n"
+            "# the generated Rust consts fall back to the openSUSE copy):\n"
+            "#   slfo/cron-whitelist.toml\n")
+    stripped = gen.strip_sync_owned_provenance(text)
+    assert "byte-identical" not in stripped
+    assert "slfo/cron-whitelist.toml" not in stripped
+    assert "# opensuse: opensuse @ AAA (2026-01-01)" in stripped
+    assert "# Pruned Filters entries:" in stripped
+
+
+def test_check_rs_deduped_prefers_disk_for_managed():
+    """--check follows on-disk dedup for sync-managed files only."""
+    import pathlib
+    import tempfile
+    d = pathlib.Path(tempfile.mkdtemp())
+    (d / "opensuse").mkdir()
+    (d / "slfo").mkdir()
+    (d / "opensuse" / "cron-whitelist.toml").write_text("same")
+    (d / "opensuse" / "licenses.toml").write_text("same")
+    # Managed file materialized on disk (TIP divergence): stays slfo/.
+    (d / "slfo" / "cron-whitelist.toml").write_text("diverged")
+    got = gen.check_rs_deduped(["cron-whitelist.toml", "licenses.toml"], d)
+    assert "cron-whitelist.toml" not in got
+    assert "licenses.toml" in got
+    # Reconverged on disk: falls back even though PINS regen dedups nothing.
+    (d / "slfo" / "cron-whitelist.toml").write_text("same")
+    got = gen.check_rs_deduped([], d)
+    assert "cron-whitelist.toml" in got
 
 
 def main():
