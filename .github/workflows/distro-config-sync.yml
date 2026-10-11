@@ -87,7 +87,10 @@ jobs:
           git add crates/rpmcrab-core/data/distro crates/rpmcrab-core/src/distro_files_generated.rs scripts/generate-distro-configs.py
           git -c user.name=github-actions -c user.email=github-actions@github.com \
             commit -m "Refresh vendored distro configs to upstream ${date}"
-          git push -u origin "$branch"
+          # Same-day reruns reset this date-named branch: force-with-lease
+          # updates the existing PR instead of failing non-fast-forward
+          # (and still refuses if someone else pushed meanwhile).
+          git push --force-with-lease -u origin "$branch"
           if [ -z "$(gh pr list --head "$branch" --json number --jq '.[].number')" ]; then
             prunes=$(cat /tmp/prunes.txt)
             body="Upstream rpmlint moved; regenerating the vendored distro configs.

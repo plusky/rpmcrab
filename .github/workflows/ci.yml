@@ -302,6 +302,7 @@ jobs:
       # Hermetic: runs before the network-dependent --check so a network
       # flake cannot hide a unit-test failure.
       - run: python3 scripts/test_generate_distro_configs.py
+      - run: python3 scripts/test_sync_upstream_whitelists.py
       - run: python3 scripts/generate-distro-configs.py --check
 
   reference-coverage-audit:
