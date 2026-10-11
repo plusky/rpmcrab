@@ -60,7 +60,7 @@ PINS = {
     ),
     "slfo": (
         "5c758cf12f9be87e9487bb60b023397f1e97115e",
-        "2026-06-09",
+        "2026-06-18",
         "opensuse-slfo-main",
     ),
 }
@@ -209,9 +209,12 @@ PRUNE_PACKAGES = {
     "pam_csync": "removed from Factory; legacy: not audited",
     "pcfclock": "removed from Factory; not in SLE 16",
     "rpmlint-integration-test": "rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap",
-    # Dead in Leap 16.0 (absent as source package and as binaries, verified
-    # 2026-10-08 against openSUSE:Leap:16.0): pruned from the slfo flavor
-    # only; kept for the opensuse flavor where the package still ships.
+}
+
+# Packages absent from Leap 16.0 (verified 2026-10-08 against
+# openSUSE:Leap:16.0): pruned from the slfo flavor only; kept for the
+# opensuse flavor where the package still ships in Tumbleweed.
+PRUNE_PACKAGES_LEAP_ONLY = {
     "pulseaudio": "not shipped in Leap 16.0 (PipeWire-only)",
     "pommed": "not shipped in Leap 16.0; legacy: not audited",
     "neard": "not shipped in Leap 16.0",
@@ -239,6 +242,21 @@ PRUNE_PACKAGES = {
     "rubygem-passenger": "not shipped in Leap 16.0",
     "parallel-printer-support": "not shipped in Leap 16.0",
 }
+
+# Historical prunes: deliberate removals that must always be documented in
+# PROVENANCE, even when the stanza is absent from the current upstream files
+# (e.g. rpmlint-integration-test was never in upstream; nscd was removed
+# upstream long ago). Each entry is (table, package, reason).
+HISTORICAL_PRUNES = [
+    ("DeviceFilesWhitelist", "rpmlint-integration-test",
+     "rpmlint\u2019s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap"),
+    ("SystemdTmpfilesWhitelist", "rpmlint-integration-test",
+     "rpmlint\u2019s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap"),
+    ("WorldWritableWhitelist", "rpmlint-integration-test",
+     "rpmlint\u2019s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap"),
+    ("WorldWritableWhitelist", "nscd",
+     "removed from Factory and SLE 16 (use the system resolver)"),
+]
 
 # Stale pie-executables paths: each entry is (owning package, kind, reason),
 # carrying per-entry evidence like PRUNE_PACKAGES does. kind "removed" means
@@ -1062,13 +1080,20 @@ def prune_stale_packages(text, pruned_log, flavor):
             m = _packages_re.search(block)
             if m:
                 pkgs = re.findall(r'"([^"]+)"', m.group(1))
-        if pkgs and all(p in PRUNE_PACKAGES for p in pkgs):
+        # For the opensuse flavor (Tumbleweed), only prune packages removed
+        # from Factory. The Leap-only absences (PRUNE_PACKAGES_LEAP_ONLY)
+        # are kept for opensuse where they still ship.
+        prune_dict = PRUNE_PACKAGES
+        if flavor == "slfo":
+            # slfo also prunes packages absent from Leap 16.0
+            prune_dict = {**PRUNE_PACKAGES, **PRUNE_PACKAGES_LEAP_ONLY}
+        if pkgs and all(p in prune_dict for p in pkgs):
             if all(not package_present(p, flavor) for p in pkgs):
                 pruned_log.append(
                     "whitelist: dropped [[%s]] stanza for %s"
                     % (
                         table,
-                        ", ".join("%r (%s)" % (p, PRUNE_PACKAGES[p]) for p in pkgs),
+                        ", ".join("%r (%s)" % (p, prune_dict[p]) for p in pkgs),
                     )
                 )
                 continue
@@ -1257,6 +1282,10 @@ def generate(ref_dir=None, pins=None):
     ]
     for flavor, data in result.items():
         provenance.append(f"# {flavor}: {data['branch']} @ {data['sha']} ({data['date']})")
+    opensuse_data = result["opensuse"]
+    provenance.append(
+        f"# opensuse-whitelists: {opensuse_data['branch']} @ {opensuse_data['sha']} ({opensuse_data['date']})"
+    )
     provenance.append("#")
     provenance.append("# Extra Filters appended (not from upstream; see EXTRA_OPENSUSE_FILTERS):")
     for f in EXTRA_OPENSUSE_FILTERS:
@@ -1271,13 +1300,23 @@ def generate(ref_dir=None, pins=None):
                 provenance.append(f"#   {entry}")
     else:
         provenance.append("# No Filters entries pruned: all referenced findings exist.")
-    if pkg_pruned_log:
+    if pkg_pruned_log or HISTORICAL_PRUNES:
         provenance.append("#")
         provenance.append(
             "# Pruned whitelist stanzas (packages gone from Tumbleweed/SLE 16):"
         )
+        seen_pkg = set()
         for entry in pkg_pruned_log:
-            provenance.append(f"#   {entry}")
+            if entry not in seen_pkg:
+                seen_pkg.add(entry)
+                provenance.append(f"#   {entry}")
+        # Historical deliberate removals: always documented even when the
+        # stanza is absent from current upstream files.
+        for table, pkg, reason in HISTORICAL_PRUNES:
+            entry = f"whitelist: dropped [[{table}]] stanza for {pkg!r} ({reason})"
+            if entry not in seen_pkg:
+                seen_pkg.add(entry)
+                provenance.append(f"#   {entry}")
     if pie_pruned_log:
         provenance.append("#")
         provenance.append("# Pruned pie-executables paths (shipped by no package in the")
