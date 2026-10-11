@@ -78,9 +78,13 @@ struct Cli {
     #[arg(short = 'i', long = "installed", value_name = "name", num_args = 1..)]
     installed: Vec<String>,
 
-    /// Per-check timing report.
+    /// Per-check timing report (on by default).
     #[arg(short = 't', long = "time-report", action = clap::ArgAction::SetTrue)]
     time_report: bool,
+
+    /// Disable the per-check timing report.
+    #[arg(long = "no-time-report", action = clap::ArgAction::SetTrue)]
+    no_time_report: bool,
 
     /// Number of parallel worker threads for checking packages; 1 is
     /// sequential. Defaults to the machine's parallelism.
@@ -456,14 +460,16 @@ pub fn run() -> ExitCode {
     let prog = "rpmcrab";
     let format = resolve_output_format(cli.format.as_deref(), &lint.config().output_format);
     // `--format` dispatches through the pluggable renderers (text/json);
-    // the text wire format is untouched, and `--time-report` stays a
-    // text-mode section.
+    // the text wire format is untouched, and the time report stays a
+    // text-mode section. It is on by default (`-t`/`--time-report` remain
+    // as explicit opt-ins); `--no-time-report` disables it.
+    let show_time_report = cli.time_report || !cli.no_time_report;
     let out = lint.render_report(
         &format,
         prog,
         RPMLINT_VERSION,
         arg_count,
-        cli.time_report,
+        show_time_report,
         duration,
     );
     print!("{out}");
