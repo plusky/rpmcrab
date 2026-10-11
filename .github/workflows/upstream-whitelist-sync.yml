@@ -46,17 +46,18 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/sync-upstream-whitelists.py 2>&1 | tee /tmp/sync.log
-          # The script exits 0 always and signals via GITHUB_OUTPUT;
-          # fall back to git diff check for robustness
-          if [ -z "${CHANGED:-}" ]; then
+          # The script signals via GITHUB_OUTPUT; the git diff is ground
+          # truth only when the script died before writing it.
+          if ! grep -q '^changed=' "$GITHUB_OUTPUT" 2>/dev/null; then
             if git diff --quiet -- crates/rpmcrab-core/data/distro; then
               echo "changed=false" >> "$GITHUB_OUTPUT"
             else
               echo "changed=true" >> "$GITHUB_OUTPUT"
             fi
           fi
-          # Capture the added entries for the PR body
+          # Capture the added/removed/skipped entries for the PR body
           grep "^  + " /tmp/sync.log > /tmp/added.txt || true
+          grep "^  x " /tmp/sync.log > /tmp/removed.txt || true
           grep "^  - " /tmp/sync.log > /tmp/skipped.txt || true
 
       - name: Open sync PR
@@ -66,9 +67,17 @@ jobs:
         run: |
           set -euo pipefail
           date=$(date -u +%F)
-          # Include run ID in branch name to avoid non-fast-forward
-          # rejections on same-day reruns
-          branch="upstream-whitelist-sync-${date}-${{ github.run_id }}"
+          # Skip when a previous sync PR is still open: every run uses a
+          # unique branch, so without this guard overlapping runs pile up
+          # duplicate PRs touching the same files.
+          if [ -n "$(gh pr list --search 'Sync upstream whitelist stanzas in:title' --state open --json number --jq '.[].number')" ]; then
+            echo "A sync PR is already open; skipping to avoid pile-up."
+            exit 0
+          fi
+          # Include run ID + attempt in branch name: run_id alone is stable
+          # across reruns of the same run, which would hit non-fast-forward
+          # rejections when pushing the rerun's commit.
+          branch="upstream-whitelist-sync-${date}-${{ github.run_id }}-${{ github.run_attempt }}"
           git -c user.name=github-actions -c user.email=github-actions@github.com \
             checkout -b "$branch"
           git add crates/rpmcrab-core/data/distro
@@ -77,11 +86,15 @@ jobs:
           git push -u origin "$branch"
           if [ -z "$(gh pr list --head "$branch" --json number --jq '.[].number')" ]; then
             added=$(cat /tmp/added.txt)
+            removed=$(cat /tmp/removed.txt)
             skipped=$(cat /tmp/skipped.txt)
             body="New whitelist stanzas from upstream rpmlint branches.
 
           Added entries:
           ${added:-none}
+
+          Removed upstream (stanzas gone from upstream branches):
+          ${removed:-none}
 
           Skipped (blocklisted):
           ${skipped:-none}
