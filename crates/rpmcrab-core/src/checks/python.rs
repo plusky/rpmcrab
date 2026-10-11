@@ -1000,8 +1000,20 @@ mod tests {
             "platform_python_implementation == \"CPython\"",
             "3.12"
         ));
-        assert!(PythonCheck::marker_holds_leftover(
-            "platform_machine != 'aarch64' or platform_python_implementation != 'PyPy' or sys_platform != 'linux'",
+        // Each pinned key gets its own assertion: the OR form is dominated
+        // by its first (true) disjunct, so it would still pass if
+        // `platform_python_implementation` were dropped from the
+        // implementation entirely.
+        assert!(PythonCheck::marker_atom_holds(
+            "platform_machine != 'aarch64'",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_atom_holds(
+            "platform_python_implementation != 'PyPy'",
+            "3.12"
+        ));
+        assert!(!PythonCheck::marker_atom_holds(
+            "sys_platform != 'linux'",
             "3.12"
         ));
         // `in` / `not in` on the newly pinned keys.
