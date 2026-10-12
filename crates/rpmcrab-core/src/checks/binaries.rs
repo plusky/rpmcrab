@@ -2284,15 +2284,16 @@ impl Check for BinariesCheck {
             self.check_libtool_wrapper(pkg, fname, pkgfile, out);
             self.check_invalid_la_file(pkg, fname, pkgfile, out);
 
-            if fname.starts_with("/usr/lib64") || fname.starts_with("/lib64") {
+            // Trailing slashes on every prefix: a file under the libdir is
+            // required. A slash-less prefix would also match the bare
+            // directory entry itself (owning the libdir is not shipping a
+            // library) and non-libdir prefixes such as /usr/libexec.
+            if fname.starts_with("/usr/lib64/") || fname.starts_with("/lib64/") {
                 pkg_has_file_in_lib64 = true;
                 if native_libdir_is_lib64 {
                     pkg_has_file_in_libdir = true;
                 }
             } else if fname.starts_with("/usr/lib/") || fname.starts_with("/lib/") {
-                // Trailing slashes: a bare "/usr/lib" prefix would also match
-                // /usr/libexec, which is not a libdir, and the bare directory
-                // entry itself is not a shipped library.
                 if !native_libdir_is_lib64 {
                     pkg_has_file_in_libdir = true;
                 }
@@ -4888,22 +4889,30 @@ description = "explicit priority string bypasses the system crypto policy"
         // lib64 dirs on 64-bit arches, lib dirs on 32-bit ones. Content
         // under the other word size's libdir does not exempt -- e.g.
         // /usr/lib/systemd units must not silence no-binary on x86_64.
+        // Bare directory entries never exempt on any arch: owning the
+        // libdir itself is not shipping a library.
         let config = test_config();
         // (arch, sole payload file, no-binary stays quiet)
-        let cases: [(&str, &str, bool); 13] = [
+        let cases: [(&str, &str, bool); 19] = [
             ("x86_64", "/usr/lib64/libfoo.so.1", true),
             ("x86_64", "/lib64/libfoo.so.1", true),
             ("x86_64", "/usr/lib/libfoo.so.1", false),
             ("x86_64", "/lib/libfoo.so.1", false),
             ("x86_64", "/usr/lib/systemd/system/foo.service", false),
+            ("x86_64", "/usr/lib64", false),
+            ("x86_64", "/lib64", false),
             ("aarch64", "/usr/lib64/libfoo.so.1", true),
             ("aarch64", "/usr/lib/libfoo.so.1", false),
+            ("aarch64", "/usr/lib64", false),
+            ("aarch64", "/lib64", false),
             ("i586", "/usr/lib/libfoo.so.1", true),
             ("i586", "/lib/libfoo.so.1", true),
             ("i586", "/usr/lib", false),
             ("i586", "/lib", false),
             ("i586", "/usr/lib64/libfoo.so.1", false),
             ("i586", "/lib64/libfoo.so.1", false),
+            ("i586", "/usr/lib64", false),
+            ("i586", "/lib64", false),
         ];
         for (arch, path, quiet) in cases {
             let pkg = synthetic_pkg("testpkg", arch, vec![syn_file(path, "ASCII text")]);
