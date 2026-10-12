@@ -2249,6 +2249,26 @@ impl BinariesCheck {
     }
 }
 
+/// Whether `arch` is a 64-bit RPM arch, whose native libdir is lib64
+/// (`/usr/lib64`, `/lib64`). Every other arch counts as 32-bit, whose
+/// native libdir is `/usr/lib` + `/lib`.
+fn is_64bit_arch(arch: &str) -> bool {
+    matches!(
+        arch,
+        "x86_64"
+            | "aarch64"
+            | "ppc64"
+            | "ppc64le"
+            | "s390x"
+            | "riscv64"
+            | "loongarch64"
+            | "ia64"
+            | "mips64"
+            | "mips64el"
+            | "sparc64"
+    )
+}
+
 impl Check for BinariesCheck {
     fn name(&self) -> &'static str {
         "BinariesCheck"
@@ -2257,10 +2277,14 @@ impl Check for BinariesCheck {
     fn check_binary(&mut self, pkg: &Pkg, config: &Config, out: &mut Filter) {
         let mut pkg_has_binary = false;
         let mut pkg_has_file_in_lib64 = false;
-        // The no-binary exemption covers the native libdir on any arch, not
-        // just lib64: on 32-bit %_libdir is /usr/lib, so a devel subpackage
-        // there is just as arch-bound as one in /usr/lib64.
+        // The no-binary exemption covers the package's native libdir only:
+        // /usr/lib64 + /lib64 on 64-bit arches, /usr/lib + /lib on 32-bit
+        // ones. On 32-bit %_libdir is /usr/lib, so a devel subpackage there
+        // is just as arch-bound as one in /usr/lib64; content under the
+        // other word size's libdir (e.g. /usr/lib/systemd on x86_64) does
+        // not exempt.
         let mut pkg_has_file_in_libdir = false;
+        let native_libdir_is_lib64 = is_64bit_arch(&pkg.arch);
 
         // Parse the expensive per-file ELF metadata in parallel (rayon).
         // Finding emission stays in the sequential loop below, in file
@@ -2281,7 +2305,9 @@ impl Check for BinariesCheck {
 
             if fname.starts_with("/usr/lib64") || fname.starts_with("/lib64") {
                 pkg_has_file_in_lib64 = true;
-                pkg_has_file_in_libdir = true;
+                if native_libdir_is_lib64 {
+                    pkg_has_file_in_libdir = true;
+                }
             } else if fname.starts_with("/usr/lib/")
                 || fname == "/usr/lib"
                 || fname.starts_with("/lib/")
@@ -2289,7 +2315,9 @@ impl Check for BinariesCheck {
             {
                 // Trailing slashes: a bare "/usr/lib" prefix would also match
                 // /usr/libexec, which is not a libdir.
-                pkg_has_file_in_libdir = true;
+                if !native_libdir_is_lib64 {
+                    pkg_has_file_in_libdir = true;
+                }
             }
 
             let is_ocaml_native = pkgfile.magic.contains("Objective caml native");
@@ -4874,6 +4902,47 @@ description = "explicit priority string bypasses the system crypto policy"
             lines.is_empty(),
             "no-binary must stay quiet for lib64 content: {results:?}"
         );
+    }
+
+    #[test]
+    fn no_binary_libdir_exemption_matches_arch_word_size() {
+        // The exemption covers only the package's own native libdir:
+        // lib64 dirs on 64-bit arches, lib dirs on 32-bit ones. Content
+        // under the other word size's libdir does not exempt -- e.g.
+        // /usr/lib/systemd units must not silence no-binary on x86_64.
+        let config = test_config();
+        // (arch, sole payload file, no-binary stays quiet)
+        let cases: [(&str, &str, bool); 12] = [
+            ("x86_64", "/usr/lib64/libfoo.so.1", true),
+            ("x86_64", "/lib64/libfoo.so.1", true),
+            ("x86_64", "/usr/lib/libfoo.so.1", false),
+            ("x86_64", "/lib/libfoo.so.1", false),
+            ("x86_64", "/usr/lib/systemd/system/foo.service", false),
+            ("aarch64", "/usr/lib64/libfoo.so.1", true),
+            ("aarch64", "/usr/lib/libfoo.so.1", false),
+            ("i586", "/usr/lib/libfoo.so.1", true),
+            ("i586", "/lib/libfoo.so.1", true),
+            ("i586", "/usr/lib", true),
+            ("i586", "/usr/lib64/libfoo.so.1", false),
+            ("i586", "/lib64/libfoo.so.1", false),
+        ];
+        for (arch, path, quiet) in cases {
+            let pkg = synthetic_pkg("testpkg", arch, vec![syn_file(path, "ASCII text")]);
+            let results = driver_results(&pkg, &config);
+            let lines = lines_for(&results, "no-binary");
+            if quiet {
+                assert!(
+                    lines.is_empty(),
+                    "{arch} + {path} must exempt from no-binary: {results:?}"
+                );
+            } else {
+                assert_eq!(
+                    lines.len(),
+                    1,
+                    "{arch} + {path} must still fire no-binary: {results:?}"
+                );
+            }
+        }
     }
 
     #[test]
