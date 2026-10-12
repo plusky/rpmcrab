@@ -79,11 +79,11 @@ struct Cli {
     installed: Vec<String>,
 
     /// Per-check timing report (on by default).
-    #[arg(short = 't', long = "time-report", action = clap::ArgAction::SetTrue)]
+    #[arg(short = 't', long = "time-report", action = clap::ArgAction::SetTrue, conflicts_with = "no_time_report")]
     time_report: bool,
 
     /// Disable the per-check timing report.
-    #[arg(long = "no-time-report", action = clap::ArgAction::SetTrue)]
+    #[arg(long = "no-time-report", action = clap::ArgAction::SetTrue, conflicts_with = "time_report")]
     no_time_report: bool,
 
     /// Number of parallel worker threads for checking packages; 1 is
@@ -462,8 +462,9 @@ pub fn run() -> ExitCode {
     // `--format` dispatches through the pluggable renderers (text/json);
     // the text wire format is untouched, and the time report stays a
     // text-mode section. It is on by default (`-t`/`--time-report` remain
-    // as explicit opt-ins); `--no-time-report` disables it.
-    let show_time_report = cli.time_report || !cli.no_time_report;
+    // as explicit opt-ins); `--no-time-report` disables it. The two flags
+    // conflict, so the opt-out alone decides.
+    let show_time_report = !cli.no_time_report;
     let out = lint.render_report(
         &format,
         prog,
