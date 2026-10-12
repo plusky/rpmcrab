@@ -75,6 +75,53 @@ sys.exit(1 if fail else 0)
 EOF
 }
 
+# Verify the corpus in $1 against the manifest: every entry present with
+# matching size and sha512, and no .rpm files beyond the manifest. The run
+# path verifies the same way download does, so a stale, truncated or
+# tampered directory fails loudly instead of benchmarking garbage.
+verify_corpus() {
+    local dir="$1"
+    local tsv rc
+    tsv=$(mktemp)
+    manifest_packages > "$tsv"
+    python3 - "$dir" "$tsv" <<'EOF'
+import hashlib, os, sys
+dest, manifest = sys.argv[1], sys.argv[2]
+entries = []
+for line in open(manifest):
+    _name, filename, _url, size, sha512 = line.rstrip("\n").split("\t")
+    entries.append((os.path.basename(filename), int(size), sha512))
+fail = 0
+expected = {fn for fn, _size, _sha in entries}
+try:
+    actual = {f for f in os.listdir(dest) if f.endswith(".rpm")}
+except OSError:
+    actual = set()
+for fn in sorted(expected - actual):
+    print(f"verify: missing {fn}", file=sys.stderr)
+    fail = 1
+for fn in sorted(actual - expected):
+    print(f"verify: unexpected {fn} (not in manifest)", file=sys.stderr)
+    fail = 1
+for fn, size, sha512 in entries:
+    path = os.path.join(dest, fn)
+    if not os.path.exists(path):
+        continue
+    if os.path.getsize(path) != size:
+        print(f"verify: size mismatch {fn}", file=sys.stderr)
+        fail = 1
+    elif hashlib.sha512(open(path, "rb").read()).hexdigest() != sha512:
+        print(f"verify: sha512 mismatch {fn}", file=sys.stderr)
+        fail = 1
+if not fail:
+    print(f"verify: {len(entries)} RPMs match the manifest", file=sys.stderr)
+sys.exit(1 if fail else 0)
+EOF
+    rc=$?
+    rm -f "$tsv"
+    return $rc
+}
+
 # Time one rpmcrab run over all RPMs; prints seconds.
 time_run() {
     local dir="$1"
@@ -89,9 +136,9 @@ time_run() {
 
 cmd_run() {
     local dir="${1:-$HERE/rpms}"
-    local rpms=( "$dir"/*.rpm )
-    [ -e "${rpms[0]}" ] || die "no RPMs in $dir (run 'bench.sh download' first)"
     [ -x "$RPMCRAB_BIN" ] || die "rpmcrab not found: $RPMCRAB_BIN"
+    verify_corpus "$dir" || die "corpus in $dir does not match manifest.toml (run 'bench.sh download' first)"
+    local rpms=( "$dir"/*.rpm )
     local times=()
     local i t
     for i in $(seq 1 $RUNS); do
