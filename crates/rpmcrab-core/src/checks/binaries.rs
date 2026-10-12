@@ -363,14 +363,22 @@ impl ReadelfInfo {
 
         // Dynamic symbols: undefined imports of stripped binaries only exist
         // here, so the reference `readelf -s` scan (both tables) needs this.
+        // Undefined imports are collected for STT_NOTYPE symbols too: modern
+        // toolchains emit many of them as NOTYPE (`__cxa_finalize` is one),
+        // and the loader-shim predicate over `undefined_functions` must see
+        // the binary's full import set.
         for sym in elf.dynsyms.iter() {
-            if sym.st_type() == goblin::elf::sym::STT_FUNC {
-                if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
-                    if !name.is_empty() {
+            let ty = sym.st_type();
+            if ty != goblin::elf::sym::STT_FUNC && ty != goblin::elf::sym::STT_NOTYPE {
+                continue;
+            }
+            if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
+                if !name.is_empty() {
+                    if ty == goblin::elf::sym::STT_FUNC {
                         self.functions.push(name.to_string());
-                        if sym.st_shndx == goblin::elf::section_header::SHN_UNDEF as usize {
-                            self.undefined_functions.push(name.to_string());
-                        }
+                    }
+                    if sym.st_shndx == goblin::elf::section_header::SHN_UNDEF as usize {
+                        self.undefined_functions.push(name.to_string());
                     }
                 }
             }
@@ -3545,6 +3553,65 @@ mod tests {
         assert!(
             lines_for(&results, "missing-stack-protector").is_empty(),
             "missing-stack-protector must not fire with __stack_chk_fail: {results:?}"
+        );
+    }
+
+    #[test]
+    fn parser_collects_notype_undefined_imports() {
+        // Modern toolchains emit undefined imports as STT_NOTYPE, not
+        // STT_FUNC (`__cxa_finalize` is NOTYPE in real binaries). The
+        // parser must collect them into `undefined_functions`: the
+        // loader-shim predicate reads only that vector, so a NOTYPE-blind
+        // parser leaves the shim check blind. (name, bind, type, shndx);
+        // STB_GLOBAL = 1, STT_NOTYPE = 0, STT_FUNC = 2, SHN_UNDEF = 0.
+        let dynsyms: &[(&str, u8, u8, u16)] = &[
+            ("dlopen", 1, 0, 0),
+            ("__cxa_finalize", 1, 0, 0),
+            ("dlsym", 1, 2, 0),
+            ("memcpy", 1, 2, 0),
+            ("exported_fn", 1, 2, 1),
+            ("some_data", 1, 0, 1),
+        ];
+        let bytes = craft_shlib_elf(false, None, None, dynsyms);
+        let path =
+            std::env::temp_dir().join(format!("rpmcrab-notype-parse-{}", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let info = ReadelfInfo::parse(path.to_str().unwrap(), "/usr/lib64/libprobe.so");
+        std::fs::remove_file(&path).ok();
+        assert!(info.failed.is_none(), "crafted ELF must parse");
+        for name in ["dlopen", "__cxa_finalize", "dlsym", "memcpy"] {
+            assert!(
+                info.undefined_functions.iter().any(|u| u == name),
+                "undefined_functions must contain {name}: {:?}",
+                info.undefined_functions
+            );
+        }
+        // Only STT_FUNC symbols land in `functions`; defined symbols are
+        // never undefined imports.
+        assert!(info.functions.iter().any(|f| f == "memcpy"));
+        assert!(info.functions.iter().any(|f| f == "exported_fn"));
+        assert!(!info.functions.iter().any(|f| f == "__cxa_finalize"));
+        assert!(!info.undefined_functions.iter().any(|u| u == "some_data"));
+
+        // End to end through the parsed vector: a shim whose imports are
+        // all NOTYPE is still a shim, so the stack-protector finding
+        // stays quiet for it.
+        let shim_syms: &[(&str, u8, u8, u16)] = &[
+            ("dlopen", 1, 0, 0),
+            ("dlsym", 1, 0, 0),
+            ("dlclose", 1, 0, 0),
+            ("__cxa_finalize", 1, 0, 0),
+        ];
+        let bytes = craft_shlib_elf(false, None, None, shim_syms);
+        let path = std::env::temp_dir().join(format!("rpmcrab-notype-shim-{}", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let info = ReadelfInfo::parse(path.to_str().unwrap(), "/usr/lib64/libshim.so");
+        std::fs::remove_file(&path).ok();
+        assert!(info.failed.is_none(), "crafted ELF must parse");
+        assert!(
+            !is_stack_protector_applicable(&info),
+            "NOTYPE-only loader shim must not be stack-protector applicable: {:?}",
+            info.undefined_functions
         );
     }
 
