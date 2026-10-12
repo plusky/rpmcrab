@@ -1,0 +1,30 @@
+# cargo-mutants config; the scheduled runner is .github/workflows/mutants.yml.
+# Not a cargo config -- cargo reads only config.toml out of a project .cargo/
+# and ignores this. Unknown keys are rejected, so a typo fails loud.
+#
+# Both keys describe this test suite rather than CI, so a hand-run (which is
+# how mutation testing mostly happens here) picks them up too. Scope is
+# deliberately absent: the workflow runs the whole workspace from day one.
+
+# MANDATORY, not a tuning knob. Check behaviour lives in rpmcrab-core but is
+# pinned by the integration suites in the `rpmcrab` crate (binary_cli,
+# parity corpus), which cargo-mutants' default per-package test scoping
+# never runs. Without this, -core mutants report survivors the workspace
+# suite would kill.
+test_workspace = true
+
+# No minimum_test_timeout floor: unlike suites with multi-second failure
+# barriers, this one sleeps in milliseconds, and the baseline above is
+# workspace-wide, so the auto-derived 5x cap is coherent. Add a floor only
+# if triage proves real hangs rather than slow failures.
+#
+# Proven-equivalent mutants, triaged by hand: each entry below was found by
+# a scheduled run, hand-proved behaviorally identical, and pinned by an
+# anchor test (or documented where no test can reach it). They are excluded
+# so the weekly summary stays a list of real gaps, not a standing roster.
+# Entries are LINE-ANCHORED on purpose: a bare function+operator pattern
+# also hides mutants the suite DOES kill. Line drift fails safe -- the
+# mutant reappears and gets re-triaged -- while a broad pattern fails
+# silent. Re-examine an entry when touching its function.
+exclude_re = [
+]
