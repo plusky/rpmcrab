@@ -37,10 +37,25 @@ for m in re.finditer(r'\[\[package\]\]\n(.*?)(?=\n\[\[package\]\]|\Z)', text, re
 EOF
 }
 
+# Write the parsed manifest to $1, failing closed: a generator error or an
+# empty result never reaches downstream code, where it would be read as a
+# corpus of 0 RPMs.
+write_manifest() {
+    local dest="$1"
+    if ! manifest_packages > "$dest"; then
+        echo "bench.sh: failed to parse $MANIFEST" >&2
+        return 1
+    fi
+    if [ ! -s "$dest" ]; then
+        echo "bench.sh: empty manifest parsed from $MANIFEST" >&2
+        return 1
+    fi
+}
+
 cmd_download() {
     local dir="${1:-$HERE/rpms}"
     mkdir -p "$dir"
-    manifest_packages > "$dir/.manifest.tsv"
+    write_manifest "$dir/.manifest.tsv" || die "manifest generation failed"
     python3 - "$dir" "$dir/.manifest.tsv" <<'EOF'
 import hashlib, os, sys, urllib.request
 dest = sys.argv[1]
@@ -81,7 +96,10 @@ verify_corpus() {
     local dir="$1"
     local tsv rc
     tsv=$(mktemp)
-    manifest_packages > "$tsv"
+    if ! write_manifest "$tsv"; then
+        rm -f "$tsv"
+        return 1
+    fi
     python3 - "$dir" "$tsv" <<'EOF'
 import hashlib, os, sys
 dest, manifest = sys.argv[1], sys.argv[2]
