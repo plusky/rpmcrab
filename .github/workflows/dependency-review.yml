@@ -22,3 +22,5 @@ jobs:
           # into it. The allow-list in deny.toml is the compile-time floor; this
           # guards the PR-time graph.
           deny-licenses: GPL-3.0-only, AGPL-3.0-only, AGPL-3.0-or-later, LGPL-3.0-only, SSPL-1.0, CC-BY-NC-4.0, CC-BY-NC-SA-4.0
+          # Path dep shares this repo's license; its bump trips the or-later match on the GPL-3.0-only entry.
+          allow-dependencies-licenses: 'pkg:cargo/rpmcrab-core'
