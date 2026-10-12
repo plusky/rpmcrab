@@ -1018,52 +1018,113 @@ fn is_stack_protector_applicable(info: &ReadelfInfo) -> bool {
 /// `__*_chk` symbol: with no fortifiable import there is nothing to
 /// fortify, so the finding would be unactionable noise. Symbol names may
 /// carry a `@VERSION` suffix in `.dynsym`; strip it before matching.
+///
+/// The set is the base name of every `__*_chk` symbol glibc exports
+/// (glibc 2.39-2.44), i.e. every function the headers redirect to a
+/// checked wrapper under `_FORTIFY_SOURCE`. Two deliberate exclusions:
+/// `__fdelt_chk` backs the `FD_SET` macro and has no importable base
+/// name, and `memccpy` has no `__memccpy_chk` in glibc's dynamic symbol
+/// table (calls stay plain under `_FORTIFY_SOURCE`).
 fn is_fortifiable_import(name: &str) -> bool {
     let base = name.split('@').next().unwrap_or(name);
     matches!(
         base,
+        // string.h
         "memcpy"
             | "memmove"
+            | "mempcpy"
             | "memset"
+            | "memset_explicit"
+            | "explicit_bzero"
             | "strcpy"
             | "strncpy"
             | "stpcpy"
             | "stpncpy"
             | "strcat"
             | "strncat"
+            | "strlcpy"
+            | "strlcat"
+            // stdio.h
+            | "printf"
+            | "fprintf"
+            | "vprintf"
+            | "vfprintf"
             | "sprintf"
             | "vsprintf"
             | "snprintf"
             | "vsnprintf"
-            | "gets"
+            | "dprintf"
+            | "vdprintf"
+            | "asprintf"
+            | "vasprintf"
+            | "obstack_printf"
+            | "obstack_vprintf"
+            | "fgets"
+            | "fgets_unlocked"
             | "fread"
             | "fread_unlocked"
+            | "gets"
+            // wchar.h: formatted I/O
+            | "wprintf"
+            | "fwprintf"
+            | "vwprintf"
+            | "vfwprintf"
+            | "swprintf"
+            | "vswprintf"
+            | "fgetws"
+            | "fgetws_unlocked"
+            // wchar.h: string functions
+            | "wmemcpy"
+            | "wmemmove"
+            | "wmempcpy"
+            | "wmemset"
+            | "wcscpy"
+            | "wcpcpy"
+            | "wcsncpy"
+            | "wcpncpy"
+            | "wcscat"
+            | "wcsncat"
+            | "wcslcpy"
+            | "wcslcat"
+            // stdlib.h / wchar.h: conversions
+            | "mbstowcs"
+            | "wcstombs"
+            | "wctomb"
+            | "wcrtomb"
+            | "mbsrtowcs"
+            | "wcsrtombs"
+            | "mbsnrtowcs"
+            | "wcsnrtombs"
+            // unistd.h
             | "read"
             | "pread"
             | "pread64"
-            | "recv"
-            | "recvfrom"
             | "readlink"
+            | "readlinkat"
             | "getcwd"
+            | "getwd"
             | "realpath"
             | "confstr"
             | "getgroups"
-            | "ttyname_r"
             | "gethostname"
             | "getdomainname"
-            | "wmemcpy"
-            | "wmemmove"
-            | "wmemset"
-            | "wcscpy"
-            | "wcsncpy"
-            | "wcscat"
-            | "wcsncat"
-            | "swprintf"
-            | "vswprintf"
-            | "mbsnrtowcs"
-            | "wcsnrtombs"
-            | "mbsrtowcs"
-            | "wcsrtombs"
+            | "getlogin_r"
+            | "ttyname_r"
+            | "ptsname_r"
+            // poll.h
+            | "poll"
+            | "ppoll"
+            // sys/socket.h
+            | "recv"
+            | "recvfrom"
+            // arpa/inet.h
+            | "inet_ntop"
+            | "inet_pton"
+            // syslog.h
+            | "syslog"
+            | "vsyslog"
+            // setjmp.h
+            | "longjmp"
     )
 }
 
@@ -3483,7 +3544,7 @@ mod tests {
         // has nothing to fortify; the finding stays quiet even without
         // any `__*_chk` symbol.
         let results =
-            hardening_results_for(false, false, &["malloc", "printf"], &["malloc", "printf"]);
+            hardening_results_for(false, false, &["malloc", "strlen"], &["malloc", "strlen"]);
         assert!(
             lines_for(&results, "missing-fortify").is_empty(),
             "missing-fortify must not fire without a fortifiable import: {results:?}"
@@ -3679,9 +3740,39 @@ mod tests {
         assert!(is_fortifiable_import("strcpy@GLIBC_2.17"));
         assert!(is_fortifiable_import("snprintf"));
         assert!(is_fortifiable_import("read"));
+        // The full glibc set: the stdio family, wide-char variants and
+        // the less common wrappers are all fortifiable.
+        for name in [
+            "mempcpy",
+            "fgets",
+            "fgets_unlocked",
+            "printf",
+            "fprintf",
+            "vprintf",
+            "vfprintf",
+            "dprintf",
+            "asprintf",
+            "poll",
+            "ppoll",
+            "readlinkat",
+            "wcpcpy",
+            "wcpncpy",
+            "wmempcpy",
+            "fgetws",
+            "syslog",
+            "longjmp",
+            "inet_ntop",
+            "strlcpy",
+        ] {
+            assert!(is_fortifiable_import(name), "{name} must be fortifiable");
+        }
         assert!(!is_fortifiable_import("__memcpy_chk"));
         assert!(!is_fortifiable_import("malloc"));
-        assert!(!is_fortifiable_import("printf"));
+        assert!(!is_fortifiable_import("strlen"));
+        // No `__memccpy_chk` in glibc's dynamic symbol table, and
+        // `__fdelt_chk` has no importable base name.
+        assert!(!is_fortifiable_import("memccpy"));
+        assert!(!is_fortifiable_import("fdelt"));
         assert!(!is_fortifiable_import("memcpy_s"));
     }
     /// Hand-built minimal ELF64 with crafted DWARF for the optflags tests.
