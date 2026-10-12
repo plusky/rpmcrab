@@ -29,7 +29,7 @@
 # Needs: podman (or PODMAN=/path/to/podman)
 # Output: input/rpmcrab-binaries-fixture-1.0-1.<arch>.rpm
 #
-# Everything (compilation and rpmbuild) runs in the digest-pinned openSUSE Tumbleweed container image (see Dockerfile): it
+# Everything (compilation and rpmbuild) runs in the openSUSE Tumbleweed container image built from the Dockerfile: it
 # produces genuine ELF output regardless of the host OS, and host rpmbuild
 # is unreliable on macOS.
 
@@ -189,8 +189,8 @@ cp /work/src/libbad.so.1 /work/src/libgood.so.1 /work/src/setuidbin /work/src/rp
 rpmbuild --define '_topdir /work/rpmbuild' --nosignature -bb /work/rpmbuild/SPECS/fixture.spec
 INNER_EOF
 
-# The image reference (digest-pinned base) lives in Dockerfile so Dependabot's
-# docker ecosystem can bump the pin monthly; build.sh only names the built tag.
+# The image reference lives in Dockerfile so Dependabot's docker
+# ecosystem can track the tag; build.sh only names the built tag.
 "$podman_bin" build -f "$here/Dockerfile" -t rpmcrab-binaries-check-fixture "$here"
 
 "$podman_bin" run --rm -v "$work:/work:z" rpmcrab-binaries-check-fixture bash /work/inner.sh
