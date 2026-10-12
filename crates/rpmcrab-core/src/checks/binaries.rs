@@ -15,6 +15,7 @@ use fancy_regex::Regex;
 use rayon::prelude::*;
 
 use crate::check::{Check, add_info};
+use crate::checks::shared::is_64bit_arch;
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
@@ -2249,26 +2250,6 @@ impl BinariesCheck {
     }
 }
 
-/// Whether `arch` is a 64-bit RPM arch, whose native libdir is lib64
-/// (`/usr/lib64`, `/lib64`). Every other arch counts as 32-bit, whose
-/// native libdir is `/usr/lib` + `/lib`.
-fn is_64bit_arch(arch: &str) -> bool {
-    matches!(
-        arch,
-        "x86_64"
-            | "aarch64"
-            | "ppc64"
-            | "ppc64le"
-            | "s390x"
-            | "riscv64"
-            | "loongarch64"
-            | "ia64"
-            | "mips64"
-            | "mips64el"
-            | "sparc64"
-    )
-}
-
 impl Check for BinariesCheck {
     fn name(&self) -> &'static str {
         "BinariesCheck"
@@ -2308,13 +2289,10 @@ impl Check for BinariesCheck {
                 if native_libdir_is_lib64 {
                     pkg_has_file_in_libdir = true;
                 }
-            } else if fname.starts_with("/usr/lib/")
-                || fname == "/usr/lib"
-                || fname.starts_with("/lib/")
-                || fname == "/lib"
-            {
+            } else if fname.starts_with("/usr/lib/") || fname.starts_with("/lib/") {
                 // Trailing slashes: a bare "/usr/lib" prefix would also match
-                // /usr/libexec, which is not a libdir.
+                // /usr/libexec, which is not a libdir, and the bare directory
+                // entry itself is not a shipped library.
                 if !native_libdir_is_lib64 {
                     pkg_has_file_in_libdir = true;
                 }
@@ -4912,7 +4890,7 @@ description = "explicit priority string bypasses the system crypto policy"
         // /usr/lib/systemd units must not silence no-binary on x86_64.
         let config = test_config();
         // (arch, sole payload file, no-binary stays quiet)
-        let cases: [(&str, &str, bool); 12] = [
+        let cases: [(&str, &str, bool); 13] = [
             ("x86_64", "/usr/lib64/libfoo.so.1", true),
             ("x86_64", "/lib64/libfoo.so.1", true),
             ("x86_64", "/usr/lib/libfoo.so.1", false),
@@ -4922,7 +4900,8 @@ description = "explicit priority string bypasses the system crypto policy"
             ("aarch64", "/usr/lib/libfoo.so.1", false),
             ("i586", "/usr/lib/libfoo.so.1", true),
             ("i586", "/lib/libfoo.so.1", true),
-            ("i586", "/usr/lib", true),
+            ("i586", "/usr/lib", false),
+            ("i586", "/lib", false),
             ("i586", "/usr/lib64/libfoo.so.1", false),
             ("i586", "/lib64/libfoo.so.1", false),
         ];

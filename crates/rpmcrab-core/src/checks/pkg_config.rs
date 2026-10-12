@@ -11,6 +11,7 @@ use fancy_regex::Regex;
 
 use crate::check::{Check, add_info};
 use crate::checks::is_match;
+use crate::checks::shared::is_64bit_arch;
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
@@ -38,12 +39,6 @@ fn wronglib_dir_64_regex() -> &'static Regex {
 static WRONGLIB_DIR_32_REGEX: OnceLock<Regex> = OnceLock::new();
 fn wronglib_dir_32_regex() -> &'static Regex {
     WRONGLIB_DIR_32_REGEX.get_or_init(|| Regex::new(r"-L/usr/lib64\b").expect("static regex"))
-}
-
-/// 64-bit architectures, as in the reference: `-L/usr/lib` is wrong for
-/// them, `-L/usr/lib64` is wrong for everything else.
-fn is_64bit_arch(arch: &str) -> bool {
-    matches!(arch, "x86_64" | "ppc64" | "s390x" | "aarch64")
 }
 
 pub struct PkgConfigCheck;
@@ -273,10 +268,20 @@ mod tests {
 
     #[test]
     fn arch_classification() {
-        for arch in ["x86_64", "ppc64", "s390x", "aarch64"] {
+        // The shared predicate covers every 64-bit RPM arch: `-L/usr/lib`
+        // is the wrong libdir for all of them, `-L/usr/lib64` for the rest.
+        for arch in [
+            "x86_64",
+            "ppc64",
+            "ppc64le",
+            "s390x",
+            "aarch64",
+            "riscv64",
+            "loongarch64",
+        ] {
             assert!(is_64bit_arch(arch), "{arch}");
         }
-        for arch in ["i586", "i686", "armv7l", "riscv64", "noarch", ""] {
+        for arch in ["i586", "i686", "armv7l", "noarch", ""] {
             assert!(!is_64bit_arch(arch), "{arch}");
         }
     }
