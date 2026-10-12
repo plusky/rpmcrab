@@ -403,14 +403,25 @@ class _FakeZstd:
 
 
 def _leap16_run(repomd, payload):
-    """Run _leap16_binary_names with mocked network and zstd."""
+    """Run _leap16_binary_names with mocked network and zstd.
+
+    The urlopen fake dispatches on the URL and never runs out of
+    responses: a failed primary download is retried over fresh repomd
+    fetches, so a two-response side-effect list no longer suffices.
+    """
     gen._leap16_binary_names_cache = None
+
+    def fake_urlopen(req, timeout=None):
+        if req.full_url.endswith('repomd.xml'):
+            return _read_once(repomd)
+        return _read_once(payload)
+
     with mock.patch.object(gen.shutil, 'which', return_value='/usr/bin/zstd'), \
             mock.patch.object(gen.urllib.request, 'urlopen',
-                              side_effect=[_read_once(repomd),
-                                            _read_once(payload)]), \
+                              side_effect=fake_urlopen), \
             mock.patch.object(gen.subprocess, 'Popen',
-                              lambda *a, **k: _FakeZstd(_LEAP16_PRIMARY_XML)):
+                              lambda *a, **k: _FakeZstd(_LEAP16_PRIMARY_XML)), \
+            mock.patch.object(gen.time, 'sleep'):
         return gen._leap16_binary_names()
 
 
@@ -686,6 +697,138 @@ def test_filelist_no_fallback_for_unknown_base():
             assert "after %d attempts" % gen._FILELIST_CYCLES in str(e), e
         else:
             raise AssertionError("did not raise")
+
+
+# ---------------------------------------------------------------------------
+# stale mirror: repomd.xml fine, primary.xml 404 -> fresh repomd per cycle
+# ---------------------------------------------------------------------------
+
+_TW_PRIMARY_PAYLOAD = b"fake tw primary payload"
+_TW_PRIMARY_XML = b"<name>twfoo</name><name>twbar</name>"
+
+
+def _tw_repomd(href):
+    import hashlib
+    sha = hashlib.sha512(_TW_PRIMARY_PAYLOAD).hexdigest()
+    return (
+        '<?xml version="1.0"?>'
+        '<repomd><data type="primary">'
+        '<checksum type="sha512">%s</checksum>'
+        '<location href="%s"/>'
+        "</data></repomd>" % (sha, href)
+    ).encode("utf-8")
+
+
+def _tw_run(primary):
+    """Run _tw_binary_names with mocked network and zstd.
+
+    `primary(url)` answers the primary.xml fetches (a response or an
+    exception). The repomd href varies per fetch, so the recorded
+    primary URLs prove each cycle used its own fresh repomd. Returns
+    (names, urls, sleeps, error): names is None when the run raised, in
+    which case error holds the exception.
+    """
+    gen._tw_binary_names_cache = None
+    urls = []
+    repomd_fetches = []
+
+    def fake_urlopen(req, timeout=None):
+        url = req.full_url
+        urls.append(url)
+        if url.endswith("repomd.xml"):
+            repomd_fetches.append(url)
+            return _read_once(
+                _tw_repomd(
+                    "repodata/cycle%d-primary.xml.zst" % len(repomd_fetches)))
+        return primary(url)
+
+    sleeps = []
+    names, error = None, None
+    with mock.patch.object(gen.shutil, "which", return_value="/usr/bin/zstd"), \
+            mock.patch.object(gen.urllib.request, "urlopen",
+                              side_effect=fake_urlopen), \
+            mock.patch.object(gen.subprocess, "Popen",
+                              lambda *a, **k: _FakeZstd(_TW_PRIMARY_XML)), \
+            mock.patch.object(gen.time, "sleep",
+                              side_effect=lambda s: sleeps.append(s)):
+        try:
+            names = gen._tw_binary_names()
+        except Exception as e:  # noqa: BLE001 - returned for assertion
+            error = e
+    return names, urls, sleeps, error
+
+
+def test_primary_stale_mirror_retries_with_fresh_repomd():
+    """A 404ing primary archive is retried with a fresh repomd fetch.
+
+    The stale-mirror signature behind the distro-config-drift flakes:
+    repomd.xml fetches fine but the primary archive it references 404s
+    on the mirror MirrorBrain redirected to. The next cycle's fresh
+    repomd fetch gets a new redirect and the download succeeds. The
+    href varies per cycle and the primary URL list is asserted, proving
+    the retry actually uses each cycle's fresh href.
+    """
+    primary_urls = []
+
+    def primary(url):
+        primary_urls.append(url)
+        if len(primary_urls) == 1:
+            raise _http_error(404)
+        return _read_once(_TW_PRIMARY_PAYLOAD)
+
+    names, _, sleeps, error = _tw_run(primary)
+    assert error is None, error
+    assert names == {"twfoo", "twbar"}, names
+    assert primary_urls == [
+        "https://download.opensuse.org/tumbleweed/repo/oss/"
+        "repodata/cycle1-primary.xml.zst",
+        "https://download.opensuse.org/tumbleweed/repo/oss/"
+        "repodata/cycle2-primary.xml.zst",
+    ], primary_urls
+    assert sleeps == [gen._PRIMARY_BACKOFF[0]], sleeps
+
+
+def test_primary_urlerror_then_succeeds():
+    """A network error on the primary download is retried like a 404."""
+    primary_urls = []
+
+    def primary(url):
+        primary_urls.append(url)
+        if len(primary_urls) == 1:
+            raise urllib.error.URLError("Temporary failure in name resolution")
+        return _read_once(_TW_PRIMARY_PAYLOAD)
+
+    names, _, sleeps, error = _tw_run(primary)
+    assert error is None, error
+    assert names == {"twfoo", "twbar"}, names
+    assert len(primary_urls) == 2, primary_urls
+    assert sleeps == [gen._PRIMARY_BACKOFF[0]], sleeps
+
+
+def test_primary_stale_mirror_exhausts_cycles_and_fallback_then_raises():
+    """Persistent primary 404s raise only after cycles + fallback mirror.
+
+    Retrying cannot help when MirrorBrain keeps redirecting to the
+    same stale mirror, so the last attempt goes to ftp.gwdg.de; a
+    failure there still fails loudly, never prunes silently.
+    """
+    primary_urls = []
+
+    def primary(url):
+        primary_urls.append(url)
+        raise _http_error(404)
+
+    names, _, sleeps, error = _tw_run(primary)
+    assert names is None, names
+    assert isinstance(error, RuntimeError), error
+    msg = str(error)
+    # the fallback mirror counts as an attempt too
+    assert "after %d attempts" % (gen._PRIMARY_CYCLES + 1) in msg, msg
+    assert "404" in msg, msg
+    assert len(primary_urls) == gen._PRIMARY_CYCLES + 1, primary_urls
+    assert any("ftp.gwdg.de" in u for u in primary_urls), primary_urls
+    assert sleeps == gen._PRIMARY_BACKOFF, sleeps
+
 
 if __name__ == "__main__":
     sys.exit(main())
