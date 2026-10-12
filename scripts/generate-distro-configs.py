@@ -635,10 +635,14 @@ LEAP16_OSS_REPOMD_URL = (
     "https://download.opensuse.org/distribution/leap/16.0/repo/oss"
     "/repodata/repomd.xml"
 )
+LEAP16_OSS_REPO_BASE = (
+    "https://download.opensuse.org/distribution/leap/16.0/repo/oss/"
+)
 _leap16_binary_names_cache = None
 TW_OSS_REPOMD_URL = (
     "https://download.opensuse.org/tumbleweed/repo/oss/repodata/repomd.xml"
 )
+TW_OSS_REPO_BASE = "https://download.opensuse.org/tumbleweed/repo/oss/"
 _tw_binary_names_cache = None
 
 
@@ -671,65 +675,146 @@ def _scan_binary_names(stdout):
     return names
 
 
+# Full repomd -> primary fetch cycles before giving up when the primary
+# download fails; mirrors _FILELIST_CYCLES/_FILELIST_BACKOFF below for
+# the same stale-mirror reason: a mirror can serve repomd.xml fine while
+# the primary archive it references 404s because it has not synced yet,
+# and each cycle's fresh repomd fetch gets its own MirrorBrain redirect
+# that may land on a synced mirror.
+_PRIMARY_CYCLES = 3
+# Backoff sleeps between primary fetch cycles (seconds); no sleep after
+# the final cycle.
+_PRIMARY_BACKOFF = [30, 60]
+
+
+def _primary_location(repomd, repo_base, label):
+    """(sha512, primary.xml URL) from a repomd.xml body."""
+    m = re.search(
+        r'<data type="primary">.*?<checksum type="sha512">([0-9a-f]+)</checksum>'
+        r'.*?<location href="([^"]*primary\.xml\.[^"]*)"',
+        repomd,
+        re.DOTALL,
+    )
+    if not m:
+        raise RuntimeError(
+            "primary.xml location/sha512 not found in %s repomd.xml" % label
+        )
+    return m.group(1), repo_base + m.group(2)
+
+
+def _download_primary_names(primary_url, expected_sha512, zstd, label):
+    """Download one primary.xml archive, verify it, and scan the names.
+
+    Raises RuntimeError on any failure: a mirror error (a stale mirror
+    404s the archive its repomd references), a truncated download
+    (sha512 mismatch) or a decompression failure are all conditions a
+    fresh mirror may not reproduce, so the caller retries them over
+    fresh repomd fetches.
+    """
+    req = urllib.request.Request(
+        primary_url, headers={"User-Agent": "rpmcrab-distro-config-sync"}
+    )
+    # The download is tens of MB: keep it out of TMPDIR, which is a
+    # small tmpfs on some build machines.
+    with tempfile.NamedTemporaryFile(suffix=".xml.zst", dir=".") as tmp:
+        try:
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                shutil.copyfileobj(resp, tmp)
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            http.client.IncompleteRead,
+            ConnectionResetError,
+        ) as e:
+            raise RuntimeError(
+                "primary.xml download failed for %s: %s" % (label, e)
+            ) from e
+        tmp.flush()
+        # Hash in chunks: no need to hold the whole archive in memory.
+        # A truncated download must fail loudly, never silently prune
+        # packages absent from the partial data.
+        hasher = hashlib.sha512()
+        with open(tmp.name, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                hasher.update(chunk)
+        if hasher.hexdigest() != expected_sha512:
+            raise RuntimeError(
+                f"sha512 mismatch on {primary_url} (truncated download?)"
+            )
+        proc = subprocess.Popen([zstd, "-dc", tmp.name], stdout=subprocess.PIPE)
+        try:
+            names = _scan_binary_names(proc.stdout)
+        finally:
+            proc.stdout.close()
+            proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError(f"zstd -dc failed on {primary_url}")
+    return names
+
+
+def _binary_names(repomd_url, repo_base, label):
+    """Binary package names shipped in a repo's published repodata.
+
+    Mirrors _filelist_hits: the repomd -> primary fetch runs in cycles
+    because a stale mirror serves repomd.xml fine but 404s the primary
+    archive it references (not synced yet). Each cycle re-fetches
+    repomd.xml, so a fresh MirrorBrain redirect can land on a synced
+    mirror; if every cycle fails, one final cycle runs against the
+    fallback mirror. Raises RuntimeError once every attempt is
+    exhausted: an unverifiable repo must fail loudly, never prune
+    against partial data.
+    """
+    zstd = shutil.which("zstd")
+    if zstd is None:
+        raise RuntimeError(
+            "the 'zstd' CLI is required to read the %s repodata "
+            "(install zstd and re-run)" % label
+        )
+    names = None
+    last_err = None
+    attempts = 0
+    for cycle in range(_PRIMARY_CYCLES):
+        repomd = _fetch_repomd_xml(repomd_url, label)
+        attempts += 1
+        expected_sha512, primary_url = _primary_location(
+            repomd, repo_base, label)
+        try:
+            names = _download_primary_names(
+                primary_url, expected_sha512, zstd, label)
+            break
+        except RuntimeError as e:
+            last_err = e
+            if cycle + 1 < _PRIMARY_CYCLES:
+                time.sleep(_PRIMARY_BACKOFF[cycle])
+    if names is None:
+        fb_repomd_url, fb_repo_base = _fallback_mirror_urls(
+            repomd_url, repo_base)
+        if fb_repomd_url is not None:
+            fb_label = label + " (fallback mirror)"
+            repomd = _fetch_repomd_xml(fb_repomd_url, fb_label)
+            attempts += 1
+            expected_sha512, primary_url = _primary_location(
+                repomd, fb_repo_base, fb_label)
+            try:
+                names = _download_primary_names(
+                    primary_url, expected_sha512, zstd, fb_label)
+            except RuntimeError as e:
+                last_err = e
+    if names is None:
+        raise RuntimeError(
+            "primary.xml download failed for %s after %d attempts: %s"
+            % (label, attempts, last_err)
+        )
+    return names
+
+
 def _leap16_binary_names():
     """Binary package names shipped in Leap 16.0 (oss), fetched once, cached."""
     global _leap16_binary_names_cache
     if _leap16_binary_names_cache is None:
-        zstd = shutil.which("zstd")
-        if zstd is None:
-            raise RuntimeError(
-                "the 'zstd' CLI is required to read the Leap 16.0 repodata "
-                "(install zstd and re-run)"
-            )
-
-        def _get(url):
-            return urllib.request.Request(
-                url, headers={"User-Agent": "rpmcrab-distro-config-sync"}
-            )
-
-        with urllib.request.urlopen(_get(LEAP16_OSS_REPOMD_URL), timeout=60) as resp:
-            repomd = resp.read().decode("utf-8")
-        m = re.search(
-            r'<data type="primary">.*?<checksum type="sha512">([0-9a-f]+)</checksum>'
-            r'.*?<location href="([^"]*primary\.xml\.[^"]*)"',
-            repomd,
-            re.DOTALL,
+        _leap16_binary_names_cache = _binary_names(
+            LEAP16_OSS_REPOMD_URL, LEAP16_OSS_REPO_BASE, "Leap 16.0"
         )
-        if not m:
-            raise RuntimeError(
-                "primary.xml location/sha512 not found in Leap 16.0 repomd.xml"
-            )
-        expected_sha512, primary_url = m.group(1), (
-            "https://download.opensuse.org/distribution/leap/16.0/repo/oss/"
-            + m.group(2)
-        )
-        names = set()
-        # A 58 MB download: keep it out of TMPDIR, which is a small tmpfs on
-        # some build machines.
-        with tempfile.NamedTemporaryFile(suffix=".xml.zst", dir=".") as tmp:
-            with urllib.request.urlopen(_get(primary_url), timeout=600) as resp:
-                shutil.copyfileobj(resp, tmp)
-            tmp.flush()
-            # Hash in chunks: the download is ~58 MB, no need to hold it
-            # all in memory.
-            hasher = hashlib.sha512()
-            with open(tmp.name, "rb") as f:
-                for chunk in iter(lambda: f.read(1 << 20), b""):
-                    hasher.update(chunk)
-            actual_sha512 = hasher.hexdigest()
-            if actual_sha512 != expected_sha512:
-                raise RuntimeError(
-                    f"sha512 mismatch on {primary_url} (truncated download?)"
-                )
-            proc = subprocess.Popen([zstd, "-dc", tmp.name], stdout=subprocess.PIPE)
-            try:
-                names = _scan_binary_names(proc.stdout)
-            finally:
-                proc.stdout.close()
-                proc.wait()
-            if proc.returncode != 0:
-                raise RuntimeError(f"zstd -dc failed on {primary_url}")
-        _leap16_binary_names_cache = names
     return _leap16_binary_names_cache
 
 
@@ -744,61 +829,11 @@ def _tw_binary_names():
     """
     global _tw_binary_names_cache
     if _tw_binary_names_cache is None:
-        zstd = shutil.which("zstd")
-        if zstd is None:
-            raise RuntimeError(
-                "the 'zstd' CLI is required to read the Tumbleweed repodata "
-                "(install zstd and re-run)"
-            )
-
-        def _get(url):
-            return urllib.request.Request(
-                url, headers={"User-Agent": "rpmcrab-distro-config-sync"}
-            )
-
-        with urllib.request.urlopen(_get(TW_OSS_REPOMD_URL), timeout=60) as resp:
-            repomd = resp.read().decode("utf-8")
-        m = re.search(
-            r'<data type="primary">.*?<checksum type="sha512">([0-9a-f]+)</checksum>'
-            r'.*?<location href="([^"]*primary\.xml\.[^"]*)"',
-            repomd,
-            re.DOTALL,
+        _tw_binary_names_cache = _binary_names(
+            TW_OSS_REPOMD_URL, TW_OSS_REPO_BASE, "Tumbleweed"
         )
-        if not m:
-            raise RuntimeError(
-                "primary.xml location/sha512 not found in Tumbleweed repomd.xml"
-            )
-        expected_sha512, primary_url = m.group(1), (
-            "https://download.opensuse.org/tumbleweed/repo/oss/" + m.group(2)
-        )
-        # Keep the download out of TMPDIR, which is a small tmpfs on
-        # some build machines.
-        with tempfile.NamedTemporaryFile(suffix=".xml.zst", dir=".") as tmp:
-            with urllib.request.urlopen(_get(primary_url), timeout=600) as resp:
-                shutil.copyfileobj(resp, tmp)
-            tmp.flush()
-            # Hash in chunks: the download is ~17 MB, no need to hold it
-            # all in memory. A truncated download must fail loudly, never
-            # silently prune packages absent from the partial data.
-            hasher = hashlib.sha512()
-            with open(tmp.name, "rb") as f:
-                for chunk in iter(lambda: f.read(1 << 20), b""):
-                    hasher.update(chunk)
-            actual_sha512 = hasher.hexdigest()
-            if actual_sha512 != expected_sha512:
-                raise RuntimeError(
-                    f"sha512 mismatch on {primary_url} (truncated download?)"
-                )
-            proc = subprocess.Popen([zstd, "-dc", tmp.name], stdout=subprocess.PIPE)
-            try:
-                names = _scan_binary_names(proc.stdout)
-            finally:
-                proc.stdout.close()
-                proc.wait()
-            if proc.returncode != 0:
-                raise RuntimeError(f"zstd -dc failed on {primary_url}")
-        _tw_binary_names_cache = names
     return _tw_binary_names_cache
+
 
 
 def package_present(pkg, flavor):
