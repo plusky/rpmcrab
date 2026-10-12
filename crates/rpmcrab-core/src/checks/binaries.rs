@@ -166,6 +166,10 @@ struct ReadelfInfo {
     /// dynamic table is where undefined imports of stripped binaries live,
     /// so function-call checks must consult it.
     functions: Vec<String>,
+    /// Undefined FUNC-type symbols from `.dynsym`: the binary's external
+    /// function imports. Used by the hardening applicability predicates to
+    /// tell a pure loader shim (only dlopen/dlsym/dlclose) from real code.
+    undefined_functions: Vec<String>,
     is_shlib: bool,
     is_debug: bool,
     /// True when the binary was produced by the Rust toolchain.
@@ -210,6 +214,7 @@ impl ReadelfInfo {
             sections: Vec::new(),
             program_headers: Vec::new(),
             functions: Vec::new(),
+            undefined_functions: Vec::new(),
             // The reference derives is_shlib and is_debug from the file name,
             // not the ELF content (readelfparser.py). A PIE executable or Go
             // binary is ET_DYN but is not a shared library for these checks.
@@ -363,6 +368,9 @@ impl ReadelfInfo {
                 if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
                     if !name.is_empty() {
                         self.functions.push(name.to_string());
+                        if sym.st_shndx == goblin::elf::section_header::SHN_UNDEF as usize {
+                            self.undefined_functions.push(name.to_string());
+                        }
                     }
                 }
             }
@@ -956,6 +964,101 @@ fn is_fortify_symbol(name: &str) -> bool {
     base.starts_with("__") && base.ends_with("_chk")
 }
 
+/// A pure dynamic-loader shim: every undefined function import is a
+/// dynamic-loader entry point (`dlopen`, `dlsym`, `dlclose`, `dlerror`,
+/// `dladdr`) or CRT boilerplate (`__cxa_finalize`, `_ITM_*`,
+/// `__gmon_start__`). Such a binary only forwards calls into libraries
+/// loaded at runtime; it implements no logic of its own and therefore has
+/// no stack buffers for `-fstack-protector` to protect. `missing-stack-protector`
+/// stays quiet for these. A binary with no undefined imports at all (e.g.
+/// static) is not a shim. Symbol names may carry a `@VERSION` suffix in
+/// `.dynsym`; strip it before matching.
+fn is_pure_loader_shim(undefined_functions: &[String]) -> bool {
+    // No undefined imports at all (e.g. a static binary) is not a shim:
+    // it has real code, just no external calls.
+    if undefined_functions.is_empty() {
+        return false;
+    }
+    undefined_functions.iter().all(|name| {
+        let base = name.split('@').next().unwrap_or(name);
+        matches!(
+            base,
+            "dlopen"
+                | "dlsym"
+                | "dlclose"
+                | "dlerror"
+                | "dladdr"
+                | "__cxa_finalize"
+                | "__gmon_start__"
+        ) || base.starts_with("_ITM_")
+    })
+}
+
+/// Whether a hardening finding applies to this binary: the binary must have
+/// "something to protect". Each check defines its own predicate over the
+/// binary's symbols; the mechanism is shared so the two checks stay in sync.
+fn is_fortify_applicable(info: &ReadelfInfo) -> bool {
+    info.functions.iter().any(|s| is_fortifiable_import(s))
+}
+
+fn is_stack_protector_applicable(info: &ReadelfInfo) -> bool {
+    !is_pure_loader_shim(&info.undefined_functions)
+}
+
+/// A libc function that `_FORTIFY_SOURCE` can instrument. `missing-fortify`
+/// fires only when a binary imports at least one of these without any
+/// `__*_chk` symbol: with no fortifiable import there is nothing to
+/// fortify, so the finding would be unactionable noise. Symbol names may
+/// carry a `@VERSION` suffix in `.dynsym`; strip it before matching.
+fn is_fortifiable_import(name: &str) -> bool {
+    let base = name.split('@').next().unwrap_or(name);
+    matches!(
+        base,
+        "memcpy"
+            | "memmove"
+            | "memset"
+            | "strcpy"
+            | "strncpy"
+            | "stpcpy"
+            | "stpncpy"
+            | "strcat"
+            | "strncat"
+            | "sprintf"
+            | "vsprintf"
+            | "snprintf"
+            | "vsnprintf"
+            | "gets"
+            | "fread"
+            | "fread_unlocked"
+            | "read"
+            | "pread"
+            | "pread64"
+            | "recv"
+            | "recvfrom"
+            | "readlink"
+            | "getcwd"
+            | "realpath"
+            | "confstr"
+            | "getgroups"
+            | "ttyname_r"
+            | "gethostname"
+            | "getdomainname"
+            | "wmemcpy"
+            | "wmemmove"
+            | "wmemset"
+            | "wcscpy"
+            | "wcsncpy"
+            | "wcscat"
+            | "wcsncat"
+            | "swprintf"
+            | "vswprintf"
+            | "mbsnrtowcs"
+            | "wcsnrtombs"
+            | "mbsrtowcs"
+            | "wcsrtombs"
+    )
+}
+
 /// The stack-protector failure handler. Both `-fstack-protector` and
 /// `-fstack-protector-strong` emit this symbol, so presence alone cannot
 /// distinguish basic from strong protection.
@@ -1440,7 +1543,14 @@ impl BinariesCheck {
         // default stack-protector instrumentation: both findings would
         // be noise. When in doubt the binary is treated as C.
         let is_rust = info.is_rust_binary();
-        if !is_rust && !info.functions.iter().any(|s| is_fortify_symbol(s)) {
+        // Each finding applies only when the binary has "something to
+        // protect" (rpmcrab#447): a binary that imports no fortifiable
+        // libc function cannot gain any `__*_chk` instrumentation, and a
+        // pure loader shim implements no logic of its own and therefore
+        // has no stack buffers for `-fstack-protector` to protect. In both
+        // cases the finding would be unactionable noise.
+        let has_fortify_symbol = info.functions.iter().any(|s| is_fortify_symbol(s));
+        if !is_rust && is_fortify_applicable(info) && !has_fortify_symbol {
             add_info(
                 out,
                 Level::Warning,
@@ -1449,7 +1559,8 @@ impl BinariesCheck {
                 &[&pkgfile.name],
             );
         }
-        if !is_rust && !info.functions.iter().any(|s| is_stack_protector_symbol(s)) {
+        let has_ssp_symbol = info.functions.iter().any(|s| is_stack_protector_symbol(s));
+        if !is_rust && is_stack_protector_applicable(info) && !has_ssp_symbol {
             add_info(
                 out,
                 Level::Warning,
@@ -2838,6 +2949,7 @@ mod tests {
                 sections: Vec::new(),
                 program_headers: Vec::new(),
                 functions: Vec::new(),
+                undefined_functions: Vec::new(),
                 is_shlib: false,
                 is_debug: false,
                 is_rust: false,
@@ -3172,7 +3284,12 @@ mod tests {
         assert!(!is_rust_symbol("memcpy@GLIBC_2.17"));
     }
 
-    fn hardening_results_for(is_rust: bool, is_zig: bool) -> Vec<(String, String)> {
+    fn hardening_results_for(
+        is_rust: bool,
+        is_zig: bool,
+        functions: &[&str],
+        undefined_functions: &[&str],
+    ) -> Vec<(String, String)> {
         let config = test_config();
         let check = BinariesCheck::with_tool_dir(&config, None);
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
@@ -3180,6 +3297,8 @@ mod tests {
         let mut info = syn_info();
         info.is_rust = is_rust;
         info.is_zig = is_zig;
+        info.functions = functions.iter().map(|s| s.to_string()).collect();
+        info.undefined_functions = undefined_functions.iter().map(|s| s.to_string()).collect();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_hardening(&pkg, &pkgfile, &info, &mut out);
         out.results().to_vec()
@@ -3221,7 +3340,7 @@ mod tests {
 
     #[test]
     fn hardening_rust_binary_skips_fortify_and_ssp() {
-        let results = hardening_results_for(true, false);
+        let results = hardening_results_for(true, false, &["memcpy"], &[]);
         assert!(
             lines_for(&results, "missing-fortify").is_empty(),
             "missing-fortify must not fire for Rust: {results:?}"
@@ -3278,6 +3397,9 @@ mod tests {
         let pkgfile = syn_file("/usr/sbin/staticbin", "ELF 64-bit LSB executable");
         let mut info = syn_info();
         info.has_dynamic = false;
+        // Static binary with real code: fortifiable import present, no
+        // undefined imports (static), so both findings still apply.
+        info.functions = vec!["main".to_string(), "memcpy".to_string()];
         info.program_headers = vec![ElfProgramHeader {
             name: "GNU_RELRO".to_string(),
             flags: "R".to_string(),
@@ -3307,7 +3429,7 @@ mod tests {
         // Zig emits none of the C-hardening artifacts: no _FORTIFY_SOURCE,
         // no stack-protector without libc, and no GNU_RELRO from its linker
         // (verified on bun, opencode, waylock). Every finding would be noise.
-        let results = hardening_results_for(false, true);
+        let results = hardening_results_for(false, true, &["memcpy"], &[]);
         for finding in [
             "missing-fortify",
             "missing-stack-protector",
@@ -3325,7 +3447,9 @@ mod tests {
     fn hardening_c_binary_still_fires() {
         // Negative case for the Zig skip pin: a plain non-Zig ELF must
         // still produce every hardening finding the fixture can emit.
-        let results = hardening_results_for(false, false);
+        // The fortifiable import is load-bearing: with nothing to fortify
+        // the finding stays quiet (rpmcrab#447).
+        let results = hardening_results_for(false, false, &["memcpy"], &["memcpy"]);
         assert_eq!(
             lines_for(&results, "missing-fortify").len(),
             1,
@@ -3343,6 +3467,101 @@ mod tests {
             1,
             "missing-relro must fire for C: {results:?}"
         );
+    }
+
+    #[test]
+    fn hardening_fortify_quiet_without_fortifiable_import() {
+        // rpmcrab#447: a binary that imports no fortifiable libc function
+        // has nothing to fortify; the finding stays quiet even without
+        // any `__*_chk` symbol.
+        let results =
+            hardening_results_for(false, false, &["malloc", "printf"], &["malloc", "printf"]);
+        assert!(
+            lines_for(&results, "missing-fortify").is_empty(),
+            "missing-fortify must not fire without a fortifiable import: {results:?}"
+        );
+        // The other hardening findings are unaffected by the import set.
+        assert_eq!(
+            lines_for(&results, "missing-stack-protector").len(),
+            1,
+            "missing-stack-protector must still fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_fortify_fires_with_fortifiable_import() {
+        // rpmcrab#447: a fortifiable import without `__*_chk` still fires.
+        let results =
+            hardening_results_for(false, false, &["memcpy@GLIBC_2.14"], &["memcpy@GLIBC_2.14"]);
+        assert_eq!(
+            lines_for(&results, "missing-fortify").len(),
+            1,
+            "missing-fortify must fire for a fortifiable import: {results:?}"
+        );
+        // ...but stays quiet once the fortified wrapper is present.
+        let results = hardening_results_for(false, false, &["memcpy", "__memcpy_chk"], &["memcpy"]);
+        assert!(
+            lines_for(&results, "missing-fortify").is_empty(),
+            "missing-fortify must not fire with __*_chk present: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_ssp_quiet_for_loader_shim() {
+        // rpmcrab#447: a pure dynamic-loader shim (only dlopen/dlsym/dlclose
+        // + CRT boilerplate imports) implements no logic of its own, so it
+        // has no stack buffers for -fstack-protector to protect.
+        let results = hardening_results_for(
+            false,
+            false,
+            &["dlopen", "dlsym", "dlclose", "__cxa_finalize"],
+            &[
+                "dlopen@GLIBC_2.34",
+                "dlsym@GLIBC_2.34",
+                "dlclose@GLIBC_2.34",
+                "__cxa_finalize",
+            ],
+        );
+        assert!(
+            lines_for(&results, "missing-stack-protector").is_empty(),
+            "missing-stack-protector must not fire for a loader shim: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_ssp_fires_for_real_code() {
+        // rpmcrab#447: a binary importing any non-loader function still
+        // fires when __stack_chk_fail is absent.
+        let results =
+            hardening_results_for(false, false, &["malloc", "memcpy"], &["malloc", "memcpy"]);
+        assert_eq!(
+            lines_for(&results, "missing-stack-protector").len(),
+            1,
+            "missing-stack-protector must fire for real code: {results:?}"
+        );
+        // ...but stays quiet once the protector is present.
+        let results =
+            hardening_results_for(false, false, &["malloc", "__stack_chk_fail"], &["malloc"]);
+        assert!(
+            lines_for(&results, "missing-stack-protector").is_empty(),
+            "missing-stack-protector must not fire with __stack_chk_fail: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_shim_predicate_unit() {
+        assert!(!is_pure_loader_shim(&[]));
+        assert!(is_pure_loader_shim(&[
+            "dlopen@GLIBC_2.34".to_string(),
+            "dlsym".to_string(),
+            "__cxa_finalize".to_string(),
+            "_ITM_deregisterTMCloneTable".to_string(),
+        ]));
+        assert!(!is_pure_loader_shim(&[
+            "dlopen".to_string(),
+            "malloc".to_string()
+        ]));
+        assert!(!is_pure_loader_shim(&["memcpy".to_string()]));
     }
 
     /// Deliberate divergence (divergences.toml, `case = "global"`, rpmcrab#17):
@@ -3388,6 +3607,15 @@ mod tests {
         assert!(is_stack_protector_symbol("__stack_chk_fail@GLIBC_2.17"));
         assert!(!is_stack_protector_symbol("__stack_chk_guard"));
         assert!(!is_stack_protector_symbol("__memcpy_chk"));
+
+        assert!(is_fortifiable_import("memcpy"));
+        assert!(is_fortifiable_import("strcpy@GLIBC_2.17"));
+        assert!(is_fortifiable_import("snprintf"));
+        assert!(is_fortifiable_import("read"));
+        assert!(!is_fortifiable_import("__memcpy_chk"));
+        assert!(!is_fortifiable_import("malloc"));
+        assert!(!is_fortifiable_import("printf"));
+        assert!(!is_fortifiable_import("memcpy_s"));
     }
     /// Hand-built minimal ELF64 with crafted DWARF for the optflags tests.
     /// Each `(producer, inline)` pair becomes one compilation unit: `inline`
@@ -3981,6 +4209,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 sections,
                 program_headers: Vec::new(),
                 functions: Vec::new(),
+                undefined_functions: Vec::new(),
                 is_shlib: true,
                 is_debug: false,
                 soname: None,
@@ -4115,6 +4344,7 @@ description = "explicit priority string bypasses the system crypto policy"
             sections: Vec::new(),
             program_headers: Vec::new(),
             functions: Vec::new(),
+            undefined_functions: Vec::new(),
             is_shlib: false,
             is_debug: false,
             soname: None,
