@@ -120,6 +120,26 @@ pub fn python_str_tuple(items: &[&str]) -> String {
     format!("({})", inner.join(", "))
 }
 
+/// Whether `arch` is a 64-bit RPM arch, whose native libdir is lib64
+/// (`/usr/lib64`, `/lib64`). Every other arch counts as 32-bit, whose
+/// native libdir is `/usr/lib` + `/lib`.
+pub fn is_64bit_arch(arch: &str) -> bool {
+    matches!(
+        arch,
+        "x86_64"
+            | "aarch64"
+            | "ppc64"
+            | "ppc64le"
+            | "s390x"
+            | "riscv64"
+            | "loongarch64"
+            | "ia64"
+            | "mips64"
+            | "mips64el"
+            | "sparc64"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

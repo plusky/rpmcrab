@@ -643,6 +643,13 @@ upstream = "https://github.com/plusky/rpmcrab/issues/44"
 
 [[divergence]]
 case = "global"
+check = "pkgconfig-invalid-libs-dir"
+kind = "behaviour"
+reason = "The wrong-libdir direction follows the shared 64-bit arch predicate, which covers every 64-bit RPM arch (ppc64le, riscv64, loongarch64, ia64, mips64, mips64el, sparc64 as well as x86_64, ppc64, s390x, aarch64). The reference (PkgConfigCheck.py) lists only the latter four, so on riscv64 it flags -L/usr/lib64 and lets -L/usr/lib pass -- the opposite of that arch's native libdir."
+since = "0.3.0"
+
+[[divergence]]
+case = "global"
 check = "PythonCheck"
 kind = "behaviour"
 reason = "For a requires.txt requirement that already carries a marker inside a named extra section, the reference (`_convert_egg_info_reqs_to_simple_reqs` in CPython's importlib.metadata, still used by rpmlint 2.10.0's `Distribution.requires` for egg-info) appends the section condition as a second `;`-part verbatim: `w6extra; python_version > \"3.9\"; (sys_platform == \"linux\") and extra == \"extra\"` (verified against CPython 3.13.14). The port stores the post-first-`;` marker text verbatim instead of merging everything into one `and`ed marker. Parity, not a logical divergence: both forms carry the `extra ==` condition, which the leftover evaluator treats as not holding (`extra` is never provided), and the reference itself drops the double-semicolon string as InvalidRequirement, so findings are unaffected either way. Pinned by emission-path tests."
