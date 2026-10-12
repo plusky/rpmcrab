@@ -1749,3 +1749,10 @@ check = "macro-in-comment"
 kind = "behaviour"
 reason = "Strictening per #442: a macro that opens the comment (after `#` and whitespace, e.g. `# %license COPYING`) or sits glued to a non-whitespace char (e.g. `# /usr/%_bindir/foo`) warns, as either looks like a commented-out invocation. A macro set off by whitespace mid-comment (`# shipped via %license`) is prose about the macro, not a mistake, and stays quiet. The frozen 2.10.0 reference warns on any occurrence."
 since = "0.3.0"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
+reason = "rpmcrab#447: `missing-fortify` and `missing-stack-protector` apply only when the binary has \"something to protect\". `missing-fortify` fires only when the binary imports at least one fortifiable libc function (the glibc _FORTIFY_SOURCE set) without any `__*_chk` symbol; `missing-stack-protector` fires only when the binary is not a pure dynamic-loader shim (undefined imports limited to dlopen/dlsym/dlclose/dlerror/dladdr plus CRT boilerplate). The reference fires both findings on any binary lacking the respective symbols, including shims and wrappers with no protectable code, where the findings are unactionable noise. Intentional post-0.2.0 strictening."
+since = "0.3.0"
