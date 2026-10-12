@@ -135,13 +135,16 @@ jobs:
           name: dist-x86_64-unknown-linux-gnu
           path: dist
           if-no-files-found: error
+      # Before the smoke test: rpmcrab shells out to `file` and to
+      # `rpm -Kv` (SignatureCheck), and a fresh ubuntu-24.04 image has
+      # no rpm, so install both up front.
+      - name: Install runtime deps
+        run: sudo apt-get update && sudo apt-get install -y file rpm
       - name: Extract release binary
         run: |
           set -euo pipefail
           tar -xzf dist/rpmcrab-*.tar.gz -C /tmp
           /tmp/rpmcrab --version
-      - name: Install runtime deps
-        run: sudo apt-get update && sudo apt-get install -y file
       - name: Run corpus benchmark
         env:
           RPMCRAB_BIN: /tmp/rpmcrab
