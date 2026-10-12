@@ -382,8 +382,11 @@ fn sorted_lines(s: &str) -> Vec<&str> {
 /// `-j1` and `-j4` produce byte-identical output over several packages,
 /// footer included: the worker pool is a scheduling detail, not a behavior
 /// change (`rpmlint#1595` `test_parallel_output_matches_sequential`). Only
-/// the wall-clock duration in the footer is normalized; the package counts
-/// are compared, so the footer cannot be silently dropped.
+/// wall-clock durations are normalized — the footer's and the time report's
+/// numbers (the report's per-check rows are additionally sorted by check
+/// name, since row order follows durations). Everything else, including the
+/// time report's structure, is compared exactly, so neither section can be
+/// silently dropped.
 #[test]
 fn parallel_output_matches_sequential() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -415,20 +418,69 @@ fn parallel_output_matches_sequential() {
                 s.replace_range(num_start..num_start + num_end, "N.N");
             }
         }
-        // The time report is on by default now and per-check durations
-        // differ between -j1 and -j4, so drop the whole section (header
-        // through the TOTAL row) before comparing.
-        if let Some(start) = s.find("Check time report") {
-            let mut end = start;
-            for line in s[start..].split_inclusive('\n') {
-                end += line.len();
-                if line.trim_start().starts_with("TOTAL") {
-                    break;
-                }
-            }
-            s.replace_range(start..end, "");
-        }
+        // The time report is on by default now; per-check durations (and
+        // hence the duration-descending row order) legitimately differ
+        // between -j1 and -j4, so normalize the timing numbers in place and
+        // sort the per-check rows: the section structure — headers, check
+        // names, TOTAL row — must still match exactly.
+        normalize_time_report(&mut s);
         s
+    }
+
+    /// Scrub every decimal number in the time-report section to `N.N` and
+    /// sort the per-check rows by check name. Row order follows durations,
+    /// which legitimately differ between -j1 and -j4; the structure must not.
+    fn normalize_time_report(s: &mut String) {
+        let Some(start) = s.find("Check time report") else {
+            return;
+        };
+        let mut end = start;
+        for line in s[start..].split_inclusive('\n') {
+            end += line.len();
+            if line.trim_start().starts_with("TOTAL") {
+                break;
+            }
+        }
+        let trailing_nl = s[..end].ends_with('\n');
+        let mut lines: Vec<String> = s[start..end].lines().map(scrub_numbers).collect();
+        // Two header lines, then per-check rows, then the TOTAL row: sort
+        // only the rows so duration-ordering noise cannot fail the test.
+        let n = lines.len();
+        if n >= 3 {
+            lines[2..n - 1].sort();
+        }
+        let mut section = lines.join("\n");
+        if trailing_nl {
+            section.push('\n');
+        }
+        s.replace_range(start..end, &section);
+    }
+
+    /// Replace every `<digits>.<digits>` token with `N.N`.
+    fn scrub_numbers(line: &str) -> String {
+        let mut out = String::with_capacity(line.len());
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c.is_ascii_digit() {
+                let mut num = String::from(c);
+                while chars.peek().is_some_and(|d| d.is_ascii_digit()) {
+                    num.push(chars.next().unwrap());
+                }
+                let mut ahead = chars.clone();
+                if ahead.next() == Some('.') && ahead.peek().is_some_and(|d| d.is_ascii_digit()) {
+                    chars.next(); // the dot
+                    while chars.peek().is_some_and(|d| d.is_ascii_digit()) {
+                        chars.next();
+                    }
+                    out.push_str("N.N");
+                } else {
+                    out.push_str(&num);
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
     }
     let seq_out = normalized(&seq);
     let par_out = normalized(&par);
