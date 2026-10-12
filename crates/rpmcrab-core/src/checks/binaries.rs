@@ -1355,10 +1355,10 @@ impl BinariesCheck {
         &self,
         pkg: &Pkg,
         has_binary: bool,
-        has_file_in_lib64: bool,
+        has_file_in_libdir: bool,
         out: &mut Filter,
     ) {
-        if !has_binary && !has_file_in_lib64 && pkg.arch != "noarch" {
+        if !has_binary && !has_file_in_libdir && pkg.arch != "noarch" {
             add_info(out, Level::Error, pkg, "no-binary", &[]);
         }
     }
@@ -2257,6 +2257,10 @@ impl Check for BinariesCheck {
     fn check_binary(&mut self, pkg: &Pkg, config: &Config, out: &mut Filter) {
         let mut pkg_has_binary = false;
         let mut pkg_has_file_in_lib64 = false;
+        // The no-binary exemption covers the native libdir on any arch, not
+        // just lib64: on 32-bit %_libdir is /usr/lib, so a devel subpackage
+        // there is just as arch-bound as one in /usr/lib64.
+        let mut pkg_has_file_in_libdir = false;
 
         // Parse the expensive per-file ELF metadata in parallel (rayon).
         // Finding emission stays in the sequential loop below, in file
@@ -2277,6 +2281,15 @@ impl Check for BinariesCheck {
 
             if fname.starts_with("/usr/lib64") || fname.starts_with("/lib64") {
                 pkg_has_file_in_lib64 = true;
+                pkg_has_file_in_libdir = true;
+            } else if fname.starts_with("/usr/lib/")
+                || fname == "/usr/lib"
+                || fname.starts_with("/lib/")
+                || fname == "/lib"
+            {
+                // Trailing slashes: a bare "/usr/lib" prefix would also match
+                // /usr/libexec, which is not a libdir.
+                pkg_has_file_in_libdir = true;
             }
 
             let is_ocaml_native = pkgfile.magic.contains("Objective caml native");
@@ -2339,7 +2352,7 @@ impl Check for BinariesCheck {
             }
         }
 
-        self.check_no_binary(pkg, pkg_has_binary, pkg_has_file_in_lib64, out);
+        self.check_no_binary(pkg, pkg_has_binary, pkg_has_file_in_libdir, out);
         self.check_noarch_with_lib64(pkg, pkg_has_file_in_lib64, out);
     }
 
@@ -4810,6 +4823,66 @@ description = "explicit priority string bypasses the system crypto policy"
         let pkg = synthetic_pkg(
             "testpkg",
             "x86_64",
+            vec![syn_file("/usr/share/doc/testpkg/README", "ASCII text")],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "no-binary");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+    }
+
+    #[test]
+    fn no_binary_quiet_when_files_in_usrlib_444() {
+        // 32-bit blosc-devel shape: headers, .so symlink and pkgconfig under
+        // /usr/lib, no binaries. The libdir exemption must not be lib64-only.
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "blosc-devel",
+            "i586",
+            vec![
+                syn_file("/usr/lib/libblosc.so.1.2.3", "ASCII text"),
+                syn_link("/usr/lib/libblosc.so", "libblosc.so.1.2.3"),
+                syn_file("/usr/lib/pkgconfig/blosc.pc", "ASCII text"),
+                syn_file("/usr/include/blosc.h", "ASCII text"),
+            ],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "no-binary");
+        assert!(
+            lines.is_empty(),
+            "no-binary must stay quiet for libdir content: {results:?}"
+        );
+    }
+
+    #[test]
+    fn no_binary_quiet_when_files_in_lib64() {
+        // Same shape on 64-bit: the pre-existing lib64 exemption keeps working.
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "blosc-devel",
+            "x86_64",
+            vec![
+                syn_file("/usr/lib64/libblosc.so.1.2.3", "ASCII text"),
+                syn_link("/usr/lib64/libblosc.so", "libblosc.so.1.2.3"),
+                syn_file("/usr/lib64/pkgconfig/blosc.pc", "ASCII text"),
+                syn_file("/usr/include/blosc.h", "ASCII text"),
+            ],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "no-binary");
+        assert!(
+            lines.is_empty(),
+            "no-binary must stay quiet for lib64 content: {results:?}"
+        );
+    }
+
+    #[test]
+    fn no_binary_still_fires_without_libdir_content() {
+        // Pure /usr/share content with no binaries: still an error.
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "i586",
             vec![syn_file("/usr/share/doc/testpkg/README", "ASCII text")],
         );
         let results = driver_results(&pkg, &config);
