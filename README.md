@@ -10,13 +10,16 @@
 A drop-in replacement for [`rpmlint`](https://github.com/rpm-software-management/rpmlint)
 (2.10.0, openSUSE flavour, `checks: 43`), rewritten in Rust.
 
-rpmcrab runs identically to rpmlint: same command-line flags, same TOML
-configuration, same `rpmlintrc` filters, and the **same frozen output and
-exit-code contract** that external tooling (OBS build summaries, openQA, the
-openSUSE badness-999 gate) already consumes. It is not a bug-for-bug port:
-upstream false positives and never-firing checks are fixed, and every fix is
-recorded in a machine-enforced ledger. Behavioural divergence is deferred to a
-later major version.
+**0.2.0 is the parity milestone:** rpmcrab matches rpmlint 2.10.0 — same
+command-line flags, same TOML configuration, same `rpmlintrc` filters, and the
+same output and exit-code contract that external tooling (OBS build summaries,
+openQA, the openSUSE badness-999 gate) already consumes — except for the
+deliberate divergences recorded in the machine-enforced ledger
+([`tests/parity/divergences.toml`](tests/parity/divergences.toml)). It is not
+a bug-for-bug port: upstream false positives and never-firing checks are
+fixed, and every fix is in the ledger. After 0.2.0 the project deliberately
+diverges wherever rpmlint is wrong, with every departure recorded in the
+ledger.
 
 - **The compatibility contract** — what is frozen and what may diverge — lives
   in [`docs/DESIGN.md`](docs/DESIGN.md).

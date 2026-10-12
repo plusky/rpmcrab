@@ -8,13 +8,15 @@ why.
 The reference implementation is `rpmlint` **2.10.0** (openSUSE flavour,
 `checks: 43`), CPython, GPL-2.0-or-later, at
 `rpm-software-management/rpmlint`. rpmcrab is a drop-in replacement rewritten
-in Rust. This file defines, precisely, what "drop-in" means.
+in Rust, with **0.2.0 as the parity milestone**. This file defines,
+precisely, what "drop-in" means — and where post-0.2.0 divergence is
+intentional.
 
 ---
 
 ## 1. Purpose and scope
 
-rpmcrab runs identically to rpmlint: same command line, same TOML
+At 0.2.0, rpmcrab runs identically to rpmlint: same command line, same TOML
 configuration, same `rpmlintrc` filters, and the same frozen output and
 exit-code contract that external tooling already consumes. It is **not** a
 bug-for-bug port. Upstream false positives and never-firing checks are fixed,
