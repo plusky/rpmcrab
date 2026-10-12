@@ -68,9 +68,13 @@ jobs:
           # pins the same toolchain for the same reason.
           toolchain: "1.99.0"
       - name: Install system dependencies
-        # librpm-sys generates bindings with bindgen, so the build needs the
-        # RPM development headers (same as the rust legs in ci.yml).
-        run: sudo apt-get update && sudo apt-get install -y librpm-dev
+        # The full workspace suite needs the same tooling as ci.yml's rust
+        # legs (binary_cli shells out to rpm/file/dash/devscripts tooling):
+        # with headers alone the unmutated baseline fails and every shard
+        # exits 4 reporting "nothing was tested". Plain apt-get, no cache
+        # action: seconds against a hours-long job, and another cache entry
+        # is exactly what the no-rust-cache note below avoids.
+        run: sudo apt-get update && sudo apt-get install -y librpm-dev rpm file devscripts dash desktop-file-utils appstream-util
       - name: Install cargo-mutants
         # Exact version and --locked. A crates.io version is immutable and
         # --locked pins its dependency tree, so this binds the binary as
