@@ -195,9 +195,29 @@ jobs:
           if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             pre="--prerelease --latest=false"
           fi
-          # Idempotent: a re-run after a partial failure (release created, an
-          # asset upload flaked) recovers instead of dying on "already exists".
+          # Assets ride the create call, not a later upload: gh creates as a
+          # draft, uploads, then publishes, which is the only sequence an
+          # immutable release accepts (a published release freezes its
+          # assets, so create-then-upload 422s). Recovery by leftover kind:
+          # a published release with assets is left alone; a draft (with or
+          # without assets) is deleted and recreated; a published mutable
+          # asset-less leftover is deleted and recreated; a published
+          # immutable asset-less release fails loudly — deleting it would
+          # retire the tag name without any release to recreate, so the way
+          # out is a new version, not a re-run.
           # shellcheck disable=SC2086
-          gh release view "$tag" >/dev/null 2>&1 \
-            || gh release create "$tag" --title "$tag" --generate-notes $pre
-          gh release upload "$tag" --clobber dist/*
+          if ! info="$(gh release view "$tag" --json isDraft,isImmutable,assets 2>/dev/null)"; then
+            gh release create "$tag" --title "$tag" --generate-notes $pre dist/*
+          elif [ "$(jq -r .isDraft <<<"$info")" = "false" ] \
+            && [ -n "$(jq -r '.assets[].name' <<<"$info")" ]; then
+            echo "release $tag already published with assets; leaving it alone"
+          elif [ "$(jq -r .isDraft <<<"$info")" = "true" ]; then
+            gh release delete "$tag" --yes
+            gh release create "$tag" --title "$tag" --generate-notes $pre dist/*
+          elif [ "$(jq -r .isImmutable <<<"$info")" = "true" ]; then
+            echo "::error::release $tag is published, immutable, and has no assets; the tag name is retired and cannot back another release — bump the version and tag again"
+            exit 1
+          else
+            gh release delete "$tag" --yes
+            gh release create "$tag" --title "$tag" --generate-notes $pre dist/*
+          fi
