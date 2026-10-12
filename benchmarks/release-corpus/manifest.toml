@@ -1,0 +1,270 @@
+# Release benchmark corpus: pinned RPM set for end-to-end timing.
+#
+# Pinned to openSUSE Leap 16.0 (NOT Tumbleweed): Leap release URLs are
+# stable for years, while Tumbleweed is rolling and URLs rot. If a URL
+# goes stale the benchmark fails loudly on checksum verification instead
+# of silently timing a different corpus.
+#
+# 25 packages, ~446 MB total. Covers: large binaries (kernel, chromium,
+# firefox, libreoffice), systemd units, python/perl packaging, desktop
+# files + appdata (gimp, kate, vlc), and small utilities.
+#
+# Fields per package: name, version, release, arch, filename (repo-relative),
+# url, size (bytes), checksum (sha512 from repodata).
+
+[meta]
+distro = "openSUSE Leap 16.0"
+repo = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/"
+repomd_primary = "1e113e18893b3cbd236171e030a274ef61a126618556df0f440fa5752b493cda3ea6a78d167d9a8ff499c2505efeef9cdaa307ad2b7f11b2bff8e0687e38c669-primary.xml.zst"
+generated = "2026-10-12"
+
+[[package]]
+name = "kernel-default"
+version = "6.12.0"
+release = "160000.26.1"
+arch = "x86_64"
+filename = "x86_64/kernel-default-6.12.0-160000.26.1.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/kernel-default-6.12.0-160000.26.1.x86_64.rpm"
+size = 122559568
+sha512 = "037f19c6916e4b15f0ef85735f81e5716208d20bab4061fbdf69a48444954cd1ab71522b0a7c6a26f9cd17e550d93f4e4545a7ab0ebe71f06a5bb01209efcb8f"
+
+[[package]]
+name = "chromium"
+version = "140.0.7339.185"
+release = "bp160.1.1"
+arch = "x86_64"
+filename = "x86_64/chromium-140.0.7339.185-bp160.1.1.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/chromium-140.0.7339.185-bp160.1.1.x86_64.rpm"
+size = 131820244
+sha512 = "d8eb2b3104d2386803e7daebc54c694e98d76f75b4e6f21abcd718b14a49679c58b4e560452132f15ebc2c028d34b3cfb5fff7554684c41f1d9794eaceeeacdb"
+
+[[package]]
+name = "MozillaFirefox"
+version = "140.10.0"
+release = "160000.1.1"
+arch = "x86_64"
+filename = "x86_64/MozillaFirefox-140.10.0-160000.1.1.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/MozillaFirefox-140.10.0-160000.1.1.x86_64.rpm"
+size = 81197373
+sha512 = "f11c9bfad5ae550970003e3dbca8a753cac2435178222f6a0087ebf2d59360129e9b849967d911f2ff836c191c86ebe4c7de9b32fc72cf77bda9ea0c8ffccbe4"
+
+[[package]]
+name = "libreoffice"
+version = "25.2.5.2"
+release = "bp160.1.2"
+arch = "x86_64"
+filename = "x86_64/libreoffice-25.2.5.2-bp160.1.2.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/libreoffice-25.2.5.2-bp160.1.2.x86_64.rpm"
+size = 72497458
+sha512 = "897b4cc839dc1e5d0de26785877ea55434467a6002a70cfc6b1195caf71301bd304af6444fd1b149a0f48b02df4877fe6397f17d127dbba78276e5b3b342a55b"
+
+[[package]]
+name = "systemd"
+version = "257.10"
+release = "160000.1.1"
+arch = "x86_64"
+filename = "x86_64/systemd-257.10-160000.1.1.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/systemd-257.10-160000.1.1.x86_64.rpm"
+size = 4941831
+sha512 = "a36ee99f11960d56616a21b1821a3792fe1bcbc205252223c360fabe24078d429a2b193e48eb80dddd8703bfc991b606e14ee0284dd28491807062463938fee3"
+
+[[package]]
+name = "python313-base"
+version = "3.13.11"
+release = "160000.1.1"
+arch = "x86_64"
+filename = "x86_64/python313-base-3.13.11-160000.1.1.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/python313-base-3.13.11-160000.1.1.x86_64.rpm"
+size = 9634406
+sha512 = "c96be3a7f14edd6cb9293c3615652e382c44b230fe1d6c3ca93742eaac6eed8e843ace58f651a3c32cc2a87dfad53c63e5e1d7e95640af5eac51c544124a207f"
+
+[[package]]
+name = "perl"
+version = "5.42.0"
+release = "160000.2.2"
+arch = "x86_64"
+filename = "x86_64/perl-5.42.0-160000.2.2.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/perl-5.42.0-160000.2.2.x86_64.rpm"
+size = 8750108
+sha512 = "b10c68fa22db870ce5bd606dae8f520b587f57d65139ed898bd91b60b587c10db76af97015ca826a1ae4c7f568ec640add05017a9d9500383b17fdf5df9ffc3e"
+
+[[package]]
+name = "gimp"
+version = "3.0.4"
+release = "bp160.1.12"
+arch = "x86_64"
+filename = "x86_64/gimp-3.0.4-bp160.1.12.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/gimp-3.0.4-bp160.1.12.x86_64.rpm"
+size = 10853987
+sha512 = "4c2de259501e443ef93240caf73e6619c411ba033912996f0d6cbd05774c0efe6653708249d97a1ae3d225fdb23e769a55ddacb7269240f7bfc2b5489ca29eb1"
+
+[[package]]
+name = "vim"
+version = "9.1.1406"
+release = "160000.3.2"
+arch = "x86_64"
+filename = "x86_64/vim-9.1.1406-160000.3.2.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/vim-9.1.1406-160000.3.2.x86_64.rpm"
+size = 3273577
+sha512 = "a1859b687b9efe9826069b8fc0c8fc4a3c6503696fa10bfe186f6a2361f7b31cc17ee92243436ffcb2d8f6922e63a4d5f207a1710a7aa2f277fa4a98aecc014a"
+
+[[package]]
+name = "glibc"
+version = "2.40"
+release = "160000.2.2"
+arch = "x86_64"
+filename = "x86_64/glibc-2.40-160000.2.2.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/glibc-2.40-160000.2.2.x86_64.rpm"
+size = 2270903
+sha512 = "5273a35845956492d49200776affd49b8f4fec2d27706dbce4d9d313aaaac364b6a15c4ede7def2f4aed361a5b8f720ac17c32510ef43ac55ea5ea4e6abc02d3"
+
+[[package]]
+name = "NetworkManager"
+version = "1.52.0"
+release = "160000.2.2"
+arch = "x86_64"
+filename = "x86_64/NetworkManager-1.52.0-160000.2.2.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/NetworkManager-1.52.0-160000.2.2.x86_64.rpm"
+size = 2430254
+sha512 = "c41804a67316a86a8c5a812a0065f3042be7020ae328ee80baf4f1518f5fffade172d14f788c77313ef519db85fc1a85f7d5626c68dc4bbbe020005d62db1bf4"
+
+[[package]]
+name = "kate"
+version = "25.04.3"
+release = "bp160.1.2"
+arch = "x86_64"
+filename = "x86_64/kate-25.04.3-bp160.1.2.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/kate-25.04.3-bp160.1.2.x86_64.rpm"
+size = 3019169
+sha512 = "e3bbd4279417c1e4ba6f013b6a1607e088274fedab1e00aad38c5cf86ae155cd5d90d40f5eeedec28744fc89b9bf762f4b96a482d70e6d4d578acfd34df0fbf7"
+
+[[package]]
+name = "python313-pip"
+version = "25.0.1"
+release = "160000.2.2"
+arch = "noarch"
+filename = "noarch/python313-pip-25.0.1-160000.2.2.noarch.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/noarch/python313-pip-25.0.1-160000.2.2.noarch.rpm"
+size = 2988268
+sha512 = "0967574716436faec9f0117e4e65d0907b3d100b606c54636eb66ba3958b1060748b19dc0a9641d9fcb5b8767a96c56365c09b5cc084ce25b853f21bb71340af"
+
+[[package]]
+name = "zypper"
+version = "1.14.101"
+release = "160000.1.1"
+arch = "x86_64"
+filename = "x86_64/zypper-1.14.101-160000.1.1.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/zypper-1.14.101-160000.1.1.x86_64.rpm"
+size = 1812075
+sha512 = "2056129ddeef893cb1f624a6acee7874a6110a758d86889e1f127ffe15fe3ec03798562582b847f3f29fe3e6646c410265689aec6710d2be75c60dbc27aa2075"
+
+[[package]]
+name = "bash"
+version = "5.2.37"
+release = "160000.2.2"
+arch = "x86_64"
+filename = "x86_64/bash-5.2.37-160000.2.2.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/bash-5.2.37-160000.2.2.x86_64.rpm"
+size = 734259
+sha512 = "4cb63c5c2431b6eb2805cfdd4e083b44e648c10fb55d558a5dbc560ddf6200e3c4ec3f11fd8fe7f4a020c61b3482b1b20af3d6264e7f5cb6abe253c1327d99f3"
+
+[[package]]
+name = "aaa_base"
+version = "84.87+git20250429.1cad3bc"
+release = "160000.2.2"
+arch = "x86_64"
+filename = "x86_64/aaa_base-84.87+git20250429.1cad3bc-160000.2.2.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/aaa_base-84.87+git20250429.1cad3bc-160000.2.2.x86_64.rpm"
+size = 326892
+sha512 = "6846733ddf8a02006ee551915d1b51e9fadd446810fa4d658a2e51ec88e94a0689954e75075c6d544137554614d4df5a1e00c92d185c10eabe845483d4731e70"
+
+[[package]]
+name = "curl"
+version = "8.14.1"
+release = "160000.2.2"
+arch = "x86_64"
+filename = "x86_64/curl-8.14.1-160000.2.2.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/curl-8.14.1-160000.2.2.x86_64.rpm"
+size = 597709
+sha512 = "b482fe0225b0ad93374a9e5770e1d20fd1ffca392e218f7d13f37e87872fdc847da771b447e47c3f2de79377af9ad27a974a3e3eac81262c46bfd97c534690e6"
+
+[[package]]
+name = "git"
+version = "2.51.0"
+release = "160000.1.2"
+arch = "x86_64"
+filename = "x86_64/git-2.51.0-160000.1.2.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/git-2.51.0-160000.1.2.x86_64.rpm"
+size = 242139
+sha512 = "d2c75f799935ac1318d920e7e9cace46d099ff918dbefcb76719e15fc7148fc7630b6cb3b8d33d29744a63f44e4cfb33f99488e6622113c1ef42edc3d9566f8d"
+
+[[package]]
+name = "openssh"
+version = "10.0p2"
+release = "160000.2.2"
+arch = "x86_64"
+filename = "x86_64/openssh-10.0p2-160000.2.2.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/openssh-10.0p2-160000.2.2.x86_64.rpm"
+size = 284105
+sha512 = "d4226217b463a8f278013f8770eef7f6ce6d31382debb293c90a30d1e9b6a2f95312d99083de0dae6d3baa8f100befa88a665244e94edfd2c92754fcc54d4ad5"
+
+[[package]]
+name = "perl-DBI"
+version = "1.647.0"
+release = "160000.2.2"
+arch = "x86_64"
+filename = "x86_64/perl-DBI-1.647.0-160000.2.2.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/perl-DBI-1.647.0-160000.2.2.x86_64.rpm"
+size = 879949
+sha512 = "c767481584b3fef75bdcb08a9cd03c25ba5f51b659a80533661cb4decf490212b1b6c8fd7511161aacefedefa322299d1f39f2cc3fb63880f271de15d5fabcb2"
+
+[[package]]
+name = "pipewire"
+version = "1.4.6"
+release = "160000.2.2"
+arch = "x86_64"
+filename = "x86_64/pipewire-1.4.6-160000.2.2.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/pipewire-1.4.6-160000.2.2.x86_64.rpm"
+size = 416461
+sha512 = "b37895f3a5a2f9ad8c4ddc049e271cfd728e1c7a0e941633562e7ccaaac446d0b14498580bb3dc825613440767d7280427162f8572e321f6f7c89e2383ba3af3"
+
+[[package]]
+name = "apparmor-parser"
+version = "4.1.1"
+release = "160000.2.2"
+arch = "x86_64"
+filename = "x86_64/apparmor-parser-4.1.1-160000.2.2.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/apparmor-parser-4.1.1-160000.2.2.x86_64.rpm"
+size = 701867
+sha512 = "1b2bd2a841c714c9b2c0d9e7cf55d132144aab272bc8138bf745e26eec40a2136137713b9b311bce869ccdf86d4d090352045dcb33973aa2c149a5033a254147"
+
+[[package]]
+name = "dracut"
+version = "059+suse.696.g950c4798"
+release = "160000.1.2"
+arch = "x86_64"
+filename = "x86_64/dracut-059+suse.696.g950c4798-160000.1.2.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/dracut-059+suse.696.g950c4798-160000.1.2.x86_64.rpm"
+size = 833480
+sha512 = "3c734c95d101c299b060dbf61ec0133670db129024bfd2ce7e47d892e515e8115bf5d7dcf08f3e191b5090d9fba11d2808357620cee2634bd5e41febf78e6db2"
+
+[[package]]
+name = "vlc"
+version = "3.0.21"
+release = "bp160.1.9"
+arch = "x86_64"
+filename = "x86_64/vlc-3.0.21-bp160.1.9.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/vlc-3.0.21-bp160.1.9.x86_64.rpm"
+size = 775471
+sha512 = "50be121ad8599fcfd2e3642e65d2e9b048265b69ee079bd29759d0b2ff8e7d6a31c93cbc2bdf5a18b7eeba9dd8908f36682f9fb96452eb115c87bd11ab669b35"
+
+[[package]]
+name = "libreoffice-writer"
+version = "25.2.5.2"
+release = "bp160.1.2"
+arch = "x86_64"
+filename = "x86_64/libreoffice-writer-25.2.5.2-bp160.1.2.x86_64.rpm"
+url = "https://download.opensuse.org/distribution/leap/16.0/repo/oss/x86_64/libreoffice-writer-25.2.5.2-bp160.1.2.x86_64.rpm"
+size = 4160987
+sha512 = "9662910773998d1c93d25fa5c64b67326828676274fb5411dbb93451cafbaa2d22745137ae57c04fa46aab1f53b8b72c4bb9c795ae2625719387f9eb3d5b01a0"
+
