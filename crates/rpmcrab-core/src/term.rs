@@ -242,7 +242,7 @@ mod tests {
         let color = crate::color::Color::for_tty(false);
         let params = crate::report::HeaderParams {
             prog: "rpmcrab",
-            version: "0.1.0",
+            version: env!("CARGO_PKG_VERSION"),
             conf_files: &[],
             rpmlintrc: &[],
             no_checks: 0,
