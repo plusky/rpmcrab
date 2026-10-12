@@ -383,10 +383,10 @@ fn sorted_lines(s: &str) -> Vec<&str> {
 /// footer included: the worker pool is a scheduling detail, not a behavior
 /// change (`rpmlint#1595` `test_parallel_output_matches_sequential`). Only
 /// wall-clock durations are normalized — the footer's and the time report's
-/// numbers (the report's per-check rows are additionally sorted by check
-/// name, since row order follows durations). Everything else, including the
-/// time report's structure, is compared exactly, so neither section can be
-/// silently dropped.
+/// numbers. The time report's per-check rows are dropped: which checks pass
+/// its (>1% & >0.1s) filter is timing-dependent and legitimately differs
+/// between -j1 and -j4. The section frame (header lines + TOTAL row) is
+/// compared exactly, so the section cannot be silently dropped.
 #[test]
 fn parallel_output_matches_sequential() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -418,18 +418,21 @@ fn parallel_output_matches_sequential() {
                 s.replace_range(num_start..num_start + num_end, "N.N");
             }
         }
-        // The time report is on by default now; per-check durations (and
-        // hence the duration-descending row order) legitimately differ
-        // between -j1 and -j4, so normalize the timing numbers in place and
-        // sort the per-check rows: the section structure — headers, check
-        // names, TOTAL row — must still match exactly.
+        // The time report is on by default now; per-check durations — and
+        // hence which checks pass the report's (>1% & >0.1s) filter —
+        // legitimately differ between -j1 and -j4, so normalize the numbers
+        // in place and drop the per-check rows: the section frame (headers
+        // + TOTAL row) must still match exactly, so the section cannot be
+        // silently dropped.
         normalize_time_report(&mut s);
         s
     }
 
     /// Scrub every decimal number in the time-report section to `N.N` and
-    /// sort the per-check rows by check name. Row order follows durations,
-    /// which legitimately differ between -j1 and -j4; the structure must not.
+    /// drop the per-check rows, keeping the header lines and the TOTAL row.
+    /// Row presence follows the (>1% & >0.1s) filter, which is timing
+    /// dependent and legitimately differs between -j1 and -j4; the frame
+    /// must not.
     fn normalize_time_report(s: &mut String) {
         let Some(start) = s.find("Check time report") else {
             return;
@@ -443,11 +446,12 @@ fn parallel_output_matches_sequential() {
         }
         let trailing_nl = s[..end].ends_with('\n');
         let mut lines: Vec<String> = s[start..end].lines().map(scrub_numbers).collect();
-        // Two header lines, then per-check rows, then the TOTAL row: sort
-        // only the rows so duration-ordering noise cannot fail the test.
+        // Two header lines, then the per-check rows, then the TOTAL row:
+        // drop only the rows. If the last line is not TOTAL (the report
+        // always ends with it), keep everything rather than guessing.
         let n = lines.len();
-        if n >= 3 {
-            lines[2..n - 1].sort();
+        if n >= 3 && lines[n - 1].trim_start().starts_with("TOTAL") {
+            lines.drain(2..n - 1);
         }
         let mut section = lines.join("\n");
         if trailing_nl {
