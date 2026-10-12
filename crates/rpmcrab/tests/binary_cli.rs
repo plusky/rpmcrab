@@ -225,6 +225,17 @@ fn no_time_report_flag_disables() {
     assert!(!stdout.contains("Check time report"), "{stdout}");
 }
 
+/// `--time-report` and `--no-time-report` are mutually exclusive: passing
+/// both is a usage error, never a silent precedence pick.
+#[test]
+fn time_report_flags_conflict() {
+    let rpm = corpus_rpm();
+    let out = rpmcrab(&["--time-report", "--no-time-report", rpm.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+}
+
 /// `-T/--profile` is gone: the reference removed it (rpmlint#1595) because
 /// cProfile only ever covered the main process and misled; `--time-report`
 /// aggregates per-check timings instead.
