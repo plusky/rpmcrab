@@ -16,8 +16,10 @@
 //! Two upstream fixes ship as fixed behaviour: `#1600` (a trailing
 //! line-continuation `\` on `BuildArch: noarch`) and `#1601` (quote-aware
 //! `#` comment detection for `macro-in-comment`). Post-0.2.0 strictening
-//! `#442` narrows `macro-in-comment` further: only a macro that opens the
-//! comment warns. The openSUSE-only
+//! `#442` narrows `macro-in-comment`: a macro that opens the comment or
+//! sits glued to a non-whitespace char warns (commented-out invocation);
+//! a macro set off by whitespace mid-comment is prose and stays quiet. The
+//! openSUSE-only
 //! `obsolete-suse-version-check` / `invalid-suse-version-check` are part of
 //! the reference flavour and are implemented. Deliberate divergences are
 //! ledgered in `tests/parity/divergences.toml`.
@@ -1618,21 +1620,34 @@ impl SpecCheck {
         if comment.starts_with('!') {
             return;
         }
-        // Strictening (#442): only a macro that opens the comment looks like
-        // a commented-out invocation (`# %license COPYING`). A macro
-        // mentioned mid-sentence (`# shipped via %license`) is prose about
+        // Strictening (#442): a macro that opens the comment (`# %license
+        // COPYING`) or sits glued to a non-whitespace char (`# /usr/%_bindir`)
+        // looks like a commented-out invocation and warns. A macro set off by
+        // whitespace mid-comment (`# shipped via %license`) is prose about
         // the macro, not a mistake, and stays quiet.
         let body = comment.trim_start();
-        let Ok(Some(m)) = self.macro_re.find(body) else {
+        let body_offset = comment.len() - body.len();
+        let Ok(matches) = self
+            .macro_re
+            .find_iter(comment)
+            .collect::<Result<Vec<_>, _>>()
+        else {
             return;
         };
-        if m.start() != 0 {
-            return;
-        }
-        let mt = m.as_str();
-        let percents = mt.chars().take_while(|&c| c == '%').count();
-        if percents % 2 == 1 {
-            self.info(out, pkg, Level::Warning, "macro-in-comment", &[mt]);
+        for m in matches {
+            let mt = m.as_str();
+            let percents = mt.chars().take_while(|&c| c == '%').count();
+            if percents % 2 == 0 {
+                continue;
+            }
+            let opens_comment = m.start() == body_offset;
+            let glued = comment[..m.start()]
+                .chars()
+                .last()
+                .is_some_and(|c| !c.is_whitespace());
+            if opens_comment || glued {
+                self.info(out, pkg, Level::Warning, "macro-in-comment", &[mt]);
+            }
         }
     }
 
@@ -1855,6 +1870,20 @@ mod tests {
         let lines = lines_for(&results, "macro-in-comment");
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("W: macro-in-comment %{version}"));
+    }
+
+    #[test]
+    fn macro_glued_to_path_in_comment_warns_442() {
+        // Tom's case: a commented-out path with a real macro invocation.
+        let results = run_mini("Name: foo\n# /usr/%{_bindir}/foo\n");
+        let lines = lines_for(&results, "macro-in-comment");
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("W: macro-in-comment %{_bindir}"));
+        // Same for a macro glued to a token with a hyphen.
+        let results = run_mini("Name: foo\n# foo-%bar\n");
+        let lines = lines_for(&results, "macro-in-comment");
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("W: macro-in-comment %bar"));
     }
 
     #[test]
@@ -2088,13 +2117,13 @@ make install
             "line: {}",
             warning[0]
         );
-        // Deliberate divergence (#442, ledgered): the `%{version}` on line
-        // 20 sits mid-URL in prose, not at the comment start, so no
-        // `macro-in-comment` fires even though the reference emits one.
+        // Refined #442: the `%{version}` on line 20 is glued to `v` in the
+        // URL (`v%{version}`), so it warns, matching the reference.
         let comment = lines_for(&results, "macro-in-comment");
+        assert_eq!(comment.len(), 1);
         assert!(
-            comment.is_empty(),
-            "unexpected macro-in-comment: {comment:?}"
+            comment[0].contains("W: macro-in-comment %{version}"),
+            "unexpected: {comment:?}"
         );
     }
 
