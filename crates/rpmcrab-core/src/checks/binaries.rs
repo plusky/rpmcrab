@@ -166,9 +166,10 @@ struct ReadelfInfo {
     /// dynamic table is where undefined imports of stripped binaries live,
     /// so function-call checks must consult it.
     functions: Vec<String>,
-    /// Undefined FUNC-type symbols from `.dynsym`: the binary's external
-    /// function imports. Used by the hardening applicability predicates to
-    /// tell a pure loader shim (only dlopen/dlsym/dlclose) from real code.
+    /// Undefined symbols from `.dynsym` (STT_FUNC and STT_NOTYPE): the
+    /// binary's external imports. The hardening predicates read this set:
+    /// it is the binary's imports, complete across symbol types, with no
+    /// defined exports mixed in.
     undefined_functions: Vec<String>,
     is_shlib: bool,
     is_debug: bool,
@@ -1006,7 +1007,17 @@ fn is_pure_loader_shim(undefined_functions: &[String]) -> bool {
 /// "something to protect". Each check defines its own predicate over the
 /// binary's symbols; the mechanism is shared so the two checks stay in sync.
 fn is_fortify_applicable(info: &ReadelfInfo) -> bool {
-    info.functions.iter().any(|s| is_fortifiable_import(s))
+    // A dynamic binary is judged on its undefined imports: a defined
+    // export of a fortifiable name is the binary's own code, not a call
+    // that `_FORTIFY_SOURCE` would redirect, and a NOTYPE import is
+    // still an import. A static binary has no imports at all, so its
+    // function symbols are the call set.
+    let calls: &[String] = if info.has_dynamic {
+        &info.undefined_functions
+    } else {
+        &info.functions
+    };
+    calls.iter().any(|s| is_fortifiable_import(s))
 }
 
 fn is_stack_protector_applicable(info: &ReadelfInfo) -> bool {
@@ -1618,7 +1629,14 @@ impl BinariesCheck {
         // pure loader shim implements no logic of its own and therefore
         // has no stack buffers for `-fstack-protector` to protect. In both
         // cases the finding would be unactionable noise.
-        let has_fortify_symbol = info.functions.iter().any(|s| is_fortify_symbol(s));
+        // Presence counts defined symbols and imports alike: an imported
+        // `__*_chk` wrapper (FUNC or NOTYPE) is the fortified call, and a
+        // defined one is the binary's own fortification.
+        let has_fortify_symbol = info
+            .functions
+            .iter()
+            .chain(&info.undefined_functions)
+            .any(|s| is_fortify_symbol(s));
         if !is_rust && is_fortify_applicable(info) && !has_fortify_symbol {
             add_info(
                 out,
@@ -1628,7 +1646,11 @@ impl BinariesCheck {
                 &[&pkgfile.name],
             );
         }
-        let has_ssp_symbol = info.functions.iter().any(|s| is_stack_protector_symbol(s));
+        let has_ssp_symbol = info
+            .functions
+            .iter()
+            .chain(&info.undefined_functions)
+            .any(|s| is_stack_protector_symbol(s));
         if !is_rust && is_stack_protector_applicable(info) && !has_ssp_symbol {
             add_info(
                 out,
@@ -3576,6 +3598,39 @@ mod tests {
     }
 
     #[test]
+    fn hardening_fortify_applicability_reads_imports_not_exports() {
+        // A defined export of a fortifiable name is not an import: with no
+        // fortifiable import there is nothing for `_FORTIFY_SOURCE` to
+        // redirect, so the finding stays quiet.
+        let results = hardening_results_for(false, false, &["memcpy"], &["malloc"]);
+        assert!(
+            lines_for(&results, "missing-fortify").is_empty(),
+            "missing-fortify must not fire for a defined export alone: {results:?}"
+        );
+        // An imported `__*_chk` counts as presence even when it never
+        // lands in `functions` (a NOTYPE import parses only into
+        // `undefined_functions`).
+        let results = hardening_results_for(false, false, &["memcpy"], &["memcpy", "__memcpy_chk"]);
+        assert!(
+            lines_for(&results, "missing-fortify").is_empty(),
+            "missing-fortify must not fire with an imported __*_chk: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_ssp_quiet_with_imported_stack_chk_fail() {
+        // `__stack_chk_fail` present only as an import (a NOTYPE import
+        // parses only into `undefined_functions`) still counts as
+        // presence: the binary is protector-instrumented.
+        let results =
+            hardening_results_for(false, false, &["malloc"], &["malloc", "__stack_chk_fail"]);
+        assert!(
+            lines_for(&results, "missing-stack-protector").is_empty(),
+            "missing-stack-protector must not fire with an imported __stack_chk_fail: {results:?}"
+        );
+    }
+
+    #[test]
     fn hardening_ssp_quiet_for_loader_shim() {
         // rpmcrab#447: a pure dynamic-loader shim (only dlopen/dlsym/dlclose
         // + CRT boilerplate imports) implements no logic of its own, so it
@@ -3674,6 +3729,52 @@ mod tests {
             "NOTYPE-only loader shim must not be stack-protector applicable: {:?}",
             info.undefined_functions
         );
+    }
+
+    #[test]
+    fn parser_notype_imports_feed_hardening_predicates() {
+        // (name, bind, type, shndx); STB_GLOBAL = 1, STT_NOTYPE = 0,
+        // SHN_UNDEF = 0. Every import here is NOTYPE, so none of them
+        // land in `functions`; the hardening predicates must still see
+        // them through `undefined_functions`.
+        let dynsyms: &[(&str, u8, u8, u16)] = &[
+            ("memcpy", 1, 0, 0),
+            ("__memcpy_chk", 1, 0, 0),
+            ("__stack_chk_fail", 1, 0, 0),
+        ];
+        let bytes = craft_shlib_elf(false, None, None, dynsyms);
+        let path =
+            std::env::temp_dir().join(format!("rpmcrab-notype-hardening-{}", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let info = ReadelfInfo::parse(path.to_str().unwrap(), "/usr/lib64/libprobe.so");
+        std::fs::remove_file(&path).ok();
+        assert!(info.failed.is_none(), "crafted ELF must parse");
+        assert!(
+            info.functions.is_empty(),
+            "NOTYPE imports stay out of functions: {:?}",
+            info.functions
+        );
+        assert!(
+            is_fortify_applicable(&info),
+            "NOTYPE memcpy import must be fortify-applicable: {:?}",
+            info.undefined_functions
+        );
+
+        // End to end: the imported wrappers count as presence, so neither
+        // hardening finding fires on this hardened binary.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib64/libprobe.so", "ELF 64-bit LSB shared object");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_hardening(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        for finding in ["missing-fortify", "missing-stack-protector"] {
+            assert!(
+                lines_for(&results, finding).is_empty(),
+                "{finding} must not fire for NOTYPE-import presence: {results:?}"
+            );
+        }
     }
 
     #[test]
