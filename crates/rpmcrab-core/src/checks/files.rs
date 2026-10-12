@@ -39,6 +39,22 @@ fn man_base_regex() -> &'static Regex {
         .expect("static regex"))
 }
 
+/// The binary a man page filename documents, mirroring the `binary`
+/// group of the reference's man_base_regex (`(?P<binary>.+)\.\d.*`,
+/// FilesCheck.py:207): the filename up to the last `.` followed by a
+/// digit, so `zoo.1.gz` -> `zoo`. `None` when the filename carries no
+/// section suffix.
+fn man_binary_basename(filename: &str) -> Option<&str> {
+    let bytes = filename.as_bytes();
+    let mut split = None;
+    for i in 1..bytes.len() {
+        if bytes[i] == b'.' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
+            split = Some(i);
+        }
+    }
+    split.map(|i| &filename[..i])
+}
+
 static INFO_REGEX: OnceLock<Regex> = OnceLock::new();
 fn info_regex() -> &'static Regex {
     INFO_REGEX.get_or_init(|| Regex::new(r"(/usr/share|/usr)/info/").expect("static regex"))
@@ -838,7 +854,7 @@ impl FilesCheck {
         if is_match(&self.log_re, fname) {
             st.log_files.push(fname.to_string());
         }
-        self.check_file_manpage(pkg, fname, pkgfile, out);
+        self.check_file_manpage(pkg, fname, pkgfile, st, out);
         self.check_file_infopage_compressed(pkg, fname, out);
         self.check_file_unexpanded_macro(pkg, fname, out);
         self.check_file_non_standard_uid(pkg, fname, pkgfile, out);
@@ -1245,7 +1261,14 @@ impl FilesCheck {
 }
 
 impl FilesCheck {
-    fn check_file_manpage(&self, pkg: &Pkg, fname: &str, pkgfile: &PkgFile, out: &mut Filter) {
+    fn check_file_manpage(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        st: &mut PkgState,
+        out: &mut Filter,
+    ) {
         if pkgfile::is_dir(pkgfile.mode) {
             return;
         }
@@ -1255,6 +1278,11 @@ impl FilesCheck {
         };
         let category = caps.name("category").map(|m| m.as_str()).unwrap_or("");
         let filename = caps.name("filename").map(|m| m.as_str()).unwrap_or("");
+        if is_reg(pkgfile.mode) {
+            if let Some(binary) = man_binary_basename(filename) {
+                st.man_basenames.insert(binary.to_string());
+            }
+        }
         let suffixes: Vec<&str> = filename.rsplit('.').collect();
         let mut suffixes = suffixes;
         if !self.compress_ext.is_empty() {
@@ -1729,7 +1757,9 @@ impl FilesCheck {
         // man page basenames
         if let Ok(Some(caps)) = self.man_base_re.captures(fname) {
             if let Some(m) = caps.name("filename") {
-                st.man_basenames.insert(m.as_str().to_string());
+                if let Some(binary) = man_binary_basename(m.as_str()) {
+                    st.man_basenames.insert(binary.to_string());
+                }
             }
         }
         // bindir exes: symlinks register an empty entry (man page existence
@@ -4206,6 +4236,71 @@ mod tests {
                 .iter()
                 .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("gamelink")),
             "no-manual-page-for-binary must fire for a /usr/games symlink: {results:?}"
+        );
+    }
+
+    #[test]
+    fn man_binary_basename_matches_reference_binary_group() {
+        // The `binary` group is greedy: the split is at the last `.`
+        // followed by a digit, and anything may trail the digit.
+        assert_eq!(man_binary_basename("zoo.1.gz"), Some("zoo"));
+        assert_eq!(man_binary_basename("fiz.1"), Some("fiz"));
+        assert_eq!(man_binary_basename("foo.1x"), Some("foo"));
+        assert_eq!(man_binary_basename("libfoo.3pm.gz"), Some("libfoo"));
+        assert_eq!(man_binary_basename("foo.1.2.gz"), Some("foo.1"));
+        // No section suffix: the reference regex does not match at all.
+        assert_eq!(man_binary_basename("README"), None);
+        assert_eq!(man_binary_basename("README.gz"), None);
+        assert_eq!(man_binary_basename("foo.bar1"), None);
+    }
+
+    #[test]
+    fn regular_file_man_page_suppresses_no_manual_page() {
+        // The reference registers the `binary` group of
+        // man_base_regex for regular files too
+        // (_check_file_normal_file_look_for_man, FilesCheck.py:1155), so a
+        // binary whose man page ships as a regular file must not warn.
+        // The zoo package: /usr/bin/zoo + /usr/share/man/man1/zoo.1.gz.
+        // The control binary (fiz, no man page at all) must still warn.
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/zoo", 0o100755, 61),
+            mkfile("/usr/bin/fiz", 0o100755, 62),
+            mkfile("/usr/share/man/man1/zoo.1.gz", 0o100644, 63),
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("zoo")),
+            "no-manual-page-for-binary must not fire for zoo, its man page ships as a regular file: {results:?}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("fiz")),
+            "no-manual-page-for-binary must still fire for fiz, which has no man page: {results:?}"
+        );
+    }
+
+    #[test]
+    fn symlinked_man_page_suppresses_no_manual_page() {
+        // The reference registers the `binary` group for
+        // symlinks too (_check_file_link_man, FilesCheck.py:810), so the
+        // set key is `fiz`, not the full filename `fiz.1.gz`.
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/fiz", 0o100755, 71),
+            mkfile("/usr/share/man/man1/zoo.1.gz", 0o100644, 72),
+            PkgFile {
+                linkto: "zoo.1.gz".to_string(),
+                ..mkfile("/usr/share/man/man1/fiz.1.gz", 0o120777, 73)
+            },
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("fiz")),
+            "no-manual-page-for-binary must not fire for fiz, its man page is a symlink: {results:?}"
         );
     }
 
