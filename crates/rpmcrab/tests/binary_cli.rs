@@ -432,10 +432,13 @@ fn parallel_output_matches_sequential() {
     /// drop the per-check rows, keeping the header lines and the TOTAL row.
     /// Row presence follows the (>1% & >0.1s) filter, which is timing
     /// dependent and legitimately differs between -j1 and -j4; the frame
-    /// must not.
+    /// must not. A missing section or a section not ending in TOTAL means
+    /// the report was dropped or truncated: panic, because normalizing
+    /// around the damage would pass vacuously or flake on the surviving
+    /// timing-dependent rows instead of failing deterministically.
     fn normalize_time_report(s: &mut String) {
         let Some(start) = s.find("Check time report") else {
-            return;
+            panic!("time-report section missing from output");
         };
         let mut end = start;
         for line in s[start..].split_inclusive('\n') {
@@ -447,12 +450,13 @@ fn parallel_output_matches_sequential() {
         let trailing_nl = s[..end].ends_with('\n');
         let mut lines: Vec<String> = s[start..end].lines().map(scrub_numbers).collect();
         // Two header lines, then the per-check rows, then the TOTAL row:
-        // drop only the rows. If the last line is not TOTAL (the report
-        // always ends with it), keep everything rather than guessing.
+        // drop only the rows.
         let n = lines.len();
-        if n >= 3 && lines[n - 1].trim_start().starts_with("TOTAL") {
-            lines.drain(2..n - 1);
-        }
+        assert!(
+            n >= 3 && lines[n - 1].trim_start().starts_with("TOTAL"),
+            "time report does not end with a TOTAL row: {lines:?}"
+        );
+        lines.drain(2..n - 1);
         let mut section = lines.join("\n");
         if trailing_nl {
             section.push('\n');
@@ -460,7 +464,11 @@ fn parallel_output_matches_sequential() {
         s.replace_range(start..end, &section);
     }
 
-    /// Replace every `<digits>.<digits>` token with `N.N`.
+    /// Replace every `<digits>.<digits>` token with `N.N`. The report
+    /// right-aligns numbers in fixed-width fields (`{duration:15.1}`), so
+    /// the padding before a number shrinks as its digit count grows:
+    /// absorb the padding and emit a single space instead, giving the
+    /// scrubbed token a canonical width regardless of digit count.
     fn scrub_numbers(line: &str) -> String {
         let mut out = String::with_capacity(line.len());
         let mut chars = line.chars().peekable();
@@ -475,6 +483,13 @@ fn parallel_output_matches_sequential() {
                     chars.next(); // the dot
                     while chars.peek().is_some_and(|d| d.is_ascii_digit()) {
                         chars.next();
+                    }
+                    let unpadded = out.trim_end_matches(' ').len();
+                    if unpadded < out.len() {
+                        out.truncate(unpadded);
+                        if !out.is_empty() {
+                            out.push(' ');
+                        }
                     }
                     out.push_str("N.N");
                 } else {
