@@ -1742,3 +1742,10 @@ check = "explicit-lib-dependency"
 kind = "behaviour"
 reason = "Rich `(libfoo if bar)` / `(libfoo unless bar)` dependencies yield `libfoo` as a leaf (the condition is a predicate, not a requirement, but the then-branch is real), so explicit-lib-dependency fires. The reference applies its anchored `^lib` regex to the whole `\"(libfoo if bar)\"` string, which does not match, so it stays silent. A conditional requirement is still a requirement — the divergence is intentional. Same for devel-dependency with `(foo-devel if bar)`."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "macro-in-comment"
+kind = "behaviour"
+reason = "Strictening per #442: only a macro that opens the comment (after `#` and whitespace) warns, as that looks like a commented-out invocation (`# %license COPYING`). A macro mentioned mid-sentence in prose (`# shipped via %license`) is documentation, not a mistake, and stays quiet. The frozen 2.10.0 reference warns on any occurrence."
+since = "0.3.0"

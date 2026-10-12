@@ -15,7 +15,9 @@
 //!
 //! Two upstream fixes ship as fixed behaviour: `#1600` (a trailing
 //! line-continuation `\` on `BuildArch: noarch`) and `#1601` (quote-aware
-//! `#` comment detection for `macro-in-comment`). The openSUSE-only
+//! `#` comment detection for `macro-in-comment`). Post-0.2.0 strictening
+//! `#442` narrows `macro-in-comment` further: only a macro that opens the
+//! comment warns. The openSUSE-only
 //! `obsolete-suse-version-check` / `invalid-suse-version-check` are part of
 //! the reference flavour and are implemented. Deliberate divergences are
 //! ledgered in `tests/parity/divergences.toml`.
@@ -1616,18 +1618,21 @@ impl SpecCheck {
         if comment.starts_with('!') {
             return;
         }
-        if let Ok(matches) = self
-            .macro_re
-            .find_iter(comment)
-            .collect::<Result<Vec<_>, _>>()
-        {
-            for m in matches {
-                let mt = m.as_str();
-                let percents = mt.chars().take_while(|&c| c == '%').count();
-                if percents % 2 == 1 {
-                    self.info(out, pkg, Level::Warning, "macro-in-comment", &[mt]);
-                }
-            }
+        // Strictening (#442): only a macro that opens the comment looks like
+        // a commented-out invocation (`# %license COPYING`). A macro
+        // mentioned mid-sentence (`# shipped via %license`) is prose about
+        // the macro, not a mistake, and stays quiet.
+        let body = comment.trim_start();
+        let Ok(Some(m)) = self.macro_re.find(body) else {
+            return;
+        };
+        if m.start() != 0 {
+            return;
+        }
+        let mt = m.as_str();
+        let percents = mt.chars().take_while(|&c| c == '%').count();
+        if percents % 2 == 1 {
+            self.info(out, pkg, Level::Warning, "macro-in-comment", &[mt]);
         }
     }
 
@@ -1828,8 +1833,25 @@ mod tests {
     }
 
     #[test]
-    fn macro_in_real_comment_still_warns() {
+    fn macro_mention_in_prose_comment_stays_quiet_442() {
         let results = run_mini("Name: foo\n# a comment with %{version} inside\n");
+        assert!(
+            !has(&results, "macro-in-comment"),
+            "unexpected: {results:?}"
+        );
+        // The dtrx case that motivated #442: prose about the macro, not a
+        // commented-out invocation.
+        let results =
+            run_mini("Name: foo\n# License is shipped via %license; drop the dist-info copy\n");
+        assert!(
+            !has(&results, "macro-in-comment"),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn macro_opening_comment_still_warns() {
+        let results = run_mini("Name: foo\n# %{version} was commented out\n");
         let lines = lines_for(&results, "macro-in-comment");
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("W: macro-in-comment %{version}"));
@@ -2048,7 +2070,6 @@ make install
             ("superfluous-%clean-section", "E"),
             ("specfile-warning", "W"),
             ("no-%check-section", "W"),
-            ("macro-in-comment", "W"),
         ] {
             assert!(
                 summary.contains(&(check, level)),
@@ -2067,12 +2088,13 @@ make install
             "line: {}",
             warning[0]
         );
+        // Deliberate divergence (#442, ledgered): the `%{version}` on line
+        // 20 sits mid-URL in prose, not at the comment start, so no
+        // `macro-in-comment` fires even though the reference emits one.
         let comment = lines_for(&results, "macro-in-comment");
-        assert_eq!(comment.len(), 1);
         assert!(
-            comment[0].contains(":20: W: macro-in-comment %{version}"),
-            "line: {}",
-            comment[0]
+            comment.is_empty(),
+            "unexpected macro-in-comment: {comment:?}"
         );
     }
 
