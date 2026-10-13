@@ -2909,6 +2909,11 @@ mod rich_dep_emission_tests {
         let results = out.results().to_vec();
         let hits = named(&results, "unexpanded-macro");
         assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": W: unexpanded-macro"),
+            "line: {}",
+            hits[0].1
+        );
         assert!(hits[0].1.contains("Group"), "line: {}", hits[0].1);
         assert!(hits[0].1.ends_with(" %foo"), "line: {}", hits[0].1);
     }
@@ -2922,6 +2927,11 @@ mod rich_dep_emission_tests {
         let results = run(&pkg, &rich_test_config(&[], true));
         let hits = named(&results, "no-epoch-in-obsoletes");
         assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": W: no-epoch-in-obsoletes"),
+            "line: {}",
+            hits[0].1
+        );
     }
 
     #[test]
