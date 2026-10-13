@@ -1803,3 +1803,11 @@ kind = "severity"
 reason = "Deliberate post-parity demotion (rpmcrab#484): the port reports I where the frozen 2.10.0 reference reports W. A missing manpage is upstream debt the packager usually cannot fix, so the finding is surfaced as info rather than firing as a warning. The reference's effective openSUSE config also filters the finding away entirely; the vendored config drops that filter so the info line actually prints (see DROP_LIVE_FILTERS in scripts/generate-distro-configs.py)."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/484"
+
+[[divergence]]
+case = "global"
+check = "PythonCheck"
+kind = "behaviour"
+reason = "Deliberate fix (plusky/rpmcrab#481): `python-leftover-require` is computed once per package over the union of all its dist-infos and emits at most one finding per (package, RPM require); the reference evaluates the requires against each dist-info separately, so a package shipping N dist-infos re-emits the same leftover once per dist-info (gnuhealth: ~51 genuine deps x ~19 dist-infos = 966 findings in the Factory sweep run-20261013). The port also suppresses a leftover when the dependency is proven used -- a top-level module imported by the package's shipped Python code that either matches the dependency's PEP 503 normalised name or is attributed to it by provider metadata seen in the same run (a provider package's dist-info top_level.txt / RECORD, or the top-level site-packages entries of its file list — python313-opencv ships a bare cv2.*.so and no dist-info at all) -- and never fires for a package that ships no Python code at all (metadata-only metapackages such as the python-azure-mgmt umbrella, whose Requires are their entire content; 378 sweep findings). Unprovable cases (dynamic imports, providers outside the run) keep firing, preserving the check's verify-it intent; sampled import ground truth showed 28 of 33 flagged deps (85%) are imported by the shipped code. Pinned by `leftover_union_across_dist_infos_emits_once_per_dep`, `after_checks_suppresses_only_proven_leftovers` and `metadata_only_package_has_no_code`."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/481"
