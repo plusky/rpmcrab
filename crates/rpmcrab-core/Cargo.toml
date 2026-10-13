@@ -34,7 +34,7 @@ rpm = { version = "0.30", default-features = false, features = ["payload"] }
 liblzma = "0.4"
 # mkfifo/mknod for native extraction of special files (safe wrappers;
 # this crate keeps `unsafe_code = "forbid"`).
-nix = { version = "0.30", features = ["fs"] }
+nix = { version = "0.31", features = ["fs"] }
 # `preserve_order`: the reference reads configs into Python dicts (insertion
 # order) and `lookup_check_for_file` is first-match-wins, so table order is
 # observable. Without it `toml::Table` is a BTreeMap (sorted).
