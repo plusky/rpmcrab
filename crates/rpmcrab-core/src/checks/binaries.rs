@@ -9,12 +9,13 @@
 
 #![allow(clippy::collapsible_if)]
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use fancy_regex::Regex;
 use rayon::prelude::*;
 
-use crate::check::{Check, add_info};
+use crate::check::{Check, add_info, basename};
 use crate::checks::shared::is_64bit_arch;
 use crate::config::Config;
 use crate::filter::Filter;
@@ -592,6 +593,9 @@ struct LddInfo {
     dependencies: Vec<String>,
     unused_dependencies: Vec<String>,
     undefined_symbols: Vec<String>,
+    /// Symbols this file defines in `.dynsym`; the provider side of
+    /// the DT_NEEDED closure resolution in `resolve_undefined_symbols`.
+    defined_symbols: Vec<String>,
     failed: Option<String>,
 }
 
@@ -601,6 +605,7 @@ impl LddInfo {
             dependencies: Vec::new(),
             unused_dependencies: Vec::new(),
             undefined_symbols: Vec::new(),
+            defined_symbols: Vec::new(),
             failed: None,
         };
         if !is_installed {
@@ -635,18 +640,33 @@ impl LddInfo {
             }
         }
 
-        // Undefined symbols: STN_UNDEF with global binding. Weak undefined
-        // symbols resolve to zero at load time, so ldd -r stays silent on
-        // them and the reference never reports them.
-        for sym in elf.syms.iter() {
-            if sym.st_shndx == goblin::elf::section_header::SHN_UNDEF as usize
-                && goblin::elf::sym::st_bind(sym.st_info) != goblin::elf::sym::STB_WEAK
-            {
-                if let Some(name) = elf.strtab.get_at(sym.st_name) {
-                    if !name.is_empty() {
-                        info.undefined_symbols.push(name.to_string());
-                    }
+        // Undefined and defined symbols from .dynsym, the dynamic
+        // loader's view of the file -- the reference's model is the
+        // real `ldd -r`, which resolves .dynsym references. The
+        // .symtab set is deliberately not used: its UND entries
+        // include references the loader never resolves, and stripped
+        // libraries (the norm) have no .symtab at all, so scanning it
+        // fired almost only on symtab-carrying libraries
+        // (plusky/rpmcrab#467).
+        for sym in elf.dynsyms.iter() {
+            let Some(name) = elf.dynstrtab.get_at(sym.st_name) else {
+                continue;
+            };
+            if name.is_empty() {
+                continue;
+            }
+            if sym.st_shndx == goblin::elf::section_header::SHN_UNDEF as usize {
+                // Weak undefined symbols resolve to zero at load
+                // time, so ldd -r stays silent on them and the
+                // reference never reports them. A name can repeat
+                // across version references; report it once.
+                if goblin::elf::sym::st_bind(sym.st_info) != goblin::elf::sym::STB_WEAK
+                    && !info.undefined_symbols.iter().any(|u| u == name)
+                {
+                    info.undefined_symbols.push(name.to_string());
                 }
+            } else {
+                info.defined_symbols.push(name.to_string());
             }
         }
 
@@ -655,6 +675,94 @@ impl LddInfo {
         // (The reference's ldd -u requires full symbol resolution.)
 
         info
+    }
+}
+
+/// A library shipped in the package, acting as a symbol provider
+/// for DT_NEEDED closure resolution: the dynamic symbols it defines
+/// and its own DT_NEEDED entries.
+struct SymbolProvider {
+    defined: HashSet<String>,
+    needs: Vec<String>,
+}
+
+/// Resolve undefined symbols against the package's own libraries,
+/// modelling `ldd -r` restricted to the checked package: a file's
+/// undefined symbol is satisfied when a library in its DT_NEEDED
+/// closure -- the file itself included, as in the loader's lookup
+/// order -- defines it. Providers are the libraries shipped in the
+/// same package, the widest set the per-package data model can see;
+/// a DT_NEEDED library absent from the package satisfies nothing, so
+/// symbols only it could define keep firing (no silent allowlisting).
+fn resolve_undefined_symbols(analyses: &mut [Option<ElfAnalysis>], files: &[PkgFile]) {
+    // Index providers by every name a DT_NEEDED entry can carry: the
+    // library's SONAME and its file basename. The two are equal for
+    // most libraries; when a package file is a symlink, the real file
+    // behind it carries the SONAME. Duplicate providers under one key
+    // (e.g. /lib64 and /usr/lib64 copies of one library) merge.
+    let mut providers: HashMap<String, SymbolProvider> = HashMap::new();
+    for (analysis, pkgfile) in analyses.iter().zip(files.iter()) {
+        let Some(analysis) = analysis else { continue };
+        let Some(ldd) = &analysis.ldd else { continue };
+        if ldd.failed.is_some() {
+            continue;
+        }
+        let mut keys = vec![basename(&pkgfile.name).to_string()];
+        if let Some(soname) = &analysis.info.soname {
+            if !keys.contains(soname) {
+                keys.push(soname.clone());
+            }
+        }
+        for key in keys {
+            let entry = providers.entry(key).or_insert_with(|| SymbolProvider {
+                defined: HashSet::new(),
+                needs: Vec::new(),
+            });
+            entry.defined.extend(ldd.defined_symbols.iter().cloned());
+            for need in &ldd.dependencies {
+                if !entry.needs.contains(need) {
+                    entry.needs.push(need.clone());
+                }
+            }
+        }
+    }
+    if providers.is_empty() {
+        return;
+    }
+
+    // Walk each file's DT_NEEDED closure. Most libraries in a package
+    // share the same direct dependencies, so memoise the provided
+    // set on the direct-dependency list.
+    let mut closures: HashMap<Vec<String>, std::rc::Rc<HashSet<String>>> = HashMap::new();
+    for analysis in analyses.iter_mut() {
+        let Some(analysis) = analysis else { continue };
+        let Some(ldd) = &mut analysis.ldd else {
+            continue;
+        };
+        if ldd.failed.is_some() || ldd.undefined_symbols.is_empty() {
+            continue;
+        }
+        let direct = ldd.dependencies.clone();
+        let provided = closures
+            .entry(direct.clone())
+            .or_insert_with(|| {
+                let mut provided: HashSet<String> = HashSet::new();
+                let mut visited: HashSet<&str> = HashSet::new();
+                let mut stack: Vec<&str> = direct.iter().map(String::as_str).collect();
+                while let Some(soname) = stack.pop() {
+                    if !visited.insert(soname) {
+                        continue;
+                    }
+                    if let Some(provider) = providers.get(soname) {
+                        provided.extend(provider.defined.iter().cloned());
+                        stack.extend(provider.needs.iter().map(String::as_str));
+                    }
+                }
+                std::rc::Rc::new(provided)
+            })
+            .clone();
+        ldd.undefined_symbols
+            .retain(|sym| !provided.contains(sym) && !ldd.defined_symbols.contains(sym));
     }
 }
 
@@ -2276,13 +2384,17 @@ impl Check for BinariesCheck {
         // Finding emission stays in the sequential loop below, in file
         // order, so the output bytes are unchanged.
         let is_noarch = pkg.arch == "noarch";
-        let analyses: Vec<Option<ElfAnalysis>> = pkg
+        let mut analyses: Vec<Option<ElfAnalysis>> = pkg
             .files
             .par_iter()
             .map(|pkgfile| {
                 ElfAnalysis::wants_analysis(pkgfile, is_noarch).then(|| ElfAnalysis::parse(pkgfile))
             })
             .collect();
+        // Model `ldd -r`'s provider resolution within the package
+        // before emission: subtract the undefined symbols each file's
+        // DT_NEEDED closure defines (plusky/rpmcrab#467).
+        resolve_undefined_symbols(&mut analyses, &pkg.files);
 
         for (idx, pkgfile) in pkg.files.iter().enumerate() {
             let fname: &str = &pkgfile.name;
@@ -4661,6 +4773,7 @@ description = "explicit priority string bypasses the system crypto policy"
             dependencies: Vec::new(),
             unused_dependencies: Vec::new(),
             undefined_symbols: Vec::new(),
+            defined_symbols: Vec::new(),
             failed: None,
         }
     }
@@ -5808,14 +5921,187 @@ description = "explicit priority string bypasses the system crypto policy"
 
     #[test]
     fn ldd_weak_undefined_symbols_are_silent() {
+        // The undefined set comes from .dynsym, the dynamic loader's
+        // view: a global undefined symbol is reported exactly once (a
+        // name can repeat across version references), while a weak
+        // undefined symbol resolves to zero at load time and stays
+        // silent, like the reference's `ldd -r`.
         let dir = tempfile::TempDir::new().expect("tmpdir");
         let elf_path = dir.path().join("libweak.so");
-        std::fs::write(&elf_path, elf_with_undef_symbols()).expect("write elf");
+        let elf = craft_shlib_elf(
+            false,
+            None,
+            Some("libweak.so"),
+            &[
+                ("global_undef", 1, 0, 0),
+                ("global_undef", 1, 0, 0),
+                ("weak_undef", 2, 0, 0),
+                ("exported_sym", 1, 0, 1),
+            ],
+        );
+        std::fs::write(&elf_path, elf).expect("write elf");
         let ldd = LddInfo::parse(&elf_path.to_string_lossy(), true);
         assert_eq!(
             ldd.undefined_symbols,
             ["global_undef"],
             "global undefined reported exactly once; weak undefined stays silent"
+        );
+        assert_eq!(
+            ldd.defined_symbols,
+            ["exported_sym"],
+            "defined dynamic symbols are collected for provider resolution"
+        );
+    }
+
+    #[test]
+    fn ldd_undefined_symbols_ignore_symtab_only_entries() {
+        // A .symtab-only undefined entry is not a dynamic reference:
+        // the loader never resolves it and `ldd -r` stays silent. The
+        // bogus undefined-non-weak-symbol hits in plusky/rpmcrab#467
+        // came from scanning .symtab entries raw.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let elf_path = dir.path().join("libsymtab.so");
+        std::fs::write(&elf_path, elf_with_undef_symbols()).expect("write elf");
+        let ldd = LddInfo::parse(&elf_path.to_string_lossy(), true);
+        assert!(
+            ldd.undefined_symbols.is_empty(),
+            "symtab-only undefined entries must not be reported: {:?}",
+            ldd.undefined_symbols
+        );
+    }
+
+    /// Write a crafted shlib into `dir` and return its `PkgFile`,
+    /// named `/usr/lib64/<base>` inside the package.
+    fn shlib_pkgfile(dir: &std::path::Path, base: &str, elf: &[u8]) -> PkgFile {
+        let path = dir.join(base);
+        std::fs::write(&path, elf).expect("write shlib");
+        PkgFile {
+            name: format!("/usr/lib64/{base}"),
+            path: path.to_string_lossy().into_owned(),
+            magic: "ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, not stripped"
+                .to_string(),
+            mode: 0o100755,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn undefined_symbol_provided_by_needed_library_is_quiet() {
+        // plusky/rpmcrab#467: the symbol is undefined in the consumer
+        // but defined by a library in its DT_NEEDED closure shipped in
+        // the same package (the glibc shape: libBrokenLocale NEEDs
+        // libc, which defines the reported symbols), so `ldd -r`
+        // stays silent. A weak undefined symbol in the consumer also
+        // stays silent.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let provider = craft_shlib_elf(
+            false,
+            None,
+            Some("libfoo.so.1"),
+            &[("provided_sym", 1, 0, 1)],
+        );
+        let consumer = craft_shlib_elf(
+            false,
+            Some("libfoo.so.1"),
+            Some("libbar.so.1"),
+            &[("provided_sym", 1, 0, 0), ("weak_sym", 2, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![
+                shlib_pkgfile(dir.path(), "libfoo.so.1", &provider),
+                shlib_pkgfile(dir.path(), "libbar.so.1", &consumer),
+            ],
+        );
+        let results = driver_results(&pkg, &test_config());
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "provider-resolved and weak symbols must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn undefined_symbol_provided_transitively_is_quiet() {
+        // The closure is transitive, like the loader's: the consumer
+        // NEEDs libfoo, libfoo NEEDs libbaz, and libbaz defines the
+        // symbol.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let baz = craft_shlib_elf(false, None, Some("libbaz.so.1"), &[("deep_sym", 1, 0, 1)]);
+        let foo = craft_shlib_elf(false, Some("libbaz.so.1"), Some("libfoo.so.1"), &[]);
+        let consumer = craft_shlib_elf(
+            false,
+            Some("libfoo.so.1"),
+            Some("libbar.so.1"),
+            &[("deep_sym", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![
+                shlib_pkgfile(dir.path(), "libbaz.so.1", &baz),
+                shlib_pkgfile(dir.path(), "libfoo.so.1", &foo),
+                shlib_pkgfile(dir.path(), "libbar.so.1", &consumer),
+            ],
+        );
+        let results = driver_results(&pkg, &test_config());
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "transitively provided symbols must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn undefined_symbol_defined_by_nobody_still_fires() {
+        // The true-positive shape the check exists for: a symbol no
+        // library in the package defines -- whether the DT_NEEDED
+        // provider is present but does not define it, or the provider
+        // is absent from the package entirely.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let provider = craft_shlib_elf(false, None, Some("libfoo.so.1"), &[("other_sym", 1, 0, 1)]);
+        let consumer = craft_shlib_elf(
+            false,
+            Some("libfoo.so.1"),
+            Some("libbar.so.1"),
+            &[("missing_sym", 1, 0, 0)],
+        );
+        let orphan = craft_shlib_elf(
+            false,
+            Some("libabsent.so.9"),
+            Some("libqux.so.1"),
+            &[("orphan_sym", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![
+                shlib_pkgfile(dir.path(), "libfoo.so.1", &provider),
+                shlib_pkgfile(dir.path(), "libbar.so.1", &consumer),
+                shlib_pkgfile(dir.path(), "libqux.so.1", &orphan),
+            ],
+        );
+        let results = driver_results(&pkg, &test_config());
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(
+            lines.len(),
+            2,
+            "both unresolvable symbols fire: {results:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("libbar.so.1") && l.contains("missing_sym")),
+            "consumer finding names file and symbol: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("libqux.so.1") && l.contains("orphan_sym")),
+            "orphan finding names file and symbol: {lines:?}"
+        );
+        assert!(
+            lines.iter().all(|l| l.contains(" E: ")),
+            "Error level: {lines:?}"
         );
     }
 

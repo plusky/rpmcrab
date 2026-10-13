@@ -237,7 +237,7 @@ since = "0.1.0"
 case = "global"
 check = "binaries-dependency-scope"
 kind = "behaviour"
-reason = "The reference runs its ldd-based dependency analysis only for installed packages; rpmcrab runs the DT_NEEDED-based analysis for extracted files too. This is also what makes unused-direct-shlib-dependency impossible to replicate (no ldd -u on extracted files). Within that analysis, undefined-non-weak-symbol fires for shared libraries only: an executable's UND entries resolve at load time (the reference's `ldd -r` stays silent there), and scanning them raw produced hundreds of bogus hits."
+reason = "The reference runs its ldd-based dependency analysis only for installed packages; rpmcrab runs the DT_NEEDED-based analysis for extracted files too. This is also what makes unused-direct-shlib-dependency impossible to replicate (no ldd -u on extracted files). Within that analysis, undefined-non-weak-symbol fires for shared libraries only: an executable's UND entries resolve at load time (the reference's `ldd -r` stays silent there), and scanning them raw produced hundreds of bogus hits. Undefined symbols are taken from .dynsym and resolved against the DT_NEEDED closure formed by the libraries shipped in the same package (the `ldd -r` model restricted to the checked package, plusky/rpmcrab#467); a symbol whose only providers live in other packages keeps firing, where the reference, resolving against the installed system, would stay silent."
 since = "0.1.0"
 
 [[divergence]]
