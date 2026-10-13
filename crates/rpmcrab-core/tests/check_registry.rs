@@ -210,6 +210,28 @@ fn exactly_four_warning_only_checks_in_registry() {
     );
 }
 
+/// A check whose `name()` disagrees with its `check::build` key corrupts every
+/// finding line it emits (`{check}` is the frozen output contract), and no
+/// emission test can see it: unit tests construct the check directly, so a
+/// renamed check keeps passing them. The mutants baseline caught two dozen
+/// `name -> "xyzzy"` survivors across the tree; this closes the class wholesale.
+#[test]
+fn every_built_check_reports_its_registry_name() {
+    // Bundled defaults: some checks (e.g. AtomicUpdateCheck) require config
+    // keys that `Config::default()` does not provide.
+    let config = config::load_bundled();
+    for name in names_built_by_registry() {
+        let built = check::build(&name, &config)
+            .unwrap_or_else(|| panic!("`check::build` cannot construct `{name}`"));
+        assert_eq!(
+            built.name(),
+            name,
+            "`{name}` reports {:?}: its finding lines would carry the wrong check",
+            built.name()
+        );
+    }
+}
+
 /// The reverse direction (issue #85): a name in the default config's
 /// `Checks = [...]` that `check::build` cannot construct is silently
 /// dropped by `load_with`, so the run advertises checks that never execute.
