@@ -955,6 +955,7 @@ def test_stale_check_catches_name_keyed_entry():
         "LSBCheck",
         "devel-package-with-non-devel-group",
         "executable-in-library-package",
+        "filelist-forbidden-xinetd-configuration",
         "hardcoded-path-in-buildroot-tag",
         "hardcoded-prefix-tag",
         "inaccessible-filename",
