@@ -952,6 +952,7 @@ def test_stale_check_catches_name_keyed_entry():
     assert names == {
         "%ifarch-applied-patch",
         "InitScriptCheck",
+        "LSBCheck",
         "devel-package-with-non-devel-group",
         "executable-in-library-package",
         "hardcoded-path-in-buildroot-tag",
