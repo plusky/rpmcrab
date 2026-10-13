@@ -45,6 +45,11 @@ Checks = [
     "SUIDPermissionsCheck",
     "WorldWritableCheck",
     "AtomicUpdateCheck",
+    # Deliberate rpmcrab addition (ledgered in tests/parity/divergences.toml):
+    # the reference lists XinetdDepCheck in no shipped config, so it never
+    # runs there; the check is implemented and its deprecation message is
+    # the point, so it runs here.
+    "XinetdDepCheck",
 ]
 # List of error titles that should be filtered
 FilterErrorTitles = []

@@ -170,15 +170,18 @@ fn checks_in_default_config() -> Vec<String> {
 /// A check that `check::build` can construct but the default config never
 /// selects can never run — the same class of defect as #49 (issue #66).
 /// The documented exceptions are modules the reference ships but lists in no
-/// shipped config's `Checks` (`XinetdDepCheck`),
-/// plus `PAMModulesCheck`, which the reference lists only in the Fedora
-/// flavour config (not yet ported); the port mirrors all of that. Every other
+/// shipped config's `Checks`: `PAMModulesCheck` only, which the reference
+/// lists only in the Fedora flavour config (not yet ported); the port
+/// mirrors that. `XinetdDepCheck` is not an exception: the reference lists
+/// it nowhere either, but rpmcrab enables it deliberately (ledgered in
+/// tests/parity/divergences.toml). `LSBCheck` is not an exception either:
+/// the check is deleted, so it is not constructible. Every other
 /// constructible check must appear in `Checks = [...]` (issue #66 closed).
 #[test]
 fn every_constructible_check_is_listed_in_checks() {
     let listed = checks_in_default_config();
     for name in names_built_by_registry() {
-        if name == "XinetdDepCheck" || name == "PAMModulesCheck" {
+        if name == "PAMModulesCheck" {
             continue;
         }
         assert!(
