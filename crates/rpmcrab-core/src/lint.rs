@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use crate::check::{Check, basename};
 use crate::color::Color;
 use crate::config::Config;
-use crate::filter::Filter;
+use crate::filter::{Filter, FilterError};
 use crate::finding::Finding;
 use crate::level::Level;
 use crate::report;
@@ -88,15 +88,15 @@ impl Lint {
     /// `Filter(self.config)`), so `config` must already have rpmlintrc applied.
     ///
     /// # Errors
-    /// Returns the `fancy-regex` error if any `Filters` pattern does not
-    /// compile — rpmlint uses a bare `re.compile(f)`, which raises on a bad
-    /// pattern at Filter construction.
+    /// Returns a [`FilterError`] if any `Filters` pattern does not compile
+    /// or a `[Scoring]` value is invalid — rpmlint uses a bare
+    /// `re.compile(f)`, which raises on a bad pattern at Filter construction.
     pub fn new(
         config: Config,
         checks: Vec<Box<dyn Check>>,
         color: Color,
         width: usize,
-    ) -> Result<Self, fancy_regex::Error> {
+    ) -> Result<Self, FilterError> {
         let filter = Filter::new(&config, color)?;
         let audit_rpmlintrc = true;
         Ok(Self {

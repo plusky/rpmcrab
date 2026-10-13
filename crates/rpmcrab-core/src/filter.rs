@@ -6,6 +6,7 @@
 //! code, not merely hidden from stdout.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 
 use fancy_regex::Regex;
 
@@ -19,7 +20,7 @@ use crate::level::Level;
 /// sorted result block.
 pub struct Filter {
     strict: bool,
-    scoring: HashMap<String, toml::Value>,
+    scoring: HashMap<String, i64>,
     severity_overrides: HashMap<String, Level>,
     filter_titles: HashSet<String>,
     blocked_filters: HashSet<String>,
@@ -49,19 +50,57 @@ pub struct Filter {
     printed_infos: u64,
 }
 
-/// Coerce a `[Scoring]` value exactly as Python `int()` does at emit time
-/// (`filter.py:101`): integers pass through, strings are parsed (garbage
-/// crashes, as `int('abc')` raises `ValueError`), floats truncate, booleans
-/// become 1/0. rpmlint crashes on a bad value, so this panics to match.
-fn coerce_scoring(v: &toml::Value) -> i64 {
+/// Why a [`Filter`] could not be built from the configuration.
+#[derive(Debug)]
+pub enum FilterError {
+    /// A `Filters` pattern does not compile.
+    Pattern(fancy_regex::Error),
+    /// A `[Scoring]` value cannot be coerced to an integer badness.
+    Scoring { check: String, value: toml::Value },
+}
+
+impl fmt::Display for FilterError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FilterError::Pattern(e) => write!(f, "{e}"),
+            FilterError::Scoring { check, value } => write!(
+                f,
+                "invalid Scoring value {value} for {check:?} (want an integer badness)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FilterError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            FilterError::Pattern(e) => Some(e),
+            FilterError::Scoring { .. } => None,
+        }
+    }
+}
+
+impl From<fancy_regex::Error> for FilterError {
+    fn from(e: fancy_regex::Error) -> Self {
+        FilterError::Pattern(e)
+    }
+}
+
+/// Coerce a `[Scoring]` value exactly as Python `int()` does (`filter.py:101`):
+/// integers pass through, strings are parsed, floats truncate, booleans
+/// become 1/0. A value `int()` would reject (a garbage string, an array, a
+/// table) is a configuration error instead of a crash.
+fn coerce_scoring(check: &str, v: &toml::Value) -> Result<i64, FilterError> {
+    let invalid = || FilterError::Scoring {
+        check: check.to_string(),
+        value: v.clone(),
+    };
     match v {
-        toml::Value::Integer(i) => *i,
-        toml::Value::String(s) => s.trim().parse::<i64>().unwrap_or_else(|_| {
-            panic!("invalid Scoring value {s:?} (int() would raise ValueError)")
-        }),
-        toml::Value::Float(f) => *f as i64,
-        toml::Value::Boolean(b) => i64::from(*b),
-        other => panic!("invalid Scoring value {other:?} (int() would raise ValueError)"),
+        toml::Value::Integer(i) => Ok(*i),
+        toml::Value::String(s) => s.trim().parse::<i64>().map_err(|_| invalid()),
+        toml::Value::Float(f) => Ok(*f as i64),
+        toml::Value::Boolean(b) => Ok(i64::from(*b)),
+        _ => Err(invalid()),
     }
 }
 
@@ -74,14 +113,22 @@ impl Filter {
     /// try/except (`filter.py:37`), so a bad `Filters` pattern raises `re.error`
     /// at Filter construction. This returns `Err` to match — it does not
     /// silently drop the pattern.
-    pub fn new(config: &Config, color: Color) -> Result<Self, fancy_regex::Error> {
+    ///
+    /// `[Scoring]` values are coerced and validated here too, so a value
+    /// Python `int()` would reject is a configuration error at load rather
+    /// than a crash when the scored finding is emitted.
+    pub fn new(config: &Config, color: Color) -> Result<Self, FilterError> {
         let mut filters = Vec::with_capacity(config.filters.len());
         for f in &config.filters {
             filters.push(Regex::new(f)?);
         }
+        let mut scoring = HashMap::with_capacity(config.scoring.len());
+        for (check, raw) in &config.scoring {
+            scoring.insert(check.clone(), coerce_scoring(check, raw)?);
+        }
         Ok(Self {
             strict: config.strict,
-            scoring: config.scoring.clone(),
+            scoring,
             severity_overrides: config.severity_overrides.clone(),
             filter_titles: config.filter_titles.iter().cloned().collect(),
             blocked_filters: config.blocked_filters.iter().cloned().collect(),
@@ -124,11 +171,11 @@ impl Filter {
         );
 
         // Scoring remaps the level in both directions: to E when badness > 0,
-        // and E -> W when the configured badness is 0. The value is coerced at
-        // emit time with Python `int()` semantics (`filter.py:124-131`).
+        // and E -> W when the configured badness is 0. The value was coerced
+        // with Python `int()` semantics at construction; `filter.py:124-131`
+        // applies the configured badness per emitted finding.
         let mut badness = None;
-        if let Some(raw) = self.scoring.get(&finding.check) {
-            let b = coerce_scoring(raw);
+        if let Some(&b) = self.scoring.get(&finding.check) {
             badness = Some(b);
             if b > 0 {
                 finding.level = Level::Error;
@@ -406,6 +453,67 @@ mod tests {
         f.add_info(finding("some-check", Level::Warning, 0));
         assert_eq!(f.printed(Level::Error), 1);
         assert_eq!(f.score, 50);
+    }
+
+    #[test]
+    fn scoring_garbage_string_is_a_config_error_not_a_panic() {
+        let mut c = cfg();
+        c.scoring.insert(
+            "some-check".to_string(),
+            toml::Value::String("abc".to_string()),
+        );
+        let err = match Filter::new(&c, Color::for_tty(false)) {
+            Ok(_) => panic!("garbage Scoring must be rejected at construction"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(&err, FilterError::Scoring { check, .. } if check == "some-check"),
+            "unexpected error: {err:?}"
+        );
+        // The rendered message names the offending value and its check.
+        let msg = err.to_string();
+        assert!(msg.contains("\"abc\""), "message lacks the value: {msg}");
+        assert!(msg.contains("some-check"), "message lacks the check: {msg}");
+    }
+
+    #[test]
+    fn scoring_wrong_type_is_a_config_error() {
+        let mut c = cfg();
+        c.scoring.insert(
+            "some-check".to_string(),
+            toml::Value::Array(vec![toml::Value::Integer(1)]),
+        );
+        assert!(matches!(
+            Filter::new(&c, Color::for_tty(false)),
+            Err(FilterError::Scoring { .. })
+        ));
+    }
+
+    #[test]
+    fn scoring_numeric_string_from_rpmlintrc_still_applies() {
+        // rpmlintrc `setBadness` lands in Scoring as a string.
+        let mut c = cfg();
+        c.scoring.insert(
+            "some-check".to_string(),
+            toml::Value::String("50".to_string()),
+        );
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        f.add_info(finding("some-check", Level::Warning, 0));
+        assert_eq!(f.printed(Level::Error), 1);
+        assert_eq!(f.score, 50);
+    }
+
+    #[test]
+    fn scoring_float_and_bool_keep_int_semantics() {
+        let mut c = cfg();
+        c.scoring
+            .insert("float-check".to_string(), toml::Value::Float(2.9));
+        c.scoring
+            .insert("bool-check".to_string(), toml::Value::Boolean(true));
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        f.add_info(finding("float-check", Level::Warning, 0));
+        f.add_info(finding("bool-check", Level::Warning, 0));
+        assert_eq!(f.score, 2 + 1);
     }
 
     #[test]
