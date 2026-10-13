@@ -36,6 +36,7 @@ use crate::pkg::pkgfile::is_symlink;
 /// way through librpm instead of a hand-written table.
 fn expand_isa() -> String {
     let _ = crate::pkg::init();
+    let _macro_guard = crate::pkg::global_macro_lock();
     librpm::macro_context::MacroContext::default()
         .expand("%{_isa}")
         .unwrap_or_default()
@@ -361,9 +362,15 @@ mod tests {
         // Honest integration assertion: the check must use rpm's own
         // `%{_isa}` expansion, not a hand-written table.
         let _ = crate::pkg::init();
-        let expected = librpm::macro_context::MacroContext::default()
-            .expand("%{_isa}")
-            .unwrap_or_default();
+        // Scoped to the expansion only: `LibraryDependencyCheck::new`
+        // below expands the same macro under the same lock, which is
+        // not re-entrant.
+        let expected = {
+            let _macro_guard = crate::pkg::global_macro_lock();
+            librpm::macro_context::MacroContext::default()
+                .expand("%{_isa}")
+                .unwrap_or_default()
+        };
         let config = Config::default();
         let check = LibraryDependencyCheck::new(&config);
         assert_eq!(check.isa, expected);

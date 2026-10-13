@@ -60,6 +60,7 @@ impl BuildRootAndDateCheck {
         // `rpm.expandMacro('%{?buildroot}')`, empty on rpm >= 4.20 — then the
         // reference falls back to the literal macro-laden path template.
         let _ = crate::pkg::init();
+        let _macro_guard = crate::pkg::global_macro_lock();
         let macros = librpm::macro_context::MacroContext::default();
         let buildroot = macros.expand("%{?buildroot}").unwrap_or_default();
         let buildroot = if buildroot.is_empty() {

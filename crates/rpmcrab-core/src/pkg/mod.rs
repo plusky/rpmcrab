@@ -18,7 +18,7 @@ pub mod tags;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
 use librpm::verify::VerifyOptions;
@@ -129,6 +129,26 @@ pub fn init() -> Result<(), PkgError> {
         Ok(()) => Ok(()),
         Err(e) => Err(PkgError::Init(e.clone())),
     }
+}
+
+/// Serialise access to librpm's process-global macro context and the
+/// spec parser state built on it.
+///
+/// The context behind `MacroContext::default()` is process-global state,
+/// and the bindings serialise `Spec::parse` itself but not the macro
+/// define/pop around a parse, nor the parsed spec's accessors and free.
+/// A parse sequence -- define, parse, read the sources, drop the parsed
+/// spec -- is therefore only sound when no other thread runs its own
+/// sequence or a macro expansion in between. Every caller that touches
+/// the global context or a parsed spec holds the returned guard for the
+/// whole sequence, which also keeps the lock ordering against librpm's
+/// internal parse lock one-directional: this lock is always the outer
+/// one.
+pub fn global_macro_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 /// Where a [`Pkg`]'s bytes come from. The reference distinguishes exactly these
