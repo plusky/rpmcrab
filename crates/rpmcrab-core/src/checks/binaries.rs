@@ -725,6 +725,11 @@ impl ElfAnalysis {
     /// `noarch` gate (passed in). Erring on the side of parsing is safe --
     /// extra parses only cost time, never correctness.
     fn wants_analysis(pkgfile: &PkgFile, is_noarch: bool) -> bool {
+        // Ghost files are in the header but not in the payload: there
+        // is nothing on disk to parse.
+        if pkgfile.is_ghost() {
+            return false;
+        }
         let magic = &pkgfile.magic;
         let is_ebpf = magic.contains("eBPF");
         let is_elf = elf_regex().is_match(magic).unwrap_or(false) && !is_ebpf;
@@ -2304,10 +2309,13 @@ impl Check for BinariesCheck {
             let is_ebpf = pkgfile.magic.contains("eBPF");
             let is_elf = elf_regex().is_match(&pkgfile.magic).unwrap_or(false) && !is_ebpf;
 
-            if !(is_elf
-                || pkgfile.magic.contains("current ar archive")
-                || is_ocaml_native
-                || is_lua_bytecode)
+            // Ghost files are in the header but not in the payload:
+            // there is nothing on disk for the ELF checks to read.
+            if pkgfile.is_ghost()
+                || !(is_elf
+                    || pkgfile.magic.contains("current ar archive")
+                    || is_ocaml_native
+                    || is_lua_bytecode)
             {
                 continue;
             }
@@ -5467,6 +5475,69 @@ description = "explicit priority string bypasses the system crypto policy"
         );
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn ghost_elf_file_is_not_analysed() {
+        // #466: a %ghost file is in the header (with an ELF FILECLASS)
+        // but not in the payload, so nothing was extracted to its path.
+        // The header magic used to pass the ELF gates and the failed
+        // payload read surfaced as E: readelf-failed.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let real_path = dir.path().join("libreal.so");
+        std::fs::write(&real_path, craft_shlib_elf(false, None, None, &[])).expect("write so");
+
+        let ghost_path = dir.path().join("vmlinux"); // never written: no payload
+        let mut ghost = syn_file(
+            "/usr/lib/modules/7.2.9-1-default/vmlinux",
+            "ELF 64-bit LSB executable, x86-64, dynamically linked",
+        );
+        ghost.path = ghost_path.to_string_lossy().into_owned();
+        ghost.flags = crate::pkg::pkgfile::RPMFILE_GHOST;
+        ghost.mode = 0o100755;
+
+        let mut real = syn_file("/usr/lib64/libreal.so", "ELF 64-bit LSB shared object");
+        real.path = real_path.to_string_lossy().into_owned();
+
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("kernel-default-base", "x86_64", vec![ghost.clone(), real]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        assert_lacks(&results, "readelf-failed");
+        assert!(
+            !results.iter().any(|(_, line)| line.contains("vmlinux")),
+            "ghost must produce no findings at all: {results:?}"
+        );
+
+        // The pre-pass must not even attempt to parse a ghost.
+        assert!(!ElfAnalysis::wants_analysis(&ghost, false));
+    }
+
+    #[test]
+    fn missing_payload_of_non_ghost_elf_still_fails() {
+        // Control for the ghost skip: a regular file whose payload is
+        // missing is a genuine extraction failure and keeps its
+        // readelf-failed error.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let missing_path = dir.path().join("gone"); // never written
+        let mut file = syn_file(
+            "/usr/bin/gone",
+            "ELF 64-bit LSB executable, x86-64, dynamically linked",
+        );
+        file.path = missing_path.to_string_lossy().into_owned();
+        file.mode = 0o100755;
+
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![file]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "readelf-failed");
+        assert_eq!(lines.len(), 1, "exactly one readelf-failed: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
     }
 
     /// Build a GNU-style ar archive with a `/` symbol-index member,
