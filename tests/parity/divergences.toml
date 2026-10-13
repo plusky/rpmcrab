@@ -1794,3 +1794,11 @@ kind = "behaviour"
 reason = "Deliberate fix (plusky/rpmcrab#480): the port fires `file-not-in-%lang` for an untagged `.mo` only under the standard locale tree, `/usr/share/locale` -- the tree the reference's own `lc_messages_regex` is anchored in and the only one `%find_lang` covers. The reference fires on every untagged `.mo` anywhere (I18NCheck.py: `(f.endswith('.mo') or subdir)` with no path condition). In the 2026-10-13 Factory sweep only 333 of 10,084 hits were under `/usr/share/locale`; the rest were app-private trees (LibreOffice, Python site-packages, kvirc, ruby gems) whose translations the applications load themselves, where `%lang` marks would let install-time language filtering strip product data. The LC_MESSAGES/man probe trigger is unchanged (its regexes are already tree-anchored) and `%lang`-tagged files stay quiet everywhere. Pinned by `mo_file_in_private_tree_is_quiet` and `mo_file_in_locale_tree_outside_lc_messages_still_warns`."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/480"
+
+[[divergence]]
+case = "global"
+check = "no-manual-page-for-binary"
+kind = "severity"
+reason = "Deliberate post-parity demotion (rpmcrab#484): the port reports I where the frozen 2.10.0 reference reports W. A missing manpage is upstream debt the packager usually cannot fix, so the finding is surfaced as info rather than firing as a warning. The reference's effective openSUSE config also filters the finding away entirely; the vendored config drops that filter so the info line actually prints (see DROP_LIVE_FILTERS in scripts/generate-distro-configs.py)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/484"

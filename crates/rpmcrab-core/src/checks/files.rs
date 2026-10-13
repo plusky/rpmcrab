@@ -832,13 +832,7 @@ impl FilesCheck {
                 );
             }
             if !st.man_basenames.contains(exe) {
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "no-manual-page-for-binary",
-                    &[exe],
-                );
+                add_info(out, Level::Info, pkg, "no-manual-page-for-binary", &[exe]);
             }
         }
     }
@@ -4553,6 +4547,32 @@ mod tests {
                 .iter()
                 .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("fiz")),
             "no-manual-page-for-binary must still fire for fiz, which has no man page: {results:?}"
+        );
+    }
+
+    #[test]
+    fn no_manual_page_for_binary_is_info_level() {
+        // rpmcrab#484: a missing manpage is upstream debt, so the finding
+        // is demoted to Info. The level comes from the structured results,
+        // not from re-parsing the rendered line.
+        let (pkg, _dir) = pkg_with_files(vec![mkfile("/usr/bin/fiz", 0o100755, 62)]);
+        let config = test_config();
+        let mut check = FilesCheck::new(&config);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(&pkg, &config, &mut out);
+        let hits: Vec<(&str, Level)> = out
+            .results()
+            .iter()
+            .zip(out.result_levels())
+            .filter(|((n, _), _)| n.as_str() == "no-manual-page-for-binary")
+            .map(|((_, line), level)| (line.as_str(), *level))
+            .collect();
+        assert_eq!(hits.len(), 1, "exactly one finding: {hits:?}");
+        assert_eq!(hits[0].1, Level::Info, "demoted level: {hits:?}");
+        assert!(
+            hits[0].0.contains(": I: no-manual-page-for-binary"),
+            "rendered at I: {}",
+            hits[0].0
         );
     }
 
