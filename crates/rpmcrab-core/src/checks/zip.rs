@@ -222,8 +222,12 @@ impl Check for ZipCheck {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::Path;
     use zip::unstable::write::FileOptionsExt;
     use zip::write::SimpleFileOptions;
+
+    use crate::color::Color;
+    use crate::pkg::pkgfile::PkgFile;
 
     /// Build a zip in memory: `(name, data, method)` entries, optional
     /// `META-INF/MANIFEST.MF` content.
@@ -451,11 +455,6 @@ mod tests {
     fn check_binary_entry_point_reports_bad_crc() {
         // Kills the neutered-`check_binary` mutant: the glue (name filter +
         // `path.is_file()` + iteration) must run for the finding to reach `Filter`.
-        use std::path::Path;
-
-        use crate::color::Color;
-        use crate::pkg::pkgfile::PkgFile;
-
         let dir = tempfile::tempdir().unwrap();
         let mut bytes = build_zip(
             &[("a.txt", b"hello world", zip::CompressionMethod::Stored)],

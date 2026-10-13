@@ -57,6 +57,9 @@ impl Check for ConfigFilesCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    use crate::color::Color;
 
     #[test]
     fn etc_noreplace_is_quiet() {
@@ -97,10 +100,6 @@ mod tests {
         // Kills the neutered-`check_binary` mutant: the glue over
         // `pkg.config_files`/`pkg.noreplace_files` must run for the findings
         // to reach the `Filter`.
-        use std::path::Path;
-
-        use crate::color::Color;
-
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
         let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
