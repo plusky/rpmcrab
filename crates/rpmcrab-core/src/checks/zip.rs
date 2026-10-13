@@ -56,7 +56,12 @@ enum CrcOutcome {
 /// at read); like the reference's `RuntimeError` path it aborts the file
 /// instead of naming an entry.
 fn first_bad_crc(archive: &mut ZipArchive<File>) -> CrcOutcome {
-    let names: Vec<String> = archive.file_names().map(str::to_string).collect();
+    // zip 9 yields entry names as results: a name that fails to
+    // decode cannot be addressed by name, so it is skipped here.
+    let names: Vec<String> = archive
+        .file_names()
+        .filter_map(|name| name.ok().map(|name| name.into_owned()))
+        .collect();
     let mut sink = Vec::new();
     for name in &names {
         sink.clear();
@@ -170,7 +175,10 @@ impl ZipCheck {
         if is_match(jar_regex(), fname) {
             // `namelist()` membership, not `by_name`: a corrupt entry is
             // still listed, as in the reference.
-            let names: Vec<String> = archive.file_names().map(str::to_string).collect();
+            let names: Vec<String> = archive
+                .file_names()
+                .filter_map(|name| name.ok().map(|name| name.into_owned()))
+                .collect();
             if names.iter().any(|n| n == "META-INF/MANIFEST.MF") {
                 match manifest_text(&mut archive) {
                     Ok(manifest) => {

@@ -349,7 +349,12 @@ mod prebuilt {
             if !entry.is_file() {
                 continue;
             }
-            let name = entry.name().to_string();
+            // zip 9 returns entry names as results; skip entries whose
+            // names do not decode, like every other unreadable entry here.
+            let name = match entry.name() {
+                Ok(name) => name.into_owned(),
+                Err(_) => continue,
+            };
             if entry.size() > MAX_ENTRY_BYTES as u64 {
                 continue;
             }
