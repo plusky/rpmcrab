@@ -103,55 +103,7 @@ fn registry_only_constructs_declared_modules() {
 /// Check names `check::build` can construct, from the match arms' string keys.
 fn names_built_by_registry() -> Vec<String> {
     let src = std::fs::read_to_string(core_root().join("src/check.rs")).expect("read check.rs");
-    parse_registry_names(&src)
-}
-
-/// Extract the match-arm keys of `check::build` from the text of `check.rs`.
-///
-/// An arm may name several keys (`"Alias" | "RealCheck" => ...`): every string
-/// literal in the pattern is a registry key, and any key the parse misses
-/// escapes every guard in this file while `build()` constructs the check.
-fn parse_registry_names(src: &str) -> Vec<String> {
-    let body = match src.find("pub fn build(") {
-        Some(start) => {
-            let rest = &src[start..];
-            // Stop at the end of the match, which closes before the next item.
-            let end = rest.find("\n}\n").map(|i| i + 1).unwrap_or(rest.len());
-            &rest[..end]
-        }
-        None => panic!("check::build not found"),
-    };
-    let mut found: Vec<String> = Vec::new();
-    // A wrapped pattern (`"A" |` on one line, `"B" => ...` on the next) spans
-    // lines: accumulate the fragments and read them only once the `=>` shows
-    // the pattern is complete. Arm bodies never start a fragment (they follow
-    // `=>`), and the `_` wildcard has no literal to collect.
-    let mut pending = String::new();
-    for line in body.lines() {
-        let line = line.trim();
-        if pending.is_empty() && !line.starts_with('"') {
-            continue;
-        }
-        if !pending.is_empty() {
-            pending.push(' ');
-        }
-        pending.push_str(line);
-        if line.contains("=>") {
-            let pattern = pending.split("=>").next().unwrap_or_default();
-            for alternative in pattern.split('|') {
-                let alternative = alternative.trim();
-                if let Some(rest) = alternative.strip_prefix('"')
-                    && let Some(end) = rest.find('"')
-                {
-                    found.push(rest[..end].to_string());
-                }
-            }
-            pending.clear();
-        }
-    }
-    found.sort();
-    found.dedup();
-    found
+    check::parse_registry_names(&src)
 }
 
 /// Every literal of a multi-pattern arm is a registry key. If the parse only
@@ -174,7 +126,7 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
 }
 "#;
     assert_eq!(
-        parse_registry_names(src),
+        check::parse_registry_names(src),
         vec![
             "PAMModulesAlias",
             "PAMModulesCheck",

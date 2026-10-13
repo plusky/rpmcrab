@@ -581,30 +581,34 @@ mod tests {
         );
     }
 
+    /// The parse `every_registered_check_has_description_coverage` guards
+    /// with sees every key of a multi-pattern arm: a check the registry
+    /// builds under an alias still needs its description TOML. The shared
+    /// parse is pinned in `tests/check_registry.rs` too; this copy pins
+    /// that the coverage guard's own key source is that parse.
+    #[test]
+    fn description_coverage_parse_collects_multi_pattern_arm_keys() {
+        let src = r#"
+pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
+    match name {
+        "TagsCheck" => Some(Box::new(crate::checks::tags::TagsCheck::new(config))),
+        "PAMModulesAlias" | "PAMModulesCheck" => Some(Box::new(
+            crate::checks::pam_modules::PAMModulesCheck::new(config),
+        )),
+        _ => None,
+    }
+}
+"#;
+        assert_eq!(
+            crate::check::parse_registry_names(src),
+            vec!["PAMModulesAlias", "PAMModulesCheck", "TagsCheck"]
+        );
+    }
+
     #[test]
     fn every_registered_check_has_description_coverage() {
         fn check_names() -> Vec<String> {
-            let src = include_str!("check.rs");
-            let body = match src.find("pub fn build(") {
-                Some(start) => {
-                    let rest = &src[start..];
-                    let end = rest.find("\n}\n").map(|i| i + 1).unwrap_or(rest.len());
-                    &rest[..end]
-                }
-                None => panic!("check::build not found"),
-            };
-            body.lines()
-                .filter_map(|l| {
-                    let l = l.trim();
-                    let rest = l.strip_prefix('"')?;
-                    let end = rest.find('"')?;
-                    let name = &rest[..end];
-                    rest[end + 1..]
-                        .trim_start()
-                        .starts_with("=>")
-                        .then(|| name.to_string())
-                })
-                .collect()
+            crate::check::parse_registry_names(include_str!("check.rs"))
         }
         fn staged_files() -> Vec<String> {
             let src = include_str!("describe.rs");

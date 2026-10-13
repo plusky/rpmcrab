@@ -311,6 +311,60 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
     }
 }
 
+/// Extract the match-arm keys of [`build`] from the text of this file.
+///
+/// An arm may name several keys (`"Alias" | "RealCheck" => ...`): every
+/// string literal in the pattern is a registry key, and any key the parse
+/// misses escapes the guards that use it. The registry drift guards
+/// (`tests/check_registry.rs`) and the description-coverage guard in
+/// `describe.rs` share this one parse, so the key set each of them guards
+/// is the same by construction.
+///
+/// Test support only; not part of the crate's public API.
+#[doc(hidden)]
+pub fn parse_registry_names(src: &str) -> Vec<String> {
+    let body = match src.find("pub fn build(") {
+        Some(start) => {
+            let rest = &src[start..];
+            // Stop at the end of the match, which closes before the next item.
+            let end = rest.find("\n}\n").map(|i| i + 1).unwrap_or(rest.len());
+            &rest[..end]
+        }
+        None => panic!("check::build not found"),
+    };
+    let mut found: Vec<String> = Vec::new();
+    // A wrapped pattern (`"A" |` on one line, `"B" => ...` on the next) spans
+    // lines: accumulate the fragments and read them only once the `=>` shows
+    // the pattern is complete. Arm bodies never start a fragment (they follow
+    // `=>`), and the `_` wildcard has no literal to collect.
+    let mut pending = String::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if pending.is_empty() && !line.starts_with('"') {
+            continue;
+        }
+        if !pending.is_empty() {
+            pending.push(' ');
+        }
+        pending.push_str(line);
+        if line.contains("=>") {
+            let pattern = pending.split("=>").next().unwrap_or_default();
+            for alternative in pattern.split('|') {
+                let alternative = alternative.trim();
+                if let Some(rest) = alternative.strip_prefix('"')
+                    && let Some(end) = rest.find('"')
+                {
+                    found.push(rest[..end].to_string());
+                }
+            }
+            pending.clear();
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
 /// `Lint.load_checks`: the configured `Checks` list in order, deduplicated by
 /// name and narrowed by `--checks` when that is given.
 pub fn load(config: &Config, selected: Option<&str>) -> Vec<Box<dyn Check>> {
