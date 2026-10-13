@@ -130,7 +130,10 @@ fn capture<'t>(re: &Regex, text: &'t str, group: usize) -> Option<&'t str> {
 }
 
 /// The language suffix of a `-lang` package name, mirroring the reference's
-/// `-('aa'|…|'qaa-qtz')$` alternation over all of `LANGUAGES`.
+/// `-('aa'|…|'qaa-qtz')$` alternation over all of `LANGUAGES`, with one
+/// deliberate exception: `doc` never counts. It is an ISO 639 code, but a
+/// `-doc` package is a documentation subpackage, not a language pack, and
+/// there is no `locales-doc` package to depend on (#459).
 ///
 /// Every code but one contains no `-`, so the alternation matches exactly
 /// when the text after the final `-` is a code. The single exception is
@@ -143,7 +146,7 @@ fn trailing_language(name: &str) -> Option<&str> {
         return Some("qaa-qtz");
     }
     let (_, suffix) = name.rsplit_once('-')?;
-    is_language(suffix).then_some(suffix)
+    (suffix != "doc" && is_language(suffix)).then_some(suffix)
 }
 
 /// What the LC_MESSAGES/man probe found for one file.
@@ -520,6 +523,22 @@ mod tests {
     }
 
     #[test]
+    fn doc_package_is_quiet() {
+        // A `-doc` package is a documentation subpackage, not a language
+        // pack, even though `doc` is an ISO 639 code; the reference demands
+        // a dependency on the nonexistent `locales-doc` here (#459).
+        let findings = I18NCheck::collect(&[], &[], &[], "foo-doc");
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn czech_lang_package_without_locales_dependency_errors() {
+        let findings = I18NCheck::collect(&[], &[], &[], "foo-cs");
+        assert_eq!(names(&findings), vec!["no-dependency-on"]);
+        assert_eq!(findings[0].2, vec!["locales-cs"]);
+    }
+
+    #[test]
     fn plain_package_name_is_quiet() {
         let findings = I18NCheck::collect(&[], &[], &[], "foo");
         assert!(findings.is_empty(), "{findings:?}");
@@ -542,6 +561,7 @@ mod tests {
         assert_eq!(trailing_language("de"), None);
         assert_eq!(trailing_language("foo-"), None);
         assert_eq!(trailing_language("-de"), Some("de"));
+        assert_eq!(trailing_language("foo-doc"), None);
     }
 
     #[test]
