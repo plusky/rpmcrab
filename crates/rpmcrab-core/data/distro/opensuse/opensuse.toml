@@ -30,10 +30,11 @@ Checks = [
     "WorldWritableCheck",
     "AtomicUpdateCheck",
 
-    # Extra: enabled by rpmcrab; upstream lists this check in no
+    # Extra: enabled by rpmcrab; upstream lists these checks in no
     # shipped config (deliberate, ledgered divergence); see
     # EXTRA_OPENSUSE_CHECKS in scripts/generate-distro-configs.py.
     "XinetdDepCheck",
+    "PAMModulesCheck",
 ]
 
 # List of directory prefixes that are not allowed in packages

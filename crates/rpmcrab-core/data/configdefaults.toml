@@ -50,6 +50,12 @@ Checks = [
     # runs there; the check is implemented and its deprecation message is
     # the point, so it runs here.
     "XinetdDepCheck",
+    # Deliberate rpmcrab addition (ledgered in tests/parity/divergences.toml):
+    # the shipping openSUSE config enables PAMModulesCheck nowhere, and
+    # upstream's flat PAMAuthorizedModules list no longer matches Factory.
+    # The port derives the authorized modules from the FileDigestGroup
+    # data (see PAMModulesCheck), so the check runs here.
+    "PAMModulesCheck",
 ]
 # List of error titles that should be filtered
 FilterErrorTitles = []

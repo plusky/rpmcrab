@@ -750,15 +750,16 @@ against the openSUSE:Factory 2.10.0 tarball. The run header prints
 | `WorldWritableCheck` | **ported** |
 | `AtomicUpdateCheck` | **ported** |
 
-One more reference module is **ported** but sits outside the 43: the
-reference ships `PAMModulesCheck` as a module enabled by neither
-`configdefaults.toml` nor `opensuse.toml`; rpmcrab ports it anyway
-(registered in `crates/rpmcrab-core/src/checks/`, selectable via `Checks`).
-`XinetdDepCheck` is a module the reference ships unenabled; rpmcrab
-enables it in its bundled configs as a deliberate divergence (ledgered in
-`tests/parity/divergences.toml`) — the deprecation message is the point of
-the check, so a default rpmcrab run reports `checks: 44`. (`InitScriptCheck`
-was deleted: systemd-only world, issue #214;
+Two more reference modules are **ported** but sit outside the 43: the
+reference ships `PAMModulesCheck` and `XinetdDepCheck` as modules enabled
+by neither `configdefaults.toml` nor `opensuse.toml`; rpmcrab ports them
+anyway (registered in `crates/rpmcrab-core/src/checks/`, selectable via
+`Checks`) and enables both in its bundled configs as deliberate
+divergences (ledgered in `tests/parity/divergences.toml`): the Xinetd
+deprecation message is the point of that check, and the PAM authorized
+set is derived from the `FileDigestGroup` data `FileDigestCheck`
+already consumes — a default rpmcrab run therefore reports `checks: 45`.
+(`InitScriptCheck` was deleted: systemd-only world, issue #214;
 `deprecated-init-script` from `SysVInitOnSystemdCheck` remains the deprecation
 signal. `LSBCheck` was deleted too: the LSB effort is defunct and no shipped
 config enables the check, issue #483.)
