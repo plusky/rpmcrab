@@ -1770,3 +1770,11 @@ check = "no-binary"
 kind = "behaviour"
 reason = "Strictening per #444: the no-binary exemption covers each arch's own native libdir (/usr/lib + /lib on 32-bit, /usr/lib64 + /lib64 on 64-bit), not just lib64. On 32-bit %_libdir is /usr/lib, so a devel subpackage there (headers, .so symlink, pkgconfig, no binaries) is just as arch-bound as one in /usr/lib64 -- the old rule fired E: no-binary on i586 but stayed quiet on x86_64 for the same spec. The frozen 2.10.0 reference only exempts lib64."
 since = "0.3.0"
+
+[[divergence]]
+case = "global"
+check = "no-dependency-on"
+kind = "behaviour"
+reason = "Deliberate fix (plusky/rpmcrab#459): the port never fires `no-dependency-on` for a `-doc` package name. `doc` is an ISO 639 code, so the reference's trailing-language alternation over LANGUAGES (I18NCheck.py) treats every documentation subpackage as a language pack and demands a dependency on the nonexistent `locales-doc`; the openSUSE distro config filters the finding, which is why the sweep never surfaced it. The port excludes `doc` from the trailing-language match; genuine language suffixes (e.g. `-de`, `-cs`) still fire. Pinned by `doc_package_is_quiet`."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/459"
