@@ -3408,6 +3408,69 @@ mod tests {
     }
 
     #[test]
+    fn missing_dependency_to_crontabs_fires_without_any_dep() {
+        // Sibling of the logrotate firing guard: a cron file with no
+        // crontabs dep of any kind must emit missing-dependency-to-crontabs.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.name = "cron-test".to_string();
+        pkg.files = vec![PkgFile {
+            name: "/etc/cron.daily/fcprobe".to_string(),
+            path: "/etc/cron.daily/fcprobe".to_string(),
+            ..Default::default()
+        }];
+        pkg.requires = vec![];
+        pkg.recommends = vec![];
+        pkg.suggests = vec![];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "missing-dependency-to-crontabs");
+    }
+
+    #[test]
+    fn no_documentation_fires_for_non_lib_without_docs() {
+        // Complement of lib_package_without_docs_skips_no_documentation: a
+        // non-lib package with no %doc files must emit no-documentation.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.name = "nodoc-test".to_string();
+        pkg.doc_files = vec![];
+        pkg.files = vec![];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "no-documentation");
+    }
+
+    #[test]
+    fn world_writable_fires_for_world_writable_regular_file() {
+        // Regular file with o+w must emit world-writable; the dispatch
+        // gates on S_IFREG, so the mode carries the file-type bits.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = vec![PkgFile {
+            name: "/usr/share/foo/data.txt".to_string(),
+            path: "/usr/share/foo/data.txt".to_string(),
+            mode: 0o100666,
+            ..Default::default()
+        }];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "world-writable");
+    }
+
+    #[test]
     fn spurious_executable_perm_fires_for_text_data_file() {
         // Text data file with the executable bit but no shebang: not a
         // script, not an ELF binary, not in a script path ->
@@ -3570,6 +3633,154 @@ mod tests {
             .filter(|((name, _), _)| *name == "bidi-control-character")
             .map(|((_, line), level)| (*level, line.clone()))
             .collect()
+    }
+
+    #[test]
+    fn normal_non_devel_typelib_in_devel_package() {
+        // .typelib in a -devel package: non-devel payload, lib half needs a .so path.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.name = "foo-devel".to_string();
+        pkg.doc_files = vec![];
+        let fname = "/usr/lib64/girepository-1.0/Foo-1.0.typelib";
+        let path = dir.path().join(fname.trim_start_matches('/'));
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+        std::fs::write(&path, b"typelib\n").expect("write temp file");
+        pkg.files = vec![PkgFile {
+            name: fname.to_string(),
+            path: path.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            magic: "ASCII text".to_string(),
+            ..Default::default()
+        }];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "non-devel-file-in-devel-package");
+    }
+
+    #[test]
+    fn normal_lib_versioned_so_in_devel_package() {
+        // Versioned .so in -devel: lib half fires, exact-.so symlink exemption needs a bare .so.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.name = "foo-devel".to_string();
+        pkg.doc_files = vec![];
+        let fname = "/usr/lib64/libfoo.so.1.2.3";
+        let path = dir.path().join(fname.trim_start_matches('/'));
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+        std::fs::write(&path, b"fake lib\n").expect("write temp file");
+        pkg.files = vec![PkgFile {
+            name: fname.to_string(),
+            path: path.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            magic: "ASCII text".to_string(),
+            ..Default::default()
+        }];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "non-devel-file-in-devel-package");
+    }
+
+    #[test]
+    fn normal_perl_dep_missing_versioned_dep() {
+        // Perl module path with no versioned perl dep: compat and version checks have nothing to match.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.name = "foo".to_string();
+        pkg.requires = vec![];
+        pkg.prereq = vec![];
+        pkg.recommends = vec![];
+        pkg.suggests = vec![];
+        pkg.doc_files = vec![];
+        let fname = "/usr/lib/perl5/vendor_perl/5.38.2/Foo/Bar.pm";
+        let path = dir.path().join(fname.trim_start_matches('/'));
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+        std::fs::write(&path, b"package Foo::Bar;\n1;\n").expect("write temp file");
+        pkg.files = vec![PkgFile {
+            name: fname.to_string(),
+            path: path.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            magic: "ASCII text".to_string(),
+            ..Default::default()
+        }];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_python_dep_missing_versioned_dep() {
+        // Python module path with no versioned python dep.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.name = "foo".to_string();
+        pkg.requires = vec![];
+        pkg.prereq = vec![];
+        pkg.recommends = vec![];
+        pkg.suggests = vec![];
+        pkg.doc_files = vec![];
+        let fname = "/usr/lib/python3.12/site-packages/foo.py";
+        let path = dir.path().join(fname.trim_start_matches('/'));
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+        std::fs::write(&path, b"x = 1\n").expect("write temp file");
+        pkg.files = vec![PkgFile {
+            name: fname.to_string(),
+            path: path.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            magic: "ASCII text".to_string(),
+            ..Default::default()
+        }];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_not_utf8_compressed_doc_flagged() {
+        // .zip has no decompressor so raw non-UTF8 bytes fail; NUL keeps the text path silent.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.name = "foo".to_string();
+        let fname = "/usr/share/doc/foo/README.zip";
+        let path = dir.path().join(fname.trim_start_matches('/'));
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+        std::fs::write(&path, b"\xff\xfe\x00\xff\xfe not utf8\n").expect("write temp file");
+        pkg.files = vec![PkgFile {
+            name: fname.to_string(),
+            path: path.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            magic: "data".to_string(),
+            ..Default::default()
+        }];
+        pkg.doc_files = vec![fname.to_string()];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "file-not-utf8");
     }
 
     #[test]
@@ -3779,6 +3990,69 @@ mod tests {
             ..Default::default()
         };
         assert!(!check.fsf_address_matches(&pkg, &ok_file, &mut out));
+    }
+
+    #[test]
+    fn files_check_infopage_not_compressed() {
+        // Uncompressed info page must warn via the per-file dispatch.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = vec![PkgFile {
+            name: "/usr/share/info/foo.info".to_string(),
+            path: "/usr/share/info/foo.info".to_string(),
+            user: "root".to_string(),
+            group: "root".to_string(),
+            ..Default::default()
+        }];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "infopage-not-compressed");
+    }
+
+    #[test]
+    fn files_check_non_standard_uid() {
+        // Owner outside StandardUsers must warn via the per-file dispatch.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = vec![PkgFile {
+            name: "/usr/share/fcprobe/data.dat".to_string(),
+            path: "/usr/share/fcprobe/data.dat".to_string(),
+            user: "nosuchuser".to_string(),
+            group: "root".to_string(),
+            ..Default::default()
+        }];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "non-standard-uid");
+    }
+
+    #[test]
+    fn files_check_non_standard_gid() {
+        // Group outside StandardGroups must warn via the per-file dispatch.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = vec![PkgFile {
+            name: "/usr/share/fcprobe/data.dat".to_string(),
+            path: "/usr/share/fcprobe/data.dat".to_string(),
+            user: "root".to_string(),
+            group: "nosuchgroup".to_string(),
+            ..Default::default()
+        }];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "non-standard-gid");
     }
 
     #[test]
