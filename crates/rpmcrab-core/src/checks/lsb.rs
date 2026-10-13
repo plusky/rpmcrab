@@ -83,6 +83,7 @@ impl Check for LSBCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::Color;
 
     fn finding_names<'a>(findings: &'a [(&'static str, String)]) -> Vec<&'a str> {
         findings.iter().map(|(n, _)| *n).collect()
@@ -150,6 +151,31 @@ mod tests {
                 "non-lsb-compliant-version",
                 "non-lsb-compliant-release"
             ]
+        );
+    }
+
+    #[test]
+    fn check_emits_bad_name() {
+        // Entry glue: `check()` reads `pkg.name` plus VERSION/RELEASE from
+        // the header. The fixture shell supplies a compliant header, so only
+        // the renamed `name` fires.
+        let mut pkg = Pkg::open_no_extract(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm")
+                .as_path(),
+        )
+        .expect("open fixture shell");
+        pkg.name = "Foo".to_string();
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = LSBCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        assert!(
+            out.results()
+                .iter()
+                .any(|(n, _)| n == "non-lsb-compliant-package-name"),
+            "results: {:?}",
+            out.results()
         );
     }
 }

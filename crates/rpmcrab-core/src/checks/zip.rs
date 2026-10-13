@@ -446,4 +446,43 @@ mod tests {
         assert!(!is_match(re, "a.txt"));
         assert!(!is_match(re, "a.zip.bak"));
     }
+
+    #[test]
+    fn check_binary_entry_point_reports_bad_crc() {
+        // Kills the neutered-`check_binary` mutant: the glue (name filter +
+        // `path.is_file()` + iteration) must run for the finding to reach `Filter`.
+        use std::path::Path;
+
+        use crate::color::Color;
+        use crate::pkg::pkgfile::PkgFile;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = build_zip(
+            &[("a.txt", b"hello world", zip::CompressionMethod::Stored)],
+            None,
+        );
+        let pos = bytes
+            .windows(b"hello world".len())
+            .position(|w| w == b"hello world")
+            .unwrap();
+        bytes[pos] ^= 0xff;
+        let path = write_fixture(dir.path(), "test.zip", &bytes);
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
+        pkg.files = vec![PkgFile {
+            name: "test.zip".to_string(),
+            path: path.to_string_lossy().into_owned(),
+            ..Default::default()
+        }];
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = ZipCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let names: Vec<&str> = out.results().iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"bad-crc-in-zip"),
+            "expected bad-crc-in-zip in {names:?}"
+        );
+    }
 }
