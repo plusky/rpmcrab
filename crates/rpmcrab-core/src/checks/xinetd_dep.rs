@@ -153,4 +153,50 @@ mod tests {
             "{results:?}"
         );
     }
+
+    /// Run the check the way a default run does: the bundled default config
+    /// (bundled defaults plus the vendored flavour layer) selects it and
+    /// `check::build` constructs it.
+    fn run_bundled_default_check(pkg: &Pkg) -> Vec<(String, String)> {
+        let config = crate::config::load_bundled();
+        assert!(
+            config.checks.iter().any(|c| c == "XinetdDepCheck"),
+            "the bundled default config must select XinetdDepCheck"
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check =
+            crate::check::build("XinetdDepCheck", &config).expect("XinetdDepCheck is registered");
+        check.check_binary(pkg, &config, &mut out);
+        out.results().to_vec()
+    }
+
+    #[test]
+    fn default_config_run_flags_xinetd_requirement() {
+        use crate::pkg::dep::DepInfo;
+        let mut pkg = pkg_named_with_files("uucp-xinetd", &[]);
+        pkg.requires.push(DepInfo {
+            name: "xinetd".to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        });
+        let results = run_bundled_default_check(&pkg);
+        assert!(
+            results
+                .iter()
+                .any(|(n, _)| n == "obsolete-xinetd-requirement"),
+            "{results:?}"
+        );
+    }
+
+    #[test]
+    fn default_config_run_flags_xinetd_config_file() {
+        let pkg = pkg_named_with_files("amanda", &["/etc/xinetd.d/amanda"]);
+        let results = run_bundled_default_check(&pkg);
+        assert!(
+            results.iter().any(|(n, _)| n == "deprecated-xinetd-config"),
+            "{results:?}"
+        );
+    }
 }

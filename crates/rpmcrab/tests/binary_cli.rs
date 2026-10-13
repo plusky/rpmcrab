@@ -1123,7 +1123,7 @@ fn severity_override_json_reports_overridden_level() {
 }
 /// `--errors-only` (upstream rpmlint#134) end-to-end: the header still reports
 /// the configured check count (`docs/DESIGN.md` §4.5 — the reference's
-/// `lint.py:272`), even though only 39 checks run.
+/// `lint.py:272`), even though only 40 checks run.
 #[test]
 fn errors_only_header_reports_configured_check_count() {
     let out = rpmcrab(&[
@@ -1133,7 +1133,7 @@ fn errors_only_header_reports_configured_check_count() {
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("checks: 43, packages: 1"),
+        stdout.contains("checks: 44, packages: 1"),
         "header reports the configured count, not the run count: {stdout}"
     );
 }
@@ -1208,7 +1208,7 @@ fn errors_only_json_finding_set_matches_full_run() {
             "warning-only check ran: {check}"
         );
     }
-    assert_eq!(eo_doc["checks"], 43);
+    assert_eq!(eo_doc["checks"], 44);
     assert_eq!(
         eo_doc["summary"]["exit_code"].as_i64(),
         eo.status.code().map(i64::from)
