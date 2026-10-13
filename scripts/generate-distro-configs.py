@@ -6,7 +6,8 @@ into ``crates/rpmcrab-core/data/distro/<flavor>/``, prunes ``Filters`` /
 ``BlockedFilters`` entries that reference findings rpmcrab no longer emits,
 drops ``Filters`` entries for live findings rpmcrab deliberately surfaces
 (see DROP_LIVE_FILTERS), drops whitelist stanzas for packages gone from
-Tumbleweed/SLE 16 and stale pie-executables paths, and stamps provenance.
+Tumbleweed/SLE 16 and stale pie-executables paths, appends the extra
+Filters/Checks rpmcrab carries on top of upstream, and stamps provenance.
 
 The checked-in files are the build's source of truth; this script runs by hand
 and in CI (drift check + monthly refresh), never at build time.
@@ -185,6 +186,15 @@ EXTRA_OPENSUSE_FILTERS = [
     r"^mingw32-.*arch-independent-package-contains-binary-or-object.*\.a$",
     # Same for mingw64 (mingw64-filesystem's mingw64-rpmlintrc).
     r"^mingw64-.*arch-independent-package-contains-binary-or-object.*\.a$",
+]
+
+# Extra Checks enabled in the openSUSE config that upstream rpmlint lists in
+# no shipped config (neither its configdefaults.toml nor the openSUSE branch's
+# opensuse.toml), so the check never runs there. XinetdDepCheck is implemented
+# and its deprecation message is the point of the check, so rpmcrab enables
+# it deliberately. Ledgered in tests/parity/divergences.toml.
+EXTRA_OPENSUSE_CHECKS = [
+    "XinetdDepCheck",
 ]
 
 # Findings rpmcrab deliberately killed (see tests/parity/divergences.toml).
@@ -1343,6 +1353,40 @@ def append_extra_filters(text, filters):
     return "".join(out)
 
 
+def append_extra_checks(text, checks):
+    """Append check names to the `Checks = [...]` list in a TOML document.
+
+    Used for checks rpmcrab enables in the distro config that upstream does
+    not list in any shipped config (see EXTRA_OPENSUSE_CHECKS). Inserted
+    before the list's closing bracket so the monthly sync re-emits them
+    deterministically.
+    """
+    lines = text.splitlines(keepends=True)
+    out = []
+    in_list = False
+    done = False
+    for line in lines:
+        stripped = line.strip()
+        if not done and re.match(r"^Checks\s*=\s*\[", stripped):
+            in_list = True
+            out.append(line)
+            continue
+        if in_list and stripped.startswith("]"):
+            out.append("\n")
+            out.append("    # Extra: enabled by rpmcrab; upstream lists this check in no\n")
+            out.append("    # shipped config (deliberate, ledgered divergence); see\n")
+            out.append("    # EXTRA_OPENSUSE_CHECKS in scripts/generate-distro-configs.py.\n")
+            for c in checks:
+                out.append(f'    "{c}",\n')
+            in_list = False
+            done = True
+            out.append(line)
+            continue
+        out.append(line)
+    assert done, "no Checks list found to append to"
+    return "".join(out)
+
+
 def generate(ref_dir=None, pins=None):
     """Return {flavor: {filename: text}} and the provenance text."""
     pins = pins or {}
@@ -1388,6 +1432,9 @@ def generate(ref_dir=None, pins=None):
             # natural fix; kept separate for review (follow-up to #412).
             if flavor == "opensuse" and filename == "opensuse.toml":
                 text = append_extra_filters(text, EXTRA_OPENSUSE_FILTERS)
+                # Same gate as the extra filters: SLFO's vendored config
+                # stays a pure mirror of the opensuse-slfo-main branch.
+                text = append_extra_checks(text, EXTRA_OPENSUSE_CHECKS)
             data["files"][filename] = text
 
     # Dedupe: an SLFO file byte-identical to its openSUSE counterpart (after
@@ -1420,6 +1467,13 @@ def generate(ref_dir=None, pins=None):
     provenance.append("# Extra Filters appended (not from upstream; see EXTRA_OPENSUSE_FILTERS):")
     for f in EXTRA_OPENSUSE_FILTERS:
         provenance.append(f"#   Filters: added {f!r} (mingw -filesystem packages' rpmlintrc)")
+    provenance.append("#")
+    provenance.append("# Extra Checks appended (not from upstream; see EXTRA_OPENSUSE_CHECKS):")
+    for c in EXTRA_OPENSUSE_CHECKS:
+        provenance.append(
+            f"#   Checks: added {c!r} (deliberate rpmcrab divergence, ledgered in"
+            " tests/parity/divergences.toml)"
+        )
     if pruned_log:
         provenance.append("#")
         provenance.append("# Pruned Filters entries (findings rpmcrab killed):")
