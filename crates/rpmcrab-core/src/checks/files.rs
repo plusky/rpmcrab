@@ -2671,11 +2671,17 @@ impl FilesCheck {
                     // istext gate matches the reference, which early-returns
                     // on non-text in the same code path and stays silent
                     // there, so the port warns nowhere the reference is
-                    // silent.
+                    // silent. Libtool .la files in lib paths are exempt,
+                    // mirroring the reference (its devel-file regex covers
+                    // .a but not .la, and its script-without-shebang path
+                    // exempts them); check_normal_text carries the same
+                    // exemption, but this gate runs first for these files
+                    // (#493).
                     || (fd.istext
                         && fd.interpreter.is_none()
                         && !pkgfile.magic.starts_with("ELF")
-                        && !is_match(&self.script_re, fname));
+                        && !is_match(&self.script_re, fname)
+                        && !(is_match(&self.lib_path_re, fname) && fname.ends_with(".la")));
             }
             if fd.nonexec_file {
                 add_info(
@@ -3541,6 +3547,64 @@ mod tests {
                 "spurious-test.noarch: E: script-without-shebang /usr/bin/noshebang".to_string(),
             )],
             "script paths keep script-without-shebang, not spurious"
+        );
+    }
+
+    #[test]
+    fn la_file_in_lib_path_is_quiet() {
+        // The reference is deliberately silent on .la files in lib paths:
+        // its devel-file regex covers .a but not .la, and the
+        // script-without-shebang path exempts (lib path + .la). Crab's
+        // script-without-shebang branch carries the same exemption; the
+        // text gate in check_normal_exec must not fire
+        // spurious-executable-perm there either (#493).
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = spurious_exec_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/lib64/libfoo.la",
+                    "ASCII text",
+                    b"# libfoo.la - a libtool library file\ndlname='libfoo.so.1'\n",
+                ),
+                (
+                    "/usr/lib/libbar.la",
+                    "ASCII text",
+                    b"# libbar.la - a libtool library file\ndlname='libbar.so.0'\n",
+                ),
+            ],
+        );
+        let findings = check_spurious_script(&pkg, &config);
+        assert_eq!(findings, [], "no finding for .la files in lib paths");
+    }
+
+    #[test]
+    fn la_file_outside_lib_path_keeps_spurious() {
+        // The reference exemption needs the lib path; a .la file elsewhere
+        // is a plain data file and keeps the #426 reclassification (the
+        // reference fires script-without-shebang on the same file).
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = spurious_exec_pkg(
+            &dir,
+            &[(
+                "/usr/share/foo/libfoo.la",
+                "ASCII text",
+                b"# libfoo.la - a libtool library file\ndlname='libfoo.so.1'\n",
+            )],
+        );
+        let findings = check_spurious_script(&pkg, &config);
+        assert_eq!(
+            findings,
+            [(
+                "spurious-executable-perm".to_string(),
+                Level::Warning,
+                "spurious-test.noarch: W: spurious-executable-perm \
+                 /usr/share/foo/libfoo.la"
+                    .to_string(),
+            )],
+            "exactly one pinned (name, Level, detail) triple"
         );
     }
 
