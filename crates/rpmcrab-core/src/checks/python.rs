@@ -11,13 +11,20 @@
 //! `dist-info/METADATA` natively (no `importlib.metadata`); environment
 //! markers are evaluated for the common `python_version` / `sys_platform`
 //! cases.
+//!
+//! `python-leftover-require` is computed once per package over the
+//! union of all its dist-infos and resolved after the whole run has
+//! been checked: a leftover is suppressed when the package's shipped
+//! code provably imports the dependency, and a package shipping no
+//! Python code never produces one (#481).
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use fancy_regex::Regex;
 use std::sync::OnceLock;
 
-use crate::check::{Check, add_info};
+use crate::check::{Check, add_info, make_finding};
 use crate::checks::is_match;
 use crate::config::Config;
 use crate::filter::Filter;
@@ -28,6 +35,45 @@ pub struct PythonCheck {
     pyc_version: Option<String>,
     checked_files: usize,
     default_python: String,
+    /// Deferred `python-leftover-require` candidates, resolved in
+    /// `after_checks` once every package in the run has contributed its
+    /// provider metadata (#481).
+    leftover_packages: Vec<LeftoverPackage>,
+    /// `(module, provider key)` pairs seen so far: which provider (by
+    /// normalised distribution name or by the providing package's name)
+    /// ships which top-level module, from dist-info metadata and from
+    /// site-packages file lists.
+    provider_modules: Vec<(String, String)>,
+}
+
+/// One package's deferred leftover candidates (#481).
+struct LeftoverPackage {
+    name: String,
+    arch: String,
+    /// Top-level modules imported by the package's shipped Python code.
+    imports: HashSet<String>,
+    /// RPM require strings no dist-info of the package accounts for,
+    /// deduplicated, in first-seen order.
+    candidates: Vec<String>,
+}
+
+/// Cross-package leftover state, exported per package and merged before
+/// `after_checks` (`rpmlint#1595`).
+struct PythonLeftoverState {
+    packages: Vec<LeftoverPackage>,
+    provider_modules: Vec<(String, String)>,
+}
+
+/// One parsed dist-info / egg-info of a package.
+struct DistInfo {
+    reqs: Vec<Requirement>,
+    python_version: String,
+    /// Directory holding the `METADATA` / `requires.txt`, for the
+    /// sibling `top_level.txt` / `RECORD`.
+    dir: String,
+    /// The distribution's own name (`Name:` for dist-info, derived from
+    /// the directory name for egg-info).
+    dist_name: Option<String>,
 }
 
 /// A parsed requirement: distribution name, environment marker, extras.
@@ -99,6 +145,8 @@ impl PythonCheck {
             pyc_version: None,
             checked_files: 0,
             default_python,
+            leftover_packages: Vec::new(),
+            provider_modules: Vec::new(),
         }
     }
 
@@ -655,6 +703,7 @@ impl Check for PythonCheck {
             EGG_INFO_RE.get_or_init(|| Regex::new(r".*egg-info$").expect("static regex"));
         let pyc_re = PYC_RE.get_or_init(|| Regex::new(r"cpython-(\d+)").expect("static regex"));
         let file_names: Vec<&str> = pkg.files.iter().map(|f| f.name.as_str()).collect();
+        let mut dist_infos: Vec<DistInfo> = Vec::new();
 
         for pkgfile in &pkg.files {
             let filename = pkgfile.name.as_str();
@@ -671,14 +720,40 @@ impl Check for PythonCheck {
                 let content = pkg.read_file(filename);
                 let python_version = self.marker_python_version(&pkg.requires, filename);
                 let reqs = Self::parse_requirements(&content, false, &python_version);
-                self.check_requirements(pkg, out, &reqs, &python_version);
+                self.check_missing_requirements(pkg, out, &reqs, &python_version);
+                let dir = filename
+                    .rsplit_once('/')
+                    .map(|(d, _)| d.to_string())
+                    .unwrap_or_default();
+                let dist_name = Self::egg_info_dist_name(&dir);
+                dist_infos.push(DistInfo {
+                    reqs,
+                    python_version,
+                    dir,
+                    dist_name,
+                });
                 continue;
             }
             if filename.ends_with("dist-info/METADATA") {
                 let content = pkg.read_file(filename);
                 let python_version = self.marker_python_version(&pkg.requires, filename);
                 let reqs = Self::parse_requirements(&content, true, &python_version);
-                self.check_requirements(pkg, out, &reqs, &python_version);
+                self.check_missing_requirements(pkg, out, &reqs, &python_version);
+                let dir = filename
+                    .rsplit_once('/')
+                    .map(|(d, _)| d.to_string())
+                    .unwrap_or_default();
+                let dist_name = content
+                    .lines()
+                    .find_map(|l| l.strip_prefix("Name:"))
+                    .map(|n| n.trim().to_string())
+                    .filter(|n| !n.is_empty());
+                dist_infos.push(DistInfo {
+                    reqs,
+                    python_version,
+                    dir,
+                    dist_name,
+                });
                 continue;
             }
             if is_match(egg_info_re, filename) {
@@ -752,10 +827,107 @@ impl Check for PythonCheck {
                 }
             }
         }
+
+        // Provider metadata (#481b), file-list part: the top-level
+        // modules this package ships under site-packages, from its own
+        // file list. Some providers ship no dist-info at all
+        // (python313-opencv ships a bare `cv2.*.so`), so this is the
+        // only attribution evidence for them — the same evidence
+        // `RECORD` carries, read from the RPM header instead.
+        let pkg_key = Self::package_key(&pkg.name);
+        for module in Self::site_packages_modules(pkg) {
+            self.provider_modules
+                .push((pep503(&module), pkg_key.clone()));
+        }
+        if dist_infos.is_empty() {
+            return;
+        }
+        // Provider metadata (#481b), dist-info part: this package's
+        // dist-infos state which top-level modules they ship, so another
+        // package's leftover can be attributed when its code imports
+        // one of them. Recorded for every package with dist-infos,
+        // whether or not the package itself has leftover candidates.
+        for di in &dist_infos {
+            let modules = Self::dist_modules(pkg, di);
+            if modules.is_empty() {
+                continue;
+            }
+            let mut keys: Vec<String> = Vec::new();
+            if let Some(name) = &di.dist_name {
+                keys.push(pep503(name));
+            }
+            keys.push(pkg_key.clone());
+            for module in modules {
+                for key in &keys {
+                    self.provider_modules.push((pep503(&module), key.clone()));
+                }
+            }
+        }
+        // Leftover candidates (#481a): computed once per package over
+        // the union of all its dist-infos, then deferred — the import
+        // suppression (#481b) needs the whole run's provider metadata,
+        // which only exists in `after_checks`. A package that ships no
+        // Python code at all (a metadata-only metapackage, #481c) never
+        // produces candidates: its Requires are its entire content.
+        let refs: Vec<(&[Requirement], &str)> = dist_infos
+            .iter()
+            .map(|d| (d.reqs.as_slice(), d.python_version.as_str()))
+            .collect();
+        let candidates = Self::leftover_require_strings(&pkg.req_names, &refs);
+        if !candidates.is_empty() && Self::package_has_code(pkg) {
+            self.leftover_packages.push(LeftoverPackage {
+                name: pkg.name.clone(),
+                arch: pkg.arch.clone(),
+                imports: Self::scan_imports(pkg),
+                candidates,
+            });
+        }
+    }
+
+    fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
+        Some(Box::new(PythonLeftoverState {
+            packages: std::mem::take(&mut self.leftover_packages),
+            provider_modules: std::mem::take(&mut self.provider_modules),
+        }))
+    }
+
+    fn import_state(&mut self, state: Box<dyn std::any::Any + Send>) {
+        if let Ok(state) = state.downcast::<PythonLeftoverState>() {
+            self.leftover_packages.extend(state.packages);
+            self.provider_modules.extend(state.provider_modules);
+        }
+    }
+
+    fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
+        // Module (PEP 503 normalised) -> the provider keys shipping it.
+        let mut providers: HashMap<String, HashSet<String>> = HashMap::new();
+        for (module, key) in &self.provider_modules {
+            providers
+                .entry(module.clone())
+                .or_default()
+                .insert(key.clone());
+        }
+        for lp in &self.leftover_packages {
+            for req in &lp.candidates {
+                if Self::leftover_suppressed(req, &lp.imports, &providers) {
+                    continue;
+                }
+                out.add_info(make_finding(
+                    &lp.name,
+                    &lp.arch,
+                    Level::Warning,
+                    "python-leftover-require",
+                    vec![req.clone()],
+                    None,
+                ));
+            }
+        }
     }
 
     fn reset(&mut self) {
         self.checked_files = 0;
+        self.leftover_packages.clear();
+        self.provider_modules.clear();
     }
 
     fn checked_files(&self) -> Option<usize> {
@@ -766,8 +938,9 @@ impl Check for PythonCheck {
 static PYTHON_NAME_RE: OnceLock<Regex> = OnceLock::new();
 
 impl PythonCheck {
-    /// Check parsed requirements against the RPM requires.
-    fn check_requirements(
+    /// `python-missing-require`: declared requirements the RPM requires
+    /// do not satisfy.
+    fn check_missing_requirements(
         &self,
         pkg: &Pkg,
         out: &mut Filter,
@@ -799,30 +972,58 @@ impl PythonCheck {
                 );
             }
         }
+    }
 
-        // Leftover requirements: python-foo in RPM requires with no match.
-        // Extra markers are evaluated here, not skipped: the reference
-        // runs the full PEP 508 environment over them.
-        let mut wanted: Vec<String> = Vec::new();
-        for req in reqs {
-            if let Some(m) = &req.marker
-                && !Self::marker_holds_leftover(m, python_version)
-            {
-                continue;
-            }
-            wanted.extend(Self::module_names(&req.name, &req.extras));
-        }
-        let wanted: Vec<String> = wanted.iter().map(|n| n.to_lowercase()).collect();
+    /// The dependency name a `python3-foo`-style RPM require stands for,
+    /// lowercased; `None` for requires of any other shape.
+    fn leftover_dep_name(req: &str) -> Option<String> {
         let py_re = PYTHON_NAME_RE
             .get_or_init(|| Regex::new(r"^python\d*-(?P<name>.+)$").expect("static regex"));
-        for req in &pkg.req_names {
-            let Some(caps) = py_re.captures(req).ok().flatten() else {
+        let caps = py_re.captures(req).ok().flatten()?;
+        let module = caps
+            .get(1)
+            .map(|m| m.as_str().trim().to_lowercase())
+            .unwrap_or_default();
+        if module.is_empty() {
+            None
+        } else {
+            Some(module)
+        }
+    }
+
+    /// RPM require strings that no dist-info in `dist_infos` accounts
+    /// for (#481a): the declared names are unioned across all of the
+    /// package's dist-infos (each evaluated with its own marker
+    /// `python_version`), and each require is returned at most once.
+    /// Extra markers are evaluated, not skipped: the reference runs the
+    /// full PEP 508 environment over them.
+    fn leftover_require_strings(
+        req_names: &[String],
+        dist_infos: &[(&[Requirement], &str)],
+    ) -> Vec<String> {
+        // The reference returns early when a distribution declares no
+        // requirements; the union keeps that guard: with nothing
+        // declared anywhere, every pythonX-* require would be reported.
+        if dist_infos.iter().all(|(reqs, _)| reqs.is_empty()) {
+            return Vec::new();
+        }
+        let mut wanted: Vec<String> = Vec::new();
+        for (reqs, python_version) in dist_infos {
+            for req in *reqs {
+                if let Some(m) = &req.marker
+                    && !Self::marker_holds_leftover(m, python_version)
+                {
+                    continue;
+                }
+                wanted.extend(Self::module_names(&req.name, &req.extras));
+            }
+        }
+        let wanted: Vec<String> = wanted.iter().map(|n| n.to_lowercase()).collect();
+        let mut out: Vec<String> = Vec::new();
+        for req in req_names {
+            let Some(module) = Self::leftover_dep_name(req) else {
                 continue;
             };
-            let module = caps
-                .get(1)
-                .map(|m| m.as_str().trim().to_lowercase())
-                .unwrap_or_default();
             if module == "base" || module == "devel" {
                 continue;
             }
@@ -830,11 +1031,254 @@ impl PythonCheck {
                 .iter()
                 .map(|n| n.to_lowercase())
                 .collect();
-            if !variants.iter().any(|v| wanted.contains(v)) {
-                add_info(out, Level::Warning, pkg, "python-leftover-require", &[req]);
+            if !variants.iter().any(|v| wanted.contains(v)) && !out.contains(req) {
+                out.push(req.clone());
             }
         }
+        out
     }
+
+    /// Whether a leftover candidate is proven used (#481b): the
+    /// package's shipped code imports a top-level module that either
+    /// *is* the dependency (exact PEP 503 normalised name match) or is
+    /// attributed to it by a provider package's dist-info metadata seen
+    /// in this run (`providers`: module -> provider keys). Anything
+    /// else keeps firing: the suppression is a proof, not a heuristic.
+    fn leftover_suppressed(
+        req: &str,
+        imports: &HashSet<String>,
+        providers: &HashMap<String, HashSet<String>>,
+    ) -> bool {
+        let Some(dep) = Self::leftover_dep_name(req) else {
+            return false;
+        };
+        let key = pep503(&dep);
+        imports.iter().any(|m| {
+            let module = pep503(m);
+            module == key
+                || providers
+                    .get(&module)
+                    .is_some_and(|keys| keys.contains(&key))
+        })
+    }
+
+    /// The provider key for a package name: `python313-opencv` and
+    /// `python3-opencv` both key as `opencv`; a name without the python
+    /// prefix keys as itself. PEP 503 normalised.
+    fn package_key(pkg_name: &str) -> String {
+        // Strip a leading `python3-` / `python313-` style prefix, if any.
+        let stripped = pkg_name
+            .strip_prefix("python")
+            .and_then(|rest| {
+                let digits: usize = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                    .map(|c| c.len_utf8())
+                    .sum();
+                rest[digits..].strip_prefix('-')
+            })
+            .unwrap_or(pkg_name);
+        pep503(stripped)
+    }
+
+    /// The distribution name of an egg-info directory:
+    /// `foo_bar-1.0.egg-info` -> `foo_bar` (the version is the last
+    /// `-`-separated component starting with a digit).
+    fn egg_info_dist_name(dir: &str) -> Option<String> {
+        let base = dir.rsplit('/').next().unwrap_or(dir);
+        let stem = base.strip_suffix(".egg-info")?;
+        let name = match stem.rfind('-') {
+            Some(idx)
+                if stem[idx + 1..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit()) =>
+            {
+                &stem[..idx]
+            }
+            _ => stem,
+        };
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
+    }
+
+    /// The top-level modules a dist-info ships: `top_level.txt` when
+    /// present, else derived from `RECORD`.
+    fn dist_modules(pkg: &Pkg, di: &DistInfo) -> Vec<String> {
+        let top = pkg.read_file(&format!("{}/top_level.txt", di.dir));
+        let modules: Vec<String> = top
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        if !modules.is_empty() {
+            return modules;
+        }
+        let record = pkg.read_file(&format!("{}/RECORD", di.dir));
+        Self::modules_from_record(&record)
+    }
+
+    /// Top-level modules from a dist-info `RECORD`: the first path
+    /// component of each entry relative to the site-packages root —
+    /// a directory is a package, a lone `*.py` file is a module.
+    /// Entries inside a `.dist-info`/`.egg-info` directory and paths
+    /// escaping the root (`../..`) are skipped.
+    fn modules_from_record(record: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for line in record.lines() {
+            let path = line.split(',').next().unwrap_or("").trim();
+            if path.is_empty() || path.starts_with("..") || path.starts_with('/') {
+                continue;
+            }
+            let mut parts = path.split('/');
+            let first = parts.next().unwrap_or("");
+            if first.is_empty() || first.ends_with(".dist-info") || first.ends_with(".egg-info") {
+                continue;
+            }
+            let module = if parts.next().is_some() {
+                Some(first.to_string())
+            } else {
+                first.strip_suffix(".py").map(str::to_string)
+            };
+            if let Some(module) = module
+                && !module.is_empty()
+                && !out.contains(&module)
+            {
+                out.push(module);
+            }
+        }
+        out
+    }
+
+    /// The top-level modules a package ships under a site-packages
+    /// directory, from its file list: a directory is a package, a lone
+    /// `*.py` file is a module, and a `*.so` file is an extension
+    /// module named by its first dotted component
+    /// (`cv2.cpython-313-x86_64-linux-gnu.so` -> `cv2`).
+    fn site_packages_modules(pkg: &Pkg) -> Vec<String> {
+        static SITELIB_RE: OnceLock<Regex> = OnceLock::new();
+        let sitelib_re = SITELIB_RE.get_or_init(|| {
+            Regex::new(&format!("{}/", Self::sitelib_pattern())).expect("static regex")
+        });
+        let mut out: Vec<String> = Vec::new();
+        for pkgfile in &pkg.files {
+            if pkg.ghost_files.iter().any(|g| g == &pkgfile.name) {
+                continue;
+            }
+            let Some(caps) = sitelib_re.captures(&pkgfile.name).ok().flatten() else {
+                continue;
+            };
+            let whole = caps.get(0).expect("regex match");
+            let rest = &pkgfile.name[whole.end()..];
+            let mut parts = rest.split('/');
+            let first = parts.next().unwrap_or("");
+            if first.is_empty()
+                || first == "__pycache__"
+                || first.ends_with(".dist-info")
+                || first.ends_with(".egg-info")
+            {
+                continue;
+            }
+            let module = if parts.next().is_some() {
+                Some(first.to_string())
+            } else if let Some(stem) = first.strip_suffix(".py") {
+                Some(stem.to_string())
+            } else if first.split('.').any(|c| c == "so") {
+                Some(first.split('.').next().unwrap_or("").to_string())
+            } else {
+                None
+            };
+            if let Some(module) = module
+                && !module.is_empty()
+                && !out.contains(&module)
+            {
+                out.push(module);
+            }
+        }
+        out
+    }
+
+    /// Whether the package ships any Python code at all: a `.py` or
+    /// `.pyc` file, or a compiled extension module (`.so`). A package
+    /// with none of these is a metadata-only metapackage (#481c).
+    fn package_has_code(pkg: &Pkg) -> bool {
+        pkg.files.iter().any(|f| {
+            !pkg.ghost_files.iter().any(|g| g == &f.name)
+                && (f.name.ends_with(".py") || f.name.ends_with(".pyc") || f.name.ends_with(".so"))
+        })
+    }
+
+    /// Top-level modules imported by the package's shipped `.py` files.
+    /// Line-based scan of `import` / `from ... import` statements;
+    /// relative imports are the package's own modules and are skipped,
+    /// and dynamic imports (`importlib`, `__import__`) are not chased —
+    /// a dependency used only that way is unprovable and keeps firing.
+    fn scan_imports(pkg: &Pkg) -> HashSet<String> {
+        let mut out = HashSet::new();
+        for pkgfile in &pkg.files {
+            if !pkgfile.name.ends_with(".py") || pkg.ghost_files.iter().any(|g| g == &pkgfile.name)
+            {
+                continue;
+            }
+            let content = pkg.read_file(&pkgfile.name);
+            for line in content.lines() {
+                Self::scan_import_line(line, &mut out);
+            }
+        }
+        out
+    }
+
+    fn scan_import_line(line: &str, out: &mut HashSet<String>) {
+        let line = line.trim_start();
+        if let Some(rest) = line.strip_prefix("import ") {
+            // `import a.b, c as d`
+            for part in rest.split(',') {
+                let dotted = part.split_whitespace().next().unwrap_or("");
+                Self::push_top_module(dotted, out);
+            }
+        } else if let Some(rest) = line.strip_prefix("from ") {
+            let dotted = rest.split_whitespace().next().unwrap_or("");
+            if dotted.starts_with('.') {
+                return;
+            }
+            Self::push_top_module(dotted, out);
+        }
+    }
+
+    fn push_top_module(dotted: &str, out: &mut HashSet<String>) {
+        let top = dotted.split('.').next().unwrap_or("");
+        if !top.is_empty()
+            && top
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && top.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            out.insert(top.to_string());
+        }
+    }
+}
+
+/// PEP 503 name normalisation: lowercase, with runs of `-`, `_` and `.`
+/// collapsed to a single `-`.
+fn pep503(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c == '-' || c == '_' || c == '.' {
+            if !out.is_empty() && !out.ends_with('-') {
+                out.push('-');
+            }
+        } else {
+            out.push(c.to_ascii_lowercase());
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
 }
 
 #[cfg(test)]
@@ -870,7 +1314,7 @@ mod tests {
 
     #[test]
     fn leftover_extra_markers_are_evaluated_not_skipped() {
-        // Emission-path test through `check_requirements`: the reference
+        // Emission-path test through `check_requirements_findings`: the reference
         // evaluates `extra` markers in the leftover path with the full PEP 508
         // environment, where `extra` is never provided. `extra == "test"` is
         // false (requirement not wanted → leftover if the RPM requires it);
@@ -964,7 +1408,7 @@ mod tests {
 
     #[test]
     fn leftover_parenthesised_markers_are_evaluated() {
-        // Emission-path test through `check_requirements`: a top-level
+        // Emission-path test through `check_requirements_findings`: a top-level
         // boolean with parenthesised operands must not be mangled by paren
         // stripping. Both markers hold for python_version 3.12 (verified
         // against `packaging`), so the requirements are wanted and no
@@ -1343,7 +1787,18 @@ mod tests {
         let config = Config::default();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let check = PythonCheck::new(&config);
-        check.check_requirements(&pkg, &mut out, reqs, "3.12");
+        // The single-dist-info flow of `check_binary`: missing inline,
+        // leftover over this dist-info alone, emitted unsuppressed.
+        check.check_missing_requirements(&pkg, &mut out, reqs, "3.12");
+        for req in PythonCheck::leftover_require_strings(&pkg.req_names, &[(reqs, "3.12")]) {
+            add_info(
+                &mut out,
+                Level::Warning,
+                &pkg,
+                "python-leftover-require",
+                &[&req],
+            );
+        }
         let levels = out.result_levels().to_vec();
         out.results()
             .iter()
@@ -1388,6 +1843,289 @@ mod tests {
             line,
             "python-test.noarch: W: python-leftover-require python3-w6leftover"
         );
+    }
+
+    #[test]
+    fn leftover_union_across_dist_infos_emits_once_per_dep() {
+        // #481a: the reference evaluates the RPM requires against each
+        // dist-info separately, so a dep declared in dist-info B still
+        // fires from dist-info A's pass (gnuhealth: ~51 deps re-emitted
+        // per dist-info). The union accounts for a dep declared
+        // *anywhere* in the package, and a duplicated require string is
+        // returned once.
+        let reqs_a = PythonCheck::parse_requirements("alpha\nbeta\n", false, "3.12");
+        let reqs_b = PythonCheck::parse_requirements("beta\ngamma\n", false, "3.12");
+        let req_names: Vec<String> = [
+            "python3-alpha",
+            "python3-beta",
+            "python3-gamma",
+            "python3-delta",
+            "python3-delta",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let got = PythonCheck::leftover_require_strings(
+            &req_names,
+            &[(&reqs_a, "3.12"), (&reqs_b, "3.12")],
+        );
+        assert_eq!(got, vec!["python3-delta".to_string()]);
+    }
+
+    #[test]
+    fn leftover_union_keeps_per_dist_info_marker_versions() {
+        // A dep declared only under a marker that does not hold for its
+        // dist-info's python version is not accounted for, even in the
+        // union; the same declaration with a holding marker is.
+        let reqs = PythonCheck::parse_requirements(
+            "Requires-Dist: old; python_version < \"3.0\"\nRequires-Dist: new; python_version >= \"3.0\"\n",
+            true,
+            "3.13",
+        );
+        let req_names: Vec<String> = ["python3-old", "python3-new"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let got = PythonCheck::leftover_require_strings(&req_names, &[(&reqs, "3.13")]);
+        assert_eq!(got, vec!["python3-old".to_string()]);
+    }
+
+    #[test]
+    fn leftover_all_empty_dist_infos_stay_quiet() {
+        // The no-declarations guard, union form: nothing declared
+        // anywhere means no leftover evaluation at all.
+        let req_names: Vec<String> = vec!["python3-anything".to_string()];
+        let empty: Vec<Requirement> = Vec::new();
+        assert!(PythonCheck::leftover_require_strings(&req_names, &[(&empty, "3.12")]).is_empty());
+        assert!(PythonCheck::leftover_require_strings(&req_names, &[]).is_empty());
+    }
+
+    #[test]
+    fn scan_import_line_collects_top_level_modules() {
+        let mut imports = HashSet::new();
+        for line in [
+            "import os, sys",
+            "    import torch.nn as nn",
+            "from cv2 import imread",
+            "from pydantic_extra_types.color import Color",
+            "from . import sibling",
+            "from .local import thing",
+            "import importlib",
+            "# import commented_out",
+            "x = 'import not_code'",
+            "importlib.import_module('dynamic')",
+            "from __future__ import annotations",
+        ] {
+            PythonCheck::scan_import_line(line, &mut imports);
+        }
+        let want: HashSet<String> = [
+            "os",
+            "sys",
+            "torch",
+            "cv2",
+            "pydantic_extra_types",
+            "importlib",
+            "__future__",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(imports, want);
+    }
+
+    #[test]
+    fn modules_from_record_extracts_top_levels() {
+        let record = "\
+cv2/__init__.py,sha256=abc,123
+cv2/cv2.abi3.so,,
+numpy-2.0.dist-info/METADATA,,
+yaml/__init__.py,,
+yaml.py,,
+../../usr/bin/opaque,,
+data.txt,,
+foo.egg-info/PKG-INFO,,
+";
+        let mut got = PythonCheck::modules_from_record(record);
+        got.sort();
+        assert_eq!(got, vec!["cv2".to_string(), "yaml".to_string()]);
+    }
+
+    #[test]
+    fn site_packages_modules_come_from_the_file_list() {
+        // The python313-opencv shape: no dist-info, just a bare
+        // extension module in site-packages — the file list is the only
+        // attribution evidence.
+        use crate::pkg::pkgfile::PkgFile;
+        let mut pkg = fixture_pkg_with_requires(&[]);
+        let file = |name: &str| PkgFile {
+            name: name.to_string(),
+            ..Default::default()
+        };
+        pkg.files = vec![
+            file("/usr/lib64/python3.13/site-packages/cv2.cpython-313-x86_64-linux-gnu.so"),
+            file("/usr/lib/python3.13/site-packages/yaml/__init__.py"),
+            file("/usr/lib/python3.13/site-packages/top.py"),
+            file("/usr/lib/python3.13/site-packages/foo-1.0.dist-info/METADATA"),
+            file("/usr/lib/python3.13/site-packages/__pycache__/top.cpython-313.pyc"),
+            file("/usr/share/doc/readme.txt"),
+        ];
+        let mut got = PythonCheck::site_packages_modules(&pkg);
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["cv2".to_string(), "top".to_string(), "yaml".to_string()]
+        );
+    }
+
+    #[test]
+    fn egg_info_dist_name_strips_the_version() {
+        assert_eq!(
+            PythonCheck::egg_info_dist_name("/usr/lib/python3/site-packages/foo_bar-1.0.egg-info"),
+            Some("foo_bar".to_string())
+        );
+        assert_eq!(
+            PythonCheck::egg_info_dist_name("/x/setuptools-80.9.0.egg-info"),
+            Some("setuptools".to_string())
+        );
+        assert_eq!(
+            PythonCheck::egg_info_dist_name("/x/bare.egg-info"),
+            Some("bare".to_string())
+        );
+    }
+
+    #[test]
+    fn pep503_and_package_key_normalisation() {
+        assert_eq!(pep503("PyYAML"), "pyyaml");
+        assert_eq!(pep503("opencv_python"), "opencv-python");
+        assert_eq!(pep503("zope.interface"), "zope-interface");
+        assert_eq!(PythonCheck::package_key("python313-opencv"), "opencv");
+        assert_eq!(PythonCheck::package_key("python3-PyYAML"), "pyyaml");
+        assert_eq!(
+            PythonCheck::package_key("python-pydantic_extra_types"),
+            "pydantic-extra-types"
+        );
+        assert_eq!(PythonCheck::package_key("gnuhealth"), "gnuhealth");
+    }
+
+    #[test]
+    fn metadata_only_package_has_no_code() {
+        // #481c: the azure umbrella shape — a dist-info and nothing else.
+        use crate::pkg::pkgfile::PkgFile;
+        let mut pkg = fixture_pkg_with_requires(&[]);
+        let file = |name: &str| PkgFile {
+            name: name.to_string(),
+            ..Default::default()
+        };
+        pkg.files = vec![file(
+            "/usr/lib/python3.13/site-packages/azure_mgmt-1.0.dist-info/METADATA",
+        )];
+        assert!(!PythonCheck::package_has_code(&pkg));
+        pkg.files
+            .push(file("/usr/lib/python3.13/site-packages/azure/__init__.py"));
+        assert!(PythonCheck::package_has_code(&pkg));
+        pkg.files = vec![file(
+            "/usr/lib64/python3.13/lib-dynload/_ssl.cpython-313.so",
+        )];
+        assert!(PythonCheck::package_has_code(&pkg));
+    }
+
+    fn leftover_package(name: &str, imports: &[&str], candidates: &[&str]) -> LeftoverPackage {
+        LeftoverPackage {
+            name: name.to_string(),
+            arch: "noarch".to_string(),
+            imports: imports.iter().map(|s| s.to_string()).collect(),
+            candidates: candidates.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn after_checks_findings(check: &mut PythonCheck) -> Vec<(String, Level, String)> {
+        use crate::color::Color;
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.after_checks(&config, &mut out);
+        let levels = out.result_levels().to_vec();
+        out.results()
+            .iter()
+            .zip(levels)
+            .map(|((name, line), level)| (name.clone(), level, line.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn after_checks_suppresses_only_proven_leftovers() {
+        // #481b: `torch` is proven by the exact name match (the code
+        // imports `torch`), `opencv` by provider attribution (the code
+        // imports `cv2`, which the run's provider metadata attributes
+        // to the `opencv` provider key). `numba` has neither and fires.
+        let config = Config::default();
+        let mut check = PythonCheck::new(&config);
+        check.leftover_packages.push(leftover_package(
+            "python3-vllm",
+            &["torch", "cv2"],
+            &["python313-torch", "python313-opencv", "python313-numba"],
+        ));
+        check
+            .provider_modules
+            .push(("cv2".to_string(), "opencv".to_string()));
+        let findings = after_checks_findings(&mut check);
+        assert_eq!(findings.len(), 1, "unexpected findings: {findings:?}");
+        let (name, level, line) = &findings[0];
+        assert_eq!(name, "python-leftover-require");
+        assert_eq!(*level, Level::Warning);
+        assert_eq!(
+            line,
+            "python3-vllm.noarch: W: python-leftover-require python313-numba"
+        );
+    }
+
+    #[test]
+    fn after_checks_suppression_needs_the_import_itself() {
+        // Provider metadata alone is not a proof: without an import of
+        // the provider's module in this package's code, the leftover
+        // keeps firing.
+        let config = Config::default();
+        let mut check = PythonCheck::new(&config);
+        check.leftover_packages.push(leftover_package(
+            "python3-consumer",
+            &["unrelated"],
+            &["python313-opencv"],
+        ));
+        check
+            .provider_modules
+            .push(("cv2".to_string(), "opencv".to_string()));
+        let findings = after_checks_findings(&mut check);
+        assert_eq!(findings.len(), 1, "unexpected findings: {findings:?}");
+    }
+
+    #[test]
+    fn after_checks_merges_exported_worker_state() {
+        // The parallel path: two workers each export their half of the
+        // state; the merged main instance must decide exactly like a
+        // single instance holding everything (the provider lives on the
+        // other worker from the consumer).
+        let config = Config::default();
+        let mut worker_a = PythonCheck::new(&config);
+        worker_a.leftover_packages.push(leftover_package(
+            "python3-vllm",
+            &["cv2"],
+            &["python313-opencv"],
+        ));
+        let mut worker_b = PythonCheck::new(&config);
+        worker_b
+            .provider_modules
+            .push(("cv2".to_string(), "opencv".to_string()));
+        worker_b.leftover_packages.push(leftover_package(
+            "python3-other",
+            &[],
+            &["python313-unproven"],
+        ));
+
+        let mut main = PythonCheck::new(&config);
+        main.import_state(worker_a.export_state().expect("worker A exports"));
+        main.import_state(worker_b.export_state().expect("worker B exports"));
+        let findings = after_checks_findings(&mut main);
+        assert_eq!(findings.len(), 1, "unexpected findings: {findings:?}");
+        assert!(findings[0].2.contains("python313-unproven"));
     }
 
     #[test]
