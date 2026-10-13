@@ -1762,7 +1762,7 @@ since = "0.1.0"
 case = "global"
 check = "macro-in-comment"
 kind = "behaviour"
-reason = "Strictening per #442: a macro that opens the comment (after `#` and whitespace, e.g. `# %license COPYING`) or sits glued to a non-whitespace char (e.g. `# /usr/%_bindir/foo`) warns, as either looks like a commented-out invocation. A macro set off by whitespace mid-comment (`# shipped via %license`) is prose about the macro, not a mistake, and stays quiet. The frozen 2.10.0 reference warns on any occurrence."
+reason = "Strictening per #442/#482: macro-in-comment warns only on effectful expansions in a comment - shell (%(...)), Lua (%{lua:...}) and macro-file (%{load:...}) forms, including forms an enclosing %{expand:...} makes live by re-expanding escaped %% runs - because rpm executes or loads those while parsing even inside comments (verified against rpm 4.20.1: plain macro mentions expand harmlessly in any position, conditional keywords in comments are inert, and %%( outside an expand stays escaped). The frozen 2.10.0 reference warns on any macro occurrence in a comment."
 since = "0.3.0"
 
 [[divergence]]

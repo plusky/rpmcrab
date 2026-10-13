@@ -1901,7 +1901,7 @@ fn explain_reworded_macro_in_comment() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         stdout,
-        "macro-in-comment:\nThere is an unescaped macro after a shell style comment in the specfile.\nMacros are expanded everywhere, so check if it can cause a problem in this\ncase and escape the macro with another leading % if appropriate.\n\n\n",
+        "macro-in-comment:\nThere is an effectful macro expansion after a shell style comment in the\nspecfile. Shell (%(...)), Lua (%{lua:...}) and macro file (%{load:...})\nexpansions are performed by rpm while the specfile is parsed, even inside\ncomments, so check if it can cause a problem in this case and escape the macro\nwith another leading % if appropriate.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());
