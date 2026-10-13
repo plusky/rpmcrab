@@ -15,7 +15,9 @@
 //! `python-leftover-require` is computed once per package over the
 //! union of all its dist-infos and resolved after the whole run has
 //! been checked: a leftover is suppressed when the package's shipped
-//! code provably imports the dependency, and a package shipping no
+//! code provably imports the dependency — an exact dotted module
+//! path, with string literals, comments and `/usr/share/doc`
+//! examples not counting as code — and a package shipping no
 //! Python code never produces one (#481).
 
 use std::collections::{HashMap, HashSet};
@@ -39,10 +41,10 @@ pub struct PythonCheck {
     /// `after_checks` once every package in the run has contributed its
     /// provider metadata (#481).
     leftover_packages: Vec<LeftoverPackage>,
-    /// `(module, provider key)` pairs seen so far: which provider (by
-    /// normalised distribution name or by the providing package's name)
-    /// ships which top-level module, from dist-info metadata and from
-    /// site-packages file lists.
+    /// `(module path, provider key)` pairs seen so far: which provider
+    /// (by normalised distribution name or by the providing package's
+    /// name) ships which exact dotted module path, from dist-info
+    /// metadata and from site-packages file lists.
     provider_modules: Vec<(String, String)>,
 }
 
@@ -50,7 +52,8 @@ pub struct PythonCheck {
 struct LeftoverPackage {
     name: String,
     arch: String,
-    /// Top-level modules imported by the package's shipped Python code.
+    /// Dotted module paths imported by the package's shipped Python
+    /// code (`azure.mgmt.network`, not just `azure`).
     imports: HashSet<String>,
     /// RPM require strings no dist-info of the package accounts for,
     /// deduplicated, in first-seen order.
@@ -828,27 +831,26 @@ impl Check for PythonCheck {
             }
         }
 
-        // Provider metadata (#481b), file-list part: the top-level
-        // modules this package ships under site-packages, from its own
+        // Provider metadata (#481b), file-list part: the exact module
+        // paths this package ships under site-packages, from its own
         // file list. Some providers ship no dist-info at all
         // (python313-opencv ships a bare `cv2.*.so`), so this is the
         // only attribution evidence for them — the same evidence
         // `RECORD` carries, read from the RPM header instead.
         let pkg_key = Self::package_key(&pkg.name);
-        for module in Self::site_packages_modules(pkg) {
-            self.provider_modules
-                .push((pep503(&module), pkg_key.clone()));
+        for module in Self::site_packages_module_paths(pkg) {
+            self.provider_modules.push((module, pkg_key.clone()));
         }
         if dist_infos.is_empty() {
             return;
         }
         // Provider metadata (#481b), dist-info part: this package's
-        // dist-infos state which top-level modules they ship, so another
+        // dist-infos state which module paths they ship, so another
         // package's leftover can be attributed when its code imports
         // one of them. Recorded for every package with dist-infos,
         // whether or not the package itself has leftover candidates.
         for di in &dist_infos {
-            let modules = Self::dist_modules(pkg, di);
+            let modules = Self::dist_module_paths(pkg, di);
             if modules.is_empty() {
                 continue;
             }
@@ -859,7 +861,7 @@ impl Check for PythonCheck {
             keys.push(pkg_key.clone());
             for module in modules {
                 for key in &keys {
-                    self.provider_modules.push((pep503(&module), key.clone()));
+                    self.provider_modules.push((module.clone(), key.clone()));
                 }
             }
         }
@@ -899,7 +901,8 @@ impl Check for PythonCheck {
     }
 
     fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
-        // Module (PEP 503 normalised) -> the provider keys shipping it.
+        // Dotted module path -> the provider keys shipping exactly
+        // that path.
         let mut providers: HashMap<String, HashSet<String>> = HashMap::new();
         for (module, key) in &self.provider_modules {
             providers
@@ -1039,11 +1042,20 @@ impl PythonCheck {
     }
 
     /// Whether a leftover candidate is proven used (#481b): the
-    /// package's shipped code imports a top-level module that either
-    /// *is* the dependency (exact PEP 503 normalised name match) or is
-    /// attributed to it by a provider package's dist-info metadata seen
-    /// in this run (`providers`: module -> provider keys). Anything
-    /// else keeps firing: the suppression is a proof, not a heuristic.
+    /// package's shipped code imports a dotted module path that
+    /// either *is* the dependency — the full path PEP 503-normalises
+    /// to the dependency's name (`azure.mgmt.network` for
+    /// `azure-mgmt-network`), or the path's top-level component does
+    /// (`starlette.routing` for `starlette`: a submodule of the
+    /// dependency's own module tree) — or is exactly a module path a
+    /// provider package's metadata seen in this run attributes to
+    /// the dependency (`providers`: module path -> provider keys).
+    /// Neither name arm can repeat the shared-namespace confusion: a
+    /// namespace top level (`azure`) never equals a namespaced
+    /// dependency's name (`azure-mgmt-core`), so importing
+    /// `azure.mgmt.network` says nothing about `azure-mgmt-core`,
+    /// however many `azure-*` packages are installed. Anything else
+    /// keeps firing: the suppression is a proof, not a heuristic.
     fn leftover_suppressed(
         req: &str,
         imports: &HashSet<String>,
@@ -1053,12 +1065,10 @@ impl PythonCheck {
             return false;
         };
         let key = pep503(&dep);
-        imports.iter().any(|m| {
-            let module = pep503(m);
-            module == key
-                || providers
-                    .get(&module)
-                    .is_some_and(|keys| keys.contains(&key))
+        imports.iter().any(|path| {
+            pep503(path) == key
+                || path.split('.').next().is_some_and(|top| pep503(top) == key)
+                || providers.get(path).is_some_and(|keys| keys.contains(&key))
         })
     }
 
@@ -1105,60 +1115,111 @@ impl PythonCheck {
         }
     }
 
-    /// The top-level modules a dist-info ships: `top_level.txt` when
-    /// present, else derived from `RECORD`.
-    fn dist_modules(pkg: &Pkg, di: &DistInfo) -> Vec<String> {
-        let top = pkg.read_file(&format!("{}/top_level.txt", di.dir));
-        let modules: Vec<String> = top
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect();
-        if !modules.is_empty() {
-            return modules;
-        }
+    /// The module paths a dist-info attests shipping: the exact
+    /// dotted paths derived from `RECORD`, plus the names listed in
+    /// `top_level.txt`. The two sources are not equivalent:
+    /// `top_level.txt` names top levels only, so a name it lists
+    /// attests that top level itself and nothing below it — the
+    /// `azure` every `azure-*` distribution lists does not attest
+    /// `azure.mgmt.network`. `RECORD` carries the full paths, which
+    /// is what makes subpackage attribution possible at all.
+    fn dist_module_paths(pkg: &Pkg, di: &DistInfo) -> Vec<String> {
         let record = pkg.read_file(&format!("{}/RECORD", di.dir));
-        Self::modules_from_record(&record)
+        let mut out = Self::module_paths_from_record(&record);
+        let top = pkg.read_file(&format!("{}/top_level.txt", di.dir));
+        for line in top.lines() {
+            let name = line.trim();
+            if !name.is_empty() && !out.iter().any(|p| p == name) {
+                out.push(name.to_string());
+            }
+        }
+        out
     }
 
-    /// Top-level modules from a dist-info `RECORD`: the first path
-    /// component of each entry relative to the site-packages root —
-    /// a directory is a package, a lone `*.py` file is a module.
-    /// Entries inside a `.dist-info`/`.egg-info` directory and paths
-    /// escaping the root (`../..`) are skipped.
-    fn modules_from_record(record: &str) -> Vec<String> {
+    /// Module paths attested by a dist-info `RECORD`: each entry,
+    /// read relative to the site-packages root, contributes the
+    /// paths of [`Self::module_paths_for_file`]. Paths escaping the
+    /// root (`../..`) are skipped.
+    fn module_paths_from_record(record: &str) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for line in record.lines() {
             let path = line.split(',').next().unwrap_or("").trim();
             if path.is_empty() || path.starts_with("..") || path.starts_with('/') {
                 continue;
             }
-            let mut parts = path.split('/');
-            let first = parts.next().unwrap_or("");
-            if first.is_empty() || first.ends_with(".dist-info") || first.ends_with(".egg-info") {
-                continue;
-            }
-            let module = if parts.next().is_some() {
-                Some(first.to_string())
-            } else {
-                first.strip_suffix(".py").map(str::to_string)
-            };
-            if let Some(module) = module
-                && !module.is_empty()
-                && !out.contains(&module)
-            {
-                out.push(module);
+            for module in Self::module_paths_for_file(path) {
+                if !out.contains(&module) {
+                    out.push(module);
+                }
             }
         }
         out
     }
 
-    /// The top-level modules a package ships under a site-packages
-    /// directory, from its file list: a directory is a package, a lone
-    /// `*.py` file is a module, and a `*.so` file is an extension
-    /// module named by its first dotted component
-    /// (`cv2.cpython-313-x86_64-linux-gnu.so` -> `cv2`).
-    fn site_packages_modules(pkg: &Pkg) -> Vec<String> {
+    /// The module paths one shipped file attests, given its path
+    /// relative to the site-packages root: the file's own module
+    /// path (`a/b.py` -> `a.b`, `a/__init__.py` -> `a`,
+    /// `a/b.abi3.so` -> `a.b`) and its containing package directory
+    /// (`a/b.py` also attests `a`). A directory is attested only by
+    /// a file shipped directly in it, never by a deeper descendant,
+    /// so a shared namespace directory is attested by nobody in
+    /// particular: `azure/mgmt/core/__init__.py` attests
+    /// `azure.mgmt.core`, not `azure` or `azure.mgmt`. Non-code
+    /// files attest nothing, and entries under a
+    /// `.dist-info`/`.egg-info` directory or `__pycache__` are
+    /// skipped.
+    fn module_paths_for_file(rel_path: &str) -> Vec<String> {
+        let mut parts: Vec<&str> = rel_path.split('/').collect();
+        let Some(file) = parts.pop() else {
+            return Vec::new();
+        };
+        if file.is_empty()
+            || parts.iter().any(|p| {
+                *p == "__pycache__" || p.ends_with(".dist-info") || p.ends_with(".egg-info")
+            })
+        {
+            return Vec::new();
+        }
+        let dir = parts.join(".");
+        let module: Option<String> = if file == "__init__.py" {
+            if dir.is_empty() {
+                None
+            } else {
+                Some(dir.clone())
+            }
+        } else if let Some(stem) = file.strip_suffix(".py") {
+            Some(join_module(&dir, stem))
+        } else if file.split('.').any(|c| c == "so") {
+            let stem = file.split('.').next().unwrap_or("");
+            if stem == "__init__" {
+                if dir.is_empty() {
+                    None
+                } else {
+                    Some(dir.clone())
+                }
+            } else {
+                Some(join_module(&dir, stem))
+            }
+        } else {
+            None
+        };
+        let Some(module) = module else {
+            return Vec::new();
+        };
+        if module.is_empty() {
+            return Vec::new();
+        }
+        let mut out = vec![module];
+        if !dir.is_empty() && !out.contains(&dir) {
+            out.push(dir);
+        }
+        out
+    }
+
+    /// The module paths a package ships under a site-packages
+    /// directory, from its file list — the same per-file derivation
+    /// `RECORD` entries get ([`Self::module_paths_for_file`]).
+    fn site_packages_module_paths(pkg: &Pkg) -> Vec<String> {
         static SITELIB_RE: OnceLock<Regex> = OnceLock::new();
         let sitelib_re = SITELIB_RE.get_or_init(|| {
             Regex::new(&format!("{}/", Self::sitelib_pattern())).expect("static regex")
@@ -1173,29 +1234,10 @@ impl PythonCheck {
             };
             let whole = caps.get(0).expect("regex match");
             let rest = &pkgfile.name[whole.end()..];
-            let mut parts = rest.split('/');
-            let first = parts.next().unwrap_or("");
-            if first.is_empty()
-                || first == "__pycache__"
-                || first.ends_with(".dist-info")
-                || first.ends_with(".egg-info")
-            {
-                continue;
-            }
-            let module = if parts.next().is_some() {
-                Some(first.to_string())
-            } else if let Some(stem) = first.strip_suffix(".py") {
-                Some(stem.to_string())
-            } else if first.split('.').any(|c| c == "so") {
-                Some(first.split('.').next().unwrap_or("").to_string())
-            } else {
-                None
-            };
-            if let Some(module) = module
-                && !module.is_empty()
-                && !out.contains(&module)
-            {
-                out.push(module);
+            for module in Self::module_paths_for_file(rest) {
+                if !out.contains(&module) {
+                    out.push(module);
+                }
             }
         }
         out
@@ -1211,20 +1253,27 @@ impl PythonCheck {
         })
     }
 
-    /// Top-level modules imported by the package's shipped `.py` files.
-    /// Line-based scan of `import` / `from ... import` statements;
-    /// relative imports are the package's own modules and are skipped,
-    /// and dynamic imports (`importlib`, `__import__`) are not chased —
-    /// a dependency used only that way is unprovable and keeps firing.
+    /// Dotted module paths imported by the package's shipped `.py`
+    /// files. The scan runs over the code skeleton
+    /// ([`strip_strings_and_comments`]): an `import` mentioned in a
+    /// docstring, a string literal or a comment is not an import, and
+    /// files under `/usr/share/doc` are documentation examples, not
+    /// the package's code — neither counts as proof of use. Relative
+    /// imports are the package's own modules and are skipped, and
+    /// dynamic imports (`importlib`, `__import__`) are not chased — a
+    /// dependency used only that way is unprovable and keeps firing.
     fn scan_imports(pkg: &Pkg) -> HashSet<String> {
         let mut out = HashSet::new();
         for pkgfile in &pkg.files {
-            if !pkgfile.name.ends_with(".py") || pkg.ghost_files.iter().any(|g| g == &pkgfile.name)
+            if !pkgfile.name.ends_with(".py")
+                || pkg.ghost_files.iter().any(|g| g == &pkgfile.name)
+                || pkgfile.name.starts_with("/usr/share/doc/")
             {
                 continue;
             }
             let content = pkg.read_file(&pkgfile.name);
-            for line in content.lines() {
+            let code = strip_strings_and_comments(&content);
+            for line in code.lines() {
                 Self::scan_import_line(line, &mut out);
             }
         }
@@ -1237,29 +1286,129 @@ impl PythonCheck {
             // `import a.b, c as d`
             for part in rest.split(',') {
                 let dotted = part.split_whitespace().next().unwrap_or("");
-                Self::push_top_module(dotted, out);
+                Self::push_module_path(dotted, out);
             }
         } else if let Some(rest) = line.strip_prefix("from ") {
-            let dotted = rest.split_whitespace().next().unwrap_or("");
+            // `from a.b import c, d as e`: the statement imports `a.b`
+            // and each named submodule (`a.b.c`), so record both —
+            // `from azure.mgmt import network` proves
+            // `azure.mgmt.network`, not the shared `azure` namespace.
+            let mut halves = rest.splitn(2, " import ");
+            let dotted = halves.next().unwrap_or("").trim();
             if dotted.starts_with('.') {
                 return;
             }
-            Self::push_top_module(dotted, out);
+            if Self::push_module_path(dotted, out)
+                && let Some(names) = halves.next()
+            {
+                for part in names.split(',') {
+                    let name = part
+                        .trim()
+                        .trim_matches(|c| c == '(' || c == ')')
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("");
+                    if Self::is_module_component(name) {
+                        Self::push_module_path(&format!("{dotted}.{name}"), out);
+                    }
+                }
+            }
         }
     }
 
-    fn push_top_module(dotted: &str, out: &mut HashSet<String>) {
-        let top = dotted.split('.').next().unwrap_or("");
-        if !top.is_empty()
-            && top
+    /// Record `dotted` when it is a well-formed dotted module path
+    /// (every component an identifier); returns whether it was.
+    fn push_module_path(dotted: &str, out: &mut HashSet<String>) -> bool {
+        if !dotted.is_empty() && dotted.split('.').all(Self::is_module_component) {
+            out.insert(dotted.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    fn is_module_component(part: &str) -> bool {
+        !part.is_empty()
+            && part
                 .chars()
                 .next()
                 .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            && top.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
-            out.insert(top.to_string());
+            && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+}
+
+/// Join a package directory path and a module stem into a dotted
+/// module path (`("a.b", "c")` -> `"a.b.c"`; `("", "c")` -> `"c"`).
+fn join_module(dir: &str, stem: &str) -> String {
+    if dir.is_empty() {
+        stem.to_string()
+    } else {
+        format!("{dir}.{stem}")
+    }
+}
+
+/// Blank out string literals and comments in Python source,
+/// preserving newlines — and therefore line numbers and line
+/// starts — so line-based scanning sees only the code skeleton. A
+/// backslash pair never terminates a literal (true for raw strings
+/// too: a closing quote cannot follow an odd number of backslashes),
+/// which is the only escape rule the scan needs. F-string
+/// expressions stay blanked with the rest of the literal: an
+/// `import` statement cannot appear inside one.
+fn strip_strings_and_comments(src: &str) -> String {
+    let chars: Vec<char> = src.chars().collect();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '#' {
+            // Comment: dropped up to (not including) the newline.
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c != '"' && c != '\'' {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        // String literal: blank it whole, opening quotes included.
+        let triple = i + 2 < chars.len() && chars[i + 1] == c && chars[i + 2] == c;
+        let opening = if triple { 3 } else { 1 };
+        for _ in 0..opening {
+            out.push(' ');
+        }
+        i += opening;
+        while i < chars.len() {
+            let ch = chars[i];
+            if ch == '\\' && i + 1 < chars.len() {
+                out.push(' ');
+                out.push(if chars[i + 1] == '\n' { '\n' } else { ' ' });
+                i += 2;
+                continue;
+            }
+            if triple {
+                if ch == c && i + 2 < chars.len() && chars[i + 1] == c && chars[i + 2] == c {
+                    out.push(' ');
+                    out.push(' ');
+                    out.push(' ');
+                    i += 3;
+                    break;
+                }
+            } else if ch == c {
+                out.push(' ');
+                i += 1;
+                break;
+            } else if ch == '\n' {
+                // Unterminated single-line literal: it ends here.
+                break;
+            }
+            out.push(if ch == '\n' { '\n' } else { ' ' });
+            i += 1;
         }
     }
+    out
 }
 
 /// PEP 503 name normalisation: lowercase, with runs of `-`, `_` and `.`
@@ -1901,7 +2050,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_import_line_collects_top_level_modules() {
+    fn scan_import_line_collects_module_paths() {
         let mut imports = HashSet::new();
         for line in [
             "import os, sys",
@@ -1921,11 +2070,14 @@ mod tests {
         let want: HashSet<String> = [
             "os",
             "sys",
-            "torch",
+            "torch.nn",
             "cv2",
-            "pydantic_extra_types",
+            "cv2.imread",
+            "pydantic_extra_types.color",
+            "pydantic_extra_types.color.Color",
             "importlib",
             "__future__",
+            "__future__.annotations",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -1934,7 +2086,7 @@ mod tests {
     }
 
     #[test]
-    fn modules_from_record_extracts_top_levels() {
+    fn module_paths_from_record_are_exact() {
         let record = "\
 cv2/__init__.py,sha256=abc,123
 cv2/cv2.abi3.so,,
@@ -1945,16 +2097,43 @@ yaml.py,,
 data.txt,,
 foo.egg-info/PKG-INFO,,
 ";
-        let mut got = PythonCheck::modules_from_record(record);
+        let mut got = PythonCheck::module_paths_from_record(record);
         got.sort();
-        assert_eq!(got, vec!["cv2".to_string(), "yaml".to_string()]);
+        assert_eq!(
+            got,
+            vec!["cv2".to_string(), "cv2.cv2".to_string(), "yaml".to_string()]
+        );
     }
 
     #[test]
-    fn site_packages_modules_come_from_the_file_list() {
+    fn module_paths_from_record_do_not_attest_shared_namespaces() {
+        // An azure-mgmt-core RECORD attests `azure.mgmt.core` (and
+        // its own submodule files) — never the shared `azure` /
+        // `azure.mgmt` namespace directories, and never a sibling
+        // subpackage like `azure.mgmt.network`.
+        let record = "\
+azure/mgmt/core/__init__.py,,
+azure/mgmt/core/models.py,,
+azure_mgmt_core-1.0.dist-info/METADATA,,
+azure_mgmt_core-1.0.dist-info/RECORD,,
+";
+        let mut got = PythonCheck::module_paths_from_record(record);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                "azure.mgmt.core".to_string(),
+                "azure.mgmt.core.models".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn site_packages_module_paths_come_from_the_file_list() {
         // The python313-opencv shape: no dist-info, just a bare
         // extension module in site-packages — the file list is the only
-        // attribution evidence.
+        // attribution evidence. Deep files attest their exact path
+        // only, not the shared namespace directories above them.
         use crate::pkg::pkgfile::PkgFile;
         let mut pkg = fixture_pkg_with_requires(&[]);
         let file = |name: &str| PkgFile {
@@ -1964,16 +2143,22 @@ foo.egg-info/PKG-INFO,,
         pkg.files = vec![
             file("/usr/lib64/python3.13/site-packages/cv2.cpython-313-x86_64-linux-gnu.so"),
             file("/usr/lib/python3.13/site-packages/yaml/__init__.py"),
+            file("/usr/lib/python3.13/site-packages/azure/mgmt/core/__init__.py"),
             file("/usr/lib/python3.13/site-packages/top.py"),
             file("/usr/lib/python3.13/site-packages/foo-1.0.dist-info/METADATA"),
             file("/usr/lib/python3.13/site-packages/__pycache__/top.cpython-313.pyc"),
             file("/usr/share/doc/readme.txt"),
         ];
-        let mut got = PythonCheck::site_packages_modules(&pkg);
+        let mut got = PythonCheck::site_packages_module_paths(&pkg);
         got.sort();
         assert_eq!(
             got,
-            vec!["cv2".to_string(), "top".to_string(), "yaml".to_string()]
+            vec![
+                "azure.mgmt.core".to_string(),
+                "cv2".to_string(),
+                "top".to_string(),
+                "yaml".to_string()
+            ]
         );
     }
 
@@ -2319,5 +2504,266 @@ foo.egg-info/PKG-INFO,,
         let req = PythonCheck::split_marker("dask[array]>=2022.2.0");
         let req_names = vec!["python313-dask-array >= 2022.2.0".to_string()];
         assert!(PythonCheck::require_satisfied(&req_names, &req));
+    }
+
+    #[test]
+    fn strip_strings_and_comments_blanks_literals_and_comments() {
+        let src = "import os  # import in_comment\nx = \"import in_string\"\n'''import in_docstring\nstill string: import in_docstring2'''\nimport sys\n";
+        let code = strip_strings_and_comments(src);
+        assert!(!code.contains("in_comment"), "cleaned: {code:?}");
+        assert!(!code.contains("in_string"), "cleaned: {code:?}");
+        assert!(!code.contains("in_docstring"), "cleaned: {code:?}");
+        assert!(code.contains("import os"), "cleaned: {code:?}");
+        assert!(code.contains("import sys"), "cleaned: {code:?}");
+        assert_eq!(code.matches('\n').count(), src.matches('\n').count());
+        // An escaped quote does not terminate the literal, raw or not.
+        let src = "x = \"a\\\" import nope\"\nimport real\n";
+        let code = strip_strings_and_comments(src);
+        assert!(!code.contains("nope"), "cleaned: {code:?}");
+        assert!(code.contains("import real"), "cleaned: {code:?}");
+        let src = "x = r\"a\\\" import nope\"\nimport real\n";
+        let code = strip_strings_and_comments(src);
+        assert!(!code.contains("nope"), "cleaned: {code:?}");
+        assert!(code.contains("import real"), "cleaned: {code:?}");
+        // A hash inside a string is not a comment; a quote inside a
+        // comment does not open a string.
+        let src = "x = \"# not a comment\"  # don't\nimport real\n";
+        let code = strip_strings_and_comments(src);
+        assert!(code.contains("import real"), "cleaned: {code:?}");
+        assert!(!code.contains("not a comment"), "cleaned: {code:?}");
+    }
+
+    #[test]
+    fn scan_imports_ignores_strings_comments_and_doc_files() {
+        // plusky's PR #489 repro, second half: an `import` inside a
+        // docstring example and one in a `/usr/share/doc` demo file
+        // used to count as proof of use. Neither is the package's
+        // code; only the real imports below may be recorded.
+        use crate::pkg::pkgfile::PkgFile;
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        let write = |pkg: &Pkg, name: &str, content: &str| {
+            let disk = pkg.dir_name().join(name.trim_start_matches('/'));
+            std::fs::create_dir_all(disk.parent().unwrap()).expect("test dirs");
+            std::fs::write(&disk, content).expect("test file");
+            PkgFile {
+                name: name.to_string(),
+                ..Default::default()
+            }
+        };
+        pkg.files = vec![
+            write(
+                &pkg,
+                "/usr/lib/python3.13/site-packages/proofpkg/__init__.py",
+                "\"\"\"Usage example:\n\n    import torch\n\"\"\"\n# import commented_out\nimport requests\ns = \"import in_string\"\nfrom azure.mgmt import network\n",
+            ),
+            write(
+                &pkg,
+                "/usr/share/doc/python3-proofpkg/demo.py",
+                "import doc_only\n",
+            ),
+        ];
+        let got = PythonCheck::scan_imports(&pkg);
+        let want: HashSet<String> = ["requests", "azure.mgmt", "azure.mgmt.network"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn dist_module_paths_top_level_attests_only_itself() {
+        // With no `RECORD`, a dist-info's `top_level.txt` attests
+        // exactly the names it lists — the shared namespace top level
+        // and nothing below it.
+        use crate::pkg::pkgfile::PkgFile;
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        let dir = "/usr/lib/python3.13/site-packages/azure_mgmt_core-1.0.dist-info";
+        let disk = pkg
+            .dir_name()
+            .join(format!("{}/top_level.txt", dir.trim_start_matches('/')));
+        std::fs::create_dir_all(disk.parent().unwrap()).expect("test dirs");
+        std::fs::write(&disk, "azure\n").expect("test file");
+        pkg.files = vec![PkgFile {
+            name: format!("{dir}/top_level.txt"),
+            ..Default::default()
+        }];
+        let di = DistInfo {
+            reqs: Vec::new(),
+            python_version: "3.13".to_string(),
+            dir: dir.to_string(),
+            dist_name: Some("azure-mgmt-core".to_string()),
+        };
+        assert_eq!(
+            PythonCheck::dist_module_paths(&pkg, &di),
+            vec!["azure".to_string()]
+        );
+    }
+
+    #[test]
+    fn after_checks_suppression_uses_exact_module_paths() {
+        // Provider attribution is by exact module path: `PIL.Image`
+        // is attributed to `pillow` and suppresses it, while the
+        // `azure` top level attributed to `azure-mgmt-core` does not
+        // suppress anything for an import of `azure.mgmt.network`.
+        let config = Config::default();
+        let mut check = PythonCheck::new(&config);
+        check.leftover_packages.push(leftover_package(
+            "python3-consumer",
+            &["azure.mgmt.network", "PIL.Image"],
+            &["python3-azure-mgmt-core", "python3-pillow"],
+        ));
+        check
+            .provider_modules
+            .push(("azure".to_string(), "azure-mgmt-core".to_string()));
+        check
+            .provider_modules
+            .push(("azure.mgmt.core".to_string(), "azure-mgmt-core".to_string()));
+        check
+            .provider_modules
+            .push(("PIL.Image".to_string(), "pillow".to_string()));
+        let findings = after_checks_findings(&mut check);
+        assert_eq!(findings.len(), 1, "unexpected findings: {findings:?}");
+        assert!(findings[0].2.contains("python3-azure-mgmt-core"));
+    }
+
+    #[test]
+    fn after_checks_top_level_name_proves_submodule_imports() {
+        // The fastmcp shape: the code imports submodules of the
+        // dependency's own module tree (`starlette.routing`,
+        // `starlette.requests`) and the provider is not part of the
+        // run. The dependency's name *is* the top-level module name,
+        // so the imports prove it — unlike a shared namespace, where
+        // the top level is nobody's name.
+        let config = Config::default();
+        let mut check = PythonCheck::new(&config);
+        check.leftover_packages.push(leftover_package(
+            "python3-fastmcp-slim",
+            &[
+                "starlette.routing",
+                "starlette.requests",
+                "packaging.version",
+            ],
+            &["python313-starlette", "python313-packaging"],
+        ));
+        let findings = after_checks_findings(&mut check);
+        assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+    }
+
+    #[test]
+    fn leftover_namespace_import_is_not_proof_for_sibling_dist() {
+        // plusky's PR #489 repro, end to end: the consumer imports
+        // `azure.mgmt.network`; the only azure provider in the run is
+        // `azure-mgmt-core`, whose `top_level.txt` lists the shared
+        // `azure` namespace. That must not silence the consumer's
+        // undeclared `python3-azure-mgmt-core` require. The sibling
+        // consumer importing `azure.mgmt.core` itself is genuinely
+        // proven and stays quiet.
+        use crate::color::Color;
+        use crate::pkg::pkgfile::PkgFile;
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let write = |pkg: &Pkg, name: &str, content: &str| {
+            let disk = pkg.dir_name().join(name.trim_start_matches('/'));
+            std::fs::create_dir_all(disk.parent().unwrap()).expect("test dirs");
+            std::fs::write(&disk, content).expect("test file");
+            PkgFile {
+                name: name.to_string(),
+                ..Default::default()
+            }
+        };
+        let mkpkg = |name: &str, req_names: &[&str]| {
+            let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+            pkg.name = name.to_string();
+            pkg.arch = "noarch".to_string();
+            pkg.req_names = req_names.iter().map(|s| s.to_string()).collect();
+            pkg
+        };
+        let config = Config::default();
+        let mut check = PythonCheck::new(&config);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+
+        // Provider: python3-azure-mgmt-core.
+        let mut provider = mkpkg("python3-azure-mgmt-core", &[]);
+        let di = "/usr/lib/python3.13/site-packages/azure_mgmt_core-1.0.dist-info";
+        provider.files = vec![
+            write(
+                &provider,
+                &format!("{di}/METADATA"),
+                "Metadata-Version: 2.1\nName: azure-mgmt-core\nVersion: 1.0\n",
+            ),
+            write(
+                &provider,
+                &format!("{di}/RECORD"),
+                "azure/mgmt/core/__init__.py,,\nazure/mgmt/core/models.py,,\n",
+            ),
+            write(&provider, &format!("{di}/top_level.txt"), "azure\n"),
+            write(
+                &provider,
+                "/usr/lib/python3.13/site-packages/azure/mgmt/core/__init__.py",
+                "",
+            ),
+            write(
+                &provider,
+                "/usr/lib/python3.13/site-packages/azure/mgmt/core/models.py",
+                "",
+            ),
+        ];
+        check.check_binary(&provider, &config, &mut out);
+
+        // Consumer A: declares azure-mgmt-network, also requires
+        // azure-mgmt-core, imports azure.mgmt.network only.
+        let mut a = mkpkg(
+            "python3-consumer-a",
+            &["python3-azure-mgmt-network", "python3-azure-mgmt-core"],
+        );
+        let di_a = "/usr/lib/python3.13/site-packages/consumer_a-1.0.dist-info";
+        a.files = vec![
+            write(
+                &a,
+                &format!("{di_a}/METADATA"),
+                "Metadata-Version: 2.1\nName: consumer-a\nVersion: 1.0\nRequires-Dist: azure-mgmt-network\n",
+            ),
+            write(
+                &a,
+                "/usr/lib/python3.13/site-packages/consumer_a/__init__.py",
+                "import azure.mgmt.network\n",
+            ),
+        ];
+        check.check_binary(&a, &config, &mut out);
+
+        // Consumer B: declares requests, also requires
+        // azure-mgmt-core, imports azure.mgmt.core itself.
+        let mut b = mkpkg(
+            "python3-consumer-b",
+            &["python3-requests", "python3-azure-mgmt-core"],
+        );
+        let di_b = "/usr/lib/python3.13/site-packages/consumer_b-1.0.dist-info";
+        b.files = vec![
+            write(
+                &b,
+                &format!("{di_b}/METADATA"),
+                "Metadata-Version: 2.1\nName: consumer-b\nVersion: 1.0\nRequires-Dist: requests\n",
+            ),
+            write(
+                &b,
+                "/usr/lib/python3.13/site-packages/consumer_b/__init__.py",
+                "import azure.mgmt.core\n",
+            ),
+        ];
+        check.check_binary(&b, &config, &mut out);
+
+        let findings = after_checks_findings(&mut check);
+        assert_eq!(findings.len(), 1, "unexpected findings: {findings:?}");
+        let (name, level, line) = &findings[0];
+        assert_eq!(name, "python-leftover-require");
+        assert_eq!(*level, Level::Warning);
+        assert_eq!(
+            line,
+            "python3-consumer-a.noarch: W: python-leftover-require python3-azure-mgmt-core"
+        );
     }
 }
