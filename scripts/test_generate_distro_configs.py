@@ -847,11 +847,12 @@ def test_append_extra_checks_lands_inside_checks_list():
     )
     out = gen.append_extra_checks(text, gen.EXTRA_OPENSUSE_CHECKS)
     checks_part, filters_part = out.split("Filters = [", 1)
-    assert '"XinetdDepCheck",' in checks_part, checks_part
-    assert "XinetdDepCheck" not in filters_part, filters_part
-    # The entry is inside the list: it precedes the closing bracket.
-    assert checks_part.index('"XinetdDepCheck",') < checks_part.index("]"), checks_part
-    assert gen.EXTRA_OPENSUSE_CHECKS == ["XinetdDepCheck"], gen.EXTRA_OPENSUSE_CHECKS
+    for check in ("XinetdDepCheck", "PAMModulesCheck"):
+        assert f'"{check}",' in checks_part, checks_part
+        assert check not in filters_part, filters_part
+        # The entry is inside the list: it precedes the closing bracket.
+        assert checks_part.index(f'"{check}",') < checks_part.index("]"), checks_part
+    assert gen.EXTRA_OPENSUSE_CHECKS == ["XinetdDepCheck", "PAMModulesCheck"], gen.EXTRA_OPENSUSE_CHECKS
 
 
 def test_append_extra_checks_without_checks_list_raises():
@@ -861,7 +862,7 @@ def test_append_extra_checks_without_checks_list_raises():
     deliberately enabled check is missing again.
     """
     try:
-        gen.append_extra_checks("Filters = [\n]\n", ["XinetdDepCheck"])
+        gen.append_extra_checks("Filters = [\n]\n", ["XinetdDepCheck", "PAMModulesCheck"])
     except AssertionError:
         return
     raise AssertionError("append_extra_checks accepted a document with no Checks list")

@@ -1161,7 +1161,7 @@ fn errors_only_header_reports_configured_check_count() {
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("checks: 44, packages: 1"),
+        stdout.contains("checks: 45, packages: 1"),
         "header reports the configured count, not the run count: {stdout}"
     );
 }

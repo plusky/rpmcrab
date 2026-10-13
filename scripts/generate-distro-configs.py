@@ -190,11 +190,18 @@ EXTRA_OPENSUSE_FILTERS = [
 
 # Extra Checks enabled in the openSUSE config that upstream rpmlint lists in
 # no shipped config (neither its configdefaults.toml nor the openSUSE branch's
-# opensuse.toml), so the check never runs there. XinetdDepCheck is implemented
+# opensuse.toml), so the checks never run there. XinetdDepCheck is implemented
 # and its deprecation message is the point of the check, so rpmcrab enables
-# it deliberately. Ledgered in tests/parity/divergences.toml.
+# it deliberately. PAMModulesCheck is listed in rpmlint main's opensuse.toml
+# but not in the shipping opensuse branch config, and upstream main pairs it
+# with a flat PAMAuthorizedModules list that no longer matches Factory
+# (measured 2026-10-13: it would flag 16 legitimate modules, e.g.
+# pam_systemd_home.so). rpmcrab enables the check and derives the authorized
+# modules from the FileDigestGroup data instead (see PAMModulesCheck).
+# Ledgered in tests/parity/divergences.toml.
 EXTRA_OPENSUSE_CHECKS = [
     "XinetdDepCheck",
+    "PAMModulesCheck",
 ]
 
 # Findings rpmcrab deliberately killed (see tests/parity/divergences.toml).
@@ -1373,7 +1380,7 @@ def append_extra_checks(text, checks):
             continue
         if in_list and stripped.startswith("]"):
             out.append("\n")
-            out.append("    # Extra: enabled by rpmcrab; upstream lists this check in no\n")
+            out.append("    # Extra: enabled by rpmcrab; upstream lists these checks in no\n")
             out.append("    # shipped config (deliberate, ledgered divergence); see\n")
             out.append("    # EXTRA_OPENSUSE_CHECKS in scripts/generate-distro-configs.py.\n")
             for c in checks:
