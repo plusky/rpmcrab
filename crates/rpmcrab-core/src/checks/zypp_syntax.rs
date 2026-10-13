@@ -60,6 +60,10 @@ impl Check for ZyppSyntaxCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    use crate::color::Color;
+    use crate::pkg::dep::DepInfo;
 
     #[test]
     fn packageand_is_flagged() {
@@ -101,11 +105,6 @@ mod tests {
     fn check_binary_entry_point_reports_packageand() {
         // Kills the neutered-`check_binary` mutant: the glue over
         // `Self::dep_names(pkg)` must run for the finding to reach `Filter`.
-        use std::path::Path;
-
-        use crate::color::Color;
-        use crate::pkg::dep::DepInfo;
-
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
         let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
