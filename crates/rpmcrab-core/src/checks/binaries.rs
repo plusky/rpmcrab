@@ -10,7 +10,9 @@
 #![allow(clippy::collapsible_if)]
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use fancy_regex::Regex;
 use rayon::prelude::*;
@@ -596,6 +598,10 @@ struct LddInfo {
     /// Symbols this file defines in `.dynsym`; the provider side of
     /// the DT_NEEDED closure resolution in `resolve_undefined_symbols`.
     defined_symbols: Vec<String>,
+    /// ELF class of the file (`Some(true)` = 64-bit), once parsed;
+    /// system-library providers are matched against it so a 32-bit
+    /// consumer never resolves against a 64-bit library or vice versa.
+    is_64: Option<bool>,
     failed: Option<String>,
 }
 
@@ -606,6 +612,7 @@ impl LddInfo {
             unused_dependencies: Vec::new(),
             undefined_symbols: Vec::new(),
             defined_symbols: Vec::new(),
+            is_64: None,
             failed: None,
         };
         if !is_installed {
@@ -627,6 +634,7 @@ impl LddInfo {
                 return info;
             }
         };
+        info.is_64 = Some(elf.is_64);
 
         // Dependencies from DT_NEEDED
         if let Some(dynamic) = &elf.dynamic {
@@ -678,23 +686,231 @@ impl LddInfo {
     }
 }
 
-/// A library shipped in the package, acting as a symbol provider
-/// for DT_NEEDED closure resolution: the dynamic symbols it defines
-/// and its own DT_NEEDED entries.
+/// A library acting as a symbol provider for DT_NEEDED closure
+/// resolution: the dynamic symbols it defines and its own DT_NEEDED
+/// entries. Providers come from the checked package first and from
+/// the system the check runs on (`SystemLibraries`) second.
 struct SymbolProvider {
     defined: HashSet<String>,
     needs: Vec<String>,
 }
 
-/// Resolve undefined symbols against the package's own libraries,
-/// modelling `ldd -r` restricted to the checked package: a file's
-/// undefined symbol is satisfied when a library in its DT_NEEDED
-/// closure -- the file itself included, as in the loader's lookup
-/// order -- defines it. Providers are the libraries shipped in the
-/// same package, the widest set the per-package data model can see;
-/// a DT_NEEDED library absent from the package satisfies nothing, so
-/// symbols only it could define keep firing (no silent allowlisting).
-fn resolve_undefined_symbols(analyses: &mut [Option<ElfAnalysis>], files: &[PkgFile]) {
+/// Lookup key for symbol providers: a SONAME plus the ELF class
+/// of the consumer asking (`None` when the class is unknown).
+type ProviderKey = (String, Option<bool>);
+
+/// Symbol providers from the system rpmcrab runs on: the fallback
+/// half of undefined-symbol resolution. The reference resolves with
+/// the real `ldd -r` against the installed system; rpmcrab by
+/// default runs inside a jailed container / OBS build root, so the
+/// libraries of the environment it runs in are the checked
+/// packages' own install target and resolving against them mirrors
+/// the reference. A SONAME is located through the ldconfig cache
+/// when one is readable, else by scanning the standard library
+/// directories; the located file is parsed like any other library
+/// and contributes only the symbols it actually defines in
+/// `.dynsym` -- never a name-based allowance -- and a symbol no
+/// located provider defines keeps firing.
+struct SystemLibraries {
+    /// Directories scanned for a SONAME, in search order.
+    dirs: Vec<PathBuf>,
+    /// The ldconfig cache consulted before the directories.
+    cache_path: Option<PathBuf>,
+    /// Lazily parsed cache: SONAME -> candidate paths, in cache order.
+    cache: Mutex<Option<HashMap<String, Vec<PathBuf>>>>,
+    /// Memoised lookups per (SONAME, ELF class): the located,
+    /// parsed provider, or `None` when no candidate parses.
+    providers: Mutex<HashMap<ProviderKey, Option<Arc<SymbolProvider>>>>,
+}
+
+impl SystemLibraries {
+    /// The live system: the standard library directories (plus any
+    /// multiarch triplet directories under them) and the default
+    /// ldconfig cache.
+    fn system() -> Self {
+        let mut dirs: Vec<PathBuf> = ["/lib64", "/usr/lib64", "/lib", "/usr/lib"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        // Multiarch systems keep the real libraries in triplet
+        // directories (x86_64-linux-gnu, aarch64-linux-gnu, ...)
+        // directly under /usr/lib and /lib.
+        let mut multiarch: Vec<PathBuf> = Vec::new();
+        for base in ["/usr/lib", "/lib"] {
+            if let Ok(entries) = std::fs::read_dir(base) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let is_triplet = entry.file_name().to_str().is_some_and(|n| n.contains('-'));
+                    if is_triplet && path.is_dir() {
+                        multiarch.push(path);
+                    }
+                }
+            }
+        }
+        multiarch.sort();
+        dirs.extend(multiarch);
+        Self::with_roots(dirs, Some(PathBuf::from("/etc/ld.so.cache")))
+    }
+
+    /// No system at all: resolution behaves exactly as if the
+    /// fallback did not exist.
+    fn empty() -> Self {
+        Self::with_roots(Vec::new(), None)
+    }
+
+    fn with_roots(dirs: Vec<PathBuf>, cache_path: Option<PathBuf>) -> Self {
+        SystemLibraries {
+            dirs,
+            cache_path,
+            cache: Mutex::new(None),
+            providers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.dirs.is_empty() && self.cache_path.is_none()
+    }
+
+    /// The provider for `soname` on this system, if any: the first
+    /// located candidate that parses as an ELF library of the
+    /// requested class (`is_64` = the consumer's class, when known).
+    fn provider(&self, soname: &str, is_64: Option<bool>) -> Option<Arc<SymbolProvider>> {
+        let key = (soname.to_string(), is_64);
+        if let Some(hit) = self.providers.lock().unwrap().get(&key) {
+            return hit.clone();
+        }
+        let found = self.locate(soname).into_iter().find_map(|path| {
+            let ldd = LddInfo::parse(path.to_str()?, true);
+            if ldd.failed.is_some() {
+                return None;
+            }
+            if let (Some(want), Some(got)) = (is_64, ldd.is_64)
+                && want != got
+            {
+                return None;
+            }
+            Some(Arc::new(SymbolProvider {
+                defined: ldd.defined_symbols.iter().cloned().collect(),
+                needs: ldd.dependencies.clone(),
+            }))
+        });
+        self.providers.lock().unwrap().insert(key, found.clone());
+        found
+    }
+
+    /// Candidate paths for `soname`: the ldconfig cache's entries
+    /// first (the loader's own map), then a same-named file in each
+    /// search directory.
+    fn locate(&self, soname: &str) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = Vec::new();
+        {
+            let mut cache = self.cache.lock().unwrap();
+            if cache.is_none() {
+                *cache = Some(
+                    self.cache_path
+                        .as_ref()
+                        .and_then(|p| std::fs::read(p).ok())
+                        .and_then(|data| parse_ld_so_cache(&data))
+                        .unwrap_or_default(),
+                );
+            }
+            if let Some(paths) = cache.as_ref().and_then(|c| c.get(soname)) {
+                out.extend(paths.iter().cloned());
+            }
+        }
+        for dir in &self.dirs {
+            let candidate = dir.join(soname);
+            if candidate.is_file() && !out.contains(&candidate) {
+                out.push(candidate);
+            }
+        }
+        out
+    }
+}
+
+/// Parse an `ld.so.cache` image into SONAME -> candidate paths.
+/// Two layouts are recognised: glibc >= 2.32 (48-byte header,
+/// 24-byte entries, key/value as absolute file offsets) and the
+/// original format (32-byte header, 12-byte entries, offsets into
+/// the trailing string table). A layout is accepted only when
+/// nearly every entry decodes to a plausible SONAME and an absolute
+/// path; anything else is treated as "no cache", so a format this
+/// parser does not understand degrades to directory scanning
+/// instead of resolving against garbage.
+fn parse_ld_so_cache(data: &[u8]) -> Option<HashMap<String, Vec<PathBuf>>> {
+    if data.len() < 48 || &data[0..17] != b"glibc-ld.so.cache" || &data[17..20] != b"1.1" {
+        return None;
+    }
+    let nlibs = u32::from_le_bytes(data[20..24].try_into().ok()?) as usize;
+    if nlibs == 0 {
+        return None;
+    }
+    let word = |off: usize| -> Option<usize> {
+        data.get(off..off + 4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize)
+    };
+    let string = |off: usize| -> Option<String> {
+        let bytes = data.get(off..)?;
+        let end = bytes.iter().position(|&b| b == 0)?;
+        String::from_utf8(bytes[..end].to_vec()).ok()
+    };
+    // (header size, entry size, offsets relative to file start?)
+    for (header, entry, absolute) in [(48usize, 24usize, true), (32, 12, false)] {
+        let strtab = header + nlibs * entry;
+        if strtab > data.len() {
+            continue;
+        }
+        let mut map: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        let mut plausible = 0usize;
+        for i in 0..nlibs {
+            let at = header + i * entry;
+            let (Some(key), Some(value)) = (word(at + 4), word(at + 8)) else {
+                break;
+            };
+            let (key, value) = if absolute {
+                (string(key), string(value))
+            } else {
+                (string(strtab + key), string(strtab + value))
+            };
+            if let (Some(key), Some(value)) = (key, value)
+                && key.contains(".so")
+                && value.starts_with('/')
+            {
+                plausible += 1;
+                let paths = map.entry(key).or_default();
+                let path = PathBuf::from(value);
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+        if plausible * 10 >= nlibs * 9 {
+            return Some(map);
+        }
+    }
+    None
+}
+
+/// Memoisation key for DT_NEEDED closures: a file's direct
+/// dependency list plus its ELF class.
+type ClosureKey = (Vec<String>, Option<bool>);
+
+/// Resolve undefined symbols the way the reference's `ldd -r`
+/// does: a file's undefined symbol is satisfied when a library in
+/// its DT_NEEDED closure -- the file itself included, as in the
+/// loader's lookup order -- defines it. The closure is formed from
+/// the libraries shipped in the same package first; a DT_NEEDED
+/// entry the package does not ship is then located on the system
+/// rpmcrab runs on (`SystemLibraries`), whose libraries join the
+/// closure with their own DT_NEEDED entries in turn. Resolution
+/// only ever subtracts symbols a located library actually defines,
+/// so a symbol with no provider anywhere keeps firing (no silent
+/// allowlisting).
+fn resolve_undefined_symbols(
+    analyses: &mut [Option<ElfAnalysis>],
+    files: &[PkgFile],
+    system: &SystemLibraries,
+) {
     // Index providers by every name a DT_NEEDED entry can carry: the
     // library's SONAME and its file basename. The two are equal for
     // most libraries; when a package file is a symlink, the real file
@@ -726,14 +942,19 @@ fn resolve_undefined_symbols(analyses: &mut [Option<ElfAnalysis>], files: &[PkgF
             }
         }
     }
-    if providers.is_empty() {
+    if providers.is_empty() && system.is_empty() {
         return;
     }
+    let providers: HashMap<String, Arc<SymbolProvider>> = providers
+        .into_iter()
+        .map(|(k, v)| (k, Arc::new(v)))
+        .collect();
 
     // Walk each file's DT_NEEDED closure. Most libraries in a package
     // share the same direct dependencies, so memoise the provided
-    // set on the direct-dependency list.
-    let mut closures: HashMap<Vec<String>, std::rc::Rc<HashSet<String>>> = HashMap::new();
+    // set on the direct-dependency list and the file's ELF class
+    // (system candidates are class-matched).
+    let mut closures: HashMap<ClosureKey, std::rc::Rc<HashSet<String>>> = HashMap::new();
     for analysis in analyses.iter_mut() {
         let Some(analysis) = analysis else { continue };
         let Some(ldd) = &mut analysis.ldd else {
@@ -743,22 +964,27 @@ fn resolve_undefined_symbols(analyses: &mut [Option<ElfAnalysis>], files: &[PkgF
             continue;
         }
         let direct = ldd.dependencies.clone();
+        let is_64 = ldd.is_64;
         let provided = closures
-            .entry(direct.clone())
+            .entry((direct.clone(), is_64))
             .or_insert_with(|| {
                 let mut provided: HashSet<String> = HashSet::new();
-                let mut visited: HashSet<&str> = HashSet::new();
-                let mut stack: Vec<&str> = direct.iter().map(String::as_str).collect();
+                let mut visited: HashSet<String> = HashSet::new();
+                let mut stack: Vec<String> = direct.clone();
                 while let Some(soname) = stack.pop() {
-                    if !visited.insert(soname) {
+                    if !visited.insert(soname.clone()) {
                         continue;
                     }
-                    if let Some(provider) = providers.get(soname) {
+                    let provider = providers
+                        .get(&soname)
+                        .cloned()
+                        .or_else(|| system.provider(&soname, is_64));
+                    if let Some(provider) = provider {
                         provided.extend(provider.defined.iter().cloned());
-                        stack.extend(provider.needs.iter().map(String::as_str));
+                        stack.extend(provider.needs.iter().cloned());
                     }
                 }
-                std::rc::Rc::new(provided)
+                Rc::new(provided)
             })
             .clone();
         ldd.undefined_symbols
@@ -1060,6 +1286,7 @@ pub struct BinariesCheck {
     strings: Tool,
     ar: Tool,
     system_lib_paths: Vec<String>,
+    system_libraries: SystemLibraries,
     pie_exec_regexes: Vec<Regex>,
     setgid_call_regex: Regex,
     setuid_call_regex: Regex,
@@ -1289,6 +1516,7 @@ impl BinariesCheck {
             strings,
             ar,
             system_lib_paths: get_strings("SystemLibPaths"),
+            system_libraries: SystemLibraries::system(),
             pie_exec_regexes,
             setgid_call_regex: SETGID_CALL_REGEX
                 .get_or_init(|| {
@@ -1333,7 +1561,12 @@ impl BinariesCheck {
     /// resolves both tools under `dir` instead of mutating the process
     /// environment.
     pub fn with_tool_dir(config: &Config, bin_dir: Option<&std::path::Path>) -> Self {
-        Self::with_tool_source(config, test_source(bin_dir))
+        let mut check = Self::with_tool_source(config, test_source(bin_dir));
+        // Tests are hermetic: undefined symbols never resolve against
+        // the host's libraries unless a test installs fixture roots
+        // in `system_libraries` itself.
+        check.system_libraries = SystemLibraries::empty();
+        check
     }
 
     fn detect_attributes(&mut self, magic: &str) {
@@ -2391,10 +2624,11 @@ impl Check for BinariesCheck {
                 ElfAnalysis::wants_analysis(pkgfile, is_noarch).then(|| ElfAnalysis::parse(pkgfile))
             })
             .collect();
-        // Model `ldd -r`'s provider resolution within the package
-        // before emission: subtract the undefined symbols each file's
-        // DT_NEEDED closure defines (plusky/rpmcrab#467).
-        resolve_undefined_symbols(&mut analyses, &pkg.files);
+        // Model `ldd -r`'s provider resolution before emission:
+        // subtract the undefined symbols each file's DT_NEEDED
+        // closure defines, looking providers up in the package
+        // first and on the system second (plusky/rpmcrab#467).
+        resolve_undefined_symbols(&mut analyses, &pkg.files, &self.system_libraries);
 
         for (idx, pkgfile) in pkg.files.iter().enumerate() {
             let fname: &str = &pkgfile.name;
@@ -4774,6 +5008,7 @@ description = "explicit priority string bypasses the system crypto policy"
             unused_dependencies: Vec::new(),
             undefined_symbols: Vec::new(),
             defined_symbols: Vec::new(),
+            is_64: None,
             failed: None,
         }
     }
@@ -6103,6 +6338,234 @@ description = "explicit priority string bypasses the system crypto policy"
             lines.iter().all(|l| l.contains(" E: ")),
             "Error level: {lines:?}"
         );
+    }
+
+    /// Run the full driver with the check's system-library fallback
+    /// pointed at fixture roots instead of the (empty) test default.
+    fn driver_results_with_system(
+        pkg: &Pkg,
+        config: &Config,
+        system: SystemLibraries,
+    ) -> Vec<(String, String)> {
+        let mut check = BinariesCheck::with_tool_dir(config, None);
+        check.system_libraries = system;
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        check.check_binary(pkg, config, &mut out);
+        out.results().to_vec()
+    }
+
+    /// Write a crafted shlib as a "system" library: a plain file
+    /// named by its SONAME inside the fixture root.
+    fn write_system_lib(dir: &std::path::Path, soname: &str, elf: &[u8]) {
+        std::fs::write(dir.join(soname), elf).expect("write system lib");
+    }
+
+    #[test]
+    fn undefined_symbol_provided_by_system_library_is_quiet() {
+        // plusky/rpmcrab#467, system fallback: the consumer's
+        // DT_NEEDED provider is not in the package at all (the java /
+        // rust shape: libc & friends live in another package), but
+        // the system rpmcrab runs on has it, and it defines the
+        // symbol -- the reference's `ldd -r` stays silent, so do we.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let sysroot = dir.path().join("sysroot");
+        std::fs::create_dir(&sysroot).expect("mkdir sysroot");
+        let syslib = craft_shlib_elf(
+            false,
+            None,
+            Some("libsys.so.1"),
+            &[("sys_sym", 1, 0, 1), ("sys_sym2", 1, 0, 1)],
+        );
+        write_system_lib(&sysroot, "libsys.so.1", &syslib);
+        let consumer = craft_shlib_elf(
+            false,
+            Some("libsys.so.1"),
+            Some("libbar.so.1"),
+            &[("sys_sym", 1, 0, 0), ("sys_sym2", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let system = SystemLibraries::with_roots(vec![sysroot], None);
+        let results = driver_results_with_system(&pkg, &test_config(), system);
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "system-provided symbols must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn undefined_symbol_provided_by_system_transitively_is_quiet() {
+        // The system side of the closure is transitive too: the
+        // consumer NEEDs libsys1, libsys1 NEEDs libsys2, libsys2
+        // defines the symbol.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let sysroot = dir.path().join("sysroot");
+        std::fs::create_dir(&sysroot).expect("mkdir sysroot");
+        let sys2 = craft_shlib_elf(
+            false,
+            None,
+            Some("libsys2.so.1"),
+            &[("deep_sys_sym", 1, 0, 1)],
+        );
+        let sys1 = craft_shlib_elf(false, Some("libsys2.so.1"), Some("libsys1.so.1"), &[]);
+        write_system_lib(&sysroot, "libsys2.so.1", &sys2);
+        write_system_lib(&sysroot, "libsys1.so.1", &sys1);
+        let consumer = craft_shlib_elf(
+            false,
+            Some("libsys1.so.1"),
+            Some("libbar.so.1"),
+            &[("deep_sys_sym", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let system = SystemLibraries::with_roots(vec![sysroot], None);
+        let results = driver_results_with_system(&pkg, &test_config(), system);
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "transitively system-provided symbols must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn undefined_symbol_missing_from_system_provider_still_fires() {
+        // Resolution reads the system provider's real symbol table:
+        // a provider that does not define the symbol satisfies
+        // nothing, exactly like a package provider that does not.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let sysroot = dir.path().join("sysroot");
+        std::fs::create_dir(&sysroot).expect("mkdir sysroot");
+        let syslib = craft_shlib_elf(false, None, Some("libsys.so.1"), &[("other_sym", 1, 0, 1)]);
+        write_system_lib(&sysroot, "libsys.so.1", &syslib);
+        let consumer = craft_shlib_elf(
+            false,
+            Some("libsys.so.1"),
+            Some("libbar.so.1"),
+            &[("missing_sym", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let system = SystemLibraries::with_roots(vec![sysroot], None);
+        let results = driver_results_with_system(&pkg, &test_config(), system);
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(lines.len(), 1, "the unprovided symbol fires: {results:?}");
+        assert!(
+            lines[0].contains("libbar.so.1") && lines[0].contains("missing_sym"),
+            "finding names file and symbol: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn undefined_symbol_without_system_roots_still_fires() {
+        // With no system roots the fallback is inert and behaviour
+        // is exactly the package-only resolution: a symbol whose
+        // only provider would be a system library keeps firing.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let consumer = craft_shlib_elf(
+            false,
+            Some("libsys.so.1"),
+            Some("libbar.so.1"),
+            &[("sys_sym", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let results = driver_results_with_system(&pkg, &test_config(), SystemLibraries::empty());
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(lines.len(), 1, "no system, no resolution: {results:?}");
+        assert!(
+            lines[0].contains("sys_sym"),
+            "finding names the symbol: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn system_provider_matches_elf_class() {
+        // A provider of the wrong ELF class is not a provider: the
+        // loader would not load it for this consumer either.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let syslib = craft_shlib_elf(false, None, Some("libsys.so.1"), &[("sys_sym", 1, 0, 1)]);
+        write_system_lib(dir.path(), "libsys.so.1", &syslib);
+        let system = SystemLibraries::with_roots(vec![dir.path().to_path_buf()], None);
+        // The crafted libraries are 64-bit.
+        assert!(
+            system.provider("libsys.so.1", Some(true)).is_some(),
+            "64-bit consumer finds the 64-bit provider"
+        );
+        assert!(
+            system.provider("libsys.so.1", Some(false)).is_none(),
+            "32-bit consumer must not resolve against the 64-bit library"
+        );
+        assert!(
+            system.provider("libabsent.so.9", Some(true)).is_none(),
+            "absent SONAME has no provider"
+        );
+    }
+
+    #[test]
+    fn ld_so_cache_parses_both_layouts() {
+        // Build minimal cache images: header, entries, then the
+        // strings the entries point at.
+        let build = |new: bool| -> Vec<u8> {
+            let (header, entry) = if new { (48usize, 24usize) } else { (32, 12) };
+            let strings: Vec<&str> = vec![
+                "libfoo.so.1",
+                "/usr/lib64/libfoo.so.1",
+                "libc.so.6",
+                "/lib64/libc.so.6",
+            ];
+            let strtab = header + 2 * entry;
+            let mut offsets = Vec::new();
+            let mut blob: Vec<u8> = Vec::new();
+            for s in &strings {
+                offsets.push(blob.len());
+                blob.extend_from_slice(s.as_bytes());
+                blob.push(0);
+            }
+            let mut img = vec![0u8; strtab];
+            img[0..17].copy_from_slice(b"glibc-ld.so.cache");
+            img[17..20].copy_from_slice(b"1.1");
+            img[20..24].copy_from_slice(&2u32.to_le_bytes());
+            img[24..28].copy_from_slice(&(blob.len() as u32).to_le_bytes());
+            for (i, (k, v)) in [(0, 1), (2, 3)].iter().enumerate() {
+                let at = header + i * entry;
+                let (ko, vo) = if new {
+                    (strtab + offsets[*k], strtab + offsets[*v])
+                } else {
+                    (offsets[*k], offsets[*v])
+                };
+                img[at + 4..at + 8].copy_from_slice(&(ko as u32).to_le_bytes());
+                img[at + 8..at + 12].copy_from_slice(&(vo as u32).to_le_bytes());
+            }
+            img.extend_from_slice(&blob);
+            img
+        };
+        for new in [true, false] {
+            let map = parse_ld_so_cache(&build(new)).expect("cache parses");
+            assert_eq!(
+                map.get("libfoo.so.1").map(Vec::as_slice),
+                Some([PathBuf::from("/usr/lib64/libfoo.so.1")].as_slice()),
+                "layout new={new}"
+            );
+            assert_eq!(
+                map.get("libc.so.6").map(Vec::as_slice),
+                Some([PathBuf::from("/lib64/libc.so.6")].as_slice()),
+                "layout new={new}"
+            );
+        }
+        // Garbage and truncations are "no cache", never a panic.
+        assert!(parse_ld_so_cache(b"not a cache at all").is_none());
+        assert!(parse_ld_so_cache(&build(true)[..40]).is_none());
     }
 
     #[test]
