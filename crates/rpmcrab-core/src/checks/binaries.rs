@@ -1375,25 +1375,36 @@ fn is_pure_loader_shim(undefined_functions: &[String]) -> bool {
     })
 }
 
+/// The call set a hardening predicate judges a binary on. A dynamic
+/// binary is judged on its undefined imports: a defined export of a name
+/// is the binary's own code, not a call, and a NOTYPE import is still an
+/// import. A static binary has no imports at all, so its function
+/// symbols are the call set.
+fn hardening_call_set(info: &ReadelfInfo) -> &[String] {
+    if info.has_dynamic {
+        &info.undefined_functions
+    } else {
+        &info.functions
+    }
+}
+
 /// Whether a hardening finding applies to this binary: the binary must have
 /// "something to protect". Each check defines its own predicate over the
 /// binary's symbols; the mechanism is shared so the two checks stay in sync.
 fn is_fortify_applicable(info: &ReadelfInfo) -> bool {
-    // A dynamic binary is judged on its undefined imports: a defined
-    // export of a fortifiable name is the binary's own code, not a call
-    // that `_FORTIFY_SOURCE` would redirect, and a NOTYPE import is
-    // still an import. A static binary has no imports at all, so its
-    // function symbols are the call set.
-    let calls: &[String] = if info.has_dynamic {
-        &info.undefined_functions
-    } else {
-        &info.functions
-    };
-    calls.iter().any(|s| is_fortifiable_import(s))
+    hardening_call_set(info)
+        .iter()
+        .any(|s| is_fortifiable_import(s))
 }
 
 fn is_stack_protector_applicable(info: &ReadelfInfo) -> bool {
+    // Pure loader shims implement no logic of their own (rpmcrab#447),
+    // and a binary importing no SSP-relevant call has no buffer-shaped
+    // stack data for a canary to guard (rpmcrab#452).
     !is_pure_loader_shim(&info.undefined_functions)
+        && hardening_call_set(info)
+            .iter()
+            .any(|s| is_ssp_relevant_import(s))
 }
 
 /// A libc function that `_FORTIFY_SOURCE` can instrument. `missing-fortify`
@@ -1508,6 +1519,83 @@ fn is_fortifiable_import(name: &str) -> bool {
             | "vsyslog"
             // setjmp.h
             | "longjmp"
+    )
+}
+
+/// A libc call that manipulates buffer-shaped data in a way a stack
+/// canary exists to guard. `missing-stack-protector` fires only when a
+/// binary imports at least one of these without `__stack_chk_fail`
+/// (rpmcrab#452): `-fstack-protector-strong` instruments functions with
+/// stack arrays and address-taken locals, and imports are the only
+/// ELF-visible proxy for "this file manipulates buffer-shaped data at
+/// all". A binary importing none of them has, as far as the artifact
+/// can tell, nothing for a canary to guard, so the finding would be
+/// unactionable noise. Symbol names may carry a `@VERSION` suffix in
+/// `.dynsym`; strip it before matching.
+///
+/// The set is the one ground-truthed against the Factory corpus in the
+/// rpmcrab#452 sweep audit (the audited genuine catches -- apparmor,
+/// apfsprogs, mjpg-streamer -- all import plain members of it). Two
+/// deliberate boundary calls: stdio buffered readers (`fread`, `fgets`)
+/// are out (zoo's `fiz` reads into heap buffers; its finding was never
+/// actionable, and including them re-admits it), and the fortified
+/// `__*_chk` spellings are not members -- the set names the plain calls,
+/// so a binary whose only string call is already fortified (again
+/// `fiz`: `__memcpy_chk`, `__printf_chk`) stays quiet.
+fn is_ssp_relevant_import(name: &str) -> bool {
+    let base = name.split('@').next().unwrap_or(name);
+    matches!(
+        base,
+        // string.h: string/memory copies and fills
+        "memcpy"
+            | "memmove"
+            | "mempcpy"
+            | "memset"
+            | "strcpy"
+            | "strncpy"
+            | "strcat"
+            | "strncat"
+            | "stpcpy"
+            | "stpncpy"
+            // OpenBSD's fortified spelling, in the audited set
+            | "strcpy_chk"
+            // stdio.h: formatted output into caller buffers
+            | "sprintf"
+            | "vsprintf"
+            | "snprintf"
+            | "vsnprintf"
+            // stdio.h: unformatted input (the scanf family, including
+            // the `__isoc99_` spellings glibc has emitted since 2.7 and
+            // the `__isoc23_` spellings that replaced them in 2.38)
+            | "gets"
+            | "scanf"
+            | "fscanf"
+            | "sscanf"
+            | "vscanf"
+            | "vfscanf"
+            | "vsscanf"
+            | "__isoc99_scanf"
+            | "__isoc99_fscanf"
+            | "__isoc99_sscanf"
+            | "__isoc99_vscanf"
+            | "__isoc99_vfscanf"
+            | "__isoc99_vsscanf"
+            | "__isoc23_scanf"
+            | "__isoc23_fscanf"
+            | "__isoc23_sscanf"
+            | "__isoc23_vscanf"
+            | "__isoc23_vfscanf"
+            | "__isoc23_vsscanf"
+            // alloca.h
+            | "alloca"
+            | "__alloca"
+            // unistd.h / sys/socket.h: raw buffer fills
+            | "read"
+            | "recv"
+            | "recvfrom"
+            | "readlink"
+            | "getcwd"
+            | "realpath"
     )
 }
 
@@ -2005,8 +2093,11 @@ impl BinariesCheck {
         // protect" (rpmcrab#447): a binary that imports no fortifiable
         // libc function cannot gain any `__*_chk` instrumentation, and a
         // pure loader shim implements no logic of its own and therefore
-        // has no stack buffers for `-fstack-protector` to protect. In both
-        // cases the finding would be unactionable noise.
+        // has no stack buffers for `-fstack-protector` to protect. Since
+        // rpmcrab#452 the stack-protector finding additionally requires
+        // an SSP-relevant import: a binary whose calls are none of the
+        // buffer-shaped ones has nothing for a canary to guard either.
+        // In all these cases the finding would be unactionable noise.
         // Presence counts defined symbols and imports alike: an imported
         // `__*_chk` wrapper (FUNC or NOTYPE) is the fortified call, and a
         // defined one is the binary's own fortification.
@@ -3969,9 +4060,15 @@ mod tests {
     fn hardening_fortify_quiet_without_fortifiable_import() {
         // rpmcrab#447: a binary that imports no fortifiable libc function
         // has nothing to fortify; the finding stays quiet even without
-        // any `__*_chk` symbol.
-        let results =
-            hardening_results_for(false, false, &["malloc", "strlen"], &["malloc", "strlen"]);
+        // any `__*_chk` symbol. The `__isoc99_sscanf` import is not
+        // fortifiable either, but it is SSP-relevant (rpmcrab#452), so
+        // the stack-protector finding below still applies.
+        let results = hardening_results_for(
+            false,
+            false,
+            &["malloc", "strlen", "__isoc99_sscanf"],
+            &["malloc", "strlen", "__isoc99_sscanf"],
+        );
         assert!(
             lines_for(&results, "missing-fortify").is_empty(),
             "missing-fortify must not fire without a fortifiable import: {results:?}"
@@ -4075,6 +4172,135 @@ mod tests {
             lines_for(&results, "missing-stack-protector").is_empty(),
             "missing-stack-protector must not fire with __stack_chk_fail: {results:?}"
         );
+    }
+
+    #[test]
+    fn hardening_ssp_quiet_without_relevant_import() {
+        // rpmcrab#452: a binary whose imports contain no buffer-shaped
+        // call has nothing for a stack canary to guard (the babl
+        // pixel-loop shape: allocator, math and measurement calls only);
+        // the finding stays quiet even without `__stack_chk_fail`.
+        let results = hardening_results_for(
+            false,
+            false,
+            &["malloc", "exp", "strlen"],
+            &["malloc", "exp", "strlen"],
+        );
+        assert!(
+            lines_for(&results, "missing-stack-protector").is_empty(),
+            "missing-stack-protector must not fire without an SSP-relevant import: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_ssp_fires_with_relevant_import() {
+        // rpmcrab#452: a plain buffer call without a canary still fires:
+        // the apparmor_parser / apfsck shape.
+        let results = hardening_results_for(false, false, &["strcpy"], &["strcpy@GLIBC_2.17"]);
+        assert_eq!(
+            lines_for(&results, "missing-stack-protector").len(),
+            1,
+            "missing-stack-protector must fire for a plain strcpy import: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_ssp_quiet_for_stdio_readers_only() {
+        // rpmcrab#452 boundary: stdio buffered readers (`fread`, `fgets`)
+        // are deliberately not SSP-relevant -- zoo's `fiz` reads into heap
+        // buffers and its finding was never actionable. They ARE
+        // fortifiable, so missing-fortify still fires for the same file:
+        // the two gates have different sets on purpose.
+        let results = hardening_results_for(
+            false,
+            false,
+            &["fread", "fgets"],
+            &["fread@GLIBC_2.2.5", "fgets@GLIBC_2.2.5"],
+        );
+        assert!(
+            lines_for(&results, "missing-stack-protector").is_empty(),
+            "missing-stack-protector must not fire for fread/fgets only: {results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-fortify").len(),
+            1,
+            "missing-fortify must still fire for fread/fgets: {results:?}"
+        );
+    }
+
+    #[test]
+    fn ssp_relevant_import_matching() {
+        // The set from the rpmcrab#452 sweep audit: string/memory calls,
+        // formatted output into caller buffers, unformatted input,
+        // `alloca`, raw buffer fills. @VERSION suffixes are stripped.
+        for name in [
+            "strcpy",
+            "strncpy@GLIBC_2.2.5",
+            "strcat",
+            "strncat",
+            "stpcpy",
+            "stpncpy",
+            "memcpy",
+            "memmove",
+            "mempcpy",
+            "memset",
+            "sprintf",
+            "vsprintf",
+            "snprintf",
+            "vsnprintf",
+            "gets",
+            "scanf",
+            "fscanf",
+            "sscanf",
+            "vscanf",
+            "vfscanf",
+            "vsscanf",
+            "__isoc99_scanf",
+            "__isoc99_fscanf",
+            "__isoc99_sscanf@GLIBC_2.7",
+            "__isoc99_vscanf",
+            "__isoc99_vfscanf",
+            "__isoc99_vsscanf",
+            "__isoc23_scanf",
+            "__isoc23_sscanf@GLIBC_2.38",
+            "alloca",
+            "__alloca",
+            "read",
+            "recv",
+            "recvfrom",
+            "readlink",
+            "getcwd",
+            "realpath",
+            "strcpy_chk",
+        ] {
+            assert!(is_ssp_relevant_import(name), "{name} must be SSP-relevant");
+        }
+        for name in [
+            // The deliberate boundary: stdio buffered readers are out.
+            "fread",
+            "fread_unlocked",
+            "fgets",
+            "fgets_unlocked",
+            // Fortified spellings are not plain calls; zoo `fiz` imports
+            // `__memcpy_chk`/`__printf_chk` and stays quiet.
+            "__memcpy_chk",
+            "__printf_chk",
+            "__stack_chk_fail",
+            // Measurement / comparison / allocation calls guard nothing.
+            "strlen",
+            "strcmp",
+            "strstr",
+            "malloc",
+            "free",
+            "printf",
+            "fprintf",
+            "dlopen",
+        ] {
+            assert!(
+                !is_ssp_relevant_import(name),
+                "{name} must not be SSP-relevant"
+            );
+        }
     }
 
     #[test]

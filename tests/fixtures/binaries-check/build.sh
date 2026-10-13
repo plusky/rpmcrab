@@ -74,10 +74,17 @@ static const char waiver_note[] = "SYSLOG priority approved by policy";
 int init_priority(void *session) { return gnutls_priority_init(session, waiver_note, 0); }
 EOF
 cat >"$work/src/hardening.c" <<'EOF'
+#include <stdio.h>
 #include <string.h>
 /* strcpy on a stack buffer: fortifiable call (needs -O1+ and
-   -D_FORTIFY_SOURCE) and a stack array (needs -fstack-protector). */
-void harden_target(char *d) { char b[64]; strcpy(b, d); }
+   -D_FORTIFY_SOURCE) and a stack array (needs -fstack-protector).
+   The sscanf into the same buffer keeps a plain SSP-relevant import:
+   glibc has no __sscanf_chk redirect, while the strcpy is fortified
+   away to __strcpy_chk whenever _FORTIFY_SOURCE is on -- and since
+   rpmcrab#452 missing-stack-protector only applies to binaries that
+   import a buffer-shaped call, nosspbin would otherwise fall out of
+   the check's scope and stop pinning the finding. */
+void harden_target(char *d) { char b[64]; strcpy(b, d); (void)sscanf(d, "%63s", b); }
 int main(void) { char x[16]; harden_target(x); return 0; }
 EOF
 
