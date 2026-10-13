@@ -800,9 +800,20 @@ impl SystemLibraries {
 
     /// Candidate paths for `soname`: the ldconfig cache's entries
     /// first (the loader's own map), then a same-named file in each
-    /// search directory.
+    /// search directory. A `soname` containing a slash is a direct
+    /// path (the loader loads it by path, with no search): the path
+    /// itself is a candidate, and the cache and the search
+    /// directories are also consulted by its basename, since a
+    /// provider shipped under that basename defines the same
+    /// symbols however the consumer spelled the dependency.
     fn locate(&self, soname: &str) -> Vec<PathBuf> {
         let mut out: Vec<PathBuf> = Vec::new();
+        if soname.contains('/') {
+            let direct = PathBuf::from(soname);
+            if direct.is_file() && !out.contains(&direct) {
+                out.push(direct);
+            }
+        }
         {
             let mut cache = self.cache.lock().unwrap();
             if cache.is_none() {
@@ -814,14 +825,33 @@ impl SystemLibraries {
                         .unwrap_or_default(),
                 );
             }
-            if let Some(paths) = cache.as_ref().and_then(|c| c.get(soname)) {
-                out.extend(paths.iter().cloned());
+            if let Some(cache) = cache.as_ref() {
+                if let Some(paths) = cache.get(soname) {
+                    out.extend(paths.iter().cloned());
+                }
+                let base = basename(soname);
+                if base != soname {
+                    if let Some(paths) = cache.get(base) {
+                        for path in paths {
+                            if !out.contains(path) {
+                                out.push(path.clone());
+                            }
+                        }
+                    }
+                }
             }
         }
         for dir in &self.dirs {
             let candidate = dir.join(soname);
             if candidate.is_file() && !out.contains(&candidate) {
                 out.push(candidate);
+            }
+            let base = basename(soname);
+            if base != soname {
+                let candidate = dir.join(base);
+                if candidate.is_file() && !out.contains(&candidate) {
+                    out.push(candidate);
+                }
             }
         }
         out
@@ -977,6 +1007,7 @@ fn resolve_undefined_symbols(
                     }
                     let provider = providers
                         .get(&soname)
+                        .or_else(|| providers.get(basename(&soname)))
                         .cloned()
                         .or_else(|| system.provider(&soname, is_64));
                     if let Some(provider) = provider {
@@ -6340,6 +6371,92 @@ description = "explicit priority string bypasses the system crypto policy"
         );
     }
 
+    #[test]
+    fn undefined_symbol_provided_via_absolute_needed_is_quiet() {
+        // plusky/rpmcrab#469 review: a DT_NEEDED entry can be a
+        // path, not a name (`/opt/libfoo.so.1` -- some upstreams
+        // link that way). Providers are indexed by SONAME and file
+        // basename, so the lookup must fall back to the NEED's
+        // basename: the package ships libfoo.so.1, whose SONAME
+        // defines the symbol, and `ldd -r` stays silent.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let provider = craft_shlib_elf(
+            false,
+            None,
+            Some("libfoo.so.1"),
+            &[("provided_sym", 1, 0, 1)],
+        );
+        let consumer = craft_shlib_elf(
+            false,
+            Some("/opt/libfoo.so.1"),
+            Some("libbar.so.1"),
+            &[("provided_sym", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![
+                shlib_pkgfile(dir.path(), "libfoo.so.1", &provider),
+                shlib_pkgfile(dir.path(), "libbar.so.1", &consumer),
+            ],
+        );
+        let results = driver_results(&pkg, &test_config());
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "absolute-NEED provider in the same package must resolve: {results:?}"
+        );
+    }
+
+    #[test]
+    fn undefined_symbol_via_absolute_needed_unresolved_still_fires() {
+        // The basename fallback must not turn path NEEDs into a
+        // blanket allowance: a symbol the basename-matched provider
+        // does not define still fires, and so does a path NEED whose
+        // provider is in no package at all.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let provider = craft_shlib_elf(false, None, Some("libfoo.so.1"), &[("other_sym", 1, 0, 1)]);
+        let consumer = craft_shlib_elf(
+            false,
+            Some("/opt/libfoo.so.1"),
+            Some("libbar.so.1"),
+            &[("missing_sym", 1, 0, 0)],
+        );
+        let orphan = craft_shlib_elf(
+            false,
+            Some("/opt/libabsent.so.9"),
+            Some("libqux.so.1"),
+            &[("orphan_sym", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![
+                shlib_pkgfile(dir.path(), "libfoo.so.1", &provider),
+                shlib_pkgfile(dir.path(), "libbar.so.1", &consumer),
+                shlib_pkgfile(dir.path(), "libqux.so.1", &orphan),
+            ],
+        );
+        let results = driver_results(&pkg, &test_config());
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(
+            lines.len(),
+            2,
+            "both unresolvable absolute-NEED symbols fire: {results:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("libbar.so.1") && l.contains("missing_sym")),
+            "consumer finding names file and symbol: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("libqux.so.1") && l.contains("orphan_sym")),
+            "orphan finding names file and symbol: {lines:?}"
+        );
+    }
+
     /// Run the full driver with the check's system-library fallback
     /// pointed at fixture roots instead of the (empty) test default.
     fn driver_results_with_system(
@@ -6486,6 +6603,105 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(
             lines[0].contains("sys_sym"),
             "finding names the symbol: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn undefined_symbol_provided_by_system_at_absolute_path_is_quiet() {
+        // plusky/rpmcrab#469 review: a DT_NEEDED entry containing a
+        // slash is a path for the loader -- it loads that exact file
+        // and never searches the library directories by name. The
+        // system fallback must do the same: take the file at the
+        // NEED's own path, even though it sits in none of the
+        // configured search roots.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let optdir = dir.path().join("opt");
+        std::fs::create_dir(&optdir).expect("mkdir opt");
+        let syslib = craft_shlib_elf(
+            false,
+            None,
+            Some("libfoo.so.1"),
+            &[("provided_sym", 1, 0, 1)],
+        );
+        std::fs::write(optdir.join("libfoo.so.1"), &syslib).expect("write system lib");
+        let need = optdir.join("libfoo.so.1").to_string_lossy().into_owned();
+        let consumer = craft_shlib_elf(
+            false,
+            Some(need.as_str()),
+            Some("libbar.so.1"),
+            &[("provided_sym", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let system = SystemLibraries::with_roots(vec![dir.path().join("elsewhere")], None);
+        let results = driver_results_with_system(&pkg, &test_config(), system);
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "system library at the NEED's absolute path must resolve: {results:?}"
+        );
+    }
+
+    #[test]
+    fn undefined_symbol_provided_by_system_via_absolute_needed_basename_is_quiet() {
+        // Companion to the absolute-path system case: the NEED is
+        // spelled as a path (`/opt/libsys.so.1`) but no file exists
+        // at that path on the system rpmcrab runs on; the system
+        // does ship the library under its basename in a search
+        // directory. `locate` must fall back to the basename there,
+        // not give up because the exact NEED string names no file
+        // in any root.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let sysroot = dir.path().join("sysroot");
+        std::fs::create_dir(&sysroot).expect("mkdir sysroot");
+        let syslib = craft_shlib_elf(false, None, Some("libsys.so.1"), &[("sys_sym", 1, 0, 1)]);
+        write_system_lib(&sysroot, "libsys.so.1", &syslib);
+        let consumer = craft_shlib_elf(
+            false,
+            Some("/opt/libsys.so.1"),
+            Some("libbar.so.1"),
+            &[("sys_sym", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let system = SystemLibraries::with_roots(vec![sysroot], None);
+        let results = driver_results_with_system(&pkg, &test_config(), system);
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "system provider found by the NEED's basename must resolve: {results:?}"
+        );
+    }
+
+    #[test]
+    fn system_provider_finds_direct_path_without_search_roots() {
+        // A direct-path NEED is honoured by `locate` itself, with
+        // no search directory to accidentally supply it through
+        // `dir.join` discarding the directory for absolute paths:
+        // with no roots at all, the file at the NEED's own path is
+        // still the provider.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let syslib = craft_shlib_elf(false, None, Some("libsys.so.1"), &[("sys_sym", 1, 0, 1)]);
+        write_system_lib(dir.path(), "libsys.so.1", &syslib);
+        let need = dir
+            .path()
+            .join("libsys.so.1")
+            .to_string_lossy()
+            .into_owned();
+        let system = SystemLibraries::with_roots(Vec::new(), None);
+        assert!(
+            system.provider(&need, Some(true)).is_some(),
+            "direct path resolves with no search roots"
+        );
+        assert!(
+            system
+                .provider("/nonexistent/libsys.so.1", Some(true))
+                .is_none(),
+            "a direct path naming no file has no provider"
         );
     }
 
