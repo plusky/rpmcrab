@@ -96,4 +96,34 @@ mod tests {
         );
         assert_eq!(found.len(), 2);
     }
+
+    #[test]
+    fn check_binary_entry_point_reports_packageand() {
+        // Kills the neutered-`check_binary` mutant: the glue over
+        // `Self::dep_names(pkg)` must run for the finding to reach `Filter`.
+        use std::path::Path;
+
+        use crate::color::Color;
+        use crate::pkg::dep::DepInfo;
+
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
+        pkg.requires = vec![DepInfo {
+            name: "packageand(a:b)".to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        }];
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = ZyppSyntaxCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let names: Vec<&str> = out.results().iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"suse-zypp-packageand"),
+            "expected suse-zypp-packageand in {names:?}"
+        );
+    }
 }

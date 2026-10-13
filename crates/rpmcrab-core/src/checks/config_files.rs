@@ -91,6 +91,35 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn check_binary_entry_point_reports_both_findings() {
+        // Kills the neutered-`check_binary` mutant: the glue over
+        // `pkg.config_files`/`pkg.noreplace_files` must run for the findings
+        // to reach the `Filter`.
+        use std::path::Path;
+
+        use crate::color::Color;
+
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
+        pkg.config_files = vec!["/opt/foo.conf".to_string()];
+        pkg.noreplace_files = vec![];
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = ConfigFilesCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let names: Vec<&str> = out.results().iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"non-etc-or-var-file-marked-as-conffile"),
+            "expected non-etc-or-var-file-marked-as-conffile in {names:?}"
+        );
+        assert!(
+            names.contains(&"conffile-without-noreplace-flag"),
+            "expected conffile-without-noreplace-flag in {names:?}"
+        );
+    }
     #[test]
     fn staged_description_carries_1606_reword() {
         // Staged for the M2 `--explain` wiring (see data/descriptions/README.md).

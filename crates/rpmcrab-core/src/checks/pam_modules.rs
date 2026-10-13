@@ -145,4 +145,32 @@ mod tests {
             vec![("pam-unauthorized-module", "pam_unix.so".to_string())]
         );
     }
+
+    #[test]
+    fn check_binary_entry_point_reports_unauthorized_module() {
+        // Kills the neutered-`check_binary` mutant: ghost collection + file
+        // iteration + `add_info` must run for the finding to reach `Filter`.
+        use std::path::Path;
+
+        use crate::color::Color;
+        use crate::pkg::pkgfile::PkgFile;
+
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
+        pkg.files = vec![PkgFile {
+            name: "/lib/security/pam_evil.so".to_string(),
+            ..Default::default()
+        }];
+        pkg.ghost_files = vec![];
+        let mut check = checker(&["pam_unix.so"]);
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(&pkg, &config, &mut out);
+        let names: Vec<&str> = out.results().iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"pam-unauthorized-module"),
+            "expected pam-unauthorized-module in {names:?}"
+        );
+    }
 }

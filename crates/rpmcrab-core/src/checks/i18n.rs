@@ -345,6 +345,8 @@ impl Check for I18NCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::Color;
+    use crate::pkg::pkgfile::PkgFile;
 
     fn names(findings: &[(Level, String, Vec<String>)]) -> Vec<&str> {
         findings.iter().map(|(_, n, _)| n.as_str()).collect()
@@ -584,5 +586,35 @@ mod tests {
         for lang in ["xx", "de_XX", "xx_DE", "", "de-DE"] {
             assert!(!is_valid_lang(lang), "{lang}");
         }
+    }
+
+    #[test]
+    fn check_binary_emits_mo_without_lang() {
+        // Entry glue: `check_binary()` maps `pkg.files` into `collect()`.
+        // A valid-locale `.mo` file with no `%lang` tag warns, so neutering
+        // the body to `()` must fail this test.
+        let mut pkg = Pkg::open_no_extract(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm")
+                .as_path(),
+        )
+        .expect("open fixture shell");
+        pkg.name = "foo".to_string();
+        let path = "/usr/share/locale/de/LC_MESSAGES/a.mo";
+        pkg.files = vec![PkgFile {
+            name: path.to_string(),
+            path: path.to_string(),
+            mode: 0o100644,
+            ..Default::default()
+        }];
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = I18NCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        assert!(
+            out.results().iter().any(|(n, _)| n == "file-not-in-%lang"),
+            "results: {:?}",
+            out.results()
+        );
     }
 }
