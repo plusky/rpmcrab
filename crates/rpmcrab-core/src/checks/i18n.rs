@@ -279,7 +279,19 @@ impl I18NCheck {
             if let Some(finding) = probe.invalid {
                 out.push((Level::Error, finding.to_string(), vec![(*file).to_string()]));
             }
-            if (file.ends_with(".mo") || probe.subdir.is_some()) && lang.is_empty() && !webapp {
+            // The `.mo` trigger covers only the standard locale tree,
+            // `/usr/share/locale`: the tree the LC_MESSAGES probe is
+            // anchored in and the only one `%find_lang` handles.
+            // Applications shipping `.mo` files in private trees
+            // (LibreOffice, Python site-packages, ...) load them
+            // themselves, and `%lang` marks there would let
+            // install-time language filtering strip product data
+            // (#480). The probe trigger is already tree-anchored.
+            if ((file.ends_with(".mo") && file.starts_with("/usr/share/locale/"))
+                || probe.subdir.is_some())
+                && lang.is_empty()
+                && !webapp
+            {
                 out.push((
                     Level::Warning,
                     "file-not-in-%lang".to_string(),
@@ -467,6 +479,43 @@ mod tests {
     fn mo_file_with_lang_is_quiet() {
         let findings = I18NCheck::collect(
             &[("/usr/share/locale/de/LC_MESSAGES/a.mo", "de")],
+            &[],
+            &[],
+            "foo",
+        );
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn mo_file_in_private_tree_is_quiet() {
+        // Applications ship `.mo` files in private trees and load them
+        // themselves; only the standard locale tree is `%find_lang`
+        // territory, so untagged files there stay quiet (#480).
+        for path in [
+            "/usr/lib/python3.13/site-packages/foo/locale/de/LC_MESSAGES/foo.mo",
+            "/usr/share/libreoffice/share/locale/de/LC_MESSAGES/foo.mo",
+            "/usr/share/kvirc/5.2/locale/about_de.mo",
+        ] {
+            let findings = I18NCheck::collect(&[(path, "")], &[], &[], "foo");
+            assert!(findings.is_empty(), "{path}: {findings:?}");
+        }
+    }
+
+    #[test]
+    fn mo_file_in_locale_tree_outside_lc_messages_still_warns() {
+        // The restriction is tree-level, not LC_MESSAGES-only: an
+        // untagged `.mo` anywhere under /usr/share/locale warns.
+        let findings = I18NCheck::collect(&[("/usr/share/locale/de/foo.mo", "")], &[], &[], "foo");
+        assert_eq!(names(&findings), vec!["file-not-in-%lang"]);
+    }
+
+    #[test]
+    fn mo_file_in_private_tree_with_lang_is_quiet() {
+        let findings = I18NCheck::collect(
+            &[(
+                "/usr/lib/python3.13/site-packages/foo/locale/de/LC_MESSAGES/foo.mo",
+                "de",
+            )],
             &[],
             &[],
             "foo",
