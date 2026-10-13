@@ -8,6 +8,11 @@ on:
     # spend the account's concurrency while a PR waits on CI.
     - cron: '19 4 * * 0'
   workflow_dispatch:
+    inputs:
+      only_shard:
+        description: 'Run a single shard only (0-63); empty runs all 64. For re-running capped shards without spending another full-matrix run.'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -38,6 +43,10 @@ jobs:
     # verdict only a curator can read). The weekly full-workspace run is the
     # whole picture instead.
     runs-on: ubuntu-latest
+    # Surgical re-runs: only_shard executes just that matrix leg, the rest
+    # skip cheaply. Shard membership is by index, so a re-run covers exactly
+    # the same mutants. An out-of-range value skips everything and goes green.
+    if: ${{ inputs.only_shard == '' || format('{0}', matrix.shard) == inputs.only_shard }}
     # Sizing (measured 2026-10-12, not guessed): full `cargo test --workspace`
     # is 1288 passed in ~15s of tests under a ~90s incremental rebuild on a
     # many-core box; call it ~150s per mutant on a 4-vCPU runner. 5252 mutants
