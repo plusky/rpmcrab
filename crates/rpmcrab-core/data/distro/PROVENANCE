@@ -54,6 +54,10 @@
 #   Filters: dropped 'postin-without-install-info' (killed: file triggers handle info-dir updates)
 #   Filters: dropped 'info-files-without-install-info-postun' (killed: file triggers handle info-dir updates)
 #
+# Dropped Filters entries (live findings rpmcrab deliberately
+# surfaces; see DROP_LIVE_FILTERS):
+#   Filters: dropped 'no-manual-page-for-binary' (demoted to Info (rpmcrab#484): a missing manpage is upstream debt; surfaced as info instead of filtered away)
+#
 # Pruned whitelist stanzas (packages gone from Tumbleweed/SLE 16):
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'sddm-kalpa' (removed from Factory (bsc#1232647))
