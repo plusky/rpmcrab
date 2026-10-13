@@ -909,6 +909,12 @@ impl SpecCheck {
         use librpm::build::SpecFlags;
         let spec_file = self.spec_file.as_deref().unwrap_or("");
         let _ = pkg_init();
+        // The define, the parse, the pop, the source iteration below and
+        // the parsed spec's drop at the end of the check all touch
+        // process-global librpm state, so the macro lock is held for the
+        // whole check: no sibling worker's sequence interleaves with any
+        // of it. `parsed` is declared after the guard so it drops first.
+        let _macro_guard = crate::pkg::global_macro_lock();
         let macros = librpm::macro_context::MacroContext::default();
         let _ = macros.define(&format!("_sourcedir {}", self.spec_file_dir()), 0);
         let parsed =
@@ -1790,6 +1796,16 @@ mod tests {
         out.results().to_vec()
     }
 
+    /// Run `SpecCheck` over the spec file at `path`, returning the raw
+    /// `(check, rendered line)` pairs.
+    fn run_spec_at(path: &Path, config: &Config) -> Vec<(String, String)> {
+        let pkg = SpecPkg::open(path).unwrap();
+        let mut check = SpecCheck::new(config);
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        check.check_spec(&pkg, config, &mut out);
+        out.results().to_vec()
+    }
+
     fn has(results: &[(String, String)], check: &str) -> bool {
         results.iter().any(|(c, _)| c == check)
     }
@@ -2124,6 +2140,105 @@ make install
         assert!(
             comment[0].contains("W: macro-in-comment %{version}"),
             "unexpected: {comment:?}"
+        );
+    }
+
+    /// `check_invalid_url` defines `_sourcedir`, parses the spec and
+    /// pops the define, all against the process-global macro context.
+    /// Run distinct specs through the check concurrently and require
+    /// every parallel result to equal the serial one. Each fixture's
+    /// `Source` URLs embed `%{_sourcedir}`, so a sibling worker's define
+    /// leaking into a parse changes that parse's `invalid-url` lines and
+    /// breaks the equality.
+    #[test]
+    fn parallel_spec_checks_match_serial_results() {
+        const WORKERS: usize = 8;
+        const ROUNDS: usize = 20;
+        const SOURCES: usize = 24;
+
+        // One fixture spec per worker, each in its own directory, so
+        // every worker's `_sourcedir` differs from the others'.
+        let mut dirs = Vec::new();
+        let mut paths = Vec::new();
+        for w in 0..WORKERS {
+            let dir = tempfile::tempdir().unwrap();
+            let mut text = String::new();
+            text.push_str("Name:           wobble\n");
+            text.push_str("Version:        1.0\n");
+            text.push_str("Release:        1\n");
+            text.push_str("Summary:        Wobble\n");
+            text.push_str("License:        MIT\n");
+            for s in 0..SOURCES {
+                text.push_str(&format!(
+                    "Source{s}:        http://%{{_sourcedir}}/f{s}.tar.gz\n"
+                ));
+            }
+            text.push_str("\n%description\nWobble.\n");
+            let path = dir.path().join(format!("race{w}.spec"));
+            std::fs::write(&path, &text).unwrap();
+            dirs.push(dir);
+            paths.push(path);
+        }
+
+        // Serial baselines. The fixture must yield one `invalid-url` per
+        // source, all naming a single source directory, and the directory
+        // must differ between fixtures -- otherwise the parallel
+        // comparison below could not observe a leaked define.
+        let config = Config::default();
+        let baselines: Vec<Vec<(String, String)>> =
+            paths.iter().map(|p| run_spec_at(p, &config)).collect();
+        let mut prefixes = Vec::new();
+        for baseline in &baselines {
+            let invalid = lines_for(baseline, "invalid-url");
+            assert_eq!(invalid.len(), SOURCES, "baseline: {invalid:?}");
+            let prefix = invalid[0]
+                .split("http://")
+                .nth(1)
+                .and_then(|rest| rest.rsplit_once("/f0.tar.gz"))
+                .map(|(prefix, _)| prefix.to_string())
+                .expect("invalid-url line carries the expanded URL");
+            assert!(
+                invalid.iter().all(|l| l.contains(&prefix)),
+                "all findings share one sourcedir: {invalid:?}"
+            );
+            prefixes.push(prefix);
+        }
+        let mut unique = prefixes.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), WORKERS, "fixture sourcedirs must differ");
+
+        // Parallel rounds: each worker re-checks only its own spec and
+        // must reproduce its serial baseline exactly, every round.
+        let mismatches: Vec<String> = std::thread::scope(|scope| {
+            let handles: Vec<_> = paths
+                .iter()
+                .zip(&baselines)
+                .map(|(path, baseline)| {
+                    scope.spawn(move || {
+                        let config = Config::default();
+                        let mut bad = Vec::new();
+                        for round in 0..ROUNDS {
+                            let results = run_spec_at(path, &config);
+                            if results != *baseline {
+                                bad.push(format!(
+                                    "{path:?} round {round} diverged from the serial baseline"
+                                ));
+                            }
+                        }
+                        bad
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap())
+                .collect()
+        });
+        assert!(
+            mismatches.is_empty(),
+            "parallel spec checks diverged:\n{}",
+            mismatches.join("\n")
         );
     }
 
