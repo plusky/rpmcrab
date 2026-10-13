@@ -1016,6 +1016,34 @@ fn non_table_severity_overrides_is_fatal() {
     );
 }
 
+/// A config file that merges a scalar into a list key set by an earlier
+/// file is a fatal configuration error (exit 1), not a panic: the
+/// reference dies with a TypeError on the same merge, and crash-parity is
+/// out (#494).
+#[test]
+fn scalar_merged_into_list_config_is_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("base.toml");
+    std::fs::write(&base, "Checks = [\"TagsCheck\"]\n").unwrap();
+    let bad = dir.path().join("bad.toml");
+    std::fs::write(&bad, "Checks = 42\n").unwrap();
+    let out = rpmcrab(&[
+        "-c",
+        base.to_str().unwrap(),
+        "-c",
+        bad.to_str().unwrap(),
+        "-p",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("fatal error in configuration"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("'Checks'"), "stderr: {stderr}");
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
+}
+
 /// The exit code follows the overridden levels end to end (DESIGN \u00a74.6):
 /// in strict mode every native error-level finding (enumerated from a
 /// non-strict `--format json` baseline) is overridden to W, so the only

@@ -303,10 +303,19 @@ fn sort_key(is_defaults: bool, name: &str) -> u8 {
 /// overwritten by the later file. One deliberate divergence: a scalar string
 /// merged into a list is kept whole as a single item instead of being
 /// shredded into characters (see the `String` arm below).
-fn merge_into(dest: &mut toml::Table, source: &toml::Table, override_: bool) {
+///
+/// # Errors
+/// Returns a diagnostic when a non-iterable scalar (integer, float, bool,
+/// datetime) is merged into a list: the reference iterates the incoming
+/// value and dies with a `TypeError`, and the port used to panic to match.
+/// Crash-parity is out (#494): a misconfigured merge is a configuration
+/// error, not an abort.
+fn merge_into(dest: &mut toml::Table, source: &toml::Table, override_: bool) -> Result<(), String> {
     for (k, v) in source {
         match (dest.get_mut(k), v) {
-            (Some(toml::Value::Table(d)), toml::Value::Table(s)) => merge_into(d, s, override_),
+            (Some(toml::Value::Table(d)), toml::Value::Table(s)) => {
+                merge_into(d, s, override_)?;
+            }
             // The reference gates the append on the destination being a list, not
             // on the incoming value's type, and then iterates whatever arrived.
             // An empty table therefore leaves the destination list intact —
@@ -327,10 +336,14 @@ fn merge_into(dest: &mut toml::Table, source: &toml::Table, override_: bool) {
                     // every path, silently skipping almost everything on a
                     // misconfigured config.
                     toml::Value::String(s) => vec![toml::Value::String(s.clone())],
-                    other => panic!(
-                        "config: array key '{k}' is merged with a {other:?}, which the \
-                         reference cannot iterate either (TypeError)"
-                    ),
+                    other => {
+                        return Err(format!(
+                            "'{k}' is a list but a later config file merges {} ({other}) \
+                             into it; only a list, a table, or a single string can be \
+                             merged into a list",
+                            value_kind(other)
+                        ));
+                    }
                 };
                 for item in items {
                     if !d.contains(&item) {
@@ -343,6 +356,7 @@ fn merge_into(dest: &mut toml::Table, source: &toml::Table, override_: bool) {
             }
         }
     }
+    Ok(())
 }
 
 /// The XDG config directories, as pyxdg builds them: `XDG_CONFIG_HOME` (or
@@ -407,21 +421,31 @@ fn glob_toml(dir: &Path, star_glob: bool, sort: bool) -> Vec<PathBuf> {
     found
 }
 
+/// Load only the bundled defaults, skipping XDG autoloading and the
+/// environment gates. For tests that must pin the shipped default values
+/// without depending on the ambient environment.
+pub fn load_bundled() -> Config {
+    // Cannot fail: the bundled defaults are the only layer and merge into an
+    // empty table (the merge error needs a list left by an earlier layer),
+    // and `finalize` on the shipped defaults is pinned by
+    // `bundled_defaults_load_with_checks`.
+    load_inner(&[], &[], false).expect("bundled defaults load cleanly")
+}
+
 /// Build the ordered config-file list (`find_configs`), merge them
 /// (`load_config`), and return the resulting [`Config`].
 ///
 /// `extra` is the `-c/--config` set (each a file or a directory of `*.toml`).
 /// Autoloading of XDG dirs is skipped when `CONFIG_DISABLE_AUTOLOADING` or
-/// `PYTEST_XDIST_TESTRUNUID` is set. An unparsable TOML file exits 4, as
-/// rpmlint does.
-/// Load only the bundled defaults, skipping XDG autoloading and the
-/// environment gates. For tests that must pin the shipped default values
-/// without depending on the ambient environment.
-pub fn load_bundled() -> Config {
-    load_inner(&[], &[], false)
-}
-
-pub fn load(extra: &[PathBuf]) -> Config {
+/// `PYTEST_XDIST_TESTRUNUID` is set.
+///
+/// # Errors
+/// Returns a diagnostic when a layer's values cannot be merged into the
+/// accumulated table ([`merge_into`]) or the merged table is rejected by
+/// [`Config::finalize`]; the caller renders it as a fatal configuration
+/// error. An unreadable file exits 1 and an unparsable TOML file exits 4 at
+/// the read site instead, as rpmlint does.
+pub fn load(extra: &[PathBuf]) -> Result<Config, String> {
     let autoload = std::env::var("PYTEST_XDIST_TESTRUNUID").is_err()
         && std::env::var("CONFIG_DISABLE_AUTOLOADING").is_err();
     load_inner(extra, &xdg_config_dirs(), autoload)
@@ -465,7 +489,7 @@ fn read_flavor_key(path: &Path) -> FlavorRead {
 
 /// The env-independent core of [`load`], so tests can drive it without
 /// process-global environment races.
-fn load_inner(extra: &[PathBuf], xdg_dirs: &[PathBuf], autoload: bool) -> Config {
+fn load_inner(extra: &[PathBuf], xdg_dirs: &[PathBuf], autoload: bool) -> Result<Config, String> {
     // (is_defaults, display_path, source).
     let mut entries: Vec<(bool, String, Layer)> =
         vec![(true, "<builtin>".to_string(), Layer::Bundled)];
@@ -589,15 +613,13 @@ fn load_inner(extra: &[PathBuf], xdg_dirs: &[PathBuf], autoload: bool) -> Config
             .map(|n| n.to_string_lossy())
             .unwrap_or_default();
         let is_override = !*is_def && file_name.contains(".override.");
-        merge_into(&mut cfg.configuration, &parsed, is_override);
+        merge_into(&mut cfg.configuration, &parsed, is_override)
+            .map_err(|e| format!("{e} (while merging configuration file {display})"))?;
         cfg.conf_files.push(display.clone());
     }
 
-    if let Err(e) = cfg.finalize() {
-        eprintln!("(none): E: fatal error in configuration: {e}");
-        std::process::exit(1);
-    }
-    cfg
+    cfg.finalize()?;
+    Ok(cfg)
 }
 
 /// Split like Python `str.splitlines()`: on `\n`, `\r\n`, `\r`, and also
@@ -639,13 +661,18 @@ pub fn load_rpmlintrc(config: &mut Config, path: &Path) -> std::io::Result<()> {
         if let Ok(Some(m)) = re_badness.captures(line) {
             let name = m.get(1).expect("capture group").as_str().to_string();
             let val = m.get(2).expect("capture group").as_str().to_string();
-            config
+            let scoring = config
                 .configuration
                 .entry("Scoring")
-                .or_insert_with(|| toml::Value::Table(toml::Table::new()))
-                .as_table_mut()
-                .expect("Scoring is a table")
-                .insert(name, toml::Value::String(val));
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            let kind = value_kind(scoring);
+            let table = scoring.as_table_mut().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("'Scoring' must be a table, found {kind}"),
+                )
+            })?;
+            table.insert(name, toml::Value::String(val));
         }
     }
 
@@ -725,7 +752,7 @@ mod tests {
     fn merge_unions_lists_for_normal_configs() {
         let mut dest = table("Checks = [\"a\", \"b\"]");
         let src = table("Checks = [\"b\", \"c\"]");
-        merge_into(&mut dest, &src, false);
+        merge_into(&mut dest, &src, false).unwrap();
         assert_eq!(
             dest["Checks"].as_array().unwrap(),
             &vec!["a", "b", "c"]
@@ -745,7 +772,7 @@ mod tests {
         // package. Found while reviewing #47.
         let mut dest = table("W = [\"a\", \"b\"]");
         let src = table("[W]\n");
-        merge_into(&mut dest, &src, false);
+        merge_into(&mut dest, &src, false).unwrap();
         assert_eq!(dest["W"].as_array().unwrap().len(), 2);
     }
 
@@ -755,7 +782,7 @@ mod tests {
         // keys, so the keys are appended.
         let mut dest = table("W = [\"a\"]");
         let src = table("[W]\nb = 1\n");
-        merge_into(&mut dest, &src, false);
+        merge_into(&mut dest, &src, false).unwrap();
         assert_eq!(
             dest["W"].as_array().unwrap(),
             &["a".to_string(), "b".to_string()]
@@ -774,7 +801,7 @@ mod tests {
         // string is one pattern, kept whole.
         let mut dest = table("P = [\"a\"]");
         let src = table("P = \"foo\"");
-        merge_into(&mut dest, &src, false);
+        merge_into(&mut dest, &src, false).unwrap();
         assert_eq!(
             dest["P"].as_array().unwrap(),
             &["a", "foo"]
@@ -790,7 +817,7 @@ mod tests {
         // Needs more than one key to discriminate the two.
         let mut dest = table("W = [\"a\"]");
         let src = table("[W]\nz = 1\nb = 2\nm = 3\n");
-        merge_into(&mut dest, &src, false);
+        merge_into(&mut dest, &src, false).unwrap();
         assert_eq!(
             dest["W"].as_array().unwrap(),
             &["a", "z", "b", "m"]
@@ -801,18 +828,52 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "which the reference cannot iterate either")]
-    fn merge_panics_on_a_non_iterable_scalar() {
+    fn merge_errors_on_a_non_iterable_scalar() {
+        // The reference iterates the incoming value and dies with a
+        // TypeError here (config.py:109-112); the port used to panic to
+        // match. Crash-parity is out (#494): a configuration error names
+        // the key and the offending value instead, and the destination is
+        // left untouched.
         let mut dest = table("W = [\"a\"]");
         let src = table("W = 42");
-        merge_into(&mut dest, &src, false);
+        let err = merge_into(&mut dest, &src, false).unwrap_err();
+        assert!(err.contains("'W'"), "error names the key: {err}");
+        assert!(
+            err.contains("an integer (42)"),
+            "error names the value: {err}"
+        );
+        assert_eq!(dest["W"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn merge_errors_on_a_non_iterable_scalar_nested_in_a_table() {
+        // The recursive table arm propagates the same error.
+        let mut dest = table("[T]\nW = [\"a\"]");
+        let src = table("[T]\nW = true");
+        let err = merge_into(&mut dest, &src, false).unwrap_err();
+        assert!(err.contains("'W'"), "error names the key: {err}");
+        assert!(
+            err.contains("a boolean (true)"),
+            "error names the value: {err}"
+        );
+    }
+
+    #[test]
+    fn merge_replaces_a_scalar_with_a_later_list() {
+        // Only a non-iterable scalar merged INTO a list is an error; the
+        // reverse direction replaces, as in the reference (its append is
+        // gated on the destination being a list).
+        let mut dest = table("W = 42");
+        let src = table("W = [\"a\", \"b\"]");
+        merge_into(&mut dest, &src, false).unwrap();
+        assert_eq!(dest["W"].as_array().unwrap().len(), 2);
     }
 
     #[test]
     fn merge_still_replaces_a_list_with_a_later_table_for_override_configs() {
         let mut dest = table("W = [\"a\", \"b\"]");
         let src = table("[W]\n");
-        merge_into(&mut dest, &src, true);
+        merge_into(&mut dest, &src, true).unwrap();
         assert!(dest["W"].is_table());
     }
 
@@ -820,7 +881,7 @@ mod tests {
     fn merge_replaces_lists_for_override_configs() {
         let mut dest = table("Checks = [\"a\", \"b\"]");
         let src = table("Checks = [\"b\", \"c\"]");
-        merge_into(&mut dest, &src, true);
+        merge_into(&mut dest, &src, true).unwrap();
         assert_eq!(
             dest["Checks"].as_array().unwrap(),
             &vec!["b", "c"]
@@ -834,7 +895,7 @@ mod tests {
     fn merge_overwrites_scalars_and_recurses_tables() {
         let mut dest = table("BadnessThreshold = 999\n[Scoring]\na = 1");
         let src = table("BadnessThreshold = 5\n[Scoring]\nb = 2");
-        merge_into(&mut dest, &src, false);
+        merge_into(&mut dest, &src, false).unwrap();
         assert_eq!(dest["BadnessThreshold"].as_integer().unwrap(), 5);
         assert_eq!(dest["Scoring"]["a"].as_integer().unwrap(), 1);
         assert_eq!(dest["Scoring"]["b"].as_integer().unwrap(), 2);
@@ -998,7 +1059,7 @@ mod tests {
 
     #[test]
     fn bundled_defaults_carry_the_suse_ism_keys() {
-        let cfg = load_inner(&[], &[], false);
+        let cfg = load_inner(&[], &[], false).unwrap();
         assert!(cfg.permissive_by_default);
         assert_eq!(
             cfg.skip_package_patterns,
@@ -1018,7 +1079,7 @@ mod tests {
     fn bundled_defaults_load_with_checks() {
         // load_bundled skips autoloading, so the vendored distro layer stays
         // out and the bare builtin baseline applies.
-        let cfg = load_inner(&[], &[], false);
+        let cfg = load_inner(&[], &[], false).unwrap();
         assert!(!cfg.checks.is_empty());
         assert_eq!(cfg.badness_threshold, -1);
         assert_eq!(cfg.conf_files, vec!["<builtin>".to_string()]);
@@ -1034,7 +1095,7 @@ mod tests {
             "Checks = [\"BrandingPolicyCheck\"]\n[Scoring]\ninvalid-license = 100000",
         )
         .unwrap();
-        let cfg = load_inner(&[], &[tmp.path().join("xdg")], true);
+        let cfg = load_inner(&[], &[tmp.path().join("xdg")], true).unwrap();
         // Base checks plus the openSUSE append, in load order.
         assert!(cfg.checks.contains(&"BrandingPolicyCheck".to_string()));
         assert_eq!(
@@ -1073,9 +1134,28 @@ mod tests {
             "Checks = [\"Only\"]",
         )
         .unwrap();
-        let cfg = load_inner(&[], &[tmp.path().join("xdg")], true);
+        let cfg = load_inner(&[], &[tmp.path().join("xdg")], true).unwrap();
         // The override file merges last and replaces the list wholesale.
         assert_eq!(cfg.checks, vec!["Only".to_string()]);
+    }
+
+    #[test]
+    fn load_errors_when_a_later_config_merges_a_scalar_into_a_list() {
+        // The bundled defaults carry `Checks` as a list; a user config
+        // setting it to a scalar used to panic the merge (the reference
+        // dies with a TypeError). It is a configuration error now, naming
+        // the key, the value, and the file being merged.
+        let tmp = tempfile::tempdir().unwrap();
+        let rpmlint_dir = tmp.path().join("xdg").join("rpmlint");
+        std::fs::create_dir_all(&rpmlint_dir).unwrap();
+        std::fs::write(rpmlint_dir.join("bad.toml"), "Checks = 42\n").unwrap();
+        let err = load_inner(&[], &[tmp.path().join("xdg")], true).unwrap_err();
+        assert!(err.contains("'Checks'"), "error names the key: {err}");
+        assert!(
+            err.contains("an integer (42)"),
+            "error names the value: {err}"
+        );
+        assert!(err.contains("bad.toml"), "error names the file: {err}");
     }
 
     #[test]
@@ -1087,7 +1167,7 @@ mod tests {
             "setBadness('no-return-in-nonvoid-function', 0)\naddFilter('no-return-in-nonvoid-function')\n",
         )
         .unwrap();
-        let mut cfg = load_inner(&[], &[], false);
+        let mut cfg = load_inner(&[], &[], false).unwrap();
         load_rpmlintrc(&mut cfg, &rc).unwrap();
         assert_eq!(
             cfg.scoring.get("no-return-in-nonvoid-function"),
@@ -1103,17 +1183,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rpmlintrc_setbadness_on_a_non_table_scoring_errors() {
+        // A config layer that sets `Scoring` to a scalar replaces the
+        // table wholesale at merge time; an rpmlintrc `setBadness` then
+        // used to panic at the insertion. It is a load error now, in the
+        // InvalidData channel `load_rpmlintrc` already uses for finalize
+        // errors.
+        let mut cfg = Config::default();
+        cfg.configuration
+            .insert("Scoring".to_string(), toml::Value::Integer(5));
+        let tmp = tempfile::tempdir().unwrap();
+        let rc = tmp.path().join("x.rc");
+        std::fs::write(&rc, "setBadness('no-%check-section', 10)\n").unwrap();
+        let err = load_rpmlintrc(&mut cfg, &rc).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string()
+                .contains("'Scoring' must be a table, found an integer"),
+            "error: {err}"
+        );
+    }
+
     fn config_with_toml(toml_text: &str) -> Config {
         let tmp = tempfile::tempdir().unwrap();
         let rpmlint_dir = tmp.path().join("xdg").join("rpmlint");
         std::fs::create_dir_all(&rpmlint_dir).unwrap();
         std::fs::write(rpmlint_dir.join("flavor.toml"), toml_text).unwrap();
-        load_inner(&[], &[tmp.path().join("xdg")], true)
+        load_inner(&[], &[tmp.path().join("xdg")], true).unwrap()
     }
 
     #[test]
     fn flavor_defaults_to_opensuse() {
-        let cfg = load_inner(&[], &[], false);
+        let cfg = load_inner(&[], &[], false).unwrap();
         assert_eq!(cfg.flavor, "opensuse");
         assert!(!cfg.is_slfo());
     }
@@ -1166,7 +1268,7 @@ mod tests {
         std::fs::create_dir_all(&rpmlint_dir).unwrap();
         std::fs::write(rpmlint_dir.join("z.toml"), "Flavor = \"opensuse\"\n").unwrap();
         std::fs::write(rpmlint_dir.join("a.override.toml"), "Flavor = \"slfo\"\n").unwrap();
-        let cfg = load_inner(&[], &[tmp.path().join("xdg")], true);
+        let cfg = load_inner(&[], &[tmp.path().join("xdg")], true).unwrap();
         assert_eq!(cfg.flavor, "slfo");
         assert!(
             cfg.conf_files
@@ -1181,7 +1283,7 @@ mod tests {
     fn divergence_applies_respects_entry_flavor() {
         // The corpus runner compares in the default flavor: an entry without a
         // flavor key applies everywhere, a slfo-gated entry only on slfo runs.
-        let opensuse = load_inner(&[], &[], false);
+        let opensuse = load_inner(&[], &[], false).unwrap();
         assert!(opensuse.divergence_applies(None));
         assert!(opensuse.divergence_applies(Some("opensuse")));
         assert!(!opensuse.divergence_applies(Some("slfo")));
@@ -1196,7 +1298,7 @@ mod tests {
     fn flavor_defaults_to_opensuse_vendored_config() {
         // Autoloading on: the default flavor pulls in the vendored openSUSE
         // distro config.
-        let cfg = load_inner(&[], &[], true);
+        let cfg = load_inner(&[], &[], true).unwrap();
         assert_eq!(cfg.flavor, "opensuse");
         // The vendored openSUSE Filters list applies: invalid-version is
         // filtered upstream, so it must be present in the merged config.
@@ -1214,7 +1316,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let flavor_cfg = tmp.path().join("flavor.toml");
         std::fs::write(&flavor_cfg, "Flavor = \"slfo\"\n").unwrap();
-        let cfg = load_inner(&[flavor_cfg], &[], true);
+        let cfg = load_inner(&[flavor_cfg], &[], true).unwrap();
         assert_eq!(cfg.flavor, "slfo");
         assert!(
             cfg.conf_files
@@ -1237,7 +1339,7 @@ mod tests {
         let rpmlint_dir = tmp.path().join("xdg").join("rpmlint");
         std::fs::create_dir_all(&rpmlint_dir).unwrap();
         std::fs::write(rpmlint_dir.join("local.toml"), "BadnessThreshold = 42\n").unwrap();
-        let cfg = load_inner(&[], &[tmp.path().join("xdg")], true);
+        let cfg = load_inner(&[], &[tmp.path().join("xdg")], true).unwrap();
         assert_eq!(cfg.badness_threshold, 42);
     }
 
