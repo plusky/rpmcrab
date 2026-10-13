@@ -608,6 +608,11 @@ struct LddInfo {
     /// system-library providers are matched against it so a 32-bit
     /// consumer never resolves against a 64-bit library or vice versa.
     is_64: Option<bool>,
+    /// DT_RPATH entries, colon-split, in order. The loader honours
+    /// these only when the file carries no DT_RUNPATH at all.
+    rpath: Vec<String>,
+    /// DT_RUNPATH entries, colon-split, in order.
+    runpath: Vec<String>,
     failed: Option<String>,
 }
 
@@ -619,6 +624,8 @@ impl LddInfo {
             undefined_symbols: Vec::new(),
             defined_symbols: Vec::new(),
             is_64: None,
+            rpath: Vec::new(),
+            runpath: Vec::new(),
             failed: None,
         };
         if !is_installed {
@@ -642,14 +649,39 @@ impl LddInfo {
         };
         info.is_64 = Some(elf.is_64);
 
-        // Dependencies from DT_NEEDED
+        // Dependencies from DT_NEEDED; search paths from DT_RPATH /
+        // DT_RUNPATH, which locate the providers of those
+        // dependencies in `resolve_undefined_symbols`.
         if let Some(dynamic) = &elf.dynamic {
             let dynstrtab = &elf.dynstrtab;
             for d in &dynamic.dyns {
-                if d.d_tag == goblin::elf::dynamic::DT_NEEDED {
-                    if let Some(s) = dynstrtab.get_at(d.d_val as usize) {
-                        info.dependencies.push(s.to_string());
-                    }
+                let tag = d.d_tag;
+                if tag != goblin::elf::dynamic::DT_NEEDED
+                    && tag != goblin::elf::dynamic::DT_RPATH
+                    && tag != goblin::elf::dynamic::DT_RUNPATH
+                {
+                    continue;
+                }
+                let Some(s) = dynstrtab.get_at(d.d_val as usize) else {
+                    continue;
+                };
+                if tag == goblin::elf::dynamic::DT_NEEDED {
+                    info.dependencies.push(s.to_string());
+                } else {
+                    // An empty segment names the loader's working
+                    // directory; the resolver has no working
+                    // directory to substitute, so empty segments
+                    // are dropped here rather than searched.
+                    let target = if tag == goblin::elf::dynamic::DT_RPATH {
+                        &mut info.rpath
+                    } else {
+                        &mut info.runpath
+                    };
+                    target.extend(
+                        s.split(':')
+                            .filter(|seg| !seg.is_empty())
+                            .map(str::to_string),
+                    );
                 }
             }
         }
@@ -699,11 +731,22 @@ impl LddInfo {
 struct SymbolProvider {
     defined: HashSet<String>,
     needs: Vec<String>,
+    /// The directory the providing object is installed in: the
+    /// base for `$ORIGIN` expansion in its search-path entries.
+    origin: PathBuf,
+    /// The object's DT_RPATH entries (raw, colon-split).
+    rpath: Vec<String>,
+    /// The object's DT_RUNPATH entries (raw, colon-split).
+    runpath: Vec<String>,
 }
 
 /// Lookup key for symbol providers: a SONAME plus the ELF class
 /// of the consumer asking (`None` when the class is unknown).
 type ProviderKey = (String, Option<bool>);
+
+/// Lookup key for directory-scoped provider lookups: the SONAME,
+/// the consumer's ELF class, and the directory list searched.
+type DirProviderKey = (String, Option<bool>, Vec<PathBuf>);
 
 /// Symbol providers from the system rpmcrab runs on: the fallback
 /// half of undefined-symbol resolution. The reference resolves with
@@ -727,6 +770,9 @@ struct SystemLibraries {
     /// Memoised lookups per (SONAME, ELF class): the located,
     /// parsed provider, or `None` when no candidate parses.
     providers: Mutex<HashMap<ProviderKey, Option<Arc<SymbolProvider>>>>,
+    /// Memoised lookups per (SONAME, ELF class, directory list)
+    /// for `provider_in_dirs`.
+    dir_providers: Mutex<HashMap<DirProviderKey, Option<Arc<SymbolProvider>>>>,
 }
 
 impl SystemLibraries {
@@ -770,6 +816,7 @@ impl SystemLibraries {
             cache_path,
             cache: Mutex::new(None),
             providers: Mutex::new(HashMap::new()),
+            dir_providers: Mutex::new(HashMap::new()),
         }
     }
 
@@ -785,22 +832,71 @@ impl SystemLibraries {
         if let Some(hit) = self.providers.lock().unwrap().get(&key) {
             return hit.clone();
         }
-        let found = self.locate(soname).into_iter().find_map(|path| {
-            let ldd = LddInfo::parse(path.to_str()?, true);
-            if ldd.failed.is_some() {
-                return None;
-            }
-            if let (Some(want), Some(got)) = (is_64, ldd.is_64)
-                && want != got
-            {
-                return None;
-            }
-            Some(Arc::new(SymbolProvider {
-                defined: ldd.defined_symbols.iter().cloned().collect(),
-                needs: ldd.dependencies.clone(),
-            }))
-        });
+        let found = self
+            .locate(soname)
+            .into_iter()
+            .find_map(|path| Self::parse_provider(&path, is_64));
         self.providers.lock().unwrap().insert(key, found.clone());
+        found
+    }
+
+    /// Parse a located candidate file into a provider, when it is
+    /// an ELF library of the consumer's class (`is_64`, when known).
+    fn parse_provider(path: &Path, is_64: Option<bool>) -> Option<Arc<SymbolProvider>> {
+        let ldd = LddInfo::parse(path.to_str()?, true);
+        if ldd.failed.is_some() {
+            return None;
+        }
+        if let (Some(want), Some(got)) = (is_64, ldd.is_64)
+            && want != got
+        {
+            return None;
+        }
+        Some(Arc::new(SymbolProvider {
+            defined: ldd.defined_symbols.iter().cloned().collect(),
+            needs: ldd.dependencies.clone(),
+            origin: path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("/")),
+            rpath: ldd.rpath.clone(),
+            runpath: ldd.runpath.clone(),
+        }))
+    }
+
+    /// The provider for `soname` in an explicit directory list --
+    /// a needing object's expanded DT_RPATH/DT_RUNPATH -- searched
+    /// in order. Independent of this instance's own roots and
+    /// cache, so it also works on the empty test seam: the
+    /// directories are the checked objects' own, wherever they
+    /// point in the filesystem rpmcrab runs on. A `soname`
+    /// containing a slash is a direct path for the loader and is
+    /// never directory-searched.
+    fn provider_in_dirs(
+        &self,
+        soname: &str,
+        is_64: Option<bool>,
+        dirs: &[PathBuf],
+    ) -> Option<Arc<SymbolProvider>> {
+        if soname.contains('/') || dirs.is_empty() {
+            return None;
+        }
+        let key: DirProviderKey = (soname.to_string(), is_64, dirs.to_vec());
+        if let Some(hit) = self.dir_providers.lock().unwrap().get(&key) {
+            return hit.clone();
+        }
+        let found = dirs.iter().find_map(|dir| {
+            let candidate = dir.join(soname);
+            if candidate.is_file() {
+                Self::parse_provider(&candidate, is_64)
+            } else {
+                None
+            }
+        });
+        self.dir_providers
+            .lock()
+            .unwrap()
+            .insert(key, found.clone());
         found
     }
 
@@ -928,20 +1024,110 @@ fn parse_ld_so_cache(data: &[u8]) -> Option<HashMap<String, Vec<PathBuf>>> {
 }
 
 /// Memoisation key for DT_NEEDED closures: a file's direct
-/// dependency list plus its ELF class.
-type ClosureKey = (Vec<String>, Option<bool>);
+/// dependency list, its ELF class, and its search context (system
+/// candidates are class-matched, and the provided set depends on
+/// the directories the file's own entries are searched in).
+type ClosureKey = (Vec<String>, Option<bool>, SearchContext);
+
+/// The directory the loader treats an object as installed in:
+/// the parent of its package path, made absolute. This is the
+/// base for `$ORIGIN` expansion in the object's search paths.
+fn installed_dir(name: &str) -> PathBuf {
+    match Path::new(name).parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            if parent.is_absolute() {
+                parent.to_path_buf()
+            } else {
+                Path::new("/").join(parent)
+            }
+        }
+        _ => PathBuf::from("/"),
+    }
+}
+
+/// Expand one object's raw DT_RPATH/DT_RUNPATH entries into the
+/// directory list the loader would search: `$ORIGIN` (and the
+/// braced `${ORIGIN}`) expands to the object's installed
+/// directory, and `.`/`..` collapse lexically. Only absolute
+/// results are kept: a relative entry is relative to the loader's
+/// working directory, which this model does not have.
+fn expand_search_dirs(entries: &[String], origin: &Path) -> Vec<PathBuf> {
+    let origin = origin.to_string_lossy();
+    entries
+        .iter()
+        .map(|entry| {
+            entry
+                .replace("${ORIGIN}", &origin)
+                .replace("$ORIGIN", &origin)
+        })
+        .map(|entry| normalize_dotdot(&entry))
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .collect()
+}
+
+/// Search context for DT_NEEDED entries issued by one object:
+/// the directories the loader searches for them, on top of the
+/// package index and the system fallback.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct SearchContext {
+    /// The needing object's expanded DT_RUNPATH: searched for
+    /// its own entries only (RUNPATH is not transitive).
+    runpath_dirs: Vec<PathBuf>,
+    /// Expanded DT_RPATH lists of the needing object and its
+    /// loaders, nearest first (RPATH is transitive). An object
+    /// contributes its list only when it carries no DT_RUNPATH:
+    /// the loader ignores DT_RPATH entirely in that case.
+    rpath_chain: Vec<Vec<PathBuf>>,
+}
+
+impl SearchContext {
+    /// The context for entries issued by an object with the given
+    /// search paths, loaded under `inherited` (the RPATH chain of
+    /// the object that issued the entry which loaded it; empty
+    /// for the checked file itself).
+    fn for_object(
+        rpath: &[String],
+        runpath: &[String],
+        origin: &Path,
+        inherited: &[Vec<PathBuf>],
+    ) -> Self {
+        let mut rpath_chain: Vec<Vec<PathBuf>> = Vec::new();
+        if runpath.is_empty() {
+            let dirs = expand_search_dirs(rpath, origin);
+            if !dirs.is_empty() {
+                rpath_chain.push(dirs);
+            }
+        }
+        // A loader already in the chain does not extend it again:
+        // the same directory list appearing twice adds no new
+        // search location, and deduplicating on it keeps a cyclic
+        // dependency graph's chains finite.
+        for dirs in inherited {
+            if !rpath_chain.contains(dirs) {
+                rpath_chain.push(dirs.clone());
+            }
+        }
+        SearchContext {
+            runpath_dirs: expand_search_dirs(runpath, origin),
+            rpath_chain,
+        }
+    }
+}
 
 /// Resolve undefined symbols the way the reference's `ldd -r`
 /// does: a file's undefined symbol is satisfied when a library in
 /// its DT_NEEDED closure -- the file itself included, as in the
 /// loader's lookup order -- defines it. The closure is formed from
 /// the libraries shipped in the same package first; a DT_NEEDED
-/// entry the package does not ship is then located on the system
-/// rpmcrab runs on (`SystemLibraries`), whose libraries join the
-/// closure with their own DT_NEEDED entries in turn. Resolution
-/// only ever subtracts symbols a located library actually defines,
-/// so a symbol with no provider anywhere keeps firing (no silent
-/// allowlisting).
+/// entry the package does not ship is then located the way the
+/// loader locates it: in the needing object's DT_RPATH chain and
+/// DT_RUNPATH (with `$ORIGIN` expansion, against the filesystem
+/// rpmcrab runs on), then on the system (`SystemLibraries`), whose
+/// libraries join the closure with their own DT_NEEDED entries in
+/// turn. Resolution only ever subtracts symbols a located library
+/// actually defines, so a symbol with no provider anywhere keeps
+/// firing (no silent allowlisting).
 fn resolve_undefined_symbols(
     analyses: &mut [Option<ElfAnalysis>],
     files: &[PkgFile],
@@ -966,9 +1152,17 @@ fn resolve_undefined_symbols(
             }
         }
         for key in keys {
+            // Duplicate providers merged under one key keep the
+            // first file's search paths: the copies are the same
+            // library (e.g. /lib64 and /usr/lib64), and their
+            // defined symbols and DT_NEEDED entries merge below
+            // regardless.
             let entry = providers.entry(key).or_insert_with(|| SymbolProvider {
                 defined: HashSet::new(),
                 needs: Vec::new(),
+                origin: installed_dir(&pkgfile.name),
+                rpath: ldd.rpath.clone(),
+                runpath: ldd.runpath.clone(),
             });
             entry.defined.extend(ldd.defined_symbols.iter().cloned());
             for need in &ldd.dependencies {
@@ -987,11 +1181,12 @@ fn resolve_undefined_symbols(
         .collect();
 
     // Walk each file's DT_NEEDED closure. Most libraries in a package
-    // share the same direct dependencies, so memoise the provided
-    // set on the direct-dependency list and the file's ELF class
-    // (system candidates are class-matched).
+    // share the same direct dependencies and search paths, so
+    // memoise the provided set on the direct-dependency list, the
+    // file's ELF class (system candidates are class-matched), and
+    // the file's search context.
     let mut closures: HashMap<ClosureKey, std::rc::Rc<HashSet<String>>> = HashMap::new();
-    for analysis in analyses.iter_mut() {
+    for (analysis, pkgfile) in analyses.iter_mut().zip(files.iter()) {
         let Some(analysis) = analysis else { continue };
         let Some(ldd) = &mut analysis.ldd else {
             continue;
@@ -1001,24 +1196,57 @@ fn resolve_undefined_symbols(
         }
         let direct = ldd.dependencies.clone();
         let is_64 = ldd.is_64;
+        let root_ctx =
+            SearchContext::for_object(&ldd.rpath, &ldd.runpath, &installed_dir(&pkgfile.name), &[]);
         let provided = closures
-            .entry((direct.clone(), is_64))
+            .entry((direct.clone(), is_64, root_ctx.clone()))
             .or_insert_with(|| {
                 let mut provided: HashSet<String> = HashSet::new();
-                let mut visited: HashSet<String> = HashSet::new();
-                let mut stack: Vec<String> = direct.clone();
-                while let Some(soname) = stack.pop() {
-                    if !visited.insert(soname.clone()) {
+                let mut visited: HashSet<(String, SearchContext)> = HashSet::new();
+                let mut stack: Vec<(String, SearchContext)> = direct
+                    .iter()
+                    .cloned()
+                    .map(|need| (need, root_ctx.clone()))
+                    .collect();
+                while let Some((soname, ctx)) = stack.pop() {
+                    if !visited.insert((soname.clone(), ctx.clone())) {
                         continue;
                     }
                     let provider = providers
                         .get(&soname)
                         .or_else(|| providers.get(basename(&soname)))
                         .cloned()
+                        .or_else(|| {
+                            // The loader's order: the RPATH chain
+                            // (the needing object's own RPATH
+                            // first, then its loaders'), then the
+                            // needing object's RUNPATH, then the
+                            // system fallback (ldconfig cache, then
+                            // the standard directories).
+                            let chain_dirs: Vec<PathBuf> =
+                                ctx.rpath_chain.iter().flatten().cloned().collect();
+                            system
+                                .provider_in_dirs(&soname, is_64, &chain_dirs)
+                                .or_else(|| {
+                                    system.provider_in_dirs(&soname, is_64, &ctx.runpath_dirs)
+                                })
+                        })
                         .or_else(|| system.provider(&soname, is_64));
                     if let Some(provider) = provider {
                         provided.extend(provider.defined.iter().cloned());
-                        stack.extend(provider.needs.iter().cloned());
+                        let child_ctx = SearchContext::for_object(
+                            &provider.rpath,
+                            &provider.runpath,
+                            &provider.origin,
+                            &ctx.rpath_chain,
+                        );
+                        stack.extend(
+                            provider
+                                .needs
+                                .iter()
+                                .cloned()
+                                .map(|need| (need, child_ctx.clone())),
+                        );
                     }
                 }
                 Rc::new(provided)
@@ -3005,6 +3233,27 @@ mod tests {
         soname: Option<&str>,
         dynsyms: &[(&str, u8, u8, u16)],
     ) -> Vec<u8> {
+        craft_shlib_elf_paths(
+            go_note,
+            &needed.into_iter().collect::<Vec<_>>(),
+            soname,
+            None,
+            None,
+            dynsyms,
+        )
+    }
+
+    /// `craft_shlib_elf` with several DT_NEEDED entries and optional
+    /// DT_RPATH / DT_RUNPATH entries (single strings, colon-joined
+    /// when they name several directories).
+    fn craft_shlib_elf_paths(
+        go_note: bool,
+        needed: &[&str],
+        soname: Option<&str>,
+        rpath: Option<&str>,
+        runpath: Option<&str>,
+        dynsyms: &[(&str, u8, u8, u16)],
+    ) -> Vec<u8> {
         const SHSTRTAB: &[u8] =
             b"\0.shstrtab\0.dynamic\0.dynstr\0.note.go.buildid\0.dynsym\0.hash\0";
         // SHSTRTAB name offsets: .shstrtab=1, .dynamic=11, .dynstr=20,
@@ -3040,7 +3289,9 @@ mod tests {
             off
         };
         let soname_off = soname.map(&mut push_str);
-        let needed_off = needed.map(&mut push_str);
+        let needed_offs: Vec<usize> = needed.iter().map(|n| push_str(n)).collect();
+        let rpath_off = rpath.map(&mut push_str);
+        let runpath_off = runpath.map(&mut push_str);
         let sym_name_offs: Vec<usize> = dynsyms.iter().map(|(n, _, _, _)| push_str(n)).collect();
         secs.push(Sec {
             name_off: 20,
@@ -3056,12 +3307,14 @@ mod tests {
         let dynstr_idx = secs.len() as u32;
 
         // .dynamic; entries are patched once section offsets are known.
-        // Pre-sized: DT_SONAME?, DT_NEEDED?, DT_HASH?, DT_SYMTAB?,
-        // DT_SYMENT?, DT_STRTAB, DT_STRSZ, DT_NULL.
+        // Pre-sized: DT_SONAME?, DT_NEEDED*, DT_RPATH?, DT_RUNPATH?,
+        // DT_HASH?, DT_SYMTAB?, DT_SYMENT?, DT_STRTAB, DT_STRSZ, DT_NULL.
         let dynamic_idx = secs.len();
         let dynamic_entries = 3
             + soname.is_some() as usize
-            + needed.is_some() as usize
+            + needed.len()
+            + rpath.is_some() as usize
+            + runpath.is_some() as usize
             + if dynsyms.is_empty() { 0 } else { 3 };
         secs.push(Sec {
             name_off: 11,
@@ -3159,8 +3412,14 @@ mod tests {
         if let Some(off) = soname_off {
             entry(14, off as u64); // DT_SONAME
         }
-        if let Some(off) = needed_off {
-            entry(1, off as u64); // DT_NEEDED
+        for off in &needed_offs {
+            entry(1, *off as u64); // DT_NEEDED
+        }
+        if let Some(off) = rpath_off {
+            entry(15, off as u64); // DT_RPATH
+        }
+        if let Some(off) = runpath_off {
+            entry(29, off as u64); // DT_RUNPATH
         }
         if !dynsyms.is_empty() {
             // .hash is the last section pushed above when dynsyms exist.
@@ -5439,6 +5698,8 @@ description = "explicit priority string bypasses the system crypto policy"
             undefined_symbols: Vec::new(),
             defined_symbols: Vec::new(),
             is_64: None,
+            rpath: Vec::new(),
+            runpath: Vec::new(),
             failed: None,
         }
     }
@@ -7103,6 +7364,364 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(
             lines_for(&results, "undefined-non-weak-symbol").is_empty(),
             "system provider found by the NEED's basename must resolve: {results:?}"
+        );
+    }
+
+    #[test]
+    fn undefined_symbol_provided_via_runpath_is_quiet() {
+        // plusky/rpmcrab#504, the GHC shape: the provider lives in
+        // a private directory named only by the consumer's
+        // DT_RUNPATH. The reference's `ldd -r` honours RUNPATH, so
+        // the symbol resolves even though the provider is neither
+        // in the package nor in any system search root (the system
+        // seam here is empty).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let privdir = dir.path().join("private");
+        std::fs::create_dir(&privdir).expect("mkdir private");
+        let provider = craft_shlib_elf(false, None, Some("libpriv.so.1"), &[("priv_sym", 1, 0, 1)]);
+        std::fs::write(privdir.join("libpriv.so.1"), &provider).expect("write provider");
+        let runpath = privdir.to_string_lossy().into_owned();
+        let consumer = craft_shlib_elf_paths(
+            false,
+            &["libpriv.so.1"],
+            Some("libbar.so.1"),
+            None,
+            Some(runpath.as_str()),
+            &[("priv_sym", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let results = driver_results_with_system(&pkg, &test_config(), SystemLibraries::empty());
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "RUNPATH-located provider must resolve: {results:?}"
+        );
+    }
+
+    #[test]
+    fn undefined_symbol_provided_via_origin_runpath_is_quiet() {
+        // `$ORIGIN` in a RUNPATH expands to the consumer's
+        // installed directory: the provider sits in a private
+        // subdirectory of it.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let libdir = dir.path().join("ghc").join("lib");
+        let privdir = libdir.join("private");
+        std::fs::create_dir_all(&privdir).expect("mkdir private");
+        let provider = craft_shlib_elf(false, None, Some("libpriv.so.1"), &[("priv_sym", 1, 0, 1)]);
+        std::fs::write(privdir.join("libpriv.so.1"), &provider).expect("write provider");
+        let consumer = craft_shlib_elf_paths(
+            false,
+            &["libpriv.so.1"],
+            Some("libpoly.so"),
+            None,
+            Some("$ORIGIN/private"),
+            &[("priv_sym", 1, 0, 0)],
+        );
+        let consumer_path = libdir.join("libpoly.so");
+        std::fs::write(&consumer_path, &consumer).expect("write consumer");
+        let pkgfile = PkgFile {
+            name: consumer_path.to_string_lossy().into_owned(),
+            path: consumer_path.to_string_lossy().into_owned(),
+            magic: "ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, not stripped"
+                .to_string(),
+            mode: 0o100755,
+            ..Default::default()
+        };
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![pkgfile]);
+        let results = driver_results_with_system(&pkg, &test_config(), SystemLibraries::empty());
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "$ORIGIN-relative RUNPATH provider must resolve: {results:?}"
+        );
+    }
+
+    #[test]
+    fn undefined_symbol_missing_from_runpath_provider_still_fires() {
+        // A RUNPATH-located provider that does not define the
+        // symbol satisfies nothing: resolution reads its real
+        // symbol table, like every other provider source.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let privdir = dir.path().join("private");
+        std::fs::create_dir(&privdir).expect("mkdir private");
+        let provider =
+            craft_shlib_elf(false, None, Some("libpriv.so.1"), &[("other_sym", 1, 0, 1)]);
+        std::fs::write(privdir.join("libpriv.so.1"), &provider).expect("write provider");
+        let runpath = privdir.to_string_lossy().into_owned();
+        let consumer = craft_shlib_elf_paths(
+            false,
+            &["libpriv.so.1"],
+            Some("libbar.so.1"),
+            None,
+            Some(runpath.as_str()),
+            &[("missing_sym", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let results = driver_results_with_system(&pkg, &test_config(), SystemLibraries::empty());
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(lines.len(), 1, "the unprovided symbol fires: {results:?}");
+        assert!(
+            lines[0].contains("missing_sym"),
+            "finding names the symbol: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn undefined_symbol_in_wrong_runpath_dir_still_fires() {
+        // The provider exists on the system but not in the
+        // directory the RUNPATH names (nor anywhere else the
+        // resolver searches): location is by directory, not by
+        // name anywhere on disk.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let wrongdir = dir.path().join("wrong");
+        let realdir = dir.path().join("real");
+        std::fs::create_dir(&wrongdir).expect("mkdir wrong");
+        std::fs::create_dir(&realdir).expect("mkdir real");
+        let provider = craft_shlib_elf(false, None, Some("libpriv.so.1"), &[("priv_sym", 1, 0, 1)]);
+        std::fs::write(realdir.join("libpriv.so.1"), &provider).expect("write provider");
+        let runpath = wrongdir.to_string_lossy().into_owned();
+        let consumer = craft_shlib_elf_paths(
+            false,
+            &["libpriv.so.1"],
+            Some("libbar.so.1"),
+            None,
+            Some(runpath.as_str()),
+            &[("priv_sym", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let results = driver_results_with_system(&pkg, &test_config(), SystemLibraries::empty());
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(
+            lines.len(),
+            1,
+            "provider outside the RUNPATH dir must not resolve: {results:?}"
+        );
+    }
+
+    /// The RPATH/RUNPATH transitivity fixture: the consumer NEEDs
+    /// libmid (in the system root), libmid NEEDs libleaf, and
+    /// libleaf -- which lives only in `privdir` -- defines the
+    /// consumer's undefined symbol. Whether the symbol resolves
+    /// depends entirely on how the consumer's search path reaches
+    /// libmid's own dependency.
+    fn rpath_transitivity_results(rpath: bool) -> Vec<(String, String)> {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let sysroot = dir.path().join("sysroot");
+        let privdir = dir.path().join("private");
+        std::fs::create_dir(&sysroot).expect("mkdir sysroot");
+        std::fs::create_dir(&privdir).expect("mkdir private");
+        let leaf = craft_shlib_elf(false, None, Some("libleaf.so.1"), &[("leaf_sym", 1, 0, 1)]);
+        std::fs::write(privdir.join("libleaf.so.1"), &leaf).expect("write leaf");
+        let mid = craft_shlib_elf(false, Some("libleaf.so.1"), Some("libmid.so.1"), &[]);
+        write_system_lib(&sysroot, "libmid.so.1", &mid);
+        let priv_s = privdir.to_string_lossy().into_owned();
+        let (rpath, runpath) = if rpath {
+            (Some(priv_s.as_str()), None)
+        } else {
+            (None, Some(priv_s.as_str()))
+        };
+        let consumer = craft_shlib_elf_paths(
+            false,
+            &["libmid.so.1"],
+            Some("libbar.so.1"),
+            rpath,
+            runpath,
+            &[("leaf_sym", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let system = SystemLibraries::with_roots(vec![sysroot], None);
+        driver_results_with_system(&pkg, &test_config(), system)
+    }
+
+    #[test]
+    fn undefined_symbol_provided_via_rpath_transitively_is_quiet() {
+        // DT_RPATH (with no DT_RUNPATH) is transitive: it also
+        // locates the dependencies of the consumer's dependencies.
+        let results = rpath_transitivity_results(true);
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "RPATH must reach the transitive provider: {results:?}"
+        );
+    }
+
+    #[test]
+    fn undefined_symbol_via_runpath_is_not_transitive() {
+        // DT_RUNPATH locates only the needing object's own
+        // entries: libmid's dependency on libleaf is not searched
+        // in the consumer's RUNPATH, so the symbol keeps firing.
+        let results = rpath_transitivity_results(false);
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(
+            lines.len(),
+            1,
+            "RUNPATH must not reach the transitive provider: {results:?}"
+        );
+        assert!(
+            lines[0].contains("leaf_sym"),
+            "finding names the symbol: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn rpath_is_ignored_when_runpath_is_present() {
+        // The loader ignores DT_RPATH entirely when the object
+        // also carries DT_RUNPATH: the provider sits in the RPATH
+        // directory, the RUNPATH directory is empty, so the
+        // symbol keeps firing.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let privdir = dir.path().join("private");
+        let emptydir = dir.path().join("empty");
+        std::fs::create_dir(&privdir).expect("mkdir private");
+        std::fs::create_dir(&emptydir).expect("mkdir empty");
+        let provider = craft_shlib_elf(false, None, Some("libpriv.so.1"), &[("priv_sym", 1, 0, 1)]);
+        std::fs::write(privdir.join("libpriv.so.1"), &provider).expect("write provider");
+        let priv_s = privdir.to_string_lossy().into_owned();
+        let empty_s = emptydir.to_string_lossy().into_owned();
+        let consumer = craft_shlib_elf_paths(
+            false,
+            &["libpriv.so.1"],
+            Some("libbar.so.1"),
+            Some(priv_s.as_str()),
+            Some(empty_s.as_str()),
+            &[("priv_sym", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let results = driver_results_with_system(&pkg, &test_config(), SystemLibraries::empty());
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(
+            lines.len(),
+            1,
+            "DT_RPATH must be ignored next to DT_RUNPATH: {results:?}"
+        );
+    }
+
+    #[test]
+    fn runpath_is_used_when_rpath_is_also_present() {
+        // Companion: with both tags present the RUNPATH directory
+        // is searched (and the empty RPATH directory is not).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let privdir = dir.path().join("private");
+        let emptydir = dir.path().join("empty");
+        std::fs::create_dir(&privdir).expect("mkdir private");
+        std::fs::create_dir(&emptydir).expect("mkdir empty");
+        let provider = craft_shlib_elf(false, None, Some("libpriv.so.1"), &[("priv_sym", 1, 0, 1)]);
+        std::fs::write(privdir.join("libpriv.so.1"), &provider).expect("write provider");
+        let priv_s = privdir.to_string_lossy().into_owned();
+        let empty_s = emptydir.to_string_lossy().into_owned();
+        let consumer = craft_shlib_elf_paths(
+            false,
+            &["libpriv.so.1"],
+            Some("libbar.so.1"),
+            Some(empty_s.as_str()),
+            Some(priv_s.as_str()),
+            &[("priv_sym", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let results = driver_results_with_system(&pkg, &test_config(), SystemLibraries::empty());
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "DT_RUNPATH must be searched when both tags exist: {results:?}"
+        );
+    }
+
+    #[test]
+    fn runpath_located_provider_joins_closure_with_its_needs() {
+        // A provider located via RUNPATH joins the closure like
+        // any other: its own DT_NEEDED entries resolve in turn
+        // (here through the system root).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let sysroot = dir.path().join("sysroot");
+        let privdir = dir.path().join("private");
+        std::fs::create_dir(&sysroot).expect("mkdir sysroot");
+        std::fs::create_dir(&privdir).expect("mkdir private");
+        let deep = craft_shlib_elf(false, None, Some("libdeep.so.1"), &[("deep_sym", 1, 0, 1)]);
+        write_system_lib(&sysroot, "libdeep.so.1", &deep);
+        let mid = craft_shlib_elf(false, Some("libdeep.so.1"), Some("libmid.so.1"), &[]);
+        std::fs::write(privdir.join("libmid.so.1"), &mid).expect("write mid");
+        let runpath = privdir.to_string_lossy().into_owned();
+        let consumer = craft_shlib_elf_paths(
+            false,
+            &["libmid.so.1"],
+            Some("libbar.so.1"),
+            None,
+            Some(runpath.as_str()),
+            &[("deep_sym", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let system = SystemLibraries::with_roots(vec![sysroot], None);
+        let results = driver_results_with_system(&pkg, &test_config(), system);
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "RUNPATH provider's own closure must resolve: {results:?}"
+        );
+    }
+
+    #[test]
+    fn dir_provider_searches_only_the_given_dirs() {
+        // `provider_in_dirs` is scoped to its directory list and
+        // class-matches like the system lookup; slash-carrying
+        // names are direct paths and never directory-searched.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let privdir = dir.path().join("private");
+        std::fs::create_dir(&privdir).expect("mkdir private");
+        let provider = craft_shlib_elf(false, None, Some("libpriv.so.1"), &[("priv_sym", 1, 0, 1)]);
+        std::fs::write(privdir.join("libpriv.so.1"), &provider).expect("write provider");
+        let system = SystemLibraries::empty();
+        assert!(
+            system
+                .provider_in_dirs("libpriv.so.1", Some(true), std::slice::from_ref(&privdir))
+                .is_some(),
+            "provider found in the given dir"
+        );
+        assert!(
+            system
+                .provider_in_dirs("libpriv.so.1", Some(false), std::slice::from_ref(&privdir))
+                .is_none(),
+            "32-bit consumer must not resolve against the 64-bit library"
+        );
+        assert!(
+            system
+                .provider_in_dirs("libpriv.so.1", Some(true), &[dir.path().join("elsewhere")])
+                .is_none(),
+            "no provider outside the given dirs"
+        );
+        assert!(
+            system
+                .provider_in_dirs("libabsent.so.9", Some(true), std::slice::from_ref(&privdir))
+                .is_none(),
+            "absent SONAME has no provider"
+        );
+        assert!(
+            system
+                .provider_in_dirs("/abs/libpriv.so.1", Some(true), &[privdir])
+                .is_none(),
+            "slash names are not directory-searched"
         );
     }
 
