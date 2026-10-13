@@ -125,17 +125,34 @@ impl Config {
         self.filters = self.get_strings("Filters")?;
         self.filter_titles = self.get_strings("FilterErrorTitles")?;
         self.blocked_filters = self.get_strings("BlockedFilters")?;
-        self.badness_threshold = self
-            .configuration
-            .get("BadnessThreshold")
-            .and_then(toml::Value::as_integer)
-            .unwrap_or(-1);
-        self.scoring = self
-            .configuration
-            .get("Scoring")
-            .and_then(toml::Value::as_table)
-            .map(|t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-            .unwrap_or_default();
+        // A present-but-non-integer `BadnessThreshold` is ignored (the -1
+        // "no threshold" default applies), but not silently: like the
+        // Flavor and OutputFormat fallbacks below, the wrongly-typed value
+        // leaves a warning on stderr so it stays discoverable.
+        self.badness_threshold = match self.configuration.get("BadnessThreshold") {
+            None => -1,
+            Some(v) => v.as_integer().unwrap_or_else(|| {
+                eprintln!(
+                    "warning: 'BadnessThreshold' must be an integer, found {}; ignoring it",
+                    value_kind(v)
+                );
+                -1
+            }),
+        };
+        // Same treatment for a present-but-non-table `Scoring`: the whole
+        // map is ignored, with a warning. (A table's individual values are
+        // coerced per finding at emit time; see the field docs.)
+        self.scoring = match self.configuration.get("Scoring") {
+            None => HashMap::new(),
+            Some(toml::Value::Table(t)) => t.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            Some(other) => {
+                eprintln!(
+                    "warning: 'Scoring' must be a table, found {}; ignoring it",
+                    value_kind(other)
+                );
+                HashMap::new()
+            }
+        };
         // `[SeverityOverrides]`: finding name → forced level. A present
         // non-table value is a fatal configuration error, like every other
         // table key — never a silent empty map.
@@ -1027,6 +1044,42 @@ mod tests {
             cfg.severity_overrides.get("spelling-error"),
             Some(&Level::Warning)
         );
+    }
+
+    #[test]
+    fn non_table_scoring_is_ignored_not_fatal() {
+        // A present-but-non-table `Scoring` finalizes to an empty map; the
+        // ignore is warned about on stderr (pinned in binary_cli), never a
+        // fatal error the way a non-table SeverityOverrides is.
+        for value in [
+            toml::Value::Integer(5),
+            toml::Value::String("abc".to_string()),
+        ] {
+            let mut cfg = Config::default();
+            cfg.configuration.insert("Scoring".to_string(), value);
+            cfg.finalize().unwrap();
+            assert!(cfg.scoring.is_empty());
+        }
+    }
+
+    #[test]
+    fn non_integer_badness_threshold_is_ignored() {
+        // Same shape as `Scoring`: a value of the wrong type is ignored (the -1
+        // "no threshold" default) with a stderr warning, not an error.
+        let mut cfg = Config::default();
+        cfg.configuration.insert(
+            "BadnessThreshold".to_string(),
+            toml::Value::String("abc".to_string()),
+        );
+        cfg.finalize().unwrap();
+        assert_eq!(cfg.badness_threshold, -1);
+    }
+
+    #[test]
+    fn scoring_table_and_integer_threshold_load() {
+        let cfg = config_with_toml("BadnessThreshold = 3\n[Scoring]\na = 7\n");
+        assert_eq!(cfg.badness_threshold, 3);
+        assert_eq!(cfg.scoring.get("a"), Some(&toml::Value::Integer(7)));
     }
 
     #[test]
