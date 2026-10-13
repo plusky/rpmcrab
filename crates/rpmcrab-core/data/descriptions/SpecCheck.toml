@@ -158,9 +158,11 @@ usually not intended and may be caused by missing whitespace between the
 token's name, the comparison operator and the version string.
 """
 macro-in-comment="""
-There is an unescaped macro after a shell style comment in the specfile.
-Macros are expanded everywhere, so check if it can cause a problem in this
-case and escape the macro with another leading % if appropriate.
+There is an effectful macro expansion after a shell style comment in the
+specfile. Shell (%(...)), Lua (%{lua:...}) and macro file (%{load:...})
+expansions are performed by rpm while the specfile is parsed, even inside
+comments, so check if it can cause a problem in this case and escape the macro
+with another leading % if appropriate.
 """
 patch-fuzz-is-changed="""
 The internal patch fuzz value was changed, and could hide patch's issues, or

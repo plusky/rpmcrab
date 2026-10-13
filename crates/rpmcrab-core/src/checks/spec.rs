@@ -15,10 +15,12 @@
 //!
 //! Two upstream fixes ship as fixed behaviour: `#1600` (a trailing
 //! line-continuation `\` on `BuildArch: noarch`) and `#1601` (quote-aware
-//! `#` comment detection for `macro-in-comment`). Post-0.2.0 strictening
-//! `#442` narrows `macro-in-comment`: a macro that opens the comment or
-//! sits glued to a non-whitespace char warns (commented-out invocation);
-//! a macro set off by whitespace mid-comment is prose and stays quiet. The
+//! `#` comment detection for `macro-in-comment`). `macro-in-comment`
+//! (`#442`, `#482`) warns only on expansions rpm performs while parsing
+//! even inside a comment: shell (`%(...)`), Lua (`%{lua:...}`) and
+//! macro-file (`%{load:...}`) forms, including ones an enclosing
+//! `%{expand:...}` makes live by re-expanding escaped `%%` runs. Inert
+//! macro mentions and conditional keywords in comments stay quiet. The
 //! openSUSE-only
 //! `obsolete-suse-version-check` / `invalid-suse-version-check` are part of
 //! the reference flavour and are implemented. Deliberate divergences are
@@ -429,6 +431,175 @@ fn comment_start_pos(line: &str) -> Option<usize> {
         pos += 1;
     }
     None
+}
+
+/// The expansions in a spec comment that rpm performs while parsing:
+/// shell expansion (`%(...)`), Lua (`%{lua:...}`) and macro-file loading
+/// (`%{load:...}`). Returns the source span of each live occurrence.
+///
+/// Verified against rpm 4.20.1 (`rpmspec -P` over crafted specs): all
+/// three forms execute or load from inside a comment, at parse time in
+/// the preamble and at build-script generation in scriptlets. Plain
+/// macro references expand harmlessly, `%[...]` / `%{expr:...}` /
+/// `%{getenv:...}` evaluate pure expressions, `%{shell:...}` and
+/// `%{eval:...}` do not exist, and conditional keywords in comments are
+/// never honoured.
+///
+/// Whether a `%` run is live follows rpm's expansion passes: the text
+/// is expanded once, plus once more per enclosing `%{expand:...}`. On
+/// each pass an odd run before an introducer expands (and executes)
+/// while an even run collapses to half its length, so `%%(` stays inert
+/// but `%%(` inside one `%{expand:...}` executes. Other braced
+/// constructs expand their argument in place (even `%{quote:...}` and
+/// untaken `%{?name:...}` branches), so their contents are scanned with
+/// the surrounding pass budget. A `%{lua:...}` body reaches the
+/// interpreter unexpanded, so it is opaque: the construct itself is the
+/// finding and its body is not scanned.
+fn effectful_expansions(comment: &str) -> Vec<&str> {
+    let mut found = Vec::new();
+    scan_comment_text(comment, 0, 0, &mut found);
+    found
+}
+
+/// Whether a run of `run` percent signs before an expansion introducer
+/// expands within `passes` expansion passes (see `effectful_expansions`).
+fn percent_run_expands(mut run: usize, passes: usize) -> bool {
+    for _ in 0..passes {
+        if run % 2 == 1 {
+            return true;
+        }
+        run /= 2;
+        if run == 0 {
+            return false;
+        }
+    }
+    false
+}
+
+/// The index just past the `close` matching the `open` at `start`,
+/// counting nested pairs the way rpm's macro grabber does, or `None`
+/// when the span never closes.
+fn balanced_span_end(bytes: &[u8], start: usize, open: u8, close: u8) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = start;
+    while i < bytes.len() {
+        if bytes[i] == open {
+            depth += 1;
+        } else if bytes[i] == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i + 1);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Scan `text` (a comment, or the argument of a braced construct) for
+/// effectful expansions. `expand_depth` counts the enclosing live
+/// `%{expand:...}` arguments; `depth` caps construct recursion.
+fn scan_comment_text<'a>(
+    text: &'a str,
+    expand_depth: usize,
+    depth: usize,
+    found: &mut Vec<&'a str>,
+) {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'%' {
+            i += 1;
+            continue;
+        }
+        let run_start = i;
+        while i < bytes.len() && bytes[i] == b'%' {
+            i += 1;
+        }
+        let run = i - run_start;
+        match bytes.get(i) {
+            Some(b'(') => {
+                if percent_run_expands(run, 1 + expand_depth) {
+                    let end = balanced_span_end(bytes, i, b'(', b')').unwrap_or(bytes.len());
+                    found.push(&text[run_start..end]);
+                    i = end;
+                }
+                // An inert `%(` is literal text: scanning continues
+                // into the parentheses as ordinary comment text.
+            }
+            Some(b'{') => {
+                i = scan_braced_construct(text, run_start, i, expand_depth, depth, found);
+            }
+            Some(b'[') => {
+                // `%[...]`: a pure expression, but it is expanded in
+                // place, so its contents keep the surrounding budget.
+                let end = balanced_span_end(bytes, i, b'[', b']');
+                if depth < 32 {
+                    let inner_end = end.map(|e| e - 1).unwrap_or(bytes.len());
+                    scan_comment_text(&text[i + 1..inner_end], expand_depth, depth + 1, found);
+                }
+                i = end.unwrap_or(bytes.len());
+            }
+            _ => {
+                // A plain macro reference or a stray `%`: consume the
+                // optional name and move on.
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+            }
+        }
+    }
+}
+
+/// Handle the `%{` construct whose percent run starts at `run_start`
+/// and whose `{` is at `brace`. Returns the index scanning continues
+/// from.
+fn scan_braced_construct<'a>(
+    text: &'a str,
+    run_start: usize,
+    brace: usize,
+    expand_depth: usize,
+    depth: usize,
+    found: &mut Vec<&'a str>,
+) -> usize {
+    let bytes = text.as_bytes();
+    // The name: word characters plus the `?`/`!` conditional markers.
+    let mut name_end = brace + 1;
+    while name_end < bytes.len()
+        && (bytes[name_end].is_ascii_alphanumeric()
+            || matches!(bytes[name_end], b'_' | b'?' | b'!'))
+    {
+        name_end += 1;
+    }
+    let end = balanced_span_end(bytes, brace, b'{', b'}');
+    let span_end = end.unwrap_or(bytes.len());
+    match bytes.get(name_end) {
+        // No argument: a plain (possibly conditional) reference, inert.
+        Some(b'}') => span_end,
+        Some(b':' | b' ' | b'\t') => {
+            let name = &text[brace + 1..name_end];
+            let live = percent_run_expands(brace - run_start, 1 + expand_depth);
+            let inner_end = end.map(|e| e - 1).unwrap_or(bytes.len());
+            let inner = &text[name_end + 1..inner_end];
+            if live && matches!(name, "lua" | "load") && !inner.trim().is_empty() {
+                found.push(&text[run_start..span_end]);
+            } else if depth < 32 {
+                // A live `%{expand:...}` re-expands its argument, adding
+                // a pass; everything else (including a dead expansion
+                // form, whose argument stays ordinary text) is scanned
+                // with the surrounding budget.
+                let extra = if live && name == "expand" {
+                    expand_depth + 1
+                } else {
+                    expand_depth
+                };
+                scan_comment_text(inner, extra, depth + 1, found);
+            }
+            span_end
+        }
+        // Not a readable construct: the `{` is literal text.
+        _ => brace + 1,
+    }
 }
 
 /// `line[:-1]`: drop the last character (the line's trailing newline).
@@ -1626,34 +1797,12 @@ impl SpecCheck {
         if comment.starts_with('!') {
             return;
         }
-        // Strictening (#442): a macro that opens the comment (`# %license
-        // COPYING`) or sits glued to a non-whitespace char (`# /usr/%_bindir`)
-        // looks like a commented-out invocation and warns. A macro set off by
-        // whitespace mid-comment (`# shipped via %license`) is prose about
-        // the macro, not a mistake, and stays quiet.
-        let body = comment.trim_start();
-        let body_offset = comment.len() - body.len();
-        let Ok(matches) = self
-            .macro_re
-            .find_iter(comment)
-            .collect::<Result<Vec<_>, _>>()
-        else {
-            return;
-        };
-        for m in matches {
-            let mt = m.as_str();
-            let percents = mt.chars().take_while(|&c| c == '%').count();
-            if percents % 2 == 0 {
-                continue;
-            }
-            let opens_comment = m.start() == body_offset;
-            let glued = comment[..m.start()]
-                .chars()
-                .last()
-                .is_some_and(|c| !c.is_whitespace());
-            if opens_comment || glued {
-                self.info(out, pkg, Level::Warning, "macro-in-comment", &[mt]);
-            }
+        // #482: only expansions rpm performs while parsing even inside
+        // a comment warn (see `effectful_expansions`). Plain macro
+        // mentions expand harmlessly and conditional keywords are inert
+        // in comments, so neither warns, wherever in the comment it sits.
+        for token in effectful_expansions(comment) {
+            self.info(out, pkg, Level::Warning, "macro-in-comment", &[token]);
         }
     }
 
@@ -1881,25 +2030,180 @@ mod tests {
     }
 
     #[test]
-    fn macro_opening_comment_still_warns() {
+    fn plain_macro_opening_comment_stays_quiet_482() {
+        // #442 warned here (a macro opening the comment looks like a
+        // commented-out invocation); #482: a plain macro mention expands
+        // harmlessly, wherever it sits in the comment.
         let results = run_mini("Name: foo\n# %{version} was commented out\n");
-        let lines = lines_for(&results, "macro-in-comment");
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("W: macro-in-comment %{version}"));
+        assert!(
+            !has(&results, "macro-in-comment"),
+            "unexpected: {results:?}"
+        );
     }
 
     #[test]
-    fn macro_glued_to_path_in_comment_warns_442() {
-        // Tom's case: a commented-out path with a real macro invocation.
+    fn plain_macro_glued_in_comment_stays_quiet_482() {
+        // Tom's #442 cases: commented-out code full of plain macros is
+        // the deliberate idiom for keeping disabled lines visible; none
+        // of it executes, so #482 keeps it all quiet.
         let results = run_mini("Name: foo\n# /usr/%{_bindir}/foo\n");
-        let lines = lines_for(&results, "macro-in-comment");
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("W: macro-in-comment %{_bindir}"));
-        // Same for a macro glued to a token with a hyphen.
+        assert!(
+            !has(&results, "macro-in-comment"),
+            "unexpected: {results:?}"
+        );
         let results = run_mini("Name: foo\n# foo-%bar\n");
+        assert!(
+            !has(&results, "macro-in-comment"),
+            "unexpected: {results:?}"
+        );
+        let results = run_mini("Name: foo\n#%makeinstall\n");
+        assert!(
+            !has(&results, "macro-in-comment"),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn shell_expansion_in_comment_warns_482() {
+        // The hazard the check exists for: rpm executes %(...) while
+        // parsing, even inside a comment, in any position.
+        let results = run_mini("Name: foo\n# %(touch /tmp/x) was here\n");
         let lines = lines_for(&results, "macro-in-comment");
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("W: macro-in-comment %bar"));
+        assert_eq!(lines.len(), 1, "{results:?}");
+        assert!(
+            lines[0].contains("W: macro-in-comment %(touch /tmp/x)"),
+            "unexpected: {lines:?}"
+        );
+        let results = run_mini("Name: foo\n# do not run %(touch /tmp/x) at home\n");
+        let lines = lines_for(&results, "macro-in-comment");
+        assert_eq!(lines.len(), 1, "{results:?}");
+        // Two live expansions on one line warn twice.
+        let results = run_mini("Name: foo\n# %(a) and %(b)\n");
+        let lines = lines_for(&results, "macro-in-comment");
+        assert_eq!(lines.len(), 2, "{results:?}");
+    }
+
+    #[test]
+    fn escaped_shell_expansion_in_comment_stays_quiet_482() {
+        // %% is the documented escape: rpm leaves it a literal %.
+        let results = run_mini("Name: foo\n# %%(touch /tmp/x)\n");
+        assert!(
+            !has(&results, "macro-in-comment"),
+            "unexpected: {results:?}"
+        );
+        // An odd run still expands (and executes) on the first pass.
+        let results = run_mini("Name: foo\n# %%%(touch /tmp/x)\n");
+        let lines = lines_for(&results, "macro-in-comment");
+        assert_eq!(lines.len(), 1, "{results:?}");
+        assert!(
+            lines[0].contains("W: macro-in-comment %%%(touch /tmp/x)"),
+            "unexpected: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn lua_and_load_in_comment_warn_482() {
+        let results = run_mini("Name: foo\n# %{lua:io.open('/tmp/x','w')}\n");
+        let lines = lines_for(&results, "macro-in-comment");
+        assert_eq!(lines.len(), 1, "{results:?}");
+        assert!(
+            lines[0].contains("W: macro-in-comment %{lua:io.open('/tmp/x','w')}"),
+            "unexpected: {lines:?}"
+        );
+        let results = run_mini("Name: foo\n# %{load:/tmp/defs.macros}\n");
+        let lines = lines_for(&results, "macro-in-comment");
+        assert_eq!(lines.len(), 1, "{results:?}");
+        assert!(
+            lines[0].contains("W: macro-in-comment %{load:/tmp/defs.macros}"),
+            "unexpected: {lines:?}"
+        );
+        // A %(...) inside a Lua body is Lua data, not an rpm expansion:
+        // the only finding is the Lua construct itself.
+        let results = run_mini("Name: foo\n# %{lua:s = \"%(touch /tmp/x)\"}\n");
+        let lines = lines_for(&results, "macro-in-comment");
+        assert_eq!(lines.len(), 1, "{results:?}");
+        assert!(lines[0].contains("%{lua:"), "unexpected: {lines:?}");
+    }
+
+    #[test]
+    fn expand_controls_escaped_expansions_482() {
+        // %{expand:...} re-expands its argument: one escape level is
+        // consumed, so %%( goes live inside a single expand...
+        let results = run_mini("Name: foo\n# %{expand:%%(touch /tmp/x)}\n");
+        let lines = lines_for(&results, "macro-in-comment");
+        assert_eq!(lines.len(), 1, "{results:?}");
+        assert!(
+            lines[0].contains("W: macro-in-comment %%(touch /tmp/x)"),
+            "unexpected: {lines:?}"
+        );
+        // ...but %%%%( survives one expand still escaped.
+        let results = run_mini("Name: foo\n# %{expand:%%%%(touch /tmp/x)}\n");
+        assert!(
+            !has(&results, "macro-in-comment"),
+            "unexpected: {results:?}"
+        );
+        // A direct %(...) inside an expand fires; plain text does not.
+        let results = run_mini("Name: foo\n# %{expand:%(touch /tmp/x)}\n");
+        assert_eq!(
+            lines_for(&results, "macro-in-comment").len(),
+            1,
+            "{results:?}"
+        );
+        let results = run_mini("Name: foo\n# %{expand:%{name} plain}\n");
+        assert!(
+            !has(&results, "macro-in-comment"),
+            "unexpected: {results:?}"
+        );
+        // Escaped Lua inside an expand goes live the same way.
+        let results = run_mini("Name: foo\n# %{expand:%%{lua:print(1)}}\n");
+        let lines = lines_for(&results, "macro-in-comment");
+        assert_eq!(lines.len(), 1, "{results:?}");
+        assert!(
+            lines[0].contains("W: macro-in-comment %%{lua:print(1)}"),
+            "unexpected: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn wrapped_shell_expansion_in_comment_warns_482() {
+        // Other braced constructs expand their argument in place, and
+        // conditional branches are expanded even when untaken.
+        let results = run_mini("Name: foo\n# %{quote:%(touch /tmp/x)}\n");
+        assert_eq!(
+            lines_for(&results, "macro-in-comment").len(),
+            1,
+            "{results:?}"
+        );
+        let results = run_mini("Name: foo\n# %{!?nosuchmacro:%(touch /tmp/x)}\n");
+        assert_eq!(
+            lines_for(&results, "macro-in-comment").len(),
+            1,
+            "{results:?}"
+        );
+        // %[...] expressions are transparent to a nested expansion.
+        let results = run_mini("Name: foo\n# %[%(touch /tmp/x) == \"\"]\n");
+        assert_eq!(
+            lines_for(&results, "macro-in-comment").len(),
+            1,
+            "{results:?}"
+        );
+    }
+
+    #[test]
+    fn pure_and_nonexistent_forms_in_comment_stay_quiet_482() {
+        // Pure evaluation, inert keywords and forms rpm does not have
+        // expand harmlessly or not at all: none of them can execute.
+        for line in [
+            "# sum %[1+1] and %{expr:2+2}",
+            "# home is %{getenv:HOME}",
+            "# %{shell:touch /tmp/x} and %{eval:1+1}",
+            "# %endif",
+            "# conditional %if 0 keyword",
+            "# a %{name} mention and %version",
+        ] {
+            let results = run_mini(&format!("Name: foo\n{line}\n"));
+            assert!(!has(&results, "macro-in-comment"), "{line}: {results:?}");
+        }
     }
 
     #[test]
@@ -2133,14 +2437,11 @@ make install
             "line: {}",
             warning[0]
         );
-        // Refined #442: the `%{version}` on line 20 is glued to `v` in the
-        // URL (`v%{version}`), so it warns, matching the reference.
+        // #482: the `%{version}` on line 20 sits in a commented-out URL;
+        // a plain macro mention expands harmlessly, so `macro-in-comment`
+        // stays quiet (the reference warns).
         let comment = lines_for(&results, "macro-in-comment");
-        assert_eq!(comment.len(), 1);
-        assert!(
-            comment[0].contains("W: macro-in-comment %{version}"),
-            "unexpected: {comment:?}"
-        );
+        assert!(comment.is_empty(), "unexpected: {comment:?}");
     }
 
     /// `check_invalid_url` defines `_sourcedir`, parses the spec and
