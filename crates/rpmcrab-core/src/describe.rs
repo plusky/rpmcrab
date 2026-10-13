@@ -33,7 +33,6 @@ const STAGED: &[&str] = &[
     include_str!("../data/descriptions/I18NCheck.toml"),
     include_str!("../data/descriptions/IconSizesCheck.toml"),
     include_str!("../data/descriptions/KMPPolicyCheck.toml"),
-    include_str!("../data/descriptions/LSBCheck.toml"),
     include_str!("../data/descriptions/LibraryDependencyCheck.toml"),
     include_str!("../data/descriptions/LogrotateCheck.toml"),
     include_str!("../data/descriptions/MenuCheck.toml"),
@@ -383,10 +382,6 @@ mod tests {
             (
                 "KMPPolicyCheck.toml",
                 "eab5b6cfe39e79e8e2f19328214970f5a4cccfd9c7a596beb5122d9a922f6493",
-            ),
-            (
-                "LSBCheck.toml",
-                "8d8693d4f0f7169ddc7e8031aef0f7a8a1689d393aa68068a02c967d2a08958a",
             ),
             (
                 "LibraryDependencyCheck.toml",
@@ -903,7 +898,7 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
     }
 
     /// Bodies of the finding-collector helpers: functions returning
-    /// `Vec<(&'static str, ...)>` (`LSBCheck::collect`,
+    /// `Vec<(&'static str, ...)>` (`PAMModulesCheck::findings`,
     /// `PkgConfigCheck::check_line`, ...). Their `("kebab-id", ...)` tuples
     /// are emitted later through a variable, invisible to the `(Level::X,
     /// "id", ...)` tuple scan and the fourth-argument scan. Brace matching
@@ -1018,7 +1013,7 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
 
     /// Finding IDs from `("kebab-id", ...)` string-first 2-tuples inside the
     /// finding-collector helper bodies: literals emitted later through a
-    /// variable (`LSBCheck::collect`, ...). A `(` following an identifier is
+    /// variable (`PAMModulesCheck::findings`, ...). A `(` following an identifier is
     /// a call's argument list, not a tuple (`dep("name", 0)`).
     fn string_tuple_literals(src: &str) -> Vec<String> {
         let bytes = src.as_bytes();

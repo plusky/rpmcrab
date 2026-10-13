@@ -235,7 +235,6 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
         "PkgConfigCheck" => Some(Box::new(crate::checks::pkg_config::PkgConfigCheck::new(
             config,
         ))),
-        "LSBCheck" => Some(Box::new(crate::checks::lsb::LSBCheck::new(config))),
         "AtomicUpdateCheck" => Some(Box::new(
             crate::checks::atomic_update::AtomicUpdateCheck::new(config),
         )),
@@ -653,6 +652,14 @@ mod tests {
         // registry must not resurrect it, or the ledger's kind="missing"
         // entry goes stale and divergences_missing.rs fails.
         assert!(build("InitScriptCheck", &Config::default()).is_none());
+    }
+
+    #[test]
+    fn lsb_check_is_not_buildable() {
+        // Issue #483: the LSB effort is defunct. The whole check was
+        // deleted; the registry must not resurrect it, or the ledger's
+        // kind="missing" entry goes stale and divergences_missing.rs fails.
+        assert!(build("LSBCheck", &Config::default()).is_none());
     }
 
     #[test]
