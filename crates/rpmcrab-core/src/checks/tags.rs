@@ -2898,6 +2898,33 @@ mod rich_dep_emission_tests {
     }
 
     #[test]
+    fn check_group_with_macro_emits() {
+        // Kills the neutered-`check_group` mutant (and, through it, the
+        // `unexpanded_macro(s)` neuters): the Group value reaches the macro
+        // probe directly, no header needed.
+        let pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        let config = rich_test_config(&[], false);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        TagsCheck::new(&config).check_group(&pkg, &mut out, "Amusements %foo");
+        let results = out.results().to_vec();
+        let hits = named(&results, "unexpanded-macro");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(hits[0].1.contains("Group"), "line: {}", hits[0].1);
+        assert!(hits[0].1.ends_with(" %foo"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn check_no_epoch_in_tags_emits() {
+        // Kills the neutered-`check_no_epoch_in_tags` mutant: a versioned
+        // obsoletion without epoch must warn when UseEpoch holds.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.obsoletes = vec![versioned_dep("oldpkg", "1.0")];
+        let results = run(&pkg, &rich_test_config(&[], true));
+        let hits = named(&results, "no-epoch-in-obsoletes");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+    }
+
+    #[test]
     fn explicit_lib_dependency_emits() {
         let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
         pkg.requires = vec![plain_dep("libexplicit")];
