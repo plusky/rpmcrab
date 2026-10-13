@@ -365,7 +365,7 @@ mod tests {
             ),
             (
                 "FilelistCheck.toml",
-                "fcb653433c3b6e59dfbcdefbcc1f13fe998b3bcdaa130415f4da574e374ed694",
+                "4ac0a23d6b8d1c724a553c94497fe74c60fe01356a37d02e956d214a4ef493e7",
             ),
             (
                 "FilesCheck.toml",

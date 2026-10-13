@@ -549,4 +549,33 @@ mod tests {
             lines[0]
         );
     }
+
+    // Issue #495: the xinetd rule's only pattern was the reference's typo
+    // `/etc/xinet.d/*`, which matches no real path; real xinetd configs are
+    // reported by XinetdDepCheck as deprecated-xinetd-config instead.
+    #[test]
+    fn xinetd_config_does_not_fire_filelist_forbidden() {
+        let pkg = pkg_with_files(&["/etc/xinetd.d/amanda", "/etc/xinetd.d/servers"]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        assert!(
+            lines_for(&results, "filelist-forbidden-xinetd-configuration").is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn sibling_forbidden_path_still_fires() {
+        let pkg = pkg_with_files(&["/etc/bash_completion.d/w6comp"]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "filelist-forbidden-bashcomp-userdirs");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0]
+                .contains("E: filelist-forbidden-bashcomp-userdirs /etc/bash_completion.d/w6comp"),
+            "name, level and detail: {}",
+            lines[0]
+        );
+    }
 }

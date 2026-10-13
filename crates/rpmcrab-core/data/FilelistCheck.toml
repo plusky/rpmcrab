@@ -209,11 +209,6 @@ GoodPrefixes = [
         "/etc/bash_completion.d/*",
     ]
 [[Check]]
-    Message = "filelist-forbidden-xinetd-configuration"
-    Bad = [
-        "/etc/xinet.d/*",
-    ]
-[[Check]]
     Message = "filelist-forbidden-move-to-usr"
     Bad = [
         "/lib/systemd/system/*",

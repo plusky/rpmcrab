@@ -1865,20 +1865,6 @@ fn explain_reworded_pem_private_key() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: reworded `FilelistCheck.toml` entry `filelist-forbidden-xinetd-configuration` pins the fixed wording.
-#[test]
-fn explain_reworded_filelist_forbidden_xinetd_configuration() {
-    let out = rpmcrab(&["-e", "filelist-forbidden-xinetd-configuration"]);
-    assert_eq!(out.status.code(), Some(0));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(
-        stdout,
-        "filelist-forbidden-xinetd-configuration:\nXinetd configuration files are deprecated. Please migrate to systemd socket\nactivated unit files. http://0pointer.de/blog/projects/socket-activation.html\n\n\n",
-        "exact --explain stdout",
-    );
-    assert!(out.stderr.is_empty());
-}
-
 /// `--explain`: reworded `FileDigestCheck.toml` entry `dbus-file-parse-error` pins the fixed wording.
 #[test]
 fn explain_reworded_dbus_file_parse_error() {
