@@ -2060,3 +2060,47 @@ fn explain_reworded_no_changelogname_tag() {
     );
     assert!(out.stderr.is_empty());
 }
+
+/// Spawn the binary with autoloading enabled so the vendored distro layer
+/// loads (the shipped flavour config), but with the XDG dirs pointed at an
+/// empty temp dir: nothing ambient leaks in. `CONFIG_DISABLE_AUTOLOADING`
+/// must NOT be set here — it would skip the vendored layer entirely.
+fn rpmcrab_flavoured(args: &[&str]) -> std::process::Output {
+    let xdg = tempfile::tempdir().expect("xdg tempdir");
+    std::fs::create_dir_all(xdg.path().join("home")).expect("xdg home");
+    std::fs::create_dir_all(xdg.path().join("dirs")).expect("xdg dirs");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rpmcrab"));
+    cmd.args(args)
+        .env("XDG_CONFIG_HOME", xdg.path().join("home"))
+        .env("XDG_CONFIG_DIRS", xdg.path().join("dirs"))
+        .env_remove("CONFIG_DISABLE_AUTOLOADING")
+        .env_remove("PYTEST_XDIST_TESTRUNUID")
+        .env_remove("COLUMNS")
+        .env_remove("NO_COLOR")
+        .env_remove("CLICOLOR");
+    cmd.output().expect("spawn rpmcrab")
+}
+
+#[test]
+fn no_manual_page_for_binary_surfaces_as_info_under_opensuse_flavour() {
+    // rpmcrab#484: the finding is Info in code and the vendored openSUSE
+    // flavour no longer filters it, so a manpage-less binary produces
+    // exactly one I-level line. (Before: the flavour filtered it away
+    // entirely, and the bare baseline reported it at W.)
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/parity/cases/w6-menu/input/w6-menu-1.0-1.noarch.rpm")
+        .canonicalize()
+        .expect("w6-menu fixture is committed");
+    let out = rpmcrab_flavoured(&[fixture.to_str().unwrap()]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let hits: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains("no-manual-page-for-binary"))
+        .collect();
+    assert_eq!(hits.len(), 1, "one surfaced finding: {stdout}");
+    assert!(
+        hits[0].contains(": I: no-manual-page-for-binary w6menu"),
+        "info level, detail is the exe name: {}",
+        hits[0]
+    );
+}

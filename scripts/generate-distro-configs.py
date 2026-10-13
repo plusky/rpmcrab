@@ -4,8 +4,9 @@
 Copies ``configs/openSUSE/*.toml`` from the pinned upstream rpmlint commits
 into ``crates/rpmcrab-core/data/distro/<flavor>/``, prunes ``Filters`` /
 ``BlockedFilters`` entries that reference findings rpmcrab no longer emits,
-drops whitelist stanzas for packages gone from Tumbleweed/SLE 16 and stale
-pie-executables paths, and stamps provenance.
+drops ``Filters`` entries for live findings rpmcrab deliberately surfaces
+(see DROP_LIVE_FILTERS), drops whitelist stanzas for packages gone from
+Tumbleweed/SLE 16 and stale pie-executables paths, and stamps provenance.
 
 The checked-in files are the build's source of truth; this script runs by hand
 and in CI (drift check + monthly refresh), never at build time.
@@ -243,6 +244,17 @@ PRUNE_CANDIDATES = {
     "spurious-bracket-in-": "killed: PostCheck stylistic nit",
     # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/PostCheck.py
     "one-line-command-in-": "killed: PostCheck stylistic nit",
+}
+
+# Filters dropped for findings that are still live: upstream's distro
+# config hides the finding entirely, but the port deliberately surfaces
+# it, so the filter goes. Unlike PRUNE_CANDIDATES these are unconditional
+# (the finding being present in the tree is the point, not a stale-filter
+# smell). Each entry is a deliberate divergence from the reference,
+# ledgered in tests/parity/divergences.toml.
+DROP_LIVE_FILTERS = {
+    # finding: reason
+    "no-manual-page-for-binary": "demoted to Info (rpmcrab#484): a missing manpage is upstream debt; surfaced as info instead of filtered away",
 }
 
 # (finding, scope) -> reason: Filters entries scoped to dead paths. The finding
@@ -551,7 +563,7 @@ def scoped_entry(entry):
     return None
 
 
-def prune_stale_filters(text, known, pruned_log):
+def prune_stale_filters(text, known, pruned_log, dropped_log):
     """Drop Filters/BlockedFilters lines referencing killed findings or dead scopes."""
     lines = text.splitlines(keepends=True)
     out = []
@@ -583,6 +595,11 @@ def prune_stale_filters(text, known, pruned_log):
                 pruned_log.append(
                     f"{in_list}: dropped {scoped[0]!r} scoped to {scoped[1]!r} "
                     f"({PRUNE_SCOPED[scoped]})"
+                )
+                continue
+            if finding is not None and finding in DROP_LIVE_FILTERS:
+                dropped_log.append(
+                    f"{in_list}: dropped {finding!r} ({DROP_LIVE_FILTERS[finding]})"
                 )
                 continue
         out.append(line)
@@ -1346,10 +1363,11 @@ def generate(ref_dir=None, pins=None):
     pruned_log = []
     pkg_pruned_log = []
     pie_pruned_log = []
+    dropped_log = []
     for flavor, data in result.items():
         for filename, text in data["files"].items():
             assert_no_flavor_key(flavor, filename, text)
-            text = prune_stale_filters(text, known, pruned_log)
+            text = prune_stale_filters(text, known, pruned_log, dropped_log)
             text = prune_stale_packages(text, pkg_pruned_log, flavor)
             if filename == "pie-executables.toml":
                 # Per-flavor evidence (see PRUNE_PIE_PATHS): the owning
@@ -1412,6 +1430,17 @@ def generate(ref_dir=None, pins=None):
                 provenance.append(f"#   {entry}")
     else:
         provenance.append("# No Filters entries pruned: all referenced findings exist.")
+    if dropped_log:
+        provenance.append("#")
+        provenance.append(
+            "# Dropped Filters entries (live findings rpmcrab deliberately"
+        )
+        provenance.append("# surfaces; see DROP_LIVE_FILTERS):")
+        seen_dropped = set()
+        for entry in dropped_log:
+            if entry not in seen_dropped:
+                seen_dropped.add(entry)
+                provenance.append(f"#   {entry}")
     if pkg_pruned_log or HISTORICAL_PRUNES:
         provenance.append("#")
         provenance.append(
@@ -1451,6 +1480,7 @@ def generate(ref_dir=None, pins=None):
         pkg_pruned_log,
         pie_pruned_log,
         deduped,
+        dropped_log,
     )
 
 
@@ -1604,7 +1634,7 @@ def main():
         rewrite_pins(Path(__file__).resolve(), pins)
 
     ref_dir = Path(args.ref_dir) if args.ref_dir else None
-    result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, deduped = generate(
+    result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, deduped, dropped_log = generate(
         ref_dir=ref_dir, pins=pins
     )
 
@@ -1706,7 +1736,7 @@ def main():
         return 0
 
     write_all(result, provenance, deduped)
-    for entry in pruned_log + pkg_pruned_log + pie_pruned_log:
+    for entry in pruned_log + pkg_pruned_log + pie_pruned_log + dropped_log:
         print(f"pruned: {entry}")
     print(f"wrote {sum(len(d['files']) for d in result.values())} files + PROVENANCE")
     return 0
