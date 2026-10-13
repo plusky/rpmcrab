@@ -1855,3 +1855,11 @@ check = "config"
 kind = "behaviour"
 reason = "A present-but-non-integer `BadnessThreshold` (e.g. a string) is ignored: finalize falls back to -1 (no threshold) and prints a warning on stderr ('BadnessThreshold' must be an integer, found ...; ignoring it). The reference compares the value directly (lint.py: `badness_threshold > 0`), so a string raises TypeError at the end of the run. Same deliberate tolerance-with-a-trace as the non-table `Scoring` entry."
 since = "0.3.0"
+
+[[divergence]]
+case = "global"
+check = "config-scoring"
+kind = "behaviour"
+reason = "A `[Scoring]` value Python `int()` would reject (a garbage string, an array, a table) crashes the reference with ValueError when the scored finding is emitted; the port's panic-to-match surfaced as a bogus 'librpm could not decode the package' fatal. The port coerces and validates every Scoring value at Filter construction and rejects the configuration with a clean error naming the check and the value (rpmcrab#494). Validation is eager: an entry for a finding that never fires is rejected too, where the reference would only crash on emission."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/494"
