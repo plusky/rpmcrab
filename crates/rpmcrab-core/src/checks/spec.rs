@@ -2191,7 +2191,14 @@ make install
         for baseline in &baselines {
             let invalid = lines_for(baseline, "invalid-url");
             assert_eq!(invalid.len(), SOURCES, "baseline: {invalid:?}");
-            let prefix = invalid[0]
+            // librpm's source iteration order varies by version, so
+            // pick the Source0 line explicitly instead of assuming it
+            // heads the list.
+            let first = invalid
+                .iter()
+                .find(|line| line.contains("Source0:"))
+                .expect("baseline carries a Source0 finding");
+            let prefix = first
                 .split("http://")
                 .nth(1)
                 .and_then(|rest| rest.rsplit_once("/f0.tar.gz"))
