@@ -229,7 +229,13 @@ pub fn run() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    let mut cfg = config::load(&cli.config);
+    let mut cfg = match config::load(&cli.config) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            warn!(color, "(none): E: fatal error in configuration: {e}");
+            return ExitCode::from(1);
+        }
+    };
 
     // Apply mode flags.
     cfg.strict = cli.strict;
