@@ -68,7 +68,8 @@ Provenance, verified against the pinned reference (`84848c0`):
   `use-of-RPM_SOURCE_DIR`
   entry reworded (the reference's `$RPM_BUILD_ROOT` advice is wrong).
   Ledgered in `tests/parity/divergences.toml`.
-- `AlternativesCheck.toml`, `FileDigestCheck.toml`, `FilelistCheck.toml`,
+- `AlternativesCheck.toml`, `FileDigestCheck.toml`, `FilelistCheck.toml`
+  (minus the dropped `filelist-forbidden-xinetd-configuration` entry),
   `FilesCheck.toml`, `KMPPolicyCheck.toml`,
   `LogrotateCheck.toml`, `MenuCheck.toml`, `MenuXDGCheck.toml`,
   `PythonCheck.toml`, `SharedLibraryPolicyCheck.toml`, `SpecCheck.toml`
