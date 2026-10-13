@@ -24,7 +24,6 @@ pub mod icon_sizes;
 pub mod kmp_policy;
 pub mod library_dependency;
 pub mod logrotate;
-pub mod lsb;
 pub mod menu;
 pub mod menu_xdg;
 pub mod mixed_ownership;

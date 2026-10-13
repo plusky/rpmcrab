@@ -1445,20 +1445,6 @@ fn explain_staged_kmp_policy_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `LSBCheck.toml` resolves `non-lsb-compliant-package-name` instead of "Unknown message".
-#[test]
-fn explain_staged_lsb_check() {
-    let out = rpmcrab(&["-e", "non-lsb-compliant-package-name"]);
-    assert_eq!(out.status.code(), Some(0));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(
-        stdout,
-        "non-lsb-compliant-package-name:\nYour package name contains an illegal character that is not LSB-compliant. Use\nonly lowercase letters, numbers, '.', '+' or '-' characters.\n\n\n",
-        "exact --explain stdout",
-    );
-    assert!(out.stderr.is_empty());
-}
-
 /// `--explain`: staged `LogrotateCheck.toml` resolves `logrotate-log-dir-not-packaged` instead of "Unknown message".
 #[test]
 fn explain_staged_logrotate_check() {
