@@ -17,8 +17,11 @@
 //! line-continuation `\` on `BuildArch: noarch`) and `#1601` (quote-aware
 //! `#` comment detection for `macro-in-comment`). `macro-in-comment`
 //! (`#442`, `#482`) warns only on expansions rpm performs while parsing
-//! even inside a comment: shell (`%(...)`), Lua (`%{lua:...}`) and
-//! macro-file (`%{load:...}`) forms, including ones an enclosing
+//! even inside a comment: shell (`%(...)`), Lua (`%{lua:...}`),
+//! macro-file (`%{load:...}`) and the executing directives (`%define`,
+//! `%global`, `%undefine`, `%lua`, `%load` and the braced `%{define:...}`,
+//! `%{global:...}`, `%{undefine:...}`, `%{error:...}` forms), including
+//! ones an enclosing
 //! `%{expand:...}` makes live by re-expanding escaped `%%` runs. Inert
 //! macro mentions and conditional keywords in comments stay quiet. The
 //! openSUSE-only
@@ -434,16 +437,19 @@ fn comment_start_pos(line: &str) -> Option<usize> {
 }
 
 /// The expansions in a spec comment that rpm performs while parsing:
-/// shell expansion (`%(...)`), Lua (`%{lua:...}`) and macro-file loading
-/// (`%{load:...}`). Returns the source span of each live occurrence.
+/// shell expansion (`%(...)`), Lua (`%{lua:...}`), macro-file loading
+/// (`%{load:...}`) and the executing directives, bare (`%define`,
+/// `%global`, `%undefine`, `%lua`, `%load`) and braced (`%{define:...}`,
+/// `%{global:...}`, `%{undefine:...}`, `%{error:...}`). Returns the
+/// source span of each live occurrence.
 ///
 /// Verified against rpm 4.20.1 (`rpmspec -P` over crafted specs): all
-/// three forms execute or load from inside a comment, at parse time in
-/// the preamble and at build-script generation in scriptlets. Plain
-/// macro references expand harmlessly, `%[...]` / `%{expr:...}` /
-/// `%{getenv:...}` evaluate pure expressions, `%{shell:...}` and
-/// `%{eval:...}` do not exist, and conditional keywords in comments are
-/// never honoured.
+/// of these forms execute, define, load or abort from inside a comment,
+/// at parse time in the preamble and at build-script generation in
+/// scriptlets. Plain macro references expand harmlessly, `%[...]` /
+/// `%{expr:...}` / `%{getenv:...}` evaluate pure expressions,
+/// `%{shell:...}` and `%{eval:...}` do not exist, and conditional
+/// keywords in comments are never honoured.
 ///
 /// Whether a `%` run is live follows rpm's expansion passes: the text
 /// is expanded once, plus once more per enclosing `%{expand:...}`. On
@@ -474,6 +480,29 @@ fn percent_run_expands(mut run: usize, passes: usize) -> bool {
         }
     }
     false
+}
+
+/// The end of the first argument token of a bare directive whose name
+/// ends at `name_end`, or `None` when no argument follows. A bare
+/// directive needs whitespace and an argument to act: `%define` defines
+/// the macro named by that argument, `%load` loads the file it names,
+/// and so on; a bare name with nothing after it does nothing.
+fn bare_directive_argument(text: &str, name_end: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if !matches!(bytes.get(name_end), Some(b' ' | b'\t')) {
+        return None;
+    }
+    let mut i = name_end;
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+        i += 1;
+    }
+    if i == bytes.len() {
+        return None;
+    }
+    while i < bytes.len() && !matches!(bytes[i], b' ' | b'\t') {
+        i += 1;
+    }
+    Some(i)
 }
 
 /// The index just past the `close` matching the `open` at `start`,
@@ -541,10 +570,33 @@ fn scan_comment_text<'a>(
                 i = end.unwrap_or(bytes.len());
             }
             _ => {
-                // A plain macro reference or a stray `%`: consume the
-                // optional name and move on.
+                // A bare directive rpm executes while parsing —
+                // `%define` / `%global` / `%undefine` / `%lua` / `%load` —
+                // is effectful; any other name is a plain macro reference
+                // or a stray `%`: consume the name and move on.
+                let name_start = i;
                 while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                     i += 1;
+                }
+                let name = &text[name_start..i];
+                if matches!(name, "define" | "global" | "undefine" | "lua" | "load")
+                    && percent_run_expands(run, 1 + expand_depth)
+                    && let Some(arg_end) = bare_directive_argument(text, i)
+                {
+                    if matches!(name, "define" | "global" | "lua") {
+                        // The argument is the rest of the text: a macro
+                        // body (stored unexpanded) or Lua code (run
+                        // as-is), so it is opaque — the directive itself
+                        // is the finding and its body is not scanned.
+                        let end = text.trim_end().len();
+                        found.push(&text[run_start..end]);
+                        i = bytes.len();
+                    } else {
+                        // `%undefine` / `%load` take a single argument;
+                        // text after it keeps the surrounding budget.
+                        found.push(&text[run_start..arg_end]);
+                        i = arg_end;
+                    }
                 }
             }
         }
@@ -581,7 +633,13 @@ fn scan_braced_construct<'a>(
             let live = percent_run_expands(brace - run_start, 1 + expand_depth);
             let inner_end = end.map(|e| e - 1).unwrap_or(bytes.len());
             let inner = &text[name_end + 1..inner_end];
-            if live && matches!(name, "lua" | "load") && !inner.trim().is_empty() {
+            if live
+                && matches!(
+                    name,
+                    "lua" | "load" | "define" | "global" | "undefine" | "error"
+                )
+                && !inner.trim().is_empty()
+            {
                 found.push(&text[run_start..span_end]);
             } else if depth < 32 {
                 // A live `%{expand:...}` re-expands its argument, adding
@@ -1797,10 +1855,11 @@ impl SpecCheck {
         if comment.starts_with('!') {
             return;
         }
-        // #482: only expansions rpm performs while parsing even inside
-        // a comment warn (see `effectful_expansions`). Plain macro
-        // mentions expand harmlessly and conditional keywords are inert
-        // in comments, so neither warns, wherever in the comment it sits.
+        // #482: only expansions and executing directives rpm performs
+        // while parsing even inside a comment warn (see
+        // `effectful_expansions`). Plain macro mentions expand harmlessly
+        // and conditional keywords are inert in comments, so neither
+        // warns, wherever in the comment it sits.
         for token in effectful_expansions(comment) {
             self.info(out, pkg, Level::Warning, "macro-in-comment", &[token]);
         }
@@ -2123,6 +2182,105 @@ mod tests {
         let lines = lines_for(&results, "macro-in-comment");
         assert_eq!(lines.len(), 1, "{results:?}");
         assert!(lines[0].contains("%{lua:"), "unexpected: {lines:?}");
+    }
+
+    #[test]
+    fn bare_directives_in_comment_warn_482() {
+        // Review on #487 (verified against rpm 4.20.1): rpm also executes
+        // the bare directives in a comment — %define/%global define a
+        // macro, %undefine removes one, bare %lua runs and bare %load
+        // loads a macro file.
+        for (line, token) in [
+            ("# %define foo 1", "%define foo 1"),
+            ("# %global foo 1", "%global foo 1"),
+            ("# %undefine foo", "%undefine foo"),
+            (
+                "# %lua os.execute('touch /tmp/x')",
+                "%lua os.execute('touch /tmp/x')",
+            ),
+            ("# %load /tmp/defs.macros", "%load /tmp/defs.macros"),
+        ] {
+            let results = run_mini(&format!("Name: foo\n{line}\n"));
+            let lines = lines_for(&results, "macro-in-comment");
+            assert_eq!(lines.len(), 1, "{line}: {results:?}");
+            assert!(
+                lines[0].contains(&format!("W: macro-in-comment {token}")),
+                "{line}: {lines:?}"
+            );
+        }
+        // A %define body is stored unexpanded, so a shell expansion in
+        // it is part of the one finding, not a second execution.
+        let results = run_mini("Name: foo\n# %define foo %(touch /tmp/x)\n");
+        assert_eq!(
+            lines_for(&results, "macro-in-comment").len(),
+            1,
+            "{results:?}"
+        );
+        // %undefine takes a single argument: a later live expansion on
+        // the same line still fires on its own.
+        let results = run_mini("Name: foo\n# %undefine foo %(touch /tmp/x)\n");
+        assert_eq!(
+            lines_for(&results, "macro-in-comment").len(),
+            2,
+            "{results:?}"
+        );
+    }
+
+    #[test]
+    fn braced_directives_in_comment_warn_482() {
+        // The braced executing directives fire the same way: they define
+        // or undefine a macro, and %{error:...} aborts the parse.
+        for token in [
+            "%{define:foo 1}",
+            "%{global:foo 1}",
+            "%{undefine:foo}",
+            "%{error:boom}",
+        ] {
+            let results = run_mini(&format!("Name: foo\n# {token}\n"));
+            let lines = lines_for(&results, "macro-in-comment");
+            assert_eq!(lines.len(), 1, "{token}: {results:?}");
+            assert!(
+                lines[0].contains(&format!("W: macro-in-comment {token}")),
+                "{token}: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn directive_lookalikes_in_comment_stay_quiet_482() {
+        for line in [
+            // No argument: the directive does nothing.
+            "# %define",
+            "# %lua",
+            // A longer name is a different, plain macro.
+            "# %defined foo 1",
+            "# %loader /tmp/defs.macros",
+            // The %license-type exclusions stay quiet (the intended
+            // divergence the #487 review asked to keep).
+            "# %license is how the license file is shipped",
+            "# %{license:MIT}",
+            // Empty braced arguments do not act.
+            "# %{define:} and %{error:}",
+            // Escaped: %% collapses to a literal %.
+            "# %%define foo 1",
+            "# %%{error:boom}",
+        ] {
+            let results = run_mini(&format!("Name: foo\n{line}\n"));
+            assert!(!has(&results, "macro-in-comment"), "{line}: {results:?}");
+        }
+    }
+
+    #[test]
+    fn escaped_bare_directive_warns_inside_expand_482() {
+        // One %{expand:...} pass consumes the escape, so the directive
+        // goes live inside it, exactly like %%( does.
+        let results = run_mini("Name: foo\n# %{expand:%%define foo 1}\n");
+        let lines = lines_for(&results, "macro-in-comment");
+        assert_eq!(lines.len(), 1, "{results:?}");
+        assert!(
+            lines[0].contains("W: macro-in-comment %%define foo 1"),
+            "unexpected: {lines:?}"
+        );
     }
 
     #[test]
