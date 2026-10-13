@@ -830,5 +830,42 @@ def test_primary_stale_mirror_exhausts_cycles_and_fallback_then_raises():
     assert sleeps == gen._PRIMARY_BACKOFF, sleeps
 
 
+def test_append_extra_checks_lands_inside_checks_list():
+    """The extra Checks must land inside `Checks = [...]`, nowhere else.
+
+    Appending to the wrong list (or outside any list) would either enable
+    nothing or corrupt the vendored config; the drift check compares bytes,
+    so this pins the shape the generator emits.
+    """
+    text = (
+        'Checks = [\n'
+        '    "BashismsCheck",\n'
+        ']\n'
+        'Filters = [\n'
+        "    ' some-filter ',\n"
+        ']\n'
+    )
+    out = gen.append_extra_checks(text, gen.EXTRA_OPENSUSE_CHECKS)
+    checks_part, filters_part = out.split("Filters = [", 1)
+    assert '"XinetdDepCheck",' in checks_part, checks_part
+    assert "XinetdDepCheck" not in filters_part, filters_part
+    # The entry is inside the list: it precedes the closing bracket.
+    assert checks_part.index('"XinetdDepCheck",') < checks_part.index("]"), checks_part
+    assert gen.EXTRA_OPENSUSE_CHECKS == ["XinetdDepCheck"], gen.EXTRA_OPENSUSE_CHECKS
+
+
+def test_append_extra_checks_without_checks_list_raises():
+    """A config with no Checks list must fail loudly, never pass silently.
+
+    Silently skipping the append would ship a vendored config in which the
+    deliberately enabled check is missing again.
+    """
+    try:
+        gen.append_extra_checks("Filters = [\n]\n", ["XinetdDepCheck"])
+    except AssertionError:
+        return
+    raise AssertionError("append_extra_checks accepted a document with no Checks list")
+
+
 if __name__ == "__main__":
     sys.exit(main())
