@@ -642,6 +642,88 @@ fn permissive_by_default_string_true_is_a_fatal_config_error() {
     assert!(stderr.contains("must be a bool"), "got {stderr}");
 }
 
+#[test]
+fn non_table_scoring_warns_on_stderr_and_is_ignored() {
+    // `Scoring = 5` is not a table: the value is ignored (the run proceeds
+    // with no scoring) but the ignore leaves a warning on stderr.
+    let dir = std::env::temp_dir().join("rpmcrab-scoring-notice-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("scoring-int.toml");
+    std::fs::write(&cfg, "Scoring = 5\n").unwrap();
+    let out = rpmcrab(&[
+        "-c",
+        cfg.to_str().unwrap(),
+        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("'Scoring' must be a table, found an integer; ignoring it"),
+        "got {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("packages and 0 specfiles checked"),
+        "the lint itself is unaffected, got {stdout}"
+    );
+}
+
+#[test]
+fn string_scoring_warns_on_stderr_and_is_ignored() {
+    let dir = std::env::temp_dir().join("rpmcrab-scoring-notice-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("scoring-str.toml");
+    std::fs::write(&cfg, "Scoring = \"abc\"\n").unwrap();
+    let out = rpmcrab(&[
+        "-c",
+        cfg.to_str().unwrap(),
+        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("'Scoring' must be a table, found a string; ignoring it"),
+        "got {stderr}"
+    );
+}
+
+#[test]
+fn non_integer_badness_threshold_warns_on_stderr_and_is_ignored() {
+    // A non-integer `BadnessThreshold` falls back to -1 (no threshold) with
+    // the same stderr warning treatment as a non-table `Scoring`.
+    let dir = std::env::temp_dir().join("rpmcrab-scoring-notice-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("threshold-str.toml");
+    std::fs::write(&cfg, "BadnessThreshold = \"abc\"\n").unwrap();
+    let out = rpmcrab(&[
+        "-c",
+        cfg.to_str().unwrap(),
+        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("'BadnessThreshold' must be an integer, found a string; ignoring it"),
+        "got {stderr}"
+    );
+}
+
+#[test]
+fn valid_scoring_table_produces_no_notice() {
+    let dir = std::env::temp_dir().join("rpmcrab-scoring-notice-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("scoring-ok.toml");
+    std::fs::write(&cfg, "[Scoring]\n\"no-%check-section\" = 50\n").unwrap();
+    let out = rpmcrab(&[
+        "-c",
+        cfg.to_str().unwrap(),
+        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("ignoring it"), "got {stderr}");
+}
+
 /// `--format json` (upstream rpmlint#1156): the run emits a JSON document
 /// with the findings and a summary, parseable by machines.
 #[test]
