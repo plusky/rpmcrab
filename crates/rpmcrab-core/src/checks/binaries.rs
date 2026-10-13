@@ -1533,17 +1533,41 @@ fn is_fortifiable_import(name: &str) -> bool {
 /// unactionable noise. Symbol names may carry a `@VERSION` suffix in
 /// `.dynsym`; strip it before matching.
 ///
-/// The set is the one ground-truthed against the Factory corpus in the
-/// rpmcrab#452 sweep audit (the audited genuine catches -- apparmor,
-/// apfsprogs, mjpg-streamer -- all import plain members of it). Two
-/// deliberate boundary calls: stdio buffered readers (`fread`, `fgets`)
-/// are out (zoo's `fiz` reads into heap buffers; its finding was never
-/// actionable, and including them re-admits it), and the fortified
-/// `__*_chk` spellings are not members -- the set names the plain calls,
-/// so a binary whose only string call is already fortified (again
-/// `fiz`: `__memcpy_chk`, `__printf_chk`) stays quiet.
+/// The plain set is the one ground-truthed against the Factory corpus
+/// in the rpmcrab#452 sweep audit (the audited genuine catches --
+/// apparmor, apfsprogs, mjpg-streamer -- all import plain members of
+/// it), completed by family so no same-risk class is split by spelling:
+/// the raw buffer fills cover the read/recv families in their plain,
+/// positioned and vectored/message forms and every path function that
+/// writes into a caller buffer, and the string copies include the
+/// bounded `strl*` spellings. One deliberate boundary call: stdio
+/// buffered readers (`fread`, `fgets`) are out (zoo's `fiz` reads into
+/// heap buffers; its finding was never actionable, and including them
+/// re-admits it).
 fn is_ssp_relevant_import(name: &str) -> bool {
     let base = name.split('@').next().unwrap_or(name);
+    if is_ssp_relevant_plain(base) {
+        return true;
+    }
+    // A fortified spelling names the same buffer operation as the plain
+    // call: `__strcpy_chk` is `strcpy` with a size check, and a
+    // `-D_FORTIFY_SOURCE` binary without a canary is exactly the silent
+    // `-fstack-protector` downgrade shape this check exists to catch.
+    // Strip the `_chk` suffix (and the wrapper's leading `__`) and
+    // judge the plain name; a spelling whose plain form is out of the
+    // set (`__fgets_chk`, `__printf_chk`) stays out with it.
+    match base.strip_suffix("_chk") {
+        Some(inner) => {
+            is_ssp_relevant_plain(inner)
+                || inner.strip_prefix("__").is_some_and(is_ssp_relevant_plain)
+        }
+        None => false,
+    }
+}
+
+/// The plain (unfortified) spelling half of `is_ssp_relevant_import`:
+/// `base` is a symbol name with any `@VERSION` suffix already stripped.
+fn is_ssp_relevant_plain(base: &str) -> bool {
     matches!(
         base,
         // string.h: string/memory copies and fills
@@ -1557,6 +1581,9 @@ fn is_ssp_relevant_import(name: &str) -> bool {
             | "strncat"
             | "stpcpy"
             | "stpncpy"
+            // The bounded spellings of the same copies (glibc >= 2.38)
+            | "strlcpy"
+            | "strlcat"
             // OpenBSD's fortified spelling, in the audited set
             | "strcpy_chk"
             // stdio.h: formatted output into caller buffers
@@ -1589,12 +1616,23 @@ fn is_ssp_relevant_import(name: &str) -> bool {
             // alloca.h
             | "alloca"
             | "__alloca"
-            // unistd.h / sys/socket.h: raw buffer fills
+            // unistd.h / sys/socket.h: raw buffer fills -- the read and
+            // recv families in their plain, positioned and vectored /
+            // message forms, and the path functions that write into a
+            // caller buffer in both spellings
             | "read"
+            | "pread"
+            | "pread64"
+            | "readv"
+            | "preadv"
+            | "preadv64"
             | "recv"
             | "recvfrom"
+            | "recvmsg"
             | "readlink"
+            | "readlinkat"
             | "getcwd"
+            | "getwd"
             | "realpath"
     )
 }
@@ -4123,9 +4161,16 @@ mod tests {
     fn hardening_ssp_quiet_with_imported_stack_chk_fail() {
         // `__stack_chk_fail` present only as an import (a NOTYPE import
         // parses only into `undefined_functions`) still counts as
-        // presence: the binary is protector-instrumented.
-        let results =
-            hardening_results_for(false, false, &["malloc"], &["malloc", "__stack_chk_fail"]);
+        // presence: the binary is protector-instrumented. The `memcpy` /
+        // `strcpy` imports make the binary SSP-applicable (rpmcrab#452),
+        // so the quiet outcome pins presence detection rather than
+        // passing via inapplicability.
+        let results = hardening_results_for(
+            false,
+            false,
+            &["malloc"],
+            &["malloc", "memcpy", "strcpy", "__stack_chk_fail"],
+        );
         assert!(
             lines_for(&results, "missing-stack-protector").is_empty(),
             "missing-stack-protector must not fire with an imported __stack_chk_fail: {results:?}"
@@ -4165,9 +4210,16 @@ mod tests {
             1,
             "missing-stack-protector must fire for real code: {results:?}"
         );
-        // ...but stays quiet once the protector is present.
-        let results =
-            hardening_results_for(false, false, &["malloc", "__stack_chk_fail"], &["malloc"]);
+        // ...but stays quiet once the protector is present. `memcpy` /
+        // `strcpy` keep the binary SSP-applicable (rpmcrab#452), so the
+        // quiet outcome pins `__stack_chk_fail` detection rather than
+        // passing via inapplicability.
+        let results = hardening_results_for(
+            false,
+            false,
+            &["malloc", "__stack_chk_fail"],
+            &["malloc", "memcpy", "strcpy"],
+        );
         assert!(
             lines_for(&results, "missing-stack-protector").is_empty(),
             "missing-stack-protector must not fire with __stack_chk_fail: {results:?}"
@@ -4201,6 +4253,25 @@ mod tests {
             lines_for(&results, "missing-stack-protector").len(),
             1,
             "missing-stack-protector must fire for a plain strcpy import: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_ssp_fires_with_fortified_import() {
+        // rpmcrab#452: a fortified spelling is the same buffer operation
+        // as the plain call, so a `-D_FORTIFY_SOURCE` binary whose only
+        // string call is fortified stays in scope: without a canary it
+        // fires (the silent `-fstack-protector` downgrade shape).
+        let results = hardening_results_for(
+            false,
+            false,
+            &["__memcpy_chk"],
+            &["__memcpy_chk@GLIBC_2.3.4"],
+        );
+        assert_eq!(
+            lines_for(&results, "missing-stack-protector").len(),
+            1,
+            "missing-stack-protector must fire for a fortified-only import: {results:?}"
         );
     }
 
@@ -4266,12 +4337,35 @@ mod tests {
             "alloca",
             "__alloca",
             "read",
+            "pread",
+            "pread64",
+            "readv",
+            "preadv",
+            "preadv64",
             "recv",
             "recvfrom",
+            "recvmsg",
             "readlink",
+            "readlinkat",
             "getcwd",
+            "getwd",
             "realpath",
+            "strlcpy",
+            "strlcat",
             "strcpy_chk",
+            // Fortified spellings normalise to the plain call.
+            "__memcpy_chk@GLIBC_2.3.4",
+            "__strcpy_chk",
+            "__strcat_chk",
+            "__snprintf_chk",
+            "__read_chk",
+            "__pread64_chk",
+            "__readlinkat_chk",
+            "__getwd_chk",
+            "__realpath_chk",
+            "__recvfrom_chk",
+            "__strlcpy_chk",
+            "__isoc99_vsscanf_chk",
         ] {
             assert!(is_ssp_relevant_import(name), "{name} must be SSP-relevant");
         }
@@ -4281,10 +4375,12 @@ mod tests {
             "fread_unlocked",
             "fgets",
             "fgets_unlocked",
-            // Fortified spellings are not plain calls; zoo `fiz` imports
-            // `__memcpy_chk`/`__printf_chk` and stays quiet.
-            "__memcpy_chk",
+            // Fortified spellings of out-of-set calls stay out with
+            // their plain forms.
+            "__fgets_chk",
+            "__fread_chk",
             "__printf_chk",
+            "__poll_chk",
             "__stack_chk_fail",
             // Measurement / comparison / allocation calls guard nothing.
             "strlen",
