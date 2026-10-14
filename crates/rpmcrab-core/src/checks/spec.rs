@@ -3720,4 +3720,37 @@ Patch0: foo.patch
             "results: {results:?}"
         );
     }
+
+    #[test]
+    fn reset_clears_applied_patches_between_specs() {
+        // Worker resets between specs; A's applied patch must not silence
+        // B's patch-not-applied. Without the reset B stays quiet via A's
+        // applied patch 0.
+        let config = config_mini();
+        let dir = tempfile::tempdir().unwrap();
+        let a_path = dir.path().join("a.spec");
+        std::fs::write(
+            &a_path,
+            "Name: foo\nPatch0: foo.patch\n%prep\n%patch -P 0\n%build\n",
+        )
+        .unwrap();
+        let b_path = dir.path().join("b.spec");
+        std::fs::write(&b_path, "Name: foo\nPatch0: foo.patch\n%prep\n%build\n").unwrap();
+        let a = SpecPkg::open(&a_path).unwrap();
+        let b = SpecPkg::open(&b_path).unwrap();
+        let mut check = SpecCheck::new(&config);
+        let mut out_a = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_spec(&a, &config, &mut out_a);
+        check.reset();
+        let mut out_b = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_spec(&b, &config, &mut out_b);
+        let results = out_b.results().to_vec();
+        let lines = lines_for(&results, "patch-not-applied");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: patch-not-applied Patch0:"),
+            "line: {}",
+            lines[0]
+        );
+    }
 }

@@ -2898,6 +2898,18 @@ mod tests {
         assert_eq!(check.name(), "BinariesCheck");
     }
 
+    /// Pins `add_checked_files`: the run-lifetime counter feeds `-t`.
+    #[test]
+    fn add_checked_files_accumulates() {
+        let config = Config::default();
+        let mut check = BinariesCheck::new(&config);
+        assert_eq!(check.checked_files(), Some(0));
+        check.add_checked_files(3);
+        assert_eq!(check.checked_files(), Some(3));
+        check.add_checked_files(2);
+        assert_eq!(check.checked_files(), Some(5));
+    }
+
     #[test]
     fn regex_factories_are_cached() {
         // Profiling showed Regex::new per call was ~18% of runtime.

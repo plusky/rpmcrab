@@ -589,4 +589,13 @@ mod tests {
             results[0].1
         );
     }
+
+    #[test]
+    fn reset_zeroes_checked_files() {
+        let config = Config::default();
+        let mut check = MenuXDGCheck::new(&config);
+        check.checked_files = 4;
+        check.reset();
+        assert_eq!(check.checked_files(), Some(0));
+    }
 }

@@ -636,4 +636,44 @@ mod tests {
         let findings = run(&lib, &devel);
         assert!(findings.is_empty(), "{findings:?}");
     }
+
+    #[test]
+    fn reset_drops_prior_packages() {
+        let config = Config::default();
+        let mut check = LibraryDependencyCheck::new(&config);
+        let (leak_lib, leak_devel) =
+            lib_and_devel_as("libleak", "libleak-devel", &["unrelated".to_string()]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(&leak_lib, &config, &mut out);
+        check.check_binary(&leak_devel, &config, &mut out);
+        check.reset();
+        let (clean_lib, clean_devel) =
+            lib_and_devel_as("libclean", "libclean-devel", &["libclean".to_string()]);
+        let mut clean_out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(&clean_lib, &config, &mut clean_out);
+        check.check_binary(&clean_devel, &config, &mut clean_out);
+        check.after_checks(&config, &mut clean_out);
+        assert!(
+            clean_out.results().is_empty(),
+            "leaked state across reset: {:?}",
+            clean_out.results()
+        );
+    }
+
+    #[test]
+    fn import_state_round_trips_worker_state() {
+        let config = Config::default();
+        let (lib, devel) = lib_and_devel(&["unrelated".to_string()]);
+        let mut worker = LibraryDependencyCheck::new(&config);
+        let mut worker_out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        worker.check_binary(&lib, &config, &mut worker_out);
+        worker.check_binary(&devel, &config, &mut worker_out);
+        let state = worker.export_state().expect("exports state");
+        let mut main = LibraryDependencyCheck::new(&config);
+        main.import_state(state);
+        let mut main_out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        main.after_checks(&config, &mut main_out);
+        assert_eq!(main_out.results().len(), 1, "{:?}", main_out.results());
+        assert_eq!(main_out.results()[0].0, "no-library-dependency-on");
+    }
 }

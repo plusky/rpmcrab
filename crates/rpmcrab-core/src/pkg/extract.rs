@@ -1639,4 +1639,44 @@ mod tests {
             "recording 50k paths took {dt:?}, expected linear time"
         );
     }
+
+    /// Pins `log_skip_collision`: a collision skip stays visible as a warning.
+    #[test]
+    fn log_skip_collision_emits_a_warning() {
+        struct Capture {
+            messages: std::sync::Mutex<Vec<String>>,
+        }
+        impl log::Log for Capture {
+            fn enabled(&self, metadata: &log::Metadata) -> bool {
+                metadata.level() <= log::Level::Warn
+            }
+            fn log(&self, record: &log::Record) {
+                if self.enabled(record.metadata()) {
+                    self.messages
+                        .lock()
+                        .unwrap()
+                        .push(record.args().to_string());
+                }
+            }
+            fn flush(&self) {}
+        }
+        static CAPTURE: Capture = Capture {
+            messages: std::sync::Mutex::new(Vec::new()),
+        };
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            let _ = log::set_logger(&CAPTURE);
+        });
+        log::set_max_level(log::LevelFilter::Warn);
+        CAPTURE.messages.lock().unwrap().clear();
+        let dir = tempfile::tempdir().unwrap();
+        let ex = extractor_for(dir.path());
+        let entry = cpio_entry(b"usr/bin/skip-probe", S_IFREG | 0o644, 0);
+        ex.log_skip_collision(&entry);
+        let messages = CAPTURE.messages.lock().unwrap().clone();
+        assert!(
+            messages.iter().any(|m| m.contains("usr/bin/skip-probe")),
+            "collision skip must warn with the entry name, got {messages:?}"
+        );
+    }
 }

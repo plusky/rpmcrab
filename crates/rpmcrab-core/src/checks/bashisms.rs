@@ -341,4 +341,13 @@ mod tests {
             "checkbashisms absent, yet potential-bashisms fired: {results:?}"
         );
     }
+
+    #[test]
+    fn reset_zeroes_checked_files() {
+        let config = Config::default();
+        let mut check = BashismsCheck::new(&config);
+        check.checked_files = 5;
+        check.reset();
+        assert_eq!(check.checked_files(), Some(0));
+    }
 }
