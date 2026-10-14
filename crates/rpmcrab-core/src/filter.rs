@@ -87,9 +87,11 @@ impl From<fancy_regex::Error> for FilterError {
 }
 
 /// Coerce a `[Scoring]` value exactly as Python `int()` does (`filter.py:101`):
-/// integers pass through, strings are parsed, floats truncate, booleans
-/// become 1/0. A value `int()` would reject (a garbage string, an array, a
-/// table) is a configuration error instead of a crash.
+/// integers pass through, strings are parsed, floats truncate toward zero,
+/// booleans become 1/0. A value `int()` would reject (a garbage string, a
+/// non-finite float, an array, a table) is a configuration error instead of
+/// a crash, as is a finite float whose truncated value does not fit in an
+/// `i64` (Python ints are unbounded, the badness score is not).
 fn coerce_scoring(check: &str, v: &toml::Value) -> Result<i64, FilterError> {
     let invalid = || FilterError::Scoring {
         check: check.to_string(),
@@ -98,7 +100,20 @@ fn coerce_scoring(check: &str, v: &toml::Value) -> Result<i64, FilterError> {
     match v {
         toml::Value::Integer(i) => Ok(*i),
         toml::Value::String(s) => s.trim().parse::<i64>().map_err(|_| invalid()),
-        toml::Value::Float(f) => Ok(*f as i64),
+        toml::Value::Float(f) => {
+            // Rust `as` saturates on float-to-int conversion (NaN becomes
+            // 0, infinities and out-of-range values clamp to the extremes),
+            // while Python `int()` rejects non-finite floats. Guard the
+            // truncated value explicitly: `i64::MAX as f64` rounds to
+            // 2^63, so it is the exclusive upper bound, and `i64::MIN as
+            // f64` is exactly the inclusive lower bound.
+            let truncated = f.trunc();
+            if !f.is_finite() || truncated < i64::MIN as f64 || truncated >= i64::MAX as f64 {
+                Err(invalid())
+            } else {
+                Ok(truncated as i64)
+            }
+        }
         toml::Value::Boolean(b) => Ok(i64::from(*b)),
         _ => Err(invalid()),
     }
@@ -501,6 +516,66 @@ mod tests {
         f.add_info(finding("some-check", Level::Warning, 0));
         assert_eq!(f.printed(Level::Error), 1);
         assert_eq!(f.score, 50);
+    }
+
+    #[test]
+    fn scoring_non_finite_float_is_a_config_error() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut c = cfg();
+            c.scoring
+                .insert("some-check".to_string(), toml::Value::Float(value));
+            assert!(
+                matches!(
+                    Filter::new(&c, Color::for_tty(false)),
+                    Err(FilterError::Scoring { .. })
+                ),
+                "float {value} must be rejected at construction"
+            );
+            assert!(
+                coerce_scoring("some-check", &toml::Value::Float(value)).is_err(),
+                "float {value} must fail coercion"
+            );
+        }
+    }
+
+    #[test]
+    fn scoring_out_of_range_float_is_a_config_error() {
+        // Python int() would produce an unbounded integer for these; the
+        // i64 badness cannot hold them, so they are configuration errors
+        // rather than saturated extremes.
+        for value in [1e20, -1e20, 1e100, 9_223_372_036_854_776_000.0] {
+            let mut c = cfg();
+            c.scoring
+                .insert("some-check".to_string(), toml::Value::Float(value));
+            assert!(
+                matches!(
+                    Filter::new(&c, Color::for_tty(false)),
+                    Err(FilterError::Scoring { .. })
+                ),
+                "float {value} must be rejected at construction"
+            );
+        }
+    }
+
+    #[test]
+    fn scoring_valid_floats_truncate_toward_zero() {
+        let cases = [
+            (2.9, 2),
+            (-2.9, -2),
+            (0.0, 0),
+            (-0.9, 0),
+            (50.0, 50),
+            // The largest f64 below 2^63 and i64::MIN itself both fit.
+            (9_223_372_036_854_774_784.0, 9_223_372_036_854_774_784),
+            (i64::MIN as f64, i64::MIN),
+        ];
+        for (input, want) in cases {
+            assert_eq!(
+                coerce_scoring("some-check", &toml::Value::Float(input)).unwrap(),
+                want,
+                "float {input} must truncate to {want}"
+            );
+        }
     }
 
     #[test]
