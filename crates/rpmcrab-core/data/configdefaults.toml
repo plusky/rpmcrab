@@ -401,6 +401,21 @@ PAMAuthorizedModules = []
 # Minimum size of files to check duplicates, in bytes
 DuplicatesMinSize = 2
 
+# Directory pairs whose duplicates DuplicatesCheck does not report (and
+# does not count toward files-duplicated-waste): one member of a
+# duplicate group under the first directory and its identical counterpart
+# under the second do not count against each other. A pattern is an
+# absolute directory prefix, or a fragment matched against consecutive
+# path components anywhere in the path; a component may contain `*` as a
+# wildcard. Both copies of a listed pair are mandated by different
+# tooling, so the duplication is not actionable: the Python stack embeds
+# the license in *.dist-info/licenses (PEP 639) while SUSE policy
+# requires the %license copy in /usr/share/licenses (or the %docdir copy).
+DuplicatesWhitelistPairs = [
+    ["*.dist-info/licenses", "/usr/share/licenses"],
+    ["*.dist-info/licenses", "/usr/share/doc/packages"],
+]
+
 # Additional warnings on specific function calls
 
 # systemd unit directory (the reference expands %{_unitdir} at import time;

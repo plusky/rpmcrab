@@ -223,6 +223,20 @@ upstream = "https://github.com/plusky/rpmcrab/issues/522"
 
 [[divergence]]
 case = "global"
+check = "files-duplicate"
+kind = "behaviour"
+reason = "Duplicates forming a DuplicatesWhitelistPairs pair do not count (issue #510): the bundled defaults pair the *.dist-info/licenses embed the Python stack requires (PEP 639) with the %license copy SUSE policy requires in /usr/share/licenses, or the %docdir copy under /usr/share/doc/packages. Both copies are toolchain-mandated and no tooling hardlinks them, so the duplication is not actionable. The frozen 2.10.0 reference reaches silence on this family through its two-level prefix suppression; the rest of the #771 narrowing above is unchanged."
+since = "0.3.0"
+
+[[divergence]]
+case = "global"
+check = "files-duplicated-waste"
+kind = "behaviour"
+reason = "Whitelisted DuplicatesWhitelistPairs pairs (see the files-duplicate entry, issue #510) do not accumulate into the waste total either: the total accumulates the same suppressed diff that drives files-duplicate, and a tooling-mandated pair is not reclaimable space."
+since = "0.3.0"
+
+[[divergence]]
+case = "global"
 check = "spurious-executable-perm"
 kind = "behaviour"
 reason = "Deliberate divergence (issue #522): a package named mingw32-* or mingw64-* does not emit this finding for paths ending in .dll.a. GCC and libtool create the Windows import libraries with the executable bit set. The reference emits the findings, but the Factory lint session suppresses exactly this shape via the '^mingw(32|64)-.*spurious-executable-perm.*\\.dll\\.a$' filter in mingw32.toml, a config the mingw32/64-filesystem packages install into the lint environment and the mirrored config set never contains. The filter carries no path condition beyond the suffix -- all 14 hits on the Factory sweep of main 782ac1d5 sit in the cross-gcc packages under /usr/lib64/gcc/<triplet>/, the host libdir, not the sys-root -- so the suppression has none either. Plain .a files are not covered by the filter and still fire."
