@@ -824,4 +824,13 @@ mod tests {
         assert_eq!(results[0].0, "invalid-appdata-file");
         assert!(results[0].1.contains("missing required tag(s): id"));
     }
+
+    #[test]
+    fn reset_zeroes_checked_files() {
+        let config = Config::default();
+        let mut check = AppDataCheck::new(&config);
+        check.checked_files = 3;
+        check.reset();
+        assert_eq!(check.checked_files(), Some(0));
+    }
 }

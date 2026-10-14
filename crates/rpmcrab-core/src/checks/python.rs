@@ -2766,4 +2766,66 @@ azure_mgmt_core-1.0.dist-info/RECORD,,
             "python3-consumer-a.noarch: W: python-leftover-require python3-azure-mgmt-core"
         );
     }
+
+    #[test]
+    fn reset_clears_provider_suppression_between_packages() {
+        // Worker resets between packages; provider metadata from A must
+        // not suppress B's leftover. Without the reset B's opencv stays
+        // quiet via A's cv2.
+        use crate::color::Color;
+        use crate::pkg::pkgfile::PkgFile;
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let write = |pkg: &Pkg, name: &str, content: &str| {
+            let disk = pkg.dir_name().join(name.trim_start_matches('/'));
+            std::fs::create_dir_all(disk.parent().unwrap()).expect("test dirs");
+            std::fs::write(&disk, content).expect("test file");
+            PkgFile {
+                name: name.to_string(),
+                ..Default::default()
+            }
+        };
+        let mkpkg = |name: &str, req_names: &[&str]| {
+            let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+            pkg.name = name.to_string();
+            pkg.arch = "noarch".to_string();
+            pkg.req_names = req_names.iter().map(|s| s.to_string()).collect();
+            pkg
+        };
+        let config = Config::default();
+        let mut check = PythonCheck::new(&config);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+
+        let mut provider = mkpkg("python313-opencv", &[]);
+        provider.files = vec![PkgFile {
+            name: "/usr/lib64/python3.13/site-packages/cv2.cpython-313-x86_64-linux-gnu.so"
+                .to_string(),
+            ..Default::default()
+        }];
+        check.check_binary(&provider, &config, &mut out);
+        check.reset();
+
+        let mut consumer = mkpkg("python3-consumer", &["python3-foo", "python3-opencv"]);
+        let di = "/usr/lib/python3.13/site-packages/consumer-1.0.dist-info";
+        consumer.files = vec![
+            write(
+                &consumer,
+                &format!("{di}/METADATA"),
+                "Metadata-Version: 2.1\nName: consumer\nVersion: 1.0\nRequires-Dist: foo\n",
+            ),
+            write(
+                &consumer,
+                "/usr/lib/python3.13/site-packages/consumer/__init__.py",
+                "import cv2\n",
+            ),
+        ];
+        check.check_binary(&consumer, &config, &mut out);
+
+        let findings = after_checks_findings(&mut check);
+        assert_eq!(findings.len(), 1, "unexpected findings: {findings:?}");
+        assert!(
+            findings[0].2.contains("python3-opencv"),
+            "findings: {findings:?}"
+        );
+    }
 }

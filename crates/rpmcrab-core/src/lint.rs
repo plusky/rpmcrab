@@ -606,3 +606,23 @@ mod exit_code_tests {
         assert_eq!(doc["summary"]["exit_code"], lint.exit_code());
     }
 }
+
+#[cfg(test)]
+mod durations_tests {
+    use super::*;
+
+    /// Pins `Durations::add`: repeats accumulate under the first position.
+    #[test]
+    fn add_accumulates_under_the_first_position() {
+        let mut d = Durations::default();
+        d.add("ExtractRpm", 1.5);
+        d.add("TagsCheck", 0.5);
+        d.add("ExtractRpm", 0.5);
+        assert_eq!(
+            d.iter().collect::<Vec<_>>(),
+            vec![("ExtractRpm", 2.0), ("TagsCheck", 0.5)]
+        );
+        assert_eq!(d.total(), 2.5);
+        assert_eq!(d.as_slice().len(), 2);
+    }
+}
