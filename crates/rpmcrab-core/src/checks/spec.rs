@@ -3273,6 +3273,66 @@ Patch0: foo.patch
     }
 
     #[test]
+    fn lib_package_with_mklibname_stays_quiet() {
+        // Kills the neutered-`checkline_mklibname` mutant: the ref959 test
+        // only covers the absent path, so a setter that never sets still
+        // passes it — the present path must stay quiet.
+        let results = run_mini(
+            "Name: foo\n%package -n libfoo\n%description\nfoo\n%define probe %mklibname\n",
+        );
+        assert!(
+            !has(&results, "lib-package-without-%mklibname"),
+            "results: {results:?}"
+        );
+    }
+
+    #[test]
+    fn package_dep_lines_with_control_char_fire_per_tag() {
+        // Kills the neutered `checkline_package_provides/obsoletes/conflicts`
+        // mutants: each delegation must reach `checkline_dep_list` with its
+        // tag (the detail carries it; the standalone controlchar probe below
+        // emits the same slug with empty details).
+        let pkg = SpecPkg {
+            name: "test.spec".to_string(),
+            lines: Vec::new(),
+            current_linenum: std::cell::Cell::new(None),
+        };
+        let config = config_mini();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = SpecCheck::new(&config);
+        check.checkline_package_provides(&pkg, &mut out, "Provides: foo\x07");
+        check.checkline_package_obsoletes(&pkg, &mut out, "Obsoletes: bar\x07");
+        check.checkline_package_conflicts(&pkg, &mut out, "Conflicts: baz\x07");
+        let results = out.results().to_vec();
+        let hits = lines_for(&results, "forbidden-controlchar-found");
+        assert_eq!(hits.len(), 3, "results: {results:?}");
+        for tag in ["Provides:", "Obsoletes:", "Conflicts:"] {
+            assert!(
+                hits.iter().any(|l| l.contains(tag)),
+                "no {tag} detail in: {hits:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn forbidden_controlchar_line_fires() {
+        // Kills the neutered-`checkline_forbidden_controlchars` mutant: the
+        // whole-line probe is a separate path from the dep-list one above.
+        let pkg = SpecPkg {
+            name: "test.spec".to_string(),
+            lines: Vec::new(),
+            current_linenum: std::cell::Cell::new(None),
+        };
+        let config = config_mini();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = SpecCheck::new(&config);
+        check.checkline_forbidden_controlchars(&pkg, &mut out, "Name: foo\x07");
+        let results = out.results().to_vec();
+        let hits = lines_for(&results, "forbidden-controlchar-found");
+        assert_eq!(hits.len(), 1, "results: {results:?}");
+    }
+
+    #[test]
     fn depscript_without_disabling_depgen_fires_warning_ref980() {
         let results = run_mini("Name: foo\n%define __find_provides /bin/true\n");
         let lines = lines_for(&results, "depscript-without-disabling-depgen");
