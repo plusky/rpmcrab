@@ -199,11 +199,35 @@ upstream = "https://github.com/plusky/rpmcrab/issues/518"
 
 [[divergence]]
 case = "global"
+check = "files-duplicate"
+kind = "behaviour"
+reason = "Deliberate divergence (issue #522): a package named mingw32-* or mingw64-* does not emit this finding. The reference emits the findings, but the Factory lint session suppresses them wholesale via the '^mingw(32|64)-.*files-duplicate' filter in mingw32.toml, a config the mingw32/64-filesystem packages install into the lint environment; it is not part of rpmlint's config tree, so the mirrored config set never contains it and the port reported the family live: 68 groups in 24 binary packages on the Factory sweep of main 782ac1d5. The filter is package-scoped with no path condition, so the suppression is package-scoped too -- 18 of the 68 groups sit in the cross-gcc packages under /usr/lib64/gcc/<triplet>/, outside any sys-root. The hardlink findings from the same check are not filtered upstream and still fire. Follows the devel-file-in-non-devel-package handling for the same config (issue #511)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/522"
+
+[[divergence]]
+case = "global"
 check = "files-duplicated-waste"
 kind = "behaviour"
 reason = "The accumulated waste total excludes duplicate groups whose members are all bytecode variants of one module (see the files-duplicate entry, issue #518): the frozen 2.10.0 reference counts them, and in the 2026-10-14 Factory sweep they alone carry 117 of the port's 259 files-duplicated-waste emissions past the 100000-byte threshold. The variants are unwired-brp bytecompile output no packager action reclaims, so counting them would keep the error firing on a total the package cannot act on."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/518"
+
+[[divergence]]
+case = "global"
+check = "files-duplicated-waste"
+kind = "behaviour"
+reason = "Deliberate divergence (issue #522): the mingw32.toml filter line '^mingw(32|64)-.*files-duplicate' also matches this finding's name, so the Factory lint session suppresses files-duplicated-waste for mingw32-*/mingw64-* packages along with the duplicate groups, and the port drops it for the family too -- the waste total accumulates the same groups. 6 lines totalling ~109 MB on the Factory sweep of main 782ac1d5 (the mingw32/64-binutils-debug pair alone ~103 MB). See the files-duplicate entry for the underlying reason."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/522"
+
+[[divergence]]
+case = "global"
+check = "spurious-executable-perm"
+kind = "behaviour"
+reason = "Deliberate divergence (issue #522): a package named mingw32-* or mingw64-* does not emit this finding for paths ending in .dll.a. GCC and libtool create the Windows import libraries with the executable bit set. The reference emits the findings, but the Factory lint session suppresses exactly this shape via the '^mingw(32|64)-.*spurious-executable-perm.*\\.dll\\.a$' filter in mingw32.toml, a config the mingw32/64-filesystem packages install into the lint environment and the mirrored config set never contains. The filter carries no path condition beyond the suffix -- all 14 hits on the Factory sweep of main 782ac1d5 sit in the cross-gcc packages under /usr/lib64/gcc/<triplet>/, the host libdir, not the sys-root -- so the suppression has none either. Plain .a files are not covered by the filter and still fire."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/522"
 
 [[divergence]]
 case = "global"
