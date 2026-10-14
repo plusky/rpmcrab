@@ -291,6 +291,15 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "AtomicUpdateCheck"
+flavor = "slfo"
+kind = "behaviour"
+reason = "Config-scoped (issue #478): snapshot layout is a transactional-update requirement, so the check runs only where packages must adhere -- it is absent from the bundled default config and from the vendored opensuse flavor config (EXCLUDED_OPENSUSE_CHECKS in scripts/generate-distro-configs.py), and enabled only by the vendored slfo flavor config; the reference lists the check in its opensuse config and runs it unconditionally. Under the opensuse flavor dir-or-file-outside-snapshot alone fires 44,107 times over 342 packages in the Factory sweep -- 94% of the hits under /srv/www, the FHS web root the distro mandates for web applications (nextcloud alone accounts for 30,148), and most of the rest /var state directories persistent by design: standard layout openSUSE packages are not required to change. Under slfo the port emits dir-or-file-outside-snapshot and ghost-outside-snapshot exactly as the reference does."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/478"
+
+[[divergence]]
+case = "global"
 check = "systemd-tmpfile-parse-error"
 kind = "detail"
 reason = "The reference (TmpfilesParser.warn) formats parse warnings as 'source:line: msg'; the port formats 'source: msg' and passes the line as a separate finding detail. Only the warning string differs ('source: msg' vs 'source:line: msg'); the detail placement is argument-for-argument identical."
