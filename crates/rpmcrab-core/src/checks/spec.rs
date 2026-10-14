@@ -3306,6 +3306,12 @@ Patch0: foo.patch
         let results = out.results().to_vec();
         let hits = lines_for(&results, "forbidden-controlchar-found");
         assert_eq!(hits.len(), 3, "results: {results:?}");
+        for line in &hits {
+            assert!(
+                line.contains(": E: forbidden-controlchar-found"),
+                "line: {line}"
+            );
+        }
         for tag in ["Provides:", "Obsoletes:", "Conflicts:"] {
             assert!(
                 hits.iter().any(|l| l.contains(tag)),
@@ -3330,6 +3336,13 @@ Patch0: foo.patch
         let results = out.results().to_vec();
         let hits = lines_for(&results, "forbidden-controlchar-found");
         assert_eq!(hits.len(), 1, "results: {results:?}");
+        // The line ending at the check name pins both the Warning level
+        // and the empty detail (a detail would be appended after it).
+        assert!(
+            hits[0].ends_with(": W: forbidden-controlchar-found"),
+            "line: {}",
+            hits[0]
+        );
     }
 
     #[test]
