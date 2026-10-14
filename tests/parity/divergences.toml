@@ -1869,6 +1869,14 @@ upstream = "https://github.com/plusky/rpmcrab/issues/515"
 
 [[divergence]]
 case = "global"
+check = "devel-file-in-non-devel-package"
+kind = "behaviour"
+reason = "Deliberate divergence (issue #511): a package named mingw32-* or mingw64-* does not emit this finding for files under the MinGW sys-root (/usr/<triplet>-w64-mingw32/sys-root/). A cross toolchain's sys-root is headers and import libraries by definition -- the devel files are the product, with no -devel split to move them into. The reference emits the findings, but the Factory lint session suppresses them wholesale via addFilter lines in mingw32.toml, a config the mingw32/64-filesystem packages install into the lint environment; it is not part of rpmlint's config tree, so the mirrored config set never contains it and the port reported the family live: 1,586 of the finding's 2,212 Factory sweep hits on main 782ac1d5 (mingw32-gcc and mingw64-gcc 786 each, the pkgconf twins 7 each). The same unloaded config also filters files-duplicate wholesale and *.dll.a spurious-executable-perm for these packages; that wider gap is recorded in issue #511 and is not covered by this entry."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/511"
+
+[[divergence]]
+case = "global"
 check = "no-dependency-on"
 kind = "behaviour"
 reason = "Deliberate fix (plusky/rpmcrab#459): the port never fires `no-dependency-on` for a `-doc` package name. `doc` is an ISO 639 code, so the reference's trailing-language alternation over LANGUAGES (I18NCheck.py) treats every documentation subpackage as a language pack and demands a dependency on the nonexistent `locales-doc`; the openSUSE distro config filters the finding, which is why the sweep never surfaced it. The port excludes `doc` from the trailing-language match; genuine language suffixes (e.g. `-de`, `-cs`) still fire. Pinned by `doc_package_is_quiet`."
