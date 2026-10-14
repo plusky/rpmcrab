@@ -1821,6 +1821,14 @@ since = "0.3.0"
 
 [[divergence]]
 case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
+reason = "Deliberate fix (plusky/rpmcrab#515): the port runs no per-file ELF analysis on %ghost files -- they are in the header but not in the payload, so there is nothing on disk to read -- and omits the reference's per-file findings for ghost ELFs (unstripped-binary-or-object, position-independent-executable-suggested, readelf-failed). The reference analyses the header-declared file anyway and surfaces readelf-failed errors for the missing payload: 24 on pcp-testsuite's %ghost fixtures and one on kernel-default-base's %ghost vmlinux. Package-level accounting is unaffected: a binary-class ghost counts toward has_binary, so no-binary stays quiet for kernel-default-base as in the reference."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/515"
+
+[[divergence]]
+case = "global"
 check = "no-dependency-on"
 kind = "behaviour"
 reason = "Deliberate fix (plusky/rpmcrab#459): the port never fires `no-dependency-on` for a `-doc` package name. `doc` is an ISO 639 code, so the reference's trailing-language alternation over LANGUAGES (I18NCheck.py) treats every documentation subpackage as a language pack and demands a dependency on the nonexistent `locales-doc`; the openSUSE distro config filters the finding, which is why the sweep never surfaced it. The port excludes `doc` from the trailing-language match; genuine language suffixes (e.g. `-de`, `-cs`) still fire. Pinned by `doc_package_is_quiet`."
