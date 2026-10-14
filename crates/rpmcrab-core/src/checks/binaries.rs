@@ -2826,14 +2826,20 @@ impl Check for BinariesCheck {
             let is_ebpf = pkgfile.magic.contains("eBPF");
             let is_elf = elf_regex().is_match(&pkgfile.magic).unwrap_or(false) && !is_ebpf;
 
+            let is_binary_class = is_elf
+                || pkgfile.magic.contains("current ar archive")
+                || is_ocaml_native
+                || is_lua_bytecode;
+            if !is_binary_class {
+                continue;
+            }
+
             // Ghost files are in the header but not in the payload:
-            // there is nothing on disk for the ELF checks to read.
-            if pkgfile.is_ghost()
-                || !(is_elf
-                    || pkgfile.magic.contains("current ar archive")
-                    || is_ocaml_native
-                    || is_lua_bytecode)
-            {
+            // there is nothing on disk for the ELF checks to read. The
+            // header class still counts for the package-level binary
+            // accounting.
+            if pkgfile.is_ghost() {
+                pkg_has_binary = true;
                 continue;
             }
 
@@ -6285,6 +6291,36 @@ description = "explicit priority string bypasses the system crypto policy"
 
         // The pre-pass must not even attempt to parse a ghost.
         assert!(!ElfAnalysis::wants_analysis(&ghost, false));
+    }
+
+    #[test]
+    fn ghost_only_binary_package_does_not_fire_no_binary() {
+        // #515: a package whose only binary-class file is a %ghost must
+        // not fire no-binary — the header FILECLASS is authoritative for
+        // package-level presence even though there is no payload on disk
+        // to analyse. kernel-default-base ships exactly this shape: its
+        // vmlinux is a %ghost that %post decompresses into place.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let ghost_path = dir.path().join("vmlinux"); // never written: no payload
+        let mut ghost = syn_file(
+            "/usr/lib/modules/7.2.9-1-default/vmlinux",
+            "ELF 64-bit LSB executable, x86-64, statically linked, not stripped",
+        );
+        ghost.path = ghost_path.to_string_lossy().into_owned();
+        ghost.flags = crate::pkg::pkgfile::RPMFILE_GHOST;
+        ghost.mode = 0o100755;
+
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("kernel-default-base", "x86_64", vec![ghost]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        assert_lacks(&results, "no-binary");
+        assert!(
+            !results.iter().any(|(_, line)| line.contains("vmlinux")),
+            "ghost must still produce no per-file findings: {results:?}"
+        );
     }
 
     #[test]
