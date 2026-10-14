@@ -120,6 +120,15 @@ pub fn python_str_tuple(items: &[&str]) -> String {
     format!("({})", inner.join(", "))
 }
 
+/// Whether `name` belongs to the MinGW cross family: `mingw32-*` or
+/// `mingw64-*`. The family carries its own lint config (`mingw32.toml`,
+/// installed into the Factory lint environment by the
+/// mingw32/64-filesystem packages), and the checks that config covers
+/// gate on this predicate (issues #511, #522).
+pub fn is_mingw_package(name: &str) -> bool {
+    name.starts_with("mingw32-") || name.starts_with("mingw64-")
+}
+
 /// Whether `arch` is a 64-bit RPM arch, whose native libdir is lib64
 /// (`/usr/lib64`, `/lib64`). Every other arch counts as 32-bit, whose
 /// native libdir is `/usr/lib` + `/lib`.

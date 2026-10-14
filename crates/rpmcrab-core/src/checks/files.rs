@@ -18,7 +18,9 @@ use fancy_regex::Regex;
 use indexmap::IndexMap;
 
 use super::is_match;
-use super::shared::{devel_regex, lib_package_regex, macro_regex, python_str_repr};
+use super::shared::{
+    devel_regex, is_mingw_package, lib_package_regex, macro_regex, python_str_repr,
+};
 use crate::check::{Check, add_info};
 use crate::config::Config;
 use crate::filter::Filter;
@@ -53,6 +55,20 @@ fn man_binary_basename(filename: &str) -> Option<&str> {
         }
     }
     split.map(|i| &filename[..i])
+}
+
+/// Whether the `spurious-executable-perm` finding is suppressed for
+/// `fname` in `pkg_name`: GCC and libtool create MinGW import libraries
+/// (`*.dll.a`) with the executable bit set, and the Factory lint session
+/// filters the finding for exactly that shape via the `mingw32.toml`
+/// config the mingw32/64-filesystem packages install into the lint
+/// environment ('^mingw(32|64)-.*spurious-executable-perm.*\.dll\.a$').
+/// That file is not part of the mirrored rpmlint config set, so the
+/// suppression lives here instead (issue #522, divergences.toml). The
+/// filter carries no path condition beyond the suffix, so neither does
+/// this predicate.
+fn mingw_dll_a_perm_exempt(pkg_name: &str, fname: &str) -> bool {
+    is_mingw_package(pkg_name) && fname.ends_with(".dll.a")
 }
 
 static INFO_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -2652,7 +2668,7 @@ impl FilesCheck {
                         && !is_match(&self.script_re, fname)
                         && !(is_match(&self.lib_path_re, fname) && fname.ends_with(".la")));
             }
-            if fd.nonexec_file {
+            if fd.nonexec_file && !mingw_dll_a_perm_exempt(&pkg.name, fname) {
                 add_info(
                     out,
                     Level::Warning,
@@ -3574,6 +3590,94 @@ mod tests {
                     .to_string(),
             )],
             "exactly one pinned (name, Level, detail) triple"
+        );
+    }
+
+    #[test]
+    fn mingw_dll_a_spurious_perm_is_quiet() {
+        // Issue #522: GCC and libtool create MinGW import libraries with
+        // the executable bit set, and the Factory session filters
+        // spurious-executable-perm for *.dll.a in the family via
+        // mingw32.toml. The filter has no path condition: both the
+        // cross-gcc host-libdir copies and the sys-root copies stay
+        // quiet.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = spurious_exec_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/lib64/gcc/x86_64-w64-mingw32/16.2.0/libfoo.dll.a",
+                    "current ar archive",
+                    b"!<arch>\n",
+                ),
+                (
+                    "/usr/x86_64-w64-mingw32/sys-root/mingw/lib/libbar.dll.a",
+                    "current ar archive",
+                    b"!<arch>\n",
+                ),
+            ],
+        );
+        pkg.name = "mingw64-cross-gcc".to_string();
+        let findings = check_spurious_script(&pkg, &config);
+        assert!(
+            findings.is_empty(),
+            "no finding for MinGW *.dll.a: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn dll_a_spurious_perm_fires_in_non_mingw_package() {
+        // Control for the MinGW suppression: the same executable import
+        // library in a package outside the family still fires.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = spurious_exec_pkg(
+            &dir,
+            &[(
+                "/usr/lib64/gcc/x86_64-w64-mingw32/16.2.0/libfoo.dll.a",
+                "current ar archive",
+                b"!<arch>\n",
+            )],
+        );
+        let findings = check_spurious_script(&pkg, &config);
+        assert_eq!(
+            findings,
+            [(
+                "spurious-executable-perm".to_string(),
+                Level::Warning,
+                "spurious-test.noarch: W: spurious-executable-perm \
+                 /usr/lib64/gcc/x86_64-w64-mingw32/16.2.0/libfoo.dll.a"
+                    .to_string(),
+            )],
+        );
+    }
+
+    #[test]
+    fn mingw_plain_archive_spurious_perm_still_fires() {
+        // Scope pin: the mingw32.toml filter covers only *.dll.a; an
+        // executable plain .a in a MinGW package still fires.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = spurious_exec_pkg(
+            &dir,
+            &[(
+                "/usr/lib64/gcc/x86_64-w64-mingw32/16.2.0/libfoo.a",
+                "current ar archive",
+                b"!<arch>\n",
+            )],
+        );
+        pkg.name = "mingw64-cross-gcc".to_string();
+        let findings = check_spurious_script(&pkg, &config);
+        assert_eq!(
+            findings,
+            [(
+                "spurious-executable-perm".to_string(),
+                Level::Warning,
+                "mingw64-cross-gcc.noarch: W: spurious-executable-perm \
+                 /usr/lib64/gcc/x86_64-w64-mingw32/16.2.0/libfoo.a"
+                    .to_string(),
+            )],
         );
     }
 

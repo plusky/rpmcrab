@@ -43,6 +43,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::shared::is_mingw_package;
 use crate::check::{Check, add_info};
 use crate::config::Config;
 use crate::filter::Filter;
@@ -315,12 +316,30 @@ impl Check for DuplicatesCheck {
             return;
         }
         let files: Vec<&PkgFile> = pkg.files.iter().collect();
-        let findings = Self::find_duplicates(
+        let mut findings = Self::find_duplicates(
             &files,
             self.min_size,
             |n| pkg.config_files.contains(&n.to_string()),
             |n| pkg.ghost_files.contains(&n.to_string()),
         );
+        if is_mingw_package(&pkg.name) {
+            // The Factory lint session filters files-duplicate wholesale
+            // for the MinGW family via mingw32.toml
+            // ('^mingw(32|64)-.*files-duplicate'), a config the
+            // mingw32/64-filesystem packages install into the lint
+            // environment and the mirrored config set never contains.
+            // The filter line also catches files-duplicated-waste, whose
+            // name shares the prefix, so both findings drop; the
+            // hardlink findings stay -- the config does not filter them
+            // (issue #522, divergences.toml).
+            findings.retain(|f| {
+                !matches!(
+                    f,
+                    DuplicateFinding::FilesDuplicate(..)
+                        | DuplicateFinding::FilesDuplicatedWaste(..)
+                )
+            });
+        }
         for f in &findings {
             let (level, name, details) = Self::describe(f);
             // `describe` yields at most two detail strings: a stack array
@@ -902,5 +921,74 @@ mod tests {
                 ),
             ],
         );
+    }
+
+    /// One small duplicate pair plus one waste-sized duplicate triple,
+    /// all inside /usr (same top-level tree, so nothing is suppressed by
+    /// the #771 rule): the payload fires two files-duplicate findings
+    /// and one files-duplicated-waste in an ordinary package.
+    fn mingw_scope_fixture_files() -> Vec<PkgFile> {
+        vec![
+            pkgfile("/usr/bin/a", "aaa", 100, 1),
+            pkgfile("/usr/bin/b", "aaa", 100, 2),
+            pkgfile("/usr/bin/x", "bbb", 60_000, 3),
+            pkgfile("/usr/lib/y", "bbb", 60_000, 4),
+            pkgfile("/usr/share/z", "bbb", 60_000, 5),
+        ]
+    }
+
+    #[test]
+    fn mingw_package_duplicates_and_waste_do_not_fire() {
+        // Issue #522: the mingw32.toml filter '^mingw(32|64)-.*
+        // files-duplicate' drops the family's files-duplicate findings
+        // wholesale in the Factory session, and the waste finding with
+        // them (its name shares the prefix). The fixture payload fires
+        // both in any other package (see the control test below).
+        let config = Config::default();
+        let mut check = DuplicatesCheck::new(&config);
+        let mut pkg = pkg_with_files(mingw_scope_fixture_files(), vec![]);
+        pkg.name = "mingw64-runtime".to_string();
+        let got = emitted(&mut check, &pkg, &config);
+        assert!(got.is_empty(), "MinGW package must stay quiet: {got:?}");
+    }
+
+    #[test]
+    fn same_duplicates_fire_in_non_mingw_package() {
+        // Control for the MinGW suppression: the identical payload in a
+        // package outside the family fires both findings.
+        let config = Config::default();
+        let mut check = DuplicatesCheck::new(&config);
+        let mut pkg = pkg_with_files(mingw_scope_fixture_files(), vec![]);
+        pkg.name = "foo".to_string();
+        let got = emitted(&mut check, &pkg, &config);
+        let names: Vec<&str> = got.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "files-duplicate",
+                "files-duplicate",
+                "files-duplicated-waste"
+            ]
+        );
+    }
+
+    #[test]
+    fn mingw_package_hardlink_findings_still_fire() {
+        // Scope pin: mingw32.toml does not filter the hardlink findings,
+        // so a MinGW package keeps them; only files-duplicate and
+        // files-duplicated-waste are suppressed.
+        let config = Config::default();
+        let mut check = DuplicatesCheck::new(&config);
+        let mut pkg = pkg_with_files(
+            vec![
+                pkgfile("/usr/bin/a", "aaa", 100, 1),
+                pkgfile("/var/lib/b", "aaa", 100, 1),
+            ],
+            vec![],
+        );
+        pkg.name = "mingw32-foo".to_string();
+        let got = emitted(&mut check, &pkg, &config);
+        let names: Vec<&str> = got.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(names, ["hardlink-across-partition"]);
     }
 }
