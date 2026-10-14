@@ -613,6 +613,11 @@ struct LddInfo {
     rpath: Vec<String>,
     /// DT_RUNPATH entries, colon-split, in order.
     runpath: Vec<String>,
+    /// A DT_RUNPATH tag is present at all, even when its value is
+    /// empty or all its segments are empty. The loader suppresses
+    /// DT_RPATH on tag presence, not on content, so this presence
+    /// bit -- not `runpath.is_empty()` -- gates DT_RPATH use.
+    has_runpath: bool,
     failed: Option<String>,
 }
 
@@ -626,6 +631,7 @@ impl LddInfo {
             is_64: None,
             rpath: Vec::new(),
             runpath: Vec::new(),
+            has_runpath: false,
             failed: None,
         };
         if !is_installed {
@@ -668,6 +674,12 @@ impl LddInfo {
                 if tag == goblin::elf::dynamic::DT_NEEDED {
                     info.dependencies.push(s.to_string());
                 } else {
+                    // Tag presence alone suppresses DT_RPATH in
+                    // the loader, even for an empty value whose
+                    // segments are all dropped below.
+                    if tag == goblin::elf::dynamic::DT_RUNPATH {
+                        info.has_runpath = true;
+                    }
                     // An empty segment names the loader's working
                     // directory; the resolver has no working
                     // directory to substitute, so empty segments
@@ -738,6 +750,8 @@ struct SymbolProvider {
     rpath: Vec<String>,
     /// The object's DT_RUNPATH entries (raw, colon-split).
     runpath: Vec<String>,
+    /// A DT_RUNPATH tag is present at all (see `LddInfo`).
+    has_runpath: bool,
 }
 
 /// Lookup key for symbol providers: a SONAME plus the ELF class
@@ -861,6 +875,7 @@ impl SystemLibraries {
                 .unwrap_or_else(|| PathBuf::from("/")),
             rpath: ldd.rpath.clone(),
             runpath: ldd.runpath.clone(),
+            has_runpath: ldd.has_runpath,
         }))
     }
 
@@ -1048,9 +1063,12 @@ fn installed_dir(name: &str) -> PathBuf {
 /// Expand one object's raw DT_RPATH/DT_RUNPATH entries into the
 /// directory list the loader would search: `$ORIGIN` (and the
 /// braced `${ORIGIN}`) expands to the object's installed
-/// directory, and `.`/`..` collapse lexically. Only absolute
-/// results are kept: a relative entry is relative to the loader's
-/// working directory, which this model does not have.
+/// directory, and `.`/`..` collapse lexically. Only entries that
+/// are absolute after `$ORIGIN` expansion are kept, and that test
+/// runs before normalisation: a relative entry is relative to
+/// the loader's working directory, which this model does not
+/// have, and normalising it first would invent a host-absolute
+/// path (`lib` becoming `/lib`) that gets searched on the host.
 fn expand_search_dirs(entries: &[String], origin: &Path) -> Vec<PathBuf> {
     let origin = origin.to_string_lossy();
     entries
@@ -1060,9 +1078,9 @@ fn expand_search_dirs(entries: &[String], origin: &Path) -> Vec<PathBuf> {
                 .replace("${ORIGIN}", &origin)
                 .replace("$ORIGIN", &origin)
         })
+        .filter(|entry| entry.starts_with('/'))
         .map(|entry| normalize_dotdot(&entry))
         .map(PathBuf::from)
-        .filter(|dir| dir.is_absolute())
         .collect()
 }
 
@@ -1089,11 +1107,12 @@ impl SearchContext {
     fn for_object(
         rpath: &[String],
         runpath: &[String],
+        has_runpath: bool,
         origin: &Path,
         inherited: &[Vec<PathBuf>],
     ) -> Self {
         let mut rpath_chain: Vec<Vec<PathBuf>> = Vec::new();
-        if runpath.is_empty() {
+        if !has_runpath {
             let dirs = expand_search_dirs(rpath, origin);
             if !dirs.is_empty() {
                 rpath_chain.push(dirs);
@@ -1163,6 +1182,7 @@ fn resolve_undefined_symbols(
                 origin: installed_dir(&pkgfile.name),
                 rpath: ldd.rpath.clone(),
                 runpath: ldd.runpath.clone(),
+                has_runpath: ldd.has_runpath,
             });
             entry.defined.extend(ldd.defined_symbols.iter().cloned());
             for need in &ldd.dependencies {
@@ -1196,8 +1216,13 @@ fn resolve_undefined_symbols(
         }
         let direct = ldd.dependencies.clone();
         let is_64 = ldd.is_64;
-        let root_ctx =
-            SearchContext::for_object(&ldd.rpath, &ldd.runpath, &installed_dir(&pkgfile.name), &[]);
+        let root_ctx = SearchContext::for_object(
+            &ldd.rpath,
+            &ldd.runpath,
+            ldd.has_runpath,
+            &installed_dir(&pkgfile.name),
+            &[],
+        );
         let provided = closures
             .entry((direct.clone(), is_64, root_ctx.clone()))
             .or_insert_with(|| {
@@ -1237,6 +1262,7 @@ fn resolve_undefined_symbols(
                         let child_ctx = SearchContext::for_object(
                             &provider.rpath,
                             &provider.runpath,
+                            provider.has_runpath,
                             &provider.origin,
                             &ctx.rpath_chain,
                         );
@@ -5700,6 +5726,7 @@ description = "explicit priority string bypasses the system crypto policy"
             is_64: None,
             rpath: Vec::new(),
             runpath: Vec::new(),
+            has_runpath: false,
             failed: None,
         }
     }
@@ -7610,6 +7637,139 @@ description = "explicit priority string bypasses the system crypto policy"
             lines.len(),
             1,
             "DT_RPATH must be ignored next to DT_RUNPATH: {results:?}"
+        );
+    }
+
+    #[test]
+    fn rpath_is_ignored_when_runpath_is_empty() {
+        // An empty DT_RUNPATH still counts as present: the linker
+        // emits empty RUNPATH values, and ld.so suppresses DT_RPATH
+        // on the tag's presence, not its content. Same shape as
+        // `rpath_is_ignored_when_runpath_is_present`, except the
+        // RUNPATH value is empty, so no segment survives parsing --
+        // the RPATH directory must stay unsearched and the symbol
+        // must keep firing.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let privdir = dir.path().join("private");
+        std::fs::create_dir(&privdir).expect("mkdir private");
+        let provider = craft_shlib_elf(false, None, Some("libpriv.so.1"), &[("priv_sym", 1, 0, 1)]);
+        std::fs::write(privdir.join("libpriv.so.1"), &provider).expect("write provider");
+        let priv_s = privdir.to_string_lossy().into_owned();
+        let consumer = craft_shlib_elf_paths(
+            false,
+            &["libpriv.so.1"],
+            Some("libbar.so.1"),
+            Some(priv_s.as_str()),
+            Some(""),
+            &[("priv_sym", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let results = driver_results_with_system(&pkg, &test_config(), SystemLibraries::empty());
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(
+            lines.len(),
+            1,
+            "empty DT_RUNPATH must still suppress DT_RPATH: {results:?}"
+        );
+        assert!(
+            lines[0].contains("priv_sym"),
+            "finding names the symbol: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn relative_search_path_entries_are_dropped() {
+        // A relative RPATH/RUNPATH entry is relative to the
+        // loader's working directory, which the resolver does not
+        // model. It must be dropped before normalisation, never
+        // turned into a host-absolute path that is then searched
+        // on the host (`lib` must not become `/lib`).
+        let origin = Path::new("/opt/pkg/lib");
+        let dropped: Vec<PathBuf> = expand_search_dirs(
+            &[
+                "lib".to_string(),
+                "./lib".to_string(),
+                "../lib".to_string(),
+                "lib/../lib".to_string(),
+                String::new(),
+            ],
+            origin,
+        );
+        assert!(dropped.is_empty(), "relative entries dropped: {dropped:?}");
+        let kept = expand_search_dirs(
+            &[
+                "/a/b/../c".to_string(),
+                "$ORIGIN/private".to_string(),
+                "${ORIGIN}/../shared".to_string(),
+                "relative".to_string(),
+            ],
+            origin,
+        );
+        assert_eq!(
+            kept,
+            vec![
+                PathBuf::from("/a/c"),
+                PathBuf::from("/opt/pkg/lib/private"),
+                PathBuf::from("/opt/pkg/shared"),
+            ],
+            "absolute and $ORIGIN entries kept, normalised: {kept:?}"
+        );
+        // The gate behind the empty-RUNPATH fix, pinned directly:
+        // with a DT_RUNPATH tag present the object's own RPATH list
+        // contributes nothing to the chain, however empty the
+        // RUNPATH value was; without the tag it does.
+        let rpath = vec!["/real/dir".to_string()];
+        let gated = SearchContext::for_object(&rpath, &[], true, Path::new("/"), &[]);
+        assert!(
+            gated.rpath_chain.is_empty(),
+            "has_runpath must gate the RPATH chain: {:?}",
+            gated.rpath_chain
+        );
+        let ungated = SearchContext::for_object(&rpath, &[], false, Path::new("/"), &[]);
+        assert_eq!(
+            ungated.rpath_chain,
+            vec![vec![PathBuf::from("/real/dir")]],
+            "no RUNPATH tag: RPATH chain present"
+        );
+    }
+
+    #[test]
+    fn undefined_symbol_with_relative_rpath_still_fires() {
+        // End-to-end companion to the unit pin above: a consumer
+        // whose only search path is the relative entry `lib`,
+        // NEEDing a library the host populates under `/lib`. The
+        // loader searches the working directory's `lib`, finds
+        // nothing there, and reports the symbol; searching the
+        // host's `/lib` instead would wrongly silence it on hosts
+        // where that library exists.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let consumer = craft_shlib_elf_paths(
+            false,
+            &["libc.so.6"],
+            Some("libbar.so.1"),
+            Some("lib"),
+            None,
+            &[("strlen", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let results = driver_results_with_system(&pkg, &test_config(), SystemLibraries::empty());
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(
+            lines.len(),
+            1,
+            "relative RPATH must not resolve against the host: {results:?}"
+        );
+        assert!(
+            lines[0].contains("strlen"),
+            "finding names the symbol: {lines:?}"
         );
     }
 
