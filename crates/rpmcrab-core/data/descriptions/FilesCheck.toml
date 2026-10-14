@@ -408,6 +408,3 @@ The symlink contains more `..` segments than the path depth allows. The symlink 
 symlink-should-be-absolute="""
 The symlink uses a relative target where an absolute one is required.
 """
-zero-length="""
-The file has zero length. Empty files are usually a packaging error; remove it if it serves no purpose.
-"""

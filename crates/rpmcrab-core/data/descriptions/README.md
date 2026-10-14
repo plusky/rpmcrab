@@ -83,7 +83,8 @@ Provenance, verified against the pinned reference (`84848c0`):
   `tests/parity/divergences.toml`.
 - `FilesCheck.toml` — the reference file, minus the `outside-libdir-files`
   entry (openSUSE: "Doesn't seem to make sense") dropped with
-  the findings.
+  the findings, and minus the port-only `zero-length` entry dropped with
+  the deliberately removed `zero-length` finding (issue #479).
 - Every other `*.toml` file — byte-identical to the reference
   `rpmlint/descriptions/` file of the same name.
 
