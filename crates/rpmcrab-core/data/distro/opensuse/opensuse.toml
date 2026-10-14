@@ -28,7 +28,9 @@ Checks = [
     "SystemdTmpfilesCheck",
     "SUIDPermissionsCheck",
     "WorldWritableCheck",
-    "AtomicUpdateCheck",
+    # Excluded: "AtomicUpdateCheck" is not run under the opensuse
+    # flavor (deliberate, ledgered divergence); see
+    # EXCLUDED_OPENSUSE_CHECKS in scripts/generate-distro-configs.py.
 
     # Extra: enabled by rpmcrab; upstream lists these checks in no
     # shipped config (deliberate, ledgered divergence); see

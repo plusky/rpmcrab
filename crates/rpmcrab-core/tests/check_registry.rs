@@ -137,10 +137,9 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
     );
 }
 
-/// The `Checks = [...]` list from the default config.
-fn checks_in_default_config() -> Vec<String> {
-    let src = std::fs::read_to_string(core_root().join("data/configdefaults.toml"))
-        .expect("read configdefaults.toml");
+/// The `Checks = [...]` list from one shipped config file.
+fn checks_in_config_file(path: &std::path::Path) -> Vec<String> {
+    let src = std::fs::read_to_string(path).expect("read config file");
     let mut in_list = false;
     let mut names = Vec::new();
     for line in src.lines() {
@@ -162,26 +161,45 @@ fn checks_in_default_config() -> Vec<String> {
     }
     assert!(
         !names.is_empty(),
-        "no Checks parsed from configdefaults.toml"
+        "no Checks parsed from {}",
+        path.display()
     );
     names
 }
 
-/// A check that `check::build` can construct but the default config never
+/// The union of the `Checks = [...]` lists of every shipped config layer:
+/// the bundled defaults and both vendored flavour configs. A check listed
+/// in any layer runs under that layer's flavour.
+fn checks_in_shipped_configs() -> Vec<String> {
+    let mut names = checks_in_config_file(&core_root().join("data/configdefaults.toml"));
+    for flavor in ["opensuse", "slfo"] {
+        for name in
+            checks_in_config_file(&core_root().join(format!("data/distro/{flavor}/opensuse.toml")))
+        {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+/// A check that `check::build` can construct but no shipped config ever
 /// selects can never run — the same class of defect as #49 (issue #66).
-/// There are no documented exceptions left: `XinetdDepCheck` and
-/// `PAMModulesCheck` are both deliberately enabled (ledgered in
-/// tests/parity/divergences.toml), and `LSBCheck` is deleted, so it is not
-/// constructible. Every constructible check must appear in
-/// `Checks = [...]` (issue #66 closed).
+/// `XinetdDepCheck` and `PAMModulesCheck` are both deliberately enabled
+/// (ledgered in tests/parity/divergences.toml), and `LSBCheck` is deleted,
+/// so it is not constructible. `AtomicUpdateCheck` is deliberately
+/// flavour-scoped: only the slfo flavour config lists it (issue #478,
+/// ledgered). Every constructible check must appear in the `Checks =
+/// [...]` list of at least one shipped config (issue #66 closed).
 #[test]
 fn every_constructible_check_is_listed_in_checks() {
-    let listed = checks_in_default_config();
+    let listed = checks_in_shipped_configs();
     for name in names_built_by_registry() {
         assert!(
             listed.contains(&name),
             "`check::build` constructs `{name}` but it is absent from \
-             `Checks = [...]` in configdefaults.toml, so it can never run"
+             `Checks = [...]` in every shipped config, so it can never run"
         );
     }
 }
@@ -237,17 +255,25 @@ fn every_built_check_reports_its_registry_name() {
     }
 }
 
-/// The reverse direction (issue #85): a name in the default config's
+/// The reverse direction (issue #85): a name in a shipped config's
 /// `Checks = [...]` that `check::build` cannot construct is silently
 /// dropped by `load_with`, so the run advertises checks that never execute.
 #[test]
 fn every_listed_check_is_constructible() {
     let built = names_built_by_registry();
-    for name in checks_in_default_config() {
-        assert!(
-            built.contains(&name),
-            "`{name}` is listed in `Checks = [...]` in configdefaults.toml \
-             but `check::build` cannot construct it, so it silently never runs"
-        );
+    let files = [
+        core_root().join("data/configdefaults.toml"),
+        core_root().join("data/distro/opensuse/opensuse.toml"),
+        core_root().join("data/distro/slfo/opensuse.toml"),
+    ];
+    for path in files {
+        for name in checks_in_config_file(&path) {
+            assert!(
+                built.contains(&name),
+                "`{name}` is listed in `Checks = [...]` in {} \
+                 but `check::build` cannot construct it, so it silently never runs",
+                path.display()
+            );
+        }
     }
 }

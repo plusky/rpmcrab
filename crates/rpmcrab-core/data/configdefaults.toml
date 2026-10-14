@@ -1,4 +1,7 @@
 # Enabled checks for the rpmlint to be run
+# AtomicUpdateCheck is deliberately absent here and in the openSUSE flavour
+# config: the snapshot layout is a transactional-update (SLFO) requirement,
+# so the check is enabled only by the slfo flavour config (issue #478).
 Checks = [
     "AlternativesCheck",
     "AppDataCheck",
@@ -44,7 +47,6 @@ Checks = [
     "SystemdTmpfilesCheck",
     "SUIDPermissionsCheck",
     "WorldWritableCheck",
-    "AtomicUpdateCheck",
     # Deliberate rpmcrab addition (ledgered in tests/parity/divergences.toml):
     # the reference lists XinetdDepCheck in no shipped config, so it never
     # runs there; the check is implemented and its deprecation message is

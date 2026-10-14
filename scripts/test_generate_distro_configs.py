@@ -868,5 +868,45 @@ def test_append_extra_checks_without_checks_list_raises():
     raise AssertionError("append_extra_checks accepted a document with no Checks list")
 
 
+def test_remove_excluded_checks_drops_entry_and_explains():
+    """The excluded Checks must vanish from `Checks = [...]` only.
+
+    The drift check compares bytes, so this pins the shape the generator
+    emits: the entry is gone, an explanation comment sits inside the list
+    at the same spot, and a same-named string in another list survives.
+    """
+    text = (
+        'Checks = [\n'
+        '    "BashismsCheck",\n'
+        '    "AtomicUpdateCheck",\n'
+        '    "ZipCheck",\n'
+        ']\n'
+        'Filters = [\n'
+        "    'AtomicUpdateCheck',\n"
+        ']\n'
+    )
+    out = gen.remove_excluded_checks(text, gen.EXCLUDED_OPENSUSE_CHECKS)
+    checks_part, filters_part = out.split("Filters = [", 1)
+    assert '"AtomicUpdateCheck",' not in checks_part, checks_part
+    assert "EXCLUDED_OPENSUSE_CHECKS" in checks_part, checks_part
+    # The comment is inside the list: it precedes the closing bracket.
+    assert checks_part.index("EXCLUDED_OPENSUSE_CHECKS") < checks_part.index("]"), checks_part
+    assert "AtomicUpdateCheck" in filters_part, filters_part
+    assert gen.EXCLUDED_OPENSUSE_CHECKS == ["AtomicUpdateCheck"], gen.EXCLUDED_OPENSUSE_CHECKS
+
+
+def test_remove_excluded_checks_without_entry_raises():
+    """A Checks list missing the excluded check must fail loudly.
+
+    Silently passing would ship an opensuse config in which the check
+    still runs -- the exact outcome the exclusion exists to prevent.
+    """
+    try:
+        gen.remove_excluded_checks('Checks = [\n    "ZipCheck",\n]\n', ["AtomicUpdateCheck"])
+    except AssertionError:
+        return
+    raise AssertionError("remove_excluded_checks accepted a Checks list without the excluded check")
+
+
 if __name__ == "__main__":
     sys.exit(main())

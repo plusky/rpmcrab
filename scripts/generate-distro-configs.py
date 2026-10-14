@@ -7,7 +7,8 @@ into ``crates/rpmcrab-core/data/distro/<flavor>/``, prunes ``Filters`` /
 drops ``Filters`` entries for live findings rpmcrab deliberately surfaces
 (see DROP_LIVE_FILTERS), drops whitelist stanzas for packages gone from
 Tumbleweed/SLE 16 and stale pie-executables paths, appends the extra
-Filters/Checks rpmcrab carries on top of upstream, and stamps provenance.
+Filters/Checks rpmcrab carries on top of upstream, removes the Checks
+the opensuse flavor deliberately does not run, and stamps provenance.
 
 The checked-in files are the build's source of truth; this script runs by hand
 and in CI (drift check + monthly refresh), never at build time.
@@ -202,6 +203,22 @@ EXTRA_OPENSUSE_FILTERS = [
 EXTRA_OPENSUSE_CHECKS = [
     "XinetdDepCheck",
     "PAMModulesCheck",
+]
+
+# Checks upstream lists in the openSUSE config that rpmcrab deliberately
+# does NOT run under the opensuse flavor. AtomicUpdateCheck enforces the
+# snapshot layout transactional updates require; that requirement binds
+# the slfo flavor (whose vendored config keeps the check), not general
+# openSUSE packages: /srv/www is the FHS web root the distro mandates for
+# web applications, and the /var state directories are persistent across
+# rollbacks by design. Under the opensuse flavor the check fired 44,107
+# times over 342 packages in the Factory sweep with no packager able to
+# act on it (issue #478). Ledgered in tests/parity/divergences.toml.
+# Config list merging appends, so the check is likewise absent from the
+# bundled default config (crates/rpmcrab-core/data/configdefaults.toml):
+# only the slfo flavour layer enables it.
+EXCLUDED_OPENSUSE_CHECKS = [
+    "AtomicUpdateCheck",
 ]
 
 # Findings rpmcrab deliberately killed (see tests/parity/divergences.toml).
@@ -1394,6 +1411,49 @@ def append_extra_checks(text, checks):
     return "".join(out)
 
 
+def remove_excluded_checks(text, checks):
+    """Remove check names from the `Checks = [...]` list in a TOML document.
+
+    Used for checks upstream lists in the openSUSE config that rpmcrab
+    deliberately does not run under the opensuse flavor (see
+    EXCLUDED_OPENSUSE_CHECKS). Each removed entry is replaced by an
+    explanation comment at the same spot so the vendored config itself
+    records the absence; the monthly sync re-emits it deterministically.
+    A listed check missing from the list fails loudly: silently passing
+    would ship the check enabled, the exact outcome the exclusion exists
+    to prevent.
+    """
+    wanted = {'"%s",' % c: c for c in checks}
+    lines = text.splitlines(keepends=True)
+    out = []
+    in_list = False
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"^Checks\s*=\s*\[", stripped):
+            in_list = True
+            out.append(line)
+            continue
+        if in_list and stripped.startswith("]"):
+            in_list = False
+            out.append(line)
+            continue
+        if in_list and stripped in wanted:
+            name = wanted.pop(stripped)
+            out.append(
+                '    # Excluded: "%s" is not run under the opensuse\n' % name
+            )
+            out.append("    # flavor (deliberate, ledgered divergence); see\n")
+            out.append(
+                "    # EXCLUDED_OPENSUSE_CHECKS in scripts/generate-distro-configs.py.\n"
+            )
+            continue
+        out.append(line)
+    assert not wanted, "excluded checks not in Checks list: %s" % sorted(
+        wanted.values()
+    )
+    return "".join(out)
+
+
 def generate(ref_dir=None, pins=None):
     """Return {flavor: {filename: text}} and the provenance text."""
     pins = pins or {}
@@ -1442,6 +1502,7 @@ def generate(ref_dir=None, pins=None):
                 # Same gate as the extra filters: SLFO's vendored config
                 # stays a pure mirror of the opensuse-slfo-main branch.
                 text = append_extra_checks(text, EXTRA_OPENSUSE_CHECKS)
+                text = remove_excluded_checks(text, EXCLUDED_OPENSUSE_CHECKS)
             data["files"][filename] = text
 
     # Dedupe: an SLFO file byte-identical to its openSUSE counterpart (after
@@ -1480,6 +1541,13 @@ def generate(ref_dir=None, pins=None):
         provenance.append(
             f"#   Checks: added {c!r} (deliberate rpmcrab divergence, ledgered in"
             " tests/parity/divergences.toml)"
+        )
+    provenance.append("#")
+    provenance.append("# Excluded Checks (removed from the opensuse flavor; see EXCLUDED_OPENSUSE_CHECKS):")
+    for c in EXCLUDED_OPENSUSE_CHECKS:
+        provenance.append(
+            f"#   Checks: removed {c!r} from the opensuse flavor (deliberate"
+            " rpmcrab divergence, ledgered in tests/parity/divergences.toml)"
         )
     if pruned_log:
         provenance.append("#")
