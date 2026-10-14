@@ -1236,7 +1236,7 @@ fn errors_only_json_finding_set_matches_full_run() {
             "warning-only check ran: {check}"
         );
     }
-    assert_eq!(eo_doc["checks"], 44);
+    assert_eq!(eo_doc["checks"], 45);
     assert_eq!(
         eo_doc["summary"]["exit_code"].as_i64(),
         eo.status.code().map(i64::from)
