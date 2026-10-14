@@ -198,7 +198,6 @@ corpus (§6).
 Examples that must reproduce exactly:
 
 ```
-clang21-devel.aarch64: E: zero-length /usr/include/clang/Basic/DiagnosticAnalysisEnums.inc
 llvm21.src: E: unused-rpmlintrc-filter "devel-file-in-non-devel-package .*/usr/include/.*"
 qdmr.spec:24: W: mixed-use-of-spaces-and-tabs (spaces: line 24, tab: line 2)
 llvm21-gold.aarch64: E: suse-zypp-packageand packageand(clang21:binutils)

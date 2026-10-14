@@ -939,6 +939,14 @@ upstream = "https://github.com/plusky/rpmcrab/issues/495"
 
 [[divergence]]
 case = "global"
+check = "zero-length"
+kind = "missing"
+reason = "Deliberate removal (issue #479): the port does not emit zero-length. In the Factory sweep the finding fired at Error 3,315 times over 526 packages (run-20261014-782ac1d5), and every sampled bucket is empty by design -- mailman templates, test/fixture paths, .fallback markers, __init__/stamp marker files, GAPDoc and clang tablegen files that are empty by construction; no accidentally-truncated file was observed across 17,242 packages. The reference exempts via a regex whitelist (FilesCheck.py:180) that has been maintained for years and still produces this pile, so extending it is an endless exemption tail for a finding with no observed true positive. The staged `--explain` entry and the exempt-regex plumbing are removed with the finding. The port also emitted at Error where the reference uses Warning; that level divergence disappears with the removal."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/479"
+
+[[divergence]]
+case = "global"
 check = "XinetdDepCheck"
 kind = "behaviour"
 reason = "Deliberate config divergence: rpmcrab enables XinetdDepCheck in its bundled default config (crates/rpmcrab-core/data/configdefaults.toml) and in the vendored openSUSE flavour config (crates/rpmcrab-core/data/distro/opensuse/opensuse.toml, appended by EXTRA_OPENSUSE_CHECKS in scripts/generate-distro-configs.py). The reference lists the check in no shipped config -- neither its configdefaults.toml nor the openSUSE branch's opensuse.toml -- so it never runs there. The port implements the check and its message is the point (xinetd is obsolete; the replacement is a systemd socket unit), so it runs by default: packages requiring xinetd or shipping /etc/xinetd.d/ files now error, and the run header reports checks: 44 where the reference reports 43. The Fedora flavour config is untouched."
@@ -1261,7 +1269,7 @@ since = "0.1.0"
 case = "global"
 check = "FilesCheck"
 kind = "detail"
-reason = "Port-only `--explain` descriptions for `debug-files-in-non-debug-package`, `infopage-not-compressed`, `kernel-modules-not-in-kernel-packages`, `manpage-not-compressed`, `mimeinfo-cache-packaged`, `no-dependency-on`, `noarch-python-in-64bit-path`, `symlink-contains-up-and-down-segments`, `symlink-has-too-many-up-segments`, `symlink-should-be-absolute`, `zero-length`: the reference emits these findings but ships no descriptions."
+reason = "Port-only `--explain` descriptions for `debug-files-in-non-debug-package`, `infopage-not-compressed`, `kernel-modules-not-in-kernel-packages`, `manpage-not-compressed`, `mimeinfo-cache-packaged`, `no-dependency-on`, `noarch-python-in-64bit-path`, `symlink-contains-up-and-down-segments`, `symlink-has-too-many-up-segments`, `symlink-should-be-absolute`: the reference emits these findings but ships no descriptions."
 since = "0.1.0"
 
 [[divergence]]
