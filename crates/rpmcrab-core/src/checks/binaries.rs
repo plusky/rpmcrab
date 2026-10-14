@@ -193,6 +193,10 @@ struct ReadelfInfo {
     /// no single `e_type`: members can mix types, so it stays `ET_NONE`
     /// (first-member or unanimous would invent semantics).
     elf_type: u16,
+    /// Raw `e_machine` from the ELF header. The RELRO gate keys the
+    /// AMDGPU exclusion on it: GPU code objects are loaded by the GPU
+    /// runtime, never by the dynamic linker.
+    elf_machine: u16,
     /// DF_BIND_NOW (DT_FLAGS) or DF_1_NOW (DT_FLAGS_1). Together with a
     /// GNU_RELRO segment this is the full-versus-partial RELRO distinction.
     bind_now: bool,
@@ -234,6 +238,7 @@ impl ReadelfInfo {
             has_nonweak_undefined: false,
             defines_main: false,
             elf_type: goblin::elf::header::ET_NONE,
+            elf_machine: goblin::elf::header::EM_NONE,
             bind_now: false,
             has_dynamic: false,
             failed: None,
@@ -269,6 +274,7 @@ impl ReadelfInfo {
         };
         info.fill_from_elf(&elf, &data);
         info.elf_type = elf.header.e_type;
+        info.elf_machine = elf.header.e_machine;
         info
     }
 
@@ -2108,6 +2114,8 @@ impl BinariesCheck {
     /// these C-hardening artifacts, so every finding would be noise. Rust
     /// binaries skip only the two C-compiler findings below (see
     /// `is_rust_binary`); the linker-level RELRO checks still apply.
+    /// AMDGPU code objects skip the RELRO findings: no dynamic linker
+    /// ever loads them, so BIND_NOW has nothing to govern.
     fn check_hardening(&self, pkg: &Pkg, pkgfile: &PkgFile, info: &ReadelfInfo, out: &mut Filter) {
         use goblin::elf::header::{ET_DYN, ET_EXEC};
         if self.is_archive || info.is_go_binary() || info.is_zig_binary() {
@@ -2169,8 +2177,11 @@ impl BinariesCheck {
         }
         // RELRO and BIND_NOW are dynamic-linker features: a static binary
         // has no lazy binding for them to protect, so neither finding is
-        // meaningful without a dynamic section.
-        if info.has_dynamic {
+        // meaningful without a dynamic section. AMDGPU code objects are
+        // gated out on the same basis: the GPU runtime loads them, the
+        // dynamic linker never does, and the amdgcn link emits no FLAGS
+        // for BIND_NOW to attach to (rpmcrab#509).
+        if info.has_dynamic && info.elf_machine != goblin::elf::header::EM_AMDGPU {
             let has_relro = info.program_headers.iter().any(|h| h.name == "GNU_RELRO");
             if !has_relro {
                 add_info(out, Level::Warning, pkg, "missing-relro", &[&pkgfile.name]);
@@ -3598,6 +3609,7 @@ mod tests {
                 has_nonweak_undefined: false,
                 defines_main: false,
                 elf_type: goblin::elf::header::ET_EXEC,
+                elf_machine: goblin::elf::header::EM_X86_64,
                 bind_now: false,
                 has_dynamic: false,
                 failed: None,
@@ -4057,6 +4069,51 @@ mod tests {
                 lines_for(&results, finding).len(),
                 1,
                 "{finding} must still fire for static binaries: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hardening_amdgpu_code_object_skips_relro() {
+        // AMDGPU code objects (.hsaco/.co) are loaded by the GPU runtime
+        // into GPU memory; the host dynamic linker never processes them
+        // and the amdgcn link emits no FLAGS, so BIND_NOW has nothing to
+        // govern. Their GNU_RELRO segment covers exactly the vestigial
+        // dynamic section. Both RELRO findings are category errors here
+        // (rpmcrab#509).
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("rocblas", "x86_64", vec![]);
+        let pkgfile = syn_file(
+            "/usr/lib64/rocblas/library/Kernels.so-000-gfx1010.hsaco",
+            "ELF 64-bit LSB shared object, AMD GPU",
+        );
+        let mut info = syn_info();
+        info.elf_type = goblin::elf::header::ET_DYN;
+        info.elf_machine = goblin::elf::header::EM_AMDGPU;
+        // With GNU_RELRO present, partial-relro fires without the gate.
+        info.program_headers = vec![ElfProgramHeader {
+            name: "GNU_RELRO".to_string(),
+            flags: "R".to_string(),
+        }];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_hardening(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        for finding in ["missing-relro", "partial-relro"] {
+            assert!(
+                lines_for(&results, finding).is_empty(),
+                "{finding} must not fire for AMDGPU code objects: {results:?}"
+            );
+        }
+        // Without GNU_RELRO, missing-relro is gated by the same exclusion.
+        info.program_headers = Vec::new();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_hardening(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        for finding in ["missing-relro", "partial-relro"] {
+            assert!(
+                lines_for(&results, finding).is_empty(),
+                "{finding} must not fire for AMDGPU code objects: {results:?}"
             );
         }
     }
@@ -5217,6 +5274,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 has_nonweak_undefined: false,
                 defines_main: false,
                 elf_type: goblin::elf::header::ET_DYN,
+                elf_machine: goblin::elf::header::EM_X86_64,
                 bind_now: false,
                 has_dynamic: false,
                 failed: None,
@@ -5352,6 +5410,7 @@ description = "explicit priority string bypasses the system crypto policy"
             has_nonweak_undefined: false,
             defines_main: false,
             elf_type: goblin::elf::header::ET_EXEC,
+            elf_machine: goblin::elf::header::EM_X86_64,
             bind_now: false,
             has_dynamic: true,
             failed: None,
