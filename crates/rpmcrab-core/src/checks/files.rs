@@ -21,7 +21,7 @@ use super::is_match;
 use super::shared::{
     devel_regex, is_mingw_package, lib_package_regex, macro_regex, python_str_repr,
 };
-use crate::check::{Check, add_info};
+use crate::check::{Check, add_info, make_finding};
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
@@ -2669,41 +2669,62 @@ impl FilesCheck {
                     &[fname],
                 );
             }
+            // Set when only the text gate below marks the file: that is
+            // the population the reference tags script-without-shebang,
+            // renamed to spurious-executable-perm by the port (#426). The
+            // finding carries the old tag as its filter alias so rpmlintrc
+            // opt-outs written against it keep working (#524).
+            let mut renamed_from_sws = false;
             if !fd.nonexec_file {
                 // doc_regex and log_regex checked earlier, no match,
                 // check rest of usual cases here.  Sourced scripts have
                 // their own check, so disregard them here.
-                fd.nonexec_file = fname.ends_with(".pc")
+                let name_based = fname.ends_with(".pc")
                     || is_match(&self.compr_re, fname)
                     || is_match(&self.includefile_re, fname)
                     || is_match(&self.develfile_re, fname)
-                    || fname.starts_with("/etc/logrotate.d/")
-                    // Data file with spurious executable bit: a text file
-                    // with no shebang, not an ELF binary, and not in a
-                    // script path (those keep script-without-shebang). The
-                    // istext gate matches the reference, which early-returns
-                    // on non-text in the same code path and stays silent
-                    // there, so the port warns nowhere the reference is
-                    // silent. Libtool .la files in lib paths are exempt,
-                    // mirroring the reference (its devel-file regex covers
-                    // .a but not .la, and its script-without-shebang path
-                    // exempts them); check_normal_text carries the same
-                    // exemption, but this gate runs first for these files
-                    // (#493).
-                    || (fd.istext
-                        && fd.interpreter.is_none()
-                        && !pkgfile.magic.starts_with("ELF")
-                        && !is_match(&self.script_re, fname)
-                        && !(is_match(&self.lib_path_re, fname) && fname.ends_with(".la")));
+                    || fname.starts_with("/etc/logrotate.d/");
+                // Data file with spurious executable bit: a text file
+                // with no shebang, not an ELF binary, and not in a
+                // script path (those keep script-without-shebang). The
+                // istext gate matches the reference, which early-returns
+                // on non-text in the same code path and stays silent
+                // there, so the port warns nowhere the reference is
+                // silent. Libtool .la files in lib paths are exempt,
+                // mirroring the reference (its devel-file regex covers
+                // .a but not .la, and its script-without-shebang path
+                // exempts them); check_normal_text carries the same
+                // exemption, but this gate runs first for these files
+                // (#493).
+                let text_gate = fd.istext
+                    && fd.interpreter.is_none()
+                    && !pkgfile.magic.starts_with("ELF")
+                    && !is_match(&self.script_re, fname)
+                    && !(is_match(&self.lib_path_re, fname) && fname.ends_with(".la"));
+                fd.nonexec_file = name_based || text_gate;
+                renamed_from_sws = text_gate && !name_based;
             }
             if fd.nonexec_file && !mingw_dll_a_perm_exempt(&pkg.name, fname) {
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "spurious-executable-perm",
-                    &[fname],
-                );
+                if renamed_from_sws {
+                    let mut finding = make_finding(
+                        &pkg.name,
+                        &pkg.arch,
+                        Level::Warning,
+                        "spurious-executable-perm",
+                        vec![fname.to_string()],
+                        None,
+                    );
+                    finding.filter_alias = Some("script-without-shebang");
+                    out.add_info(finding);
+                } else {
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "spurious-executable-perm",
+                        &[fname],
+                    );
+                }
             }
         }
     }
@@ -3561,6 +3582,101 @@ mod tests {
             )],
             "script paths keep script-without-shebang, not spurious"
         );
+    }
+
+    #[test]
+    fn sws_rpmlintrc_filter_suppresses_text_gate_spurious() {
+        // Issue #524 (the grpc shape): the package's rpmlintrc filters the
+        // reference tag script-without-shebang, which is exactly the
+        // population the #426 rename moved to spurious-executable-perm.
+        // The old opt-out must keep working, and the filter must count as
+        // used instead of being reported back as unused-rpmlintrc-filter.
+        // A second, unrelated rpmlintrc filter stays unused.
+        let mut config = test_config();
+        let sws = "spurious-test.* script-without-shebang".to_string();
+        let unrelated = "spurious-test.* no-such-check".to_string();
+        config.filters.push(sws.clone());
+        config.filters.push(unrelated.clone());
+        config.rpmlintrc_filters = vec![sws, unrelated.clone()];
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = spurious_exec_pkg(
+            &dir,
+            &[(
+                "/usr/share/themes/foo/index.theme",
+                "ASCII text",
+                b"[Icon Theme]\nName=Foo\n",
+            )],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        assert_eq!(
+            spurious_script_findings(&out),
+            [],
+            "the script-without-shebang filter suppresses the renamed finding"
+        );
+        assert_eq!(
+            out.unused_filters(&config.rpmlintrc_filters),
+            vec![unrelated.as_str()],
+            "the alias match counts as filter usage; the unrelated filter stays unused"
+        );
+    }
+
+    #[test]
+    fn sws_rpmlintrc_filter_does_not_suppress_name_based_spurious() {
+        // Precision guard for #524: a .pc file is spurious under its own
+        // tag in the reference too (the name-based setter), so it is not
+        // part of the renamed script-without-shebang population and a
+        // script-without-shebang filter must not touch it — the filter
+        // stays unused.
+        let mut config = test_config();
+        let sws = "spurious-test.* script-without-shebang".to_string();
+        config.filters.push(sws.clone());
+        config.rpmlintrc_filters = vec![sws.clone()];
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = spurious_exec_pkg(
+            &dir,
+            &[("/usr/lib/pkgconfig/foo.pc", "ASCII text", b"prefix=/usr\n")],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        assert_eq!(
+            spurious_script_findings(&out),
+            [(
+                "spurious-executable-perm".to_string(),
+                Level::Warning,
+                "spurious-test.noarch: W: spurious-executable-perm \
+                 /usr/lib/pkgconfig/foo.pc"
+                    .to_string(),
+            )],
+            "name-based spurious finding is not the renamed population"
+        );
+        assert_eq!(
+            out.unused_filters(&config.rpmlintrc_filters),
+            vec![sws.as_str()],
+            "no alias match: the filter never fired"
+        );
+    }
+
+    #[test]
+    fn spurious_rpmlintrc_filter_still_suppresses_text_gate_spurious() {
+        // Filters written against the new tag keep working unchanged.
+        let mut config = test_config();
+        config
+            .filters
+            .push("spurious-test.* spurious-executable-perm".to_string());
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = spurious_exec_pkg(
+            &dir,
+            &[(
+                "/usr/share/themes/foo/index.theme",
+                "ASCII text",
+                b"[Icon Theme]\nName=Foo\n",
+            )],
+        );
+        let findings = check_spurious_script(&pkg, &config);
+        assert_eq!(findings, [], "the current-tag filter still suppresses");
     }
 
     #[test]

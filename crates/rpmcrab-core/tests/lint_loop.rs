@@ -60,6 +60,7 @@ impl Check for Recorder {
             pkg_name: "(none)".to_string(),
             arch: None,
             line: None,
+            filter_alias: None,
         });
     }
 

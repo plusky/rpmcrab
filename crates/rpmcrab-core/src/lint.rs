@@ -227,6 +227,7 @@ impl Lint {
                     arch.clone().filter(|a| !a.is_empty())
                 },
                 line: None,
+                filter_alias: None,
             });
         }
     }
@@ -404,6 +405,7 @@ mod exit_code_tests {
                 pkg_name: "testpkg".to_string(),
                 arch: None,
                 line: None,
+                filter_alias: None,
             });
         }
         assert_eq!(lint.filter.score, 2);
@@ -434,6 +436,7 @@ mod exit_code_tests {
                 pkg_name: "testpkg".to_string(),
                 arch: None,
                 line: None,
+                filter_alias: None,
             });
         }
         assert_eq!(lint.filter.printed(Level::Error), 1);
@@ -471,6 +474,7 @@ mod exit_code_tests {
             pkg_name: "testpkg".to_string(),
             arch: None,
             line: None,
+            filter_alias: None,
         });
         assert_eq!(lint.filter.printed(Level::Warning), 1);
         assert_eq!(lint.filter.printed(Level::Error), 0);
@@ -512,6 +516,7 @@ mod exit_code_tests {
             pkg_name: "testpkg".to_string(),
             arch: None,
             line: None,
+            filter_alias: None,
         });
         use crate::render::{JsonRenderer, RenderContext, Renderer};
         let ctx = RenderContext {
@@ -579,6 +584,7 @@ mod exit_code_tests {
                 pkg_name: "testpkg".to_string(),
                 arch: None,
                 line: None,
+                filter_alias: None,
             });
         }
         let ctx = RenderContext {

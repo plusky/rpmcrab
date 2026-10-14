@@ -234,8 +234,18 @@ impl Filter {
                 return;
             }
             let match_string = finding.match_string();
+            // A renamed finding is also matched rendered under its former
+            // name (`filter_alias`), so a filter written against the
+            // reference tag keeps suppressing it — and counts as used.
+            let alias_string = finding
+                .filter_alias
+                .map(|alias| finding.match_string_as(alias));
             for re in &self.filters {
-                if matches!(re.find(&match_string), Ok(Some(_))) {
+                let matched = matches!(re.find(&match_string), Ok(Some(_)))
+                    || alias_string
+                        .as_ref()
+                        .is_some_and(|s| matches!(re.find(s), Ok(Some(_))));
+                if matched {
                     self.used_filters.insert(re.as_str().to_string());
                     self.filtered_out += 1;
                     return;
@@ -427,6 +437,7 @@ mod tests {
             pkg_name: "pkg".to_string(),
             arch: Some("src".to_string()),
             line: None,
+            filter_alias: None,
         }
     }
 
@@ -721,6 +732,29 @@ mod tests {
     }
 
     #[test]
+    fn aliased_finding_matches_filters_under_its_former_name() {
+        // #524: a finding whose tag was renamed for one emission path
+        // carries the old name as its filter alias. A filter written
+        // against the old name suppresses it and counts as used; the same
+        // finding without the alias is not matched.
+        let mut c = cfg();
+        c.filters = vec!["script-without-shebang".to_string()];
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        let mut aliased = finding("spurious-executable-perm", Level::Warning, 0);
+        aliased.filter_alias = Some("script-without-shebang");
+        f.add_info(aliased);
+        assert_eq!(f.filtered_out, 1);
+        assert_eq!(f.printed(Level::Warning), 0);
+        assert!(f.unused_filters(&c.filters).is_empty());
+
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        f.add_info(finding("spurious-executable-perm", Level::Warning, 0));
+        assert_eq!(f.filtered_out, 0);
+        assert_eq!(f.printed(Level::Warning), 1);
+        assert_eq!(f.unused_filters(&c.filters), vec!["script-without-shebang"]);
+    }
+
+    #[test]
     fn blocked_filter_is_unfilterable() {
         let mut c = cfg();
         c.filters = vec!["no-soname".to_string()];
@@ -816,6 +850,7 @@ mod tests {
                 pkg_name: "pkg".to_string(),
                 arch: Some("src".to_string()),
                 line: None,
+                filter_alias: None,
             };
             (check.to_string(), f.line(&c))
         };
