@@ -178,17 +178,6 @@ fn lib_regex() -> &'static Regex {
         .expect("static regex"))
 }
 
-/// Files exempt from the zero-length check (FilesCheck.py:180).
-static NORMAL_ZERO_LENGTH_REGEX: OnceLock<Regex> = OnceLock::new();
-fn normal_zero_length_regex() -> &'static Regex {
-    NORMAL_ZERO_LENGTH_REGEX.get_or_init(|| {
-        Regex::new(
-            r"^/etc/security/console\.apps/|/\.nosearch$|/__init__\.py$|/py\.typed$|\.dist-info/REQUESTED$|/gem\.build_complete$",
-        )
-        .expect("static regex")
-    })
-}
-
 static PERL_TEMP_FILE_REGEX: OnceLock<Regex> = OnceLock::new();
 fn perl_temp_file_regex() -> &'static Regex {
     PERL_TEMP_FILE_REGEX
@@ -387,7 +376,6 @@ pub struct FilesCheck {
     buildconfig_rpath_re: Regex,
     sofile_re: Regex,
     lib_re: Regex,
-    normal_zero_length_re: Regex,
     perl_temp_file_re: Regex,
     interpreter_re: Regex,
     script_re: Regex,
@@ -495,7 +483,6 @@ impl FilesCheck {
             buildconfig_rpath_re: buildconfig_rpath_regex().clone(),
             sofile_re: sofile_regex().clone(),
             lib_re: lib_regex().clone(),
-            normal_zero_length_re: normal_zero_length_regex().clone(),
             perl_temp_file_re: perl_temp_file_regex().clone(),
             interpreter_re: interpreter_regex().clone(),
             script_re: script_regex().clone(),
@@ -2037,7 +2024,6 @@ impl FilesCheck {
         self.check_normal_bin(pkg, fname, pkgfile, st, out);
         self.check_normal_devel(pkg, fname, st, &fd, out);
         self.check_normal_non_readable(pkg, fname, pkgfile, out);
-        self.check_normal_zero_length(pkg, fname, pkgfile, out);
         self.check_normal_world_w(pkg, fname, pkgfile, out);
         self.check_normal_perl_dep(pkg, fname, st, out);
         self.check_normal_python_dep(pkg, fname, st, out);
@@ -2303,23 +2289,6 @@ impl FilesCheck {
                 "non-readable",
                 &[fname, &format!("{:o}", perm)],
             );
-        }
-    }
-
-    fn check_normal_zero_length(
-        &self,
-        pkg: &Pkg,
-        fname: &str,
-        pkgfile: &PkgFile,
-        out: &mut Filter,
-    ) {
-        // zero-length: the reference exempts __init__.py, py.typed, etc.
-        // via normal_zero_length_regex, and skips ghost files.
-        if pkgfile.size == Some(0)
-            && !is_match(&self.normal_zero_length_re, fname)
-            && !pkg.ghost_files.iter().any(|g| g == fname)
-        {
-            add_info(out, Level::Error, pkg, "zero-length", &[fname]);
         }
     }
 
@@ -5109,67 +5078,6 @@ mod tests {
         assert!(
             !results.iter().any(|(n, _)| n == "mimeinfo-cache-packaged"),
             "unexpected: {results:?}"
-        );
-    }
-
-    #[test]
-    fn zero_length_exempts_init_py_and_ghosts() {
-        // Benchmark found: zero-length __init__.py files were flagged, and
-        // ghost files were not skipped. The reference exempts both.
-        let config = test_config();
-        let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
-        // Header only, no extraction: `files` is overwritten wholesale below.
-        let mut pkg = Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture");
-        pkg.files = vec![
-            PkgFile {
-                name: "/usr/lib/python3.12/site-packages/foo/__init__.py".to_string(),
-                path: "/usr/lib/python3.12/site-packages/foo/__init__.py".to_string(),
-                mode: 0o100644,
-                size: Some(0),
-                ..Default::default()
-            },
-            PkgFile {
-                name: "/usr/bin/empty-script".to_string(),
-                path: "/usr/bin/empty-script".to_string(),
-                mode: 0o100755,
-                size: Some(0),
-                ..Default::default()
-            },
-            PkgFile {
-                name: "/var/log/ghost.log".to_string(),
-                path: "/var/log/ghost.log".to_string(),
-                mode: 0o100644,
-                size: Some(0),
-                flags: RPMFILE_GHOST,
-                ..Default::default()
-            },
-        ];
-        pkg.ghost_files = vec!["/var/log/ghost.log".to_string()];
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let mut check = FilesCheck::new(&config);
-        check.check_binary(&pkg, &config, &mut out);
-        let results: Vec<(String, String)> = out
-            .results()
-            .iter()
-            .map(|(n, d)| (n.clone(), d.clone()))
-            .collect();
-        assert!(
-            !results
-                .iter()
-                .any(|(n, d)| n == "zero-length" && d.contains("__init__.py")),
-            "false positive on __init__.py: {results:?}"
-        );
-        assert!(
-            !results
-                .iter()
-                .any(|(n, d)| n == "zero-length" && d.contains("ghost.log")),
-            "false positive on ghost: {results:?}"
-        );
-        assert!(
-            results.iter().any(|(n, d)| n == "zero-length"
-                && d.contains(": E: zero-length")
-                && d.contains("empty-script")),
-            "missing E-level zero-length on empty-script: {results:?}"
         );
     }
 
