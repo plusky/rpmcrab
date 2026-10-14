@@ -71,6 +71,29 @@ fn mingw_dll_a_perm_exempt(pkg_name: &str, fname: &str) -> bool {
     is_mingw_package(pkg_name) && fname.ends_with(".dll.a")
 }
 
+/// Whether the `devel-file-in-non-devel-package` finding is suppressed
+/// for `fname` in `pkg_name`: a MinGW cross package's payload under the
+/// target sys-root (`/usr/<triplet>-w64-mingw32/sys-root/`) is headers
+/// and import libraries by definition -- the devel files are the
+/// product, with no `-devel` split to move them into. The Factory lint
+/// session suppresses the finding for the whole family via the
+/// `mingw32.toml` config the mingw32/64-filesystem packages install
+/// into the lint environment; that file is not part of the mirrored
+/// rpmlint config set, so the suppression lives here instead (issue
+/// #511, divergences.toml).
+fn mingw_sysroot_devel_exempt(pkg_name: &str, fname: &str) -> bool {
+    if !pkg_name.starts_with("mingw32-") && !pkg_name.starts_with("mingw64-") {
+        return false;
+    }
+    let mut segments = fname.split('/');
+    matches!(segments.next(), Some(""))
+        && matches!(segments.next(), Some("usr"))
+        && segments
+            .next()
+            .is_some_and(|triplet| triplet.ends_with("-w64-mingw32"))
+        && matches!(segments.next(), Some("sys-root"))
+}
+
 static INFO_REGEX: OnceLock<Regex> = OnceLock::new();
 fn info_regex() -> &'static Regex {
     INFO_REGEX.get_or_init(|| Regex::new(r"(/usr/share|/usr)/info/").expect("static regex"))
@@ -1742,7 +1765,11 @@ impl FilesCheck {
         // devel-file-in-non-devel-package for .so links: the reference
         // gates on the anchored sofile_regex (FilesCheck.py:165,
         // _check_file_link_devel), so versioned libfoo.so.0 links do not fire.
-        if !st.devel_pkg && is_match(&self.sofile_re, fname) && !link.ends_with(".so") {
+        if !st.devel_pkg
+            && !mingw_sysroot_devel_exempt(&pkg.name, fname)
+            && is_match(&self.sofile_re, fname)
+            && !link.ends_with(".so")
+        {
             add_info(
                 out,
                 Level::Warning,
@@ -2196,6 +2223,7 @@ impl FilesCheck {
         let is_doc = pkg.doc_files.iter().any(|d| d == fname);
         if !st.devel_pkg
             && !is_doc
+            && !mingw_sysroot_devel_exempt(&pkg.name, fname)
             && (fd.is_buildconfig
                 || is_match(&self.includefile_re, fname)
                 || is_match(&self.develfile_re, fname))
@@ -5093,6 +5121,149 @@ mod tests {
                 .any(|(n, _)| n == "devel-file-in-non-devel-package"),
             "false positive on doc-listed header: {results:?}"
         );
+    }
+
+    #[test]
+    fn mingw_sysroot_devel_files_do_not_fire() {
+        // Issue #511: a MinGW cross package's sys-root payload is its
+        // development environment by definition, so the finding does
+        // not fire for files under /usr/<triplet>-w64-mingw32/sys-root/.
+        // Covers both emission sites: normal files (.h, .a, .dll.a,
+        // .pc) and the unversioned .so symlink.
+        let (mut pkg, dir) = pkg_with_files(vec![
+            PkgFile {
+                ..mkfile(
+                    "/usr/x86_64-w64-mingw32/sys-root/mingw/include/stdio.h",
+                    0o100644,
+                    81,
+                )
+            },
+            PkgFile {
+                ..mkfile(
+                    "/usr/x86_64-w64-mingw32/sys-root/mingw/lib/libfoo.a",
+                    0o100644,
+                    82,
+                )
+            },
+            PkgFile {
+                ..mkfile(
+                    "/usr/x86_64-w64-mingw32/sys-root/mingw/lib/libfoo.dll.a",
+                    0o100644,
+                    83,
+                )
+            },
+            PkgFile {
+                linkto: "libfoo.dll".to_string(),
+                ..mkfile(
+                    "/usr/x86_64-w64-mingw32/sys-root/mingw/lib/libfoo.so",
+                    0o120777,
+                    84,
+                )
+            },
+        ]);
+        pkg.name = "mingw64-gcc".to_string();
+        // .pc files only count when the file is text: materialize one so
+        // fd.is_buildconfig is true, mirroring the reference's peek.
+        let pc_path = dir.path().join("foo.pc");
+        std::fs::write(&pc_path, "prefix=/usr\n").expect("write pc fixture");
+        pkg.files.push(PkgFile {
+            path: pc_path.to_string_lossy().into_owned(),
+            ..mkfile(
+                "/usr/x86_64-w64-mingw32/sys-root/mingw/lib/pkgconfig/foo.pc",
+                0o100644,
+                85,
+            )
+        });
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, _)| n == "devel-file-in-non-devel-package"),
+            "false positive on MinGW sys-root payload: {results:?}"
+        );
+    }
+
+    #[test]
+    fn sysroot_devel_files_fire_in_non_mingw_package() {
+        // The exemption is name-scoped: the same sys-root payload in a
+        // package outside the mingw32-/mingw64- family still fires.
+        let (mut pkg, dir) = pkg_with_files(vec![
+            PkgFile {
+                ..mkfile(
+                    "/usr/i686-w64-mingw32/sys-root/mingw/include/stdio.h",
+                    0o100644,
+                    86,
+                )
+            },
+            PkgFile {
+                ..mkfile(
+                    "/usr/i686-w64-mingw32/sys-root/mingw/lib/libfoo.dll.a",
+                    0o100644,
+                    87,
+                )
+            },
+            PkgFile {
+                linkto: "libfoo.dll".to_string(),
+                ..mkfile(
+                    "/usr/i686-w64-mingw32/sys-root/mingw/lib/libfoo.so",
+                    0o120777,
+                    88,
+                )
+            },
+        ]);
+        pkg.name = "foo".to_string();
+        let pc_path = dir.path().join("foo.pc");
+        std::fs::write(&pc_path, "prefix=/usr\n").expect("write pc fixture");
+        pkg.files.push(PkgFile {
+            path: pc_path.to_string_lossy().into_owned(),
+            ..mkfile(
+                "/usr/i686-w64-mingw32/sys-root/mingw/lib/pkgconfig/foo.pc",
+                0o100644,
+                89,
+            )
+        });
+        let results = run_check_binary(&pkg);
+        for f in [
+            "/usr/i686-w64-mingw32/sys-root/mingw/include/stdio.h",
+            "/usr/i686-w64-mingw32/sys-root/mingw/lib/libfoo.dll.a",
+            "/usr/i686-w64-mingw32/sys-root/mingw/lib/libfoo.so",
+            "/usr/i686-w64-mingw32/sys-root/mingw/lib/pkgconfig/foo.pc",
+        ] {
+            assert!(
+                results
+                    .iter()
+                    .any(|(n, d)| n == "devel-file-in-non-devel-package" && d.contains(f)),
+                "missing finding for {f}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mingw_devel_files_outside_sysroot_still_fire() {
+        // The exemption is path-scoped too: devel files a MinGW-named
+        // package ships outside the sys-root (the host include dir, or
+        // the triplet dir without the sys-root level) still fire.
+        let (mut pkg, _dir) = pkg_with_files(vec![
+            PkgFile {
+                ..mkfile("/usr/include/stdio.h", 0o100644, 90)
+            },
+            PkgFile {
+                ..mkfile("/usr/x86_64-w64-mingw32/include/stdio.h", 0o100644, 91)
+            },
+        ]);
+        pkg.name = "mingw64-gcc".to_string();
+        let results = run_check_binary(&pkg);
+        for f in [
+            "/usr/include/stdio.h",
+            "/usr/x86_64-w64-mingw32/include/stdio.h",
+        ] {
+            assert!(
+                results
+                    .iter()
+                    .any(|(n, d)| n == "devel-file-in-non-devel-package" && d.contains(f)),
+                "missing finding for {f}: {results:?}"
+            );
+        }
     }
 
     // Upstream rpmlint#435: mimeinfo.cache must not be packaged as a real file.
