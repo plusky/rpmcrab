@@ -75,6 +75,7 @@ pub(crate) fn make_finding(
         pkg_name: basename(pkg_name).to_string(),
         arch: (!arch.is_empty()).then(|| arch.to_string()),
         line,
+        filter_alias: None,
     }
 }
 
@@ -477,6 +478,7 @@ impl Check for SyntheticCheck {
                 pkg_name: self.pkg_name.clone(),
                 arch: self.arch.clone(),
                 line: None,
+                filter_alias: None,
             });
         }
     }

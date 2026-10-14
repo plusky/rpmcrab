@@ -31,6 +31,13 @@ pub struct Finding {
     pub arch: Option<String>,
     /// Spec line number; omitted for binary findings.
     pub line: Option<u32>,
+    /// The former check name for a finding whose tag the port renamed for
+    /// one emission path (the `script-without-shebang` population that
+    /// `spurious-executable-perm` absorbed): filters are also matched
+    /// against the finding rendered under this name, so rpmlintrc opt-outs
+    /// written against the reference tag keep working. `None` for findings
+    /// whose tag was never renamed.
+    pub filter_alias: Option<&'static str>,
 }
 
 impl Finding {
@@ -64,11 +71,18 @@ impl Finding {
 
     /// The de-coloured filter-match string: no colour, no `(Badness: N)`.
     pub fn match_string(&self) -> String {
+        self.match_string_as(&self.check)
+    }
+
+    /// The match string rendered under another check name — the form a
+    /// filter written against the finding's `filter_alias` is matched
+    /// with. Everything else (prefix, level, details) is unchanged.
+    pub fn match_string_as(&self, check: &str) -> String {
         format!(
             "{} {}: {}{}",
             self.prefix(),
             self.level.letter(),
-            self.check,
+            check,
             self.detail_output()
         )
     }
@@ -127,6 +141,7 @@ mod tests {
             pkg_name: "llvm21-gold".to_string(),
             arch: Some("aarch64".to_string()),
             line: None,
+            filter_alias: None,
         }
     }
 
@@ -180,6 +195,7 @@ mod tests {
             pkg_name: "qdmr.spec".to_string(),
             arch: None,
             line: Some(24),
+            filter_alias: None,
         };
         assert_eq!(
             f.line(&Color::for_tty(false)),
