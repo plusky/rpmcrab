@@ -36,6 +36,15 @@
 //! reported and contributes nothing to the waste total (ledgered as a
 //! `behaviour` divergence). Mixed groups — variants plus a real file, or
 //! bytecode of different modules or directories — report as before.
+//! A duplicate that forms a pair listed in the `DuplicatesWhitelistPairs`
+//! config key does not count toward the same `diff`: both directories of
+//! a whitelisted pair are exacted by different tooling, so neither copy
+//! can be dropped and the duplication is not actionable. The bundled
+//! defaults pair the `*.dist-info/licenses` embed the Python stack
+//! requires (PEP 639) with the `%license` copy SUSE policy requires in
+//! `/usr/share/licenses`, or the `%docdir` copy under
+//! `/usr/share/doc/packages`. The pair likewise stays out of the
+//! `files-duplicated-waste` total, which accumulates the same `diff`.
 //!
 //! Four findings: `hardlink-across-partition` (E),
 //! `hardlink-across-config-files` (E), `files-duplicate` (W),
@@ -65,8 +74,86 @@ enum DuplicateFinding {
     FilesDuplicatedWaste(u64),
 }
 
+/// One side of a `DuplicatesWhitelistPairs` entry: a directory pattern.
+///
+/// A pattern starting with `/` is an absolute directory prefix; any other
+/// pattern is matched against consecutive path components anywhere in
+/// the path. A component may contain `*`, matching any (possibly empty)
+/// text within that component.
+struct DirPattern {
+    anchored: bool,
+    components: Vec<String>,
+}
+
+impl DirPattern {
+    fn parse(text: &str) -> Self {
+        Self {
+            anchored: text.starts_with('/'),
+            components: text
+                .split('/')
+                .filter(|c| !c.is_empty())
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+
+    /// Whether the directory part of `path` matches this pattern.
+    fn matches(&self, path: &str) -> bool {
+        let dir: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+        // The last component is the file name; patterns name directories.
+        let dir = &dir[..dir.len().saturating_sub(1)];
+        if self.components.is_empty() || self.components.len() > dir.len() {
+            return false;
+        }
+        if self.anchored {
+            self.components
+                .iter()
+                .zip(dir.iter())
+                .all(|(p, c)| component_matches(p, c))
+        } else {
+            dir.windows(self.components.len()).any(|window| {
+                self.components
+                    .iter()
+                    .zip(window)
+                    .all(|(p, c)| component_matches(p, c))
+            })
+        }
+    }
+}
+
+/// A directory pair from `DuplicatesWhitelistPairs`: duplicates sitting
+/// one under each directory of the pair do not count against each other.
+struct WhitelistPair {
+    first: DirPattern,
+    second: DirPattern,
+}
+
+impl WhitelistPair {
+    /// Whether the two file paths sit one under each directory of the pair.
+    fn matches(&self, a: &str, b: &str) -> bool {
+        (self.first.matches(a) && self.second.matches(b))
+            || (self.first.matches(b) && self.second.matches(a))
+    }
+}
+
+/// Whether one path component matches a pattern component; `*` matches
+/// any (possibly empty) text, every other character is literal.
+fn component_matches(pattern: &str, component: &str) -> bool {
+    fn go(pattern: &[u8], text: &[u8]) -> bool {
+        if pattern.is_empty() {
+            return text.is_empty();
+        }
+        if pattern[0] == b'*' {
+            return (0..=text.len()).any(|i| go(&pattern[1..], &text[i..]));
+        }
+        !text.is_empty() && pattern[0] == text[0] && go(&pattern[1..], &text[1..])
+    }
+    go(pattern.as_bytes(), component.as_bytes())
+}
+
 pub struct DuplicatesCheck {
     min_size: u64,
+    whitelist_pairs: Vec<WhitelistPair>,
 }
 
 impl DuplicatesCheck {
@@ -76,7 +163,37 @@ impl DuplicatesCheck {
             .get("DuplicatesMinSize")
             .and_then(|v| v.as_integer())
             .unwrap_or(0) as u64;
-        Self { min_size }
+        Self {
+            min_size,
+            whitelist_pairs: Self::parse_whitelist_pairs(config),
+        }
+    }
+
+    /// The `DuplicatesWhitelistPairs` config value: a list of
+    /// two-pattern directory pairs. Malformed entries are skipped; the
+    /// bundled defaults are well-formed.
+    fn parse_whitelist_pairs(config: &Config) -> Vec<WhitelistPair> {
+        let Some(entries) = config
+            .configuration
+            .get("DuplicatesWhitelistPairs")
+            .and_then(|v| v.as_array())
+        else {
+            return Vec::new();
+        };
+        entries
+            .iter()
+            .filter_map(|entry| {
+                let pair = entry.as_array()?;
+                let (first, second) = match pair.as_slice() {
+                    [first, second] => (first.as_str()?, second.as_str()?),
+                    _ => return None,
+                };
+                Some(WhitelistPair {
+                    first: DirPattern::parse(first),
+                    second: DirPattern::parse(second),
+                })
+            })
+            .collect()
     }
 
     /// First directory of the path: `/usr` for `/usr/bin/foo`.
@@ -147,7 +264,9 @@ impl DuplicatesCheck {
     }
 
     /// Pure core: group files by md5 and emit findings. `is_config` reports
-    /// whether a filename is a config file; `is_ghost` for ghost files.
+    /// whether a filename is a config file; `is_ghost` for ghost files;
+    /// `is_whitelisted_pair` whether two filenames sit one under each
+    /// directory of a `DuplicatesWhitelistPairs` pair.
     ///
     /// Implements the #1603 fix: within each md5 group, files are further
     /// grouped by `(rdev, inode)` so hardlinked files are told apart from
@@ -159,6 +278,7 @@ impl DuplicatesCheck {
         min_size: u64,
         is_config: impl Fn(&str) -> bool,
         is_ghost: impl Fn(&str) -> bool,
+        is_whitelisted_pair: impl Fn(&str, &str) -> bool,
     ) -> Vec<DuplicateFinding> {
         let mut md5s: BTreeMap<&str, BTreeSet<usize>> = BTreeMap::new();
         let mut sizes: BTreeMap<&str, u64> = BTreeMap::new();
@@ -238,11 +358,21 @@ impl DuplicatesCheck {
                 let mut diff = diff;
                 let topdir = Self::get_topdir(&first.name);
                 for &di in &duplicates {
+                    // Hardlinks to `first` are not part of `diff` (the
+                    // inode-group size already excluded them), so they
+                    // must not decrement it either.
+                    if (files[di].rdev, files[di].inode) == (first.rdev, first.inode) {
+                        continue;
+                    }
                     // Duplicates under a different top-level directory
                     // cannot be hardlinked together, so they do not count
                     // as wasted space (#771: same narrowed definition as
-                    // the hardlink-across-partition trigger).
-                    if topdir != Self::get_topdir(&files[di].name) {
+                    // the hardlink-across-partition trigger). A duplicate
+                    // forming a whitelisted pair with `first` does not
+                    // count either: both copies are tooling-mandated.
+                    if topdir != Self::get_topdir(&files[di].name)
+                        || is_whitelisted_pair(&first.name, &files[di].name)
+                    {
                         diff -= 1;
                     }
                 }
@@ -321,6 +451,7 @@ impl Check for DuplicatesCheck {
             self.min_size,
             |n| pkg.config_files.contains(&n.to_string()),
             |n| pkg.ghost_files.contains(&n.to_string()),
+            |a, b| self.whitelist_pairs.iter().any(|pair| pair.matches(a, b)),
         );
         if is_mingw_package(&pkg.name) {
             // The Factory lint session filters files-duplicate wholesale
@@ -376,6 +507,24 @@ mod tests {
     fn no_ghost(_: &str) -> bool {
         false
     }
+    fn no_whitelist(_: &str, _: &str) -> bool {
+        false
+    }
+
+    /// The bundled defaults' whitelist pairs, via the real parse path.
+    fn bundled_whitelist() -> Vec<WhitelistPair> {
+        let table: toml::Table = toml::from_str(include_str!("../../data/configdefaults.toml"))
+            .expect("parse configdefaults");
+        let config = Config {
+            configuration: table,
+            ..Default::default()
+        };
+        DuplicatesCheck::parse_whitelist_pairs(&config)
+    }
+
+    fn is_whitelisted(pairs: &[WhitelistPair]) -> impl Fn(&str, &str) -> bool + '_ {
+        move |a, b| pairs.iter().any(|p| p.matches(a, b))
+    }
 
     #[test]
     fn no_duplicates_is_quiet() {
@@ -384,7 +533,10 @@ mod tests {
             pkgfile("/usr/bin/b", "bbb", 100, 2),
         ];
         let refs: Vec<&PkgFile> = files.iter().collect();
-        assert!(DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost).is_empty());
+        assert!(
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -394,7 +546,8 @@ mod tests {
             pkgfile("/usr/bin/b", "aaa", 100, 2),
         ];
         let refs: Vec<&PkgFile> = files.iter().collect();
-        let findings = DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost);
+        let findings =
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist);
         assert!(
             findings
                 .iter()
@@ -410,7 +563,8 @@ mod tests {
             pkgfile("/usr/bin/b", "aaa", 100, 1),
         ];
         let refs: Vec<&PkgFile> = files.iter().collect();
-        let findings = DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost);
+        let findings =
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist);
         assert!(
             !findings
                 .iter()
@@ -426,7 +580,8 @@ mod tests {
             pkgfile("/usr/bin/b", "aaa", 10, 2),
         ];
         let refs: Vec<&PkgFile> = files.iter().collect();
-        let findings = DuplicatesCheck::find_duplicates(&refs, 50, no_config, no_ghost);
+        let findings =
+            DuplicatesCheck::find_duplicates(&refs, 50, no_config, no_ghost, no_whitelist);
         assert!(findings.is_empty(), "{findings:?}");
     }
 
@@ -443,7 +598,8 @@ mod tests {
             pkgfile("/usr/bin/c", "aaa", 100, 2), // genuine duplicate
         ];
         let refs: Vec<&PkgFile> = files.iter().collect();
-        let findings = DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost);
+        let findings =
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist);
         assert_eq!(
             findings,
             vec![
@@ -470,7 +626,8 @@ mod tests {
         ];
         let refs: Vec<&PkgFile> = files.iter().collect();
         assert!(
-            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost).is_empty(),
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist)
+                .is_empty(),
             "hardlink inside one top-level directory is not across-partition"
         );
     }
@@ -484,7 +641,7 @@ mod tests {
         ];
         let refs: Vec<&PkgFile> = files.iter().collect();
         assert_eq!(
-            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost),
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist),
             vec![DuplicateFinding::HardlinkAcrossPartition(
                 "/var/lib/b".into(),
                 "/usr/bin/a".into(),
@@ -503,7 +660,7 @@ mod tests {
         ];
         let refs: Vec<&PkgFile> = files.iter().collect();
         assert_eq!(
-            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost),
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist),
             vec![DuplicateFinding::FilesDuplicate(
                 "/usr/lib/b".into(),
                 "/usr/bin/a".into(),
@@ -520,7 +677,8 @@ mod tests {
         ];
         let refs: Vec<&PkgFile> = files.iter().collect();
         assert!(
-            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost).is_empty(),
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist)
+                .is_empty(),
             "duplicates across top-level directories cannot be linked"
         );
     }
@@ -553,7 +711,7 @@ mod tests {
         ];
         let refs: Vec<&PkgFile> = files.iter().collect();
         assert_eq!(
-            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost),
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist),
             vec![
                 DuplicateFinding::FilesDuplicate(
                     "/usr/share/z".into(),
@@ -562,6 +720,215 @@ mod tests {
                 DuplicateFinding::FilesDuplicatedWaste(120_000),
             ],
         );
+    }
+
+    #[test]
+    fn distinfo_license_pair_is_whitelisted() {
+        // Issue #510: the *.dist-info/licenses embed (PEP 639) and the
+        // %license copy in /usr/share/licenses are both mandated, so the
+        // pair is not reported -- at any size (150_000 also pins that the
+        // pair stays out of the files-duplicated-waste total).
+        let pairs = bundled_whitelist();
+        assert!(!pairs.is_empty(), "bundled defaults must carry the pairs");
+        for size in [100, 150_000] {
+            let files = [
+                pkgfile(
+                    "/usr/lib/python3.13/site-packages/foo-1.0.dist-info/licenses/LICENSE",
+                    "aaa",
+                    size,
+                    1,
+                ),
+                pkgfile("/usr/share/licenses/foo/LICENSE", "aaa", size, 2),
+            ];
+            let refs: Vec<&PkgFile> = files.iter().collect();
+            assert!(
+                DuplicatesCheck::find_duplicates(
+                    &refs,
+                    0,
+                    no_config,
+                    no_ghost,
+                    is_whitelisted(&pairs)
+                )
+                .is_empty(),
+                "size {size}"
+            );
+        }
+        // The %docdir variant of the pair is whitelisted too.
+        let files = [
+            pkgfile(
+                "/usr/lib/python3.13/site-packages/foo-1.0.dist-info/licenses/LICENSE",
+                "aaa",
+                100,
+                1,
+            ),
+            pkgfile("/usr/share/doc/packages/foo/LICENSE", "aaa", 100, 2),
+        ];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        assert!(
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, is_whitelisted(&pairs))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn license_pairs_without_distinfo_still_fire() {
+        // The whitelist covers only the dist-info pair: a %license copy
+        // duplicated into the %docdir (no dist-info member), a dist-info
+        // license duplicated into an unrelated directory, and two
+        // dist-info copies of one file all keep firing.
+        let pairs = bundled_whitelist();
+        for (a, b) in [
+            (
+                "/usr/share/licenses/foo/LICENSE",
+                "/usr/share/doc/packages/foo/LICENSE",
+            ),
+            (
+                "/usr/lib/python3.13/site-packages/foo-1.0.dist-info/licenses/LICENSE",
+                "/usr/share/foo/LICENSE",
+            ),
+            (
+                "/usr/lib/python3.13/site-packages/foo-1.0.dist-info/licenses/LICENSE",
+                "/usr/lib/python3.13/site-packages/bar-2.0.dist-info/licenses/LICENSE",
+            ),
+        ] {
+            let files = [pkgfile(a, "aaa", 100, 1), pkgfile(b, "aaa", 100, 2)];
+            let refs: Vec<&PkgFile> = files.iter().collect();
+            let findings = DuplicatesCheck::find_duplicates(
+                &refs,
+                0,
+                no_config,
+                no_ghost,
+                is_whitelisted(&pairs),
+            );
+            assert!(
+                findings
+                    .iter()
+                    .any(|f| matches!(f, DuplicateFinding::FilesDuplicate(_, _))),
+                "{a} vs {b}: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_group_whitelists_only_the_pair() {
+        // Three identical copies: the %license file (first), its
+        // dist-info embed (whitelisted against first) and a %docdir copy
+        // (no dist-info member, so not a pair). Only the pair member is
+        // suppressed; the group still fires on the remaining duplicate.
+        // Suppressed members still appear in the detail, as with the
+        // top-level-directory suppression. The 60_000 size makes the
+        // residual diff observable: diff 1 keeps the waste total at
+        // 60_000 (no files-duplicated-waste); an unsuppressed pair would
+        // give diff 2 and a 120_000 waste finding, and suppressing the
+        // whole group would give no files-duplicate at all.
+        let pairs = bundled_whitelist();
+        let files = [
+            pkgfile("/usr/share/licenses/foo/LICENSE", "aaa", 60_000, 1),
+            pkgfile(
+                "/usr/lib/python3.13/site-packages/foo-1.0.dist-info/licenses/LICENSE",
+                "aaa",
+                60_000,
+                2,
+            ),
+            pkgfile("/usr/share/doc/packages/foo/LICENSE", "aaa", 60_000, 3),
+        ];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        assert_eq!(
+            DuplicatesCheck::find_duplicates(
+                &refs,
+                0,
+                no_config,
+                no_ghost,
+                is_whitelisted(&pairs)
+            ),
+            vec![DuplicateFinding::FilesDuplicate(
+                "/usr/share/licenses/foo/LICENSE".into(),
+                "/usr/lib/python3.13/site-packages/foo-1.0.dist-info/licenses/LICENSE:/usr/share/doc/packages/foo/LICENSE".into(),
+            )],
+        );
+    }
+
+    #[test]
+    fn whitelisted_hardlink_does_not_silence_genuine_duplicate() {
+        // `diff` already excludes hardlinks to `first` (via the inode
+        // group size), so the suppression loop must not decrement for
+        // one again: A = the %license copy (first), B = its dist-info
+        // embed hardlinked to A and forming a whitelisted pair with it,
+        // C = the same content on its own inode. The group must still
+        // fire on C, and C alone counts toward the waste total.
+        let pairs = bundled_whitelist();
+        let files = [
+            pkgfile("/usr/share/licenses/foo/LICENSE", "aaa", 150_000, 1),
+            pkgfile(
+                "/usr/lib/python3.13/site-packages/foo-1.0.dist-info/licenses/LICENSE",
+                "aaa",
+                150_000,
+                1,
+            ),
+            pkgfile("/usr/share/foo/LICENSE", "aaa", 150_000, 2),
+        ];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        assert_eq!(
+            DuplicatesCheck::find_duplicates(
+                &refs,
+                0,
+                no_config,
+                no_ghost,
+                is_whitelisted(&pairs)
+            ),
+            vec![
+                DuplicateFinding::FilesDuplicate(
+                    "/usr/share/licenses/foo/LICENSE".into(),
+                    "/usr/lib/python3.13/site-packages/foo-1.0.dist-info/licenses/LICENSE:/usr/share/foo/LICENSE".into(),
+                ),
+                DuplicateFinding::FilesDuplicatedWaste(150_000),
+            ],
+        );
+    }
+
+    #[test]
+    fn whitelisted_hardlink_pair_alone_is_quiet() {
+        // The whitelisted pair on its own, with the dist-info member
+        // hardlinked to the %license copy: no genuine duplicate exists,
+        // so nothing fires and nothing counts as waste, at any size.
+        let pairs = bundled_whitelist();
+        let files = [
+            pkgfile("/usr/share/licenses/foo/LICENSE", "aaa", 150_000, 1),
+            pkgfile(
+                "/usr/lib/python3.13/site-packages/foo-1.0.dist-info/licenses/LICENSE",
+                "aaa",
+                150_000,
+                1,
+            ),
+        ];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        assert!(
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, is_whitelisted(&pairs))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn whitelist_pattern_matching() {
+        let distinfo = DirPattern::parse("*.dist-info/licenses");
+        assert!(
+            distinfo
+                .matches("/usr/lib/python3.13/site-packages/foo-1.0.dist-info/licenses/LICENSE")
+        );
+        // Nested content below the licenses directory still matches.
+        assert!(distinfo.matches("/usr/lib/foo-1.0.dist-info/licenses/sub/extra.txt"));
+        assert!(!distinfo.matches("/usr/lib/python3.13/site-packages/foo-1.0.dist-info/METADATA"));
+        assert!(!distinfo.matches("/usr/share/licenses/foo/LICENSE"));
+
+        let licenses = DirPattern::parse("/usr/share/licenses");
+        assert!(licenses.matches("/usr/share/licenses/foo/LICENSE"));
+        assert!(!licenses.matches("/usr/share/licensesfoo/LICENSE"));
+        assert!(!licenses.matches("/opt/usr/share/licenses/foo/LICENSE"));
+
+        assert!(component_matches("*.dist-info", "foo-1.0.dist-info"));
+        assert!(!component_matches("*.dist-info", "foo-1.0.egg-info"));
+        assert!(component_matches("licenses", "licenses"));
+        assert!(!component_matches("licenses", "licensesfoo"));
     }
 
     #[test]
@@ -615,7 +982,8 @@ mod tests {
         ];
         let refs: Vec<&PkgFile> = files.iter().collect();
         assert!(
-            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost).is_empty(),
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist)
+                .is_empty(),
             "bytecode variants of one module are not actionable duplicates"
         );
     }
@@ -640,7 +1008,8 @@ mod tests {
         ];
         let refs: Vec<&PkgFile> = files.iter().collect();
         assert!(
-            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost).is_empty(),
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist)
+                .is_empty(),
             "suppressed variants contribute no files-duplicated-waste"
         );
     }
@@ -683,7 +1052,8 @@ mod tests {
         ];
         let refs: Vec<&PkgFile> = files.iter().collect();
         assert!(
-            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost).is_empty(),
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist)
+                .is_empty(),
             "opt triples, free-threaded tags and legacy .pyc/.pyo pairs are all variants"
         );
     }
@@ -711,7 +1081,7 @@ mod tests {
         ];
         let refs: Vec<&PkgFile> = files.iter().collect();
         assert_eq!(
-            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost),
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist),
             vec![
                 DuplicateFinding::FilesDuplicate(
                     "/usr/share/doc/m/mod.txt".into(),
@@ -743,7 +1113,7 @@ mod tests {
         ];
         let refs: Vec<&PkgFile> = files.iter().collect();
         assert_eq!(
-            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost),
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist),
             vec![DuplicateFinding::FilesDuplicate(
                 "/usr/lib/python3.13/site-packages/m/__pycache__/b.cpython-313.pyc".into(),
                 "/usr/lib/python3.13/site-packages/m/__pycache__/a.cpython-313.pyc".into(),
@@ -771,7 +1141,7 @@ mod tests {
         ];
         let refs: Vec<&PkgFile> = files.iter().collect();
         assert_eq!(
-            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost),
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist),
             vec![DuplicateFinding::FilesDuplicate(
                 "/usr/lib/python3.13/site-packages/omniidl_be/__pycache__/__init__.cpython-313.pyc"
                     .into(),
