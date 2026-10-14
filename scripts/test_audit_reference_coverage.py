@@ -1007,6 +1007,7 @@ def test_stale_check_catches_name_keyed_entry():
         "uncompressed-zip",
         "unversioned-explicit-obsoletes",
         "unversioned-explicit-provides",
+        "zero-length",
     }, names
     assert all(e.get("case") == "global" for e in missing), [
         (e.get("case"), e.get("check")) for e in missing]
