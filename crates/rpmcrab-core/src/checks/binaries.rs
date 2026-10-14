@@ -494,6 +494,33 @@ impl ReadelfInfo {
         self.is_zig
     }
 
+    /// Haskell toolchain output links the Haskell runtime libraries:
+    /// every GHC-produced executable and library carries a `libHS*`
+    /// DT_NEEDED (at minimum `libHSrts`), and the libraries are
+    /// themselves `libHS*` by SONAME (`libHSrts` links only system
+    /// libraries, so its SONAME is its only signal). GHC emits no
+    /// stack-protector or `_FORTIFY_SOURCE` instrumentation for
+    /// Haskell code — the buffer-shaped imports arrive via the
+    /// runtime — so the C-compiler findings would be noise. A C
+    /// program that merely ships alongside (GHC's hp2ps, unlit)
+    /// carries neither signal and is still checked.
+    fn is_haskell_binary(&self) -> bool {
+        self.soname
+            .as_deref()
+            .is_some_and(|s| s.starts_with("libHS"))
+            || self.needed.iter().any(|n| n.starts_with("libHS"))
+    }
+
+    /// OCaml toolchain output carries the runtime entry point or
+    /// module-qualified symbols of OCaml-generated code (see
+    /// `is_ocaml_symbol`). ocamlopt emits no stack-protector or
+    /// `_FORTIFY_SOURCE` instrumentation for OCaml code — the
+    /// buffer-shaped imports belong to the runtime — so the
+    /// C-compiler findings would be noise.
+    fn is_ocaml_binary(&self) -> bool {
+        self.functions.iter().any(|s| is_ocaml_symbol(s))
+    }
+
     /// A shared object for which an empty DT_NEEDED is legitimate, not
     /// "missing dependency information": a dlopen-only plugin (no
     /// DT_SONAME, so never DT_NEEDED-linked), a fully self-contained
@@ -521,6 +548,32 @@ fn is_rust_symbol(name: &str) -> bool {
     // may carry one, and the base name is what identifies the runtime.
     let base = name.split('@').next().unwrap_or(name);
     base == "rust_begin_unwind" || base == "rust_eh_personality" || base.starts_with("__rust_")
+}
+
+/// An OCaml toolchain symbol: the native-code runtime entry point
+/// `caml_startup`, linked into every ocamlopt-produced executable
+/// (and exported there because OCaml links executables so their
+/// symbols stay visible to dynamically loaded code), or a
+/// module-qualified name of OCaml-generated code: `caml` directly
+/// followed by the capitalised module name (`camlStdlib__List`,
+/// `camlUnix__entry`). The runtime's own C functions and the OCaml
+/// C stub libraries use `caml_` + lowercase primitives instead
+/// (`caml_alloc`, `caml_main`), which never match: ocamlrun and the
+/// `dll*_stubs.so` libraries are compiled C and stay checked.
+fn is_ocaml_symbol(name: &str) -> bool {
+    // Strip a @VERSION suffix like is_rust_symbol does: .dynsym names
+    // may carry one, and the base name is what identifies the runtime.
+    let base = name.split('@').next().unwrap_or(name);
+    if base == "caml_startup" {
+        return true;
+    }
+    match base.strip_prefix("caml") {
+        Some(rest) => rest
+            .as_bytes()
+            .first()
+            .is_some_and(|b| b.is_ascii_uppercase()),
+        None => false,
+    }
 }
 
 fn detect_rust_binary(elf: &goblin::elf::Elf, data: &[u8], functions: &[String]) -> bool {
@@ -2365,9 +2418,10 @@ impl BinariesCheck {
     /// for shared objects, so the check only makes sense for executables.
     ///
     /// Go and Zig binaries are skipped: neither toolchain emits any of
-    /// these C-hardening artifacts, so every finding would be noise. Rust
-    /// binaries skip only the two C-compiler findings below (see
-    /// `is_rust_binary`); the linker-level RELRO checks still apply.
+    /// these C-hardening artifacts, so every finding would be noise. Rust,
+    /// Haskell and OCaml binaries skip only the two C-compiler findings
+    /// below (see `is_rust_binary`, `is_haskell_binary`,
+    /// `is_ocaml_binary`); the linker-level RELRO checks still apply.
     /// AMDGPU code objects skip the RELRO findings: no dynamic linker
     /// ever loads them, so BIND_NOW has nothing to govern.
     fn check_hardening(&self, pkg: &Pkg, pkgfile: &PkgFile, info: &ReadelfInfo, out: &mut Filter) {
@@ -2385,10 +2439,13 @@ impl BinariesCheck {
         if info.elf_type != ET_EXEC && info.elf_type != ET_DYN {
             return;
         }
-        // Rust emits neither `_FORTIFY_SOURCE` instrumentation nor
-        // default stack-protector instrumentation: both findings would
-        // be noise. When in doubt the binary is treated as C.
+        // Rust, Haskell and OCaml emit neither `_FORTIFY_SOURCE`
+        // instrumentation nor default stack-protector instrumentation
+        // for their own code: both findings would be noise. When in
+        // doubt the binary is treated as C.
         let is_rust = info.is_rust_binary();
+        let is_haskell = info.is_haskell_binary();
+        let is_ocaml = info.is_ocaml_binary();
         // Each finding applies only when the binary has "something to
         // protect" (rpmcrab#447): a binary that imports no fortifiable
         // libc function cannot gain any `__*_chk` instrumentation, and a
@@ -2406,7 +2463,12 @@ impl BinariesCheck {
             .iter()
             .chain(&info.undefined_functions)
             .any(|s| is_fortify_symbol(s));
-        if !is_rust && is_fortify_applicable(info) && !has_fortify_symbol {
+        if !is_rust
+            && !is_haskell
+            && !is_ocaml
+            && is_fortify_applicable(info)
+            && !has_fortify_symbol
+        {
             add_info(
                 out,
                 Level::Warning,
@@ -2420,7 +2482,12 @@ impl BinariesCheck {
             .iter()
             .chain(&info.undefined_functions)
             .any(|s| is_stack_protector_symbol(s));
-        if !is_rust && is_stack_protector_applicable(info) && !has_ssp_symbol {
+        if !is_rust
+            && !is_haskell
+            && !is_ocaml
+            && is_stack_protector_applicable(info)
+            && !has_ssp_symbol
+        {
             add_info(
                 out,
                 Level::Warning,
@@ -4224,6 +4291,22 @@ mod tests {
         assert!(!is_rust_symbol("memcpy@GLIBC_2.17"));
     }
 
+    #[test]
+    fn ocaml_symbol_detection() {
+        assert!(is_ocaml_symbol("caml_startup"));
+        assert!(is_ocaml_symbol("camlStdlib__List"));
+        assert!(is_ocaml_symbol("camlUnix__entry"));
+        // @VERSION suffixes (from .dynsym) are stripped before matching.
+        assert!(is_ocaml_symbol("camlStdlib__Bytes@@OCaml_5.0"));
+        // The runtime's and stub libraries' C primitives never match.
+        assert!(!is_ocaml_symbol("caml_alloc"));
+        assert!(!is_ocaml_symbol("caml_main"));
+        assert!(!is_ocaml_symbol("caml_named_value"));
+        assert!(!is_ocaml_symbol("caml_copy_string@GLIBC_2.17"));
+        assert!(!is_ocaml_symbol("memcpy"));
+        assert!(!is_ocaml_symbol("caml"));
+    }
+
     fn hardening_results_for(
         is_rust: bool,
         is_zig: bool,
@@ -4294,6 +4377,150 @@ mod tests {
             lines_for(&results, "missing-relro").len(),
             1,
             "missing-relro must still fire for Rust: {results:?}"
+        );
+    }
+
+    fn hardening_results_with(
+        needed: &[&str],
+        soname: Option<&str>,
+        functions: &[&str],
+        undefined_functions: &[&str],
+    ) -> Vec<(String, String)> {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/bin/probe", "ELF 64-bit LSB pie executable");
+        let mut info = syn_info();
+        info.needed = needed.iter().map(|s| s.to_string()).collect();
+        info.soname = soname.map(|s| s.to_string());
+        info.functions = functions.iter().map(|s| s.to_string()).collect();
+        info.undefined_functions = undefined_functions.iter().map(|s| s.to_string()).collect();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_hardening(&pkg, &pkgfile, &info, &mut out);
+        out.results().to_vec()
+    }
+
+    #[test]
+    fn hardening_haskell_executable_skips_fortify_and_ssp() {
+        // A GHC-produced executable links the Haskell runtime libraries;
+        // the buffer-shaped call (memcpy) arrives via the RTS/FFI, and
+        // GHC emits no canary or fortify instrumentation for it.
+        let results = hardening_results_with(
+            &[
+                "libHSrts-1.0.3-ghc9.12.4.so",
+                "libHSbase-4.21.2.0-9c1f-ghc9.12.4.so",
+                "libc.so.6",
+            ],
+            None,
+            &[],
+            &["memcpy"],
+        );
+        assert!(
+            lines_for(&results, "missing-fortify").is_empty(),
+            "missing-fortify must not fire for Haskell: {results:?}"
+        );
+        assert!(
+            lines_for(&results, "missing-stack-protector").is_empty(),
+            "missing-stack-protector must not fire for Haskell: {results:?}"
+        );
+        // Linker-level RELRO checks still apply to Haskell binaries.
+        assert_eq!(
+            lines_for(&results, "missing-relro").len(),
+            1,
+            "missing-relro must still fire for Haskell: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_haskell_library_by_soname_skips_fortify_and_ssp() {
+        // libHSrts itself links only system libraries; its own SONAME
+        // is the Haskell signal.
+        let results = hardening_results_with(
+            &["libc.so.6", "libffi.so.8"],
+            Some("libHSrts-1.0.3-ghc9.12.4.so"),
+            &[],
+            &["memcpy"],
+        );
+        assert!(
+            lines_for(&results, "missing-fortify").is_empty(),
+            "missing-fortify must not fire for libHSrts: {results:?}"
+        );
+        assert!(
+            lines_for(&results, "missing-stack-protector").is_empty(),
+            "missing-stack-protector must not fire for libHSrts: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_ocaml_executable_skips_fortify_and_ssp() {
+        // A native OCaml executable statically links the runtime and
+        // exports its entry point; ocamlopt emits no canary or fortify
+        // instrumentation for OCaml code.
+        let results = hardening_results_with(
+            &["libzstd.so.1", "libc.so.6"],
+            None,
+            &["caml_startup", "camlStdlib__List"],
+            &["memcpy"],
+        );
+        assert!(
+            lines_for(&results, "missing-fortify").is_empty(),
+            "missing-fortify must not fire for OCaml: {results:?}"
+        );
+        assert!(
+            lines_for(&results, "missing-stack-protector").is_empty(),
+            "missing-stack-protector must not fire for OCaml: {results:?}"
+        );
+        // Linker-level RELRO checks still apply to OCaml binaries.
+        assert_eq!(
+            lines_for(&results, "missing-relro").len(),
+            1,
+            "missing-relro must still fire for OCaml: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_ocaml_plugin_skips_fortify_and_ssp() {
+        // A native plugin (.cmxs) carries module-qualified symbols of
+        // OCaml-generated code and imports the runtime from the host.
+        let results = hardening_results_with(
+            &["libc.so.6"],
+            None,
+            &["camlUnix__entry", "camlStdlib__Bytes", "memcpy"],
+            &["caml_alloc", "caml_named_value", "memcpy"],
+        );
+        assert!(
+            lines_for(&results, "missing-fortify").is_empty(),
+            "missing-fortify must not fire for an OCaml plugin: {results:?}"
+        );
+        assert!(
+            lines_for(&results, "missing-stack-protector").is_empty(),
+            "missing-stack-protector must not fire for an OCaml plugin: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_ocaml_c_stub_still_flagged() {
+        // A C stub library for OCaml bindings is compiled C: it defines
+        // and imports only `caml_` primitives (and the runtime's
+        // `caml_main` shape is C too, e.g. ocamlrun). Neither the
+        // runtime entry point of native executables nor
+        // module-qualified generated-code symbols are present, so the
+        // findings must still fire.
+        let results = hardening_results_with(
+            &["libc.so.6"],
+            None,
+            &["caml_main", "caml_alloc", "caml_named_value", "memcpy"],
+            &["caml_copy_string", "caml_raise_not_found", "memcpy"],
+        );
+        assert_eq!(
+            lines_for(&results, "missing-fortify").len(),
+            1,
+            "missing-fortify must still fire for a C stub library: {results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-stack-protector").len(),
+            1,
+            "missing-stack-protector must still fire for a C stub library: {results:?}"
         );
     }
 
