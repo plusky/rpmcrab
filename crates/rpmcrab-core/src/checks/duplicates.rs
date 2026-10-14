@@ -25,6 +25,18 @@
 //! larger total where the reference's two-level suppression keeps the
 //! package under the threshold (ledgered as a `behaviour` divergence).
 //!
+//! One md5 group shape is suppressed outright (issue #518): when every
+//! member is a bytecode variant of one module — same directory and stem,
+//! differing only in interpreter cache tag, `.opt-N` level or
+//! `.pyc`/`.pyo` extension — the group is the standard bytecompile
+//! output emitted at several optimisation levels. The distro's macros
+//! generate every level unconditionally, and neither the dedicated
+//! hardlink brp (not wired into the build) nor `%fdupes` links the
+//! variants, so no packager action reclaims the space: the group is not
+//! reported and contributes nothing to the waste total (ledgered as a
+//! `behaviour` divergence). Mixed groups — variants plus a real file, or
+//! bytecode of different modules or directories — report as before.
+//!
 //! Four findings: `hardlink-across-partition` (E),
 //! `hardlink-across-config-files` (E), `files-duplicate` (W),
 //! `files-duplicated-waste` (E).
@@ -83,6 +95,56 @@ impl DuplicatesCheck {
         }
     }
 
+    /// Whether every file in an md5 group is a bytecode variant of the
+    /// same module: same directory and stem for all members (issue #518).
+    fn is_bytecode_variant_group(files: &[&PkgFile], indices: &BTreeSet<usize>) -> bool {
+        let mut key: Option<(&str, &str)> = None;
+        for &i in indices {
+            let Some(k) = Self::bytecode_key(&files[i].name) else {
+                return false;
+            };
+            match key {
+                None => key = Some(k),
+                Some(prev) if prev != k => return false,
+                _ => {}
+            }
+        }
+        key.is_some()
+    }
+
+    /// `(directory, module stem)` for a Python bytecode file name, or
+    /// `None` for any other file. The stem strips the `.pyc`/`.pyo`
+    /// extension, an `.opt-N` optimisation suffix and one trailing
+    /// interpreter cache tag (`.cpython-313`, `.pypy310`, ...), so
+    /// `__pycache__/mod.cpython-313.opt-1.pyc`,
+    /// `__pycache__/mod.cpython-313.pyc` and the legacy `mod.pyo` all
+    /// map to the same module.
+    fn bytecode_key(name: &str) -> Option<(&str, &str)> {
+        let (dir, base) = name.rsplit_once('/')?;
+        let mut stem = base
+            .strip_suffix(".pyc")
+            .or_else(|| base.strip_suffix(".pyo"))?;
+        if let Some(idx) = stem.rfind(".opt-") {
+            let level = &stem[idx + ".opt-".len()..];
+            if !level.is_empty() && level.bytes().all(|b| b.is_ascii_digit()) {
+                stem = &stem[..idx];
+            }
+        }
+        if let Some(idx) = stem.rfind('.') {
+            let tag = &stem[idx + 1..];
+            let known = ["cpython-", "pypy", "graalpy-", "ironpython-", "jython-"]
+                .iter()
+                .any(|prefix| tag.starts_with(prefix));
+            if known && tag.bytes().any(|b| b.is_ascii_digit()) {
+                stem = &stem[..idx];
+            }
+        }
+        if stem.is_empty() {
+            return None;
+        }
+        Some((dir, stem))
+    }
+
     /// Pure core: group files by md5 and emit findings. `is_config` reports
     /// whether a filename is a config file; `is_ghost` for ghost files.
     ///
@@ -117,6 +179,9 @@ impl DuplicatesCheck {
 
         for (md5_hash, indices) in &md5s {
             if indices.len() == 1 {
+                continue;
+            }
+            if Self::is_bytecode_variant_group(files, indices) {
                 continue;
             }
             let mut duplicates: Vec<usize> = indices.iter().copied().collect();
@@ -477,6 +542,223 @@ mod tests {
                 ),
                 DuplicateFinding::FilesDuplicatedWaste(120_000),
             ],
+        );
+    }
+
+    #[test]
+    fn bytecode_key_cases() {
+        let key = DuplicatesCheck::bytecode_key;
+        assert_eq!(
+            key("/usr/lib/python3.13/site-packages/m/__pycache__/mod.cpython-313.pyc"),
+            Some(("/usr/lib/python3.13/site-packages/m/__pycache__", "mod"))
+        );
+        assert_eq!(
+            key("/usr/lib/python3.13/site-packages/m/__pycache__/mod.cpython-313.opt-1.pyc"),
+            Some(("/usr/lib/python3.13/site-packages/m/__pycache__", "mod"))
+        );
+        assert_eq!(
+            key("/usr/lib/python3.13/site-packages/m/__pycache__/mod.cpython-313t.opt-2.pyc"),
+            Some(("/usr/lib/python3.13/site-packages/m/__pycache__", "mod"))
+        );
+        assert_eq!(
+            key("/usr/lib/python3.13/mod.pyo"),
+            Some(("/usr/lib/python3.13", "mod"))
+        );
+        assert_eq!(
+            key("/usr/lib/python3.13/mod.pyc"),
+            Some(("/usr/lib/python3.13", "mod"))
+        );
+        assert_eq!(key("/usr/bin/mod"), None);
+        assert_eq!(key("/usr/lib/python3.13/mod.py"), None);
+        assert_eq!(key("relative.pyc"), None);
+    }
+
+    #[test]
+    fn bytecode_opt_variants_are_not_duplicates() {
+        // Issue #518: the bytecompile macros emit every module at
+        // optimize levels 0 and 1; for a module with no docstrings or
+        // asserts to strip the products are byte-identical. Neither the
+        // (unwired) hardlink brp nor %fdupes links them, so no packager
+        // action reclaims the space and the group stays unreported.
+        let files = [
+            pkgfile(
+                "/usr/lib/python3.13/site-packages/m/__pycache__/mod.cpython-313.pyc",
+                "aaa",
+                4_000,
+                1,
+            ),
+            pkgfile(
+                "/usr/lib/python3.13/site-packages/m/__pycache__/mod.cpython-313.opt-1.pyc",
+                "aaa",
+                4_000,
+                2,
+            ),
+        ];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        assert!(
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost).is_empty(),
+            "bytecode variants of one module are not actionable duplicates"
+        );
+    }
+
+    #[test]
+    fn bytecode_variants_contribute_no_waste() {
+        // The suppressed group must not feed the waste total either:
+        // at 200_000 bytes a reported pair would cross the threshold.
+        let files = [
+            pkgfile(
+                "/usr/lib/python3.13/site-packages/m/__pycache__/mod.cpython-313.pyc",
+                "aaa",
+                200_000,
+                1,
+            ),
+            pkgfile(
+                "/usr/lib/python3.13/site-packages/m/__pycache__/mod.cpython-313.opt-1.pyc",
+                "aaa",
+                200_000,
+                2,
+            ),
+        ];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        assert!(
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost).is_empty(),
+            "suppressed variants contribute no files-duplicated-waste"
+        );
+    }
+
+    #[test]
+    fn bytecode_triple_and_free_threaded_variants_are_suppressed() {
+        let files = [
+            pkgfile(
+                "/usr/lib/python3.13/site-packages/m/__pycache__/mod.cpython-313.pyc",
+                "aaa",
+                4_000,
+                1,
+            ),
+            pkgfile(
+                "/usr/lib/python3.13/site-packages/m/__pycache__/mod.cpython-313.opt-1.pyc",
+                "aaa",
+                4_000,
+                2,
+            ),
+            pkgfile(
+                "/usr/lib/python3.13/site-packages/m/__pycache__/mod.cpython-313.opt-2.pyc",
+                "aaa",
+                4_000,
+                3,
+            ),
+            pkgfile(
+                "/usr/lib/python3.13/site-packages/n/__pycache__/mod.cpython-313t.pyc",
+                "bbb",
+                4_000,
+                4,
+            ),
+            pkgfile(
+                "/usr/lib/python3.13/site-packages/n/__pycache__/mod.cpython-313t.opt-1.pyc",
+                "bbb",
+                4_000,
+                5,
+            ),
+            pkgfile("/usr/lib/python3.13/legacy.pyc", "ccc", 4_000, 6),
+            pkgfile("/usr/lib/python3.13/legacy.pyo", "ccc", 4_000, 7),
+        ];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        assert!(
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost).is_empty(),
+            "opt triples, free-threaded tags and legacy .pyc/.pyo pairs are all variants"
+        );
+    }
+
+    #[test]
+    fn bytecode_variants_plus_real_file_are_reported() {
+        // Mixed group: the two variants share their md5 with a real
+        // file. The group is not all variants of one module, so the
+        // normal rule reports it — the real file is not hidden by its
+        // bytecode lookalikes.
+        let files = [
+            pkgfile(
+                "/usr/lib/python3.13/site-packages/m/__pycache__/mod.cpython-313.opt-1.pyc",
+                "aaa",
+                200_000,
+                1,
+            ),
+            pkgfile(
+                "/usr/lib/python3.13/site-packages/m/__pycache__/mod.cpython-313.pyc",
+                "aaa",
+                200_000,
+                2,
+            ),
+            pkgfile("/usr/share/doc/m/mod.txt", "aaa", 200_000, 3),
+        ];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        assert_eq!(
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost),
+            vec![
+                DuplicateFinding::FilesDuplicate(
+                    "/usr/share/doc/m/mod.txt".into(),
+                    "/usr/lib/python3.13/site-packages/m/__pycache__/mod.cpython-313.opt-1.pyc:/usr/lib/python3.13/site-packages/m/__pycache__/mod.cpython-313.pyc".into(),
+                ),
+                DuplicateFinding::FilesDuplicatedWaste(400_000),
+            ],
+        );
+    }
+
+    #[test]
+    fn different_modules_identical_bytecode_are_reported() {
+        // Identical bytecode of two DIFFERENT modules (empty __init__
+        // files are the classic) is not one module's variant set: the
+        // group still reports.
+        let files = [
+            pkgfile(
+                "/usr/lib/python3.13/site-packages/m/__pycache__/a.cpython-313.pyc",
+                "aaa",
+                200,
+                1,
+            ),
+            pkgfile(
+                "/usr/lib/python3.13/site-packages/m/__pycache__/b.cpython-313.pyc",
+                "aaa",
+                200,
+                2,
+            ),
+        ];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        assert_eq!(
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost),
+            vec![DuplicateFinding::FilesDuplicate(
+                "/usr/lib/python3.13/site-packages/m/__pycache__/b.cpython-313.pyc".into(),
+                "/usr/lib/python3.13/site-packages/m/__pycache__/a.cpython-313.pyc".into(),
+            )],
+        );
+    }
+
+    #[test]
+    fn same_stem_variants_in_different_directories_are_reported() {
+        // omniORB shape: two packages' __init__ bytecode, same stem,
+        // different directories — different modules, still reported.
+        let files = [
+            pkgfile(
+                "/usr/lib/python3.13/site-packages/omniidl/__pycache__/__init__.cpython-313.pyc",
+                "aaa",
+                200,
+                1,
+            ),
+            pkgfile(
+                "/usr/lib/python3.13/site-packages/omniidl_be/__pycache__/__init__.cpython-313.pyc",
+                "aaa",
+                200,
+                2,
+            ),
+        ];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        assert_eq!(
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost),
+            vec![DuplicateFinding::FilesDuplicate(
+                "/usr/lib/python3.13/site-packages/omniidl_be/__pycache__/__init__.cpython-313.pyc"
+                    .into(),
+                "/usr/lib/python3.13/site-packages/omniidl/__pycache__/__init__.cpython-313.pyc"
+                    .into(),
+            )],
         );
     }
 
