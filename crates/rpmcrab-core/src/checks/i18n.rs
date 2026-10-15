@@ -1,11 +1,12 @@
-//! `I18NCheck` — locale directory, man page locale and language-pack checks.
+//! `I18NCheck` — locale directory, man page locale and `%lang` checks.
 //!
-//! Ported from `rpmlint/checks/I18NCheck.py`. Eight `add_info` sites; the
-//! `incorrect-i18n-tag-*` and `incorrect-locale-*` finding names are dynamic
-//! (suffixed with the corrected code), the rest are static:
+//! Covers the reference's `add_info` call sites in
+//! `rpmlint/checks/I18NCheck.py`, except its trailing-language
+//! `no-dependency-on` site, which the port does not emit. The
+//! `incorrect-i18n-tag-*` and `incorrect-locale-*` finding names are
+//! dynamic (suffixed with the corrected code), the rest are static:
 //! `incorrect-locale-subdir`, `invalid-lc-messages-dir`,
-//! `invalid-locale-man-dir`, `file-not-in-%lang`, `subfile-not-in-%lang`,
-//! `no-dependency-on`.
+//! `invalid-locale-man-dir`, `file-not-in-%lang`, `subfile-not-in-%lang`.
 
 use fancy_regex::Regex;
 use librpm::Tag;
@@ -129,26 +130,6 @@ fn capture<'t>(re: &Regex, text: &'t str, group: usize) -> Option<&'t str> {
     }
 }
 
-/// The language suffix of a `-lang` package name, mirroring the reference's
-/// `-('aa'|…|'qaa-qtz')$` alternation over all of `LANGUAGES`, with one
-/// deliberate exception: `doc` never counts. It is an ISO 639 code, but a
-/// `-doc` package is a documentation subpackage, not a language pack, and
-/// there is no `locales-doc` package to depend on (#459).
-///
-/// Every code but one contains no `-`, so the alternation matches exactly
-/// when the text after the final `-` is a code. The single exception is
-/// `qaa-qtz` — a private-use *range* entry, not a real code — matched
-/// literally here.
-fn trailing_language(name: &str) -> Option<&str> {
-    if let Some(prefix) = name.strip_suffix("qaa-qtz")
-        && prefix.ends_with('-')
-    {
-        return Some("qaa-qtz");
-    }
-    let (_, suffix) = name.rsplit_once('-')?;
-    (suffix != "doc" && is_language(suffix)).then_some(suffix)
-}
-
 /// What the LC_MESSAGES/man probe found for one file.
 struct LocaleProbe<'a> {
     /// Error finding for a locale dir the ISO data does not know.
@@ -214,15 +195,10 @@ impl I18NCheck {
         }
     }
 
-    /// Pure core over mockable inputs: `(path, lang)` files, header i18n
-    /// tags, require names and the package name. Returns
+    /// Pure core over mockable inputs: `(path, lang)` files and header
+    /// i18n tags. Returns
     /// `(level, finding, details)` in emission order.
-    fn collect(
-        files: &[(&str, &str)],
-        i18n_tags: &[&str],
-        requires: &[&str],
-        name: &str,
-    ) -> Vec<(Level, String, Vec<String>)> {
+    fn collect(files: &[(&str, &str)], i18n_tags: &[&str]) -> Vec<(Level, String, Vec<String>)> {
         let locale_re = locale_regex();
         let subdir_re = correct_subdir_regex();
         let lc_re = lc_messages_regex();
@@ -321,13 +297,6 @@ impl I18NCheck {
             }
         }
 
-        if let Some(lang) = trailing_language(name) {
-            let locales = format!("locales-{lang}");
-            if locales != name && !requires.contains(&locales.as_str()) {
-                out.push((Level::Error, "no-dependency-on".to_string(), vec![locales]));
-            }
-        }
-
         out
     }
 }
@@ -345,9 +314,8 @@ impl Check for I18NCheck {
             .iter()
             .map(|f| (f.name.as_str(), f.lang.as_str()))
             .collect();
-        let requires: Vec<&str> = pkg.requires.iter().map(|d| d.name.as_str()).collect();
         let tag_refs: Vec<&str> = i18n_tags.iter().map(String::as_str).collect();
-        for (level, check, details) in Self::collect(&files, &tag_refs, &requires, &pkg.name) {
+        for (level, check, details) in Self::collect(&files, &tag_refs) {
             let detail_refs: Vec<&str> = details.iter().map(String::as_str).collect();
             add_info(out, level, pkg, &check, &detail_refs);
         }
@@ -372,8 +340,6 @@ mod tests {
                 ("/usr/share/locale/xx-yy/LC_MESSAGES/b.mo", ""),
             ],
             &[],
-            &[],
-            "foo",
         );
         let subdir: Vec<_> = findings
             .iter()
@@ -388,12 +354,7 @@ mod tests {
 
     #[test]
     fn sane_locale_subdir_is_quiet() {
-        let findings = I18NCheck::collect(
-            &[("/usr/share/locale/de/LC_MESSAGES/a.mo", "de")],
-            &[],
-            &[],
-            "foo",
-        );
+        let findings = I18NCheck::collect(&[("/usr/share/locale/de/LC_MESSAGES/a.mo", "de")], &[]);
         assert!(findings.is_empty(), "{findings:?}");
     }
 
@@ -401,19 +362,14 @@ mod tests {
     fn exception_dirs_are_quiet() {
         for dir in ["C", "POSIX", "UTF-8", "ISO-8859-15"] {
             let path = format!("/usr/share/locale/{dir}");
-            let findings = I18NCheck::collect(&[(path.as_str(), "")], &[], &[], "foo");
+            let findings = I18NCheck::collect(&[(path.as_str(), "")], &[]);
             assert!(findings.is_empty(), "{dir}: {findings:?}");
         }
     }
 
     #[test]
     fn incorrect_locale_code_is_remapped() {
-        let findings = I18NCheck::collect(
-            &[("/usr/share/locale/in/LC_MESSAGES/a.mo", "in")],
-            &[],
-            &[],
-            "foo",
-        );
+        let findings = I18NCheck::collect(&[("/usr/share/locale/in/LC_MESSAGES/a.mo", "in")], &[]);
         // "in" is syntactically fine, so no incorrect-locale-subdir; the
         // mapping fires, and since "in" is not a real ISO code the semantic
         // check fires too. The %lang tag keeps the warning away.
@@ -427,19 +383,14 @@ mod tests {
 
     #[test]
     fn incorrect_i18n_header_tag_is_remapped() {
-        let findings = I18NCheck::collect(&[], &["iw_IL", "de"], &[], "foo");
+        let findings = I18NCheck::collect(&[], &["iw_IL", "de"]);
         assert_eq!(names(&findings), vec!["incorrect-i18n-tag-he_IL"]);
         assert_eq!(findings[0].2, vec!["iw_IL"]);
     }
 
     #[test]
     fn unknown_lc_messages_dir_is_invalid() {
-        let findings = I18NCheck::collect(
-            &[("/usr/share/locale/xx/LC_MESSAGES/a.mo", "")],
-            &[],
-            &[],
-            "foo",
-        );
+        let findings = I18NCheck::collect(&[("/usr/share/locale/xx/LC_MESSAGES/a.mo", "")], &[]);
         // "xx" is syntactically a valid subdir, so only the semantic checks fire.
         assert_eq!(
             names(&findings),
@@ -450,7 +401,7 @@ mod tests {
 
     #[test]
     fn unknown_man_dir_is_invalid() {
-        let findings = I18NCheck::collect(&[("/usr/share/man/xx/man1/foo.1", "")], &[], &[], "foo");
+        let findings = I18NCheck::collect(&[("/usr/share/man/xx/man1/foo.1", "")], &[]);
         assert_eq!(
             names(&findings),
             vec!["invalid-locale-man-dir", "file-not-in-%lang"],
@@ -460,29 +411,19 @@ mod tests {
 
     #[test]
     fn known_man_dir_is_quiet() {
-        let findings = I18NCheck::collect(&[("/usr/share/man/de/man1/foo.1", "")], &[], &[], "foo");
+        let findings = I18NCheck::collect(&[("/usr/share/man/de/man1/foo.1", "")], &[]);
         assert!(findings.is_empty(), "{findings:?}");
     }
 
     #[test]
     fn mo_file_without_lang_warns() {
-        let findings = I18NCheck::collect(
-            &[("/usr/share/locale/de/LC_MESSAGES/a.mo", "")],
-            &[],
-            &[],
-            "foo",
-        );
+        let findings = I18NCheck::collect(&[("/usr/share/locale/de/LC_MESSAGES/a.mo", "")], &[]);
         assert_eq!(names(&findings), vec!["file-not-in-%lang"]);
     }
 
     #[test]
     fn mo_file_with_lang_is_quiet() {
-        let findings = I18NCheck::collect(
-            &[("/usr/share/locale/de/LC_MESSAGES/a.mo", "de")],
-            &[],
-            &[],
-            "foo",
-        );
+        let findings = I18NCheck::collect(&[("/usr/share/locale/de/LC_MESSAGES/a.mo", "de")], &[]);
         assert!(findings.is_empty(), "{findings:?}");
     }
 
@@ -496,7 +437,7 @@ mod tests {
             "/usr/share/libreoffice/share/locale/de/LC_MESSAGES/foo.mo",
             "/usr/share/kvirc/5.2/locale/about_de.mo",
         ] {
-            let findings = I18NCheck::collect(&[(path, "")], &[], &[], "foo");
+            let findings = I18NCheck::collect(&[(path, "")], &[]);
             assert!(findings.is_empty(), "{path}: {findings:?}");
         }
     }
@@ -505,7 +446,7 @@ mod tests {
     fn mo_file_in_locale_tree_outside_lc_messages_still_warns() {
         // The restriction is tree-level, not LC_MESSAGES-only: an
         // untagged `.mo` anywhere under /usr/share/locale warns.
-        let findings = I18NCheck::collect(&[("/usr/share/locale/de/foo.mo", "")], &[], &[], "foo");
+        let findings = I18NCheck::collect(&[("/usr/share/locale/de/foo.mo", "")], &[]);
         assert_eq!(names(&findings), vec!["file-not-in-%lang"]);
     }
 
@@ -517,8 +458,6 @@ mod tests {
                 "de",
             )],
             &[],
-            &[],
-            "foo",
         );
         assert!(findings.is_empty(), "{findings:?}");
     }
@@ -531,8 +470,6 @@ mod tests {
                 ("/usr/share/locale/de/LC_MESSAGES/a.mo", ""),
             ],
             &[],
-            &[],
-            "foo",
         );
         assert!(findings.is_empty(), "{findings:?}");
     }
@@ -545,8 +482,6 @@ mod tests {
                 ("/usr/share/locale/de/LC_MESSAGES/a.mo", ""),
             ],
             &[],
-            &[],
-            "foo",
         );
         assert!(
             names(&findings).contains(&"subfile-not-in-%lang"),
@@ -555,64 +490,36 @@ mod tests {
     }
 
     #[test]
-    fn lang_package_without_locales_dependency_errors() {
-        let findings = I18NCheck::collect(&[], &[], &[], "foo-de");
-        assert_eq!(names(&findings), vec!["no-dependency-on"]);
-        assert_eq!(findings[0].2, vec!["locales-de"]);
-    }
-
-    #[test]
-    fn lang_package_with_locales_dependency_is_quiet() {
-        let findings = I18NCheck::collect(&[], &[], &["locales-de"], "foo-de");
-        assert!(findings.is_empty(), "{findings:?}");
-    }
-
-    #[test]
-    fn locales_package_itself_is_quiet() {
-        let findings = I18NCheck::collect(&[], &[], &[], "locales-de");
-        assert!(findings.is_empty(), "{findings:?}");
-    }
-
-    #[test]
-    fn doc_package_is_quiet() {
-        // A `-doc` package is a documentation subpackage, not a language
-        // pack, even though `doc` is an ISO 639 code; the reference demands
-        // a dependency on the nonexistent `locales-doc` here (#459).
-        let findings = I18NCheck::collect(&[], &[], &[], "foo-doc");
-        assert!(findings.is_empty(), "{findings:?}");
-    }
-
-    #[test]
-    fn czech_lang_package_without_locales_dependency_errors() {
-        let findings = I18NCheck::collect(&[], &[], &[], "foo-cs");
-        assert_eq!(names(&findings), vec!["no-dependency-on"]);
-        assert_eq!(findings[0].2, vec!["locales-cs"]);
+    fn killed_locales_dependency_finding_stays_absent() {
+        // The trailing-language `no-dependency-on` emission is removed
+        // (#534): the `locales-<lang>` packages it demanded are Mandriva's
+        // locale model and no package named `locales-<lang>` exists. These
+        // are the package-name shapes that used to fire.
+        for name in ["foo-de", "foo-cs", "foo-doc", "foo-qaa-qtz"] {
+            let mut pkg = Pkg::open_no_extract(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm")
+                    .as_path(),
+            )
+            .expect("open fixture shell");
+            pkg.name = name.to_string();
+            pkg.files = vec![];
+            let config = Config::default();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            let mut check = I18NCheck::new(&config);
+            check.check_binary(&pkg, &config, &mut out);
+            assert!(
+                !out.results().iter().any(|(n, _)| n == "no-dependency-on"),
+                "{name}: {:?}",
+                out.results()
+            );
+        }
     }
 
     #[test]
     fn plain_package_name_is_quiet() {
-        let findings = I18NCheck::collect(&[], &[], &[], "foo");
+        let findings = I18NCheck::collect(&[], &[]);
         assert!(findings.is_empty(), "{findings:?}");
-    }
-
-    #[test]
-    fn hyphenated_range_code_matches_literally() {
-        // `qaa-qtz` is the only LANGUAGES entry containing '-'; the
-        // reference alternation matches it verbatim at the end of the name.
-        let findings = I18NCheck::collect(&[], &[], &[], "foo-qaa-qtz");
-        assert_eq!(names(&findings), vec!["no-dependency-on"]);
-        assert_eq!(findings[0].2, vec!["locales-qaa-qtz"]);
-    }
-
-    #[test]
-    fn trailing_language_detection() {
-        assert_eq!(trailing_language("foo-de"), Some("de"));
-        assert_eq!(trailing_language("foo-de_DE"), None);
-        assert_eq!(trailing_language("foo"), None);
-        assert_eq!(trailing_language("de"), None);
-        assert_eq!(trailing_language("foo-"), None);
-        assert_eq!(trailing_language("-de"), Some("de"));
-        assert_eq!(trailing_language("foo-doc"), None);
     }
 
     #[test]
