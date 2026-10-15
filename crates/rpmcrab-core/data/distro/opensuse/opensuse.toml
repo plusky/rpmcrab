@@ -136,7 +136,6 @@ Filters = [
     ' devel-file-in-non-devel-package.*-config',
     'libtool\.\S+: \w: devel-file-in-non-devel-package',
     'sdb.* dangling-relative-symlink /usr/share/doc/sdb/.*/gifs ../gifs',
-    'kernel-modules-not-in-kernel-packages',
 
 # SUSE kmp's don't need manual depmod (bnc#456048)
     'configure-without-libdir-spec',

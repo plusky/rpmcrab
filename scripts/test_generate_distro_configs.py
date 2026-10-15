@@ -954,5 +954,29 @@ def test_retarget_filters_byte_exact_only():
     assert retargeted == [], retargeted
 
 
+def test_drop_live_filters_drops_kernel_modules_line():
+    """The kernel-modules filter is dropped via DROP_LIVE_FILTERS.
+
+    The check is config-gated off in both implementations
+    (KernelModuleRPMsOK defaults to true), so the line can never match;
+    the drop is unconditional \u2014 the finding staying in the tree is
+    the point of this table, unlike PRUNE_CANDIDATES.
+    """
+    text = (
+        'Filters = [\n'
+        "    'kernel-modules-not-in-kernel-packages',\n"
+        "    ' dangerous-command.*',\n"
+        ']\n'
+    )
+    pruned, dropped, retargeted = [], [], []
+    out = gen.prune_stale_filters(
+        text, {"kernel-modules-not-in-kernel-packages"}, pruned, dropped, retargeted)
+    assert 'kernel-modules-not-in-kernel-packages' not in out, out
+    assert "    ' dangerous-command.*',\n" in out, out
+    assert len(dropped) == 1, dropped
+    assert 'kernel-modules-not-in-kernel-packages' in dropped[0], dropped
+    assert pruned == [] and retargeted == [], (pruned, retargeted)
+
+
 if __name__ == "__main__":
     sys.exit(main())
