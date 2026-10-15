@@ -1103,6 +1103,61 @@ def test_scope_filters_leaves_blocked_filters_and_other_lists_alone():
     assert log == [], log
 
 
+def test_scope_filters_rewrites_bare_read_error_entry():
+    """The bare read-error entry is replaced by its ENOENT-scoped form.
+
+    Same guard as the ldconfig rewrite test: if the rewrite silently
+    stopped firing (upstream rewords the line, the matcher stops
+    recognising it), the vendored config would ship the blanket filter
+    again with no trace — the log assertion guards that.
+    """
+    scoped, _reason = gen.SCOPE_FILTERS["read-error"]
+    text = (
+        "Filters = [\n"
+        "    ' non-standard-dir-perm ',\n"
+        "    ' read-error ',\n"
+        "    ' non-readable ',\n"
+        "]\n"
+    )
+    log = []
+    out = gen.scope_filters(text, log)
+    assert f"    '{scoped}',\n" in out, out
+    assert "' read-error ',\n" not in out, out
+    assert "' non-standard-dir-perm ',\n" in out, out
+    assert "' non-readable ',\n" in out, out
+    assert len(log) == 1 and "read-error" in log[0], log
+
+
+def test_scope_filters_read_error_pattern_matches_enoent_detail_only():
+    """The scoped read-error pattern keys on the ENOENT detail.
+
+    The measured class (issue #579) is the bindir-shebang peek opening
+    a symlink whose target is a %ghost placeholder: the rendered
+    detail is the io::Error text 'No such file or directory
+    (os error 2)'. A read failure with any other errno — what a
+    genuine tool or package defect looks like — must NOT match, so
+    it surfaces instead of being eaten by the narrowed filter.
+    """
+    import re
+
+    scoped, _reason = gen.SCOPE_FILTERS["read-error"]
+    filtered = [
+        "arptables.x86_64: W: read-error No such file or directory (os error 2)",
+        "python313-impacket.noarch: W: read-error No such file or directory (os error 2)",
+        "ca-certificates.noarch: W: read-error No such file or directory (os error 2)",
+    ]
+    visible = [
+        "foo.x86_64: W: read-error Permission denied (os error 13)",
+        "foo.x86_64: W: read-error Is a directory (os error 21)",
+        "foo.x86_64: W: read-error Input/output error (os error 5)",
+        "foo.x86_64: W: read-error Too many levels of symbolic links (os error 40)",
+    ]
+    for line in filtered:
+        assert re.search(scoped, line), line
+    for line in visible:
+        assert not re.search(scoped, line), line
+
+
 def test_dedupe_filters_drops_exact_duplicates():
     """Byte-identical Filters lines collapse to the first occurrence.
 
