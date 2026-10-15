@@ -312,6 +312,16 @@ DROP_LIVE_FILTERS = {
     # ledgered in tests/parity/divergences.toml.
     "kernel-modules-not-in-kernel-packages": "config-dead: KernelModuleRPMsOK defaults to true in both implementations and nothing overrides it, so the check never emits (issue #538)",
     "dangling-relative-symlink": "check is session-aware (rpmcrab#547): sibling-resolved links stay quiet, genuinely dangling ones surface; the blanket filter's 'we check for that already' rationale is stale",
+    # Blanket hide inherited verbatim from upstream's openSUSE config
+    # (upstream's Fedora config has the same line commented out and
+    # lets the finding fire). The check is a verbatim port and sound;
+    # measured over the Factory corpus (issue #557) the filter
+    # suppresses 137 E lines in 44 srcpkgs, 24 of them genuine
+    # accidental markings (rear's whole-tree %config(noreplace),
+    # postfix-bdb's glob, pcp's generated lists, build's helper).
+    # Ruled in the config-filters follow-through (issue #538) and
+    # ledgered in tests/parity/divergences.toml.
+    "executable-marked-as-config-file": "blanket filter dropped by ruling (issue #557): the Factory set it suppresses (137 E lines, 44 srcpkgs) includes 24 genuine accidental markings no other check covers; deliberate shapes belong in per-package rpmlintrc",
 }
 
 # (finding, scope) -> reason: Filters entries scoped to dead paths. The finding

@@ -1133,6 +1133,28 @@ def test_retarget_filters_spells_crontabs_tag_in_full():
     assert "'^filesystem\\..*:  missing-dependency-to-cron'," in out, out
     assert len(retargeted) == 1, retargeted
     assert 'missing-dependency-to-crontabs' in retargeted[0], retargeted
+def test_drop_live_filters_drops_executable_config_line():
+    """The executable-marked-as-config-file filter is dropped via
+    DROP_LIVE_FILTERS (ruling in issue #557).
+
+    The vendored line carries a leading space (' executable-...'):
+    pure_finding_pattern strips it, and the drop is unconditional --
+    the finding becoming visible is the point of this table.
+    """
+    text = (
+        'Filters = [\n'
+        "    ' executable-marked-as-config-file',\n"
+        "    ' dangerous-command.*',\n"
+        ']\n'
+    )
+    pruned, dropped, retargeted = [], [], []
+    out = gen.prune_stale_filters(
+        text, {"executable-marked-as-config-file"}, pruned, dropped, retargeted)
+    assert 'executable-marked-as-config-file' not in out, out
+    assert "    ' dangerous-command.*',\n" in out, out
+    assert len(dropped) == 1, dropped
+    assert 'executable-marked-as-config-file' in dropped[0], dropped
+    assert pruned == [] and retargeted == [], (pruned, retargeted)
 
 
 if __name__ == "__main__":
