@@ -1552,6 +1552,14 @@ upstream = "https://github.com/plusky/rpmcrab/issues/531"
 
 [[divergence]]
 case = "global"
+check = "postin-without-ghost-file-creation"
+kind = "missing"
+reason = "Deliberate removal (issue #562): the port does not emit this finding -- it flags each declared %ghost whose path never appears as a literal substring in the %prein/%postin scriptlet text, a detection model that predates systemd-tmpfiles and update-alternatives, the mechanisms that create ghosts today. Measured over the Factory corpus (17,242 srcpkgs / 51,586 binary RPMs; predicate-exact scan validated against both implementations on anchors, pcp 6,668 lines alike) the finding fires on 10,125 lines in 782 srcpkgs -- 97.9% of all %ghost declarations corpus-wide -- and hand-checked classification found no genuine defect among them: tmpfiles creation (~6,700, pcp stash-relocate architecture), update-alternatives (2,269; --install creates /etc/alternatives/<name> internally and never spells it), kernel delegated postin, admin placeholders, tool-generated caches and payload that materialises post-install by design. Both upstream distro configs (openSUSE and Fedora) filter it, so the finding is dead in every shipped configuration while still carrying parity and maintenance surface. The emission and its registered error detail are removed; the sibling ghost-files-without-postin stays, and the exact-vector fixture pins in the PostCheck tests keep the absence pinned under cargo test. The reference still emits it."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/562"
+
+[[divergence]]
+case = "global"
 check = "hardcoded-prefix-tag"
 kind = "missing"
 reason = "Deliberate removal per triage: the Prefix: tag is obsolete and ignored by RPM, the same class as the killed BuildRoot findings. The port does not emit it. The reference still emits it."
