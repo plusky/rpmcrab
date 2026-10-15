@@ -64,6 +64,7 @@
 #   Filters: dropped 'no-dependency-on' scoped to 'locales' (dead scope: the I18NCheck locales-* dependency rule is removed (issue #534); the finding stays live from FilesCheck)
 #   Filters: dropped 'hardcoded-prefix-tag' (killed: Prefix: tag obsolete/ignored)
 #   Filters: dropped 'no-default-runlevel' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped 'postin-without-ghost-file-creation' (killed: check dropped (issue #562); literal-substring model predates tmpfiles/update-alternatives, fires on 97.9% of %ghost declarations)
 #   Filters: dropped 'invalid-build-requires' (killed: Mandriva-specific, openSUSE doesn't want it)
 #   Filters: dropped 'no-provides' (killed: Mandriva-specific, openSUSE doesn't want it)
 #   Filters: dropped 'info-files-without-install-info-postin' (killed: file triggers handle info-dir updates)

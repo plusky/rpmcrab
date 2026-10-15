@@ -176,7 +176,6 @@ Filters = [
     ' multiple-specfiles',
     ' setgid-binary ',
     ' non-readable ',
-    ' postin-without-ghost-file-creation ',
 
 # Exceptions for filelist checks
     'nfs-client\.\S+: \w: filelist-forbidden-backup-file /var/lib/nfs/sm.bak',
