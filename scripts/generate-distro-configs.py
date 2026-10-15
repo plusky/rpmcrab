@@ -473,6 +473,18 @@ SCOPE_FILTERS = {
         "are private; elsewhere a missing ldconfig symlink is a real "
         "packaging bug and stays visible",
     ),
+    "read-error": (
+        r"^\S+\.\S+: W: read-error No such file or directory",
+        "narrowed to the ENOENT class measured in issue #579: all "
+        "1,932 lines the blanket filter suppresses are ENOENT — 1,925 "
+        "symlinks to %ghost placeholders under /etc/alternatives/ and "
+        "7 to install/runtime-generated files — with zero "
+        "unreadable-payload, corrupt-package or parser-failure lines; "
+        "a read failure with any other errno is a genuine tool or "
+        "package defect and surfaces again. The pattern keys on the "
+        "detail format ledgered in issue #72 and must be re-cut if "
+        "that divergence is fixed",
+    ),
 }
 
 # Packages gone from the distros: whitelist stanzas naming them are pruned.
