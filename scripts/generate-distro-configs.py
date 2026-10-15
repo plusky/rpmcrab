@@ -5,7 +5,9 @@ Copies ``configs/openSUSE/*.toml`` from the pinned upstream rpmlint commits
 into ``crates/rpmcrab-core/data/distro/<flavor>/``, prunes ``Filters`` /
 ``BlockedFilters`` entries that reference findings rpmcrab no longer emits,
 drops ``Filters`` entries for live findings rpmcrab deliberately surfaces
-(see DROP_LIVE_FILTERS), drops whitelist stanzas for packages gone from
+(see DROP_LIVE_FILTERS), drops duplicate ``Filters`` lines and lines
+subsumed by a broader line for the same finding (see dedupe_filters),
+drops whitelist stanzas for packages gone from
 Tumbleweed/SLE 16 and stale pie-executables paths, retargets ``Filters``
 entries whose target path moved (see RETARGET_FILTERS), appends the extra
 Filters/Checks rpmcrab carries on top of upstream, removes the Checks
@@ -388,6 +390,15 @@ RETARGET_FILTERS = {
         ".* statically-linked-binary /usr/sbin/ldconfig",
         "usr-merge: ldconfig ships as /usr/sbin/ldconfig, so the /sbin/ anchor could never match (issue #538)",
     ),
+    # The check emits the plural tag (checks/files.rs); the pattern names
+    # the singular, which matches only because filter matching is an
+    # unanchored regex search and the singular is a prefix of the tag.
+    # Any future anchoring or rename would break the exemption silently,
+    # so spell the tag in full; the rest of the pattern is unchanged.
+    r"^filesystem\..*: missing-dependency-to-cron": (
+        r"^filesystem\..*: missing-dependency-to-crontabs",
+        "the emitted tag is missing-dependency-to-crontabs (plural); the singular matched only as a substring prefix of the tag (issue #538)",
+    ),
 }
 
 # Packages gone from the distros: whitelist stanzas naming them are pruned.
@@ -757,6 +768,105 @@ def prune_stale_filters(text, known, pruned_log, dropped_log, retargeted_log):
                 continue
         out.append(line)
     return "".join(out)
+
+
+# Regex metacharacters. A Filters pattern containing none of these is a
+# plain literal: the filter engine runs an unanchored regex search, so a
+# literal matches exactly the strings that contain it as a substring.
+_REGEX_META = frozenset("\\.^$|?*+()[]{}")
+
+
+def _literal_pattern(entry):
+    """The pattern of a Filters entry if it is a plain literal, else None.
+
+    Only literals take part in subsumption (see dedupe_filters): for
+    literals, one pattern's match set contains another's exactly when its
+    text is a substring of the other's. A regex pattern's match set is
+    not substring-ordered, so regexes are only ever deduplicated
+    byte-for-byte, never subsumption-checked.
+    """
+    raw = raw_filter_pattern(entry)
+    if raw is None or any(c in _REGEX_META for c in raw):
+        return None
+    return raw
+
+
+def dedupe_filters(text, deduped_log):
+    """Drop redundant lines from Filters lists; output-neutral hygiene.
+
+    The filter engine suppresses a finding when ANY Filters pattern
+    matches the rendered line, so a line is redundant when another line
+    in the same list matches everything it does. Two such cases:
+
+    - exact duplicates: a pattern byte-identical to an earlier entry in
+      the same list matches the very same strings;
+    - subsumed literals: a plain-literal pattern whose text strictly
+      contains another literal pattern in the same list naming the SAME
+      finding (see pure_finding_pattern) — every string the longer
+      pattern matches contains the shorter one, so the broader line
+      already suppresses everything the narrower one would.
+
+    The same-finding condition keeps package-scoped lines safe:
+    'ibcs2 non-standard-dir-in-usr ...' textually contains the blanket
+    ' non-standard-dir-in-usr ' but names a compound scope, not the bare
+    finding, so it is never dropped — it stays as the recorded exception
+    for if the blanket line is ever revisited. BlockedFilters is not
+    touched: its entries are matched as exact finding names, not
+    patterns, so neither rule applies there.
+
+    Deterministic: first occurrences stay, positions never change, and
+    the drop set is computed over the whole list before any line is
+    removed, so which lines go never depends on processing order. A
+    second pass over the output drops nothing (idempotent).
+    """
+    lines = text.splitlines(keepends=True)
+    drop = set()
+    i = 0
+    while i < len(lines):
+        if not re.match(r"^Filters\s*=\s*\[", lines[i].strip()):
+            i += 1
+            continue
+        # One Filters list: collect (line index, pattern, literal,
+        # finding) for every quoted entry until the closing bracket.
+        entries = []
+        j = i + 1
+        while j < len(lines) and not lines[j].strip().startswith("]"):
+            raw = raw_filter_pattern(lines[j])
+            if raw is not None:
+                literal = _literal_pattern(lines[j])
+                finding = (
+                    pure_finding_pattern(lines[j]) if literal is not None else None
+                )
+                entries.append((j, raw, literal, finding))
+            j += 1
+        seen = set()
+        for idx, raw, literal, finding in entries:
+            if raw in seen:
+                drop.add(idx)
+                deduped_log.append(
+                    f"Filters: dropped duplicate {raw!r} "
+                    "(byte-identical to an earlier Filters entry)"
+                )
+                continue
+            seen.add(raw)
+            if literal is None or finding is None:
+                continue
+            for _, other_raw, other_literal, other_finding in entries:
+                if (
+                    other_literal is not None
+                    and other_finding == finding
+                    and other_raw != raw
+                    and other_literal in literal
+                ):
+                    drop.add(idx)
+                    deduped_log.append(
+                        f"Filters: dropped {raw!r} (subsumed by {other_raw!r}: "
+                        f"both name {finding!r} and the broader literal "
+                        "matches everything it does)"
+                    )
+                    break
+        i = j
+    return "".join(line for n, line in enumerate(lines) if n not in drop)
 
 
 def assert_no_flavor_key(flavor, filename, text):
@@ -1595,12 +1705,14 @@ def generate(ref_dir=None, pins=None):
     pie_pruned_log = []
     dropped_log = []
     retargeted_log = []
+    deduped_filters_log = []
     for flavor, data in result.items():
         for filename, text in data["files"].items():
             assert_no_flavor_key(flavor, filename, text)
             text = prune_stale_filters(
                 text, known, pruned_log, dropped_log, retargeted_log
             )
+            text = dedupe_filters(text, deduped_filters_log)
             text = prune_stale_packages(text, pkg_pruned_log, flavor)
             if filename == "pie-executables.toml":
                 # Per-flavor evidence (see PRUNE_PIE_PATHS): the owning
@@ -1701,6 +1813,16 @@ def generate(ref_dir=None, pins=None):
             if entry not in seen_dropped:
                 seen_dropped.add(entry)
                 provenance.append(f"#   {entry}")
+    if deduped_filters_log:
+        provenance.append("#")
+        provenance.append("# Deduped Filters entries (exact duplicates and")
+        provenance.append("# same-finding lines subsumed by a broader literal;")
+        provenance.append("# output-neutral, see dedupe_filters):")
+        seen_deduped_filters = set()
+        for entry in deduped_filters_log:
+            if entry not in seen_deduped_filters:
+                seen_deduped_filters.add(entry)
+                provenance.append(f"#   {entry}")
     if pkg_pruned_log or HISTORICAL_PRUNES:
         provenance.append("#")
         provenance.append(
@@ -1742,6 +1864,7 @@ def generate(ref_dir=None, pins=None):
         deduped,
         dropped_log,
         retargeted_log,
+        deduped_filters_log,
     )
 
 
@@ -1895,7 +2018,7 @@ def main():
         rewrite_pins(Path(__file__).resolve(), pins)
 
     ref_dir = Path(args.ref_dir) if args.ref_dir else None
-    result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, deduped, dropped_log, retargeted_log = generate(
+    result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, deduped, dropped_log, retargeted_log, deduped_filters_log = generate(
         ref_dir=ref_dir, pins=pins
     )
 
@@ -2001,6 +2124,8 @@ def main():
         print(f"pruned: {entry}")
     for entry in retargeted_log:
         print(f"retargeted: {entry}")
+    for entry in deduped_filters_log:
+        print(f"deduped: {entry}")
     print(f"wrote {sum(len(d['files']) for d in result.values())} files + PROVENANCE")
     return 0
 

@@ -978,5 +978,162 @@ def test_drop_live_filters_drops_kernel_modules_line():
     assert pruned == [] and retargeted == [], (pruned, retargeted)
 
 
+def test_dedupe_filters_drops_exact_duplicates():
+    """Byte-identical Filters lines collapse to the first occurrence.
+
+    Upstream's filesystem exception block repeats the var-run/var-lock
+    and .gnupg lines; the filter engine suppresses on ANY match, so the
+    repeats can never change an outcome. Everything else — including the
+    first occurrences and unrelated lines — survives byte-identical and
+    in place.
+    """
+    text = (
+        'Filters = [\n'
+        "    '^filesystem\\..*: dir-or-file-in-var-run',\n"
+        "    '^filesystem\\..*: dir-or-file-in-var-lock',\n"
+        "    '^filesystem\\..*: dir-or-file-in-var-tmp',\n"
+        "    '^filesystem\\..*: dir-or-file-in-var-run',\n"
+        "    '^filesystem\\..*: dir-or-file-in-var-lock',\n"
+        "    '^filesystem\\..*: hidden-file-or-dir /root/.gnupg',\n"
+        "    '^filesystem\\..*: hidden-file-or-dir /root/.gnupg',\n"
+        "    ' dangerous-command.*',\n"
+        ']\n'
+    )
+    deduped = []
+    out = gen.dedupe_filters(text, deduped)
+    assert out == (
+        'Filters = [\n'
+        "    '^filesystem\\..*: dir-or-file-in-var-run',\n"
+        "    '^filesystem\\..*: dir-or-file-in-var-lock',\n"
+        "    '^filesystem\\..*: dir-or-file-in-var-tmp',\n"
+        "    '^filesystem\\..*: hidden-file-or-dir /root/.gnupg',\n"
+        "    ' dangerous-command.*',\n"
+        ']\n'
+    ), out
+    assert len(deduped) == 3, deduped
+    assert all('duplicate' in entry for entry in deduped), deduped
+
+
+def test_dedupe_filters_drops_subsumed_literal():
+    """The narrower prereq-use line is dropped, the broader kept.
+
+    Both lines are plain literals naming the same finding, and
+    ' prereq-use ' strictly contains ' prereq-use': every rendered line
+    the narrower pattern matches also matches the broader one, so the
+    narrower line suppresses nothing the broader does not. Dropping the
+    broader instead would unfilter findings whose tag ends the line —
+    this test fails if the direction is ever inverted.
+    """
+    text = (
+        'Filters = [\n'
+        "    ' prereq-use',\n"
+        "    ' file-not-utf8',\n"
+        "    ' prereq-use ',\n"
+        ']\n'
+    )
+    deduped = []
+    out = gen.dedupe_filters(text, deduped)
+    assert out == (
+        'Filters = [\n'
+        "    ' prereq-use',\n"
+        "    ' file-not-utf8',\n"
+        ']\n'
+    ), out
+    assert len(deduped) == 1, deduped
+    assert "' prereq-use '" in deduped[0], deduped
+    assert "' prereq-use'" in deduped[0], deduped
+
+
+def test_dedupe_filters_keeps_scoped_and_regex_lines():
+    """Subsumption never touches compound scopes or regex patterns.
+
+    'ibcs2 non-standard-dir-in-usr ...' textually contains the blanket
+    ' non-standard-dir-in-usr ' literal, but it is a package-scoped
+    exception, not the bare finding: dropping it would erase the
+    recorded per-package exception for if the blanket line is ever
+    revisited. Literals naming different findings and regex patterns
+    whose text contains another pattern are likewise kept.
+    """
+    text = (
+        'Filters = [\n'
+        "    ' non-standard-dir-in-usr ',  # handled by CheckFilelist.py\n"
+        "    'ibcs2 non-standard-dir-in-usr i486-sysv4',\n"
+        "    'shlibs5 non-standard-dir-in-usr i486-linux-libc5',\n"
+        "    ' prereq-use',\n"
+        "    ' file-not-utf8',\n"
+        "    '.*file-not-utf8.*',\n"
+        ']\n'
+    )
+    deduped = []
+    out = gen.dedupe_filters(text, deduped)
+    assert out == text, out
+    assert deduped == [], deduped
+
+
+def test_dedupe_filters_idempotent():
+    """A second dedupe pass over the output drops nothing.
+
+    --check regenerates from upstream each time, but the vendored files
+    are also the input to by-hand verification of the filter passes;
+    a non-idempotent step would make the checked-in files unstable
+    under re-application.
+    """
+    text = (
+        'Filters = [\n'
+        "    '^filesystem\\..*: dir-or-file-in-var-run',\n"
+        "    '^filesystem\\..*: dir-or-file-in-var-run',\n"
+        "    ' prereq-use',\n"
+        "    ' prereq-use ',\n"
+        ']\n'
+    )
+    once = gen.dedupe_filters(text, [])
+    deduped = []
+    twice = gen.dedupe_filters(once, deduped)
+    assert twice == once, twice
+    assert deduped == [], deduped
+
+
+def test_dedupe_filters_ignores_blocked_filters():
+    """BlockedFilters is never deduped: its entries are matched as exact
+    finding names, not patterns, so 'permissions-incorrect' does not
+    cover 'permissions-incorrect-owner' and a repeated name is a set
+    member, not a redundant regex. Pattern rules must not leak across.
+    """
+    text = (
+        'BlockedFilters = [\n'
+        "    'permissions-incorrect',\n"
+        "    'permissions-incorrect-owner',\n"
+        "    'permissions-incorrect',\n"
+        ']\n'
+        'Filters = [\n'
+        "    'permissions-incorrect',\n"
+        ']\n'
+    )
+    deduped = []
+    out = gen.dedupe_filters(text, deduped)
+    assert out == text, out
+    assert deduped == [], deduped
+
+
+def test_retarget_filters_spells_crontabs_tag_in_full():
+    """The missing-dependency-to-cron pattern is rewritten to the plural
+    tag the check emits; the singular only ever matched as a substring
+    prefix of it. A reworded (double-space) line is not rewritten —
+    byte-exact matching surfaces it for a fresh audit instead.
+    """
+    text = (
+        'Filters = [\n'
+        "    '^filesystem\\..*: missing-dependency-to-cron',\n"
+        "    '^filesystem\\..*:  missing-dependency-to-cron',\n"
+        ']\n'
+    )
+    pruned, dropped, retargeted = [], [], []
+    out = gen.prune_stale_filters(text, set(), pruned, dropped, retargeted)
+    assert "'^filesystem\\..*: missing-dependency-to-crontabs'," in out, out
+    assert "'^filesystem\\..*:  missing-dependency-to-cron'," in out, out
+    assert len(retargeted) == 1, retargeted
+    assert 'missing-dependency-to-crontabs' in retargeted[0], retargeted
+
+
 if __name__ == "__main__":
     sys.exit(main())
