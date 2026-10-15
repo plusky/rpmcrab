@@ -159,11 +159,9 @@ Filters = [
     ' hidden-file-or-dir .*/\.packlist',
     ' hidden-file-or-dir .*/\.directory',
     'perl-.*no-binary',
-    ' no-major-in-name ',
 
 # We check for that already
     'dangling-relative-symlink',
-    ' lib-package-without-%mklibname',
     ' requires-on-release',
     ' non-executable-script /etc/profile.d/',
     ' non-executable-script /var/adm/fillup-templates/',

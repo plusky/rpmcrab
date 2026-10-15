@@ -269,6 +269,10 @@ PRUNE_CANDIDATES = {
     # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py
     "no-provides": "killed: Mandriva-specific, openSUSE doesn't want it",
     # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py
+    "no-major-in-name": "killed: Mandriva-specific, openSUSE doesn't want it",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py
+    "lib-package-without-%mklibname": "killed: Mandriva-specific, openSUSE doesn't want it",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py
     "hardcoded-prefix-tag": "killed: Prefix: tag obsolete/ignored",
     # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/ZipCheck.py
     "jar-not-indexed": "killed: negligible value",
