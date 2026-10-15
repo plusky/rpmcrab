@@ -27,9 +27,6 @@ Name tag.
 non-coherent-filename="""
 The file which contains the package should be named <NAME>-<VERSION>-<RELEASE>.<ARCH>.rpm.
 """
-no-major-in-name="""
-The major number of the library isn't included in the package's name.
-"""
 description-shorter-than-summary="""
 The package description should be longer than the summary.
 """

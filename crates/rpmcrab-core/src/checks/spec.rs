@@ -1,14 +1,14 @@
 //! `SpecCheck`: spec-file validation, ported from rpmlint's `SpecCheck.py`.
 //!
-//! Covers all 63 `add_info` call sites: the per-line checks (sections,
+//! Covers the reference's `add_info` call sites: the per-line checks (sections,
 //! buildroot usage, `%setup`/`%autosetup`/`%autopatch`, applied patches,
 //! `%{_sourcedir}` use, `./configure` handling, hardcoded library paths,
-//! `%mklibname`, preamble tags, dependencies, changelog/files-section rules,
+//! preamble tags, dependencies, changelog/files-section rules,
 //! indentation, deprecated grep, `Group` validity, macros in comments, the
 //! python helpers, forbidden control characters, the
 //! `update-desktop-files` deprecation) and the whole-package checks
 //! (`BuildRoot` tag, missing sections, superfluous `%clean`, multiple
-//! `%changelog`, `%mklibname` for lib packages, depgen, patch fuzz, mixed
+//! `%changelog`, depgen, patch fuzz, mixed
 //! indentation, `%ifarch`-applied and unapplied patches), plus the two
 //! checks that need the `rpm` tool or the spec parser (`specfile-error`,
 //! `specfile-warning`, `invalid-url`), skipped in mini mode.
@@ -160,11 +160,6 @@ fn hardcoded_libdir_paths_re() -> &'static Regex {
         Regex::new(r"^(/lib|/usr/lib|/usr/X11R6/lib/(?!([^/]+/)+)[^/]*\.([oa]|la|so[0-9.]*))")
             .expect("static regex")
     })
-}
-
-static LIB_PACKAGE_RE: OnceLock<Regex> = OnceLock::new();
-fn lib_package_re() -> &'static Regex {
-    LIB_PACKAGE_RE.get_or_init(|| Regex::new(r"^%package.*\Wlib").expect("static regex"))
 }
 
 /// `DEFAULT_BIARCH_PACKAGES`: hardcoded library paths are not checked in
@@ -720,7 +715,6 @@ pub struct SpecCheck {
     rpm_buildroot_re: Regex,
     configure_libdir_spec_re: Regex,
     hardcoded_libdir_paths_re: Regex,
-    lib_package_re: Regex,
     biarch_package_re: Regex,
     libdir_re: Regex,
     description_lang_re: Regex,
@@ -763,8 +757,6 @@ pub struct SpecCheck {
     source_dir: bool,
     configure_linenum: Option<u32>,
     configure_cmdline: String,
-    mklibname: bool,
-    is_lib_pkg: bool,
     depscript_override: bool,
     depgen_disabled: bool,
     patch_fuzz_override: bool,
@@ -828,7 +820,6 @@ impl SpecCheck {
             rpm_buildroot_re: rpm_buildroot_re().clone(),
             configure_libdir_spec_re: configure_libdir_spec_re().clone(),
             hardcoded_libdir_paths_re: hardcoded_libdir_paths_re().clone(),
-            lib_package_re: lib_package_re().clone(),
             biarch_package_re: biarch_package_re().clone(),
             libdir_re: libdir_re().clone(),
             description_lang_re: description_lang_re().clone(),
@@ -868,8 +859,6 @@ impl SpecCheck {
             source_dir: false,
             configure_linenum: None,
             configure_cmdline: String::new(),
-            mklibname: false,
-            is_lib_pkg: false,
             depscript_override: false,
             depgen_disabled: false,
             patch_fuzz_override: false,
@@ -1000,15 +989,6 @@ impl Check for SpecCheck {
                 &[],
             );
         }
-        if self.is_lib_pkg && !self.mklibname {
-            self.info(
-                out,
-                pkg,
-                Level::Error,
-                "lib-package-without-%mklibname",
-                &[],
-            );
-        }
         if self.depscript_override && !self.depgen_disabled {
             self.info(
                 out,
@@ -1072,8 +1052,6 @@ impl Check for SpecCheck {
         self.source_dir = false;
         self.configure_linenum = None;
         self.configure_cmdline.clear();
-        self.mklibname = false;
-        self.is_lib_pkg = false;
         self.depscript_override = false;
         self.depgen_disabled = false;
         self.patch_fuzz_override = false;
@@ -1191,7 +1169,6 @@ impl SpecCheck {
         self.checkline_sourcedir(pkg, out, line);
         self.checkline_configure(pkg, out, line);
         self.checkline_hardcoded_library_path(pkg, out, line);
-        self.checkline_mklibname(line);
         self.checkline_package(pkg, out, line);
         self.checkline_changelog(pkg, out, line);
         self.checkline_files(pkg, out, line);
@@ -1266,9 +1243,6 @@ impl SpecCheck {
                 .flatten()
                 .and_then(|caps| caps.get(1))
                 .map(|m| m.as_str().to_string());
-        }
-        if !self.is_lib_pkg && self.lib_package_re.is_match(line).unwrap_or(false) {
-            self.is_lib_pkg = true;
         }
         true
     }
@@ -1516,12 +1490,6 @@ impl SpecCheck {
                 &["in", path],
             );
         }
-    }
-
-    fn checkline_mklibname(&mut self, line: &str) {
-        // The reference assigns (not ORs): after the line loop `mklibname`
-        // reflects the last line only.
-        self.mklibname = line.contains("%mklibname");
     }
 }
 
@@ -3260,26 +3228,14 @@ Patch0: foo.patch
         }
     }
 
+    /// Negative pin for the deliberately removed Mandriva-policy finding
+    /// (`lib-package-without-%mklibname`, issue #531): the input is the
+    /// shape that fired pre-removal -- a spec defining a lib subpackage
+    /// with no `%mklibname` anywhere -- so re-adding the emission fails
+    /// here under plain `cargo test`.
     #[test]
-    fn lib_package_without_mklibname_fires_error_ref959() {
+    fn killed_mklibname_finding_stays_absent() {
         let results = run_mini("Name: foo\n%package -n libfoo\n%description\nfoo\n");
-        let lines = lines_for(&results, "lib-package-without-%mklibname");
-        assert_eq!(lines.len(), 1, "results: {results:?}");
-        assert!(
-            lines[0].contains("E: lib-package-without-%mklibname"),
-            "line: {}",
-            lines[0]
-        );
-    }
-
-    #[test]
-    fn lib_package_with_mklibname_stays_quiet() {
-        // Kills the neutered-`checkline_mklibname` mutant: the ref959 test
-        // only covers the absent path, so a setter that never sets still
-        // passes it — the present path must stay quiet.
-        let results = run_mini(
-            "Name: foo\n%package -n libfoo\n%description\nfoo\n%define probe %mklibname\n",
-        );
         assert!(
             !has(&results, "lib-package-without-%mklibname"),
             "results: {results:?}"

@@ -86,10 +86,6 @@ The spec file unnecessarily contains more than one %changelog section.
 The spec section %clean should not be used any longer.
 RPM provides its own clean logic.
 """
-"lib-package-without-%mklibname"="""
-The package name must be built using %mklibname to allow lib64 and lib32
-coexistence.
-"""
 prereq-use="""
 The use of PreReq is deprecated. In the majority of cases, a plain Requires
 is enough and the right thing to do. Sometimes Requires(pre), Requires(post),

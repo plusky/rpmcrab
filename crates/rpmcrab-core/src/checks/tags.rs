@@ -80,7 +80,6 @@ pub struct TagsCheck {
     invalid_version_re: Regex,
     changelog_version_re: Regex,
     changelog_text_version_re: Regex,
-    devel_number_re: Regex,
     leading_space_re: Regex,
     license_exception_re: Regex,
     pkg_config_re: Regex,
@@ -155,7 +154,6 @@ impl TagsCheck {
             invalid_version_re: invalid_version_regex().clone(),
             changelog_version_re: Regex::new(r"[^>]([^ >]+)\s*$").expect("static regex"),
             changelog_text_version_re: Regex::new(r"^\s*-\s*((\d+:)?[\w\.]+-[\w\.]+)").expect("static regex"),
-            devel_number_re: Regex::new(r"(.*?)([0-9.]+)(_[0-9.]+)?-devel").expect("static regex"),
             leading_space_re: Regex::new(r"^\s+").expect("static regex"),
             license_exception_re: Regex::new(r"([^(\s]+)\s(?:WITH|with)\s([^)\s]+)").expect("static regex"),
             pkg_config_re: Regex::new(r"^/usr/(?:lib\d*|share)/pkgconfig/").expect("static regex"),
@@ -651,9 +649,6 @@ impl TagsCheck {
                             &[&format!("{base_or_libs} = {v}")],
                         );
                     }
-                }
-                if self.devel_number_re.captures(name).ok().flatten().is_none() {
-                    add_info(out, Level::Warning, pkg, "no-major-in-name", &[name]);
                 }
             }
             if has_pc {
@@ -3121,6 +3116,23 @@ mod rich_dep_emission_tests {
                 .ends_with("tags-missingdep*/tags-missingdep-libs/libtags-missingdep* = 2.0"),
             "line: {}",
             hits[0].1
+        );
+    }
+
+    /// Negative pin for the deliberately removed `no-major-in-name`
+    /// finding (issue #531): the shape that fired pre-removal -- an
+    /// unnumbered `-devel` package shipping a `.so`, exactly the
+    /// construction above -- so re-adding the emission fails here under
+    /// plain `cargo test`.
+    #[test]
+    fn killed_no_major_in_name_stays_absent() {
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.name = "tags-missingdep-devel".to_string();
+        pkg.files.push(so_file());
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "no-major-in-name").is_empty(),
+            "must stay silent: {results:?}"
         );
     }
 

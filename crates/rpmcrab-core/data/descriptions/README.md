@@ -47,8 +47,9 @@ Provenance, verified against the pinned reference (`84848c0`):
   symbols are provided at once claim is not always accurate: duplicate
   versioned provides trigger the check too), staged ahead of the reference
   per the fix-in-port rule; minus the `non-standard-group`,
-  `no-group-tag`, and `devel-package-with-non-devel-group` entries, dropped
-  with the deliberately-removed findings. Ledgered in `tests/parity/divergences.toml`.
+  `no-group-tag`, `devel-package-with-non-devel-group`, and
+  `no-major-in-name` entries, dropped with the deliberately-removed
+  findings. Ledgered in `tests/parity/divergences.toml`.
 - `DeviceFilesCheck.toml`, `WorldWritableCheck.toml` — the entries carved
   out of the reference's `FileMetadataCheck.toml`, normalized to the
   reference's single-line form: the carved files used `"""` blocks, whose
@@ -61,10 +62,11 @@ Provenance, verified against the pinned reference (`84848c0`):
 - `SpecCheck.toml` — the reference file, plus one port-only entry:
   `translated-description` (upstream rpmlint#2). The reference has no
   such finding, so `--explain` would print `Unknown message` for it;
-  minus the six entries dropped with their deliberately-removed findings
+  minus the seven entries dropped with their deliberately-removed findings
   (`no-buildroot-tag`, `hardcoded-path-in-buildroot-tag`,
   `%ifarch-applied-patch`, `unversioned-explicit-provides`,
-  `unversioned-explicit-obsoletes`, `setup-not-quiet`); and the
+  `unversioned-explicit-obsoletes`, `setup-not-quiet`,
+  `lib-package-without-%mklibname`); and the
   `use-of-RPM_SOURCE_DIR`
   entry reworded (the reference's `$RPM_BUILD_ROOT` advice is wrong).
   Ledgered in `tests/parity/divergences.toml`.
@@ -74,10 +76,12 @@ Provenance, verified against the pinned reference (`84848c0`):
   `LogrotateCheck.toml`, `MenuCheck.toml`, `MenuXDGCheck.toml`,
   `PythonCheck.toml`, `SharedLibraryPolicyCheck.toml`, `SpecCheck.toml`
   (besides its one port-only entry above, minus the dropped
-  `hardcoded-prefix-tag` entry), `SystemdTmpfilesCheck.toml`,
-  `TagsCheck.toml` (minus the dropped `invalid-build-requires` and
-  `no-provides` entries) — the reference files with English/logic fixes to
-  individual entries (copy-paste errors naming the wrong package, wrong
+  `hardcoded-prefix-tag` and `lib-package-without-%mklibname` entries),
+  `SystemdTmpfilesCheck.toml`,
+  `TagsCheck.toml` (minus the dropped `invalid-build-requires`,
+  `no-provides`, and `no-major-in-name` entries) — the reference files
+  with English/logic fixes to individual entries (copy-paste errors
+  naming the wrong package, wrong
   scriptlet phase, self-contradictory sentences, ungrammatical wording);
   each fix is a deliberate `kind="detail"` divergence, ledgered in
   `tests/parity/divergences.toml`.
