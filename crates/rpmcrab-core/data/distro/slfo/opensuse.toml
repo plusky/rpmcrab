@@ -149,7 +149,6 @@ Filters = [
     'perl-.*no-binary',
 
 # We check for that already
-    'dangling-relative-symlink',
     ' requires-on-release',
     ' non-executable-script /etc/profile.d/',
     ' non-executable-script /var/adm/fillup-templates/',
