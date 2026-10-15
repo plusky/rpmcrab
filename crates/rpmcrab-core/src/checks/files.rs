@@ -1248,7 +1248,14 @@ fn is_peek_printable(b: u8) -> bool {
 }
 
 /// The standard library directories ldconfig always scans (issue #569).
-const STANDARD_LIBDIRS: [&str; 4] = ["/lib", "/lib64", "/usr/lib", "/usr/lib64"];
+const STANDARD_LIBDIRS: [&str; 6] = [
+    "/lib",
+    "/lib64",
+    "/usr/lib",
+    "/usr/lib64",
+    "/usr/local/lib",
+    "/usr/local/lib64",
+];
 
 /// Collect the directories the `/etc/ld.so.conf.d/*.conf` snippets
 /// shipped in `pkg` register with ldconfig (issue #569).
@@ -5969,6 +5976,10 @@ mod tests {
         // Issue #569: the gate keeps the genuine class -- a library
         // directly in a standard libdir with no scriptlet still fires
         // (powercap's /usr/lib64/libpowercap.so.0.6.0 is the archetype).
+        // /usr/local/lib{,64} are standard libdirs too: stock glibc's
+        // /etc/ld.so.conf names them explicitly, so a library shipped
+        // there without scriptlets is a genuine miss, not a private
+        // subtree (PR #570 review).
         let config = test_config();
         let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
         let pkg = Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture");
@@ -5979,6 +5990,8 @@ mod tests {
             "/lib64/libfoo.so.1",
             "/usr/lib/libfoo.so.1",
             "/usr/lib64/libpowercap.so.0.6.0",
+            "/usr/local/lib/libfoo.so.1",
+            "/usr/local/lib64/libfoo.so.1",
         ] {
             let pkgfile = PkgFile {
                 name: fname.to_string(),
