@@ -300,6 +300,15 @@ PRUNE_CANDIDATES = {
 DROP_LIVE_FILTERS = {
     # finding: reason
     "no-manual-page-for-binary": "demoted to Info (rpmcrab#484): a missing manpage is upstream debt; surfaced as info instead of filtered away",
+    # Not surfaced-versus-hidden like the entry above: the check is
+    # gated off by KernelModuleRPMsOK = true, the default in both
+    # implementations' configdefaults, and no vendored config overrides
+    # it, so under the shipped flavours the filter can never match
+    # (verified on real KMP packages: leancrypto-kmp/vhba-kmp produce
+    # zero emissions). The filter only hid that gating; the drop was
+    # ruled in the config-filters follow-through (issue #538) and is
+    # ledgered in tests/parity/divergences.toml.
+    "kernel-modules-not-in-kernel-packages": "config-dead: KernelModuleRPMsOK defaults to true in both implementations and nothing overrides it, so the check never emits (issue #538)",
 }
 
 # (finding, scope) -> reason: Filters entries scoped to dead paths. The finding
