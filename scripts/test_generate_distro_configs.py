@@ -1064,9 +1064,31 @@ def test_scope_filters_leaves_scoped_and_compound_entries_alone():
     assert log == [], log
 
 
-def test_scope_filters_covers_blocked_filters_and_ignores_other_lists():
-    """BlockedFilters lines are rewritten too; unrelated lists are not."""
+def test_scope_filters_matches_whitespace_padded_bare_entry():
+    """A bare entry padded inside its quotes still counts as the bare entry.
+
+    The strip lives at this call site only: raw_filter_pattern itself
+    stays byte-exact for prune_stale_filters' PRUNE_RAW matching.
+    """
     scoped, _reason = gen.SCOPE_FILTERS["no-ldconfig-symlink"]
+    text = (
+        "Filters = [\n"
+        "    ' no-ldconfig-symlink ',\n"
+        "]\n"
+    )
+    log = []
+    out = gen.scope_filters(text, log)
+    assert f"    '{scoped}',\n" in out, out
+    assert len(log) == 1 and "no-ldconfig-symlink" in log[0], log
+
+
+def test_scope_filters_leaves_blocked_filters_and_other_lists_alone():
+    """BlockedFilters and unrelated lists are never rewritten.
+
+    BlockedFilters entries are matched by exact string equality, not as
+    regex patterns, so rewriting one to the scoped pattern would make it
+    unmatchable and silently drop the guard it names.
+    """
     text = (
         "BlockedFilters = [\n"
         "    'no-ldconfig-symlink',\n"
@@ -1077,8 +1099,8 @@ def test_scope_filters_covers_blocked_filters_and_ignores_other_lists():
     )
     log = []
     out = gen.scope_filters(text, log)
-    assert out.count(f"'{scoped}',") == 1, out
-    assert len(log) == 1 and log[0].startswith("BlockedFilters:"), log
+    assert out == text, out
+    assert log == [], log
 
 
 def test_dedupe_filters_drops_exact_duplicates():
