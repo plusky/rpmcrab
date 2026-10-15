@@ -99,11 +99,6 @@ fn info_regex() -> &'static Regex {
     INFO_REGEX.get_or_init(|| Regex::new(r"(/usr/share|/usr)/info/").expect("static regex"))
 }
 
-static LOG_REGEX: OnceLock<Regex> = OnceLock::new();
-fn log_regex() -> &'static Regex {
-    LOG_REGEX.get_or_init(|| Regex::new(r"/var/log/").expect("static regex"))
-}
-
 static SCM_REGEX: OnceLock<Regex> = OnceLock::new();
 fn scm_regex() -> &'static Regex {
     SCM_REGEX.get_or_init(|| {
@@ -391,7 +386,6 @@ pub struct FilesCheck {
     man_re: Regex,
     man_base_re: Regex,
     info_re: Regex,
-    log_re: Regex,
     devel_re: Regex,
     lib_package_re: Regex,
     kernel_package_re: Regex,
@@ -495,7 +489,6 @@ impl FilesCheck {
             man_re: man_regex().clone(),
             man_base_re: man_base_regex().clone(),
             info_re: info_regex().clone(),
-            log_re: log_regex().clone(),
             devel_re: devel_regex().clone(),
             lib_package_re: lib_package_regex().clone(),
             kernel_package_re: kernel_package_regex().clone(),
@@ -883,7 +876,12 @@ impl FilesCheck {
         st: &mut PkgState,
         out: &mut Filter,
     ) {
-        if is_match(&self.log_re, fname) {
+        // Only entries directly under /var/log count as log files here:
+        // a nested path's top-level entry is itself in the file list, and
+        // /var/log-shaped paths elsewhere in the tree are not log files.
+        // log_file_re (^/var/log/[^/]+$) is the same definition the
+        // per-file log checks below use.
+        if is_match(&self.log_file_re, fname) {
             st.log_files.push(fname.to_string());
         }
         self.check_file_manpage(pkg, fname, pkgfile, st, out);
@@ -3235,6 +3233,102 @@ mod tests {
         // Negative guard: with no logrotate dep of any kind the finding stays.
         let names = run_files_check_with_deps("/etc/logrotate.d/fcprobe", vec![], vec![], vec![]);
         assert_has(&names, "missing-dependency-to-logrotate");
+    }
+
+    /// Run the full FilesCheck over a package shipping exactly `files`;
+    /// return the (finding, rendered line) pairs.
+    fn run_files_check_with_files(files: Vec<PkgFile>) -> Vec<(String, String)> {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = files;
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        out.results().to_vec()
+    }
+
+    fn plain_file(name: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn finding_names(results: &[(String, String)]) -> Vec<String> {
+        results.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    #[test]
+    fn log_files_without_logrotate_fires_on_top_level_entries() {
+        // Every entry directly under /var/log counts: directories, plain
+        // files and %ghost files alike.
+        for files in [
+            vec![plain_file("/var/log/fcprobe")],
+            vec![plain_file("/var/log/fcprobe.log")],
+            vec![PkgFile {
+                name: "/var/log/fcprobe.log".to_string(),
+                path: "/var/log/fcprobe.log".to_string(),
+                flags: RPMFILE_GHOST,
+                ..Default::default()
+            }],
+        ] {
+            let names = finding_names(&run_files_check_with_files(files));
+            assert_has(&names, "log-files-without-logrotate");
+        }
+    }
+
+    #[test]
+    fn log_files_without_logrotate_ignores_nested_paths() {
+        // A log file nested under a /var/log subdirectory does not count
+        // on its own: when the package ships the subdirectory, its
+        // top-level entry is the log file; when it does not, the package
+        // has no log files for this check.
+        let names = finding_names(&run_files_check_with_files(vec![plain_file(
+            "/var/log/fcprobe/fcprobe.log",
+        )]));
+        assert_lacks(&names, "log-files-without-logrotate");
+    }
+
+    #[test]
+    fn log_files_without_logrotate_ignores_var_log_shaped_paths_elsewhere() {
+        // Skeleton/template payload that merely contains a var/log-shaped
+        // tail (rear ships /usr/share/rear/skel/* trees) is not a log
+        // file: the definition is anchored at the filesystem root.
+        let names = finding_names(&run_files_check_with_files(vec![
+            plain_file("/usr/share/rear/skel/EXAMPLE/var/log/galaxy"),
+            plain_file("/usr/share/rear/skel/EXAMPLE/var/log/galaxy/Log_Files"),
+        ]));
+        assert_lacks(&names, "log-files-without-logrotate");
+    }
+
+    #[test]
+    fn log_files_without_logrotate_detail_lists_top_level_only() {
+        let results = run_files_check_with_files(vec![
+            plain_file("/var/log/fcprobe"),
+            plain_file("/var/log/fcprobe/fcprobe.log"),
+            plain_file("/var/log/other.log"),
+        ]);
+        let (_, line) = results
+            .iter()
+            .find(|(n, _)| n == "log-files-without-logrotate")
+            .expect("finding fires");
+        let detail = line
+            .split_once("log-files-without-logrotate ")
+            .map(|(_, d)| d)
+            .expect("detail present");
+        assert_eq!(detail, "/var/log/fcprobe /var/log/other.log");
+    }
+
+    #[test]
+    fn log_files_without_logrotate_suppressed_by_logrotate_file() {
+        let names = finding_names(&run_files_check_with_files(vec![
+            plain_file("/var/log/fcprobe.log"),
+            plain_file("/etc/logrotate.d/fcprobe"),
+        ]));
+        assert_lacks(&names, "log-files-without-logrotate");
     }
 
     #[test]
