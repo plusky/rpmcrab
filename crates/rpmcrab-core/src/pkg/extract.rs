@@ -244,6 +244,9 @@ fn decoder<'a>(
 struct HardlinkGroup {
     paths: Vec<PathBuf>,
     data_path: Option<PathBuf>,
+    /// The data carrier was skipped (materializing it would have gone
+    /// through a symlink), so the group legitimately has no data path.
+    carrier_skipped: bool,
 }
 
 /// A path needing the post-extraction fixup: the archived permission bits and
@@ -344,24 +347,24 @@ impl<'a> Extractor<'a> {
         );
     }
 
-    /// Fail-closed symlink guard: entries are never materialized *through* a
-    /// symlink. Every ancestor strictly below the extraction root is checked
-    /// with no-follow metadata — `a -> /tmp` in the archive must not let a
-    /// later `a/b` entry write outside the root — and a non-symlink entry may
-    /// not land on a live symlink final component, where `File::create`
-    /// would truncate through the link (link entry first, file entry
-    /// second). Only `S_IFLNK` entries may replace a live symlink:
-    /// `remove_file` unlinks the link itself, never its target.
+    /// Symlink-escape check: whether materializing an entry at `path`
+    /// would go *through* a live symlink. Every ancestor strictly below
+    /// the extraction root is checked with no-follow metadata --
+    /// `a -> /tmp` in the archive must not let a later `a/b` entry write
+    /// outside the root -- and a non-symlink entry may not land on a
+    /// live symlink final component, where `File::create` would
+    /// truncate through the link (link entry first, file entry second).
+    /// Only `S_IFLNK` entries may replace a live symlink: `remove_file`
+    /// unlinks the link itself, never its target.
     ///
-    /// Ordering contract with path-collision skips (#356): this guard runs
-    /// first and fails closed -- a non-symlink entry landing on a live
-    /// symlink, or any entry beneath one, is UnsafePath; a symlink entry
-    /// colliding with an existing directory skips with a warning like other
-    /// plain collisions. Plain file/directory collisions with an
-    /// incompatible existing object skip with a warning instead of aborting.
-    /// Coherent by design: symlinks can escape the extraction root, plain
-    /// files cannot.
-    fn reject_symlink_escape(&self, path: &Path, is_link: bool) -> Result<(), ExtractError> {
+    /// The caller skips an entry this flags, with the collision warning
+    /// used for other path collisions: nothing is written for a skipped
+    /// entry, so no escape is possible, and a single colliding entry
+    /// does not sink the whole extraction. Real packages ship such
+    /// collisions when two payload paths differ only by case (the
+    /// symlink `Thunar` and the file `thunar`): on a case-insensitive
+    /// filesystem the second entry resolves to the first one's symlink.
+    fn goes_through_symlink(&self, path: &Path, is_link: bool) -> bool {
         let is_symlink = |p: &Path| {
             fs::symlink_metadata(p)
                 .map(|m| m.file_type().is_symlink())
@@ -373,14 +376,11 @@ impl<'a> Extractor<'a> {
                 break;
             }
             if is_symlink(parent) {
-                return Err(ExtractError::UnsafePath(parent.to_path_buf()));
+                return true;
             }
             cur = parent;
         }
-        if !is_link && is_symlink(path) {
-            return Err(ExtractError::UnsafePath(path.to_path_buf()));
-        }
-        Ok(())
+        !is_link && is_symlink(path)
     }
 
     fn record(&mut self, path: PathBuf, perm: u32, mtime: Option<u32>, is_dir: bool) {
@@ -408,10 +408,24 @@ impl<'a> Extractor<'a> {
             return skip_data(r, e.size);
         }
         let path = self.dir.join(&rel);
-        // #354 stopped following symlinks at the final component; the parent
-        // components and the link-then-file order get the same fail-closed
-        // treatment here.
-        self.reject_symlink_escape(&path, e.mode & S_IFMT == S_IFLNK)?;
+        // An entry that would be materialized through a live symlink is
+        // skipped like other path collisions: writing nothing keeps the
+        // escape impossible without sinking the whole extraction.
+        if self.goes_through_symlink(&path, e.mode & S_IFMT == S_IFLNK) {
+            self.log_skip_collision(e);
+            if e.mode & S_IFMT == S_IFREG && e.nlink > 1 && e.size > 0 {
+                // The skipped entry is a hardlink group's data carrier:
+                // record the skip so the end-of-extraction group check
+                // does not fail the whole package over a deliberately
+                // skipped entry. The group's other entries stay empty
+                // placeholders, as the collision leaves them.
+                self.hardlinks
+                    .entry((e.dev_major, e.dev_minor, e.ino))
+                    .or_default()
+                    .carrier_skipped = true;
+            }
+            return skip_data(r, e.size);
+        }
         let is_duplicate = self.seen.contains(&rel);
         match e.mode & S_IFMT {
             S_IFDIR => {
@@ -563,10 +577,12 @@ impl<'a> Extractor<'a> {
 
     /// Every hardlink group needs exactly one data carrier: a group whose
     /// entries all carried size 0 would otherwise leave empty placeholders
-    /// behind, silently.
+    /// behind, silently. A group whose carrier was skipped by the
+    /// symlink-collision rule is exempt: the skip is logged, so its empty
+    /// placeholders are not silent either.
     fn check_hardlinks(&self) -> Result<(), ExtractError> {
         for (key, group) in &self.hardlinks {
-            if group.data_path.is_none() {
+            if group.data_path.is_none() && !group.carrier_skipped {
                 return Err(entry_error(format!(
                     "hardlink group {key:?} has no data carrier"
                 )));
@@ -936,6 +952,44 @@ mod tests {
         assert!(mtime("etc") > ts);
     }
 
+    /// Regression for #563: a payload whose symlink and regular-file
+    /// paths differ only by case (thunar's `usr/bin/Thunar -> thunar`
+    /// alongside `usr/bin/thunar`) extracts without error. On a
+    /// case-insensitive filesystem the file entry collides with the
+    /// live symlink and is skipped; on a case-sensitive one both
+    /// entries materialize. Either way the rest of the payload
+    /// extracts and `extract` succeeds.
+    #[test]
+    fn extract_link_then_file_case_collision_succeeds() {
+        use rpm::{BuildConfig, FileOptions, PackageBuilder, Timestamp};
+
+        let src = tempfile::tempdir().unwrap();
+        let rpm_path = src.path().join("probe.rpm");
+        let mut b = PackageBuilder::new("caseprobe", "1.0", "MIT", "x86_64", "probe");
+        b.using_config(BuildConfig::default().source_date(Timestamp(1_577_922_245)));
+        b.with_symlink(FileOptions::symlink("/usr/bin/Thunar", "thunar"))
+            .unwrap();
+        b.with_file_contents(b"binary\n".to_vec(), FileOptions::new("/usr/bin/thunar"))
+            .unwrap();
+        b.with_file_contents(b"sentinel\n".to_vec(), FileOptions::new("/usr/bin/other"))
+            .unwrap();
+        let pkg = b.build().unwrap();
+        pkg.write(&mut File::create(&rpm_path).unwrap()).unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        extract(&rpm_path, out.path(), true).unwrap();
+        assert_eq!(
+            std::fs::read(out.path().join("usr/bin/other")).unwrap(),
+            b"sentinel\n"
+        );
+        assert!(
+            std::fs::symlink_metadata(out.path().join("usr/bin/Thunar"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
     /// Regression: the mtime fixup must not open files for writing — a 0444
     /// payload file (docs, licenses, man pages) EACCESes on `.write(true)`.
     #[test]
@@ -1044,18 +1098,17 @@ mod tests {
         }
     }
 
-    /// Nit 1 from the #354 review: a symlink parent must not redirect a later
-    /// entry outside the extraction root. `a -> <outside>` followed by a
-    /// regular file `a/b` fails loudly with `UnsafePath` and writes nothing
-    /// outside. Without the parent walk, `File::create` follows the link and
-    /// the payload lands in `<outside>/b`.
+    /// A symlink parent must not redirect a later entry outside the
+    /// extraction root: with `a -> <outside>` in the archive, a regular
+    /// file `a/b` is skipped and nothing is written outside. Without
+    /// the parent walk, `File::create` would follow the link and the
+    /// payload would land in `<outside>/b`.
     #[test]
-    fn symlink_parent_escape_is_rejected() {
+    fn symlink_parent_escape_is_skipped() {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let mut ex = extractor_for(root.path());
-        // The symlink entry itself is the #354-accepted case: creating the
-        // link never follows anything.
+        // Creating the symlink entry itself never follows anything.
         let target = outside.path().as_os_str().as_bytes().to_vec();
         let link = cpio_entry(b"a", S_IFLNK | 0o777, target.len() as u64);
         let raw = padded(&target);
@@ -1063,24 +1116,21 @@ mod tests {
         ex.materialize(&mut data, &link).unwrap();
 
         let reg = cpio_entry(b"a/b", S_IFREG | 0o644, 5);
-        let mut fdata = &b"hello\0\0\0"[..];
-        let err = ex.materialize(&mut fdata, &reg).unwrap_err();
-        assert!(
-            matches!(err, ExtractError::UnsafePath(_)),
-            "symlink parent escape must be UnsafePath, got {err:?}"
-        );
+        let raw = padded(b"hello");
+        let mut fdata = &raw[..];
+        ex.materialize(&mut fdata, &reg).unwrap();
         assert!(
             !outside.path().join("b").exists(),
             "nothing may be written outside the extraction root"
         );
     }
 
-    /// Nit 2 from the #354 review, reverse payload order: a symlink entry
-    /// preceding a regular file at the same path must not let `File::create`
-    /// truncate through the link. Fails loudly with `UnsafePath`, and the
-    /// link target keeps its bytes.
+    /// Reverse payload order: a symlink entry preceding a regular file
+    /// at the same path must not let `File::create` truncate through
+    /// the link. The file entry is skipped, the symlink stays in place,
+    /// and the link target keeps its bytes.
     #[test]
-    fn link_then_file_truncation_is_rejected() {
+    fn link_then_file_is_skipped() {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let victim = outside.path().join("victim");
@@ -1093,23 +1143,26 @@ mod tests {
         ex.materialize(&mut data, &link).unwrap();
 
         let reg = cpio_entry(b"link", S_IFREG | 0o644, 5);
-        let mut fdata = &b"pwned\0\0\0"[..];
-        let err = ex.materialize(&mut fdata, &reg).unwrap_err();
-        assert!(
-            matches!(err, ExtractError::UnsafePath(_)),
-            "link-then-file truncation must be UnsafePath, got {err:?}"
-        );
+        let raw = padded(b"pwned");
+        let mut fdata = &raw[..];
+        ex.materialize(&mut fdata, &reg).unwrap();
         assert_eq!(
             std::fs::read(&victim).unwrap(),
             b"original",
             "the link target must not be truncated through the link"
         );
+        assert_eq!(
+            std::fs::read_link(root.path().join("link")).unwrap(),
+            victim,
+            "the symlink itself stays in place"
+        );
     }
 
-    /// A symlink entry is still an entry: planting it under a live symlink
-    /// parent would create the link outside the root, so it is rejected too.
+    /// A symlink entry is still an entry: planting it under a live
+    /// symlink parent would create the link outside the root, so the
+    /// entry is skipped as well.
     #[test]
-    fn symlink_entry_under_symlink_parent_is_rejected() {
+    fn symlink_entry_under_symlink_parent_is_skipped() {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let mut ex = extractor_for(root.path());
@@ -1120,12 +1173,9 @@ mod tests {
         ex.materialize(&mut data, &parent).unwrap();
 
         let child = cpio_entry(b"a/b", S_IFLNK | 0o777, 1);
-        let mut cdata = &b"x\0\0\0"[..];
-        let err = ex.materialize(&mut cdata, &child).unwrap_err();
-        assert!(
-            matches!(err, ExtractError::UnsafePath(_)),
-            "symlink under a symlink parent must be UnsafePath, got {err:?}"
-        );
+        let raw = padded(b"x");
+        let mut cdata = &raw[..];
+        ex.materialize(&mut cdata, &child).unwrap();
         assert!(
             !outside.path().join("b").exists(),
             "no link may be planted outside the extraction root"
@@ -1377,6 +1427,45 @@ mod tests {
         assert!(matches!(err, ExtractError::Entry(_)));
     }
 
+    /// A hardlink data carrier skipped by the symlink-collision rule
+    /// must not fail the extraction at the group check: the carrier's
+    /// path was unusable, the skip is logged, and the group's other
+    /// entries stay empty placeholders.
+    #[test]
+    fn skipped_hardlink_carrier_does_not_fail_extraction() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mut ex = extractor_for(root.path());
+        // A live symlink at what will be the carrier's path.
+        let target = outside.path().as_os_str().as_bytes().to_vec();
+        let link = cpio_entry(b"carrier", S_IFLNK | 0o777, target.len() as u64);
+        let raw = padded(&target);
+        let mut data = &raw[..];
+        ex.materialize(&mut data, &link).unwrap();
+
+        // The group's data carrier lands on the symlink: skipped.
+        let mut carrier = cpio_entry(b"carrier", S_IFREG | 0o644, 5);
+        carrier.nlink = 2;
+        carrier.ino = 7;
+        let raw = padded(b"hello");
+        let mut data = &raw[..];
+        ex.materialize(&mut data, &carrier).unwrap();
+
+        // The other group member is a plain placeholder.
+        let mut member = cpio_entry(b"member", S_IFREG | 0o644, 0);
+        member.nlink = 2;
+        member.ino = 7;
+        let mut data = &[][..];
+        ex.materialize(&mut data, &member).unwrap();
+
+        ex.check_hardlinks().unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join("member")).unwrap(),
+            b"",
+            "the member stays an empty placeholder"
+        );
+    }
+
     /// bzip2 payloads have no pure-Rust decoder: the failure names the
     /// compressor instead of failing obscurely mid-stream.
     #[test]
@@ -1571,21 +1660,17 @@ mod tests {
         );
     }
 
-    /// A directory entry landing on a live symlink is fail-closed
-    /// (UnsafePath), not skipped: symlink handling belongs to the
-    /// symlink-escape guard, while this PR only skips file/dir collisions.
+    /// A directory entry landing on a live symlink is skipped like
+    /// other collisions through a symlink: the link stays in place and
+    /// no directory is created through it.
     #[test]
-    fn extract_dir_on_live_symlink_is_rejected() {
+    fn extract_dir_on_live_symlink_is_skipped() {
         let dir = tempfile::tempdir().unwrap();
         let mut ex = collide_extractor(dir.path());
         let (e, mut r) = collide_entry(b"./sub/Link", S_IFLNK | 0o777, b"target");
         ex.materialize(&mut r, &e).unwrap();
         let (e, mut r) = collide_entry(b"./sub/Link", S_IFDIR | 0o755, b"");
-        let err = ex.materialize(&mut r, &e).unwrap_err();
-        assert!(
-            matches!(err, ExtractError::UnsafePath(_)),
-            "expected UnsafePath, got {err:?}"
-        );
+        ex.materialize(&mut r, &e).unwrap();
 
         assert_eq!(
             std::fs::read_link(dir.path().join("sub/Link")).unwrap(),
