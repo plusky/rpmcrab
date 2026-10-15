@@ -306,10 +306,6 @@ pub fn register_error_details(out: &mut Filter) {
         "The %pretrans scriptlet must be written in Lua: it runs before any package payload is installed, so the internal Lua interpreter is the only one guaranteed to exist.".to_string(),
     );
     out.set_error_detail(
-        "postin-without-ghost-file-creation",
-        "A file tagged as ghost is not created during %prein nor during %postin.".to_string(),
-    );
-    out.set_error_detail(
         "ghost-files-without-postin",
         "The package tags files as ghost but has no %postin scriptlet to create them.".to_string(),
     );
@@ -447,6 +443,10 @@ impl Check for PostCheck {
             }
         }
 
+        // Deliberate absence: the per-ghost finding
+        // `postin-without-ghost-file-creation` is not emitted (issue #562,
+        // ledgered as kind = "missing" in tests/parity/divergences.toml);
+        // only the package-level sibling below remains.
         if !pkg.ghost_files.is_empty() {
             let postin = pkg.tag_str(Tag::POSTIN).unwrap_or_default();
             let prein = pkg.tag_str(Tag::PREIN).unwrap_or_default();
@@ -456,15 +456,6 @@ impl Check for PostCheck {
                 }
                 if postin.is_empty() && prein.is_empty() {
                     add_info(out, Level::Warning, pkg, "ghost-files-without-postin", &[]);
-                }
-                if !postin.contains(f) && !prein.contains(f) {
-                    add_info(
-                        out,
-                        Level::Warning,
-                        pkg,
-                        "postin-without-ghost-file-creation",
-                        &[f],
-                    );
                 }
             }
         }
@@ -733,7 +724,10 @@ mod tests {
                 "pretrans-not-lua",
                 "percent-in-%filetrigger",
                 "dangerous-command-in-%transfiletrigger",
-                "postin-without-ghost-file-creation",
+                // Deliberate divergence from the pinned reference:
+                // `postin-without-ghost-file-creation` is dropped
+                // (issue #562); the fixture's ghost path, spelled in
+                // neither %prein nor %postin, yields no finding.
             ]
         );
     }
@@ -741,12 +735,12 @@ mod tests {
     #[test]
     fn parity_ghost_fixture_matches_reference() {
         // Same reference run: a ghost file with no %pre/%post at all.
+        // The reference also emits `postin-without-ghost-file-creation`
+        // here; the port dropped that finding (issue #562), so the
+        // sibling stands alone -- the exact vector pins the absence.
         assert_eq!(
             check_fixture_names("postcheck-ghost-parity-1.0-1.noarch.rpm"),
-            vec![
-                "ghost-files-without-postin",
-                "postin-without-ghost-file-creation",
-            ]
+            vec!["ghost-files-without-postin"]
         );
     }
 
@@ -776,9 +770,11 @@ mod tests {
         check.check(&pkg, &config, &mut out);
         let rendered = out.render_results(&config);
         // Only finding names present in the results get their description;
-        // the fixture trips percent-in-* and the ghost-file finding.
+        // the fixture trips percent-in-* and empty-%post.
         assert!(rendered.contains("macro/variable"));
-        assert!(rendered.contains("not created during %prein"));
+        assert!(rendered.contains("scriptlet is empty"));
+        // The dropped ghost finding's detail must not resurface (#562).
+        assert!(!rendered.contains("not created during %prein"));
     }
 
     #[test]

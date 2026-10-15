@@ -10,7 +10,8 @@
 # a rename of the tag-table entries changes the name vector.
 #
 # postcheck-ghost-parity: ghost file with no %pre/%post at all, pinning
-# ghost-files-without-postin and postin-without-ghost-file-creation.
+# ghost-files-without-postin (and the absence of the dropped
+# postin-without-ghost-file-creation, issue #562).
 #
 # Usage: bash tests/parity/pkg/inputs/build-postcheck-parity.sh
 # Needs: podman (or PODMAN=/path/to/podman), an openSUSE container image
