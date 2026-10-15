@@ -95,6 +95,8 @@
 #
 # Scoped Filters entries (narrowed to their recorded rationale;
 # see SCOPE_FILTERS):
+#   Filters: scoped 'no-ldconfig-symlink' to '^\\S*-kmp-\\S+\\.\\S+: \\w: no-ldconfig-symlink' (scoped to kernel-module packages: the block's only recorded rationale is the KMP one (bnc#456048) — shared libraries in KMPs are private; elsewhere a missing ldconfig symlink is a real packaging bug and stays visible)
+#
 # Deduped Filters entries (exact duplicates and
 # same-finding lines subsumed by a broader literal;
 # output-neutral, see dedupe_filters):
