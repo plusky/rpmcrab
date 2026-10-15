@@ -80,6 +80,7 @@
 # Dropped Filters entries (live findings rpmcrab deliberately
 # surfaces; see DROP_LIVE_FILTERS):
 #   Filters: dropped 'kernel-modules-not-in-kernel-packages' (config-dead: KernelModuleRPMsOK defaults to true in both implementations and nothing overrides it, so the check never emits (issue #538))
+#   Filters: dropped 'dangling-relative-symlink' (check is session-aware (rpmcrab#547): sibling-resolved links stay quiet, genuinely dangling ones surface; the blanket filter's 'we check for that already' rationale is stale)
 #   Filters: dropped 'no-manual-page-for-binary' (demoted to Info (rpmcrab#484): a missing manpage is upstream debt; surfaced as info instead of filtered away)
 #
 # Pruned whitelist stanzas (packages gone from Tumbleweed/SLE 16):

@@ -309,6 +309,7 @@ DROP_LIVE_FILTERS = {
     # ruled in the config-filters follow-through (issue #538) and is
     # ledgered in tests/parity/divergences.toml.
     "kernel-modules-not-in-kernel-packages": "config-dead: KernelModuleRPMsOK defaults to true in both implementations and nothing overrides it, so the check never emits (issue #538)",
+    "dangling-relative-symlink": "check is session-aware (rpmcrab#547): sibling-resolved links stay quiet, genuinely dangling ones surface; the blanket filter's 'we check for that already' rationale is stale",
 }
 
 # (finding, scope) -> reason: Filters entries scoped to dead paths. The finding
