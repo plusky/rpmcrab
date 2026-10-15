@@ -585,6 +585,10 @@ fn unicode_octal_digit(c: char) -> Option<u32> {
 /// The decimal value of any Unicode decimal-digit character, mirroring
 /// CPython's `Py_UNICODE_TODECIMAL`. Each arm is one digit block laid out
 /// 0-9 in order; characters outside these blocks are not decimal digits.
+///
+/// The blocks are the decimal-digit blocks of CPython 3.14.8's
+/// unicodedata (Unicode 16.0.0), regenerated from that interpreter;
+/// the block names in the arm comments are its character names.
 fn unicode_decimal_value(c: char) -> Option<u32> {
     let c = c as u32;
     let base = match c {
@@ -601,7 +605,7 @@ fn unicode_decimal_value(c: char) -> Option<u32> {
         0x0C66..=0x0C6F => 0x0C66,    // Telugu
         0x0CE6..=0x0CEF => 0x0CE6,    // Kannada
         0x0D66..=0x0D6F => 0x0D66,    // Malayalam
-        0x0DE6..=0x0DEF => 0x0DE6,    // Sinhala
+        0x0DE6..=0x0DEF => 0x0DE6,    // Sinhala Lith
         0x0E50..=0x0E59 => 0x0E50,    // Thai
         0x0ED0..=0x0ED9 => 0x0ED0,    // Lao
         0x0F20..=0x0F29 => 0x0F20,    // Tibetan
@@ -615,6 +619,7 @@ fn unicode_decimal_value(c: char) -> Option<u32> {
         0x1A90..=0x1A99 => 0x1A90,    // Tai Tham Tham
         0x1B50..=0x1B59 => 0x1B50,    // Balinese
         0x1BB0..=0x1BB9 => 0x1BB0,    // Sundanese
+        0x1C40..=0x1C49 => 0x1C40,    // Lepcha
         0x1C50..=0x1C59 => 0x1C50,    // Ol Chiki
         0xA620..=0xA629 => 0xA620,    // Vai
         0xA8D0..=0xA8D9 => 0xA8D0,    // Saurashtra
@@ -625,6 +630,8 @@ fn unicode_decimal_value(c: char) -> Option<u32> {
         0xABF0..=0xABF9 => 0xABF0,    // Meetei Mayek
         0xFF10..=0xFF19 => 0xFF10,    // Fullwidth
         0x104A0..=0x104A9 => 0x104A0, // Osmanya
+        0x10D30..=0x10D39 => 0x10D30, // Hanifi Rohingya
+        0x10D40..=0x10D49 => 0x10D40, // Garay
         0x11066..=0x1106F => 0x11066, // Brahmi
         0x110F0..=0x110F9 => 0x110F0, // Sora Sompeng
         0x11136..=0x1113F => 0x11136, // Chakma
@@ -634,19 +641,33 @@ fn unicode_decimal_value(c: char) -> Option<u32> {
         0x114D0..=0x114D9 => 0x114D0, // Tirhuta
         0x11650..=0x11659 => 0x11650, // Modi
         0x116C0..=0x116C9 => 0x116C0, // Takri
+        0x116D0..=0x116D9 => 0x116D0, // Myanmar Pao
+        0x116DA..=0x116E3 => 0x116DA, // Myanmar Eastern Pwo Karen
         0x11730..=0x11739 => 0x11730, // Ahom
         0x118E0..=0x118E9 => 0x118E0, // Warang Citi
+        0x11950..=0x11959 => 0x11950, // Dives Akuru
+        0x11BF0..=0x11BF9 => 0x11BF0, // Sunuwar
         0x11C50..=0x11C59 => 0x11C50, // Bhaiksuki
         0x11D50..=0x11D59 => 0x11D50, // Masaram Gondi
         0x11DA0..=0x11DA9 => 0x11DA0, // Gunjala Gondi
+        0x11F50..=0x11F59 => 0x11F50, // Kawi
+        0x16130..=0x16139 => 0x16130, // Gurung Khema
         0x16A60..=0x16A69 => 0x16A60, // Mro
+        0x16AC0..=0x16AC9 => 0x16AC0, // Tangsa
         0x16B50..=0x16B59 => 0x16B50, // Pahawh Hmong
+        0x16D70..=0x16D79 => 0x16D70, // Kirat Rai
+        0x1CCF0..=0x1CCF9 => 0x1CCF0, // Outlined
         0x1D7CE..=0x1D7D7 => 0x1D7CE, // Mathematical Bold
         0x1D7D8..=0x1D7E1 => 0x1D7D8, // Mathematical Double-Struck
         0x1D7E2..=0x1D7EB => 0x1D7E2, // Mathematical Sans-Serif
         0x1D7EC..=0x1D7F5 => 0x1D7EC, // Mathematical Sans-Serif Bold
         0x1D7F6..=0x1D7FF => 0x1D7F6, // Mathematical Monospace
+        0x1E140..=0x1E149 => 0x1E140, // Nyiakeng Puachue Hmong
+        0x1E2F0..=0x1E2F9 => 0x1E2F0, // Wancho
+        0x1E4F0..=0x1E4F9 => 0x1E4F0, // Nag Mundari
+        0x1E5F1..=0x1E5FA => 0x1E5F1, // Ol Onal
         0x1E950..=0x1E959 => 0x1E950, // Adlam
+        0x1FBF0..=0x1FBF9 => 0x1FBF0, // Segmented
         _ => return None,
     };
     Some(c - base)
@@ -736,20 +757,24 @@ ValidSrcPerms = ["0o644", "0o755"]
     /// Every [`unicode_decimal_value`] match arm, pinned at both edges and
     /// the middle: deleting an arm (or shifting a boundary) turns those
     /// lookups into `None` or wrong values. Neighbors assert `None` except
-    /// inside the contiguous Mathematical run, where the adjacency itself
-    /// is pinned by the neighboring blocks' edges.
+    /// inside contiguous runs (the Mathematical blocks and the Myanmar
+    /// Pao / Eastern Pwo Karen pair), where the adjacency itself is
+    /// pinned by the neighboring blocks' edges.
     #[test]
     fn unicode_decimal_value_covers_all_digit_blocks() {
         const BASES: &[u32] = &[
             0x30, 0x660, 0x6F0, 0x7C0, 0x966, 0x9E6, 0xA66, 0xAE6, 0xB66, 0xBE6, 0xC66, 0xCE6,
             0xD66, 0xDE6, 0xE50, 0xED0, 0xF20, 0x1040, 0x1090, 0x17E0, 0x1810, 0x1946, 0x19D0,
-            0x1A80, 0x1A90, 0x1B50, 0x1BB0, 0x1C50, 0xA620, 0xA8D0, 0xA900, 0xA9D0, 0xA9F0, 0xAA50,
-            0xABF0, 0xFF10, 0x104A0, 0x11066, 0x110F0, 0x11136, 0x111D0, 0x112F0, 0x11450, 0x114D0,
-            0x11650, 0x116C0, 0x11730, 0x118E0, 0x11C50, 0x11D50, 0x11DA0, 0x16A60, 0x16B50,
-            0x1D7CE, 0x1D7D8, 0x1D7E2, 0x1D7EC, 0x1D7F6, 0x1E950,
+            0x1A80, 0x1A90, 0x1B50, 0x1BB0, 0x1C40, 0x1C50, 0xA620, 0xA8D0, 0xA900, 0xA9D0, 0xA9F0,
+            0xAA50, 0xABF0, 0xFF10, 0x104A0, 0x10D30, 0x10D40, 0x11066, 0x110F0, 0x11136, 0x111D0,
+            0x112F0, 0x11450, 0x114D0, 0x11650, 0x116C0, 0x116D0, 0x116DA, 0x11730, 0x118E0,
+            0x11950, 0x11BF0, 0x11C50, 0x11D50, 0x11DA0, 0x11F50, 0x16130, 0x16A60, 0x16AC0,
+            0x16B50, 0x16D70, 0x1CCF0, 0x1D7CE, 0x1D7D8, 0x1D7E2, 0x1D7EC, 0x1D7F6, 0x1E140,
+            0x1E2F0, 0x1E4F0, 0x1E5F1, 0x1E950, 0x1FBF0,
         ];
         const EXCEPT: &[u32] = &[
-            0x1D7D7, 0x1D7D8, 0x1D7E1, 0x1D7E2, 0x1D7EB, 0x1D7EC, 0x1D7F5, 0x1D7F6,
+            0x116D9, 0x116DA, 0x1D7D7, 0x1D7D8, 0x1D7E1, 0x1D7E2, 0x1D7EB, 0x1D7EC, 0x1D7F5,
+            0x1D7F6,
         ];
         for &base in BASES {
             let c = |o| char::from_u32(base + o).unwrap();
