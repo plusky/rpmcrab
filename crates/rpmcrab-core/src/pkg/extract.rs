@@ -338,10 +338,12 @@ impl<'a> Extractor<'a> {
         Ok(true)
     }
 
-    /// Log a skip forced by a path collision. The linter proceeds on an
+    /// Warn about a skip forced by a path collision, via `tracing`: the
+    /// binary installs a `tracing` subscriber that renders these on
+    /// stderr, so a skip is user-visible. The linter proceeds on an
     /// incomplete tree, so these must be visible, never silent.
-    fn log_skip_collision(&self, e: &CpioEntry) {
-        log::warn!(
+    fn warn_skip_collision(&self, e: &CpioEntry) {
+        tracing::warn!(
             "extract: skipping entry {:?}: path collides with an incompatible existing object",
             String::from_utf8_lossy(&e.name)
         );
@@ -412,7 +414,7 @@ impl<'a> Extractor<'a> {
         // skipped like other path collisions: writing nothing keeps the
         // escape impossible without sinking the whole extraction.
         if self.goes_through_symlink(&path, e.mode & S_IFMT == S_IFLNK) {
-            self.log_skip_collision(e);
+            self.warn_skip_collision(e);
             if e.mode & S_IFMT == S_IFREG && e.nlink > 1 && e.size > 0 {
                 // The skipped entry is a hardlink group's data carrier:
                 // record the skip so the end-of-extraction group check
@@ -432,7 +434,7 @@ impl<'a> Extractor<'a> {
                 // ensure_dir_all doubles as the collision check for the entry
                 // itself: an existing non-directory at `path` yields false.
                 if !self.ensure_dir_all(&path)? {
-                    self.log_skip_collision(e);
+                    self.warn_skip_collision(e);
                     return skip_data(r, e.size);
                 }
                 skip_data(r, e.size)?;
@@ -441,7 +443,7 @@ impl<'a> Extractor<'a> {
             }
             S_IFREG => {
                 if !self.ensure_parent(&path)? || is_existing_dir(&path) {
-                    self.log_skip_collision(e);
+                    self.warn_skip_collision(e);
                     return skip_data(r, e.size);
                 }
                 if e.nlink > 1 {
@@ -458,7 +460,7 @@ impl<'a> Extractor<'a> {
             }
             S_IFLNK => {
                 if !self.ensure_parent(&path)? || is_existing_dir(&path) {
-                    self.log_skip_collision(e);
+                    self.warn_skip_collision(e);
                     return skip_data(r, e.size);
                 }
                 // `e.size` is attacker-controlled: cap before allocating
@@ -485,7 +487,7 @@ impl<'a> Extractor<'a> {
                 if !is_duplicate
                     && fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_symlink())
                 {
-                    self.log_skip_collision(e);
+                    self.warn_skip_collision(e);
                     return Ok(());
                 }
                 // Guard passed: record the path as materialized.
@@ -496,7 +498,7 @@ impl<'a> Extractor<'a> {
             }
             S_IFIFO => {
                 if !self.ensure_parent(&path)? || is_existing_dir(&path) {
-                    self.log_skip_collision(e);
+                    self.warn_skip_collision(e);
                     return Ok(());
                 }
                 let _ = fs::remove_file(&path);
@@ -578,7 +580,7 @@ impl<'a> Extractor<'a> {
     /// Every hardlink group needs exactly one data carrier: a group whose
     /// entries all carried size 0 would otherwise leave empty placeholders
     /// behind, silently. A group whose carrier was skipped by the
-    /// symlink-collision rule is exempt: the skip is logged, so its empty
+    /// symlink-collision rule is exempt: the skip is warned about, so its empty
     /// placeholders are not silent either.
     fn check_hardlinks(&self) -> Result<(), ExtractError> {
         for (key, group) in &self.hardlinks {
@@ -1429,7 +1431,7 @@ mod tests {
 
     /// A hardlink data carrier skipped by the symlink-collision rule
     /// must not fail the extraction at the group check: the carrier's
-    /// path was unusable, the skip is logged, and the group's other
+    /// path was unusable, the skip is warned about, and the group's other
     /// entries stay empty placeholders.
     #[test]
     fn skipped_hardlink_carrier_does_not_fail_extraction() {
@@ -1725,43 +1727,153 @@ mod tests {
         );
     }
 
-    /// Pins `log_skip_collision`: a collision skip stays visible as a warning.
-    #[test]
-    fn log_skip_collision_emits_a_warning() {
-        struct Capture {
-            messages: std::sync::Mutex<Vec<String>>,
+    /// Captured `tracing` output for the visibility tests: the binary
+    /// renders `tracing` events on stderr through its subscriber, so
+    /// these tests capture events through a subscriber too and keep
+    /// the rendered lines. Hand-rolled on the `tracing` core traits:
+    /// `tracing-subscriber` is a CLI concern the layering gate keeps
+    /// out of this crate, dev-dependencies included.
+    ///
+    /// Installed once as the process-global default: a scoped default
+    /// races the process-wide callsite-interest cache when other
+    /// tests hit the same callsites with no capture installed, which
+    /// intermittently swallowed the warnings captured here.
+    static CAPTURED_LINES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    static CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static NEXT_SPAN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+    struct CaptureSubscriber;
+
+    impl tracing::Subscriber for CaptureSubscriber {
+        fn register_callsite(
+            &self,
+            _metadata: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            // `sometimes`: the per-event `enabled` check decides, so a
+            // callsite first hit with no subscriber installed can never
+            // be cached as `never` for the capture below.
+            tracing::subscriber::Interest::sometimes()
         }
-        impl log::Log for Capture {
-            fn enabled(&self, metadata: &log::Metadata) -> bool {
-                metadata.level() <= log::Level::Warn
-            }
-            fn log(&self, record: &log::Record) {
-                if self.enabled(record.metadata()) {
-                    self.messages
-                        .lock()
-                        .unwrap()
-                        .push(record.args().to_string());
+
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.level() <= &tracing::Level::WARN
+        }
+
+        fn new_span(&self, _attrs: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(NEXT_SPAN.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Message(String);
+            impl tracing::field::Visit for Message {
+                fn record_debug(
+                    &mut self,
+                    _field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if !self.0.is_empty() {
+                        self.0.push(' ');
+                    }
+                    self.0.push_str(&format!("{value:?}"));
                 }
             }
-            fn flush(&self) {}
+            let mut message = Message(String::new());
+            event.record(&mut message);
+            CAPTURED_LINES.lock().unwrap().push(format!(
+                "{} {}",
+                event.metadata().level(),
+                message.0
+            ));
         }
-        static CAPTURE: Capture = Capture {
-            messages: std::sync::Mutex::new(Vec::new()),
-        };
-        static INIT: std::sync::Once = std::sync::Once::new();
-        INIT.call_once(|| {
-            let _ = log::set_logger(&CAPTURE);
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    /// Run `f` with the capture subscriber installed and return
+    /// everything it rendered, mirroring the binary's stderr channel.
+    /// The capture tests are serialised against each other; warnings
+    /// other tests emit meanwhile only add lines, and the assertions
+    /// are `contains` checks.
+    fn capture_tracing(f: impl FnOnce()) -> String {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(CaptureSubscriber);
         });
-        log::set_max_level(log::LevelFilter::Warn);
-        CAPTURE.messages.lock().unwrap().clear();
+        let _serialised = CAPTURE_LOCK.lock().unwrap();
+        CAPTURED_LINES.lock().unwrap().clear();
+        f();
+        CAPTURED_LINES.lock().unwrap().join("\n")
+    }
+
+    /// Pins `warn_skip_collision`: a collision skip stays visible as a
+    /// warning on the channel the binary actually renders (`tracing`).
+    #[test]
+    fn warn_skip_collision_emits_a_tracing_warning() {
         let dir = tempfile::tempdir().unwrap();
         let ex = extractor_for(dir.path());
         let entry = cpio_entry(b"usr/bin/skip-probe", S_IFREG | 0o644, 0);
-        ex.log_skip_collision(&entry);
-        let messages = CAPTURE.messages.lock().unwrap().clone();
+        let output = capture_tracing(|| ex.warn_skip_collision(&entry));
         assert!(
-            messages.iter().any(|m| m.contains("usr/bin/skip-probe")),
-            "collision skip must warn with the entry name, got {messages:?}"
+            output.contains("WARN") && output.contains("usr/bin/skip-probe"),
+            "collision skip must warn with the entry name, got {output:?}"
+        );
+    }
+
+    /// A crafted symlink-escape package (`a -> <outside>` plus `a/b`)
+    /// leaves an incomplete tree, so the skip must warn on the rendered
+    /// channel instead of succeeding silently: nothing lands outside,
+    /// and the warning names the skipped entry. The hardlink-carrier
+    /// exemption rests on the same warning, so its skip warns too.
+    #[test]
+    fn symlink_escape_skip_warns_through_tracing() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mut ex = extractor_for(root.path());
+        let output = capture_tracing(|| {
+            let target = outside.path().as_os_str().as_bytes().to_vec();
+            let link = cpio_entry(b"a", S_IFLNK | 0o777, target.len() as u64);
+            let raw = padded(&target);
+            let mut data = &raw[..];
+            ex.materialize(&mut data, &link).unwrap();
+
+            let reg = cpio_entry(b"a/b", S_IFREG | 0o644, 5);
+            let raw = padded(b"hello");
+            let mut fdata = &raw[..];
+            ex.materialize(&mut fdata, &reg).unwrap();
+
+            // A hardlink data carrier landing on a live symlink is
+            // skipped the same way; the group check exempts it only
+            // because this skip warns.
+            let link = cpio_entry(b"carrier", S_IFLNK | 0o777, target.len() as u64);
+            let raw = padded(&target);
+            let mut data = &raw[..];
+            ex.materialize(&mut data, &link).unwrap();
+
+            let mut carrier = cpio_entry(b"carrier", S_IFREG | 0o644, 5);
+            carrier.nlink = 2;
+            carrier.ino = 7;
+            let raw = padded(b"hello");
+            let mut data = &raw[..];
+            ex.materialize(&mut data, &carrier).unwrap();
+        });
+        assert!(
+            !outside.path().join("b").exists(),
+            "nothing may be written outside the extraction root"
+        );
+        ex.check_hardlinks().unwrap();
+        assert!(
+            output.contains("a/b"),
+            "symlink-escape skip must warn with the entry name, got {output:?}"
+        );
+        assert!(
+            output.contains("carrier"),
+            "hardlink-carrier skip must warn with the entry name, got {output:?}"
         );
     }
 }
