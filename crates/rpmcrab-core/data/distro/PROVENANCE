@@ -40,6 +40,8 @@
 #   Filters: dropped 'invalid-ldconfig-symlink' (killed: openSUSE config says 'Doesn't seem to make sense')
 #   Filters: dropped 'only-non-binary-in-usr-lib' (killed: openSUSE config says 'Doesn't seem to make sense')
 #   Filters: dropped 'outside-libdir-files' (killed: openSUSE config says 'Doesn't seem to make sense')
+#   Filters: dropped 'no-major-in-name' (killed: Mandriva-specific, openSUSE doesn't want it)
+#   Filters: dropped 'lib-package-without-%mklibname' (killed: Mandriva-specific, openSUSE doesn't want it)
 #   Filters: dropped 'init-script-name-with-dot' (killed: InitScriptCheck deleted (issue #214))
 #   Filters: dropped 'setup-not-quiet' (killed: spec-cleaner adds -q)
 #   Filters: dropped 'no-packager-tag' (killed: autobuild redundancy, suppressed by openSUSE and Fedora)
