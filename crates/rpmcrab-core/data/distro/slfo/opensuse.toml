@@ -178,7 +178,6 @@ Filters = [
     ' conffile-without-noreplace-flag ',
     ' non-standard-executable-perm ',
     ' read-error ',
-    ' no-dependency-on locales',
     ' executable-marked-as-config-file',
     ' log-files-without-logrotate',
     ' no-documentation',

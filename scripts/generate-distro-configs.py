@@ -302,6 +302,7 @@ DROP_LIVE_FILTERS = {
 PRUNE_SCOPED = {
     ("subdir-in-bin", "/sbin/conf.d/"): "dead SysV scope",
     ("conffile-without-noreplace-flag", "/etc/init.d"): "dead SysV scope",
+    ("no-dependency-on", "locales"): "dead scope: the I18NCheck locales-* dependency rule is removed (issue #534); the finding stays live from FilesCheck",
 }
 
 # Packages gone from the distros: whitelist stanzas naming them are pruned.
