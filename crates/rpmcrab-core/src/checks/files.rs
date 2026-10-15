@@ -11,7 +11,7 @@
 
 #![allow(clippy::collapsible_if, clippy::bool_comparison)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use fancy_regex::Regex;
@@ -438,6 +438,13 @@ pub struct FilesCheck {
     python_default_version: String,
     /// Probed `gzip`, `bzip2`, `xz`, `zstd`, in that order.
     decompressors: [Tool; 4],
+    /// Session state for `no-documentation` (issue #539): the doc-less
+    /// non-lib packages seen since the last export, as
+    /// `(name, arch, source key)`, and the source keys of the packages
+    /// that ship documentation. The finding is decided in `after_checks`,
+    /// once every package of the run has been seen.
+    nodoc_candidates: Vec<(String, String, String)>,
+    documented_sources: HashSet<String>,
 }
 
 impl FilesCheck {
@@ -544,6 +551,8 @@ impl FilesCheck {
             python_default_version: get_str("PythonDefaultVersion"),
             decompressors: ["gzip", "bzip2", "xz", "zstd"]
                 .map(|name| Tool::probe(&source, name, &[]).0),
+            nodoc_candidates: Vec::new(),
+            documented_sources: HashSet::new(),
         }
     }
 
@@ -636,7 +645,7 @@ impl Check for FilesCheck {
             librpm::Tag::PREUNPROG,
         );
 
-        self.check_nodoc(pkg, &st, out);
+        self.check_nodoc(pkg, &st);
         self.check_meta_package(pkg, &st, out);
         self.check_empty_debuginfo(pkg, &st, out);
         for f in &pkg.files {
@@ -646,6 +655,65 @@ impl Check for FilesCheck {
         self.check_log_files_without_logrotate(pkg, &st, out);
         self.check_debuginfo_without_sources(pkg, &st, out);
         self.check_bindir_exes(pkg, &st, out);
+    }
+
+    fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
+        // The session-aware `no-documentation` decision (issue #539): a
+        // candidate is suppressed when any package from the same source
+        // in the run ships documentation. Candidates are in lint order,
+        // which the stable output sort preserves for equal keys.
+        for (name, arch, source) in &self.nodoc_candidates {
+            if !self.documented_sources.contains(source) {
+                out.add_info(make_finding(
+                    name,
+                    arch,
+                    Level::Warning,
+                    "no-documentation",
+                    vec![],
+                    None,
+                ));
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        self.nodoc_candidates.clear();
+        self.documented_sources.clear();
+    }
+
+    fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
+        if self.nodoc_candidates.is_empty() && self.documented_sources.is_empty() {
+            return None;
+        }
+        Some(Box::new(NoDocState {
+            candidates: std::mem::take(&mut self.nodoc_candidates),
+            documented_sources: std::mem::take(&mut self.documented_sources),
+        }))
+    }
+
+    fn import_state(&mut self, state: Box<dyn std::any::Any + Send>) {
+        if let Ok(state) = state.downcast::<NoDocState>() {
+            self.nodoc_candidates.extend(state.candidates);
+            self.documented_sources.extend(state.documented_sources);
+        }
+    }
+}
+
+/// Cross-package `no-documentation` state, exported per package and
+/// merged before `after_checks` (`rpmlint#1595`).
+struct NoDocState {
+    candidates: Vec<(String, String, String)>,
+    documented_sources: HashSet<String>,
+}
+
+/// The key grouping binary packages built from one source: the
+/// `SOURCERPM` header value. A package whose header carries none
+/// groups by its own name, so it is only ever its own sibling and the
+/// per-package behaviour is preserved.
+fn source_key(pkg: &Pkg) -> String {
+    match pkg.tag_str(librpm::Tag::SOURCERPM) {
+        Some(srpm) if !srpm.is_empty() => srpm,
+        _ => pkg.name.clone(),
     }
 }
 
@@ -774,9 +842,22 @@ impl FilesCheck {
         }
     }
 
-    fn check_nodoc(&self, pkg: &Pkg, st: &PkgState, out: &mut Filter) {
-        if !st.lib_package && pkg.doc_files.is_empty() {
-            add_info(out, Level::Warning, pkg, "no-documentation", &[]);
+    /// Record the package for the session-aware `no-documentation`
+    /// decision in `after_checks` (issue #539): a package carrying doc
+    /// files documents its whole source group, and a doc-less non-lib
+    /// package becomes a candidate. A candidate fires only when no
+    /// package from the same source in the run ships documentation —
+    /// the standard layout of docs in the main package and none in its
+    /// data/devel subpackages stays quiet, while a genuinely doc-less
+    /// source still fires on every non-lib package. The reference
+    /// decides per package (`FilesCheck.py` `_check_nodoc`) and has no
+    /// cross-package awareness; the divergence is ledgered.
+    fn check_nodoc(&mut self, pkg: &Pkg, st: &PkgState) {
+        if !pkg.doc_files.is_empty() {
+            self.documented_sources.insert(source_key(pkg));
+        } else if !st.lib_package {
+            self.nodoc_candidates
+                .push((pkg.name.clone(), pkg.arch.clone(), source_key(pkg)));
         }
     }
 
@@ -3121,14 +3202,37 @@ mod tests {
         )
     }
 
-    fn run_files_check(rpm: &str, config: &Config) -> (Vec<String>, tempfile::TempDir) {
-        let dir = tempfile::TempDir::new().expect("tmpdir");
-        let pkg = Pkg::open(std::path::Path::new(rpm), dir.path(), true).expect("open fixture");
+    /// Drive `FilesCheck` over `rpms` the way the lint loop drives a
+    /// batch: one worker instance checks each package in order and
+    /// exports its cross-package state after each one, the main
+    /// instance merges the exports and runs `after_checks` once at the
+    /// end. Returns the `(finding, rendered line)` pairs.
+    fn run_files_check_session(
+        rpms: &[&str],
+        config: &Config,
+    ) -> (Vec<(String, String)>, Vec<tempfile::TempDir>) {
+        let mut dirs = Vec::new();
         let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
-        let mut check = FilesCheck::new(config);
-        check.check(&pkg, config, &mut out);
-        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
-        (names, dir)
+        let mut worker = FilesCheck::new(config);
+        let mut main = FilesCheck::new(config);
+        for rpm in rpms {
+            let dir = tempfile::TempDir::new().expect("tmpdir");
+            let pkg = Pkg::open(std::path::Path::new(rpm), dir.path(), true).expect("open fixture");
+            worker.check(&pkg, config, &mut out);
+            if let Some(state) = worker.export_state() {
+                main.import_state(state);
+            }
+            worker.reset();
+            dirs.push(dir);
+        }
+        main.after_checks(config, &mut out);
+        (out.results().to_vec(), dirs)
+    }
+
+    fn run_files_check(rpm: &str, config: &Config) -> (Vec<String>, tempfile::TempDir) {
+        let (results, mut dirs) = run_files_check_session(&[rpm], config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        (names, dirs.pop().expect("one extraction dir"))
     }
 
     fn assert_has(names: &[String], finding: &str) {
@@ -3575,6 +3679,9 @@ mod tests {
     fn no_documentation_fires_for_non_lib_without_docs() {
         // Complement of lib_package_without_docs_skips_no_documentation: a
         // non-lib package with no %doc files must emit no-documentation.
+        // The decision lands in after_checks (issue #539), so drive the
+        // session lifecycle the lint loop drives: export the package's
+        // state, merge it back, then run after_checks.
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
         let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
@@ -3585,6 +3692,10 @@ mod tests {
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = FilesCheck::new(&config);
         check.check(&pkg, &config, &mut out);
+        if let Some(state) = check.export_state() {
+            check.import_state(state);
+        }
+        check.after_checks(&config, &mut out);
         let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
         assert_has(&names, "no-documentation");
     }
@@ -4496,6 +4607,65 @@ mod tests {
         let (names, _dir) =
             run_files_check(&fixture_path("libnodoc-test-1.0-1.noarch.rpm"), &config);
         assert_lacks(&names, "no-documentation");
+    }
+
+    #[test]
+    fn no_documentation_fires_for_lone_docless_package() {
+        // Issue #539: a doc-less package with no documented sibling in
+        // the run still fires — the session awareness must not become a
+        // blanket suppression.
+        let config = test_config();
+        let (results, _dirs) =
+            run_files_check_session(&[&fixture_path("nodoc-lone-1.0-1.noarch.rpm")], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "no-documentation");
+    }
+
+    #[test]
+    fn no_documentation_suppressed_when_sibling_ships_docs() {
+        // Issue #539: nodoc-session-main and nodoc-session-data are built
+        // from one spec; the main package ships %doc files, so the data
+        // subpackage stays quiet — in either lint order. Dropping the
+        // sibling awareness (deciding per package, as the reference
+        // does) makes the data package fire and this fail.
+        let config = test_config();
+        let main = fixture_path("nodoc-session-main-1.0-1.noarch.rpm");
+        let data = fixture_path("nodoc-session-data-1.0-1.noarch.rpm");
+        for rpms in [
+            [data.as_str(), main.as_str()],
+            [main.as_str(), data.as_str()],
+        ] {
+            let (results, _dirs) = run_files_check_session(&rpms, &config);
+            let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+            assert_lacks(&names, "no-documentation");
+        }
+    }
+
+    #[test]
+    fn no_documentation_mixed_sources_decide_per_source() {
+        // Issue #539: two sources in one run — the sibling-covered data
+        // package stays quiet while the lone doc-less package from the
+        // other source fires, exactly once and on the right package.
+        let config = test_config();
+        let (results, _dirs) = run_files_check_session(
+            &[
+                &fixture_path("nodoc-session-data-1.0-1.noarch.rpm"),
+                &fixture_path("nodoc-session-main-1.0-1.noarch.rpm"),
+                &fixture_path("nodoc-lone-1.0-1.noarch.rpm"),
+            ],
+            &config,
+        );
+        let lines: Vec<&str> = results
+            .iter()
+            .filter(|(n, _)| n == "no-documentation")
+            .map(|(_, line)| line.as_str())
+            .collect();
+        assert_eq!(lines.len(), 1, "got: {results:?}");
+        assert!(
+            lines[0].starts_with("nodoc-lone.noarch"),
+            "unexpected line: {}",
+            lines[0]
+        );
     }
 
     #[test]
