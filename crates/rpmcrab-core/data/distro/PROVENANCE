@@ -93,6 +93,8 @@
 #   Filters: dropped 'executable-marked-as-config-file' (blanket filter dropped by ruling (issue #557): the Factory set it suppresses (137 E lines, 44 srcpkgs) includes 24 genuine accidental markings no other check covers; deliberate shapes belong in per-package rpmlintrc)
 #   Filters: dropped 'no-manual-page-for-binary' (demoted to Info (rpmcrab#484): a missing manpage is upstream debt; surfaced as info instead of filtered away)
 #
+# Scoped Filters entries (narrowed to their recorded rationale;
+# see SCOPE_FILTERS):
 # Deduped Filters entries (exact duplicates and
 # same-finding lines subsumed by a broader literal;
 # output-neutral, see dedupe_filters):
