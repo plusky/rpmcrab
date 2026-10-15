@@ -1948,8 +1948,12 @@ mod tests {
         assert!(!range_compare(&obs, &prov), "strictly-below must not match");
     }
 
+    /// A `range_compare` matrix row: requirement flags + EVR, provider
+    /// flags + EVR, and the expected verdict.
+    type MatrixCase = (u32, Option<&'static str>, u32, Option<&'static str>, bool);
+
     /// Flag/ordering matrix for [`range_compare`]: every arm of the
-    /// Greater/Equal/Less dispatch on both sides, plus the unversioned,
+    /// Greater/Equal/Less dispatch on both flag sides, plus the unversioned,
     /// name-mismatch and release-drop paths. GT=4, GE=12, EQ=8, LE=10, LT=2.
     #[test]
     fn range_compare_flag_ordering_matrix() {
@@ -1959,7 +1963,7 @@ mod tests {
         const GE: u32 = GT | EQ;
         const LE: u32 = LT | EQ;
         // (req flags, req EVR, prov flags, prov EVR, expected).
-        let cases: &[(u32, Option<&str>, u32, Option<&str>, bool)] = &[
+        let cases: &[MatrixCase] = &[
             // Unversioned satisfies everything (prov side).
             (EQ, Some("2.0"), 0, None, true),
             // Unversioned satisfies everything (req side).
@@ -1970,7 +1974,8 @@ mod tests {
             (EQ, Some("1.0"), EQ, Some("2.0"), false),
             (LE, Some("1.0"), EQ, Some("2.0"), false),
             (LT, Some("1.0"), EQ, Some("2.0"), false),
-            // Provided greater against LT prov: LE/LT match via arm 3.
+            // Provided greater against LT prov: LT matches via arm 3
+            // (the LE row is #1599-shadowed: at-or-below never matches).
             (LE, Some("1.0"), LT, Some("2.0"), false),
             (LT, Some("1.0"), LT, Some("2.0"), true),
             (EQ, Some("1.0"), LT, Some("2.0"), false),
@@ -1997,6 +2002,10 @@ mod tests {
             // provider -- those return false above -- so the drop only
             // bites for GT/GE/LT requirements.)
             (EQ, Some("1.0"), EQ, Some("1.0-15"), false),
+            // The drop pinned where it bites: without it rc is Greater
+            // and a GT requirement matches; with it rc is Equal and an
+            // EQ provider does not.
+            (GT, Some("1.0"), EQ, Some("1.0-15"), false),
             // Epoch decides before version.
             (GE, Some("0:1.0"), GE, Some("1:1.0"), true),
             (EQ, Some("0:2.0"), EQ, Some("1:1.0"), false),
