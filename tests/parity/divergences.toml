@@ -813,7 +813,7 @@ since = "0.1.0"
 case = "global"
 check = "incorrect-fsf-address"
 kind = "behaviour"
-reason = "The port scans the whole file for the FSF license and wrong-address patterns; the reference (FilesCheck.py:1393-1395) searches only its 2048-byte peek chunk, so a stale FSF address past byte 2048 goes unreported. Deliberate fix-in-port of upstream rpmlint#40, open since 2013: the peek limit lets wrong addresses through in longer files."
+reason = "The port scans the whole file for the FSF license and wrong-address patterns; the reference (FilesCheck.py:1393-1395) searches only its 2048-byte peek chunk, so a stale FSF address past byte 2048 goes unreported. Deliberate fix-in-port of upstream rpmlint#40, open since 2013: the peek limit lets wrong addresses through in longer files. The port's wrong-address pattern also requires a word boundary after the abbreviated '51 Franklin St'; the reference pattern (FilesCheck.py:210) has none, so it matches the FSF's current address '51 Franklin Street, Fifth Floor, Boston, MA 02110-1301' — the address the current GPL texts themselves print — and reports it as incorrect. Deliberate fix (plusky/rpmcrab#543): the abbreviated form and the other stale addresses still fire; the spelled-out current address stays silent. Measured filter-free: gpsbabel 1.10.0 ships the stock GPL-2.0 COPYING with the current address and fired once before the fix, never after; on piglit (54,741 files) 9 files fire before and 8 after, the removed one embedding the current address. Pinned by fsf_wrong_address_regex_matches_only_stale_addresses and the fsf-address fixture (LICENSE-abbrev fires, LICENSE-current silent)."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/40"
 
