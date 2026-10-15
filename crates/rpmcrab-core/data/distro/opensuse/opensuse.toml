@@ -137,7 +137,6 @@ Filters = [
 # SUSE kmp's don't need manual depmod (bnc#456048)
     'configure-without-libdir-spec',
     'use-of-RPM_SOURCE_DIR',
-    'use-tmp-in-',
     'symlink-contains-up-and-down-segments /var/lib/named',
     'no-ldconfig-symlink',
     'aaa_base\.\S+: \w: use-of-home-in-%post',

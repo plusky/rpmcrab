@@ -330,6 +330,12 @@ DROP_LIVE_FILTERS = {
     # bulk-glob corpora and structural non-configs. The tag's
     # --explain text is reworded alongside (see divergences.toml).
     "conffile-without-noreplace-flag": "upstream hides it as policy; the port surfaces it so the residual /etc main-config findings are visible (issue #556)",
+    # The bare 'use-tmp-in-' pattern is the pattern itself, trailing dash
+    # included: pure_finding_pattern returns it verbatim, so the key must
+    # carry the dash. The check now fires only on literal paths (templates
+    # and glob patterns are not predictable paths), so the blanket filter
+    # would only hide genuine uses.
+    "use-tmp-in-": "check tightened to literal paths (rpmcrab#558): mktemp templates and glob patterns no longer fire; the blanket filter would only hide genuine predictable-path uses (issue #538)",
 }
 
 # (finding, scope) -> reason: Filters entries scoped to dead paths. The finding
