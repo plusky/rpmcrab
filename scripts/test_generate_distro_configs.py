@@ -954,6 +954,48 @@ def test_retarget_filters_byte_exact_only():
     assert retargeted == [], retargeted
 
 
+def test_prune_flavoured_filters_drops_opensuse_snapshot_line():
+    """PRUNE_FLAVOURED drops the snapshot exemption for opensuse only.
+
+    AtomicUpdateCheck is excluded from the opensuse flavor at the Checks
+    layer (issue #478), so the line can never fire there; the slfo flavor
+    runs the check and keeps the exemption, so the same text passes
+    through untouched under that flavor (issue #565).
+    """
+    text = (
+        'Filters = [\n'
+        "    '^filesystem\\..*: dir-or-file-outside-snapshot',\n"
+        "    ' dangerous-command.*',\n"
+        ']\n'
+    )
+    log = []
+    out = gen.prune_flavoured_filters(text, "opensuse", log)
+    assert 'dir-or-file-outside-snapshot' not in out, out
+    assert "    ' dangerous-command.*',\n" in out, out
+    assert len(log) == 1 and 'opensuse' in log[0], log
+
+    log = []
+    out = gen.prune_flavoured_filters(text, "slfo", log)
+    assert out == text, out
+    assert log == [], log
+
+
+def test_prune_flavoured_filters_byte_exact_only():
+    """A reworded line is NOT pruned: matching is byte-exact, so an
+    upstream reword stops the prune and the sync surfaces the line for
+    a fresh audit instead of the prune silently widening.
+    """
+    text = (
+        'Filters = [\n'
+        "    '^filesystem\\..*: dir-or-file-outside-snapshot ',\n"
+        ']\n'
+    )
+    log = []
+    out = gen.prune_flavoured_filters(text, "opensuse", log)
+    assert out == text, out
+    assert log == [], log
+
+
 def test_drop_live_filters_drops_kernel_modules_line():
     """The kernel-modules filter is dropped via DROP_LIVE_FILTERS.
 

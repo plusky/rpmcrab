@@ -9,7 +9,8 @@ drops ``Filters`` entries for live findings rpmcrab deliberately surfaces
 subsumed by a broader line for the same finding (see dedupe_filters),
 drops whitelist stanzas for packages gone from
 Tumbleweed/SLE 16 and stale pie-executables paths, retargets ``Filters``
-entries whose target path moved (see RETARGET_FILTERS), appends the extra
+entries whose target path moved (see RETARGET_FILTERS), prunes ``Filters``
+entries dead in one flavor only (see PRUNE_FLAVOURED), appends the extra
 Filters/Checks rpmcrab carries on top of upstream, removes the Checks
 the opensuse flavor deliberately does not run, and stamps provenance.
 
@@ -375,6 +376,25 @@ PRUNE_RAW = {
     # package ships only iconvconfig and ldconfig in /usr/sbin, and the
     # Factory sweep contains zero mentions of the name.
     r"glibc\.\S+: \w: statically-linked-binary /usr/sbin/glibc_post_upgrade": "dead pattern: glibc 2.44 no longer ships glibc_post_upgrade; zero emissions in the Factory sweep (issue #538)",
+}
+
+# Filters lines pruned for one flavor only: flavor -> {pattern: reason}.
+# Every other PRUNE_* table applies to both flavors; these name lines that
+# are dead under one flavor because that flavor's Checks layer differs,
+# while the other flavor runs the check and keeps the exemption. Matching
+# is byte-exact like PRUNE_RAW: when upstream rewords the line the entry
+# stops matching and the monthly sync surfaces the line again for a fresh
+# audit — a flavor prune can never silently widen.
+PRUNE_FLAVOURED = {
+    "opensuse": {
+        # AtomicUpdateCheck is excluded from the opensuse flavor at the
+        # Checks layer (EXCLUDED_OPENSUSE_CHECKS, issue #478), so the
+        # finding is never emitted there and this exemption can never
+        # fire. The slfo flavor runs the check and keeps the line: the
+        # snapshot layout binds the SLFO product layered on openSUSE,
+        # not every openSUSE package (issue #565).
+        r"^filesystem\..*: dir-or-file-outside-snapshot": "dead in the opensuse flavor only: AtomicUpdateCheck is excluded there (issue #478), so the finding is never emitted; the slfo flavor runs the check and keeps the exemption (issue #565)",
+    },
 }
 
 # Filters lines whose exemption is still wanted but whose target moved:
@@ -788,6 +808,42 @@ def prune_stale_filters(text, known, pruned_log, dropped_log, retargeted_log):
             if finding is not None and finding in DROP_LIVE_FILTERS:
                 dropped_log.append(
                     f"{in_list}: dropped {finding!r} ({DROP_LIVE_FILTERS[finding]})"
+                )
+                continue
+        out.append(line)
+    return "".join(out)
+
+
+def prune_flavoured_filters(text, flavor, flavoured_pruned_log):
+    """Drop Filters/BlockedFilters lines pruned for this flavor only.
+
+    PRUNE_FLAVOURED maps a flavor to byte-exact patterns (PRUNE_RAW
+    semantics) that are dead under that flavor's Checks layer while the
+    other flavor still runs the check and keeps the exemption. Flavors
+    with no table pass through untouched.
+    """
+    table = PRUNE_FLAVOURED.get(flavor)
+    if not table:
+        return text
+    lines = text.splitlines(keepends=True)
+    out = []
+    in_list = None
+    for line in lines:
+        stripped = line.strip()
+        m = re.match(r"^(Filters|BlockedFilters)\s*=\s*\[", stripped)
+        if m:
+            in_list = m.group(1)
+            out.append(line)
+            continue
+        if in_list and stripped.startswith("]"):
+            in_list = None
+            out.append(line)
+            continue
+        if in_list:
+            raw = raw_filter_pattern(line)
+            if raw is not None and raw in table:
+                flavoured_pruned_log.append(
+                    f"{flavor} {in_list}: dropped {raw!r} ({table[raw]})"
                 )
                 continue
         out.append(line)
@@ -1730,6 +1786,7 @@ def generate(ref_dir=None, pins=None):
     dropped_log = []
     retargeted_log = []
     deduped_filters_log = []
+    flavoured_pruned_log = []
     for flavor, data in result.items():
         for filename, text in data["files"].items():
             assert_no_flavor_key(flavor, filename, text)
@@ -1737,6 +1794,7 @@ def generate(ref_dir=None, pins=None):
                 text, known, pruned_log, dropped_log, retargeted_log
             )
             text = dedupe_filters(text, deduped_filters_log)
+            text = prune_flavoured_filters(text, flavor, flavoured_pruned_log)
             text = prune_stale_packages(text, pkg_pruned_log, flavor)
             if filename == "pie-executables.toml":
                 # Per-flavor evidence (see PRUNE_PIE_PATHS): the owning
@@ -1817,6 +1875,16 @@ def generate(ref_dir=None, pins=None):
                 provenance.append(f"#   {entry}")
     else:
         provenance.append("# No Filters entries pruned: all referenced findings exist.")
+    if flavoured_pruned_log:
+        provenance.append("#")
+        provenance.append("# Pruned Filters entries (one flavor only; the other")
+        provenance.append("# flavor runs the check and keeps the exemption;")
+        provenance.append("# see PRUNE_FLAVOURED):")
+        seen_flavoured = set()
+        for entry in flavoured_pruned_log:
+            if entry not in seen_flavoured:
+                seen_flavoured.add(entry)
+                provenance.append(f"#   {entry}")
     if retargeted_log:
         provenance.append("#")
         provenance.append("# Retargeted Filters entries (exemption kept, its target")
@@ -1889,6 +1957,7 @@ def generate(ref_dir=None, pins=None):
         dropped_log,
         retargeted_log,
         deduped_filters_log,
+        flavoured_pruned_log,
     )
 
 
@@ -2042,7 +2111,7 @@ def main():
         rewrite_pins(Path(__file__).resolve(), pins)
 
     ref_dir = Path(args.ref_dir) if args.ref_dir else None
-    result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, deduped, dropped_log, retargeted_log, deduped_filters_log = generate(
+    result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, deduped, dropped_log, retargeted_log, deduped_filters_log, flavoured_pruned_log = generate(
         ref_dir=ref_dir, pins=pins
     )
 
