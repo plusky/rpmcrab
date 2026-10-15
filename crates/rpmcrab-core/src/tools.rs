@@ -89,15 +89,23 @@ impl Tool {
 /// A single spawn can fail transiently under load (fork/exec pressure
 /// on a busy runner), and one failure would otherwise read as "the
 /// tool is not installed", silently disabling every check that depends
-/// on it. A genuinely absent or broken tool fails every attempt and
-/// still ends up absent; the retries cost it a few milliseconds, once.
+/// on it. Only transient failures (`WouldBlock`, `Interrupted`) are
+/// retried; a permanent failure -- a missing or non-executable
+/// binary -- fails fast on the first attempt.
 const PROBE_ATTEMPTS: usize = 3;
 
 /// Pause between probe attempts; see [`PROBE_ATTEMPTS`].
 const PROBE_RETRY_DELAY: Duration = Duration::from_millis(25);
 
-/// Run `spawn` until it succeeds, up to [`PROBE_ATTEMPTS`] times, and
-/// return the output; `None` when every attempt failed.
+/// Run `spawn` until it succeeds and return the output; `None` when
+/// the spawn failed permanently or every attempt failed transiently.
+///
+/// Retries apply only to transient spawn errors -- `WouldBlock`
+/// (resource pressure) and `Interrupted` (a signal interrupted the
+/// spawn) -- up to [`PROBE_ATTEMPTS`] attempts. Any other error, such
+/// as `NotFound` for a missing binary or `PermissionDenied` for a
+/// non-executable one, fails identically on every attempt, so it
+/// returns `None` on the first attempt.
 ///
 /// Split out of [`Tool::probe`] so the retry policy is testable with a
 /// scripted spawner instead of a real binary.
@@ -109,8 +117,12 @@ where
         if attempt > 0 {
             std::thread::sleep(PROBE_RETRY_DELAY);
         }
-        if let Ok(output) = spawn() {
-            return Some(output);
+        match spawn() {
+            Ok(output) => return Some(output),
+            Err(err) => match err.kind() {
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted => {}
+                _ => return None,
+            },
         }
     }
     None
@@ -145,8 +157,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn spawn_retry_returns_the_first_success() {
-        // Two transient failures, then the spawn works: the tool must
-        // read as present, not absent.
+        // Two transient (WouldBlock) failures, then the spawn works:
+        // the tool must read as present, not absent.
         let attempts = Cell::new(0);
         let output = spawn_with_retry(|| {
             attempts.set(attempts.get() + 1);
@@ -160,14 +172,57 @@ mod tests {
         assert_eq!(attempts.get(), 3);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn spawn_retry_gives_up_when_every_attempt_fails() {
-        // A genuinely absent tool fails every spawn and must still end
-        // up absent after exactly PROBE_ATTEMPTS tries.
+    fn spawn_retry_retries_an_interrupted_spawn() {
+        // Interrupted is the other transient kind: one interrupted
+        // spawn, then the retry succeeds.
+        let attempts = Cell::new(0);
+        let output = spawn_with_retry(|| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() < 2 {
+                Err(io::Error::from(io::ErrorKind::Interrupted))
+            } else {
+                Ok(fake_output())
+            }
+        });
+        assert!(output.is_some());
+        assert_eq!(attempts.get(), 2);
+    }
+
+    #[test]
+    fn spawn_retry_fails_fast_on_a_missing_binary() {
+        // NotFound is permanent -- a missing binary stays missing --
+        // so the probe must not retry it.
         let attempts = Cell::new(0);
         let output: Option<Output> = spawn_with_retry(|| {
             attempts.set(attempts.get() + 1);
             Err(io::Error::from(io::ErrorKind::NotFound))
+        });
+        assert!(output.is_none());
+        assert_eq!(attempts.get(), 1);
+    }
+
+    #[test]
+    fn spawn_retry_fails_fast_on_a_non_executable_binary() {
+        // PermissionDenied is permanent too: exactly one attempt.
+        let attempts = Cell::new(0);
+        let output: Option<Output> = spawn_with_retry(|| {
+            attempts.set(attempts.get() + 1);
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        });
+        assert!(output.is_none());
+        assert_eq!(attempts.get(), 1);
+    }
+
+    #[test]
+    fn spawn_retry_gives_up_when_every_attempt_fails_transiently() {
+        // A spawn that keeps failing transiently must still end up
+        // absent after exactly PROBE_ATTEMPTS tries.
+        let attempts = Cell::new(0);
+        let output: Option<Output> = spawn_with_retry(|| {
+            attempts.set(attempts.get() + 1);
+            Err(io::Error::from(io::ErrorKind::WouldBlock))
         });
         assert!(output.is_none());
         assert_eq!(attempts.get(), PROBE_ATTEMPTS);
