@@ -93,14 +93,11 @@ Filters = [
     '^filesystem\..*: dir-or-file-in-var-run',
     '^filesystem\..*: dir-or-file-in-var-lock',
     '^filesystem\..*: dir-or-file-in-var-tmp',
-    '^filesystem\..*: dir-or-file-in-var-run',
-    '^filesystem\..*: dir-or-file-in-var-lock',
     '^filesystem\..*: dir-or-file-in-usr-tmp',
     '^filesystem\..*: dir-or-file-in-tmp',
     '^filesystem\..*: dir-or-file-in-mnt',
     '^filesystem\..*: dir-or-file-in-home',
     '^filesystem\..*: dir-or-file-outside-snapshot',
-    '^filesystem\..*: hidden-file-or-dir /root/.gnupg',
     '^filesystem\..*: hidden-file-or-dir /root/.gnupg',
     '^filesystem\..*: hidden-file-or-dir /usr/etc/skel/.config',
     '^filesystem\..*: hidden-file-or-dir /usr/etc/skel/.local',
@@ -110,7 +107,7 @@ Filters = [
     '^filesystem\..*: filelist-forbidden-fhs23',
     '^filesystem\..*: filelist-forbidden-opt',
     '^filesystem\..*: non-standard-uid /var/lib/nobody nobody',
-    '^filesystem\..*: missing-dependency-to-cron',
+    '^filesystem\..*: missing-dependency-to-crontabs',
 # has arch specific dirs in /usr
     '^filesystem\..*: no-binary',
 
@@ -171,7 +168,6 @@ Filters = [
     ' prereq-use',
     ' file-not-utf8',
     ' mixed-use-of-spaces-and-tabs ',
-    ' prereq-use ',
 
 # An issue with OBS, works with autobuild
     ' non-standard-dir-perm ',

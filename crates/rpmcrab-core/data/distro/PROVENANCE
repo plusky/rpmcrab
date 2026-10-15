@@ -75,6 +75,7 @@
 #   Filters: retargeted '^filesystem\\..*: hidden-file-or-dir /etc/skel/.config' to '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.config' (skeleton dotdirs moved to /usr/etc/skel; the check excludes the /etc/skel/ prefix in code, so the old pattern could never match (issue #538))
 #   Filters: retargeted '^filesystem\\..*: hidden-file-or-dir /etc/skel/.local' to '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.local' (skeleton dotdirs moved to /usr/etc/skel; the check excludes the /etc/skel/ prefix in code, so the old pattern could never match (issue #538))
 #   Filters: retargeted '^filesystem\\..*: hidden-file-or-dir /etc/skel/.fonts' to '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.fonts' (skeleton dotdirs moved to /usr/etc/skel; the check excludes the /etc/skel/ prefix in code, so the old pattern could never match (issue #538))
+#   Filters: retargeted '^filesystem\\..*: missing-dependency-to-cron' to '^filesystem\\..*: missing-dependency-to-crontabs' (the emitted tag is missing-dependency-to-crontabs (plural); the singular matched only as a substring prefix of the tag (issue #538))
 #   Filters: retargeted '.* statically-linked-binary /sbin/ldconfig' to '.* statically-linked-binary /usr/sbin/ldconfig' (usr-merge: ldconfig ships as /usr/sbin/ldconfig, so the /sbin/ anchor could never match (issue #538))
 #
 # Dropped Filters entries (live findings rpmcrab deliberately
@@ -82,6 +83,14 @@
 #   Filters: dropped 'kernel-modules-not-in-kernel-packages' (config-dead: KernelModuleRPMsOK defaults to true in both implementations and nothing overrides it, so the check never emits (issue #538))
 #   Filters: dropped 'dangling-relative-symlink' (check is session-aware (rpmcrab#547): sibling-resolved links stay quiet, genuinely dangling ones surface; the blanket filter's 'we check for that already' rationale is stale)
 #   Filters: dropped 'no-manual-page-for-binary' (demoted to Info (rpmcrab#484): a missing manpage is upstream debt; surfaced as info instead of filtered away)
+#
+# Deduped Filters entries (exact duplicates and
+# same-finding lines subsumed by a broader literal;
+# output-neutral, see dedupe_filters):
+#   Filters: dropped duplicate '^filesystem\\..*: dir-or-file-in-var-run' (byte-identical to an earlier Filters entry)
+#   Filters: dropped duplicate '^filesystem\\..*: dir-or-file-in-var-lock' (byte-identical to an earlier Filters entry)
+#   Filters: dropped duplicate '^filesystem\\..*: hidden-file-or-dir /root/.gnupg' (byte-identical to an earlier Filters entry)
+#   Filters: dropped ' prereq-use ' (subsumed by ' prereq-use': both name 'prereq-use' and the broader literal matches everything it does)
 #
 # Pruned whitelist stanzas (packages gone from Tumbleweed/SLE 16):
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
