@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Build the fsf-address-fixture RPM (incorrect-fsf-address whole-file scan).
 #
-# fsf-address-fixture: three doc files exercising the FSF address check end
+# fsf-address-fixture: five doc files exercising the FSF address check end
 # to end through a real RPM payload --
-#   LICENSE-early: wrong FSF address inside the first 2048 bytes,
-#   LICENSE-late:  wrong FSF address past byte 2048 (upstream rpmlint#40),
-#   LICENSE-ok:    GPL mention with no street address (must stay silent).
+#   LICENSE-early:   wrong FSF address inside the first 2048 bytes,
+#   LICENSE-late:    wrong FSF address past byte 2048 (upstream rpmlint#40),
+#   LICENSE-abbrev:  abbreviated "51 Franklin St" address (must fire),
+#   LICENSE-ok:      GPL mention with no street address (must stay silent),
+#   LICENSE-current: the FSF's current "51 Franklin Street" address
+#                    (must stay silent).
 #
 # Usage: bash tests/parity/pkg/inputs/build-fsf-address-fixture.sh
 # Needs: podman (or PODMAN=/path/to/podman), an openSUSE container image

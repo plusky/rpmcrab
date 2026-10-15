@@ -257,7 +257,10 @@ fn fsf_license_regex() -> &'static Regex {
 static FSF_WRONG_ADDRESS_REGEX: OnceLock<Regex> = OnceLock::new();
 fn fsf_wrong_address_regex() -> &'static Regex {
     FSF_WRONG_ADDRESS_REGEX.get_or_init(|| {
-        Regex::new(r"(?i)(675\s+Mass\s+Ave|59\s+Temple\s+Place|02139|51\s+Franklin\s+St)")
+        // The word boundary after `St` keeps the abbreviated old form
+        // ("51 Franklin St, Fifth Floor") matching while the FSF's current
+        // address ("51 Franklin Street, Fifth Floor") does not.
+        Regex::new(r"(?i)(675\s+Mass\s+Ave|59\s+Temple\s+Place|02139|51\s+Franklin\s+St\b)")
             .expect("static regex")
     })
 }
@@ -4215,15 +4218,43 @@ mod tests {
             .collect();
         // LICENSE-early carries the wrong address at byte 385 (inside the
         // old 2048-byte window); LICENSE-late carries it at byte 3372
-        // (past it); LICENSE-ok mentions the GPL with no street address
-        // and must stay silent.
+        // (past it); LICENSE-abbrev carries the abbreviated
+        // "51 Franklin St" form and fires; LICENSE-ok mentions the GPL
+        // with no street address and LICENSE-current carries the FSF's
+        // current "51 Franklin Street" address — both must stay silent.
         assert_eq!(
             fsf,
             [
+                "fsf-address-fixture.noarch: E: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-abbrev",
                 "fsf-address-fixture.noarch: E: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-early",
                 "fsf-address-fixture.noarch: E: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-late",
             ],
         );
+    }
+
+    #[test]
+    fn fsf_wrong_address_regex_matches_only_stale_addresses() {
+        let re = fsf_wrong_address_regex();
+        // Stale addresses fire, including the abbreviated Franklin form
+        // the reference's own incorrect-fsf fixture carries.
+        for text in [
+            "51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA",
+            "51 Franklin St., Fifth Floor, Boston, MA 02110-1301 USA",
+            "51 FRANKLIN ST, FIFTH FLOOR",
+            "59 Temple Place, Suite 330, Boston, MA 02111-1307 USA",
+            "675 Mass Ave, Cambridge, MA 02139",
+            "Cambridge, MA 02139",
+        ] {
+            assert!(is_match(re, text), "must match: {text}");
+        }
+        // The FSF's current address, as printed in the current GPL texts,
+        // is not a stale address and must stay silent.
+        for text in [
+            "51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA",
+            "51 Franklin Street",
+        ] {
+            assert!(!is_match(re, text), "must not match: {text}");
+        }
     }
 
     #[test]

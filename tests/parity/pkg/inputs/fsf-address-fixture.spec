@@ -9,7 +9,10 @@ BuildArch:      noarch
 Hand-built fixture for the whole-file incorrect-fsf-address scan
 (upstream rpmlint#40). LICENSE-early carries the wrong FSF address inside
 the first 2048 bytes, LICENSE-late carries it past byte 2048,
-LICENSE-ok mentions the GPL with no street address and must stay silent.
+LICENSE-abbrev carries the abbreviated "51 Franklin St" form,
+LICENSE-ok mentions the GPL with no street address and must stay silent,
+and LICENSE-current carries the FSF's current "51 Franklin Street"
+address and must stay silent.
 
 %install
 mkdir -p %{buildroot}%{_docdir}/%{name}
@@ -37,6 +40,27 @@ echo "You should have received a copy of the GNU General Public License"
 echo "along with this program; if not, write to the Free Software"
 echo "Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA."
 } > %{buildroot}%{_docdir}/%{name}/LICENSE-late
+cat > %{buildroot}%{_docdir}/%{name}/LICENSE-abbrev <<'EOF'
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+EOF
+cat > %{buildroot}%{_docdir}/%{name}/LICENSE-current <<'EOF'
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+02110-1301 USA.
+EOF
 cat > %{buildroot}%{_docdir}/%{name}/LICENSE-ok <<'EOF'
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
