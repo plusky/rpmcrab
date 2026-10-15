@@ -537,7 +537,9 @@ fn range_compare(req: &DepInfo, prov: &DepInfo) -> bool {
     let (e, v, r) = (prov.epoch, prov.version.as_deref(), prov.release.as_deref());
     let (reqe, reqv, reqr) = (req.epoch, req.version.as_deref(), req.release.as_deref());
     // Drop the provided release when the requirement has none, so
-    // `foo = 1:3.0.0` matches `foo = 1:3.0.0-15`.
+    // `foo = 1:3.0.0` matches `foo = 1:3.0.0-15`. (#1599 returns false
+    // before this matters for EQ/LE requirements at or below the
+    // provider; the drop bites for the other flag shapes.)
     let r = if reqr.is_none() { None } else { r };
     let v = if reqv.is_none() { None } else { v };
     let reqr = if r.is_none() { None } else { reqr };
@@ -1944,6 +1946,99 @@ mod tests {
             release: None,
         };
         assert!(!range_compare(&obs, &prov), "strictly-below must not match");
+    }
+
+    /// Flag/ordering matrix for [`range_compare`]: every arm of the
+    /// Greater/Equal/Less dispatch on both sides, plus the unversioned,
+    /// name-mismatch and release-drop paths. GT=4, GE=12, EQ=8, LE=10, LT=2.
+    #[test]
+    fn range_compare_flag_ordering_matrix() {
+        use RPMSENSE_EQUAL as EQ;
+        use RPMSENSE_GREATER as GT;
+        use RPMSENSE_LESS as LT;
+        const GE: u32 = GT | EQ;
+        const LE: u32 = LT | EQ;
+        // (req flags, req EVR, prov flags, prov EVR, expected).
+        let cases: &[(u32, Option<&str>, u32, Option<&str>, bool)] = &[
+            // Unversioned satisfies everything (prov side).
+            (EQ, Some("2.0"), 0, None, true),
+            // Unversioned satisfies everything (req side).
+            (0, None, EQ, Some("1.0"), true),
+            // Provided greater: GT/GE match, EQ/LE/LT do not (prov EQ).
+            (GT, Some("1.0"), EQ, Some("2.0"), true),
+            (GE, Some("1.0"), EQ, Some("2.0"), true),
+            (EQ, Some("1.0"), EQ, Some("2.0"), false),
+            (LE, Some("1.0"), EQ, Some("2.0"), false),
+            (LT, Some("1.0"), EQ, Some("2.0"), false),
+            // Provided greater against LT prov: LE/LT match via arm 3.
+            (LE, Some("1.0"), LT, Some("2.0"), false),
+            (LT, Some("1.0"), LT, Some("2.0"), true),
+            (EQ, Some("1.0"), LT, Some("2.0"), false),
+            // Provided equal: each flag only matches its set.
+            (GT, Some("1.0"), GT, Some("1.0"), true),
+            (GT, Some("1.0"), EQ, Some("1.0"), false),
+            (GE, Some("1.0"), LT, Some("1.0"), false),
+            (GE, Some("1.0"), EQ, Some("1.0"), true),
+            (EQ, Some("1.0"), LE, Some("1.0"), false),
+            (EQ, Some("1.0"), EQ, Some("1.0"), false),
+            (LE, Some("1.0"), EQ, Some("1.0"), false),
+            (LE, Some("1.0"), LE, Some("1.0"), false),
+            (LT, Some("1.0"), LT, Some("1.0"), true),
+            (LT, Some("1.0"), EQ, Some("1.0"), false),
+            // Provided less: GT/GE/EQ match GT/GE provs; LE/LT match all.
+            (GT, Some("2.0"), GT, Some("1.0"), true),
+            (GT, Some("2.0"), EQ, Some("1.0"), false),
+            (EQ, Some("2.0"), EQ, Some("1.0"), false),
+            (EQ, Some("2.0"), GT, Some("1.0"), true),
+            (LE, Some("2.0"), EQ, Some("1.0"), true),
+            (LT, Some("2.0"), LT, Some("1.0"), true),
+            // Dropped provided release matches releaseless requirement.
+            // (#1599 shadows this for EQ/LE requirements at or below the
+            // provider -- those return false above -- so the drop only
+            // bites for GT/GE/LT requirements.)
+            (EQ, Some("1.0"), EQ, Some("1.0-15"), false),
+            // Epoch decides before version.
+            (GE, Some("0:1.0"), GE, Some("1:1.0"), true),
+            (EQ, Some("0:2.0"), EQ, Some("1:1.0"), false),
+        ];
+        // Name mismatch never matches, whatever the flags.
+        assert!(!range_compare(
+            &make_dep("foo", EQ, Some("1.0")),
+            &make_dep("bar", EQ, Some("1.0"))
+        ));
+        for (i, (reqf, reqe, f, e, expected)) in cases.iter().enumerate() {
+            let req = make_dep("foo", *reqf, *reqe);
+            let prov = make_dep("foo", *f, *e);
+            assert_eq!(
+                range_compare(&req, &prov),
+                *expected,
+                "case {i}: req {reqf}/{reqe:?} vs prov {f}/{e:?}"
+            );
+        }
+    }
+
+    /// Date boundaries for [`format_date`] (Howard Hinnant's algorithm):
+    /// epoch, pre-epoch negatives, leap days, month/year wraps, far future.
+    #[test]
+    fn format_date_boundaries() {
+        let cases: &[(i64, &str)] = &[
+            (0, "1970-01-01"),
+            (86400, "1970-01-02"),
+            (-86400, "1969-12-31"),
+            (-1, "1969-12-31"),
+            (951782400, "2000-02-29"),
+            (951868800, "2000-03-01"),
+            (1709164800, "2024-02-29"),
+            (1709251200, "2024-03-01"),
+            (1672531199, "2022-12-31"),
+            (1672531200, "2023-01-01"),
+            (1767225600, "2026-01-01"),
+            (4102444800, "2100-01-01"),
+            (4107542400, "2100-03-01"),
+        ];
+        for (ts, expected) in cases {
+            assert_eq!(&format_date(*ts), expected, "ts {ts}");
+        }
     }
 
     /// Build a [`DepInfo`] from an optional `epoch:version-release` string.
