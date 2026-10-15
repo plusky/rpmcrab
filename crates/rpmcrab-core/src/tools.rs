@@ -14,6 +14,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::Duration;
 
 /// Where external tool binaries resolve from.
 #[derive(Debug, Clone)]
@@ -58,7 +59,7 @@ impl Tool {
         probe_args: &[&str],
     ) -> (Self, Option<Output>) {
         let path = source.resolve(name);
-        let output = Command::new(&path).args(probe_args).output().ok();
+        let output = spawn_with_retry(|| Command::new(&path).args(probe_args).output());
         let tool = Self {
             name,
             path: output.as_ref().map(|_| path),
@@ -83,6 +84,38 @@ impl Tool {
     }
 }
 
+/// Attempts for one probe spawn before the tool is declared absent.
+///
+/// A single spawn can fail transiently under load (fork/exec pressure
+/// on a busy runner), and one failure would otherwise read as "the
+/// tool is not installed", silently disabling every check that depends
+/// on it. A genuinely absent or broken tool fails every attempt and
+/// still ends up absent; the retries cost it a few milliseconds, once.
+const PROBE_ATTEMPTS: usize = 3;
+
+/// Pause between probe attempts; see [`PROBE_ATTEMPTS`].
+const PROBE_RETRY_DELAY: Duration = Duration::from_millis(25);
+
+/// Run `spawn` until it succeeds, up to [`PROBE_ATTEMPTS`] times, and
+/// return the output; `None` when every attempt failed.
+///
+/// Split out of [`Tool::probe`] so the retry policy is testable with a
+/// scripted spawner instead of a real binary.
+fn spawn_with_retry<F>(mut spawn: F) -> Option<Output>
+where
+    F: FnMut() -> std::io::Result<Output>,
+{
+    for attempt in 0..PROBE_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(PROBE_RETRY_DELAY);
+        }
+        if let Ok(output) = spawn() {
+            return Some(output);
+        }
+    }
+    None
+}
+
 /// Build a [`ToolSource`] for tests: `None` probes the live `PATH`,
 /// `Some(dir)` resolves every tool under `dir`.
 pub(crate) fn test_source(dir: Option<&Path>) -> ToolSource {
@@ -95,6 +128,62 @@ pub(crate) fn test_source(dir: Option<&Path>) -> ToolSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+    use std::io;
+
+    /// A stand-in successful spawn result, built without spawning.
+    #[cfg(unix)]
+    fn fake_output() -> Output {
+        use std::os::unix::process::ExitStatusExt;
+        Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_retry_returns_the_first_success() {
+        // Two transient failures, then the spawn works: the tool must
+        // read as present, not absent.
+        let attempts = Cell::new(0);
+        let output = spawn_with_retry(|| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() < 3 {
+                Err(io::Error::from(io::ErrorKind::WouldBlock))
+            } else {
+                Ok(fake_output())
+            }
+        });
+        assert!(output.is_some());
+        assert_eq!(attempts.get(), 3);
+    }
+
+    #[test]
+    fn spawn_retry_gives_up_when_every_attempt_fails() {
+        // A genuinely absent tool fails every spawn and must still end
+        // up absent after exactly PROBE_ATTEMPTS tries.
+        let attempts = Cell::new(0);
+        let output: Option<Output> = spawn_with_retry(|| {
+            attempts.set(attempts.get() + 1);
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        });
+        assert!(output.is_none());
+        assert_eq!(attempts.get(), PROBE_ATTEMPTS);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_retry_does_not_retry_a_success() {
+        let attempts = Cell::new(0);
+        let output = spawn_with_retry(|| {
+            attempts.set(attempts.get() + 1);
+            Ok(fake_output())
+        });
+        assert!(output.is_some());
+        assert_eq!(attempts.get(), 1);
+    }
 
     #[test]
     fn probe_marks_missing_tool_absent() {
