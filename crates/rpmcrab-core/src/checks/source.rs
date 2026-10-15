@@ -733,6 +733,45 @@ ValidSrcPerms = ["0o644", "0o755"]
         SourceCheck::new(&config)
     }
 
+    /// Every [`unicode_decimal_value`] match arm, pinned at both edges and
+    /// the middle: deleting an arm (or shifting a boundary) turns those
+    /// lookups into `None` or wrong values. Neighbors assert `None` except
+    /// inside the contiguous Mathematical run, where the adjacency itself
+    /// is pinned by the neighboring blocks' edges.
+    #[test]
+    fn unicode_decimal_value_covers_all_digit_blocks() {
+        const BASES: &[u32] = &[
+            0x30, 0x660, 0x6F0, 0x7C0, 0x966, 0x9E6, 0xA66, 0xAE6, 0xB66, 0xBE6, 0xC66, 0xCE6,
+            0xD66, 0xDE6, 0xE50, 0xED0, 0xF20, 0x1040, 0x1090, 0x17E0, 0x1810, 0x1946, 0x19D0,
+            0x1A80, 0x1A90, 0x1B50, 0x1BB0, 0x1C50, 0xA620, 0xA8D0, 0xA900, 0xA9D0, 0xA9F0, 0xAA50,
+            0xABF0, 0xFF10, 0x104A0, 0x11066, 0x110F0, 0x11136, 0x111D0, 0x112F0, 0x11450, 0x114D0,
+            0x11650, 0x116C0, 0x11730, 0x118E0, 0x11C50, 0x11D50, 0x11DA0, 0x16A60, 0x16B50,
+            0x1D7CE, 0x1D7D8, 0x1D7E2, 0x1D7EC, 0x1D7F6, 0x1E950,
+        ];
+        const EXCEPT: &[u32] = &[
+            0x1D7D7, 0x1D7D8, 0x1D7E1, 0x1D7E2, 0x1D7EB, 0x1D7EC, 0x1D7F5, 0x1D7F6,
+        ];
+        for &base in BASES {
+            let c = |o| char::from_u32(base + o).unwrap();
+            assert_eq!(unicode_decimal_value(c(0)), Some(0), "base {base:#X}");
+            assert_eq!(unicode_decimal_value(c(5)), Some(5), "base {base:#X}");
+            assert_eq!(unicode_decimal_value(c(9)), Some(9), "base {base:#X}");
+            for n in [base.wrapping_sub(1), base + 10] {
+                if EXCEPT.contains(&n) {
+                    continue;
+                }
+                assert_eq!(
+                    unicode_decimal_value(char::from_u32(n).unwrap()),
+                    None,
+                    "neighbor {n:#X}"
+                );
+            }
+        }
+        for c in ['/', ':', '@', 'A', '\u{1D7C0}', '\u{10FFFF}'] {
+            assert_eq!(unicode_decimal_value(c), None, "{c:?}");
+        }
+    }
+
     #[test]
     fn matching_extension_and_magic_is_quiet() {
         let c = checker();
