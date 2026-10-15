@@ -37,7 +37,11 @@ Provenance, verified against the pinned reference (`84848c0`):
 - `ConfigFilesCheck.toml` — the reference file, except
   `non-etc-or-var-file-marked-as-conffile` carries the reword from upstream
   #1606 (drop `%config` named as an option), staged ahead of the reference
-  per the fix-in-port rule. Ledgered in `tests/parity/divergences.toml`.
+  per the fix-in-port rule, and `conffile-without-noreplace-flag` carries
+  the reword ruled in rpmcrab#556 (both `%config` forms valid; the text
+  lays out the .rpmsave/.rpmnew upgrade semantics and asks for a per-file
+  choice instead of prescribing `noreplace`). Ledgered in
+  `tests/parity/divergences.toml`.
 - `Variables.toml` — the reference file, plus the `SUFFIX` entry lifted from
   the reference's `descriptions/FileMetadataCheck.toml` (the port stages the
   device/world-writable descriptions separately, but the `#SUFFIX#`

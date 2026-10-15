@@ -5,8 +5,10 @@ from the corresponding line in the %files section.
 """
 conffile-without-noreplace-flag="""
 A configuration file is stored in your package without the noreplace flag.
-This flag tells RPM not to overwrite or replace a configuration file to protect
-local modifications.
-A way to resolve this is to put the following in your SPEC file:
-%config(noreplace) /etc/your_config_file_here
+Both %config and %config(noreplace) are valid; neither is wrong as such.
+The choice matters on upgrade: with plain %config a locally modified file
+is preserved as .rpmsave and the newly shipped file takes its place, so
+the local modifications stop being in effect; with %config(noreplace) the
+local modifications stay in effect and the newly shipped file arrives as
+.rpmnew instead. Consider per file which behaviour fits the file.
 """

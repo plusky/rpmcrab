@@ -333,7 +333,7 @@ mod tests {
             ),
             (
                 "ConfigFilesCheck.toml",
-                "4c026df7eff586f7ba46cf07719cd8235dca25e30fb4e07de5e73331008a86bf",
+                "87e2c684472af24816070ab57688fc3005558a473559309d710eef6dd5d3a108",
             ),
             (
                 "DBusPolicyCheck.toml",
