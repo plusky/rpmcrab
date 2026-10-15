@@ -2558,6 +2558,10 @@ impl FilesCheck {
         if st.perl_dep_error {
             return;
         }
+        // The base package itself cannot carry the dependency.
+        if pkg.name == "perl-base" {
+            return;
+        }
         let caps = match self.perl_re.captures(fname) {
             Ok(Some(c)) => c,
             _ => return,
@@ -2601,14 +2605,29 @@ impl FilesCheck {
         if st.python_dep_error {
             return;
         }
+        // The base packages themselves cannot carry the dependency.
+        if pkg.name == "python-base" || pkg.name == "python3-base" {
+            return;
+        }
         let caps = match self.python_re.captures(fname) {
             Ok(Some(c)) => c,
             _ => return,
         };
         let ver = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-        if !["python", "python-base", "python(abi)"]
+        // SUSE names the base package `python3-base`; a dependency on it
+        // carries the base role whatever its version relation, and an
+        // interpreter-path dependency (`/usr/bin/python3.13`) pins the
+        // version in the path itself.
+        let interpreter = format!("/usr/bin/python{ver}");
+        let base_named = pkg
+            .requires
             .iter()
-            .any(|dep| check_versioned_dep(pkg, dep, ver))
+            .chain(&pkg.prereq)
+            .any(|d| dep_name_matches(&d.name, "python3-base") || d.name == interpreter);
+        if !base_named
+            && !["python", "python-base", "python(abi)"]
+                .iter()
+                .any(|dep| check_versioned_dep(pkg, dep, ver))
         {
             add_info(
                 out,
@@ -4358,6 +4377,137 @@ mod tests {
         check.check(&pkg, &config, &mut out);
         let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
         assert_has(&names, "no-dependency-on");
+    }
+
+    fn dep_flagged(name: &str, flags: u32, version: Option<&str>) -> crate::pkg::dep::DepInfo {
+        crate::pkg::dep::DepInfo {
+            name: name.to_string(),
+            flags,
+            epoch: None,
+            version: version.map(str::to_string),
+            release: None,
+        }
+    }
+
+    /// Run FilesCheck over a package named `pkg_name` shipping one real
+    /// file `fname` with the given Requires; return the finding names.
+    fn run_dep_check(
+        pkg_name: &str,
+        requires: Vec<crate::pkg::dep::DepInfo>,
+        fname: &str,
+        contents: &[u8],
+    ) -> Vec<String> {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.name = pkg_name.to_string();
+        pkg.requires = requires;
+        pkg.prereq = vec![];
+        pkg.recommends = vec![];
+        pkg.suggests = vec![];
+        pkg.doc_files = vec![];
+        let path = dir.path().join(fname.trim_start_matches('/'));
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+        std::fs::write(&path, contents).expect("write temp file");
+        pkg.files = vec![PkgFile {
+            name: fname.to_string(),
+            path: path.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            magic: "ASCII text".to_string(),
+            ..Default::default()
+        }];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        out.results().iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    #[test]
+    fn normal_python_dep_python3_base_unversioned_satisfies() {
+        // SUSE's base package name, in the unversioned form specs use.
+        let names = run_dep_check(
+            "foo",
+            vec![dep_named("python3-base")],
+            "/usr/lib/python3.13/site-packages/foo.py",
+            b"x = 1\n",
+        );
+        assert_lacks(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_python_dep_python3_base_floor_satisfies() {
+        // The `>=` floor form also carries the base dependency.
+        let names = run_dep_check(
+            "foo",
+            vec![dep_flagged("python3-base", 12, Some("3.8"))],
+            "/usr/lib/python3.13/site-packages/foo.py",
+            b"x = 1\n",
+        );
+        assert_lacks(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_python_dep_interpreter_path_satisfies() {
+        // The interpreter-path dependency pins the version in the path.
+        let names = run_dep_check(
+            "foo",
+            vec![dep_flagged("/usr/bin/python3.13", 16384, None)],
+            "/usr/lib/python3.13/site-packages/foo.py",
+            b"x = 1\n",
+        );
+        assert_lacks(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_python_dep_interpreter_path_other_version_fires() {
+        // An interpreter path for a different version is not the dep owed.
+        let names = run_dep_check(
+            "foo",
+            vec![dep_flagged("/usr/bin/python3.12", 16384, None)],
+            "/usr/lib/python3.13/site-packages/foo.py",
+            b"x = 1\n",
+        );
+        assert_has(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_python_dep_unrelated_python_name_fires() {
+        // A bare `python3` dependency is not the base package.
+        let names = run_dep_check(
+            "foo",
+            vec![dep_named("python3")],
+            "/usr/lib/python3.13/site-packages/foo.py",
+            b"x = 1\n",
+        );
+        assert_has(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_python_dep_base_packages_quiet() {
+        // The base packages cannot depend on themselves.
+        for base in ["python-base", "python3-base"] {
+            let names = run_dep_check(
+                base,
+                vec![],
+                "/usr/lib/python3.13/site-packages/foo.py",
+                b"x = 1\n",
+            );
+            assert_lacks(&names, "no-dependency-on");
+        }
+    }
+
+    #[test]
+    fn normal_perl_dep_base_package_quiet() {
+        // The base package cannot depend on itself.
+        let names = run_dep_check(
+            "perl-base",
+            vec![],
+            "/usr/lib/perl5/vendor_perl/5.44.0/Foo/Bar.pm",
+            b"package Foo::Bar;\n1;\n",
+        );
+        assert_lacks(&names, "no-dependency-on");
     }
 
     #[test]
