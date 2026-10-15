@@ -751,7 +751,9 @@ impl TagsCheck {
             d.push(summary);
             add_info(out, Level::Warning, pkg, "summary-ended-with-dot", &d);
         }
-        if summary.len() > self.max_line_len {
+        // The reference counts characters (Python `len` on a str), not
+        // UTF-8 bytes; a multibyte summary measures the same here.
+        if summary.chars().count() > self.max_line_len {
             let mut d: Vec<&str> = Vec::new();
             if let Some(l) = lang_err {
                 d.push(l);
@@ -851,9 +853,10 @@ impl TagsCheck {
         for line in description.split('\n') {
             // Strip a trailing \r for length purposes? The reference uses
             // splitlines() which strips all line boundaries; len() is on the
-            // stripped line.
+            // stripped line and counts characters (codepoints), not UTF-8
+            // bytes.
             let line = line.strip_suffix('\r').unwrap_or(line);
-            if line.len() > self.max_line_len {
+            if line.chars().count() > self.max_line_len {
                 let mut d: Vec<&str> = Vec::new();
                 if let Some(l) = lang_err {
                     d.push(l);
@@ -2412,6 +2415,42 @@ mod tests {
     }
 
     #[test]
+    fn summary_length_counts_characters_not_bytes() {
+        // Reference parity (#577): the length limit counts characters,
+        // not UTF-8 bytes. A summary of <=79 characters stays quiet
+        // however many bytes it occupies; 80 characters fire.
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-longsummary-1.0-1.noarch.rpm");
+        let config = test_config();
+        let check = TagsCheck::new(&config);
+        // 41 characters, 81 bytes: within the limit.
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_summary(
+            &pkg,
+            &mut out,
+            &format!("S{}", "\u{e9}".repeat(40)),
+            "C",
+            &[],
+        );
+        let results = out.results().to_vec();
+        assert!(
+            tag_hits(&results, "summary-too-long").is_empty(),
+            "multibyte summary within the character limit must stay quiet: {results:?}"
+        );
+        // 80 characters, 159 bytes: fires.
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_summary(
+            &pkg,
+            &mut out,
+            &format!("S{}", "\u{e9}".repeat(79)),
+            "C",
+            &[],
+        );
+        let results = out.results().to_vec();
+        let hits = tag_hits(&results, "summary-too-long");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+    }
+
+    #[test]
     fn summary_not_capitalized_and_ended_with_dot_emit() {
         let (_tmp, pkg) = fixture_pkg("tags-emission-pins-badsummary-1.0-1.noarch.rpm");
         let results = run_check(&pkg);
@@ -2498,6 +2537,39 @@ mod tests {
             hits[0].1,
             "tags-emission-pins-longdesc.noarch: E: description-line-too-long This is a ridiculously long description line that definitely exceeds seventy nine characters."
         );
+    }
+
+    #[test]
+    fn description_length_counts_characters_not_bytes() {
+        // Reference parity (#577): the length limit counts characters,
+        // not UTF-8 bytes. Lines of <=79 characters stay quiet however
+        // many bytes they occupy; an 80-character line fires.
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-longdesc-1.0-1.noarch.rpm");
+        let config = test_config();
+        let check = TagsCheck::new(&config);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        // 41 characters, 123 bytes (the karukan/VFlib3 shape: Japanese
+        // description lines the byte count flagged as too long).
+        check.check_description(&pkg, &mut out, &"\u{3042}".repeat(41), "C", &[]);
+        // 79 characters, 80 bytes: exactly at the limit.
+        check.check_description(
+            &pkg,
+            &mut out,
+            &format!("{}\u{e9}", "a".repeat(78)),
+            "C",
+            &[],
+        );
+        let results = out.results().to_vec();
+        assert!(
+            tag_hits(&results, "description-line-too-long").is_empty(),
+            "multibyte lines within the character limit must stay quiet: {results:?}"
+        );
+        // 80 characters, 240 bytes: fires.
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_description(&pkg, &mut out, &"\u{3042}".repeat(80), "C", &[]);
+        let results = out.results().to_vec();
+        let hits = tag_hits(&results, "description-line-too-long");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
     }
 
     #[test]
