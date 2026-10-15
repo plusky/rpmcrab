@@ -719,6 +719,18 @@ fn is_debug_path(path: &str) -> bool {
         || path.starts_with("/usr/src/debug/")
 }
 
+/// Whether libmagic describes a file as text: `text` as a whole word of
+/// the description, as in "ASCII text" or "UTF-8 Unicode text". A
+/// substring test would also open the gate for binary formats whose
+/// descriptions merely contain the letters -- the "texture" of
+/// "Khronos KTX texture", a "context" record -- and their compressed
+/// payloads then false-fire on coincidental control bytes (issue #533).
+fn magic_is_text(magic: &str) -> bool {
+    magic
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|word| word.eq_ignore_ascii_case("text"))
+}
+
 fn strip_quotes(re: &Regex, s: &str) -> String {
     re.replace_all(s, "").to_string()
 }
@@ -750,7 +762,7 @@ impl FilesCheck {
             if !is_reg(pkgfile.mode) {
                 continue;
             }
-            if !pkgfile.magic.to_lowercase().contains("text") {
+            if !magic_is_text(&pkgfile.magic) {
                 continue;
             }
             let path = Path::new(&pkgfile.path);
@@ -4110,6 +4122,48 @@ mod tests {
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         FilesCheck::new(&config).check_bidi_controls(&pkg, &mut out);
         assert!(bidi_findings(&out).is_empty(), "binaries out of scope");
+    }
+
+    #[test]
+    fn bidi_texture_payload_not_scanned() {
+        // Issue #533: libmagic calls KTX payloads "Khronos KTX texture" --
+        // "texture" contains "text" but the file is compressed binary, so
+        // the gate stays shut even though the payload holds a control.
+        let mut content = b"KTX".to_vec();
+        content.extend_from_slice("/* \u{202E} */".as_bytes());
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = bidi_pkg(
+            &dir,
+            vec![(
+                "/waffles.ktx",
+                "Khronos KTX texture (little-endian), 160 x 106, COMPRESSED_RGBA_ASTC_10x5",
+                content,
+            )],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        FilesCheck::new(&config).check_bidi_controls(&pkg, &mut out);
+        assert!(
+            bidi_findings(&out).is_empty(),
+            "binary texture payloads out of scope"
+        );
+    }
+
+    #[test]
+    fn bidi_unicode_text_description_still_scanned() {
+        // The whole-word gate keeps real text in scope: in "UTF-8 Unicode
+        // text" the word `text` stands alone, so a control still fires.
+        let evil = "name = \"a\u{202A}b\";\n";
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = bidi_pkg(
+            &dir,
+            vec![("/names.txt", "UTF-8 Unicode text", evil.as_bytes().to_vec())],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        FilesCheck::new(&config).check_bidi_controls(&pkg, &mut out);
+        let findings = bidi_findings(&out);
+        assert_eq!(findings.len(), 1, "one finding: {findings:?}");
     }
 
     #[test]
