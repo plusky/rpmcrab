@@ -130,7 +130,7 @@ Filters = [
     'configure-without-libdir-spec',
     'use-of-RPM_SOURCE_DIR',
     'symlink-contains-up-and-down-segments /var/lib/named',
-    'no-ldconfig-symlink',
+    '^\S*-kmp-\S+\.\S+: \w: no-ldconfig-symlink',
     'aaa_base\.\S+: \w: use-of-home-in-%post',
     'description-line-too-long',
     'hardcoded-library-path',

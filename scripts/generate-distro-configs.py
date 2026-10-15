@@ -447,6 +447,25 @@ RETARGET_FILTERS = {
     ),
 }
 
+# Filters entries narrowed to the scope their recorded rationale covers:
+# {bare pattern: (scoped pattern, reason)}. The finding stays live and the
+# filter stays, but only for the shape the rationale justifies; everywhere
+# else the finding becomes visible again. Applied by scope_filters() to
+# Filters lines whose entire pattern is the bare entry, and
+# logged for PROVENANCE. Unconditional like PRUNE_SCOPED: if upstream drops
+# or rewords the bare entry the rewrite stops firing and the drift check
+# shows upstream's text. Each entry is a deliberate divergence from the
+# upstream distro config, ledgered in tests/parity/divergences.toml.
+SCOPE_FILTERS = {
+    "no-ldconfig-symlink": (
+        r"^\S*-kmp-\S+\.\S+: \w: no-ldconfig-symlink",
+        "scoped to kernel-module packages: the block's only recorded "
+        "rationale is the KMP one (bnc#456048) — shared libraries in KMPs "
+        "are private; elsewhere a missing ldconfig symlink is a real "
+        "packaging bug and stays visible",
+    ),
+}
+
 # Packages gone from the distros: whitelist stanzas naming them are pruned.
 # A stanza is pruned only when the package is actually absent from the
 # flavor's codebase (openSUSE:Factory for the opensuse flavor,
@@ -846,6 +865,48 @@ def prune_flavoured_filters(text, flavor, flavoured_pruned_log):
             if raw is not None and raw in table:
                 flavoured_pruned_log.append(
                     f"{flavor} {in_list}: dropped {raw!r} ({table[raw]})"
+                )
+                continue
+        out.append(line)
+    return "".join(out)
+
+
+def scope_filters(text, scoped_log):
+    """Rewrite bare Filters entries listed in SCOPE_FILTERS.
+
+    Only a line whose entire pattern is the bare entry is rewritten; the
+    replacement keeps the line's indentation, quote style and trailing
+    comma. Anything else (already-scoped entries, compound patterns, the
+    bare entry embedded in a larger pattern) is left untouched.
+    BlockedFilters is never rewritten: its entries are matched by exact
+    string equality, not as regex patterns, so a scoped pattern there
+    would never match and would silently drop the guard it names.
+    """
+    lines = text.splitlines(keepends=True)
+    out = []
+    in_list = None
+    for line in lines:
+        stripped = line.strip()
+        m = re.match(r"^Filters\s*=\s*\[", stripped)
+        if m:
+            in_list = "Filters"
+            out.append(line)
+            continue
+        if in_list and stripped.startswith("]"):
+            in_list = None
+            out.append(line)
+            continue
+        if in_list:
+            raw = raw_filter_pattern(line)
+            pattern = raw.strip() if raw is not None else None
+            if pattern is not None and pattern in SCOPE_FILTERS:
+                scoped, reason = SCOPE_FILTERS[pattern]
+                indent = line[: len(line) - len(line.lstrip())]
+                quote = stripped[:1] if stripped[:1] in ("'", '"') else "'"
+                eol = "\n" if line.endswith("\n") else ""
+                out.append(f"{indent}{quote}{scoped}{quote},{eol}")
+                scoped_log.append(
+                    f"{in_list}: scoped {pattern!r} to {scoped!r} ({reason})"
                 )
                 continue
         out.append(line)
@@ -1787,6 +1848,7 @@ def generate(ref_dir=None, pins=None):
     pie_pruned_log = []
     dropped_log = []
     retargeted_log = []
+    scoped_log = []
     deduped_filters_log = []
     flavoured_pruned_log = []
     for flavor, data in result.items():
@@ -1795,6 +1857,7 @@ def generate(ref_dir=None, pins=None):
             text = prune_stale_filters(
                 text, known, pruned_log, dropped_log, retargeted_log
             )
+            text = scope_filters(text, scoped_log)
             text = dedupe_filters(text, deduped_filters_log)
             text = prune_flavoured_filters(text, flavor, flavoured_pruned_log)
             text = prune_stale_packages(text, pkg_pruned_log, flavor)
@@ -1907,6 +1970,17 @@ def generate(ref_dir=None, pins=None):
             if entry not in seen_dropped:
                 seen_dropped.add(entry)
                 provenance.append(f"#   {entry}")
+    if scoped_log:
+        provenance.append("#")
+        provenance.append(
+            "# Scoped Filters entries (narrowed to their recorded rationale;"
+        )
+        provenance.append("# see SCOPE_FILTERS):")
+        seen_scoped = set()
+        for entry in scoped_log:
+            if entry not in seen_scoped:
+                seen_scoped.add(entry)
+                provenance.append(f"#   {entry}")
     if deduped_filters_log:
         provenance.append("#")
         provenance.append("# Deduped Filters entries (exact duplicates and")
@@ -1958,6 +2032,7 @@ def generate(ref_dir=None, pins=None):
         deduped,
         dropped_log,
         retargeted_log,
+        scoped_log,
         deduped_filters_log,
         flavoured_pruned_log,
     )
@@ -2113,7 +2188,7 @@ def main():
         rewrite_pins(Path(__file__).resolve(), pins)
 
     ref_dir = Path(args.ref_dir) if args.ref_dir else None
-    result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, deduped, dropped_log, retargeted_log, deduped_filters_log, flavoured_pruned_log = generate(
+    result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, deduped, dropped_log, retargeted_log, scoped_log, deduped_filters_log, flavoured_pruned_log = generate(
         ref_dir=ref_dir, pins=pins
     )
 
