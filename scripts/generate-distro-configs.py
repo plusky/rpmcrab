@@ -322,6 +322,14 @@ DROP_LIVE_FILTERS = {
     # Ruled in the config-filters follow-through (issue #538) and
     # ledgered in tests/parity/divergences.toml.
     "executable-marked-as-config-file": "blanket filter dropped by ruling (issue #557): the Factory set it suppresses (137 E lines, 44 srcpkgs) includes 24 genuine accidental markings no other check covers; deliberate shapes belong in per-package rpmlintrc",
+    # Ruled in the config-filters follow-through (issue #538, ruling
+    # item 1): upstream hides the tag purely as policy; the check is
+    # sound and the residual /etc main-config findings it emits have no
+    # other coverage. Measured over the Factory snapshot corpus, the
+    # filter hides 4,261 lines in 649 srcpkgs, ~78% of them deliberate
+    # bulk-glob corpora and structural non-configs. The tag's
+    # --explain text is reworded alongside (see divergences.toml).
+    "conffile-without-noreplace-flag": "upstream hides it as policy; the port surfaces it so the residual /etc main-config findings are visible (issue #556)",
 }
 
 # (finding, scope) -> reason: Filters entries scoped to dead paths. The finding

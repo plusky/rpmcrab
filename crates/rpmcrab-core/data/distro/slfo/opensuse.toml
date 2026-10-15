@@ -163,7 +163,6 @@ Filters = [
 
 # An issue with OBS, works with autobuild
     ' non-standard-dir-perm ',
-    ' conffile-without-noreplace-flag ',
     ' non-standard-executable-perm ',
     ' read-error ',
     ' log-files-without-logrotate',
