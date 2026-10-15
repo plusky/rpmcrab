@@ -75,10 +75,24 @@ int init_priority(void *session) { return gnutls_priority_init(session, waiver_n
 EOF
 cat >"$work/src/hardening.c" <<'EOF'
 #include <string.h>
-/* strcpy on a stack buffer: fortifiable call (needs -O1+ and
-   -D_FORTIFY_SOURCE) and a stack array (needs -fstack-protector). */
-void harden_target(char *d) { char b[64]; strcpy(b, d); }
-int main(void) { char x[16]; harden_target(x); return 0; }
+/* strcpy, memcpy and memset on stack buffers: fortifiable calls (need
+   -O1+ and -D_FORTIFY_SOURCE to become __*_chk) and stack arrays (need
+   -fstack-protector). Three distinct fortifiable calls put the
+   unfortified variant past the missing-fortify evidence threshold of
+   three distinct fortifiable imports (rpmcrab#529). */
+__attribute__((noinline)) int harden_target(char *d, unsigned long n) {
+    char b[64];
+    char c[32];
+    strcpy(b, d);
+    memcpy(c, b, n);
+    memset(b, 0, n);
+    return b[0] + c[0];
+}
+int main(int argc, char **argv) {
+    (void)argv;
+    char x[16] = "fixture";
+    return harden_target(x, (unsigned long)argc);
+}
 EOF
 
 cat >"$work/rpmbuild/SPECS/fixture.spec" <<'EOF'
@@ -178,6 +192,13 @@ for b in hardenedbin nofortifybin nosspbin nonpiebin; do
         || { echo "fixture broken: $b lacks full RELRO" >&2; exit 1; }
 done
 chk nofortifybin && { echo "fixture broken: nofortifybin is fortified" >&2; exit 1; }
+# nofortifybin must import the three distinct fortifiable functions from
+# hardening.c, or it falls below the missing-fortify evidence threshold
+# and the finding stops firing for it (rpmcrab#529).
+for f in strcpy memcpy memset; do
+    readelf --dyn-syms -W nofortifybin | grep -q " $f@" \
+        || { echo "fixture broken: nofortifybin lacks a $f import" >&2; exit 1; }
+done
 ssp nosspbin && { echo "fixture broken: nosspbin has __stack_chk_fail" >&2; exit 1; }
 pie nonpiebin && { echo "fixture broken: nonpiebin is PIE" >&2; exit 1; }
 chk nonpiebin && ssp nonpiebin \

@@ -1729,10 +1729,30 @@ fn hardening_call_set(info: &ReadelfInfo) -> &[String] {
 /// Whether a hardening finding applies to this binary: the binary must have
 /// "something to protect". Each check defines its own predicate over the
 /// binary's symbols; the mechanism is shared so the two checks stay in sync.
+///
+/// The fortify predicate counts *distinct* fortifiable imports and
+/// requires at least three. glibc redirects a call to its `__*_chk`
+/// wrapper only when the destination object size is compile-time known,
+/// so a binary with one or two distinct fortifiable imports and no
+/// `__*_chk` symbol is just as consistent with a fortified build whose
+/// calls all have runtime-sized destinations as with an unfortified
+/// build: the evidence cannot tell the two apart, and the finding would
+/// be unactionable for that shape (rpmcrab#529).
 fn is_fortify_applicable(info: &ReadelfInfo) -> bool {
-    hardening_call_set(info)
-        .iter()
-        .any(|s| is_fortifiable_import(s))
+    let mut distinct: Vec<&str> = Vec::new();
+    for name in hardening_call_set(info) {
+        if !is_fortifiable_import(name) {
+            continue;
+        }
+        let base = name.split('@').next().unwrap_or(name);
+        if !distinct.contains(&base) {
+            distinct.push(base);
+            if distinct.len() >= 3 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn is_stack_protector_applicable(info: &ReadelfInfo) -> bool {
@@ -1746,10 +1766,11 @@ fn is_stack_protector_applicable(info: &ReadelfInfo) -> bool {
 }
 
 /// A libc function that `_FORTIFY_SOURCE` can instrument. `missing-fortify`
-/// fires only when a binary imports at least one of these without any
-/// `__*_chk` symbol: with no fortifiable import there is nothing to
-/// fortify, so the finding would be unactionable noise. Symbol names may
-/// carry a `@VERSION` suffix in `.dynsym`; strip it before matching.
+/// fires only when a binary imports at least three distinct functions
+/// from this set without any `__*_chk` symbol (see
+/// `is_fortify_applicable`): below that count the absence of `__*_chk`
+/// symbols proves nothing about how the binary was built. Symbol names
+/// may carry a `@VERSION` suffix in `.dynsym`; strip it before matching.
 ///
 /// The set is the base name of every `__*_chk` symbol glibc exports
 /// (glibc 2.39-2.44), i.e. every function the headers redirect to a
@@ -2472,8 +2493,10 @@ impl BinariesCheck {
         let is_haskell = info.is_haskell_binary();
         let is_ocaml = info.is_ocaml_binary();
         // Each finding applies only when the binary has "something to
-        // protect" (rpmcrab#447): a binary that imports no fortifiable
-        // libc function cannot gain any `__*_chk` instrumentation, and a
+        // protect" (rpmcrab#447): a binary that imports fewer than three
+        // distinct fortifiable libc functions cannot be told apart from
+        // a fortified build whose fortifiable calls all have
+        // runtime-sized destinations (rpmcrab#529), and a
         // pure loader shim implements no logic of its own and therefore
         // has no stack buffers for `-fstack-protector` to protect. Since
         // rpmcrab#452 the stack-protector finding additionally requires
@@ -4534,8 +4557,21 @@ mod tests {
         let results = hardening_results_with(
             &["libc.so.6"],
             None,
-            &["caml_main", "caml_alloc", "caml_named_value", "memcpy"],
-            &["caml_copy_string", "caml_raise_not_found", "memcpy"],
+            &[
+                "caml_main",
+                "caml_alloc",
+                "caml_named_value",
+                "memcpy",
+                "memset",
+                "strcpy",
+            ],
+            &[
+                "caml_copy_string",
+                "caml_raise_not_found",
+                "memcpy",
+                "memset",
+                "strcpy",
+            ],
         );
         assert_eq!(
             lines_for(&results, "missing-fortify").len(),
@@ -4561,8 +4597,8 @@ mod tests {
         let results = hardening_results_with(
             &["libc.so.6"],
             None,
-            &["caml_startup", "main", "memcpy"],
-            &["caml_startup", "memcpy"],
+            &["caml_startup", "main", "memcpy", "memset", "strcpy"],
+            &["caml_startup", "memcpy", "memset", "strcpy"],
         );
         assert_eq!(
             lines_for(&results, "missing-fortify").len(),
@@ -4586,8 +4622,8 @@ mod tests {
         let results = hardening_results_with(
             &["libc.so.6"],
             None,
-            &["camlStdlib__List", "memcpy"],
-            &["camlStdlib__List", "memcpy"],
+            &["camlStdlib__List", "memcpy", "memset", "strcpy"],
+            &["camlStdlib__List", "memcpy", "memset", "strcpy"],
         );
         assert_eq!(
             lines_for(&results, "missing-fortify").len(),
@@ -4670,9 +4706,14 @@ mod tests {
         let pkgfile = syn_file("/usr/sbin/staticbin", "ELF 64-bit LSB executable");
         let mut info = syn_info();
         info.has_dynamic = false;
-        // Static binary with real code: fortifiable import present, no
-        // undefined imports (static), so both findings still apply.
-        info.functions = vec!["main".to_string(), "memcpy".to_string()];
+        // Static binary with real code: fortifiable functions present,
+        // no undefined imports (static), so both findings still apply.
+        info.functions = vec![
+            "main".to_string(),
+            "memcpy".to_string(),
+            "memset".to_string(),
+            "strcpy".to_string(),
+        ];
         info.program_headers = vec![ElfProgramHeader {
             name: "GNU_RELRO".to_string(),
             flags: "R".to_string(),
@@ -4765,9 +4806,14 @@ mod tests {
     fn hardening_c_binary_still_fires() {
         // Negative case for the Zig skip pin: a plain non-Zig ELF must
         // still produce every hardening finding the fixture can emit.
-        // The fortifiable import is load-bearing: with nothing to fortify
-        // the finding stays quiet (rpmcrab#447).
-        let results = hardening_results_for(false, false, &["memcpy"], &["memcpy"]);
+        // The fortifiable imports are load-bearing: below three distinct
+        // ones the fortify finding stays quiet (rpmcrab#447, rpmcrab#529).
+        let results = hardening_results_for(
+            false,
+            false,
+            &["memcpy", "memset", "strcpy"],
+            &["memcpy", "memset", "strcpy"],
+        );
         assert_eq!(
             lines_for(&results, "missing-fortify").len(),
             1,
@@ -4813,21 +4859,53 @@ mod tests {
     }
 
     #[test]
-    fn hardening_fortify_fires_with_fortifiable_import() {
-        // rpmcrab#447: a fortifiable import without `__*_chk` still fires.
-        let results =
-            hardening_results_for(false, false, &["memcpy@GLIBC_2.14"], &["memcpy@GLIBC_2.14"]);
+    fn hardening_fortify_fires_with_three_distinct_fortifiable_imports() {
+        // rpmcrab#529: three distinct fortifiable imports without any
+        // `__*_chk` are evidence of a build without _FORTIFY_SOURCE.
+        let results = hardening_results_for(
+            false,
+            false,
+            &["memcpy@GLIBC_2.14", "memset", "strcpy"],
+            &["memcpy@GLIBC_2.14", "memset", "strcpy"],
+        );
         assert_eq!(
             lines_for(&results, "missing-fortify").len(),
             1,
-            "missing-fortify must fire for a fortifiable import: {results:?}"
+            "missing-fortify must fire for three distinct fortifiable imports: {results:?}"
         );
-        // ...but stays quiet once the fortified wrapper is present.
-        let results = hardening_results_for(false, false, &["memcpy", "__memcpy_chk"], &["memcpy"]);
+        // ...but stays quiet once a fortified wrapper is present.
+        let results = hardening_results_for(
+            false,
+            false,
+            &["memcpy", "memset", "strcpy", "__memcpy_chk"],
+            &["memcpy", "memset", "strcpy"],
+        );
         assert!(
             lines_for(&results, "missing-fortify").is_empty(),
             "missing-fortify must not fire with __*_chk present: {results:?}"
         );
+    }
+
+    #[test]
+    fn hardening_fortify_quiet_below_three_distinct_imports() {
+        // rpmcrab#529: with one or two distinct fortifiable imports, the
+        // absence of `__*_chk` cannot distinguish an unfortified build
+        // from a fortified build whose calls all have runtime-sized
+        // destinations (glibc emits `__*_chk` only for compile-time-known
+        // object sizes), so the finding stays quiet.
+        for imports in [
+            &["memcpy"][..],
+            &["memcpy", "memset"][..],
+            // Three imports but only two distinct names: duplicates are
+            // one piece of evidence, not several.
+            &["memcpy", "memcpy@GLIBC_2.14", "memset"][..],
+        ] {
+            let results = hardening_results_for(false, false, imports, imports);
+            assert!(
+                lines_for(&results, "missing-fortify").is_empty(),
+                "missing-fortify must not fire for imports {imports:?}: {results:?}"
+            );
+        }
     }
 
     #[test]
@@ -4842,8 +4920,15 @@ mod tests {
         );
         // An imported `__*_chk` counts as presence even when it never
         // lands in `functions` (a NOTYPE import parses only into
-        // `undefined_functions`).
-        let results = hardening_results_for(false, false, &["memcpy"], &["memcpy", "__memcpy_chk"]);
+        // `undefined_functions`). The binary imports three distinct
+        // fortifiable functions, so the quiet outcome pins presence
+        // detection rather than passing via inapplicability.
+        let results = hardening_results_for(
+            false,
+            false,
+            &["memcpy", "memset", "strcpy"],
+            &["memcpy", "memset", "strcpy", "__memcpy_chk"],
+        );
         assert!(
             lines_for(&results, "missing-fortify").is_empty(),
             "missing-fortify must not fire with an imported __*_chk: {results:?}"
@@ -4973,13 +5058,15 @@ mod tests {
         // rpmcrab#452 boundary: stdio buffered readers (`fread`, `fgets`)
         // are deliberately not SSP-relevant -- zoo's `fiz` reads into heap
         // buffers and its finding was never actionable. They ARE
-        // fortifiable, so missing-fortify still fires for the same file:
-        // the two gates have different sets on purpose.
+        // fortifiable, and with `printf` (fortifiable, not SSP-relevant)
+        // the file clears the fortify evidence threshold, so
+        // missing-fortify still fires for the same file: the two gates
+        // have different sets on purpose.
         let results = hardening_results_for(
             false,
             false,
-            &["fread", "fgets"],
-            &["fread@GLIBC_2.2.5", "fgets@GLIBC_2.2.5"],
+            &["fread", "fgets", "printf"],
+            &["fread@GLIBC_2.2.5", "fgets@GLIBC_2.2.5", "printf"],
         );
         assert!(
             lines_for(&results, "missing-stack-protector").is_empty(),
@@ -4988,7 +5075,7 @@ mod tests {
         assert_eq!(
             lines_for(&results, "missing-fortify").len(),
             1,
-            "missing-fortify must still fire for fread/fgets: {results:?}"
+            "missing-fortify must still fire for fread/fgets/printf: {results:?}"
         );
     }
 
@@ -5159,6 +5246,8 @@ mod tests {
         // them through `undefined_functions`.
         let dynsyms: &[(&str, u8, u8, u16)] = &[
             ("memcpy", 1, 0, 0),
+            ("memset", 1, 0, 0),
+            ("strcpy", 1, 0, 0),
             ("__memcpy_chk", 1, 0, 0),
             ("__stack_chk_fail", 1, 0, 0),
         ];
@@ -5214,20 +5303,23 @@ mod tests {
     }
 
     /// Deliberate divergence (divergences.toml, `case = "global"`, rpmcrab#17):
-    /// the frozen reference emits no hardening findings, so each captured case
-    /// gains exactly one port-only `W: missing-fortify` line:
-    /// - `liblto21`: 0 -> 1 warning (`/usr/lib64/libLTO.so.21.1`)
-    /// - `llvm21-gold`: 1 -> 2 warnings (`/usr/lib64/LLVMgold.so`)
+    /// the frozen reference emits no hardening findings, so a captured case
+    /// gains a port-only `W: missing-fortify` line exactly where the binary
+    /// clears the evidence threshold (rpmcrab#529):
+    /// - `liblto21`: gains one (`/usr/lib64/libLTO.so.21.1`)
+    /// - `llvm21-gold`: gains none -- `LLVMgold.so` imports only two
+    ///   distinct fortifiable functions (`memcpy`, `snprintf`), below the
+    ///   threshold, so crab and reference agree on silence there.
     #[test]
     fn hardening_captured_cases_pin_new_lines() {
-        let cases = [
+        let cases: [(&str, &[&str]); 2] = [
             (
                 "../../tests/parity/cases/liblto21/input/libLTO21-21.1.8-9.2.aarch64.rpm",
-                "libLTO21.aarch64: W: missing-fortify /usr/lib64/libLTO.so.21.1",
+                &["libLTO21.aarch64: W: missing-fortify /usr/lib64/libLTO.so.21.1"],
             ),
             (
                 "../../tests/parity/cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm",
-                "llvm21-gold.aarch64: W: missing-fortify /usr/lib64/LLVMgold.so",
+                &[],
             ),
         ];
         for (rel, expected) in cases {
@@ -5235,8 +5327,8 @@ mod tests {
             let (results, _dir) = run_binaries_check(&rpm);
             let lines = lines_for(&results, "missing-fortify");
             assert_eq!(
-                lines,
-                [expected],
+                lines.as_slice(),
+                expected,
                 "port-only hardening delta for {rel}: {results:?}"
             );
         }
