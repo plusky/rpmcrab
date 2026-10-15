@@ -445,6 +445,13 @@ pub struct FilesCheck {
     /// once every package of the run has been seen.
     nodoc_candidates: Vec<(String, String, String)>,
     documented_sources: HashSet<String>,
+    /// Session state for `dangling-relative-symlink` (issue #547): the
+    /// file names shipped by every package seen since the last export,
+    /// and the relative links no single package resolved. The finding
+    /// is decided in `after_checks`, once every package of the run has
+    /// been seen.
+    session_files: HashSet<String>,
+    dangling_candidates: Vec<DanglingCandidate>,
 }
 
 impl FilesCheck {
@@ -553,6 +560,8 @@ impl FilesCheck {
                 .map(|name| Tool::probe(&source, name, &[]).0),
             nodoc_candidates: Vec::new(),
             documented_sources: HashSet::new(),
+            session_files: HashSet::new(),
+            dangling_candidates: Vec::new(),
         }
     }
 
@@ -645,6 +654,8 @@ impl Check for FilesCheck {
             librpm::Tag::PREUNPROG,
         );
 
+        self.session_files
+            .extend(pkg.files.iter().map(|f| f.name.clone()));
         self.check_nodoc(pkg, &st);
         self.check_meta_package(pkg, &st, out);
         self.check_empty_debuginfo(pkg, &st, out);
@@ -674,36 +685,78 @@ impl Check for FilesCheck {
                 ));
             }
         }
+        // The session-aware `dangling-relative-symlink` decision (issue
+        // #547): a candidate fires only when no package of the run
+        // ships its normalised target. Candidates are in lint order,
+        // which the stable output sort preserves for equal keys.
+        for cand in &self.dangling_candidates {
+            if self.session_files.contains(&cand.target) {
+                continue;
+            }
+            match &cand.disposition {
+                DanglingDisposition::Plain => out.add_info(make_finding(
+                    &cand.name,
+                    &cand.arch,
+                    Level::Warning,
+                    "dangling-relative-symlink",
+                    vec![cand.fname.clone(), cand.link.clone()],
+                    None,
+                )),
+                DanglingDisposition::Divert(name) => out.add_info(make_finding(
+                    &cand.name,
+                    &cand.arch,
+                    Level::Warning,
+                    "no-dependency-on",
+                    vec![name.clone()],
+                    None,
+                )),
+                DanglingDisposition::Silent => {}
+            }
+        }
     }
 
     fn reset(&mut self) {
         self.nodoc_candidates.clear();
         self.documented_sources.clear();
+        self.session_files.clear();
+        self.dangling_candidates.clear();
     }
 
     fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
-        if self.nodoc_candidates.is_empty() && self.documented_sources.is_empty() {
+        if self.nodoc_candidates.is_empty()
+            && self.documented_sources.is_empty()
+            && self.session_files.is_empty()
+            && self.dangling_candidates.is_empty()
+        {
             return None;
         }
-        Some(Box::new(NoDocState {
-            candidates: std::mem::take(&mut self.nodoc_candidates),
+        Some(Box::new(FilesSessionState {
+            nodoc_candidates: std::mem::take(&mut self.nodoc_candidates),
             documented_sources: std::mem::take(&mut self.documented_sources),
+            session_files: std::mem::take(&mut self.session_files),
+            dangling_candidates: std::mem::take(&mut self.dangling_candidates),
         }))
     }
 
     fn import_state(&mut self, state: Box<dyn std::any::Any + Send>) {
-        if let Ok(state) = state.downcast::<NoDocState>() {
-            self.nodoc_candidates.extend(state.candidates);
+        if let Ok(state) = state.downcast::<FilesSessionState>() {
+            self.nodoc_candidates.extend(state.nodoc_candidates);
             self.documented_sources.extend(state.documented_sources);
+            self.session_files.extend(state.session_files);
+            self.dangling_candidates.extend(state.dangling_candidates);
         }
     }
 }
 
-/// Cross-package `no-documentation` state, exported per package and
-/// merged before `after_checks` (`rpmlint#1595`).
-struct NoDocState {
-    candidates: Vec<(String, String, String)>,
+/// Cross-package `FilesCheck` state, exported per package and merged
+/// before `after_checks` (`rpmlint#1595`): the session-aware
+/// `no-documentation` (issue #539) and `dangling-relative-symlink`
+/// (issue #547) decisions.
+struct FilesSessionState {
+    nodoc_candidates: Vec<(String, String, String)>,
     documented_sources: HashSet<String>,
+    session_files: HashSet<String>,
+    dangling_candidates: Vec<DanglingCandidate>,
 }
 
 /// The key grouping binary packages built from one source: the
@@ -715,6 +768,32 @@ fn source_key(pkg: &Pkg) -> String {
         Some(srpm) if !srpm.is_empty() => srpm,
         _ => pkg.name.clone(),
     }
+}
+
+/// One relative symlink whose normalised target the emitting package
+/// alone does not ship (issue #547).
+struct DanglingCandidate {
+    name: String,
+    arch: String,
+    fname: String,
+    link: String,
+    /// The normalised absolute target path.
+    target: String,
+    disposition: DanglingDisposition,
+}
+
+/// What an unresolved candidate emits, precomputed at record time from
+/// the emitting package alone (the `DanglingSymlinkExceptions`
+/// diversion depends only on it).
+enum DanglingDisposition {
+    /// `dangling-relative-symlink` for the link.
+    Plain,
+    /// `no-dependency-on` for the exception's package: the link matches
+    /// a `DanglingSymlinkExceptions` entry the package does not Require.
+    Divert(String),
+    /// Nothing: the link matches a `DanglingSymlinkExceptions` entry
+    /// whose package the emitting package Requires.
+    Silent,
 }
 
 /// The nine Unicode bidirectional control characters behind trojan-source
@@ -950,7 +1029,7 @@ impl FilesCheck {
     }
 
     fn check_file(
-        &self,
+        &mut self,
         pkg: &Pkg,
         fname: &str,
         pkgfile: &PkgFile,
@@ -1842,7 +1921,7 @@ impl FilesCheck {
     }
 
     fn check_file_link(
-        &self,
+        &mut self,
         pkg: &Pkg,
         fname: &str,
         pkgfile: &PkgFile,
@@ -1971,8 +2050,26 @@ impl FilesCheck {
         }
     }
 
+    /// The `DanglingSymlinkExceptions` outcome for a link, mirroring
+    /// `report_dangling`'s match: the first matching exception diverts
+    /// the finding to `no-dependency-on` for its package, unless the
+    /// emitting package Requires that package (then nothing is
+    /// reported); an empty exception name behaves like no exception.
+    fn dangling_disposition(&self, pkg: &Pkg, link: &str) -> DanglingDisposition {
+        match self.dangling_exception(link) {
+            Some(name) if !name.is_empty() => {
+                if pkg.req_names.iter().any(|n| n == name) {
+                    DanglingDisposition::Silent
+                } else {
+                    DanglingDisposition::Divert(name.to_string())
+                }
+            }
+            _ => DanglingDisposition::Plain,
+        }
+    }
+
     fn check_link_relative(
-        &self,
+        &mut self,
         pkg: &Pkg,
         fname: &str,
         pkgfile: &PkgFile,
@@ -1991,7 +2088,23 @@ impl FilesCheck {
                 .unwrap_or_default();
             let abslink = crate::pkg::normalize_path(&format!("{parent}/{link}"));
             if !pkg.files.iter().any(|f| f.name == abslink) && !pkg.req_names.contains(&abslink) {
-                self.report_dangling(pkg, fname, link, true, out);
+                // Session-aware decision (issue #547): record the link
+                // and decide in `after_checks`, when the file sets of
+                // the whole run are known — a sibling package in the
+                // run may ship the target. A run over one package keeps
+                // today's behaviour: its session set is its own file
+                // list. The reference decides per package
+                // (`FilesCheck.py` `_check_file_link_relative`); the
+                // divergence is ledgered.
+                let disposition = self.dangling_disposition(pkg, link);
+                self.dangling_candidates.push(DanglingCandidate {
+                    name: pkg.name.clone(),
+                    arch: pkg.arch.clone(),
+                    fname: fname.to_string(),
+                    link: link.to_string(),
+                    target: abslink,
+                    disposition,
+                });
             }
         }
         let parts: Vec<&str> = fname.split('/').skip(1).collect();
@@ -4756,6 +4869,216 @@ mod tests {
     }
 
     #[test]
+    fn dangling_relative_fires_for_lang_package_alone() {
+        // Issue #547: the -lang subpackage's link target ships only in
+        // its sibling; linted alone the session set is its own file
+        // list, so the finding fires — per-package behaviour preserved.
+        let config = test_config();
+        let (results, _dirs) = run_files_check_session(
+            &[&fixture_path("dangling-session-lang-1.0-1.noarch.rpm")],
+            &config,
+        );
+        let lines: Vec<&str> = results
+            .iter()
+            .filter(|(n, _)| n == "dangling-relative-symlink")
+            .map(|(_, line)| line.as_str())
+            .collect();
+        assert_eq!(lines.len(), 1, "got: {results:?}");
+        assert!(
+            lines[0].starts_with("dangling-session-lang.noarch"),
+            "unexpected line: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn dangling_relative_suppressed_when_sibling_ships_target() {
+        // Issue #547: dangling-session-main and dangling-session-lang
+        // are built from one spec; the main package ships the figure
+        // the lang package links to, so the pair stays quiet — in
+        // either lint order. Deciding per package, as the reference
+        // does, makes the lang package fire and this fail.
+        let config = test_config();
+        let main = fixture_path("dangling-session-main-1.0-1.noarch.rpm");
+        let lang = fixture_path("dangling-session-lang-1.0-1.noarch.rpm");
+        for rpms in [
+            [lang.as_str(), main.as_str()],
+            [main.as_str(), lang.as_str()],
+        ] {
+            let (results, _dirs) = run_files_check_session(&rpms, &config);
+            let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+            assert_lacks(&names, "dangling-relative-symlink");
+        }
+    }
+
+    #[test]
+    fn dangling_relative_unrelated_package_does_not_resolve() {
+        // Issue #547: session awareness is target existence, not a
+        // blanket suppression — a run whose other package does not
+        // ship the target leaves the lang package's finding in place.
+        let config = test_config();
+        let (results, _dirs) = run_files_check_session(
+            &[
+                &fixture_path("dangling-session-lang-1.0-1.noarch.rpm"),
+                &fixture_path("dangling-lone-1.0-1.noarch.rpm"),
+            ],
+            &config,
+        );
+        let lines: Vec<&str> = results
+            .iter()
+            .filter(|(n, _)| n == "dangling-relative-symlink")
+            .map(|(_, line)| line.as_str())
+            .collect();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("dangling-session-lang.noarch")),
+            "got: {results:?}"
+        );
+    }
+
+    #[test]
+    fn dangling_relative_fires_for_lone_dangling_package() {
+        // Issue #547: dangling-lone's build-host-shaped link target
+        // (the gfxboot shape) exists in no package, so it fires in a
+        // session too; the intended in-package target shipping
+        // alongside does not save it. The consolehelper-shaped link
+        // fires plainly here: the default test config carries no
+        // DanglingSymlinkExceptions.
+        let config = test_config();
+        let (results, _dirs) =
+            run_files_check_session(&[&fixture_path("dangling-lone-1.0-1.noarch.rpm")], &config);
+        let lines: Vec<&str> = results
+            .iter()
+            .filter(|(n, _)| n == "dangling-relative-symlink")
+            .map(|(_, line)| line.as_str())
+            .collect();
+        assert!(
+            lines.iter().any(|l| l.contains("links/logo.txt")),
+            "got: {results:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("dangling-lone-helper")),
+            "got: {results:?}"
+        );
+        // The mid-tree dir-link resolves: its target is a directory
+        // entry the same package ships (%dir), and the lookup matches
+        // header entries verbatim.
+        assert!(
+            !lines.iter().any(|l| l.contains("dir-link")),
+            "got: {results:?}"
+        );
+        // Class F parity: the root-level link's normalised target
+        // keeps POSIX's double leading slash (`//usr/...`), which
+        // never equals a header entry, so it fires — the reference
+        // emits the identical lines for filesystem's own root links.
+        assert!(
+            lines.iter().any(|l| l.contains("lone-root-link")),
+            "got: {results:?}"
+        );
+    }
+
+    /// The distro-shaped `DanglingSymlinkExceptions` table (the
+    /// consolehelper entry of the vendored openSUSE config).
+    fn config_with_consolehelper_exception() -> Config {
+        let mut config = test_config();
+        let mut entry = toml::Table::new();
+        entry.insert(
+            "path".to_string(),
+            toml::Value::String("consolehelper$".to_string()),
+        );
+        entry.insert(
+            "name".to_string(),
+            toml::Value::String("usermode-consoleonly".to_string()),
+        );
+        let mut exceptions = toml::Table::new();
+        exceptions.insert("consolehelper$".to_string(), toml::Value::Table(entry));
+        config.configuration.insert(
+            "DanglingSymlinkExceptions".to_string(),
+            toml::Value::Table(exceptions),
+        );
+        config
+    }
+
+    #[test]
+    fn dangling_relative_exception_diverts_to_no_dependency_on() {
+        // Issue #547: the exceptions diversion survives the deferral —
+        // with the consolehelper exception configured, the helper link
+        // reports `no-dependency-on usermode-consoleonly` instead of
+        // `dangling-relative-symlink`, decided in `after_checks` like
+        // the plain finding; the build-host link still fires plainly.
+        let config = config_with_consolehelper_exception();
+        let (results, _dirs) =
+            run_files_check_session(&[&fixture_path("dangling-lone-1.0-1.noarch.rpm")], &config);
+        let diverted: Vec<&str> = results
+            .iter()
+            .filter(|(n, _)| n == "no-dependency-on")
+            .map(|(_, line)| line.as_str())
+            .collect();
+        assert_eq!(diverted.len(), 1, "got: {results:?}");
+        assert!(
+            diverted[0].contains("usermode-consoleonly"),
+            "unexpected line: {}",
+            diverted[0]
+        );
+        let plain: Vec<&str> = results
+            .iter()
+            .filter(|(n, _)| n == "dangling-relative-symlink")
+            .map(|(_, line)| line.as_str())
+            .collect();
+        assert_eq!(plain.len(), 2, "got: {results:?}");
+        assert!(
+            plain.iter().any(|l| l.contains("links/logo.txt")),
+            "got: {results:?}"
+        );
+        assert!(
+            plain.iter().any(|l| l.contains("lone-root-link")),
+            "got: {results:?}"
+        );
+    }
+
+    #[test]
+    fn dangling_relative_exception_required_stays_silent() {
+        // Issue #547: when the emitting package Requires the
+        // exception's package, the diverted finding disappears
+        // entirely — the per-package diversion outcome is unchanged by
+        // the deferral. The build-host link still fires.
+        let config = config_with_consolehelper_exception();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = Pkg::open(
+            std::path::Path::new(&fixture_path("dangling-lone-1.0-1.noarch.rpm")),
+            dir.path(),
+            true,
+        )
+        .expect("open fixture");
+        pkg.req_names.push("usermode-consoleonly".to_string());
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        if let Some(state) = check.export_state() {
+            check.import_state(state);
+        }
+        check.after_checks(&config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_lacks(&names, "no-dependency-on");
+        let lines: Vec<&str> = out
+            .results()
+            .iter()
+            .filter(|(n, _)| n == "dangling-relative-symlink")
+            .map(|(_, line)| line.as_str())
+            .collect();
+        assert_eq!(lines.len(), 2, "got: {:?}", out.results());
+        assert!(
+            lines.iter().any(|l| l.contains("links/logo.txt")),
+            "got: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("lone-root-link")),
+            "got: {lines:?}"
+        );
+    }
+
+    #[test]
     fn symlink_up_and_down_segments() {
         // The reference emits E symlink-contains-up-and-down-segments once
         // per ".." segment left in the link target after the leading "../"
@@ -4763,7 +5086,7 @@ mod tests {
         // an empty remainder stays silent. Cases verified against the
         // pinned reference interpreter.
         let config = test_config();
-        let check = FilesCheck::new(&config);
+        let mut check = FilesCheck::new(&config);
         // (fname, link target, expected E count)
         let cases = [
             ("/a/b/c", "../foo/../bar", 1),
