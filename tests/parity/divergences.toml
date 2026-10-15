@@ -1922,6 +1922,14 @@ upstream = "https://github.com/plusky/rpmcrab/issues/534"
 
 [[divergence]]
 case = "global"
+check = "no-documentation"
+kind = "behaviour"
+reason = "Deliberate fix (plusky/rpmcrab#539): the port decides `no-documentation` session-wide — a doc-less non-lib package stays quiet when any package built from the same source (the `SOURCERPM` header) in the same run ships documentation. The reference decides per package (`FilesCheck.py` `_check_nodoc`: `not lib_package and not pkg.doc_files`) with no cross-package awareness, so the standard SUSE layout (docs in the main package, none in its data/devel subpackages) fires on every subpackage and the vendored openSUSE/SLFO configs filter the finding outright (config-filters audit F1, tracked in plusky/rpmcrab#538). Measured on the proj 9.9.0 corpus (37 binary RPMs from one source, filter-free): 34 findings, all 34 sibling-covered by the `proj` main package, 0 genuinely doc-less. The decision is deferred to `after_checks` over state merged via `export_state`/`import_state`, the port's existing cross-package machinery; tag, level and message are unchanged, and a package with no documented sibling still fires. A header without `SOURCERPM` groups by its own name, preserving the per-package behaviour. Pinned by `no_documentation_suppressed_when_sibling_ships_docs`, `no_documentation_mixed_sources_decide_per_source` and `no_documentation_fires_for_lone_docless_package`."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/539"
+
+[[divergence]]
+case = "global"
 check = "file-not-in-%lang"
 kind = "behaviour"
 reason = "Deliberate fix (plusky/rpmcrab#480): the port fires `file-not-in-%lang` for an untagged `.mo` only under the standard locale tree, `/usr/share/locale` -- the tree the reference's own `lc_messages_regex` is anchored in and the only one `%find_lang` covers. The reference fires on every untagged `.mo` anywhere (I18NCheck.py: `(f.endswith('.mo') or subdir)` with no path condition). In the 2026-10-13 Factory sweep only 333 of 10,084 hits were under `/usr/share/locale`; the rest were app-private trees (LibreOffice, Python site-packages, kvirc, ruby gems) whose translations the applications load themselves, where `%lang` marks would let install-time language filtering strip product data. The LC_MESSAGES/man probe trigger is unchanged (its regexes are already tree-anchored) and `%lang`-tagged files stay quiet everywhere. Pinned by `mo_file_in_private_tree_is_quiet` and `mo_file_in_locale_tree_outside_lc_messages_still_warns`."
