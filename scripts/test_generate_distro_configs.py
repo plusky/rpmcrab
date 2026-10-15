@@ -1018,6 +1018,67 @@ def test_drop_live_filters_drops_kernel_modules_line():
     assert len(dropped) == 1, dropped
     assert 'kernel-modules-not-in-kernel-packages' in dropped[0], dropped
     assert pruned == [] and retargeted == [], (pruned, retargeted)
+# ---------------------------------------------------------------------------
+# scope_filters: bare entries narrowed to their recorded rationale
+# ---------------------------------------------------------------------------
+
+def test_scope_filters_rewrites_bare_entry():
+    """The bare entry is replaced by its scoped form, in place, and logged.
+
+    If the rewrite silently stopped firing (upstream rewords the line, the
+    matcher stops recognising it), the vendored config would ship the
+    blanket filter again with no trace — the log assertion guards that.
+    """
+    scoped, _reason = gen.SCOPE_FILTERS["no-ldconfig-symlink"]
+    text = (
+        "Filters = [\n"
+        "    'use-tmp-in-',\n"
+        "    'no-ldconfig-symlink',\n"
+        "    'description-line-too-long',\n"
+        "]\n"
+    )
+    log = []
+    out = gen.scope_filters(text, log)
+    assert f"    '{scoped}',\n" in out, out
+    assert "'no-ldconfig-symlink',\n" not in out, out
+    assert "'use-tmp-in-',\n" in out and "'description-line-too-long',\n" in out, out
+    assert len(log) == 1 and "no-ldconfig-symlink" in log[0], log
+
+
+def test_scope_filters_leaves_scoped_and_compound_entries_alone():
+    """Only a line whose entire pattern is the bare entry is rewritten.
+
+    An already-scoped entry or a compound pattern embedding the finding
+    name expresses a different (already deliberate) scope; rewriting it
+    would corrupt upstream's text.
+    """
+    text = (
+        "Filters = [\n"
+        "    'no-ldconfig-symlink /usr/lib/modules',\n"
+        "    '.*no-ldconfig-symlink.*',\n"
+        "]\n"
+    )
+    log = []
+    out = gen.scope_filters(text, log)
+    assert out == text, out
+    assert log == [], log
+
+
+def test_scope_filters_covers_blocked_filters_and_ignores_other_lists():
+    """BlockedFilters lines are rewritten too; unrelated lists are not."""
+    scoped, _reason = gen.SCOPE_FILTERS["no-ldconfig-symlink"]
+    text = (
+        "BlockedFilters = [\n"
+        "    'no-ldconfig-symlink',\n"
+        "]\n"
+        "SomeOtherList = [\n"
+        "    'no-ldconfig-symlink',\n"
+        "]\n"
+    )
+    log = []
+    out = gen.scope_filters(text, log)
+    assert out.count(f"'{scoped}',") == 1, out
+    assert len(log) == 1 and log[0].startswith("BlockedFilters:"), log
 
 
 def test_dedupe_filters_drops_exact_duplicates():
