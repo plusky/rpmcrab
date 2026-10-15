@@ -6,7 +6,8 @@ into ``crates/rpmcrab-core/data/distro/<flavor>/``, prunes ``Filters`` /
 ``BlockedFilters`` entries that reference findings rpmcrab no longer emits,
 drops ``Filters`` entries for live findings rpmcrab deliberately surfaces
 (see DROP_LIVE_FILTERS), drops whitelist stanzas for packages gone from
-Tumbleweed/SLE 16 and stale pie-executables paths, appends the extra
+Tumbleweed/SLE 16 and stale pie-executables paths, retargets ``Filters``
+entries whose target path moved (see RETARGET_FILTERS), appends the extra
 Filters/Checks rpmcrab carries on top of upstream, removes the Checks
 the opensuse flavor deliberately does not run, and stamps provenance.
 
@@ -327,6 +328,56 @@ PRUNE_RAW = {
     # nothing for decades; it survives verbatim in upstream's current
     # configs, which mention nss_db nowhere else. The finding stays live.
     ".* nss_db non-standard-dir-in-var db": "dead pattern: written for rpmlint's severity-first output format; the current 'name.arch: sev: tag' layout breaks its adjacency (issue #538)",
+    # Same usr-merge fossil shape, one line down in the upstream config:
+    # init ships as the /usr/sbin/init symlink to systemd, which carries
+    # no ELF payload for the check to flag (a symlink has no readelf
+    # data), and the full Factory sweep (17,241 srcpkgs,
+    # run-20261014-6013f789) contains zero statically-linked-binary
+    # emissions for any /sbin/ path at all.
+    ".* statically-linked-binary /sbin/init": "dead pattern: init is a symlink to systemd on usr-merged Factory; zero emissions in the Factory sweep (issue #538)",
+    # glibc 2.44 dropped the post-upgrade helper: the current glibc
+    # package ships only iconvconfig and ldconfig in /usr/sbin, and the
+    # Factory sweep contains zero mentions of the name.
+    r"glibc\.\S+: \w: statically-linked-binary /usr/sbin/glibc_post_upgrade": "dead pattern: glibc 2.44 no longer ships glibc_post_upgrade; zero emissions in the Factory sweep (issue #538)",
+}
+
+# Filters lines whose exemption is still wanted but whose target moved:
+# old pattern -> (new pattern, reason). The PRUNE_* tables drop lines
+# whose finding or scope is gone; these lines name a live finding scoped
+# to a path the distro relocated (usr-merge, /etc/skel -> /usr/etc/skel),
+# so the scope is rewritten instead. Matching is byte-exact like
+# PRUNE_RAW: when upstream rewords the line the entry stops matching and
+# the monthly sync surfaces the upstream text for a fresh audit — a
+# retarget can never silently widen.
+RETARGET_FILTERS = {
+    # Skeleton dotdirs moved from /etc/skel to /usr/etc/skel. The check
+    # excludes the /etc/skel/ prefix in code (the reference does the
+    # same), so the old patterns could never match, while the
+    # /usr/etc/skel dotdirs fire visibly today (filesystem in the Factory
+    # sweep: .cache/.config/.local print unsuppressed; .config and
+    # .local are the ones these lines cover). Config-only fix: restores
+    # the intended exemption in both implementations.
+    r"^filesystem\..*: hidden-file-or-dir /etc/skel/.config": (
+        r"^filesystem\..*: hidden-file-or-dir /usr/etc/skel/.config",
+        "skeleton dotdirs moved to /usr/etc/skel; the check excludes the /etc/skel/ prefix in code, so the old pattern could never match (issue #538)",
+    ),
+    r"^filesystem\..*: hidden-file-or-dir /etc/skel/.local": (
+        r"^filesystem\..*: hidden-file-or-dir /usr/etc/skel/.local",
+        "skeleton dotdirs moved to /usr/etc/skel; the check excludes the /etc/skel/ prefix in code, so the old pattern could never match (issue #538)",
+    ),
+    r"^filesystem\..*: hidden-file-or-dir /etc/skel/.fonts": (
+        r"^filesystem\..*: hidden-file-or-dir /usr/etc/skel/.fonts",
+        "skeleton dotdirs moved to /usr/etc/skel; the check excludes the /etc/skel/ prefix in code, so the old pattern could never match (issue #538)",
+    ),
+    # usr-merge: ldconfig ships as /usr/sbin/ldconfig and the rendered
+    # finding names that path, so the /sbin/ anchor right after the
+    # finding could never match and glibc's statically-linked error
+    # prints unsuppressed today. ldconfig is static by design — the
+    # exemption is wanted, at the path the distro actually ships.
+    ".* statically-linked-binary /sbin/ldconfig": (
+        ".* statically-linked-binary /usr/sbin/ldconfig",
+        "usr-merge: ldconfig ships as /usr/sbin/ldconfig, so the /sbin/ anchor could never match (issue #538)",
+    ),
 }
 
 # Packages gone from the distros: whitelist stanzas naming them are pruned.
@@ -641,8 +692,9 @@ def raw_filter_pattern(entry):
     return None
 
 
-def prune_stale_filters(text, known, pruned_log, dropped_log):
-    """Drop Filters/BlockedFilters lines referencing killed findings or dead scopes."""
+def prune_stale_filters(text, known, pruned_log, dropped_log, retargeted_log):
+    """Drop Filters/BlockedFilters lines referencing killed findings or dead
+    scopes, and rewrite lines whose target path moved (RETARGET_FILTERS)."""
     lines = text.splitlines(keepends=True)
     out = []
     in_list = None
@@ -680,6 +732,13 @@ def prune_stale_filters(text, known, pruned_log, dropped_log):
                 pruned_log.append(
                     f"{in_list}: dropped {raw!r} ({PRUNE_RAW[raw]})"
                 )
+                continue
+            if raw is not None and raw in RETARGET_FILTERS:
+                new_pattern, reason = RETARGET_FILTERS[raw]
+                retargeted_log.append(
+                    f"{in_list}: retargeted {raw!r} to {new_pattern!r} ({reason})"
+                )
+                out.append(line.replace(raw, new_pattern, 1))
                 continue
             if finding is not None and finding in DROP_LIVE_FILTERS:
                 dropped_log.append(
@@ -1525,10 +1584,13 @@ def generate(ref_dir=None, pins=None):
     pkg_pruned_log = []
     pie_pruned_log = []
     dropped_log = []
+    retargeted_log = []
     for flavor, data in result.items():
         for filename, text in data["files"].items():
             assert_no_flavor_key(flavor, filename, text)
-            text = prune_stale_filters(text, known, pruned_log, dropped_log)
+            text = prune_stale_filters(
+                text, known, pruned_log, dropped_log, retargeted_log
+            )
             text = prune_stale_packages(text, pkg_pruned_log, flavor)
             if filename == "pie-executables.toml":
                 # Per-flavor evidence (see PRUNE_PIE_PATHS): the owning
@@ -1609,6 +1671,15 @@ def generate(ref_dir=None, pins=None):
                 provenance.append(f"#   {entry}")
     else:
         provenance.append("# No Filters entries pruned: all referenced findings exist.")
+    if retargeted_log:
+        provenance.append("#")
+        provenance.append("# Retargeted Filters entries (exemption kept, its target")
+        provenance.append("# moved; see RETARGET_FILTERS):")
+        seen_retargeted = set()
+        for entry in retargeted_log:
+            if entry not in seen_retargeted:
+                seen_retargeted.add(entry)
+                provenance.append(f"#   {entry}")
     if dropped_log:
         provenance.append("#")
         provenance.append(
@@ -1660,6 +1731,7 @@ def generate(ref_dir=None, pins=None):
         pie_pruned_log,
         deduped,
         dropped_log,
+        retargeted_log,
     )
 
 
@@ -1813,7 +1885,7 @@ def main():
         rewrite_pins(Path(__file__).resolve(), pins)
 
     ref_dir = Path(args.ref_dir) if args.ref_dir else None
-    result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, deduped, dropped_log = generate(
+    result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, deduped, dropped_log, retargeted_log = generate(
         ref_dir=ref_dir, pins=pins
     )
 
@@ -1917,6 +1989,8 @@ def main():
     write_all(result, provenance, deduped)
     for entry in pruned_log + pkg_pruned_log + pie_pruned_log + dropped_log:
         print(f"pruned: {entry}")
+    for entry in retargeted_log:
+        print(f"retargeted: {entry}")
     print(f"wrote {sum(len(d['files']) for d in result.values())} files + PROVENANCE")
     return 0
 

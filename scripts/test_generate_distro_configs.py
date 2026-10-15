@@ -908,5 +908,51 @@ def test_remove_excluded_checks_without_entry_raises():
     raise AssertionError("remove_excluded_checks accepted a Checks list without the excluded check")
 
 
+def test_retarget_filters_rewrites_moved_targets():
+    """RETARGET_FILTERS lines are rewritten in place inside Filters.
+
+    The exemption is kept (ldconfig is static by design; skel dotdirs are
+    deliberate), only the moved path changes; the proven-dead neighbours
+    are pruned via PRUNE_RAW in the same pass; unrelated lines survive
+    byte-identical.
+    """
+    text = (
+        'Filters = [\n'
+        "    '^filesystem\\..*: hidden-file-or-dir /etc/skel/.config',\n"
+        "    '.* statically-linked-binary /sbin/ldconfig',\n"
+        "    '.* statically-linked-binary /sbin/init',\n"
+        "    'glibc\\.\\S+: \\w: statically-linked-binary /usr/sbin/glibc_post_upgrade',\n"
+        "    ' dangerous-command.*',\n"
+        ']\n'
+    )
+    pruned, dropped, retargeted = [], [], []
+    out = gen.prune_stale_filters(text, set(), pruned, dropped, retargeted)
+    assert '/usr/etc/skel/.config' in out, out
+    assert 'hidden-file-or-dir /etc/skel/.config' not in out, out
+    assert "'.* statically-linked-binary /usr/sbin/ldconfig'," in out, out
+    assert '/sbin/init' not in out, out
+    assert 'glibc_post_upgrade' not in out, out
+    assert "    ' dangerous-command.*',\n" in out, out
+    assert len(retargeted) == 2, retargeted
+    assert len(pruned) == 2, pruned
+    assert dropped == [], dropped
+
+
+def test_retarget_filters_byte_exact_only():
+    """A reworded line is NOT rewritten: matching is byte-exact, so an
+    upstream reword stops the retarget and the sync surfaces the line
+    for a fresh audit instead of the rewrite silently widening.
+    """
+    text = (
+        'Filters = [\n'
+        "    '.* statically-linked-binary  /sbin/ldconfig',\n"
+        ']\n'
+    )
+    pruned, dropped, retargeted = [], [], []
+    out = gen.prune_stale_filters(text, set(), pruned, dropped, retargeted)
+    assert out == text, out
+    assert retargeted == [], retargeted
+
+
 if __name__ == "__main__":
     sys.exit(main())

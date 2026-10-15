@@ -46,6 +46,8 @@
 #   Filters: dropped 'no-major-in-name' (killed: Mandriva-specific, openSUSE doesn't want it)
 #   Filters: dropped 'lib-package-without-%mklibname' (killed: Mandriva-specific, openSUSE doesn't want it)
 #   Filters: dropped 'init-script-name-with-dot' (killed: InitScriptCheck deleted (issue #214))
+#   Filters: dropped '.* statically-linked-binary /sbin/init' (dead pattern: init is a symlink to systemd on usr-merged Factory; zero emissions in the Factory sweep (issue #538))
+#   Filters: dropped 'glibc\\.\\S+: \\w: statically-linked-binary /usr/sbin/glibc_post_upgrade' (dead pattern: glibc 2.44 no longer ships glibc_post_upgrade; zero emissions in the Factory sweep (issue #538))
 #   Filters: dropped 'tag-not-utf8' (never ported: non-UTF-8 header tags abort the read; no finding is emitted)
 #   Filters: dropped 'setup-not-quiet' (killed: spec-cleaner adds -q)
 #   Filters: dropped 'no-packager-tag' (killed: autobuild redundancy, suppressed by openSUSE and Fedora)
@@ -67,6 +69,13 @@
 #   Filters: dropped 'info-files-without-install-info-postin' (killed: file triggers handle info-dir updates)
 #   Filters: dropped 'postin-without-install-info' (killed: file triggers handle info-dir updates)
 #   Filters: dropped 'info-files-without-install-info-postun' (killed: file triggers handle info-dir updates)
+#
+# Retargeted Filters entries (exemption kept, its target
+# moved; see RETARGET_FILTERS):
+#   Filters: retargeted '^filesystem\\..*: hidden-file-or-dir /etc/skel/.config' to '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.config' (skeleton dotdirs moved to /usr/etc/skel; the check excludes the /etc/skel/ prefix in code, so the old pattern could never match (issue #538))
+#   Filters: retargeted '^filesystem\\..*: hidden-file-or-dir /etc/skel/.local' to '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.local' (skeleton dotdirs moved to /usr/etc/skel; the check excludes the /etc/skel/ prefix in code, so the old pattern could never match (issue #538))
+#   Filters: retargeted '^filesystem\\..*: hidden-file-or-dir /etc/skel/.fonts' to '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.fonts' (skeleton dotdirs moved to /usr/etc/skel; the check excludes the /etc/skel/ prefix in code, so the old pattern could never match (issue #538))
+#   Filters: retargeted '.* statically-linked-binary /sbin/ldconfig' to '.* statically-linked-binary /usr/sbin/ldconfig' (usr-merge: ldconfig ships as /usr/sbin/ldconfig, so the /sbin/ anchor could never match (issue #538))
 #
 # Dropped Filters entries (live findings rpmcrab deliberately
 # surfaces; see DROP_LIVE_FILTERS):
