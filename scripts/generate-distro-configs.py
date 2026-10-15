@@ -233,6 +233,8 @@ PRUNE_CANDIDATES = {
     "no-buildroot-tag": "killed: BuildRoot: is obsolete/ignored",
     "hardcoded-path-in-buildroot-tag": "killed: policing an obsolete tag",
     "non-standard-group": "killed: openSUSE dropped the Group tag",
+    "devel-package-with-non-devel-group": "killed: openSUSE dropped the Group tag",
+    "no-group-tag": "killed: openSUSE dropped the Group tag",
     "setup-not-quiet": "killed: spec-cleaner adds -q",
     "not-standard-release-extension": "killed: autobuild redundancy, suppressed by openSUSE and Fedora",
     "executable-in-library-package": "killed: autobuild redundancy, suppressed by openSUSE and Fedora",
@@ -282,6 +284,10 @@ PRUNE_CANDIDATES = {
     "spurious-bracket-in-": "killed: PostCheck stylistic nit",
     # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/PostCheck.py
     "one-line-command-in-": "killed: PostCheck stylistic nit",
+    # Filtered by both upstream distro configs but emitted by no check,
+    # upstream or here (the name survives only in those configs): the port
+    # never had this finding — a non-UTF-8 header tag aborts the read.
+    "tag-not-utf8": "never ported: non-UTF-8 header tags abort the read; no finding is emitted",
 }
 
 # Filters dropped for findings that are still live: upstream's distro
@@ -303,6 +309,24 @@ PRUNE_SCOPED = {
     ("subdir-in-bin", "/sbin/conf.d/"): "dead SysV scope",
     ("conffile-without-noreplace-flag", "/etc/init.d"): "dead SysV scope",
     ("no-dependency-on", "locales"): "dead scope: the I18NCheck locales-* dependency rule is removed (issue #534); the finding stays live from FilesCheck",
+}
+
+# Exact Filters lines pruned verbatim: pattern -> reason. PRUNE_CANDIDATES
+# matches a whole finding name and PRUNE_SCOPED a (finding, scope) pair;
+# neither can express a compound pattern (package anchor + finding +
+# detail). A raw entry prunes only a byte-exact pattern, so when upstream
+# rewords the line the entry stops matching and the monthly sync surfaces
+# the line again for a fresh audit — a raw prune can never silently widen.
+PRUNE_RAW = {
+    # Written for rpmlint's original severity-first output format
+    # ("W: nss_db non-standard-dir-in-var db", Filter.py as of the 1999
+    # first version): it demands the package name and the finding be
+    # separated by a single space. Every later format — rpmlint >= 1.4 and
+    # rpmcrab alike — renders "nss_db.<arch>: W: non-standard-dir-in-var
+    # db", inserting ".<arch>: W:" exactly there, so the line has matched
+    # nothing for decades; it survives verbatim in upstream's current
+    # configs, which mention nss_db nowhere else. The finding stays live.
+    ".* nss_db non-standard-dir-in-var db": "dead pattern: written for rpmlint's severity-first output format; the current 'name.arch: sev: tag' layout breaks its adjacency (issue #538)",
 }
 
 # Packages gone from the distros: whitelist stanzas naming them are pruned.
@@ -602,6 +626,21 @@ def scoped_entry(entry):
     return None
 
 
+def raw_filter_pattern(entry):
+    """The pattern text of a Filters entry with its quotes stripped.
+
+    Returns None for lines that are not a single quoted pattern. Unlike
+    pure_finding_pattern the pattern is kept intact: PRUNE_RAW matches it
+    byte-for-byte.
+    """
+    s = entry.strip().split("#", 1)[0].strip().rstrip(",").strip()
+    if (s.startswith("'") and s.endswith("'")) or (
+        s.startswith('"') and s.endswith('"')
+    ):
+        return s[1:-1]
+    return None
+
+
 def prune_stale_filters(text, known, pruned_log, dropped_log):
     """Drop Filters/BlockedFilters lines referencing killed findings or dead scopes."""
     lines = text.splitlines(keepends=True)
@@ -634,6 +673,12 @@ def prune_stale_filters(text, known, pruned_log, dropped_log):
                 pruned_log.append(
                     f"{in_list}: dropped {scoped[0]!r} scoped to {scoped[1]!r} "
                     f"({PRUNE_SCOPED[scoped]})"
+                )
+                continue
+            raw = raw_filter_pattern(line)
+            if raw is not None and raw in PRUNE_RAW:
+                pruned_log.append(
+                    f"{in_list}: dropped {raw!r} ({PRUNE_RAW[raw]})"
                 )
                 continue
             if finding is not None and finding in DROP_LIVE_FILTERS:

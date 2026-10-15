@@ -66,8 +66,6 @@ Filters = [
     '.*invalid-buildhost.*',
 
 # Do not validate package rpm groups
-    '.*devel-package-with-non-devel-group.*',
-    '.*no-group-tag.*',
 
 # Output filters
     ' dir-or-file-in-opt ',  # handled by CheckFilelist.py
@@ -78,7 +76,6 @@ Filters = [
     'unstripped-binary-or-object.*\.ko',
     ' dangerous-command.*',
     ' setuid-binary.*',
-    '.* nss_db non-standard-dir-in-var db',
     'non-standard-dir-in-usr openwin',
     'ibcs2 non-standard-dir-in-usr i486-sysv4',
     'shlibs5 non-standard-dir-in-usr i486-linux-libc5',
@@ -169,7 +166,6 @@ Filters = [
 # Stuff that is currently too noisy, but might become relevant in the future
     ' prereq-use',
     ' file-not-utf8',
-    ' tag-not-utf8',
     ' mixed-use-of-spaces-and-tabs ',
     ' prereq-use ',
 
