@@ -441,7 +441,7 @@ mod tests {
             ),
             (
                 "SpecCheck.toml",
-                "004c07fce185b39a19d3b5246668ccd2c691c4f54c5e2fb21b62cdcf65d05783",
+                "6af8443ce6f295bbd225a48a01473cd0a1d0057674aecec74578d3c3abd10a91",
             ),
             (
                 "SysVInitOnSystemdCheck.toml",
@@ -457,7 +457,7 @@ mod tests {
             ),
             (
                 "TagsCheck.toml",
-                "14f57fd8235f6c9c4b435ff56839509a7b2aa4e6b1358943c6954de0aee7d397",
+                "2cc77b5f879c99f10521077486453a56f3cdeb011a877deada63eab4022f9b99",
             ),
             (
                 "TmpFilesCheck.toml",

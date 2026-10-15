@@ -84,7 +84,6 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ("files.rs", "Regex::new(\"$^\")", "fallback"),
     ("spec.rs", "Regex::new(\"$^\")", "fallback"),
     // Constant patterns in struct fields (compile once per instance).
-    ("tags.rs", "devel_number_re", "ctor-once"),
     ("tags.rs", "leading_space_re", "ctor-once"),
     ("tags.rs", "license_exception_re", "ctor-once"),
     ("tags.rs", "pkg_config_re", "ctor-once"),
