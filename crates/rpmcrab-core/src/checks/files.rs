@@ -592,6 +592,10 @@ struct PkgState {
     postin: String,
     postun: String,
     preun: String,
+    /// Directories named by the `/etc/ld.so.conf.d/*.conf` snippets this
+    /// package ships (issue #569): together with the standard libdirs,
+    /// the only directories ldconfig scans.
+    ldconfig_dirs: std::collections::HashSet<String>,
     hardlinks: HashMap<(u32, u32), Vec<String>>,
     bindir_exes: IndexMap<String, Vec<String>>,
     man_basenames: std::collections::HashSet<String>,
@@ -653,6 +657,7 @@ impl Check for FilesCheck {
             librpm::Tag::PREUN,
             librpm::Tag::PREUNPROG,
         );
+        st.ldconfig_dirs = ldconfig_conf_dirs(pkg);
 
         self.session_files
             .extend(pkg.files.iter().map(|f| f.name.clone()));
@@ -1240,6 +1245,39 @@ struct FileData {
 /// text-vs-binary.
 fn is_peek_printable(b: u8) -> bool {
     matches!(b, b'\n' | b'\r' | b'\t' | 0x0c | 0x08) || b >= 32
+}
+
+/// The standard library directories ldconfig always scans (issue #569).
+const STANDARD_LIBDIRS: [&str; 4] = ["/lib", "/lib64", "/usr/lib", "/usr/lib64"];
+
+/// Collect the directories the `/etc/ld.so.conf.d/*.conf` snippets
+/// shipped in `pkg` register with ldconfig (issue #569).
+fn ldconfig_conf_dirs(pkg: &Pkg) -> std::collections::HashSet<String> {
+    let mut dirs = std::collections::HashSet::new();
+    for f in &pkg.files {
+        let Some(rest) = f.name.strip_prefix("/etc/ld.so.conf.d/") else {
+            continue;
+        };
+        if rest.contains('/') || !rest.ends_with(".conf") {
+            continue;
+        }
+        parse_ldso_conf(&pkg.read_file(&f.name), &mut dirs);
+    }
+    dirs
+}
+
+/// Record the directory entries of one ld.so.conf-format text in `dirs`:
+/// one directory per line; `#` comments and `include` directives name
+/// none, and relative entries can never name a library's parent.
+fn parse_ldso_conf(content: &str, dirs: &mut std::collections::HashSet<String>) {
+    for line in content.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() || line.starts_with("include") || !line.starts_with('/') {
+            continue;
+        }
+        let dir = line.trim_end_matches('/');
+        dirs.insert(if dir.is_empty() { "/" } else { dir }.to_string());
+    }
 }
 
 impl FilesCheck {
@@ -3180,6 +3218,17 @@ impl FilesCheck {
         // The reference gates on lib_regex (anchored /lib(?:64)?/lib...),
         // not a `.so` substring: `.../libbasegfxlo.so-gdb.py` is not a library.
         if is_match(&self.lib_re, fname) {
+            // Issue #569: ldconfig scans only the standard libdirs and
+            // the directories a shipped /etc/ld.so.conf.d/*.conf snippet
+            // names. A library anywhere else (GHC's
+            // /usr/lib64/ghc-<ver>/lib tree, polymake's private tree) is
+            // invisible to ldconfig whether or not the package runs it,
+            // so the scriptlet test does not apply there; the reference
+            // applies it to every lib_regex match (divergences.toml).
+            let parent = fname.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+            if !STANDARD_LIBDIRS.contains(&parent) && !st.ldconfig_dirs.contains(parent) {
+                return;
+            }
             let postin_prog = pkg.scriptprog(librpm::Tag::POSTINPROG);
             let postun_prog = pkg.scriptprog(librpm::Tag::POSTUNPROG);
             if !is_ldconfig(&st.postin, &postin_prog) {
@@ -5880,6 +5929,199 @@ mod tests {
         // ldconfig present: silence.
         let results = run("/sbin/ldconfig", "/sbin/ldconfig");
         assert!(results.is_empty(), "unexpected findings: {results:?}");
+    }
+
+    #[test]
+    fn ldconfig_private_subtree_is_quiet() {
+        // Issue #569: ldconfig never scans private subtrees, so a library
+        // there must not draw the scriptlet demand. GHC's
+        // /usr/lib64/ghc-<ver>/lib tree (registered via ghc-pkg) is the
+        // measured pile: 193 of the 195 private-subdir lines on Factory.
+        let config = test_config();
+        let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
+        let pkg = Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture");
+        let check = FilesCheck::new(&config);
+        let st = PkgState::default();
+        for fname in [
+            "/usr/lib64/ghc-9.12.4/lib/libHSpolyparse-1.13.1-1Na5SdBty6sEY6bGCl8BU7-ghc9.12.4.so",
+            "/usr/lib64/polymake-4.15/lib/libpolymake-apps.so.4.15",
+            "/opt/vendor/lib/libvendor.so.2",
+        ] {
+            let pkgfile = PkgFile {
+                name: fname.to_string(),
+                path: fname.to_string(),
+                mode: 0o100755,
+                size: Some(100),
+                ..Default::default()
+            };
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_ldconfig(&pkg, fname, &pkgfile, &st, &mut out);
+            assert!(
+                out.results().is_empty(),
+                "private-subtree library must stay quiet: {fname}: {:?}",
+                out.results()
+            );
+        }
+    }
+
+    #[test]
+    fn ldconfig_standard_libdirs_still_fire() {
+        // Issue #569: the gate keeps the genuine class -- a library
+        // directly in a standard libdir with no scriptlet still fires
+        // (powercap's /usr/lib64/libpowercap.so.0.6.0 is the archetype).
+        let config = test_config();
+        let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
+        let pkg = Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture");
+        let check = FilesCheck::new(&config);
+        let st = PkgState::default();
+        for fname in [
+            "/lib/libfoo.so.1",
+            "/lib64/libfoo.so.1",
+            "/usr/lib/libfoo.so.1",
+            "/usr/lib64/libpowercap.so.0.6.0",
+        ] {
+            let pkgfile = PkgFile {
+                name: fname.to_string(),
+                path: fname.to_string(),
+                mode: 0o100755,
+                size: Some(100),
+                ..Default::default()
+            };
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_ldconfig(&pkg, fname, &pkgfile, &st, &mut out);
+            let names: Vec<&str> = out.results().iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(
+                names,
+                [
+                    "library-without-ldconfig-postin",
+                    "library-without-ldconfig-postun"
+                ],
+                "standard libdir {fname} must still fire: {:?}",
+                out.results()
+            );
+        }
+    }
+
+    #[test]
+    fn ldconfig_conf_registered_dir_still_fires() {
+        // Issue #569: a private directory the package itself registers in
+        // /etc/ld.so.conf.d is ldconfig-managed, so the scriptlet test
+        // applies there in both its shapes (missing scriptlet and
+        // ldconfig-less scriptlet); outside the registered set the same
+        // library stays quiet.
+        let config = test_config();
+        let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
+        let pkg = Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture");
+        let check = FilesCheck::new(&config);
+        let fname = "/usr/lib64/foo/lib/libfoo.so.1";
+        let pkgfile = PkgFile {
+            name: fname.to_string(),
+            path: fname.to_string(),
+            mode: 0o100755,
+            size: Some(100),
+            ..Default::default()
+        };
+        let mut dirs = std::collections::HashSet::new();
+        dirs.insert("/usr/lib64/foo/lib".to_string());
+        let run = |postin: &str, postun: &str| {
+            let st = PkgState {
+                postin: postin.to_string(),
+                postun: postun.to_string(),
+                ldconfig_dirs: dirs.clone(),
+                ..Default::default()
+            };
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_ldconfig(&pkg, fname, &pkgfile, &st, &mut out);
+            out.results().to_vec()
+        };
+        let results = run("", "");
+        let names: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "library-without-ldconfig-postin",
+                "library-without-ldconfig-postun"
+            ],
+            "conf-registered dir with no scriptlets"
+        );
+        let results = run("echo hi", "echo hi");
+        let names: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            ["postin-without-ldconfig", "postun-without-ldconfig"],
+            "conf-registered dir with ldconfig-less scriptlets"
+        );
+        let st = PkgState::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_ldconfig(&pkg, fname, &pkgfile, &st, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "unregistered private dir must stay quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn ldso_conf_parsing_collects_only_directory_entries() {
+        // Issue #569: comments, include directives and relative entries
+        // name no directory; trailing slashes normalise away.
+        let mut dirs = std::collections::HashSet::new();
+        parse_ldso_conf(
+            "# comment\n/usr/lib64/foo\ninclude /etc/ld.so.conf.d/*.conf\n\n/opt/bar/  # trailing comment\nrelative/dir\nhwcap 1 nosegneg\n",
+            &mut dirs,
+        );
+        let expected: std::collections::HashSet<String> =
+            ["/usr/lib64/foo".to_string(), "/opt/bar".to_string()]
+                .into_iter()
+                .collect();
+        assert_eq!(dirs, expected);
+    }
+
+    #[test]
+    fn ldconfig_conf_snippet_wires_through_check_binary() {
+        // Issue #569: the conf-snippet collection runs at package level,
+        // so through check_binary a library in a snippet-registered
+        // private dir fires while a GHC-tree library in the same package
+        // stays quiet. The snippet is materialised in the extract dir,
+        // where read_file resolves it.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = Pkg::open(
+            std::path::Path::new(&fixture_path("fcprobe-1-1.noarch.rpm")),
+            dir.path(),
+            true,
+        )
+        .expect("open fixture");
+        // Extraction lands in a per-package subdir of the extract dir;
+        // read_file resolves against it.
+        let conf_dir = pkg
+            .extracted_dir()
+            .expect("extracted fixture")
+            .join("etc/ld.so.conf.d");
+        std::fs::create_dir_all(&conf_dir).expect("mkdir conf.d");
+        std::fs::write(conf_dir.join("foo.conf"), "/usr/lib64/foo/lib\n").expect("write conf");
+        pkg.files = vec![
+            mkfile("/etc/ld.so.conf.d/foo.conf", 0o100644, 91),
+            mkfile("/usr/lib64/foo/lib/libfoo.so.1", 0o100755, 92),
+            mkfile(
+                "/usr/lib64/ghc-9.12.4/lib/libHSbar-1.0-ghc9.12.4.so",
+                0o100755,
+                93,
+            ),
+        ];
+        let results = run_check_binary(&pkg);
+        assert!(
+            results
+                .iter()
+                .any(|(n, d)| n == "library-without-ldconfig-postin"
+                    && d.contains("/usr/lib64/foo/lib/libfoo.so.1")),
+            "conf-registered private dir must fire: {results:?}"
+        );
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n.contains("ldconfig") && d.contains("ghc-9.12.4")),
+            "GHC private tree must stay quiet: {results:?}"
+        );
     }
 
     #[test]
