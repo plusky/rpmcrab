@@ -991,6 +991,7 @@ def test_stale_check_catches_name_keyed_entry():
         "only-non-binary-in-usr-lib",
         "outside-libdir-files",
         "post-without-tmpfile-creation",
+        "postin-without-ghost-file-creation",
         "postin-with-wrong-depmod",
         "postin-without-install-info",
         "postun-with-wrong-depmod",
