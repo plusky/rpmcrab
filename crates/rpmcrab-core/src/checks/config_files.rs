@@ -120,11 +120,16 @@ mod tests {
         );
     }
     #[test]
-    fn staged_description_carries_1606_reword() {
+    fn staged_descriptions_carry_deliberate_rewords() {
         // Staged for the M2 `--explain` wiring (see data/descriptions/README.md).
-        // Upstream #1606 reworded this entry to name dropping `%config` as an
-        // option, not just moving files; the other entry stays byte-identical
-        // to the reference (pinned rpmlint@84848c0).
+        // `non-etc-or-var-file-marked-as-conffile` carries the reword from
+        // upstream #1606 (dropping `%config` named as an option, not just
+        // moving files), byte-identical to the reference (pinned
+        // rpmlint@84848c0). `conffile-without-noreplace-flag` carries the
+        // reword ruled in rpmcrab#556: both `%config` forms are valid, and
+        // the text lays out the .rpmsave/.rpmnew upgrade semantics the
+        // choice turns on instead of prescribing noreplace; ledgered in
+        // tests/parity/divergences.toml.
         let raw = include_str!("../../data/descriptions/ConfigFilesCheck.toml");
         let table: toml::Table = raw.parse().expect("staged descriptions are valid toml");
         assert_eq!(
@@ -139,10 +144,12 @@ mod tests {
             table["conffile-without-noreplace-flag"].as_str(),
             Some(
                 "A configuration file is stored in your package without the noreplace flag.\n\
-                 This flag tells RPM not to overwrite or replace a configuration file to protect\n\
-                 local modifications.\n\
-                 A way to resolve this is to put the following in your SPEC file:\n\
-                 %config(noreplace) /etc/your_config_file_here\n"
+                 Both %config and %config(noreplace) are valid; neither is wrong as such.\n\
+                 The choice matters on upgrade: with plain %config a locally modified file\n\
+                 is preserved as .rpmsave and the newly shipped file takes its place, so\n\
+                 the local modifications stop being in effect; with %config(noreplace) the\n\
+                 local modifications stay in effect and the newly shipped file arrives as\n\
+                 .rpmnew instead. Consider per file which behaviour fits the file.\n"
             )
         );
     }
