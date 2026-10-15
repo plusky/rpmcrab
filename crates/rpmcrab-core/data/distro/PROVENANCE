@@ -70,6 +70,11 @@
 #   Filters: dropped 'postin-without-install-info' (killed: file triggers handle info-dir updates)
 #   Filters: dropped 'info-files-without-install-info-postun' (killed: file triggers handle info-dir updates)
 #
+# Pruned Filters entries (one flavor only; the other
+# flavor runs the check and keeps the exemption;
+# see PRUNE_FLAVOURED):
+#   opensuse Filters: dropped '^filesystem\\..*: dir-or-file-outside-snapshot' (dead in the opensuse flavor only: AtomicUpdateCheck is excluded there (issue #478), so the finding is never emitted; the slfo flavor runs the check and keeps the exemption (issue #565))
+#
 # Retargeted Filters entries (exemption kept, its target
 # moved; see RETARGET_FILTERS):
 #   Filters: retargeted '^filesystem\\..*: hidden-file-or-dir /etc/skel/.config' to '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.config' (skeleton dotdirs moved to /usr/etc/skel; the check excludes the /etc/skel/ prefix in code, so the old pattern could never match (issue #538))
