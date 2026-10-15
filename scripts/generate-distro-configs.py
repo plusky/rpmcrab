@@ -288,6 +288,8 @@ PRUNE_CANDIDATES = {
     "spurious-bracket-in-": "killed: PostCheck stylistic nit",
     # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/PostCheck.py
     "one-line-command-in-": "killed: PostCheck stylistic nit",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/PostCheck.py
+    "postin-without-ghost-file-creation": "killed: check dropped (issue #562); literal-substring model predates tmpfiles/update-alternatives, fires on 97.9% of %ghost declarations",
     # Filtered by both upstream distro configs but emitted by no check,
     # upstream or here (the name survives only in those configs): the port
     # never had this finding — a non-UTF-8 header tag aborts the read.
