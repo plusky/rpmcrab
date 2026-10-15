@@ -503,7 +503,12 @@ impl ReadelfInfo {
     /// Haskell code — the buffer-shaped imports arrive via the
     /// runtime — so the C-compiler findings would be noise. A C
     /// program that merely ships alongside (GHC's hp2ps, unlit)
-    /// carries neither signal and is still checked.
+    /// carries neither signal and is still checked. Known
+    /// limitation: the signal cannot distinguish GHC output from a
+    /// C host embedding Haskell (the documented `hs_init` /
+    /// `-no-hs-main` FFI pattern links `libHSrts`), so such a host
+    /// is skipped the same way; detection is conservative only in
+    /// the miss direction (a missed detection stays checked).
     fn is_haskell_binary(&self) -> bool {
         self.soname
             .as_deref()
@@ -517,8 +522,22 @@ impl ReadelfInfo {
     /// `_FORTIFY_SOURCE` instrumentation for OCaml code — the
     /// buffer-shaped imports belong to the runtime — so the
     /// C-compiler findings would be noise.
+    ///
+    /// Only defined symbols count: `functions` also carries
+    /// undefined dynsym entries (every `STT_FUNC` import), so an
+    /// imported OCaml symbol must not classify the binary. A C
+    /// program embedding OCaml merely imports `caml_startup` (the
+    /// documented embedding pattern: a C `main` calls it and links
+    /// the runtime) with zero defined OCaml symbols, and its own C
+    /// buffer calls stay checked.
     fn is_ocaml_binary(&self) -> bool {
-        self.functions.iter().any(|s| is_ocaml_symbol(s))
+        self.functions.iter().any(|s| {
+            is_ocaml_symbol(s)
+                && !self
+                    .undefined_functions
+                    .iter()
+                    .any(|u| symbol_base(u) == symbol_base(s))
+        })
     }
 
     /// A shared object for which an empty DT_NEEDED is legitimate, not
@@ -548,6 +567,12 @@ fn is_rust_symbol(name: &str) -> bool {
     // may carry one, and the base name is what identifies the runtime.
     let base = name.split('@').next().unwrap_or(name);
     base == "rust_begin_unwind" || base == "rust_eh_personality" || base.starts_with("__rust_")
+}
+
+/// The base name of a symbol: the name with any `@VERSION` suffix
+/// (carried by `.dynsym` entries) stripped.
+fn symbol_base(name: &str) -> &str {
+    name.split('@').next().unwrap_or(name)
 }
 
 /// An OCaml toolchain symbol: the native-code runtime entry point
@@ -4521,6 +4546,87 @@ mod tests {
             lines_for(&results, "missing-stack-protector").len(),
             1,
             "missing-stack-protector must still fire for a C stub library: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_ocaml_embedder_importing_caml_startup_still_flagged() {
+        // Negative pin: a C program embedding OCaml merely imports
+        // `caml_startup` (the documented embedding pattern: a C
+        // `main` calls it and links the runtime). `fill_from_elf`
+        // records every STT_FUNC dynsym entry in `functions`,
+        // imports included, so the symbol appears in both lists;
+        // with zero defined OCaml symbols the binary is compiled C
+        // and both findings must still fire on its buffer calls.
+        let results = hardening_results_with(
+            &["libc.so.6"],
+            None,
+            &["caml_startup", "main", "memcpy"],
+            &["caml_startup", "memcpy"],
+        );
+        assert_eq!(
+            lines_for(&results, "missing-fortify").len(),
+            1,
+            "missing-fortify must still fire for a C embedder importing caml_startup: {results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-stack-protector").len(),
+            1,
+            "missing-stack-protector must still fire for a C embedder importing caml_startup: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_ocaml_imported_module_symbol_still_flagged() {
+        // Negative pin for the module-qualified shape: a defined-only
+        // rule must not special-case `caml_startup`. A binary that
+        // only imports a module-qualified symbol of OCaml-generated
+        // code (defined in the host it plugs into) defines no OCaml
+        // code itself and stays checked.
+        let results = hardening_results_with(
+            &["libc.so.6"],
+            None,
+            &["camlStdlib__List", "memcpy"],
+            &["camlStdlib__List", "memcpy"],
+        );
+        assert_eq!(
+            lines_for(&results, "missing-fortify").len(),
+            1,
+            "missing-fortify must still fire when the OCaml symbol is only imported: {results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-stack-protector").len(),
+            1,
+            "missing-stack-protector must still fire when the OCaml symbol is only imported: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_haskell_embedder_skipped_known_limitation() {
+        // Pinned known limitation (ledgered in
+        // tests/parity/divergences.toml, rpmcrab#525): a C host
+        // embedding Haskell (the documented `hs_init` / `-no-hs-main`
+        // FFI pattern) links `libHSrts`, so it carries the same
+        // `libHS*` DT_NEEDED signal as GHC output and is skipped the
+        // same way, even though its own code is compiled C importing
+        // plain buffer calls. At DT_NEEDED granularity there is no
+        // cheap precise signal separating the two, so Haskell
+        // detection is conservative only in the miss direction.
+        // This test pins the current behaviour deliberately: any
+        // future precise signal must update it on purpose.
+        let results = hardening_results_with(
+            &["libHSrts-1.0.3-ghc9.12.4.so", "libc.so.6"],
+            None,
+            &["main", "memcpy"],
+            &["hs_init", "memcpy"],
+        );
+        assert!(
+            lines_for(&results, "missing-fortify").is_empty(),
+            "missing-fortify is currently skipped for a Haskell embedder (known limitation): {results:?}"
+        );
+        assert!(
+            lines_for(&results, "missing-stack-protector").is_empty(),
+            "missing-stack-protector is currently skipped for a Haskell embedder (known limitation): {results:?}"
         );
     }
 
