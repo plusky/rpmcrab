@@ -77,9 +77,34 @@ impl PostCheck {
                 .expect("static regex")
         })
     }
-    fn tmp_regex() -> &'static Regex {
-        static TMP_REGEX: OnceLock<Regex> = OnceLock::new();
-        TMP_REGEX.get_or_init(|| Regex::new(r"(?m)^[^#]*\s(/var)?/tmp").expect("static regex"))
+    fn tmp_token_regex() -> &'static Regex {
+        static TMP_TOKEN_REGEX: OnceLock<Regex> = OnceLock::new();
+        TMP_TOKEN_REGEX
+            .get_or_init(|| Regex::new(r"(?:^|\s)((?:/var)?/tmp[^\s]*)").expect("static regex"))
+    }
+
+    /// Whether the scriptlet names a *literal* path under /tmp or /var/tmp.
+    ///
+    /// Deliberate divergence from the reference, whose `tmp_regex` fires on
+    /// any whitespace-preceded `/tmp` token: a token that is a creation
+    /// template (a run of `X`, the mktemp/mkstemp convention — the name is
+    /// generated at runtime, not predictable) or a shell glob pattern (it
+    /// matches existing files instead of naming a creation target) is not
+    /// a predictable path and does not fire. Ledgered in
+    /// tests/parity/divergences.toml.
+    fn uses_tmp_literal(script: &str) -> bool {
+        script.lines().any(|line| {
+            // The reference's `^[^#]*` prefix cannot cross a `#`.
+            let code = line.split('#').next().unwrap_or("");
+            Self::tmp_token_regex()
+                .captures_iter(code)
+                .filter_map(|c| c.ok())
+                .filter_map(|c| c.get(1))
+                .any(|m| {
+                    let token = m.as_str();
+                    !token.contains('*') && !token.contains('[') && !token.contains("XXX")
+                })
+        })
     }
     fn bogus_var_regex() -> &'static Regex {
         static BOGUS_VAR_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -194,7 +219,7 @@ impl PostCheck {
                     ));
                 }
             }
-            if is_match(Self::tmp_regex(), script) {
+            if Self::uses_tmp_literal(script) {
                 out.push((Level::Error, finding("use-tmp-in"), vec![]));
             }
             // prereq_assoc: chkfontpath, rpm-helper
@@ -587,6 +612,46 @@ mod tests {
                 .iter()
                 .any(|(l, f, _)| *l == Level::Error && f == "use-tmp-in-%post")
         );
+    }
+
+    fn tmp_finding(script: &str) -> bool {
+        check()
+            .check_scriptlet("/bin/sh", script, "%post", &[], &[])
+            .iter()
+            .any(|(_, f, _)| f == "use-tmp-in-%post")
+    }
+
+    #[test]
+    fn tmp_template_is_not_flagged() {
+        // mktemp templates: the name is generated, not predictable.
+        assert!(!tmp_finding("tmpfile=$(mktemp /tmp/tmp-XXXX)"));
+        assert!(!tmp_finding("tmpdir=$(mktemp -d /tmp/tmpdir-XXXXXXXXX)"));
+        assert!(!tmp_finding("tmpfile=$(mktemp /var/tmp/tmp-XXXX)"));
+    }
+
+    #[test]
+    fn tmp_glob_is_not_flagged() {
+        // A glob matches existing files; it names no creation target.
+        assert!(!tmp_finding(
+            "rm -f /tmp/tmp\\.[A-Z,a-z,0-9]*\\.google-accounts-daemon-active"
+        ));
+    }
+
+    #[test]
+    fn tmp_literal_alongside_template_is_flagged() {
+        assert!(tmp_finding(
+            "d=$(mktemp -d /tmp/x-XXXXXX); echo hi > /tmp/fixed"
+        ));
+    }
+
+    #[test]
+    fn var_tmp_literal_is_flagged() {
+        assert!(tmp_finding("echo hi > /var/tmp/foo"));
+    }
+
+    #[test]
+    fn tmp_in_comment_is_not_flagged() {
+        assert!(!tmp_finding("# scratch lives in /tmp/foo\necho ok"));
     }
 
     #[test]
