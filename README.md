@@ -10,7 +10,7 @@
 A drop-in replacement for [`rpmlint`](https://github.com/rpm-software-management/rpmlint)
 (2.10.0, openSUSE flavour, `checks: 43`), rewritten in Rust.
 
-**0.2.0 is the parity milestone:** rpmcrab matches rpmlint 2.10.0 — same
+**0.2.0 was the parity milestone:** rpmcrab matches rpmlint 2.10.0 — same
 command-line flags, same TOML configuration, same `rpmlintrc` filters, and the
 same output and exit-code contract that external tooling (OBS build summaries,
 openQA, the openSUSE badness-999 gate) already consumes — except for the
@@ -19,7 +19,7 @@ deliberate divergences recorded in the machine-enforced ledger
 a bug-for-bug port: upstream false positives and never-firing checks are
 fixed, and every fix is in the ledger. After 0.2.0 the project deliberately
 diverges wherever rpmlint is wrong, with every departure recorded in the
-ledger.
+ledger. The current release is **0.2.1**.
 
 - **The compatibility contract** — what is frozen and what may diverge — lives
   in [`docs/DESIGN.md`](docs/DESIGN.md).
@@ -28,9 +28,10 @@ ledger.
 
 ## Status
 
-Pre-1.0. The crate layout and the report-rendering pipeline land first (M1);
-byte-identical output is proven against a synthetic check set before any real
-check exists. See the milestones for sequencing.
+Pre-1.0, post-parity: 43 checks matching rpmlint 2.10.0 (openSUSE flavour),
+packaged for OBS, with deliberate divergences from the reference recorded in
+the ledger. 1.0 will mark proven substitutability of the output contract
+(see `docs/DESIGN.md` §9); that decision is still open.
 
 ## Building
 

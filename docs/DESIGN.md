@@ -794,21 +794,24 @@ a scheduling detail, not a behaviour change.
 
 ## 9. Versioning and release
 
-`[workspace.package] version` is the single source of truth. **0.x** until the
-output contract is proven substitutable (M4), **1.0** at that point. Findings
-may diverge at any version (§5.1), so the version tracks the stability of the
-*output contract*, not the set of findings — 1.0 means "substitutable", not
-"bug-for-bug identical". A change to the frozen output contract itself would be
-a deliberate major-version bump. The CLI changes in this cycle (threading,
-fatal-continue, flag straightening) stay at **0.1.0**: they are the designed
-pre-1.0 direction, and 1.0 still marks the substitutability milestone, not the
-absence of divergence. This avoids `rpmcrab 1.x` masquerading as
-`rpmlint 2.x` for packagers. Bare `X.Y.Z` tags, no `v`. Distribution is
-primarily the OBS package (`rpmcrab`, plus an `rpmcrab-mini` build-root flavour
-mirroring `rpmlint-mini`); crates.io is the secondary channel — `rpmcrab-core`
-is published early (M1) to reserve the name. The release workflow ships a
-single `x86_64-unknown-linux-gnu` asset; macOS builds work (§3.1) but no macOS
-release asset is planned.
+`[workspace.package] version` is the single source of truth. Findings may
+diverge at any version (§5.1), so the version tracks the stability of the
+*output contract*, not the set of findings. **0.2.0** was the parity
+milestone — the frozen surface (§4) matched rpmlint 2.10.0 (openSUSE
+flavour) — and since then the project deliberately diverges wherever
+rpmlint is wrong, with every departure recorded in the ledger (§6). The
+current release is **0.2.1**. The project stays **0.x** until the output
+contract is proven substitutable (M4); **1.0** at that point means
+"substitutable", not "bug-for-bug identical", and taking that step is a
+deliberate decision that is still open. A change to the frozen output
+contract itself would be a deliberate major-version bump. This avoids
+`rpmcrab 1.x` masquerading as `rpmlint 2.x` for packagers. Tags are
+`vX.Y.Z`. Distribution is primarily the OBS package (`rpmcrab`, plus an
+`rpmcrab-mini` build-root flavour mirroring `rpmlint-mini`); crates.io is
+the secondary channel — `rpmcrab-core` was published at 0.1.0 early on to
+reserve the name and is not kept current. The release workflow ships a
+single `x86_64-unknown-linux-gnu` asset; macOS builds work (§3.1) but no
+macOS release asset is planned.
 
 ---
 
