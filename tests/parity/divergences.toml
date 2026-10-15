@@ -1536,6 +1536,22 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 
 [[divergence]]
 case = "global"
+check = "lib-package-without-%mklibname"
+kind = "missing"
+reason = "Deliberate removal (issue #531): the port does not emit this finding -- it encodes Mandriva's library naming policy: upstream's SpecCheck docstring calls the check 'specific to Mandriva and its derivatives' (upstream issue #9 concludes it is not generic), and the `%mklibname` macro does not exist in SUSE or Fedora spec-land, so the finding can never be satisfied on a supported flavour; both distro configs filter it. The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. Mageia, the live Mandriva derivative, consumes upstream rpmlint, which keeps the check. The emission, its staged `--explain` entry, the supporting tracking state, and the dedicated tests are removed; a negative pin in the SpecCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/531"
+
+[[divergence]]
+case = "global"
+check = "no-major-in-name"
+kind = "missing"
+reason = "Deliberate removal (issue #531): the port does not emit this finding -- it is the devel half of the same Mandriva naming policy as lib-package-without-%mklibname, emitted upstream from the same TagsCheck block as the already-removed no-provides. SUSE and Fedora policy is the opposite shape (the major lives only in the runtime package, e.g. libgeotiff5; the devel package is unnumbered), so the finding fires on policy-compliant packages; both distro configs filter it, and SUSE enforces its own library policy via SharedLibraryPolicyCheck. The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the supporting regex are removed; a negative pin in the TagsCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/531"
+
+[[divergence]]
+case = "global"
 check = "hardcoded-prefix-tag"
 kind = "missing"
 reason = "Deliberate removal per triage: the Prefix: tag is obsolete and ignored by RPM, the same class as the killed BuildRoot findings. The port does not emit it. The reference still emits it."
