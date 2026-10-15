@@ -333,6 +333,15 @@ DROP_LIVE_FILTERS = {
     # bulk-glob corpora and structural non-configs. The tag's
     # --explain text is reworded alongside (see divergences.toml).
     "conffile-without-noreplace-flag": "upstream hides it as policy; the port surfaces it so the residual /etc main-config findings are visible (issue #556)",
+    # Ruled in the config-filters follow-through (issue #538, ruling
+    # item 5): the bare line sits in upstream's bnc#456048 kernel-module
+    # block, but measured over the Factory corpus (issue #578) the KMP
+    # class is 14 lines (0.28%) of ordinary hand-written prose and the
+    # three actual *-kmp srcpkgs (vhba-kmp, leancrypto-kmp,
+    # virtualbox-kmp) contribute none; the suppressed set is 5,089
+    # genuine findings in 2,041 srcpkgs. Fedora does not filter the tag
+    # at all. Ledgered in tests/parity/divergences.toml.
+    "description-line-too-long": "blanket filter dropped by ruling (issue #578): the KMP rationale measures empty (14 ordinary prose lines, 0.28% of the suppressed set; the three *-kmp srcpkgs contribute none); the suppressed set is 5,089 genuine lines in 2,041 srcpkgs",
     # The bare 'use-tmp-in-' pattern is the pattern itself, trailing dash
     # included: pure_finding_pattern returns it verbatim, so the key must
     # carry the dash. The check now fires only on literal paths (templates

@@ -1281,6 +1281,30 @@ def test_drop_live_filters_drops_executable_config_line():
     assert 'executable-marked-as-config-file' in dropped[0], dropped
     assert pruned == [] and retargeted == [], (pruned, retargeted)
 
+def test_drop_live_filters_drops_description_line_too_long_line():
+    """The description-line-too-long filter is dropped via
+    DROP_LIVE_FILTERS (ruling in issue #578).
+
+    The bare line sits in upstream's bnc#456048 kernel-module block,
+    but the KMP class measures empty on the Factory corpus (14 prose
+    lines, none from the actual *-kmp srcpkgs); the drop is
+    unconditional -- the 5,089 genuine findings becoming visible is
+    the point of this table.
+    """
+    text = (
+        'Filters = [\n'
+        "    'description-line-too-long',\n"
+        "    ' dangerous-command.*',\n"
+        ']\n'
+    )
+    pruned, dropped, retargeted = [], [], []
+    out = gen.prune_stale_filters(
+        text, {"description-line-too-long"}, pruned, dropped, retargeted)
+    assert 'description-line-too-long' not in out, out
+    assert "    ' dangerous-command.*',\n" in out, out
+    assert len(dropped) == 1, dropped
+    assert 'description-line-too-long' in dropped[0], dropped
+    assert pruned == [] and retargeted == [], (pruned, retargeted)
 
 if __name__ == "__main__":
     sys.exit(main())

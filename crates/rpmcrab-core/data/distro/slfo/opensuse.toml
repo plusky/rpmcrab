@@ -132,7 +132,6 @@ Filters = [
     'symlink-contains-up-and-down-segments /var/lib/named',
     '^\S*-kmp-\S+\.\S+: \w: no-ldconfig-symlink',
     'aaa_base\.\S+: \w: use-of-home-in-%post',
-    'description-line-too-long',
     'hardcoded-library-path',
 
 # Doesn't seem to make sense
