@@ -150,7 +150,7 @@ Filters = [
     '.* statically-linked-binary /usr/sbin/ldconfig',
     'valgrind.* statically-linked-binary',
     'ldconfig-post.*/ddiwrapper/wine/',
-    ' symlink-should-be-relative ',
+    '^\S+: \w: symlink-should-be-relative \S+ /etc/alternatives/',
     'libzypp.*shlib-policy-name-error.*libzypp',
     'libtool.*shlib-policy.*',
 

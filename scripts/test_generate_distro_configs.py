@@ -1165,6 +1165,126 @@ def test_scope_filters_read_error_pattern_matches_enoent_detail_only():
         assert not re.search(scoped, line), line
 
 
+# ---------------------------------------------------------------------------
+# scope_filters: bare entries narrowed to their recorded rationale
+# ---------------------------------------------------------------------------
+
+def test_scope_filters_rewrites_bare_entry():
+    """The bare entry is replaced by its scoped form, in place, and logged.
+
+    If the rewrite silently stopped firing (upstream rewords the line, the
+    matcher stops recognising it), the vendored config would ship the
+    blanket filter again with no trace \u2014 the log assertion guards that.
+    """
+    scoped, _reason = gen.SCOPE_FILTERS["symlink-should-be-relative"]
+    text = (
+        "Filters = [\n"
+        "    'use-tmp-in-',\n"
+        "    ' symlink-should-be-relative ',\n"
+        "    'description-line-too-long',\n"
+        "]\n"
+    )
+    log = []
+    out = gen.scope_filters(text, log)
+    assert f"    '{scoped}',\n" in out, out
+    assert "' symlink-should-be-relative ',\n" not in out, out
+    assert "'use-tmp-in-',\n" in out and "'description-line-too-long',\n" in out, out
+    assert len(log) == 1 and "symlink-should-be-relative" in log[0], log
+
+
+def test_scope_filters_leaves_scoped_and_compound_entries_alone():
+    """Only a line whose entire pattern is the bare entry is rewritten.
+
+    An already-scoped entry or a compound pattern embedding the finding
+    name expresses a different (already deliberate) scope; rewriting it
+    would corrupt upstream's text.
+    """
+    text = (
+        "Filters = [\n"
+        "    'symlink-should-be-relative /usr/lib/modules',\n"
+        "    '.*symlink-should-be-relative.*',\n"
+        "]\n"
+    )
+    log = []
+    out = gen.scope_filters(text, log)
+    assert out == text, out
+    assert log == [], log
+
+
+def test_scope_filters_matches_unpadded_bare_entry():
+    """The bare entry without padding inside its quotes is rewritten too.
+
+    raw_filter_pattern keeps the pattern byte-exact for PRUNE_RAW; the
+    strip that makes padded and unpadded forms equivalent lives in
+    scope_filters only.
+    """
+    scoped, _reason = gen.SCOPE_FILTERS["symlink-should-be-relative"]
+    text = (
+        "Filters = [\n"
+        "    'symlink-should-be-relative',\n"
+        "]\n"
+    )
+    log = []
+    out = gen.scope_filters(text, log)
+    assert f"    '{scoped}',\n" in out, out
+    assert len(log) == 1 and "symlink-should-be-relative" in log[0], log
+
+
+def test_scope_filters_leaves_blocked_filters_and_other_lists_alone():
+    """BlockedFilters and unrelated lists are never rewritten.
+
+    BlockedFilters entries are matched by exact string equality, not as
+    regex patterns, so rewriting one to the scoped pattern would make it
+    unmatchable and silently drop the guard it names.
+    """
+    text = (
+        "BlockedFilters = [\n"
+        "    ' symlink-should-be-relative ',\n"
+        "]\n"
+        "SomeOtherList = [\n"
+        "    ' symlink-should-be-relative ',\n"
+        "]\n"
+    )
+    log = []
+    out = gen.scope_filters(text, log)
+    assert out == text, out
+    assert log == [], log
+
+
+def test_scope_filters_scoped_pattern_matches_alternatives_targets_only():
+    """The scoped pattern matches the rendered line by its target argument.
+
+    The scope is the finding's second path (the link target), not the
+    package name or the link location: alternatives endpoints stay
+    filtered wherever they are shipped from, and a hand-authored link
+    anywhere else \u2014 including a link that itself lives under
+    /etc/alternatives but points out of it \u2014 surfaces.
+    """
+    import re
+
+    scoped, _reason = gen.SCOPE_FILTERS["symlink-should-be-relative"]
+    filtered = [
+        "python313-impacket.noarch: W: symlink-should-be-relative "
+        "/usr/bin/impacket-GetADUsers /etc/alternatives/impacket-GetADUsers",
+        "python313-csvkit.noarch: W: symlink-should-be-relative "
+        "/usr/share/man/man1/csvlook.1.gz /etc/alternatives/csvlook.1.gz",
+    ]
+    visible = [
+        "gavl.x86_64: W: symlink-should-be-relative "
+        "/usr/share/licenses/gavl/COPYING /usr/share/automake-1.18/COPYING",
+        "texlive-scripts-bin.x86_64: W: symlink-should-be-relative "
+        "/usr/bin/texhash /usr/libexec/mktex/public",
+        "cloud-netconfig-azure.noarch: W: symlink-should-be-relative "
+        "/etc/udev/rules.d/75-persistent-net-generator.rules /dev/null",
+        "foo.x86_64: W: symlink-should-be-relative "
+        "/etc/alternatives/editor /usr/bin/vim",
+    ]
+    for line in filtered:
+        assert re.search(scoped, line), line
+    for line in visible:
+        assert not re.search(scoped, line), line
+
+
 def test_dedupe_filters_drops_exact_duplicates():
     """Byte-identical Filters lines collapse to the first occurrence.
 
