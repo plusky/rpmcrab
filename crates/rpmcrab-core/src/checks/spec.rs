@@ -2451,6 +2451,57 @@ Requires:       foo<bar\n";
     }
 
     #[test]
+    fn comparison_operator_silent_on_macro_body_rich_deps() {
+        // #588: inside a %define body each line ends with a continuation
+        // backslash. Glued to the closing paren (`)\`) it is line
+        // punctuation, not part of the token, so rich dependencies stay
+        // silent exactly like the spaced spelling.
+        for requires in [
+            "(tesseract-ocr >= %{version} or libtesseract5 >= %{version})\\",
+            "(tesseract-ocr >= %{version} or libtesseract5 >= %{version}) \\",
+            "(a >= 1 and b >= 2)\\",
+            "(a >= 1 with b < 2)\\",
+        ] {
+            let spec = format!(
+                "Name:           wobble\nVersion:        1.0\nRelease:        1\nSummary:        Wobble\nLicense:        MIT\n\n%description\nWobble.\n\n%define lang_subpkg(m:l:n:o:) \\\n\\\n%package       %{{macrolang}}\\\nSummary:       %{{langname}} language data for %{{name}}\\\nBuildArch:     noarch\\\nRequires:      {requires}\n%lang_subpkg -m eng -n English -o english\n"
+            );
+            let results = run_mini(&spec);
+            let lines = lines_for(&results, "comparison-operator-in-deptoken");
+            assert!(lines.is_empty(), "{requires}: {results:?}");
+        }
+        // Plain preamble spellings of the same rich forms.
+        for requires in [
+            "(a >= 1 or b >= 2)",
+            "(a >= 1 and b >= 2)",
+            "(a >= 1 with b < 2)",
+        ] {
+            let results = run_mini(&format!(
+                "Name:           wobble\nVersion:        1.0\nRelease:        1\nSummary:        Wobble\nLicense:        MIT\nRequires:       {requires}\n"
+            ));
+            let lines = lines_for(&results, "comparison-operator-in-deptoken");
+            assert!(lines.is_empty(), "{requires}: {results:?}");
+        }
+    }
+
+    #[test]
+    fn comparison_operator_glued_operator_fires_with_continuation() {
+        // Positive control in a %define continuation context: an
+        // operator glued into the deptoken itself still warns, with or
+        // without the trailing continuation backslash, while the spaced
+        // spelling is an ordinary versioned dep and stays silent.
+        let spec = "Name:           wobble\nVersion:        1.0\nRelease:        1\nSummary:        Wobble\nLicense:        MIT\n\n%description\nWobble.\n\n%define sub(m:) \\\n\\\n%package       %{macrolang}\\\nSummary:       sub\\\nBuildArch:     noarch\\\nRequires:      foo>=1.0\\\n%sub -m eng\n";
+        let results = run_mini(spec);
+        let lines = lines_for(&results, "comparison-operator-in-deptoken");
+        assert_eq!(lines.len(), 1, "{results:?}");
+        assert!(lines[0].contains("foo>=1.0"), "{results:?}");
+
+        let spaced = "Name:           wobble\nVersion:        1.0\nRelease:        1\nSummary:        Wobble\nLicense:        MIT\n\n%description\nWobble.\n\n%define sub(m:) \\\n\\\n%package       %{macrolang}\\\nSummary:       sub\\\nBuildArch:     noarch\\\nRequires:      foo >= 1.0\\\n%sub -m eng\n";
+        let results = run_mini(spaced);
+        let lines = lines_for(&results, "comparison-operator-in-deptoken");
+        assert!(lines.is_empty(), "{results:?}");
+    }
+
+    #[test]
     fn controlchar_in_dep_list_still_fires_without_compop() {
         // Fast path: no comparison operator in the raw line, so `parse_deps`
         // is skipped -- the forbidden-controlchar probe must still fire on
