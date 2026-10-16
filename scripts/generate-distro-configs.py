@@ -363,6 +363,21 @@ DROP_LIVE_FILTERS = {
     # and lets the finding fire. Ledgered in
     # tests/parity/divergences.toml.
     "dir-or-file-in-usr-local": "blanket filter dropped by ruling (issue #583): verbatim-port check, 0/45 measured misfires; the suppressed set is 45 E lines in 2 srcpkgs, both deliberate carriers (filesystem's %ghost /usr/local skeleton, reproducible-faketools' PATH-shadowing wrappers) whose exceptions belong in per-package rpmlintrc; Fedora ships the line commented out",
+    # item 7): upstream's line is one of the three carrying the
+    # 1.x-era fossil comment 'handled by CheckFilelist.py'. The
+    # FHSCheck fix (issue #582) whitelists in the check itself
+    # everything sanctioned the blanket suppressed -- /usr/etc, the
+    # MinGW sysroots and X11R6, all modelled as good by
+    # FilelistCheck's GoodPrefixes, plus the measured
+    # cross-toolchain target sysroots -- so the blanket's measured
+    # set (416 W lines over the Factory corpus) is sanctioned
+    # practice at the source, and each cross sysroot is already
+    # reported by FilelistCheck as a filelist-forbidden-fhs23 error
+    # in the same run. What the tag can still fire on is a genuinely
+    # novel /usr top-level directory -- exactly what it exists to
+    # catch -- so it fires unsuppressed. Ledgered in
+    # tests/parity/divergences.toml.
+    "non-standard-dir-in-usr": "blanket filter dropped by ruling (issue #582): FHSCheck whitelists /usr/etc, the MinGW sysroots, X11R6 and the measured cross-toolchain target sysroots in the check itself, so the set the blanket suppressed (416 W lines over the Factory corpus: 213 /usr/etc, 92 MinGW sysroots, 111 cross-toolchain sysroots) is sanctioned practice at the source; the tag now fires only on genuinely novel /usr top-level directories, unsuppressed",
 }
 
 # (finding, scope) -> reason: Filters entries scoped to dead paths. The finding

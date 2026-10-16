@@ -1517,5 +1517,45 @@ def test_drop_live_filters_drops_usr_local_line():
     assert 'dir-or-file-in-usr-local' in dropped[0], dropped
     assert pruned == [] and retargeted == [], (pruned, retargeted)
 
+
+def test_drop_live_filters_drops_non_standard_dir_in_usr_line():
+    """The non-standard-dir-in-usr filter is dropped via
+    DROP_LIVE_FILTERS (ruling in issue #582).
+
+    The FHSCheck fix whitelists the sanctioned /usr directories in
+    the check itself (/usr/etc, the MinGW sysroots, X11R6 and the
+    measured cross-toolchain target sysroots), so the blanket's
+    measured set is sanctioned practice at the source and what the
+    tag can still fire on -- a genuinely novel /usr top-level
+    directory -- fires unsuppressed. The drop is unconditional.
+    The line under test is upstream's verbatim shape, padding and
+    fossil comment included; the three dormant scoped exceptions
+    for the same finding are separate deliberate keeps and must
+    survive untouched. The fixture's dir-or-file-in-usr-local line
+    is dropped as well (issue #583 added it to the same table), so
+    it is asserted gone, with both drops logged.
+    """
+    text = (
+        'Filters = [\n'
+        "    ' dir-or-file-in-usr-local ',  # handled by CheckFilelist.py\n"
+        "    ' non-standard-dir-in-usr ',  # handled by CheckFilelist.py\n"
+        "    'non-standard-dir-in-usr openwin',\n"
+        "    'ibcs2 non-standard-dir-in-usr i486-sysv4',\n"
+        "    'shlibs5 non-standard-dir-in-usr i486-linux-libc5',\n"
+        ']\n'
+    )
+    pruned, dropped, retargeted = [], [], []
+    out = gen.prune_stale_filters(
+        text, {"non-standard-dir-in-usr"}, pruned, dropped, retargeted)
+    assert "    ' non-standard-dir-in-usr ',  #" not in out, out
+    assert "    ' dir-or-file-in-usr-local ',  # handled by CheckFilelist.py\n" not in out, out
+    assert "    'non-standard-dir-in-usr openwin',\n" in out, out
+    assert "    'ibcs2 non-standard-dir-in-usr i486-sysv4',\n" in out, out
+    assert "    'shlibs5 non-standard-dir-in-usr i486-linux-libc5',\n" in out, out
+    assert len(dropped) == 2, dropped
+    assert 'dir-or-file-in-usr-local' in dropped[0], dropped
+    assert 'non-standard-dir-in-usr' in dropped[1], dropped
+    assert pruned == [] and retargeted == [], (pruned, retargeted)
+
 if __name__ == "__main__":
     sys.exit(main())
