@@ -529,6 +529,14 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "non-standard-dir-in-usr"
+kind = "behaviour"
+reason = "FHSCheck's standard /usr list additionally treats etc, i686-w64-mingw32, x86_64-w64-mingw32 and X11R6 as standard, appended after the reference's twelve FHS 3.0 entries so they name last in the generated description, and the check separately treats the measured cross-toolchain target sysroots as standard: the *-suse-linux triples and the bare-metal targets avr, amdgcn-amdhsa, rx-elf, nvptx-none, bpf-none, pru, arm-none-eabi, epiphany-elf, riscv64-elf and spu, held in their own list so the generated description names only the standard directories. The reference emits the warning for all of them: /usr/etc is the distro's vendor-default config tree, the MinGW sysroots are the guideline-sanctioned cross-toolchain layout, and X11R6 matches FilelistCheck's /usr/X11R6/ GoodPrefix - all modelled as good by FilelistCheck's GoodPrefixes, and the port already whitelists the MinGW sysroots in FilelistCheck itself (see the filelist-forbidden-fhs23 entry above) - while the target sysroots are the layout the distro's cross-compiler packages install by design. The vendored configs also drop upstream's bare Filters entry for the tag, so under the openSUSE flavour the warning fires on genuinely novel /usr top-level directories where upstream's shipped config suppresses it. Measured on the Factory corpus the warning's firing set drops 416 to 0 lines (issue #582)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/582"
+
+[[divergence]]
+case = "global"
 check = "filelist-forbidden-opt"
 kind = "behaviour"
 reason = "Same shape as filelist-forbidden-fhs23: the reference emits once per matching Bad pattern iterating a Python set (FilelistCheck.py:127); the port emits one finding per directory in sorted order."
