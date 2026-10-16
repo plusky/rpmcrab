@@ -201,6 +201,20 @@ fn split_dep_tokens(line: &str) -> Vec<&str> {
     if let Some(s) = start {
         tokens.push(&line[s..]);
     }
+    // A spec line-continuation backslash at the end of the line is line
+    // punctuation, not part of a token. The reference drops it as a
+    // standalone token (`pkg.py:310-311`); glued onto the final token --
+    // `(a >= 1)\` at the end of a macro-body line -- it is stripped here
+    // so the token keeps its true shape.
+    if let Some(last) = tokens.last_mut()
+        && let Some(trimmed) = last.strip_suffix('\\')
+    {
+        if trimmed.is_empty() {
+            tokens.pop();
+        } else {
+            *last = trimmed;
+        }
+    }
     tokens
 }
 
@@ -242,12 +256,7 @@ pub fn first_dep_token(line: &str) -> Option<&str> {
 }
 
 pub fn parse_deps(line: &str) -> Vec<(String, Option<String>)> {
-    let mut tokens: Vec<&str> = split_dep_tokens(line);
-    // Drop a trailing line-continuation backslash from a multi-line macro
-    // definition (`pkg.py:310-311`).
-    if tokens.last().is_some_and(|t| *t == "\\") {
-        tokens.pop();
-    }
+    let tokens: Vec<&str> = split_dep_tokens(line);
 
     let mut prcos = Vec::new();
     // The reference accumulates `prco` as [name], [name, flags],
@@ -296,11 +305,7 @@ pub fn parse_dep_infos(line: &str) -> Vec<DepInfo> {
             release: None,
         }
     }
-    let mut tokens: Vec<&str> = split_dep_tokens(line);
-    // Drop a trailing line-continuation backslash (pkg.py:310-311).
-    if tokens.last().is_some_and(|t| *t == "\\") {
-        tokens.pop();
-    }
+    let tokens: Vec<&str> = split_dep_tokens(line);
     let mut out = Vec::new();
     // The reference accumulates `prco` as [name], [name, flags],
     // [name, flags, evr].
@@ -839,6 +844,28 @@ mod parse_deps_tests {
         assert_eq!(
             parse_deps("foo bar \\"),
             vec![("foo".to_string(), None), ("bar".to_string(), None),]
+        );
+    }
+
+    #[test]
+    fn glued_trailing_backslash_is_not_part_of_the_last_token() {
+        // A continuation backslash with no space before it glues onto
+        // the final token of a macro-body line; it is line punctuation,
+        // not part of the token.
+        assert_eq!(
+            parse_deps("foo bar\\"),
+            vec![("foo".to_string(), None), ("bar".to_string(), None),]
+        );
+        // Glued onto a version: the version must not absorb it.
+        assert_eq!(
+            parse_deps("foo >= 1.0\\"),
+            vec![("foo".to_string(), Some("1.0".to_string()))]
+        );
+        // Glued onto a parenthesized rich dep: identical to the
+        // unglued spelling, one whole unversioned token.
+        assert_eq!(
+            parse_deps("(a >= 1 or b >= 2)\\"),
+            parse_deps("(a >= 1 or b >= 2)")
         );
     }
 
