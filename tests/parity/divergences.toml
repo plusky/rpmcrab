@@ -2191,6 +2191,62 @@ upstream = "https://github.com/plusky/rpmcrab/issues/593"
 
 [[divergence]]
 case = "global"
+check = "config"
+kind = "behaviour"
+reason = "The vendored flavours no longer bundle upstream's scoring-strict.override.toml, the rpmlint-strict subpackage's layer (issue #594, the #289 config-badness pass): the reference's main package excludes that file and the parity reference environment does too, so each flavour now carries one calibrated [Scoring] table, and the strict layer remains available as an opt-in XDG/-c layer for users who want it. What changes is badness magnitude only: the strict layer's 10-to-10000 raises for the whitelist families are gone, but their base values are positive, so the findings print E exactly as before -- a single such finding no longer trips BadnessThreshold = 999 on its own (corpus badness in the 20261016 Factory sweep: ~14.94M with the layer bundled vs ~2.20M base-only). The one strict entry whose absence would change a printed level, invalid-license, is folded into the base instead (separate entry)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/594"
+
+[[divergence]]
+case = "global"
+check = "invalid-license"
+kind = "behaviour"
+reason = "Config-only (issue #594): invalid-license = 100000 moves from upstream's strict layer into the vendored base scoring.toml of both flavours (SCORING_ADDITIONS in scripts/generate-distro-configs.py), so the finding keeps printing E in the base calibration. Both implementations emit it at W; a license string that fails SPDX validation is a legal metadata defect in itself, which is why this promotion survives the pass's always-implies-damage rule while the rest of the strict layer leaves the bundle. Near-miss spellings are covered by the separate I-level invalid-license-spellcheck suggestion, not by softening this one."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/594"
+
+[[divergence]]
+case = "global"
+check = "devel-file-in-non-devel-package"
+kind = "behaviour"
+reason = "Config-only (issue #594): the vendored configs drop upstream's [Scoring] promotion devel-file-in-non-devel-package = 50 (DROP_SCORING in scripts/generate-distro-configs.py), so the finding prints at the W both implementations emit. The finding is a packaging-shape judgement with a documented false-positive family -- runtime soname symlinks (Mesa's libEGL_mesa.so) fire alongside genuinely misplaced devel libraries (FreeCAD's libE57Format.so) -- so the harm is conditional and the promotion fails the pass's always-implies-damage rule (626 promoted E lines in the 20261016 Factory sweep)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/594"
+
+[[divergence]]
+case = "global"
+check = "spurious-executable-perm"
+kind = "behaviour"
+reason = "Config-only (issue #594): the vendored configs drop upstream's [Scoring] promotion spurious-executable-perm = 50 (DROP_SCORING in scripts/generate-distro-configs.py), so the finding prints at the W both implementations emit. A stray exec bit on a data file implies no damage by itself -- nothing ever executes it -- and the promotion produced 3,989 printed E lines in the 20261016 Factory sweep (samtools test data alone 674), none of them an artefact defect."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/594"
+
+[[divergence]]
+case = "global"
+check = "summary-not-capitalized"
+kind = "behaviour"
+reason = "Config-only (issue #594): the vendored configs drop upstream's [Scoring] promotion summary-not-capitalized = 20 (DROP_SCORING in scripts/generate-distro-configs.py), so the finding prints at the W both implementations emit. A lowercase summary initial is style, not damage (268 promoted E lines in the 20261016 Factory sweep)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/594"
+
+[[divergence]]
+case = "global"
+check = "summary-ended-with-dot"
+kind = "behaviour"
+reason = "Config-only (issue #594): the vendored configs drop upstream's [Scoring] promotion summary-ended-with-dot = 20 (DROP_SCORING in scripts/generate-distro-configs.py), so the finding prints at the W both implementations emit. Summary punctuation is style, not damage (63 promoted E lines in the 20261016 Factory sweep)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/594"
+
+[[divergence]]
+case = "global"
+check = "makefile-junk"
+kind = "behaviour"
+reason = "Config-only (issue #594): the vendored configs drop upstream's [Scoring] promotion makefile-junk = 109 (DROP_SCORING in scripts/generate-distro-configs.py), so the finding prints at the W both implementations emit. A Makefile shipped in a doc directory is a judgement call -- shipped examples are legitimate -- not damage (16 promoted E lines in the 20261016 Factory sweep)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/594"
+
+[[divergence]]
+case = "global"
 check = "files-duplicated-waste"
 kind = "severity"
 reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports W where the reference reports E, for consistency with the sibling files-duplicate finding, which is W in both codebases (pcp calibration set). Check-level only under the shipped flavours: the vendored opensuse/slfo scoring.toml sets files-duplicated-waste = 100, so the Scoring>0 promotion still prints E in both binaries; the W surfaces only where that scoring entry is absent."
@@ -2236,3 +2292,11 @@ kind = "severity"
 reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports E unconditionally; the reference splits the level on the setuid bit (E when the binary is installed setuid, W otherwise). Privilege-drop correctness is security-critical when real and the check is high-precision, so the level does not split (pcp audit: the 2 W lines there are genuine)."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "files-duplicated-waste"
+kind = "severity"
+reason = "Config-only (issue #594): the vendored configs drop upstream's [Scoring] entry files-duplicated-waste = 100 (DROP_SCORING in scripts/generate-distro-configs.py), so the port prints W with no badness where the reference prints E: files-duplicated-waste (Badness: 100) (the emission demotion to W is ledgered under issue #593; without the drop the surviving Scoring entry would silently re-promote it to E via the b > 0 rule)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/594"
