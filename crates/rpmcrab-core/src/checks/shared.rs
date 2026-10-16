@@ -129,12 +129,31 @@ pub fn is_mingw_package(name: &str) -> bool {
     name.starts_with("mingw32-") || name.starts_with("mingw64-")
 }
 
+/// The base arch of `arch`: a hwcaps subarch string carries its
+/// microarchitecture level as a trailing `_v<level>` component
+/// (`x86_64_v3`, `x86_64_v4`) and builds for the base arch, so its
+/// packages ship files under the base arch's libdirs. Any string
+/// without such a component is its own base arch.
+fn base_arch(arch: &str) -> &str {
+    match arch.rsplit_once('_') {
+        Some((base, level))
+            if level.len() > 1
+                && level.as_bytes()[0] == b'v'
+                && level[1..].bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            base
+        }
+        _ => arch,
+    }
+}
+
 /// Whether `arch` is a 64-bit RPM arch, whose native libdir is lib64
-/// (`/usr/lib64`, `/lib64`). Every other arch counts as 32-bit, whose
+/// (`/usr/lib64`, `/lib64`). A hwcaps subarch counts as its base arch
+/// (`x86_64_v3` is 64-bit). Every other arch counts as 32-bit, whose
 /// native libdir is `/usr/lib` + `/lib`.
 pub fn is_64bit_arch(arch: &str) -> bool {
     matches!(
-        arch,
+        base_arch(arch),
         "x86_64"
             | "aarch64"
             | "ppc64"

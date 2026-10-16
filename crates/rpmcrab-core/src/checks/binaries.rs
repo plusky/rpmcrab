@@ -3146,7 +3146,8 @@ impl Check for BinariesCheck {
         let mut pkg_has_file_in_lib64 = false;
         // The no-binary exemption covers the package's native libdir only:
         // /usr/lib64 + /lib64 on 64-bit arches, /usr/lib + /lib on 32-bit
-        // ones. On 32-bit %_libdir is /usr/lib, so a devel subpackage there
+        // ones. A hwcaps subarch (x86_64_v3) takes its base arch's libdir.
+        // On 32-bit %_libdir is /usr/lib, so a devel subpackage there
         // is just as arch-bound as one in /usr/lib64; content under the
         // other word size's libdir (e.g. /usr/lib/systemd on x86_64) does
         // not exempt.
@@ -6383,6 +6384,33 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn no_binary_quiet_for_hwcaps_subarch_devel() {
+        // tesseract-ocr-devel shape built for a hwcaps subarch (issue
+        // #589): headers, .so symlink and pkgconfig under the base arch's
+        // /usr/lib64, no binaries. The subarch takes the base arch's
+        // native libdir, so the exemption applies exactly as it does for
+        // the plain arch twin.
+        let config = test_config();
+        for arch in ["x86_64", "x86_64_v3", "x86_64_v4"] {
+            let pkg = synthetic_pkg(
+                "tesseract-ocr-devel",
+                arch,
+                vec![
+                    syn_link("/usr/lib64/libtesseract.so", "libtesseract.so.5.0.4"),
+                    syn_file("/usr/lib64/pkgconfig/tesseract.pc", "ASCII text"),
+                    syn_file("/usr/include/tesseract/baseapi.h", "ASCII text"),
+                ],
+            );
+            let results = driver_results(&pkg, &config);
+            let lines = lines_for(&results, "no-binary");
+            assert!(
+                lines.is_empty(),
+                "{arch} devel shape must stay quiet: {results:?}"
+            );
+        }
+    }
+
+    #[test]
     fn no_binary_libdir_exemption_matches_arch_word_size() {
         // The exemption covers only the package's own native libdir:
         // lib64 dirs on 64-bit arches, lib dirs on 32-bit ones. Content
@@ -6392,7 +6420,7 @@ description = "explicit priority string bypasses the system crypto policy"
         // libdir itself is not shipping a library.
         let config = test_config();
         // (arch, sole payload file, no-binary stays quiet)
-        let cases: [(&str, &str, bool); 19] = [
+        let cases: [(&str, &str, bool); 23] = [
             ("x86_64", "/usr/lib64/libfoo.so.1", true),
             ("x86_64", "/lib64/libfoo.so.1", true),
             ("x86_64", "/usr/lib/libfoo.so.1", false),
@@ -6412,6 +6440,10 @@ description = "explicit priority string bypasses the system crypto policy"
             ("i586", "/lib64/libfoo.so.1", false),
             ("i586", "/usr/lib64", false),
             ("i586", "/lib64", false),
+            ("x86_64_v3", "/usr/lib64/libfoo.so.1", true),
+            ("x86_64_v3", "/lib64/libfoo.so.1", true),
+            ("x86_64_v3", "/usr/lib/libfoo.so.1", false),
+            ("x86_64_v4", "/usr/lib64/libfoo.so.1", true),
         ];
         for (arch, path, quiet) in cases {
             let pkg = synthetic_pkg("testpkg", arch, vec![syn_file(path, "ASCII text")]);
