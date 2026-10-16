@@ -2124,3 +2124,115 @@ kind = "behaviour"
 reason = "Config-only (issue #583): the vendored configs drop upstream's bare filter for this finding (DROP_LIVE_FILTERS in scripts/generate-distro-configs.py), so the findings surface under the distro flavours where the reference's shipped openSUSE config hides them. The check's semantics match the reference exactly (FilesCheck DisallowedDirs prefix walk, E in both, one emission per header entry including %ghost entries). Measured over the Factory corpus (header census over 51,586 binary RPMs, validated per-RPM against both the port and the reference binaries, exact): the filter suppresses 45 E lines in 2 srcpkgs / 20 binary RPMs, with a misfire rate of 0/45 -- no prefix collisions, no cross sysroots, no parser artefacts; genuine accidental violations measure zero. Both carriers are deliberate: filesystem's %ghost /usr/local skeleton tree (20 lines) and reproducible-faketools' /usr/local/bin PATH-shadowing wrappers plus support files (25 lines), the honest home for whose exceptions is a per-package rpmlintrc. The filter's 'handled by CheckFilelist.py' rationale is a 1.x-era fossil: FilelistCheck's pattern rules cover 0 of the 45 lines, and its GoodPrefixes walk's coarser per-package E is itself filtered for filesystem by filesystem's own scoped exception. Fedora's shipped config carries the line commented out and lets the tag fire. Ruled in the config-filters follow-through (issue #538, ruling item 8)."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/583"
+
+[[divergence]]
+case = "global"
+check = "no-%check-section"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593, decided in plusky/rpmcrab#289 D1): the port reports I where the reference reports W. A missing %check section is an advisory absence: the class cannot distinguish a testable package that skips its upstream tests from the data and doc packages with nothing to test that make up most of its 9,055 lines in the 2026-10-16 Factory sweep, so it is surfaced as info, on the no-manual-page-for-binary precedent."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "description-line-too-long"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593, decided in plusky/rpmcrab#289 D10 and approved by plusky there): the port reports W where the reference reports E. A description line over the length limit is a style defect with no artefact consequence; it printed 5,078 E lines in the 2026-10-16 Factory sweep."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "systemd-service-without-service_add_pre"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports W where the reference reports E, for the whole systemd-service-without-service_* family. The check cannot see manual scriptlet handling of a unit, so a missing macro call is not a certain defect: the pcp audit classified 60 E lines on services that work."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "systemd-service-without-service_add_post"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports W where the reference reports E, for the whole systemd-service-without-service_* family. The check cannot see manual scriptlet handling of a unit, so a missing macro call is not a certain defect: the pcp audit classified 60 E lines on services that work."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "systemd-service-without-service_del_preun"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports W where the reference reports E, for the whole systemd-service-without-service_* family. The check cannot see manual scriptlet handling of a unit, so a missing macro call is not a certain defect: the pcp audit classified 60 E lines on services that work."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "systemd-service-without-service_del_postun"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports W where the reference reports E, for the whole systemd-service-without-service_* family. The check cannot see manual scriptlet handling of a unit, so a missing macro call is not a certain defect: the pcp audit classified 60 E lines on services that work."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "no-binary"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports W where the reference reports E. An arch package shipping no binary has a structural false-positive shape on self-contained devel content (pcp calibration set), so the absence is a warning for review, not a certain defect."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "no-library-dependency-for"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports W where the reference reports E. Like no-binary, the finding has a structural false-positive shape on self-contained devel content (pcp calibration set); the sibling no-library-dependency-on stays E."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "files-duplicated-waste"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports W where the reference reports E, for consistency with the sibling files-duplicate finding, which is W in both codebases (pcp calibration set)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "obsolete-tmpfiles-macro"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports I where the reference reports W. The %tmpfiles_create macros have been no-ops since 2023 (tmpfiles.d entries are created by file triggers), so a leftover call is dead spec text: an advisory cleanup hint, not a defect in the built artefact (pcp calibration set)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "dangling-relative-symlink"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports I where the reference reports W. The session-wide decision (plusky/rpmcrab#547, ledgered above) already removes the sibling-resolved majority; the residue is dominated by links whose target is provided outside the run or created at install time (gfxboot audit: about half genuine, half target-elsewhere), so the finding is info. The absolute sibling dangling-symlink stays W."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "non-etc-or-var-file-marked-as-conffile"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports I where the reference reports W. A %config mark outside /etc and /var is a packaging-shape observation with no artefact consequence on its own (pcp calibration set); the companion conffile-without-noreplace-flag, which carries the upgrade-clobber risk, stays W."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "potential-bashisms"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports I where the reference reports W. The finding is a heuristic portability hint produced by the external checkbashisms tool, not a defect in the script; the companion bin-sh-syntax-error, a real parse failure, stays W (pcp calibration set)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "missing-call-to-setgroups-before-setuid"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports E unconditionally; the reference splits the level on the setuid bit (E when the binary is installed setuid, W otherwise). Privilege-drop correctness is security-critical when real and the check is high-precision, so the level does not split (pcp audit: the 2 W lines there are genuine)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
