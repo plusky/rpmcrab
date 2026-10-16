@@ -1488,5 +1488,34 @@ def test_drop_live_filters_drops_description_line_too_long_line():
     assert 'description-line-too-long' in dropped[0], dropped
     assert pruned == [] and retargeted == [], (pruned, retargeted)
 
+def test_drop_live_filters_drops_usr_local_line():
+    """The dir-or-file-in-usr-local filter is dropped via
+    DROP_LIVE_FILTERS (ruling in issue #583).
+
+    The check is a verbatim port of FilesCheck with a measured
+    misfire rate of 0/45 on the Factory corpus; the suppressed set
+    is two deliberate carriers (filesystem's %ghost /usr/local
+    skeleton tree, reproducible-faketools' /usr/local/bin
+    PATH-shadowing wrappers) whose exceptions belong in per-package
+    rpmlintrc. The drop is unconditional -- the 45 findings
+    becoming visible is the point of this table. The line under
+    test is upstream's verbatim shape, padding and fossil comment
+    included.
+    """
+    text = (
+        'Filters = [\n'
+        "    ' dir-or-file-in-usr-local ',  # handled by CheckFilelist.py\n"
+        "    ' dangerous-command.*',\n"
+        ']\n'
+    )
+    pruned, dropped, retargeted = [], [], []
+    out = gen.prune_stale_filters(
+        text, {"dir-or-file-in-usr-local"}, pruned, dropped, retargeted)
+    assert 'dir-or-file-in-usr-local' not in out, out
+    assert "    ' dangerous-command.*',\n" in out, out
+    assert len(dropped) == 1, dropped
+    assert 'dir-or-file-in-usr-local' in dropped[0], dropped
+    assert pruned == [] and retargeted == [], (pruned, retargeted)
+
 if __name__ == "__main__":
     sys.exit(main())
