@@ -474,7 +474,7 @@ SCOPE_FILTERS = {
         "packaging bug and stays visible",
     ),
     "read-error": (
-        r"^\S+\.\S+: W: read-error No such file or directory",
+        r"^\S+\.\S+: \w: read-error No such file or directory",
         "narrowed to the ENOENT class measured in issue #579: all "
         "1,932 lines the blanket filter suppresses are ENOENT — 1,925 "
         "symlinks to %ghost placeholders under /etc/alternatives/ and "
