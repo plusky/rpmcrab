@@ -77,7 +77,6 @@ Filters = [
 
 # Output filters
     ' dir-or-file-in-opt ',  # handled by CheckFilelist.py
-    ' non-standard-dir-in-usr ',  # handled by CheckFilelist.py
     'incoherent-version-in-changelog',
     ' symlink-crontab-file',  #bnc591431
     'unstripped-binary-or-object.*\.ko',
