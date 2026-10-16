@@ -1169,7 +1169,7 @@ def test_scope_filters_read_error_pattern_matches_enoent_detail_only():
 # scope_filters: bare entries narrowed to their recorded rationale
 # ---------------------------------------------------------------------------
 
-def test_scope_filters_rewrites_bare_entry():
+def test_scope_filters_rewrites_bare_entry_symlink():
     """The bare entry is replaced by its scoped form, in place, and logged.
 
     If the rewrite silently stopped firing (upstream rewords the line, the
@@ -1192,7 +1192,7 @@ def test_scope_filters_rewrites_bare_entry():
     assert len(log) == 1 and "symlink-should-be-relative" in log[0], log
 
 
-def test_scope_filters_leaves_scoped_and_compound_entries_alone():
+def test_scope_filters_leaves_scoped_and_compound_entries_alone_symlink():
     """Only a line whose entire pattern is the bare entry is rewritten.
 
     An already-scoped entry or a compound pattern embedding the finding
@@ -1230,7 +1230,7 @@ def test_scope_filters_matches_unpadded_bare_entry():
     assert len(log) == 1 and "symlink-should-be-relative" in log[0], log
 
 
-def test_scope_filters_leaves_blocked_filters_and_other_lists_alone():
+def test_scope_filters_leaves_blocked_filters_and_other_lists_alone_symlink():
     """BlockedFilters and unrelated lists are never rewritten.
 
     BlockedFilters entries are matched by exact string equality, not as
