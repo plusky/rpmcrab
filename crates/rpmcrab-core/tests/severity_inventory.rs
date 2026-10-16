@@ -13,15 +13,30 @@
 //! entry points (`add_info`, `add_info_at`, `spec_add_info`, `make_finding`,
 //! and the spec check's `info` helper). In every shape the level literal
 //! precedes the tag literal inside the call, so a call window yields
-//! (level, tag) pairs. Comments and `#[cfg(test)]` blocks are excluded.
-//! Only statically literal sites are listed: findings whose tag or level is
-//! computed at runtime (format!-built families such as `no-%{sec}-section`
-//! and `{check_type}-file-*`, variable tags, data-driven levels) resolve at
-//! runtime and do not appear — the same boundary the reference-coverage
-//! audit draws.
+//! (level, tag) pairs. Every tag-shaped literal passed as a direct argument
+//! of the call counts, not just the first, so an `if`/`else` pair sharing
+//! one window contributes both tags. Comments and `#[cfg(test)]` blocks are
+//! excluded.
 //!
-//! Derivation, scoring: every `[Scoring]` table under `data/` (the built-in
-//! defaults and the vendored distro layers).
+//! Variable-tag sites are resolved by following the producing function,
+//! the same indirection `scripts/audit-reference-coverage.py` draws for
+//! its dynamic sites: `bashisms.rs`'s `warning` from the literals pushed
+//! in `classify_bashisms`, `alternatives.rs`'s `finding` from the `Err(..)`
+//! literals in `check_post_phase`, `systemd_install.rs`'s `finding` from
+//! the tag-shaped literals in `check_unit`, and the `(Level, tag)` tuple
+//! producers `parse_desktop` (`menu_xdg.rs`) and `describe`
+//! (`duplicates.rs`), whose tuples carry their own level. A call window
+//! that still yields no tag — format!-built families such as
+//! `no-%{sec}-section` and `{check_type}-file-*`, data-driven tags or
+//! levels, filelist `rule.message` — is NOT dropped silently: it is
+//! recorded in the snapshot's `[unresolved-sites]` section, so the
+//! snapshot never reads as a complete inventory and any new unresolved
+//! shape fails here until it is resolved or ratified in the snapshot.
+//!
+//! Derivation, scoring: every `[Scoring]` and `[SeverityOverrides]`
+//! table under `data/` (the built-in defaults and the vendored distro
+//! layers) — both are per-tag level knobs, so a shipped override that
+//! flips a tag's level fails here just like a scoring change.
 //!
 //! Regenerate the snapshot after an intentional change:
 //!     UPDATE_SEVERITY_INVENTORY=1 cargo test -p rpmcrab-core --test severity_inventory
@@ -162,14 +177,29 @@ fn lex(src: &[char]) -> (Vec<char>, Vec<StrLit>) {
             i = end;
             continue;
         }
-        // Char literal ('x', '\n') vs lifetime ('a): only the closed,
-        // single-char shape is a literal; anything else is a lifetime and
-        // just the quote is skipped.
+        // Char literal ('x', '\n', '\u{...}') vs lifetime ('a): only a
+        // closed literal shape is a literal; anything else is a lifetime
+        // and just the quote is skipped. A recognised literal is blanked
+        // in `clean`, so bracket matching never counts a '(' or '{'
+        // carried by a char literal.
         if c == '\'' {
-            if i + 3 < n && src[i + 1] == '\\' && src[i + 3] == '\'' {
-                i += 4;
+            let lit_len = if i + 3 < n && src[i + 1] == '\\' && src[i + 3] == '\'' {
+                Some(4)
             } else if i + 2 < n && src[i + 1] != '\\' && src[i + 2] == '\'' {
-                i += 3;
+                Some(3)
+            } else if i + 3 < n && src[i + 1] == '\\' && src[i + 2] == 'u' && src[i + 3] == '{' {
+                (i + 4..(i + 16).min(n))
+                    .find(|&j| src[j] == '}')
+                    .filter(|&j| j + 1 < n && src[j + 1] == '\'')
+                    .map(|j| j + 2 - i)
+            } else {
+                None
+            };
+            if let Some(len) = lit_len {
+                for slot in clean.iter_mut().take(i + len).skip(i) {
+                    *slot = ' ';
+                }
+                i += len;
             } else {
                 i += 1;
             }
@@ -306,21 +336,34 @@ fn is_tag(s: &str) -> bool {
 }
 
 /// tag -> set of level letters, from every statically literal emission
-/// site under `src/`.
-fn emitted_levels(src_root: &PathBuf) -> BTreeMap<String, BTreeSet<char>> {
+/// site under `src/`, plus the set of call windows that yielded no tag
+/// (recorded in the snapshot instead of being dropped silently).
+fn emitted_levels(src_root: &PathBuf) -> (BTreeMap<String, BTreeSet<char>>, BTreeSet<String>) {
     let mut files = Vec::new();
     collect_rs(src_root, &mut files);
     files.sort();
     let mut inventory: BTreeMap<String, BTreeSet<char>> = BTreeMap::new();
+    let mut unresolved: BTreeSet<String> = BTreeSet::new();
     for file in files {
         let text =
             std::fs::read_to_string(&file).unwrap_or_else(|_| panic!("read {}", file.display()));
         let chars: Vec<char> = text.chars().collect();
         let (mut clean, strings) = lex(&chars);
         blank_test_blocks(&mut clean, &strings);
-        extract_from_file(&chars, &clean, &strings, &mut inventory);
+        let file_name = file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        extract_from_file(
+            &file_name,
+            &chars,
+            &clean,
+            &strings,
+            &mut inventory,
+            &mut unresolved,
+        );
     }
-    inventory
+    (inventory, unresolved)
 }
 
 fn collect_rs(dir: &PathBuf, out: &mut Vec<PathBuf>) {
@@ -338,124 +381,6 @@ fn collect_rs(dir: &PathBuf, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn extract_from_file(
-    original: &[char],
-    clean: &[char],
-    strings: &[StrLit],
-    inventory: &mut BTreeMap<String, BTreeSet<char>>,
-) {
-    let spans = span_ends(strings);
-    let tokens: Vec<Vec<char>> = CALL_TOKENS.iter().map(|t| t.chars().collect()).collect();
-    let level_forms: Vec<(Vec<char>, char)> = [
-        ("Level::Error", 'E'),
-        ("Level::Warning", 'W'),
-        ("Level::Info", 'I'),
-    ]
-    .iter()
-    .map(|(s, l)| (s.chars().collect(), *l))
-    .collect();
-    let mut i = 0;
-    loop {
-        // Earliest next call token at or after i.
-        let mut best: Option<(usize, usize)> = None; // (pos, token len)
-        for tok in &tokens {
-            if let Some(pos) = find_subslice(clean, tok, i)
-                && best.is_none_or(|(b, _)| pos < b)
-            {
-                best = Some((pos, tok.len()));
-            }
-        }
-        let Some((pos, tok_len)) = best else { break };
-        let open = pos + tok_len - 1; // the '(' itself
-        let end = match_bracket(clean, &spans, open, '(', ')');
-        // First Level:: literal inside the window.
-        let mut level: Option<(usize, char)> = None;
-        for (form, letter) in &level_forms {
-            if let Some(p) = find_subslice(&clean[open..end], form, 0) {
-                let abs = open + p + form.len();
-                if level.is_none_or(|(b, _)| abs < b) {
-                    level = Some((abs, *letter));
-                }
-            }
-        }
-        if let Some((level_end, letter)) = level {
-            // The tag is the first string literal starting at or after the
-            // level literal within the window.
-            if let Some(lit) = strings
-                .iter()
-                .find(|l| l.start >= level_end && l.start < end)
-            {
-                let tag: String = original[lit.content.0..lit.content.1].iter().collect();
-                if is_tag(&tag) {
-                    inventory.entry(tag).or_default().insert(letter);
-                }
-            }
-        }
-        i = pos + tok_len;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Vendored [Scoring] tables.
-// ---------------------------------------------------------------------------
-
-/// relpath (from the crate root) -> (tag -> badness), for every `[Scoring]`
-/// table under `data/`.
-fn scoring_tables(data_root: &PathBuf) -> BTreeMap<String, BTreeMap<String, i64>> {
-    let mut files = Vec::new();
-    collect_toml(data_root, &mut files);
-    files.sort();
-    let mut tables = BTreeMap::new();
-    for file in files {
-        let text =
-            std::fs::read_to_string(&file).unwrap_or_else(|_| panic!("read {}", file.display()));
-        let mut in_scoring = false;
-        let mut saw_scoring = false;
-        let mut entries: BTreeMap<String, i64> = BTreeMap::new();
-        for (lineno, line) in text.lines().enumerate() {
-            let line = line.trim();
-            if line.starts_with('[') {
-                in_scoring = line == "[Scoring]";
-                saw_scoring |= in_scoring;
-                continue;
-            }
-            if !in_scoring || line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let Some((key, value)) = line.split_once('=') else {
-                panic!(
-                    "{}:{}: unparsable [Scoring] line: {line}",
-                    file.display(),
-                    lineno + 1
-                );
-            };
-            let key = key.trim().trim_matches('"');
-            let digits: String = value
-                .trim()
-                .chars()
-                .take_while(|c| c.is_ascii_digit() || *c == '-')
-                .collect();
-            let badness: i64 = digits.parse().unwrap_or_else(|_| {
-                panic!(
-                    "{}:{}: unparsable [Scoring] value: {line}",
-                    file.display(),
-                    lineno + 1
-                )
-            });
-            entries.insert(key.to_string(), badness);
-        }
-        if saw_scoring {
-            let rel = file
-                .strip_prefix(core_root())
-                .expect("data file under crate root")
-                .to_string_lossy()
-                .replace('\\', "/");
-            tables.insert(rel, entries);
-        }
-    }
-    tables
-}
-
 fn collect_toml(dir: &PathBuf, out: &mut Vec<PathBuf>) {
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
         .unwrap_or_else(|_| panic!("read_dir {}", dir.display()))
@@ -471,28 +396,491 @@ fn collect_toml(dir: &PathBuf, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// How a variable-tag site's producing function yields its tags; the same
+/// dynamic-site table `scripts/audit-reference-coverage.py` uses.
+/// (file, tag variable, producing function, extractor kind)
+#[derive(Clone, Copy, PartialEq)]
+enum ProducerKind {
+    /// Literals in `.push("...")` calls in the producer (`fn_push_literals`).
+    Push,
+    /// Literals in `Err("...")` / `Err((Level::.., "..."))` (`fn_err_literals`).
+    Err,
+    /// Every tag-shaped literal in the producer body (`fn_finding_literals`).
+    TagShapedBody,
+    /// `(Level::.., "tag", ...)` tuples; each tuple carries its own level,
+    /// so the call site needs none (`fn_describe_tuple_literals`, and the
+    /// tuple form of `fn_err_literals`).
+    LevelTuples,
+}
+
+const DYNAMIC_SITES: &[(&str, &str, &str, ProducerKind)] = &[
+    (
+        "alternatives.rs",
+        "finding",
+        "check_post_phase",
+        ProducerKind::Err,
+    ),
+    (
+        "bashisms.rs",
+        "warning",
+        "classify_bashisms",
+        ProducerKind::Push,
+    ),
+    (
+        "duplicates.rs",
+        "name",
+        "describe",
+        ProducerKind::LevelTuples,
+    ),
+    (
+        "menu_xdg.rs",
+        "finding",
+        "parse_desktop",
+        ProducerKind::LevelTuples,
+    ),
+    (
+        "systemd_install.rs",
+        "finding",
+        "check_unit",
+        ProducerKind::TagShapedBody,
+    ),
+];
+
+/// Byte-char range of the body (braces included) of `fn <name>` in the
+/// cleaned source, or None if there is no such function.
+fn fn_body_range(clean: &[char], spans: &SpanEnds, name: &str) -> Option<(usize, usize)> {
+    let needle: Vec<char> = format!("fn {name}").chars().collect();
+    let mut from = 0;
+    loop {
+        let pos = find_subslice(clean, &needle, from)?;
+        // Word boundary after the name, so `fn describe_x` is not `describe`.
+        let after = pos + needle.len();
+        if after < clean.len() && (clean[after].is_alphanumeric() || clean[after] == '_') {
+            from = pos + 1;
+            continue;
+        }
+        let mut j = after;
+        while j < clean.len() {
+            if let Some(&end) = spans.get(&j) {
+                j = end;
+                continue;
+            }
+            if clean[j] == '{' {
+                return Some((j, match_bracket(clean, spans, j, '{', '}')));
+            }
+            if clean[j] == ';' {
+                return None;
+            }
+            j += 1;
+        }
+        return None;
+    }
+}
+
+fn tag_text(original: &[char], lit: &StrLit) -> String {
+    original[lit.content.0..lit.content.1].iter().collect()
+}
+
+/// Tags (with levels) a producer function yields, per its extractor kind.
+/// Push/Err/TagShapedBody tags pair with `call_level`; LevelTuples pairs
+/// come from the tuples themselves.
+fn producer_tags(
+    original: &[char],
+    clean: &[char],
+    strings: &[StrLit],
+    fn_name: &str,
+    kind: ProducerKind,
+    call_level: Option<char>,
+) -> Vec<(String, char)> {
+    let spans = span_ends(strings);
+    let Some((bstart, bend)) = fn_body_range(clean, &spans, fn_name) else {
+        return Vec::new();
+    };
+    let in_body = |l: &StrLit| l.start >= bstart && l.start < bend;
+    let mut out: Vec<(String, char)> = Vec::new();
+    let push_tag = |tag: String, level: char, out: &mut Vec<(String, char)>| {
+        if is_tag(&tag) && !out.contains(&(tag.clone(), level)) {
+            out.push((tag, level));
+        }
+    };
+    match kind {
+        ProducerKind::LevelTuples => {
+            for (form, letter) in LEVEL_FORMS {
+                let needle: Vec<char> = form.chars().collect();
+                let mut from = bstart;
+                while let Some(p) = find_subslice(&clean[from..bend], &needle, 0) {
+                    let abs = from + p;
+                    from = abs + needle.len();
+                    // The tag is the first literal after `(Level::.., `.
+                    if let Some(lit) = strings
+                        .iter()
+                        .find(|l| l.start >= abs + needle.len() && l.start < bend)
+                    {
+                        push_tag(tag_text(original, lit), letter, &mut out);
+                    }
+                }
+            }
+        }
+        ProducerKind::Push => {
+            let Some(level) = call_level else { return out };
+            let needle: Vec<char> = ".push(".chars().collect();
+            let mut from = bstart;
+            while let Some(p) = find_subslice(&clean[from..bend], &needle, 0) {
+                let abs = from + p;
+                from = abs + needle.len();
+                if let Some(lit) = strings
+                    .iter()
+                    .find(|l| l.start >= abs + needle.len() && l.start < bend)
+                {
+                    push_tag(tag_text(original, lit), level, &mut out);
+                }
+            }
+        }
+        ProducerKind::Err => {
+            let Some(level) = call_level else { return out };
+            let needle: Vec<char> = "Err(".chars().collect();
+            let mut from = bstart;
+            while let Some(p) = find_subslice(&clean[from..bend], &needle, 0) {
+                let abs = from + p;
+                from = abs + needle.len();
+                // Err("tag") or Err((Level::.., "tag", ..)): first literal
+                // after the Err( (skipping a level form in between) whose
+                // text is tag-shaped.
+                if let Some(lit) = strings
+                    .iter()
+                    .find(|l| l.start >= abs + needle.len() && l.start < bend)
+                {
+                    push_tag(tag_text(original, lit), level, &mut out);
+                }
+            }
+            // Bare `(Level::.., "tag", ..)` tuple returns, as in the audit.
+            for (form, _letter) in LEVEL_FORMS {
+                let needle2: Vec<char> = form.chars().collect();
+                let mut from2 = bstart;
+                while let Some(p) = find_subslice(&clean[from2..bend], &needle2, 0) {
+                    let abs = from2 + p;
+                    from2 = abs + needle2.len();
+                    if let Some(lit) = strings
+                        .iter()
+                        .find(|l| l.start >= abs + needle2.len() && l.start < bend)
+                    {
+                        push_tag(tag_text(original, lit), level, &mut out);
+                    }
+                }
+            }
+        }
+        ProducerKind::TagShapedBody => {
+            let Some(level) = call_level else { return out };
+            for lit in strings.iter().filter(|l| in_body(l)) {
+                push_tag(tag_text(original, lit), level, &mut out);
+            }
+        }
+    }
+    out
+}
+
+const LEVEL_FORMS: [(&str, char); 3] = [
+    ("Level::Error", 'E'),
+    ("Level::Warning", 'W'),
+    ("Level::Info", 'I'),
+];
+
+/// Paren/bracket depth of `pos` relative to the call's opening paren at
+/// `open` (0 = a direct argument of the call), skipping string literals.
+/// Braces do not count: an `if`/`else` tag expression is still a direct
+/// argument, while detail literals sit inside `&[...]` or a nested call.
+fn rel_depth(clean: &[char], spans: &SpanEnds, open: usize, pos: usize) -> usize {
+    let mut depth = 0usize;
+    let mut j = open + 1;
+    while j < pos {
+        if let Some(&end) = spans.get(&j) {
+            j = end;
+            continue;
+        }
+        match clean[j] {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        j += 1;
+    }
+    depth
+}
+
+fn extract_from_file(
+    file_name: &str,
+    original: &[char],
+    clean: &[char],
+    strings: &[StrLit],
+    inventory: &mut BTreeMap<String, BTreeSet<char>>,
+    unresolved: &mut BTreeSet<String>,
+) {
+    let spans = span_ends(strings);
+    let tokens: Vec<Vec<char>> = CALL_TOKENS.iter().map(|t| t.chars().collect()).collect();
+    let level_forms: Vec<(Vec<char>, char)> = LEVEL_FORMS
+        .iter()
+        .map(|(s, l)| (s.chars().collect(), *l))
+        .collect();
+    let mut i = 0;
+    loop {
+        // Earliest next call token at or after i.
+        let mut best: Option<(usize, usize)> = None; // (pos, token len)
+        for tok in &tokens {
+            if let Some(pos) = find_subslice(clean, tok, i)
+                && best.is_none_or(|(b, _)| pos < b)
+            {
+                best = Some((pos, tok.len()));
+            }
+        }
+        let Some((pos, tok_len)) = best else { break };
+        // A `fn add_info(` / `fn make_finding(` definition is the plumbing,
+        // not an emission site: skip it outright instead of recording it
+        // as unresolved.
+        let mut back = pos;
+        while back > 0 && clean[back - 1] == ' ' {
+            back -= 1;
+        }
+        if back >= 2
+            && clean[back - 2..back] == ['f', 'n']
+            && (back == 2 || !(clean[back - 3].is_alphanumeric() || clean[back - 3] == '_'))
+        {
+            i = pos + tok_len;
+            continue;
+        }
+        let open = pos + tok_len - 1; // the '(' itself
+        let end = match_bracket(clean, &spans, open, '(', ')');
+        // First Level:: literal inside the window.
+        let mut level: Option<(usize, char)> = None;
+        for (form, letter) in &level_forms {
+            if let Some(p) = find_subslice(&clean[open..end], form, 0) {
+                let abs = open + p + form.len();
+                if level.is_none_or(|(b, _)| abs < b) {
+                    level = Some((abs, *letter));
+                }
+            }
+        }
+        let mut produced = false;
+        if let Some((level_end, letter)) = level {
+            // Tag literals: the first literal at or after the level (the
+            // historical rule, which also reaches a tag nested inside a
+            // constructor argument) plus every tag-shaped literal passed
+            // as a direct argument of the call, so an if/else pair sharing
+            // one window contributes both tags.
+            let mut literals: Vec<&StrLit> = Vec::new();
+            if let Some(first) = strings
+                .iter()
+                .find(|l| l.start >= level_end && l.start < end)
+            {
+                literals.push(first);
+            }
+            for lit in strings
+                .iter()
+                .filter(|l| l.start >= level_end && l.start < end)
+            {
+                if rel_depth(clean, &spans, open, lit.start) == 0
+                    && !literals.iter().any(|l| l.start == lit.start)
+                {
+                    literals.push(lit);
+                }
+            }
+            for lit in literals {
+                let tag = tag_text(original, lit);
+                if is_tag(&tag) {
+                    inventory.entry(tag).or_default().insert(letter);
+                    produced = true;
+                }
+            }
+        }
+        // Variable-tag sites: follow the producing function, as the
+        // reference-coverage audit does. Applies with or without a
+        // literal level at the call site (tuple producers carry their
+        // own levels).
+        for (dfile, var, producer, kind) in DYNAMIC_SITES {
+            if *dfile != file_name {
+                continue;
+            }
+            let var_needle: Vec<char> = var.chars().collect();
+            if find_subslice(&clean[pos..end], &var_needle, 0).is_none() {
+                continue;
+            }
+            for (tag, letter) in producer_tags(
+                original,
+                clean,
+                strings,
+                producer,
+                *kind,
+                level.map(|(_, l)| l),
+            ) {
+                inventory.entry(tag).or_default().insert(letter);
+                produced = true;
+            }
+        }
+        if !produced {
+            // Never drop a window silently: record it for the snapshot's
+            // [unresolved-sites] section (whitespace collapsed, truncated).
+            let snippet: String = clean[pos..end.min(pos + 110)]
+                .iter()
+                .collect::<String>()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            unresolved.insert(format!("{file_name}: {snippet}"));
+        }
+        i = pos + tok_len;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vendored [Scoring] and [SeverityOverrides] tables.
+// ---------------------------------------------------------------------------
+
+type ScoringTables = BTreeMap<String, BTreeMap<String, i64>>;
+type OverrideTables = BTreeMap<String, BTreeMap<String, char>>;
+
+/// (relpath -> (tag -> badness), relpath -> (tag -> level letter)), for
+/// every `[Scoring]` / `[SeverityOverrides]` table under `data/`.
+fn distro_tables(data_root: &PathBuf) -> (ScoringTables, OverrideTables) {
+    let mut files = Vec::new();
+    collect_toml(data_root, &mut files);
+    files.sort();
+    let mut scoring = BTreeMap::new();
+    let mut overrides = BTreeMap::new();
+    for file in files {
+        let text =
+            std::fs::read_to_string(&file).unwrap_or_else(|_| panic!("read {}", file.display()));
+        #[derive(PartialEq)]
+        enum Section {
+            Other,
+            Scoring,
+            Overrides,
+        }
+        let mut section = Section::Other;
+        let mut saw_scoring = false;
+        let mut saw_overrides = false;
+        let mut scoring_entries: BTreeMap<String, i64> = BTreeMap::new();
+        let mut override_entries: BTreeMap<String, char> = BTreeMap::new();
+        for (lineno, raw_line) in text.lines().enumerate() {
+            let line = raw_line.trim();
+            if line.starts_with('[') {
+                section = match line {
+                    "[Scoring]" => Section::Scoring,
+                    "[SeverityOverrides]" => Section::Overrides,
+                    _ => Section::Other,
+                };
+                saw_scoring |= section == Section::Scoring;
+                saw_overrides |= section == Section::Overrides;
+                continue;
+            }
+            if section == Section::Other || line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                panic!(
+                    "{}:{}: unparsable table line: {line}",
+                    file.display(),
+                    lineno + 1
+                );
+            };
+            let key = key.trim().trim_matches('"').to_string();
+            // Strip a trailing `#` comment outside quotes.
+            let mut in_str = false;
+            let mut cut = value.len();
+            for (idx, c) in value.char_indices() {
+                match c {
+                    '"' => in_str = !in_str,
+                    '#' if !in_str => {
+                        cut = idx;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            let value = value[..cut].trim();
+            if section == Section::Scoring {
+                scoring_entries.insert(key, coerce_scoring_value(&file, lineno + 1, line, value));
+            } else {
+                let raw = value.trim_matches('"');
+                let letter = match raw.to_ascii_lowercase().as_str() {
+                    "e" | "error" => 'E',
+                    "w" | "warning" => 'W',
+                    "i" | "info" => 'I',
+                    _ => panic!(
+                        "{}:{}: unparsable [SeverityOverrides] value: {line}",
+                        file.display(),
+                        lineno + 1
+                    ),
+                };
+                override_entries.insert(key, letter);
+            }
+        }
+        let rel = file
+            .strip_prefix(core_root())
+            .expect("data file under crate root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if saw_scoring {
+            scoring.insert(rel.clone(), scoring_entries);
+        }
+        if saw_overrides {
+            overrides.insert(rel, override_entries);
+        }
+    }
+    (scoring, overrides)
+}
+
+/// Coerce a `[Scoring]` value the way `filter.rs`'s `coerce_scoring`
+/// does (mirroring Python `int()`): integers pass through, quoted
+/// strings are parsed, floats truncate toward zero, booleans are 1/0.
+/// Anything else panics, as an unparsable value did before.
+fn coerce_scoring_value(file: &std::path::Path, lineno: usize, line: &str, value: &str) -> i64 {
+    let fail = || -> ! {
+        panic!(
+            "{}:{}: unparsable [Scoring] value: {line}",
+            file.display(),
+            lineno
+        )
+    };
+    if value == "true" {
+        return 1;
+    }
+    if value == "false" {
+        return 0;
+    }
+    if let Some(quoted) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
+        return quoted.trim().parse().unwrap_or_else(|_| fail());
+    }
+    if value.contains(['.', 'e', 'E']) {
+        let f: f64 = value.parse().unwrap_or_else(|_| fail());
+        if !f.is_finite() || f.trunc() < i64::MIN as f64 || f.trunc() >= i64::MAX as f64 {
+            fail();
+        }
+        return f.trunc() as i64;
+    }
+    value.parse().unwrap_or_else(|_| fail())
+}
+
 // ---------------------------------------------------------------------------
 // The snapshot and the guard.
 // ---------------------------------------------------------------------------
 
 fn render_inventory() -> String {
     let root = core_root();
-    let emissions = emitted_levels(&root.join("src"));
-    let scoring = scoring_tables(&root.join("data"));
+    let (emissions, unresolved) = emitted_levels(&root.join("src"));
+    let (scoring, overrides) = distro_tables(&root.join("data"));
     let mut out = String::new();
     out.push_str(
         "# Severity inventory: emitted level(s) per finding tag and the vendored\n\
-         # [Scoring] tables, derived mechanically from the tree by the\n\
-         # severity_inventory test (crates/rpmcrab-core/tests/severity_inventory.rs).\n\
+         # [Scoring] / [SeverityOverrides] tables, derived mechanically from the\n\
+         # tree by the severity_inventory test\n\
+         # (crates/rpmcrab-core/tests/severity_inventory.rs).\n\
          #\n\
          # A deliberate level or scoring change updates this file in the same diff:\n\
          #     UPDATE_SEVERITY_INVENTORY=1 cargo test -p rpmcrab-core --test severity_inventory\n\
          # An unintentional change fails the test instead of drifting silently.\n\
          #\n\
-         # Only statically literal emission sites are listed. Findings whose tag\n\
-         # or level is computed at runtime (format!-built families such as\n\
-         # `no-%{sec}-section` and `{check_type}-file-*`, variable tags,\n\
-         # data-driven levels) do not appear.\n",
+         # Emission sites whose tag or level is computed at runtime and cannot\n\
+         # be resolved statically are listed under [unresolved-sites] below,\n\
+         # never dropped silently.\n",
     );
     out.push_str("\n[emitted-levels]\n");
     for (tag, levels) in &emissions {
@@ -503,10 +891,21 @@ fn render_inventory() -> String {
             .collect();
         out.push_str(&format!("{tag} = {}\n", letters.join(",")));
     }
+    out.push_str("\n[unresolved-sites]\n");
+    out.push_str(&format!("# count = {}\n", unresolved.len()));
+    for site in &unresolved {
+        out.push_str(&format!("{site}\n"));
+    }
     for (rel, entries) in &scoring {
         out.push_str(&format!("\n[scoring {rel}]\n"));
         for (tag, badness) in entries {
             out.push_str(&format!("{tag} = {badness}\n"));
+        }
+    }
+    for (rel, entries) in &overrides {
+        out.push_str(&format!("\n[severity-overrides {rel}]\n"));
+        for (tag, letter) in entries {
+            out.push_str(&format!("{tag} = {letter}\n"));
         }
     }
     out
@@ -516,9 +915,19 @@ fn render_inventory() -> String {
 fn severity_inventory_matches_snapshot() {
     let snapshot_path = core_root().join("tests/data/severity-inventory.txt");
     let derived = render_inventory();
-    if std::env::var_os("UPDATE_SEVERITY_INVENTORY").is_some() {
-        std::fs::write(&snapshot_path, &derived).expect("write severity inventory snapshot");
-        return;
+    match std::env::var("UPDATE_SEVERITY_INVENTORY") {
+        Err(std::env::VarError::NotPresent) => {}
+        Ok(value) if value == "1" => {
+            std::fs::write(&snapshot_path, &derived).expect("write severity inventory snapshot");
+            return;
+        }
+        Ok(value) => {
+            panic!(
+                "UPDATE_SEVERITY_INVENTORY must be exactly \"1\" to regenerate the \
+                 severity inventory snapshot, got {value:?}; unset it to run the guard"
+            );
+        }
+        Err(e) => panic!("UPDATE_SEVERITY_INVENTORY is not readable: {e}"),
     }
     let expected = std::fs::read_to_string(&snapshot_path).unwrap_or_else(|_| {
         panic!(
