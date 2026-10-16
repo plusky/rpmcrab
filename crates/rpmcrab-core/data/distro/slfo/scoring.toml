@@ -2,13 +2,11 @@
 arch-dependent-file-in-usr-share = 590
 arch-independent-package-contains-binary-or-object = 499
 binary-in-etc = 900
-devel-file-in-non-devel-package = 50
 dir-or-file-in-var-lock = 10000
 dir-or-file-in-var-run = 10000
 env-script-interpreter = 9
 executable-docs = 900
 file-contains-buildroot = 10000
-files-duplicated-waste = 100
 hardlink-across-config-files = 10000
 hardlink-across-partition = 10000
 info-dir-file = 10000
@@ -16,7 +14,6 @@ invalid-pkgconfig-file = 10000
 libtool-wrapper-in-package = 10000
 lto-bytecode = 10000
 lto-no-text-in-archive = 10000
-makefile-junk = 109
 no-pkg-config-provides = 300
 non-ghost-in-run = 10000
 non-position-independent-executable = 10000
@@ -25,9 +22,6 @@ percent-in-dependency = 10000
 percent-in-obsoletes = 10000
 percent-in-provides = 10000
 shlib-policy-name-error = 10000
-spurious-executable-perm = 50
-summary-ended-with-dot = 20
-summary-not-capitalized = 20
 summary-too-long = 200
 filelist-forbidden = 10000
 filelist-forbidden-backup-file = 10000
@@ -102,3 +96,7 @@ zypperplugin-file-unauthorized = 10
 # Set to 10000 once affected packages have been updated
 # for atomic update compatibility
 dir-or-file-outside-snapshot = 0
+
+# Added by rpmcrab (deliberate, ledgered divergence; see
+# SCORING_ADDITIONS in scripts/generate-distro-configs.py):
+invalid-license = 100000

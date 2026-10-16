@@ -1156,9 +1156,9 @@ mod tests {
             Some(&toml::Value::Integer(100000))
         );
         // conf_files: builtin first, then the vendored distro files, then
-        // the XDG-discovered openSUSE file; the vendored
-        // scoring-strict.override.toml merges last by override-file
-        // semantics, mirroring upstream.
+        // the XDG-discovered openSUSE file. The vendored set carries no
+        // *.override.* file since the strict layer left the bundle
+        // (issue #594), so the XDG file sorts last here.
         assert_eq!(cfg.conf_files[0], "<builtin>");
         assert!(
             cfg.conf_files
@@ -1170,9 +1170,12 @@ mod tests {
                 .iter()
                 .any(|f| f.ends_with("xdg/rpmlint/opensuse.toml"))
         );
-        assert_eq!(
-            cfg.conf_files.last().unwrap(),
-            "<distro:opensuse>/scoring-strict.override.toml"
+        assert!(cfg.conf_files.iter().all(|f| !f.contains("scoring-strict")));
+        assert!(
+            cfg.conf_files
+                .last()
+                .unwrap()
+                .ends_with("xdg/rpmlint/opensuse.toml")
         );
     }
 
