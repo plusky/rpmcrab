@@ -348,6 +348,21 @@ DROP_LIVE_FILTERS = {
     # and glob patterns are not predictable paths), so the blanket filter
     # would only hide genuine uses.
     "use-tmp-in-": "check tightened to literal paths (rpmcrab#558): mktemp templates and glob patterns no longer fire; the blanket filter would only hide genuine predictable-path uses (issue #538)",
+    # Ruled in the config-filters follow-through (issue #538, ruling
+    # item 8, the last): upstream's line is one of the three carrying
+    # the 1.x-era fossil comment 'handled by CheckFilelist.py', and
+    # the claim does not survive measurement -- FilelistCheck's
+    # pattern rules cover 0 of the 45 suppressed lines. The check is
+    # a verbatim port of FilesCheck and measured over the Factory
+    # corpus (issue #583) misfires on 0 of those 45 lines; the whole
+    # suppressed set is 45 E lines in 2 srcpkgs, both deliberate
+    # carriers (filesystem's %ghost /usr/local skeleton tree,
+    # reproducible-faketools' /usr/local/bin PATH-shadowing
+    # wrappers). Deliberate per-package placements belong in
+    # per-package rpmlintrc; Fedora ships the line commented out
+    # and lets the finding fire. Ledgered in
+    # tests/parity/divergences.toml.
+    "dir-or-file-in-usr-local": "blanket filter dropped by ruling (issue #583): verbatim-port check, 0/45 measured misfires; the suppressed set is 45 E lines in 2 srcpkgs, both deliberate carriers (filesystem's %ghost /usr/local skeleton, reproducible-faketools' PATH-shadowing wrappers) whose exceptions belong in per-package rpmlintrc; Fedora ships the line commented out",
 }
 
 # (finding, scope) -> reason: Filters entries scoped to dead paths. The finding
