@@ -2222,7 +2222,7 @@ impl BinariesCheck {
         out: &mut Filter,
     ) {
         if !has_binary && !has_file_in_libdir && pkg.arch != "noarch" {
-            add_info(out, Level::Error, pkg, "no-binary", &[]);
+            add_info(out, Level::Warning, pkg, "no-binary", &[]);
         }
     }
 
@@ -2760,11 +2760,14 @@ impl BinariesCheck {
         let gethostbyname = info.has_function_matching(&self.gethostbyname_call_regex);
 
         if setgid && setuid && !setgroups {
-            // openSUSE flips the upstream severity: E when installed setuid.
-            let is_uid = pkgfile.mode & 0o4000 != 0;
+            // Deliberate divergence (#593): always an error. The
+            // reference splits the level on the setuid bit (E when
+            // installed setuid, W otherwise); privilege-drop
+            // correctness is security-critical and the check is
+            // high-precision, so the level does not split.
             add_info(
                 out,
-                if is_uid { Level::Error } else { Level::Warning },
+                Level::Error,
                 pkg,
                 "missing-call-to-setgroups-before-setuid",
                 &[&pkgfile.name],
@@ -6325,7 +6328,7 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
-    fn package_without_binary_is_error() {
+    fn package_without_binary_is_warning() {
         let config = test_config();
         let pkg = synthetic_pkg(
             "testpkg",
@@ -6335,7 +6338,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let results = driver_results(&pkg, &config);
         let lines = lines_for(&results, "no-binary");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
-        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
     }
 
     #[test]
@@ -6466,7 +6469,7 @@ description = "explicit priority string bypasses the system crypto policy"
 
     #[test]
     fn no_binary_still_fires_without_libdir_content() {
-        // Pure /usr/share content with no binaries: still an error.
+        // Pure /usr/share content with no binaries: still fires.
         let config = test_config();
         let pkg = synthetic_pkg(
             "testpkg",
@@ -6476,7 +6479,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let results = driver_results(&pkg, &config);
         let lines = lines_for(&results, "no-binary");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
-        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
     }
 
     #[test]
@@ -8582,8 +8585,8 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
         assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
 
-        // setuid+setgid without setgroups: Error when installed setuid,
-        // Warning otherwise.
+        // setuid+setgid without setgroups: Error with or without
+        // the setuid bit (#593).
         let mut info = syn_info();
         info.functions = vec!["setuid".to_string(), "setgid".to_string()];
         let mut pkgfile = syn_file("/usr/bin/setuidbin", "ELF 64-bit LSB executable");
@@ -8601,7 +8604,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let results = out.results().to_vec();
         let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
-        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
 
         // Calling setgroups silences the finding.
         let mut info = syn_info();

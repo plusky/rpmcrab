@@ -51,7 +51,7 @@ comparison-operator-in-deptoken = W
 compressed-symlink-with-wrong-ext = E
 configure-without-libdir-spec = W
 cross-directory-hard-link = W
-dangling-relative-symlink = W
+dangling-relative-symlink = I
 dangling-symlink = W
 dbus-parsing-exception = E
 debug-files-in-non-debug-package = W
@@ -61,7 +61,7 @@ deprecated-grep = W
 deprecated-init-script = E
 deprecated-xinetd-config = E
 depscript-without-disabling-depgen = W
-description-line-too-long = E
+description-line-too-long = W
 description-shorter-than-summary = W
 description-use-invalid-word = W
 desktopfile-duplicate-option = E
@@ -94,7 +94,7 @@ filelist-forbidden-fhs23 = E
 filelist-forbidden-opt = E
 filename-not-utf8 = E
 files-duplicate = W
-files-duplicated-waste = E
+files-duplicated-waste = W
 forbidden-controlchar-found = E,W
 forbidden-optflags = E
 ghost-files-without-postin = W
@@ -186,7 +186,7 @@ more-than-one-%changelog-section = W
 multiple-entries = E
 multiple-specfiles = E
 name-repeated-in-summary = W
-no-binary = E
+no-binary = W
 no-buildhost-tag = E
 no-changelogname-tag = E
 no-dependency-on = E,W
@@ -196,7 +196,7 @@ no-epoch-in-dependency = W
 no-epoch-tag = E
 no-icon-in-menu = W
 no-ldconfig-symlink = E
-no-library-dependency-for = E
+no-library-dependency-for = W
 no-library-dependency-on = E
 no-license = E
 no-longtitle-in-menu = E
@@ -245,7 +245,7 @@ obsolete-mime-format-dir = W
 obsolete-not-provided = W
 obsolete-suse-version-check = E
 obsolete-tag = W
-obsolete-tmpfiles-macro = W
+obsolete-tmpfiles-macro = I
 obsolete-xinetd-requirement = E
 old-menu-entry = E
 package-supports-libalternatives = I
@@ -277,7 +277,7 @@ postin-without-ldconfig = E
 postin-without-update-menus = E
 postun-without-ldconfig = E
 postun-without-update-menus = E
-potential-bashisms = W
+potential-bashisms = I
 pre-with-tmpfile-creation = W
 prebuilt-binary-in-sources = W
 prereq-use = E
@@ -341,10 +341,10 @@ symlink-has-too-many-up-segments = E
 symlink-should-be-absolute = W
 symlink-should-be-relative = W
 symlink-to-binary-with-shebang = W
-systemd-service-without-service_add_post = E
-systemd-service-without-service_add_pre = E
-systemd-service-without-service_del_postun = E
-systemd-service-without-service_del_preun = E
+systemd-service-without-service_add_post = W
+systemd-service-without-service_add_pre = W
+systemd-service-without-service_del_postun = W
+systemd-service-without-service_del_preun = W
 systemd-shadowed-initscript = E
 systemd-tmpfile-entry-unauthorized = E
 systemd-tmpfile-ghost = E
@@ -399,7 +399,7 @@ check.rs: add_info(make_finding( &pkg.name, &pkg.arch, level, check, details.ite
 check.rs: add_info_at(out, level, pkg, None, check, details)
 check.rs: make_finding( &pkg.name, "", level, check, details.iter().map(|d| (*d)
 check.rs: make_finding( &pkg.name, &pkg.arch, level, check, details.iter().map(|
-config_files.rs: add_info(out, Level::Warning, pkg, finding, &[filename])
+config_files.rs: add_info(out, level, pkg, finding, &[filename])
 dbus_policy.rs: add_info(out, level, pkg, finding, &[&detail, fname])
 dbus_policy.rs: add_info(out, level, pkg, finding, &[fname])
 device_files.rs: add_info(out, level, pkg, check, &refs)
@@ -420,7 +420,7 @@ post.rs: add_info(out, level, pkg, finding, details)
 python.rs: add_info(out, Level::Error, pkg, finding, &[filename])
 source.rs: add_info(out, level, pkg, check, &refs)
 spec.rs: .info( out, pkg, Level::Warning,
-spec.rs: .info(out, pkg, Level::Warning, &check, &[])
+spec.rs: .info(out, pkg, level, &check, &[])
 spec.rs: spec_add_info(out, level, pkg, pkg.current_linenum.get(), check, details)
 suid_permissions.rs: add_info( out, Level::Error, pkg, diag,
 tags.rs: add_info( out, Level::Warning, pkg,

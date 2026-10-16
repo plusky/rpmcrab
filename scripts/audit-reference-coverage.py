@@ -2302,7 +2302,7 @@ def audit_port(checks_dir):
             # (file, variable) -> (function, extractor)
             dynamic_sites = {
                 ("alternatives.rs", "finding"): ("check_post_phase", fn_err_literals),
-                ("bashisms.rs", "warning"): ("classify_bashisms", fn_push_literals),
+                ("bashisms.rs", "warning"): ("classify_bashisms", fn_describe_tuple_literals),
                 ("duplicates.rs", "name"): ("describe", fn_describe_tuple_literals),
                 ("menu_xdg.rs", "finding"): ("parse_desktop", fn_err_literals),
                 ("systemd_install.rs", "finding"): ("check_unit", fn_finding_literals),

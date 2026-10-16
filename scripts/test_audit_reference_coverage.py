@@ -468,22 +468,22 @@ pub struct BashismsCheck {
 }
 
 impl BashismsCheck {
-    fn classify_bashisms(dash_code: Option<i32>, bashisms_code: Option<i32>) -> Vec<&'static str> {
+    fn classify_bashisms(dash_code: Option<i32>, bashisms_code: Option<i32>) -> Vec<(Level, &'static str)> {
         let mut out = Vec::new();
         match dash_code {
-            Some(2) => out.push("bin-sh-syntax-error"),
+            Some(2) => out.push((Level::Warning, "bin-sh-syntax-error")),
             Some(127) | None => return out,
             _ => {}
         }
         if bashisms_code == Some(1) {
-            out.push("potential-bashisms");
+            out.push((Level::Info, "potential-bashisms"));
         }
         let unrelated = "not-a-finding";
         out
     }
 
-    fn check_bashisms(&self, path: &str) -> Vec<&'static str> {
-        out.push("potential-bashisms")
+    fn check_bashisms(&self, path: &str) -> Vec<(Level, &'static str)> {
+        out.push((Level::Info, "potential-bashisms"))
     }
 }
 """
@@ -497,7 +497,7 @@ def test_classify_bashisms_resolves_both_names():
         path = os.path.join(d, "bashisms.rs")
         _write(path, BASHISMS_RS)
         src = open(path, encoding="utf-8").read()
-    assert audit.fn_push_literals(src, "classify_bashisms") == [
+    assert audit.fn_describe_tuple_literals(src, "classify_bashisms") == [
         "bin-sh-syntax-error", "potential-bashisms"]
 
 
@@ -509,7 +509,7 @@ def test_classify_bashisms_is_scoped_to_the_named_function():
         path = os.path.join(d, "bashisms.rs")
         _write(path, BASHISMS_RS)
         src = open(path, encoding="utf-8").read()
-    got = audit.fn_push_literals(src, "classify_bashisms")
+    got = audit.fn_describe_tuple_literals(src, "classify_bashisms")
     assert "not-a-finding" not in got, got
     assert len(got) == 2, got
 
@@ -820,8 +820,8 @@ BASHISMS_CHECK_BINARY = """
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
         for pkgfile in &pkg.files {
             let warnings = self.check_bashisms(&pkgfile.name);
-            for warning in warnings.clone() {
-                add_info(out, Level::Warning, pkg, warning, &[&pkgfile.name]);
+            for (level, warning) in warnings.clone() {
+                add_info(out, level, pkg, warning, &[&pkgfile.name]);
             }
         }
     }

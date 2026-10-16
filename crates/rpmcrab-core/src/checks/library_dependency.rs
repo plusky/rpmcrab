@@ -254,7 +254,7 @@ impl Check for LibraryDependencyCheck {
                     out.add_info(make_finding(
                         &pkgname,
                         &arch,
-                        Level::Error,
+                        Level::Warning,
                         "no-library-dependency-for",
                         vec![link.clone()],
                         None,
@@ -494,7 +494,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "no-library-dependency-for");
         let line = &results[0].1;
-        assert!(line.contains(": E: "), "level: {line}");
+        assert!(line.contains(": W: "), "level: {line}");
         assert!(line.contains("/usr/lib64/libfoo.so.1"), "link: {line}");
     }
 

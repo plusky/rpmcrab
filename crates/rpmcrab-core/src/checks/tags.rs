@@ -862,7 +862,7 @@ impl TagsCheck {
                     d.push(l);
                 }
                 d.push(line);
-                add_info(out, Level::Error, pkg, "description-line-too-long", &d);
+                add_info(out, Level::Warning, pkg, "description-line-too-long", &d);
             }
             if let Some(re) = &self.forbidden_words_regex
                 && let Ok(Some(m)) = re.find(line)
@@ -2535,7 +2535,7 @@ mod tests {
         assert_eq!(hits.len(), 1, "all: {results:?}");
         assert_eq!(
             hits[0].1,
-            "tags-emission-pins-longdesc.noarch: E: description-line-too-long This is a ridiculously long description line that definitely exceeds seventy nine characters."
+            "tags-emission-pins-longdesc.noarch: W: description-line-too-long This is a ridiculously long description line that definitely exceeds seventy nine characters."
         );
     }
 
