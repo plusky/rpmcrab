@@ -272,6 +272,9 @@ mod tests {
         // is the wrong libdir for all of them, `-L/usr/lib64` for the rest.
         for arch in [
             "x86_64",
+            "x86_64_v2",
+            "x86_64_v3",
+            "x86_64_v4",
             "ppc64",
             "ppc64le",
             "s390x",
