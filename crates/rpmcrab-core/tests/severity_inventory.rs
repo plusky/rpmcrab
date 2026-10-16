@@ -401,8 +401,6 @@ fn collect_toml(dir: &PathBuf, out: &mut Vec<PathBuf>) {
 /// (file, tag variable, producing function, extractor kind)
 #[derive(Clone, Copy, PartialEq)]
 enum ProducerKind {
-    /// Literals in `.push("...")` calls in the producer (`fn_push_literals`).
-    Push,
     /// Literals in `Err("...")` / `Err((Level::.., "..."))` (`fn_err_literals`).
     Err,
     /// Every tag-shaped literal in the producer body (`fn_finding_literals`).
@@ -424,7 +422,7 @@ const DYNAMIC_SITES: &[(&str, &str, &str, ProducerKind)] = &[
         "bashisms.rs",
         "warning",
         "classify_bashisms",
-        ProducerKind::Push,
+        ProducerKind::LevelTuples,
     ),
     (
         "duplicates.rs",
@@ -482,7 +480,7 @@ fn tag_text(original: &[char], lit: &StrLit) -> String {
 }
 
 /// Tags (with levels) a producer function yields, per its extractor kind.
-/// Push/Err/TagShapedBody tags pair with `call_level`; LevelTuples pairs
+/// Err/TagShapedBody tags pair with `call_level`; LevelTuples pairs
 /// come from the tuples themselves.
 fn producer_tags(
     original: &[char],
@@ -518,21 +516,6 @@ fn producer_tags(
                     {
                         push_tag(tag_text(original, lit), letter, &mut out);
                     }
-                }
-            }
-        }
-        ProducerKind::Push => {
-            let Some(level) = call_level else { return out };
-            let needle: Vec<char> = ".push(".chars().collect();
-            let mut from = bstart;
-            while let Some(p) = find_subslice(&clean[from..bend], &needle, 0) {
-                let abs = from + p;
-                from = abs + needle.len();
-                if let Some(lit) = strings
-                    .iter()
-                    .find(|l| l.start >= abs + needle.len() && l.start < bend)
-                {
-                    push_tag(tag_text(original, lit), level, &mut out);
                 }
             }
         }

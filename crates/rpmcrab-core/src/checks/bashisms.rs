@@ -72,27 +72,31 @@ impl BashismsCheck {
         self.dash.is_present()
     }
 
-    /// The warnings for one script file: `bin-sh-syntax-error` and/or
-    /// `potential-bashisms`.
+    /// The findings for one script file, with their levels:
+    /// `bin-sh-syntax-error` and/or `potential-bashisms`.
     ///
     /// Pure classification of the two tools' exit codes, split out so tests
     /// can drive it without subprocesses.
-    fn classify_bashisms(dash_code: Option<i32>, bashisms_code: Option<i32>) -> Vec<&'static str> {
+    fn classify_bashisms(
+        dash_code: Option<i32>,
+        bashisms_code: Option<i32>,
+    ) -> Vec<(Level, &'static str)> {
         let mut out = Vec::new();
         match dash_code {
-            Some(2) => out.push("bin-sh-syntax-error"),
+            Some(2) => out.push((Level::Warning, "bin-sh-syntax-error")),
             // 127 or spawn failure: dash itself is missing, nothing to report.
             Some(127) | None => return out,
             _ => {}
         }
         if bashisms_code == Some(1) {
-            out.push("potential-bashisms");
+            // Deliberate divergence (#593): info, not a warning.
+            out.push((Level::Info, "potential-bashisms"));
         }
         out
     }
 
     /// Run the tools and classify their exit codes.
-    fn check_bashisms(&self, path: &str) -> Vec<&'static str> {
+    fn check_bashisms(&self, path: &str) -> Vec<(Level, &'static str)> {
         let dash_code = self.run_dash(path);
         let bashisms_code = self.run_checkbashisms(path);
         Self::classify_bashisms(dash_code, bashisms_code)
@@ -119,8 +123,8 @@ impl Check for BashismsCheck {
         "BashismsCheck"
     }
 
-    /// This check only ever emits warnings (every `add_info` call site
-    /// passes `Level::Warning`), so `--errors-only` skips it.
+    /// This check never emits errors (its findings are warnings and
+    /// info), so `--errors-only` skips it.
     fn max_severity(&self) -> Level {
         Level::Warning
     }
@@ -132,7 +136,7 @@ impl Check for BashismsCheck {
         }
         // Cache by md5 like the reference (kernel-source ships the same
         // script in several packages).
-        let mut cache: std::collections::HashMap<String, Vec<&'static str>> =
+        let mut cache: std::collections::HashMap<String, Vec<(Level, &'static str)>> =
             std::collections::HashMap::new();
         for pkgfile in &pkg.files {
             // The reference counts every non-ghost file (files_re is `.*`) and
@@ -152,8 +156,8 @@ impl Check for BashismsCheck {
             let warnings = cache
                 .entry(key)
                 .or_insert_with(|| self.check_bashisms(&pkgfile.path));
-            for warning in warnings.clone() {
-                add_info(out, Level::Warning, pkg, warning, &[&pkgfile.name]);
+            for (level, warning) in warnings.clone() {
+                add_info(out, level, pkg, warning, &[&pkgfile.name]);
             }
         }
     }
@@ -251,7 +255,7 @@ mod tests {
     fn syntax_error_is_reported() {
         assert_eq!(
             BashismsCheck::classify_bashisms(Some(2), Some(0)),
-            vec!["bin-sh-syntax-error"]
+            vec![(Level::Warning, "bin-sh-syntax-error")]
         );
     }
 
@@ -259,7 +263,10 @@ mod tests {
     fn syntax_error_and_bashisms_combine() {
         assert_eq!(
             BashismsCheck::classify_bashisms(Some(2), Some(1)),
-            vec!["bin-sh-syntax-error", "potential-bashisms"]
+            vec![
+                (Level::Warning, "bin-sh-syntax-error"),
+                (Level::Info, "potential-bashisms")
+            ]
         );
     }
 
@@ -267,7 +274,7 @@ mod tests {
     fn clean_dash_with_bashisms() {
         assert_eq!(
             BashismsCheck::classify_bashisms(Some(0), Some(1)),
-            vec!["potential-bashisms"]
+            vec![(Level::Info, "potential-bashisms")]
         );
     }
 
@@ -290,7 +297,7 @@ mod tests {
         // fires from `dash -n` alone.
         assert_eq!(
             BashismsCheck::classify_bashisms(Some(2), None),
-            vec!["bin-sh-syntax-error"]
+            vec![(Level::Warning, "bin-sh-syntax-error")]
         );
     }
 

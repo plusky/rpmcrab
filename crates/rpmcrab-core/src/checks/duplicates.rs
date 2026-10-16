@@ -48,7 +48,7 @@
 //!
 //! Four findings: `hardlink-across-partition` (E),
 //! `hardlink-across-config-files` (E), `files-duplicate` (W),
-//! `files-duplicated-waste` (E).
+//! `files-duplicated-waste` (W).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -429,9 +429,11 @@ impl DuplicatesCheck {
                 "files-duplicate",
                 vec![a.clone(), b.clone()],
             ),
-            DuplicateFinding::FilesDuplicatedWaste(n) => {
-                (Level::Error, "files-duplicated-waste", vec![n.to_string()])
-            }
+            DuplicateFinding::FilesDuplicatedWaste(n) => (
+                Level::Warning,
+                "files-duplicated-waste",
+                vec![n.to_string()],
+            ),
         }
     }
 }
@@ -1286,8 +1288,8 @@ mod tests {
                 ),
                 (
                     "files-duplicated-waste".to_string(),
-                    'E',
-                    line(&pkg, 'E', "files-duplicated-waste", "120000"),
+                    'W',
+                    line(&pkg, 'W', "files-duplicated-waste", "120000"),
                 ),
             ],
         );

@@ -1,9 +1,9 @@
 //! `ConfigFilesCheck` — configuration files must be in `/etc` or `/var` and
 //! marked `noreplace`.
 //!
-//! Ported from `rpmlint/checks/ConfigFilesCheck.py`. Two findings, both
-//! warnings: `non-etc-or-var-file-marked-as-conffile` and
-//! `conffile-without-noreplace-flag`.
+//! Ported from `rpmlint/checks/ConfigFilesCheck.py`. Two findings:
+//! `non-etc-or-var-file-marked-as-conffile` (info) and
+//! `conffile-without-noreplace-flag` (warning).
 
 use crate::check::{Check, add_info};
 use crate::config::Config;
@@ -18,15 +18,16 @@ impl ConfigFilesCheck {
         Self
     }
 
-    /// Returns the finding name for `filename`, or `None` when it is fine.
-    /// `noreplace` indicates whether the file has the noreplace flag.
-    fn check_one(filename: &str, noreplace: bool) -> Vec<&'static str> {
+    /// Returns the findings for `filename` with their levels, or an
+    /// empty vec when it is fine. `noreplace` indicates whether the
+    /// file has the noreplace flag.
+    fn check_one(filename: &str, noreplace: bool) -> Vec<(&'static str, Level)> {
         let mut out = Vec::new();
         if !filename.starts_with("/etc/") && !filename.starts_with("/var/") {
-            out.push("non-etc-or-var-file-marked-as-conffile");
+            out.push(("non-etc-or-var-file-marked-as-conffile", Level::Info));
         }
         if !noreplace {
-            out.push("conffile-without-noreplace-flag");
+            out.push(("conffile-without-noreplace-flag", Level::Warning));
         }
         out
     }
@@ -37,8 +38,8 @@ impl Check for ConfigFilesCheck {
         "ConfigFilesCheck"
     }
 
-    /// This check only ever emits warnings (every `add_info` call site
-    /// passes `Level::Warning`), so `--errors-only` skips it.
+    /// This check never emits errors (its findings are warnings and
+    /// info), so `--errors-only` skips it.
     fn max_severity(&self) -> Level {
         Level::Warning
     }
@@ -47,8 +48,10 @@ impl Check for ConfigFilesCheck {
         // `pkg.config_files` lists the paths; `noreplace_files` lists those
         // with the flag. Mirror the reference's two loops over the same list.
         for filename in &pkg.config_files {
-            for finding in Self::check_one(filename, pkg.noreplace_files.contains(filename)) {
-                add_info(out, Level::Warning, pkg, finding, &[filename]);
+            for (finding, level) in
+                Self::check_one(filename, pkg.noreplace_files.contains(filename))
+            {
+                add_info(out, level, pkg, finding, &[filename]);
             }
         }
     }
@@ -74,13 +77,19 @@ mod tests {
     #[test]
     fn non_etc_var_is_flagged() {
         let findings = ConfigFilesCheck::check_one("/usr/share/foo.conf", true);
-        assert_eq!(findings, vec!["non-etc-or-var-file-marked-as-conffile"]);
+        assert_eq!(
+            findings,
+            vec![("non-etc-or-var-file-marked-as-conffile", Level::Info)]
+        );
     }
 
     #[test]
     fn missing_noreplace_is_flagged() {
         let findings = ConfigFilesCheck::check_one("/etc/foo.conf", false);
-        assert_eq!(findings, vec!["conffile-without-noreplace-flag"]);
+        assert_eq!(
+            findings,
+            vec![("conffile-without-noreplace-flag", Level::Warning)]
+        );
     }
 
     #[test]
@@ -89,8 +98,8 @@ mod tests {
         assert_eq!(
             findings,
             vec![
-                "non-etc-or-var-file-marked-as-conffile",
-                "conffile-without-noreplace-flag"
+                ("non-etc-or-var-file-marked-as-conffile", Level::Info),
+                ("conffile-without-noreplace-flag", Level::Warning)
             ]
         );
     }

@@ -702,7 +702,7 @@ impl Check for FilesCheck {
                 DanglingDisposition::Plain => out.add_info(make_finding(
                     &cand.name,
                     &cand.arch,
-                    Level::Warning,
+                    Level::Info,
                     "dangling-relative-symlink",
                     vec![cand.fname.clone(), cand.link.clone()],
                     None,
@@ -2045,17 +2045,19 @@ impl FilesCheck {
                 }
             }
             _ => {
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    if relative {
-                        "dangling-relative-symlink"
-                    } else {
-                        "dangling-symlink"
-                    },
-                    &[fname, link],
-                );
+                if relative {
+                    // Deliberate divergence (#593): the relative form
+                    // is info; the absolute form stays a warning.
+                    add_info(
+                        out,
+                        Level::Info,
+                        pkg,
+                        "dangling-relative-symlink",
+                        &[fname, link],
+                    );
+                } else {
+                    add_info(out, Level::Warning, pkg, "dangling-symlink", &[fname, link]);
+                }
             }
         }
     }
@@ -5312,7 +5314,7 @@ mod tests {
                 true,
             )
             .expect("open fixture");
-            // Silence the dangling-relative-symlink warning so the count
+            // Silence the dangling-relative-symlink finding so the count
             // below sees only this check's emissions.
             let parent = std::path::Path::new(fname)
                 .parent()

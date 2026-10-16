@@ -973,7 +973,15 @@ impl Check for SpecCheck {
             for sec in ["prep", "build", "install", "check"] {
                 if self.section.get(sec).copied().unwrap_or(0) == 0 {
                     let check = format!("no-%{sec}-section");
-                    self.info(out, pkg, Level::Warning, &check, &[]);
+                    // Deliberate divergence (#593): a missing %check
+                    // section is advisory (info); the other missing
+                    // sections stay warnings.
+                    let level = if sec == "check" {
+                        Level::Info
+                    } else {
+                        Level::Warning
+                    };
+                    self.info(out, pkg, level, &check, &[]);
                 }
             }
         }
@@ -1803,7 +1811,7 @@ impl SpecCheck {
             return;
         };
         let name = m.get(0).map(|m| m.as_str()).unwrap_or("");
-        self.info(out, pkg, Level::Warning, "obsolete-tmpfiles-macro", &[name]);
+        self.info(out, pkg, Level::Info, "obsolete-tmpfiles-macro", &[name]);
     }
 
     fn checkline_macros_in_comments(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
@@ -2587,7 +2595,13 @@ make install
         let summary: Vec<(&str, &str)> = results
             .iter()
             .map(|(c, l)| {
-                let level = if l.contains(": E: ") { "E" } else { "W" };
+                let level = if l.contains(": E: ") {
+                    "E"
+                } else if l.contains(": I: ") {
+                    "I"
+                } else {
+                    "W"
+                };
                 (c.as_str(), level)
             })
             .collect();
@@ -2595,7 +2609,7 @@ make install
             ("suse-update-desktop-file-deprecated", "W"),
             ("superfluous-%clean-section", "E"),
             ("specfile-warning", "W"),
-            ("no-%check-section", "W"),
+            ("no-%check-section", "I"),
         ] {
             assert!(
                 summary.contains(&(check, level)),
@@ -2927,7 +2941,7 @@ make install
         let lines = lines_for(&results, "obsolete-tmpfiles-macro");
         assert_eq!(lines.len(), 1, "results: {results:?}");
         assert!(
-            lines[0].contains("W: obsolete-tmpfiles-macro %tmpfiles_create_package"),
+            lines[0].contains("I: obsolete-tmpfiles-macro %tmpfiles_create_package"),
             "line: {}",
             lines[0]
         );
@@ -2939,7 +2953,7 @@ make install
         let lines = lines_for(&results, "obsolete-tmpfiles-macro");
         assert_eq!(lines.len(), 1, "results: {results:?}");
         assert!(
-            lines[0].contains("W: obsolete-tmpfiles-macro %tmpfiles_create"),
+            lines[0].contains("I: obsolete-tmpfiles-macro %tmpfiles_create"),
             "line: {}",
             lines[0]
         );
@@ -2964,7 +2978,7 @@ make install
         let lines = lines_for(&results, "obsolete-tmpfiles-macro");
         assert_eq!(lines.len(), 1, "results: {results:?}");
         assert!(
-            lines[0].contains("W: obsolete-tmpfiles-macro %{tmpfiles_create_package}"),
+            lines[0].contains("I: obsolete-tmpfiles-macro %{tmpfiles_create_package}"),
             "line: {}",
             lines[0]
         );
@@ -3211,16 +3225,16 @@ Patch0: foo.patch
     #[test]
     fn missing_mandatory_sections_fire_warnings() {
         let results = run_mini("Name: foo\nVersion: 1.0\n%description\nfoo\n");
-        for check in [
-            "no-%prep-section",
-            "no-%build-section",
-            "no-%install-section",
-            "no-%check-section",
+        for (check, level) in [
+            ("no-%prep-section", "W"),
+            ("no-%build-section", "W"),
+            ("no-%install-section", "W"),
+            ("no-%check-section", "I"),
         ] {
             let lines = lines_for(&results, check);
             assert_eq!(lines.len(), 1, "missing {check}: {results:?}");
             assert!(
-                lines[0].contains(&format!("W: {check}")),
+                lines[0].contains(&format!("{level}: {check}")),
                 "line: {}",
                 lines[0]
             );

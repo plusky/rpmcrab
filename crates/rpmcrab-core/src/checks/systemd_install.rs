@@ -130,7 +130,7 @@ impl Check for SystemdInstallCheck {
 
         for basename in &units {
             for finding in Self::check_unit(basename, &pre, &post, &preun, &postun) {
-                add_info(out, Level::Error, pkg, finding, &[basename]);
+                add_info(out, Level::Warning, pkg, finding, &[basename]);
             }
         }
     }
