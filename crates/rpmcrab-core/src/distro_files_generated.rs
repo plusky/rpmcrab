@@ -48,10 +48,6 @@ const DISTRO_OPENSUSE_FILES: &[(&str, &str)] = &[
         include_str!("../data/distro/opensuse/polkit-rules-whitelist.toml"),
     ),
     (
-        "scoring-strict.override.toml",
-        include_str!("../data/distro/opensuse/scoring-strict.override.toml"),
-    ),
-    (
         "scoring.toml",
         include_str!("../data/distro/opensuse/scoring.toml"),
     ),
@@ -127,10 +123,6 @@ const DISTRO_SLFO_FILES: &[(&str, &str)] = &[
     (
         "polkit-rules-whitelist.toml",
         include_str!("../data/distro/slfo/polkit-rules-whitelist.toml"),
-    ),
-    (
-        "scoring-strict.override.toml",
-        include_str!("../data/distro/slfo/scoring-strict.override.toml"),
     ),
     (
         "scoring.toml",

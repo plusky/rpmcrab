@@ -12,7 +12,9 @@ Tumbleweed/SLE 16 and stale pie-executables paths, retargets ``Filters``
 entries whose target path moved (see RETARGET_FILTERS), prunes ``Filters``
 entries dead in one flavor only (see PRUNE_FLAVOURED), appends the extra
 Filters/Checks rpmcrab carries on top of upstream, removes the Checks
-the opensuse flavor deliberately does not run, and stamps provenance.
+the opensuse flavor deliberately does not run, recalibrates the
+``[Scoring]`` tables (see DROP_SCORING and SCORING_ADDITIONS), and
+stamps provenance.
 
 The checked-in files are the build's source of truth; this script runs by hand
 and in CI (drift check + monthly refresh), never at build time.
@@ -78,6 +80,11 @@ PINS = {
 
 # The vendored file sets, per flavor (configs/openSUSE/*.toml at the pinned
 # SHAs; SLFO dropped varlink-whitelist.toml).
+# Upstream's scoring-strict.override.toml is deliberately not vendored:
+# it is the rpmlint-strict subpackage's layer, and the default bundle
+# carries one calibrated [Scoring] set per flavor instead (issue #594).
+# Users who want the strict layer can still drop the file into their
+# XDG config dir or pass it with -c.
 FILES = {
     "opensuse": [
         "cron-whitelist.toml",
@@ -89,7 +96,6 @@ FILES = {
         "permissions-whitelist.toml",
         "pie-executables.toml",
         "polkit-rules-whitelist.toml",
-        "scoring-strict.override.toml",
         "scoring.toml",
         "security.toml",
         "sudoers-whitelist.toml",
@@ -378,6 +384,35 @@ DROP_LIVE_FILTERS = {
     # catch -- so it fires unsuppressed. Ledgered in
     # tests/parity/divergences.toml.
     "non-standard-dir-in-usr": "blanket filter dropped by ruling (issue #582): FHSCheck whitelists /usr/etc, the MinGW sysroots, X11R6 and the measured cross-toolchain target sysroots in the check itself, so the set the blanket suppressed (416 W lines over the Factory corpus: 213 /usr/etc, 92 MinGW sysroots, 111 cross-toolchain sysroots) is sanctioned practice at the source; the tag now fires only on genuinely novel /usr top-level directories, unsuppressed",
+}
+# [Scoring] entries dropped from the vendored scoring.toml (issue #594,
+# the #289 config-badness pass). A positive Scoring value promotes a
+# W-emitted finding to E, so every entry upstream carries is a severity
+# decision; under the pass's governing rule a finding earns that
+# promotion only when it ALWAYS implies the damage (issue #289, D4).
+# The entries below fail that test -- style findings and packaging-shape
+# judgements with legitimate shapes -- so the promotion goes and the
+# findings print at their emitted W. Each drop is a deliberate
+# divergence from the reference, ledgered in
+# tests/parity/divergences.toml.
+DROP_SCORING = {
+    # finding: reason
+    "devel-file-in-non-devel-package": "a devel-shaped file in a main package is a packaging-shape judgement (runtime soname symlinks are the false-positive family); conditional harm stays W",
+    "files-duplicated-waste": "the damage is the measured byte count the finding already prints; the emission demotes to W (issue #593), where a surviving entry would silently re-promote it to E",
+    "makefile-junk": "a Makefile in a doc directory is a judgement call (shipped examples are legitimate), not damage",
+    "spurious-executable-perm": "a stray exec bit on a data file implies no damage by itself (3,989 promoted E lines in the 20261016 Factory sweep, e.g. test data and icon themes)",
+    "summary-ended-with-dot": "summary punctuation is style, not damage",
+    "summary-not-capitalized": "summary capitalisation is style, not damage",
+}
+
+# [Scoring] entries folded into the vendored base scoring.toml
+# (issue #594): genuine promotions that belong in the base calibration
+# itself, so they survive the strict layer leaving the bundle
+# (scoring-strict.override.toml is not vendored; see FILES). Values are
+# upstream's strict-layer values, unchanged -- only the layer moves.
+# finding: (value, reason)
+SCORING_ADDITIONS = {
+    "invalid-license": (100000, "a license string that fails SPDX validation is a legal metadata defect in itself; the near-miss spellings are the I-level invalid-license-spellcheck tag's job, not a reason to soften this one"),
 }
 
 # (finding, scope) -> reason: Filters entries scoped to dead paths. The finding
@@ -1886,6 +1921,61 @@ def remove_excluded_checks(text, checks):
     return "".join(out)
 
 
+def adjust_scoring(text, dropped_log, added_log):
+    """Apply DROP_SCORING / SCORING_ADDITIONS to a vendored scoring.toml.
+
+    Only the ``[Scoring]`` table is touched. A dropped key loses its
+    line; an addition upstream already carries is rewritten in place
+    (so a future upstream adoption cannot produce a duplicate key),
+    and a missing addition is appended at the end of the file -- the
+    table runs to EOF in the pinned files -- under an explanatory
+    comment, the same self-documenting shape append_extra_checks uses.
+    Idempotent: re-running on adjusted text changes nothing.
+    """
+    lines = text.splitlines(keepends=True)
+    out = []
+    in_scoring = False
+    present = set()
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_scoring = stripped == "[Scoring]"
+            out.append(line)
+            continue
+        if in_scoring:
+            m = re.match(r"^([A-Za-z0-9_.%*-]+)\s*=", stripped)
+            if m:
+                key = m.group(1)
+                present.add(key)
+                if key in DROP_SCORING:
+                    dropped_log.append(
+                        f"Scoring: dropped {key!r} ({DROP_SCORING[key]})"
+                    )
+                    continue
+                if key in SCORING_ADDITIONS:
+                    value, reason = SCORING_ADDITIONS[key]
+                    new_line = f"{key} = {value}\n"
+                    if line != new_line:
+                        added_log.append(
+                            f"Scoring: set {key!r} to {value} ({reason})"
+                        )
+                        out.append(new_line)
+                        continue
+        out.append(line)
+    missing = [k for k in SCORING_ADDITIONS if k not in present]
+    if missing:
+        if out and not out[-1].endswith("\n"):
+            out.append("\n")
+        out.append("\n")
+        out.append("# Added by rpmcrab (deliberate, ledgered divergence; see\n")
+        out.append("# SCORING_ADDITIONS in scripts/generate-distro-configs.py):\n")
+        for key in missing:
+            value, reason = SCORING_ADDITIONS[key]
+            out.append(f"{key} = {value}\n")
+            added_log.append(f"Scoring: added {key!r} = {value} ({reason})")
+    return "".join(out)
+
+
 def generate(ref_dir=None, pins=None):
     """Return {flavor: {filename: text}} and the provenance text."""
     pins = pins or {}
@@ -1910,6 +2000,8 @@ def generate(ref_dir=None, pins=None):
     retargeted_log = []
     scoped_log = []
     deduped_filters_log = []
+    scoring_dropped_log = []
+    scoring_added_log = []
     flavoured_pruned_log = []
     for flavor, data in result.items():
         for filename, text in data["files"].items():
@@ -1920,6 +2012,8 @@ def generate(ref_dir=None, pins=None):
             text = scope_filters(text, scoped_log)
             text = dedupe_filters(text, deduped_filters_log)
             text = prune_flavoured_filters(text, flavor, flavoured_pruned_log)
+            if filename == "scoring.toml":
+                text = adjust_scoring(text, scoring_dropped_log, scoring_added_log)
             text = prune_stale_packages(text, pkg_pruned_log, flavor)
             if filename == "pie-executables.toml":
                 # Per-flavor evidence (see PRUNE_PIE_PATHS): the owning
@@ -2074,6 +2168,24 @@ def generate(ref_dir=None, pins=None):
         provenance.append("# flavor's distro codebase):")
         for entry in pie_pruned_log:
             provenance.append(f"#   {entry}")
+    if scoring_dropped_log:
+        provenance.append("#")
+        provenance.append("# Dropped [Scoring] entries (upstream promotions failing the")
+        provenance.append("# always-implies-damage rule; see DROP_SCORING):")
+        seen_scoring_dropped = set()
+        for entry in scoring_dropped_log:
+            if entry not in seen_scoring_dropped:
+                seen_scoring_dropped.add(entry)
+                provenance.append(f"#   {entry}")
+    if scoring_added_log:
+        provenance.append("#")
+        provenance.append("# Added [Scoring] entries (genuine promotions folded into the")
+        provenance.append("# base calibration; see SCORING_ADDITIONS):")
+        seen_scoring_added = set()
+        for entry in scoring_added_log:
+            if entry not in seen_scoring_added:
+                seen_scoring_added.add(entry)
+                provenance.append(f"#   {entry}")
     if deduped:
         provenance.append("#")
         provenance.append("# SLFO files byte-identical to openSUSE (not vendored twice;")
@@ -2095,6 +2207,8 @@ def generate(ref_dir=None, pins=None):
         scoped_log,
         deduped_filters_log,
         flavoured_pruned_log,
+        scoring_dropped_log,
+        scoring_added_log,
     )
 
 
@@ -2248,7 +2362,7 @@ def main():
         rewrite_pins(Path(__file__).resolve(), pins)
 
     ref_dir = Path(args.ref_dir) if args.ref_dir else None
-    result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, deduped, dropped_log, retargeted_log, scoped_log, deduped_filters_log, flavoured_pruned_log = generate(
+    result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, deduped, dropped_log, retargeted_log, scoped_log, deduped_filters_log, flavoured_pruned_log, scoring_dropped_log, scoring_added_log = generate(
         ref_dir=ref_dir, pins=pins
     )
 
@@ -2356,6 +2470,8 @@ def main():
         print(f"retargeted: {entry}")
     for entry in deduped_filters_log:
         print(f"deduped: {entry}")
+    for entry in scoring_dropped_log + scoring_added_log:
+        print(f"scoring: {entry}")
     print(f"wrote {sum(len(d['files']) for d in result.values())} files + PROVENANCE")
     return 0
 

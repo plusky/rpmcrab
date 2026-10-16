@@ -1557,5 +1557,92 @@ def test_drop_live_filters_drops_non_standard_dir_in_usr_line():
     assert 'non-standard-dir-in-usr' in dropped[1], dropped
     assert pruned == [] and retargeted == [], (pruned, retargeted)
 
+
+# ---------------------------------------------------------------------------
+# adjust_scoring: [Scoring] recalibration (issue #594)
+# ---------------------------------------------------------------------------
+
+def test_adjust_scoring_drops_promotions_and_keeps_the_rest():
+    """DROP_SCORING lines go; every other line survives byte-exact.
+
+    The kept lines matter as much as the dropped ones: summary-too-long
+    keeps its reference calibration (its E is an emission decision, not
+    a promotion) and the dir-or-file-outside-snapshot = 0 demote switch
+    is upstream's stated policy.
+    """
+    text = (
+        "[Scoring]\n"
+        "devel-file-in-non-devel-package = 50\n"
+        "files-duplicated-waste = 100\n"
+        "makefile-junk = 109\n"
+        "spurious-executable-perm = 50\n"
+        "summary-ended-with-dot = 20\n"
+        "summary-not-capitalized = 20\n"
+        "summary-too-long = 200\n"
+        "dir-or-file-outside-snapshot = 0\n"
+    )
+    dropped, added = [], []
+    out = gen.adjust_scoring(text, dropped, added)
+    for key in gen.DROP_SCORING:
+        assert "%s =" % key not in out, out
+    assert "summary-too-long = 200\n" in out, out
+    assert "dir-or-file-outside-snapshot = 0\n" in out, out
+    assert len(dropped) == len(gen.DROP_SCORING), dropped
+    # invalid-license is absent from the fixture, so it is appended
+    # under its explanatory comment, inside the [Scoring] table.
+    assert out.endswith("invalid-license = 100000\n"), out
+    assert "# SCORING_ADDITIONS in scripts/generate-distro-configs.py" in out, out
+    assert len(added) == 1 and "invalid-license" in added[0], added
+
+
+def test_adjust_scoring_is_idempotent():
+    """Re-running on adjusted text changes nothing: the monthly sync
+    regenerates from upstream, but a no-op second pass proves the
+    transform cannot compound (no duplicated additions, no re-drops)."""
+    text = "[Scoring]\nmakefile-junk = 109\nsummary-too-long = 200\n"
+    once = gen.adjust_scoring(text, [], [])
+    twice = gen.adjust_scoring(once, [], [])
+    assert once == twice, (once, twice)
+    assert once.count("invalid-license") == 1, once
+
+
+def test_adjust_scoring_replaces_an_upstream_adopted_addition():
+    """If upstream adopts an addition at another value, the line is
+    rewritten in place -- never duplicated (a duplicate key would make
+    the vendored table fail to parse)."""
+    text = "[Scoring]\ninvalid-license = 5\nsummary-too-long = 200\n"
+    dropped, added = [], []
+    out = gen.adjust_scoring(text, dropped, added)
+    assert out.count("invalid-license") == 1, out
+    assert "invalid-license = 100000\n" in out, out
+    assert "summary-too-long = 200\n" in out, out
+    assert dropped == [], dropped
+    assert len(added) == 1, added
+
+
+def test_adjust_scoring_leaves_other_tables_alone():
+    """A key named like a dropped entry outside [Scoring] is not a
+    scoring decision and must survive."""
+    text = (
+        "[Scoring]\n"
+        "summary-too-long = 200\n"
+        "[SeverityOverrides]\n"
+        "makefile-junk = \"W\"\n"
+    )
+    dropped, added = [], []
+    out = gen.adjust_scoring(text, dropped, added)
+    assert 'makefile-junk = "W"\n' in out, out
+    assert dropped == [], dropped
+
+
+def test_strict_layer_is_not_vendored():
+    """scoring-strict.override.toml stays out of the bundle (issue
+    #594): it is the rpmlint-strict subpackage's layer; the default
+    bundle carries one calibrated [Scoring] set per flavor."""
+    for flavor, files in gen.FILES.items():
+        assert "scoring-strict.override.toml" not in files, (flavor, files)
+        assert "scoring.toml" in files, (flavor, files)
+
+
 if __name__ == "__main__":
     sys.exit(main())

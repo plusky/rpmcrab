@@ -358,6 +358,19 @@
 #   pie-executables: dropped stale path '/usr/sbin/yppush' (ypserv removed from Factory)
 #   pie-executables: dropped stale path '/usr/sbin/ypserv' (ypserv removed from Factory)
 #
+# Dropped [Scoring] entries (upstream promotions failing the
+# always-implies-damage rule; see DROP_SCORING):
+#   Scoring: dropped 'devel-file-in-non-devel-package' (a devel-shaped file in a main package is a packaging-shape judgement (runtime soname symlinks are the false-positive family); conditional harm stays W)
+#   Scoring: dropped 'files-duplicated-waste' (the damage is the measured byte count the finding already prints; the emission demotes to W (issue #593), where a surviving entry would silently re-promote it to E)
+#   Scoring: dropped 'makefile-junk' (a Makefile in a doc directory is a judgement call (shipped examples are legitimate), not damage)
+#   Scoring: dropped 'spurious-executable-perm' (a stray exec bit on a data file implies no damage by itself (3,989 promoted E lines in the 20261016 Factory sweep, e.g. test data and icon themes))
+#   Scoring: dropped 'summary-ended-with-dot' (summary punctuation is style, not damage)
+#   Scoring: dropped 'summary-not-capitalized' (summary capitalisation is style, not damage)
+#
+# Added [Scoring] entries (genuine promotions folded into the
+# base calibration; see SCORING_ADDITIONS):
+#   Scoring: added 'invalid-license' = 100000 (a license string that fails SPDX validation is a legal metadata defect in itself; the near-miss spellings are the I-level invalid-license-spellcheck tag's job, not a reason to soften this one)
+#
 # SLFO files byte-identical to openSUSE (not vendored twice;
 # the generated Rust consts fall back to the openSUSE copy):
 #   slfo/cron-whitelist.toml
