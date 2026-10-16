@@ -1137,12 +1137,19 @@ def test_scope_filters_read_error_pattern_matches_enoent_detail_only():
     (os error 2)'. A read failure with any other errno — what a
     genuine tool or package defect looks like — must NOT match, so
     it surfaces instead of being eaten by the narrowed filter.
+
+    The level is not pinned to W: either: Filter::add_info promotes
+    the level before building the match string, so under --strict or
+    a [SeverityOverrides] entry the same ENOENT line renders with
+    E: and must still match (the \w: convention the sibling
+    no-ldconfig-symlink scoping already uses).
     """
     import re
 
     scoped, _reason = gen.SCOPE_FILTERS["read-error"]
     filtered = [
         "arptables.x86_64: W: read-error No such file or directory (os error 2)",
+        "arptables.x86_64: E: read-error No such file or directory (os error 2)",
         "python313-impacket.noarch: W: read-error No such file or directory (os error 2)",
         "ca-certificates.noarch: W: read-error No such file or directory (os error 2)",
     ]
