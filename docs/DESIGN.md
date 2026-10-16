@@ -809,9 +809,10 @@ contract itself would be a deliberate major-version bump. This avoids
 `vX.Y.Z`. Distribution is primarily the OBS package (`rpmcrab`, plus an
 `rpmcrab-mini` build-root flavour mirroring `rpmlint-mini`); crates.io is
 the secondary channel — `rpmcrab-core` was published at 0.1.0 early on to
-reserve the name and is not kept current. The release workflow ships a
-single `x86_64-unknown-linux-gnu` asset; macOS builds work (§3.1) but no
-macOS release asset is planned.
+reserve the name and is not kept current. The release workflow ships two
+target assets, `x86_64-unknown-linux-gnu` and
+`aarch64-unknown-linux-gnu`; macOS builds work (§3.1) but no macOS
+release asset is planned.
 
 ---
 
