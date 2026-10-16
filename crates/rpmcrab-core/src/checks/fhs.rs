@@ -9,10 +9,70 @@ use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
 
-/// Allowed subdirectories of `/usr` (FHS 3.0, chapters 4.2 and 4.3).
+/// Allowed subdirectories of `/usr`: the FHS 3.0 list (chapters 4.2 and
+/// 4.3), plus the first components the distro treats as standard in
+/// practice - `etc` (the vendor-default config tree), the MinGW
+/// cross-toolchain sysroots and `X11R6` - which FilelistCheck's
+/// GoodPrefixes likewise model as good (ledgered divergence, issue #582).
+/// The additions are appended so the reference's twelve stay in order at
+/// the head of the list (and of the generated description).
 const FHS_USR_SUBDIRS: &[&str] = &[
-    "bin", "lib", "local", "sbin", "share", "games", "include", "libexec", "lib64", "src", "spool",
+    "bin",
+    "lib",
+    "local",
+    "sbin",
+    "share",
+    "games",
+    "include",
+    "libexec",
+    "lib64",
+    "src",
+    "spool",
     "tmp",
+    "etc",
+    "i686-w64-mingw32",
+    "x86_64-w64-mingw32",
+    "X11R6",
+];
+
+/// Cross-toolchain target sysroots: the first components under `/usr`
+/// that are target names of the distro's cross compilers - the
+/// `*-suse-linux` triples and the bare-metal targets. Each names the
+/// sysroot its toolchain installs into, so the check treats them as
+/// standard in practice. They stay out of `FHS_USR_SUBDIRS`: that list
+/// names the standard directories in the generated description, while
+/// this set is the measured Factory population (issue #582), not a
+/// pattern - any other first component still fires.
+const FHS_USR_CROSS_SYSROOTS: &[&str] = &[
+    "aarch64-suse-linux",
+    "amdgcn-amdhsa",
+    "arm-none-eabi",
+    "arm-suse-linux-gnueabi",
+    "avr",
+    "bpf-none",
+    "epiphany-elf",
+    "hppa-suse-linux",
+    "hppa64-suse-linux",
+    "i586-suse-linux",
+    "ia64-suse-linux",
+    "loongarch64-suse-linux",
+    "m68k-suse-linux",
+    "mips-suse-linux",
+    "nvptx-none",
+    "powerpc-suse-linux",
+    "powerpc64-suse-linux",
+    "powerpc64le-suse-linux",
+    "pru",
+    "riscv64-elf",
+    "riscv64-suse-linux",
+    "rx-elf",
+    "s390-suse-linux",
+    "s390x-suse-linux",
+    "sparc-suse-linux",
+    "sparc64-suse-linux",
+    "spu",
+    "x86_64-suse-linux",
+    "xtensa-suse-linux",
 ];
 
 /// Allowed subdirectories of `/var` (FHS 3.0, chapters 5.2 and 5.3).
@@ -41,6 +101,7 @@ impl FHSCheck {
                 let subdir: &str = rest.split('/').next().unwrap_or("");
                 if !subdir.is_empty()
                     && !FHS_USR_SUBDIRS.contains(&subdir)
+                    && !FHS_USR_CROSS_SYSROOTS.contains(&subdir)
                     && !seen_usr.contains(&subdir)
                 {
                     seen_usr.push(subdir);
@@ -127,6 +188,69 @@ mod tests {
     fn non_standard_usr_dir_is_reported() {
         let dirs = FHSCheck::non_standard_dirs(["/usr/weird/tool"].into_iter());
         assert_eq!(dirs, vec![("usr".to_string(), "weird".to_string())]);
+    }
+
+    #[test]
+    fn sanctioned_usr_dirs_are_quiet() {
+        // /usr/etc (vendor-default config tree), the MinGW sysroots and
+        // /usr/X11R6 are standard in distro practice: FilelistCheck's
+        // GoodPrefixes model all of them as good (issue #582).
+        let dirs = FHSCheck::non_standard_dirs(
+            [
+                "/usr/etc/profile.d/alias.ash",
+                "/usr/etc/skel/.bashrc",
+                "/usr/i686-w64-mingw32/sys-root/mingw/bin/cpp.exe",
+                "/usr/x86_64-w64-mingw32/sys-root/mingw/bin/cpp.exe",
+                "/usr/X11R6/bin/xterm",
+            ]
+            .into_iter(),
+        );
+        assert!(dirs.is_empty(), "{dirs:?}");
+    }
+
+    #[test]
+    fn cross_toolchain_sysroots_are_quiet() {
+        // The cross compilers' target sysroots - *-suse-linux triples
+        // and the bare-metal targets - are standard in distro practice
+        // (issue #582).
+        let dirs = FHSCheck::non_standard_dirs(
+            [
+                "/usr/riscv64-suse-linux/bin/ld",
+                "/usr/aarch64-suse-linux/bin/ld",
+                "/usr/arm-suse-linux-gnueabi/bin/ld",
+                "/usr/x86_64-suse-linux/bin/ld",
+                "/usr/avr/bin/avr-gcc",
+                "/usr/amdgcn-amdhsa/lib/libclang_rt.builtins.a",
+                "/usr/rx-elf/bin/rx-elf-gcc",
+                "/usr/nvptx-none/bin/nvptx-none-ld",
+                "/usr/bpf-none/bin/bpf-none-clang",
+                "/usr/pru/bin/pru-gcc",
+                "/usr/arm-none-eabi/bin/arm-none-eabi-gcc",
+                "/usr/epiphany-elf/bin/epiphany-elf-gcc",
+                "/usr/riscv64-elf/bin/riscv64-elf-gcc",
+                "/usr/spu/bin/spu-gcc",
+            ]
+            .into_iter(),
+        );
+        assert!(dirs.is_empty(), "{dirs:?}");
+    }
+
+    #[test]
+    fn every_measured_cross_sysroot_is_quiet() {
+        // Pin the whole measured set: an entry dropped from
+        // FHS_USR_CROSS_SYSROOTS must fail here.
+        assert_eq!(FHS_USR_CROSS_SYSROOTS.len(), 29);
+        for sysroot in FHS_USR_CROSS_SYSROOTS {
+            let path = format!("/usr/{sysroot}/bin/tool");
+            let dirs = FHSCheck::non_standard_dirs([path.as_str()].into_iter());
+            assert!(dirs.is_empty(), "{sysroot}: {dirs:?}");
+        }
+    }
+
+    #[test]
+    fn novel_usr_dir_still_fires() {
+        let dirs = FHSCheck::non_standard_dirs(["/usr/frobnicate/bin/tool"].into_iter());
+        assert_eq!(dirs, vec![("usr".to_string(), "frobnicate".to_string())]);
     }
 
     #[test]
