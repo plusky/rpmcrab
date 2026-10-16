@@ -1,15 +1,15 @@
 # Severity inventory: emitted level(s) per finding tag and the vendored
-# [Scoring] tables, derived mechanically from the tree by the
-# severity_inventory test (crates/rpmcrab-core/tests/severity_inventory.rs).
+# [Scoring] / [SeverityOverrides] tables, derived mechanically from the
+# tree by the severity_inventory test
+# (crates/rpmcrab-core/tests/severity_inventory.rs).
 #
 # A deliberate level or scoring change updates this file in the same diff:
 #     UPDATE_SEVERITY_INVENTORY=1 cargo test -p rpmcrab-core --test severity_inventory
 # An unintentional change fails the test instead of drifting silently.
 #
-# Only statically literal emission sites are listed. Findings whose tag
-# or level is computed at runtime (format!-built families such as
-# `no-%{sec}-section` and `{check_type}-file-*`, variable tags,
-# data-driven levels) do not appear.
+# Emission sites whose tag or level is computed at runtime and cannot
+# be resolved statically are listed under [unresolved-sites] below,
+# never dropped silently.
 
 [emitted-levels]
 %autopatch-not-in-prep = W
@@ -28,6 +28,7 @@ beam-compile-info-missed = W
 beam-compiled-without-debuginfo = E
 beam-was-not-recompiled = W
 bidi-control-character = W
+bin-sh-syntax-error = W
 binary-entry-value-not-found = W
 binary-in-etc = E
 binary-or-shlib-calls-gethostbyname = W
@@ -51,6 +52,7 @@ compressed-symlink-with-wrong-ext = E
 configure-without-libdir-spec = W
 cross-directory-hard-link = W
 dangling-relative-symlink = W
+dangling-symlink = W
 dbus-parsing-exception = E
 debug-files-in-non-debug-package = W
 debuginfo-without-sources = E
@@ -62,6 +64,9 @@ depscript-without-disabling-depgen = W
 description-line-too-long = E
 description-shorter-than-summary = W
 description-use-invalid-word = W
+desktopfile-duplicate-option = E
+desktopfile-duplicate-section = E
+desktopfile-missing-header = E
 desktopfile-without-binary = W
 devel-dependency = E
 devel-file-in-non-devel-package = W
@@ -88,6 +93,8 @@ file-parent-ownership-mismatch = E
 filelist-forbidden-fhs23 = E
 filelist-forbidden-opt = E
 filename-not-utf8 = E
+files-duplicate = W
+files-duplicated-waste = E
 forbidden-controlchar-found = E,W
 forbidden-optflags = E
 ghost-files-without-postin = W
@@ -96,6 +103,8 @@ gzipped-svg-icon = W
 hardcoded-library-path = E
 hardcoded-packager-tag = W
 hardcoded-path-in-menu-icon = W
+hardlink-across-config-files = E
+hardlink-across-partition = E
 hidden-file-or-dir = W
 htaccess-file = E
 incoherent-logrotate-file = E
@@ -156,6 +165,7 @@ manual-page-in-subfolder = E
 menu-command-not-in-package = W
 menu-in-wrong-dir = E
 menu-longtitle-not-capitalized = W
+menu-title-not-capitalized = W
 menu-without-postin = E
 menu-without-postun = E
 mimeinfo-cache-packaged = E
@@ -267,6 +277,7 @@ postin-without-ldconfig = E
 postin-without-update-menus = E
 postun-without-ldconfig = E
 postun-without-update-menus = E
+potential-bashisms = W
 pre-with-tmpfile-creation = W
 prebuilt-binary-in-sources = W
 prereq-use = E
@@ -330,6 +341,10 @@ symlink-has-too-many-up-segments = E
 symlink-should-be-absolute = W
 symlink-should-be-relative = W
 symlink-to-binary-with-shebang = W
+systemd-service-without-service_add_post = E
+systemd-service-without-service_add_pre = E
+systemd-service-without-service_del_postun = E
+systemd-service-without-service_del_preun = E
 systemd-shadowed-initscript = E
 systemd-tmpfile-entry-unauthorized = E
 systemd-tmpfile-ghost = E
@@ -353,6 +368,7 @@ unknown-key = E
 unreasonable-epoch = W
 unstripped-binary-or-object = W
 unused-rpmlintrc-filter = E
+update-alternatives-post-call-missing = E
 update-alternatives-postun-call-missing = E
 update-alternatives-requirement-missing = E
 use-of-RPM_SOURCE_DIR = E
@@ -360,6 +376,7 @@ use-of-launcher-in-menu-but-no-requires-on = E
 useless-provides = E
 version-control-internal-file = E
 version-in-menu-longtitle = W
+version-in-menu-title = W
 world-writable = E
 wrong-entry-format = E
 wrong-file-end-of-line-encoding = W
@@ -370,6 +387,46 @@ wrong-script-interpreter = E
 wrong-tag-found = W
 zero-perms = W
 zero-perms-ghost = W
+
+[unresolved-sites]
+# count = 37
+alternatives.rs: add_info( out, level, pkg, "li
+binaries.rs: add_info( out, info_type, pkg, "unused-direct-
+binaries.rs: add_info(out, Level::Warning, pkg, &r_name, &[&pkgfile.name, &f_name])
+check.rs: add_info(Finding { level: *level, check: (*check).to_string(),
+check.rs: add_info(make_finding( &pkg.name, "", level, check, details.iter().map
+check.rs: add_info(make_finding( &pkg.name, &pkg.arch, level, check, details.ite
+check.rs: add_info_at(out, level, pkg, None, check, details)
+check.rs: make_finding( &pkg.name, "", level, check, details.iter().map(|d| (*d)
+check.rs: make_finding( &pkg.name, &pkg.arch, level, check, details.iter().map(|
+config_files.rs: add_info(out, Level::Warning, pkg, finding, &[filename])
+dbus_policy.rs: add_info(out, level, pkg, finding, &[&detail, fname])
+dbus_policy.rs: add_info(out, level, pkg, finding, &[fname])
+device_files.rs: add_info(out, level, pkg, check, &refs)
+fhs.rs: add_info(out, Level::Warning, pkg, &check, &[&subdir])
+file_digest.rs: add_info( out, Level::Error, pkg,
+file_digest.rs: add_info( out, Level::Warning, pkg, &format!("
+filelist.rs: add_info(out, Level::Error, pkg, &rule.message, &[f])
+files.rs: add_info(finding)
+files.rs: add_info(out, Level::Error, pkg, &tag, &[fname])
+files.rs: add_info(out, level, pkg, "python-bytecode-wrong-magic-value", &refs)
+i18n.rs: add_info(out, level, pkg, &check, &detail_refs)
+menu.rs: add_info( out, Level::Error,
+pam_modules.rs: add_info(out, Level::Error, pkg, finding, &[&detail])
+pkg_config.rs: add_info(out, Level::Error, pkg, check, &[&file.name, l])
+pkg_config.rs: add_info(out, Level::Error, pkg, check, &[&file.name])
+polkit.rs: add_info(out, level, pkg, &finding, &[&detail])
+post.rs: add_info(out, level, pkg, finding, details)
+python.rs: add_info(out, Level::Error, pkg, finding, &[filename])
+source.rs: add_info(out, level, pkg, check, &refs)
+spec.rs: .info( out, pkg, Level::Warning,
+spec.rs: .info(out, pkg, Level::Warning, &check, &[])
+spec.rs: spec_add_info(out, level, pkg, pkg.current_linenum.get(), check, details)
+suid_permissions.rs: add_info( out, Level::Error, pkg, diag,
+tags.rs: add_info( out, Level::Warning, pkg,
+world_writable.rs: add_info(out, level, pkg, check, &refs)
+zip.rs: add_info(out, level, pkg, check, &detail_refs)
+zypp_syntax.rs: add_info(out, Level::Error, pkg, finding, &[&keyword])
 
 [scoring data/configdefaults.toml]
 
