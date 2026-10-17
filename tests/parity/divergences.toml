@@ -392,8 +392,9 @@ since = "0.1.0"
 case = "global"
 check = "systemd-tmpfile-device"
 kind = "behaviour"
-reason = "Deliberate fix of a reference bug (SystemdTmpfilesCheck.py:186): `tf_entry.get_target_path.startswith('/dev')` is missing its call parentheses, so the bound method is always truthy and the 'device not in /dev' sensitivity branch never fires. The port calls the equivalent and treats a device entry outside /dev as sensitive."
+reason = "Deliberate fix of a reference bug (SystemdTmpfilesCheck.py:186): `tf_entry.get_target_path.startswith('/dev')` is missing its call parentheses, so the bound method is always truthy and the 'device not in /dev' sensitivity branch never fires. The port calls the equivalent and treats a device entry outside /dev as sensitive. The port's /dev test matches on a path-component boundary (issue #619): only /dev itself and paths below it are in /dev, so a target such as /device... is outside it."
 since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/619"
 
 [[divergence]]
 case = "global"
