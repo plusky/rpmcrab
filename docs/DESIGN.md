@@ -144,9 +144,9 @@ existing checks:
 **Check-internal patches** (these change *findings*, so each wants a corpus
 case or an explicit ledger entry):
 
-- `BinariesCheck`: `missing-call-to-setgroups-before-setuid` severity is
-  **flipped** — openSUSE emits `E if is_uid else W`, upstream `W if is_uid
-  else E`. This touches the frozen E/W taxonomy.
+- `BinariesCheck`: `missing-call-to-setgroups-before-setuid` severity
+  matches upstream (`E if is_uid else W`); rpmcrab's unconditional `E`
+  is the #593 severity recalibration, not a flavour patch.
 - `BinariesCheck`: `binary-in-etc` also fires under `/usr/etc/`.
 - `DBusPolicyCheck`: new `E: dbus-policy-allow-wildcard` (bsc#1220215) and
   `W: dbus-policy-allow-receive`.
@@ -389,7 +389,8 @@ requires it.
 for post-build runs that only care about errors. CLI-only: there is no config-file
 key (the filter lives in check loading, `check::load_with`). The filter is a
 **static pre-scoring bound** on each check's declared `max_severity`
-(`BashismsCheck`, `ConfigFilesCheck`, `FHSCheck`, `TmpFilesCheck` — every
+(`BashismsCheck`, `ConfigFilesCheck`, `FHSCheck`, `SystemdInstallCheck`,
+`TmpFilesCheck` — every
 `add_info` call site audited): runtime promotions a finding may receive at emit
 time (`Scoring>0`, severity overrides) are invisible at load time, so a finding
 that promotion would have raised to E on a skipped check never runs
@@ -441,9 +442,9 @@ not real flavor divergences:
 | 3 | `file-contains-date-and-time` / `file-contains-current-date` W→E | **QUESTIONABLE** | Plausible (immutable images need reproducibility) but undocumented: no upstream issue, no commit message justifying the severity flip. Held for Tom's decision. |
 | 4 | LogrotateCheck drops `/usr/etc/logrotate.d/` | **REJECTED** | Same staleness as #2: `/usr/etc/` support added to opensuse after the SLFO fork. Do not gate. |
 
-The already-landed `missing-call-to-setgroups-before-setuid` severity flip
-(PR #37, upstream #1462) matches the SLFO form but is implemented
-unconditionally with a ledger entry — it is a bugfix, not a flavor gate.
+`missing-call-to-setgroups-before-setuid` carries upstream's own level
+split (`E if is_uid else W`); rpmcrab's unconditional `E` is the #593
+severity recalibration with a ledger entry, not a flavor gate.
 
 If #3 is approved, the divergence matrix is:
 

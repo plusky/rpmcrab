@@ -1233,7 +1233,7 @@ fn severity_override_json_reports_overridden_level() {
 }
 /// `--errors-only` (upstream rpmlint#134) end-to-end: the header still reports
 /// the configured check count (`docs/DESIGN.md` §4.5 — the reference's
-/// `lint.py:272`), even though only 40 checks run.
+/// `lint.py:272`), even though only 39 checks run.
 #[test]
 fn errors_only_header_reports_configured_check_count() {
     let out = rpmcrab(&[
@@ -1269,6 +1269,25 @@ fn errors_only_empty_selection_warns_instead_of_silently_exiting_zero() {
     assert!(stdout.contains("0 errors, 0 warnings"), "footer: {stdout}");
 }
 
+/// `--checks SystemdInstallCheck --errors-only`: SystemdInstallCheck is
+/// warning-only (its only emission site passes `Level::Warning`), so the
+/// run is empty and warns like any other warning-only selection.
+#[test]
+fn errors_only_skips_systemd_install_check() {
+    let out = rpmcrab(&[
+        "--errors-only",
+        "--checks",
+        "SystemdInstallCheck",
+        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--errors-only skipped every selected check, nothing to run"),
+        "stderr: {stderr}"
+    );
+}
+
 /// `--strict` promotes every finding to E at emit time, so under
 /// `--strict --errors-only` the warning-only check runs: no empty-run
 /// warning. Mutation proof for the strict guard in `errors_only_skips` —
@@ -1291,7 +1310,7 @@ fn strict_reenables_warning_only_checks_under_errors_only() {
 }
 
 /// `--format json --errors-only`: the finding multiset matches the full run
-/// (the four skipped checks fire nothing on this fixture), no finding names
+/// (the five skipped checks fire nothing on this fixture), no finding names
 /// a warning-only check, the JSON `checks` field reports the configured
 /// count, and the summary exit code matches the process.
 #[test]
@@ -1312,6 +1331,7 @@ fn errors_only_json_finding_set_matches_full_run() {
                 "BashismsCheck",
                 "ConfigFilesCheck",
                 "FHSCheck",
+                "SystemdInstallCheck",
                 "TmpFilesCheck"
             ]
             .contains(&check),
