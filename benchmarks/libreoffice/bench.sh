@@ -78,8 +78,9 @@ sys.exit(1 if fail else 0)
 EOF
 }
 
-# run_tool <name> <rpms...> -> prints "<seconds> <logfile>" and leaves the
-# tool's raw output in $RESULTS_DIR/<name>.log
+# run_tool <name> <rpms...> -> prints the wall-clock seconds on one line
+# and "<logfile> <exit-code>" on the next; the raw output is left in
+# $RESULTS_DIR/<name>.log
 run_tool() {
     local name="$1"; shift
     local log="$RESULTS_DIR/$name.log"
@@ -126,7 +127,7 @@ cmd_run() {
     if [ "$name" = "rpmlint" ]; then
         [ -f "$REF_CONFIG" ] || die "reference config missing: $REF_CONFIG"
     fi
-    read -r seconds log rc < <(run_tool "$name" "${rpms[@]}")
+    { read -r seconds; read -r log rc; } < <(run_tool "$name" "${rpms[@]}")
     local counts
     counts=$(summarize "$name" "$log")
     local total_mb
