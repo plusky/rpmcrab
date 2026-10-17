@@ -4,17 +4,36 @@
 //! `shlib-policy-missing-lib`, `readelf-failed`, `shlib-unversioned-lib`,
 //! `shlib-fixed-dependency`, `shlib-policy-excessive-dependency`,
 //! `shlib-policy-obsoletes-sibling`, `shlib-policy-etc-payload`.
+//!
+//! One finding has no reference counterpart: `shlib-devel-unversioned-requires`
+//! (Warning). The shared library packaging policy asks a library `-devel`
+//! package to require its shared library package with a version constraint.
+//! The pairing is cross-package: `check_binary` records every binary package
+//! and `after_checks` groups the records by source package (`SOURCERPM`);
+//! packages built from different sources never pair, however their names
+//! look. A sibling is a package in the same source set whose name matches
+//! the policy naming scheme (`lib<name><number>`, a `-32bit`/`-64bit` suffix
+//! normalised away) and that ships a versioned shared library file
+//! (`.so.<number>`). The `-devel` package paired with it is
+//! `lib<name><number>-devel` or `lib<name>-devel`. The finding fires on the
+//! `-devel` package when none of its requires names the sibling — under the
+//! sibling's own name or one of its non-SONAME provides names — with a
+//! version relation. SONAME provides (`libfoo.so.1()(64bit)`) never count:
+//! they are the automatic file dependencies, not the package pairing.
+//! Rich (boolean) requires are read through their leaves: a leaf naming the
+//! sibling with a version relation satisfies the rule, a bare leaf does not.
 
 use std::collections::{HashMap, HashSet};
 
 use fancy_regex::Regex;
 
-use crate::check::{Check, add_info};
+use crate::check::{Check, add_info, make_finding};
 use crate::checks::is_match;
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
+use crate::pkg::dep::DepInfo;
 use crate::pkg::pkgfile::is_dir;
 
 const RPMSENSE_EQUAL: u32 = 8;
@@ -29,6 +48,25 @@ pub struct SharedLibraryPolicyCheck {
     re_soname_strongly_versioned: Regex,
     re_soname_pkg: Regex,
     re_so_files: Regex,
+    re_versioned_so_file: Regex,
+    seen: Vec<SeenPkg>,
+}
+
+/// One binary package of the run, recorded for the cross-package `-devel`
+/// pairing in `after_checks`.
+struct SeenPkg {
+    name: String,
+    arch: String,
+    source_rpm: Option<String>,
+    requires: Vec<DepInfo>,
+    provides: Vec<String>,
+    has_versioned_so: bool,
+}
+
+/// Cross-package state, exported per package and merged before
+/// `after_checks`.
+struct DevelPairingState {
+    seen: Vec<SeenPkg>,
 }
 
 impl SharedLibraryPolicyCheck {
@@ -37,7 +75,82 @@ impl SharedLibraryPolicyCheck {
             re_soname_strongly_versioned: Regex::new(r"-[\d\.]+\.so$").expect("static regex"),
             re_soname_pkg: Regex::new(r"^lib\S+(\d+(-(32|64)bit)?)$").expect("static regex"),
             re_so_files: Regex::new(r"\S+.so((\.(\d+))*)$").expect("static regex"),
+            re_versioned_so_file: Regex::new(r"\.so\.\d").expect("static regex"),
+            seen: Vec::new(),
         }
+    }
+
+    fn record(&mut self, pkg: &Pkg) {
+        self.record_seen(SeenPkg {
+            name: pkg.name.clone(),
+            arch: pkg.arch.clone(),
+            source_rpm: pkg.source_rpm.clone(),
+            requires: pkg
+                .requires
+                .iter()
+                .chain(pkg.prereq.iter())
+                .cloned()
+                .collect(),
+            provides: pkg.provides.iter().map(|d| d.name.clone()).collect(),
+            has_versioned_so: pkg
+                .files
+                .iter()
+                .any(|f| is_match(&self.re_versioned_so_file, &f.name)),
+        });
+    }
+
+    fn record_seen(&mut self, entry: SeenPkg) {
+        // One entry per (name, arch, source): a repeated package replaces
+        // its earlier record instead of pairing with itself twice.
+        if let Some(old) = self.seen.iter_mut().find(|e| {
+            e.name == entry.name && e.arch == entry.arch && e.source_rpm == entry.source_rpm
+        }) {
+            *old = entry;
+        } else {
+            self.seen.push(entry);
+        }
+    }
+
+    /// The `-devel` package names a policy-named shared library package
+    /// pairs with: `lib<name><number>-devel` and `lib<name>-devel`, with a
+    /// `-32bit`/`-64bit` suffix on the number normalised away. Empty when
+    /// the name does not match the naming scheme.
+    fn devel_names_for(&self, shlib: &str) -> Vec<String> {
+        if !is_match(&self.re_soname_pkg, shlib) {
+            return Vec::new();
+        }
+        // The scheme number is the trailing digit run (plus a normalised
+        // `-32bit`/`-64bit` suffix); the regex capture alone does not pin
+        // it, since the name part is greedy (`libfoo23` captures `3`).
+        let base = shlib
+            .strip_suffix("-32bit")
+            .or_else(|| shlib.strip_suffix("-64bit"))
+            .unwrap_or(shlib);
+        let num_len = base.len() - base.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+        if num_len == 0 {
+            return Vec::new();
+        }
+        let stem = &base[..base.len() - num_len];
+        vec![format!("{base}-devel"), format!("{stem}-devel")]
+    }
+
+    /// Whether the `-devel` package requires the sibling with a version
+    /// relation, under the sibling's name or one of its non-SONAME provides
+    /// names. A bare name or a SONAME require does not satisfy the pairing.
+    fn versioned_sibling_require(devel: &SeenPkg, sibling: &SeenPkg) -> bool {
+        let mut names: Vec<&str> = vec![sibling.name.as_str()];
+        for provide in &sibling.provides {
+            let base = provide.split('(').next().unwrap_or("");
+            if base.starts_with("lib") && !base.contains(".so") {
+                names.push(base);
+            }
+        }
+        devel.requires.iter().any(|dep| {
+            dep.leaves().iter().any(|leaf| {
+                leaf.flags & (RPMSENSE_LESS | RPMSENSE_GREATER | RPMSENSE_EQUAL) != 0
+                    && names.contains(&leaf.name.split('(').next().unwrap_or(""))
+            })
+        })
     }
 
     /// `(soname, needed)` from an ELF file, or the parse failure reason.
@@ -109,6 +222,7 @@ impl Check for SharedLibraryPolicyCheck {
         if pkg.is_source {
             return;
         }
+        self.record(pkg);
         // Only non-development, non-language library packages.
         if !pkg.name.starts_with("lib")
             || pkg.name.ends_with("-devel")
@@ -316,6 +430,62 @@ impl Check for SharedLibraryPolicyCheck {
                         &[dep],
                     );
                 }
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        self.seen.clear();
+    }
+
+    fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
+        Some(Box::new(DevelPairingState {
+            seen: std::mem::take(&mut self.seen),
+        }))
+    }
+
+    fn import_state(&mut self, state: Box<dyn std::any::Any + Send>) {
+        if let Ok(state) = state.downcast::<DevelPairingState>() {
+            for entry in state.seen {
+                self.record_seen(entry);
+            }
+        }
+    }
+
+    fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
+        // Lint order of the `-devel` packages drives the finding order.
+        for d in 0..self.seen.len() {
+            if !self.seen[d].name.ends_with("-devel") {
+                continue;
+            }
+            let Some(source_rpm) = self.seen[d].source_rpm.clone() else {
+                continue;
+            };
+            for s in 0..self.seen.len() {
+                if s == d {
+                    continue;
+                }
+                let sibling = &self.seen[s];
+                if sibling.source_rpm.as_deref() != Some(source_rpm.as_str())
+                    || !sibling.has_versioned_so
+                    || !self
+                        .devel_names_for(&sibling.name)
+                        .contains(&self.seen[d].name)
+                {
+                    continue;
+                }
+                if Self::versioned_sibling_require(&self.seen[d], sibling) {
+                    continue;
+                }
+                let devel = &self.seen[d];
+                out.add_info(make_finding(
+                    &devel.name,
+                    &devel.arch,
+                    Level::Warning,
+                    "shlib-devel-unversioned-requires",
+                    vec![sibling.name.clone()],
+                    None,
+                ));
             }
         }
     }
@@ -956,5 +1126,278 @@ mod tests {
             "findings sorted by path: {}",
             lines[1]
         );
+    }
+
+    fn set_pkg(
+        name: &str,
+        source_rpm: &str,
+        requires: Vec<DepInfo>,
+        provides: Vec<DepInfo>,
+        so_file: Option<&str>,
+    ) -> Pkg {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture header");
+        pkg.name = name.to_string();
+        pkg.arch = "x86_64".to_string();
+        pkg.source_rpm = Some(source_rpm.to_string());
+        pkg.requires = requires;
+        pkg.prereq = vec![];
+        pkg.provides = provides;
+        pkg.files = so_file
+            .map(|f| {
+                vec![PkgFile {
+                    name: f.to_string(),
+                    mode: 0o100644,
+                    ..Default::default()
+                }]
+            })
+            .unwrap_or_default();
+        pkg
+    }
+
+    fn shlib(name: &str, source_rpm: &str) -> Pkg {
+        set_pkg(
+            name,
+            source_rpm,
+            vec![],
+            vec![],
+            Some("/usr/lib64/libfoo.so.1"),
+        )
+    }
+
+    fn devel(name: &str, source_rpm: &str, requires: Vec<DepInfo>) -> Pkg {
+        set_pkg(name, source_rpm, requires, vec![], None)
+    }
+
+    fn dep_versioned(name: &str, flags: u32) -> DepInfo {
+        DepInfo {
+            name: name.to_string(),
+            flags,
+            epoch: None,
+            version: Some("1.0".to_string()),
+            release: Some("1".to_string()),
+        }
+    }
+
+    fn run_set(pkgs: &[&Pkg]) -> Vec<(String, String)> {
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = checker();
+        for pkg in pkgs {
+            check.check_binary(pkg, &config, &mut out);
+        }
+        check.after_checks(&config, &mut out);
+        out.results()
+            .iter()
+            .filter(|(n, _)| n == "shlib-devel-unversioned-requires")
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn devel_bare_require_on_sibling_warns() {
+        let lib = shlib("libfoo1", "foo-1-1.src.rpm");
+        let devel = devel("libfoo-devel", "foo-1-1.src.rpm", vec![dep("libfoo1")]);
+        let results = run_set(&[&lib, &devel]);
+        assert_eq!(results.len(), 1, "exactly one finding: {results:?}");
+        assert_eq!(
+            results[0].1,
+            "libfoo-devel.x86_64: W: shlib-devel-unversioned-requires libfoo1"
+        );
+    }
+
+    #[test]
+    fn devel_missing_require_on_sibling_warns() {
+        let lib = shlib("libfoo1", "foo-1-1.src.rpm");
+        let devel = devel("libfoo-devel", "foo-1-1.src.rpm", vec![dep("unrelated")]);
+        let results = run_set(&[&lib, &devel]);
+        assert_eq!(results.len(), 1, "exactly one finding: {results:?}");
+        assert_eq!(
+            results[0].1,
+            "libfoo-devel.x86_64: W: shlib-devel-unversioned-requires libfoo1"
+        );
+    }
+
+    #[test]
+    fn devel_versioned_require_on_sibling_is_quiet() {
+        for flags in [RPMSENSE_EQUAL, RPMSENSE_GREATER | RPMSENSE_EQUAL] {
+            let lib = shlib("libfoo1", "foo-1-1.src.rpm");
+            let devel = devel(
+                "libfoo-devel",
+                "foo-1-1.src.rpm",
+                vec![dep_versioned("libfoo1", flags)],
+            );
+            assert!(
+                run_set(&[&lib, &devel]).is_empty(),
+                "flags {flags} must satisfy the pairing"
+            );
+        }
+    }
+
+    #[test]
+    fn devel_without_versioned_shlib_sibling_is_quiet() {
+        // The sibling candidate carries no policy number, so the pairing
+        // is out of scope even with a bare require.
+        let lib = shlib("libfoo", "foo-1-1.src.rpm");
+        let devel = devel("libfoo-devel", "foo-1-1.src.rpm", vec![dep("libfoo")]);
+        assert!(run_set(&[&lib, &devel]).is_empty());
+    }
+
+    #[test]
+    fn devel_sibling_without_versioned_so_is_quiet() {
+        // A policy-named package shipping no versioned library file is not
+        // a shared library sibling.
+        let lib = set_pkg(
+            "libfoo1",
+            "foo-1-1.src.rpm",
+            vec![],
+            vec![],
+            Some("/usr/lib64/libfoo.so"),
+        );
+        let devel = devel("libfoo-devel", "foo-1-1.src.rpm", vec![dep("unrelated")]);
+        assert!(run_set(&[&lib, &devel]).is_empty());
+    }
+
+    #[test]
+    fn devel_and_shlib_from_different_sources_do_not_pair() {
+        let lib = shlib("libfoo1", "foo-1-1.src.rpm");
+        let devel = devel("libfoo-devel", "other-2-1.src.rpm", vec![dep("unrelated")]);
+        assert!(run_set(&[&lib, &devel]).is_empty());
+    }
+
+    #[test]
+    fn devel_named_after_numbered_sibling_warns() {
+        let lib = shlib("libfoo1", "foo-1-1.src.rpm");
+        let devel = devel("libfoo1-devel", "foo-1-1.src.rpm", vec![dep("libfoo1")]);
+        let results = run_set(&[&lib, &devel]);
+        assert_eq!(results.len(), 1, "exactly one finding: {results:?}");
+        assert_eq!(
+            results[0].1,
+            "libfoo1-devel.x86_64: W: shlib-devel-unversioned-requires libfoo1"
+        );
+    }
+
+    #[test]
+    fn devel_32bit_sibling_pairs() {
+        let lib = shlib("libfoo1-32bit", "foo-1-1.src.rpm");
+        let devel = devel("libfoo-devel", "foo-1-1.src.rpm", vec![dep("unrelated")]);
+        let results = run_set(&[&lib, &devel]);
+        assert_eq!(results.len(), 1, "exactly one finding: {results:?}");
+        assert_eq!(
+            results[0].1,
+            "libfoo-devel.x86_64: W: shlib-devel-unversioned-requires libfoo1-32bit"
+        );
+    }
+
+    #[test]
+    fn devel_versioned_require_on_sibling_provides_name_is_quiet() {
+        // The sibling provides its stem name with a version; a versioned
+        // require on that name is the package pairing.
+        let mut lib = shlib("libfoo23", "foo-1-1.src.rpm");
+        lib.provides = vec![dep_versioned("libfoo", RPMSENSE_EQUAL)];
+        let devel = devel(
+            "libfoo-devel",
+            "foo-1-1.src.rpm",
+            vec![dep_versioned("libfoo", RPMSENSE_EQUAL)],
+        );
+        assert!(run_set(&[&lib, &devel]).is_empty());
+    }
+
+    #[test]
+    fn devel_bare_require_on_sibling_provides_name_warns() {
+        let mut lib = shlib("libfoo23", "foo-1-1.src.rpm");
+        lib.provides = vec![dep_versioned("libfoo", RPMSENSE_EQUAL)];
+        let devel = devel("libfoo-devel", "foo-1-1.src.rpm", vec![dep("libfoo")]);
+        let results = run_set(&[&lib, &devel]);
+        assert_eq!(results.len(), 1, "exactly one finding: {results:?}");
+    }
+
+    #[test]
+    fn devel_soname_require_does_not_satisfy() {
+        // A SONAME require binds the library file, not the package pairing.
+        let lib = shlib("libfoo1", "foo-1-1.src.rpm");
+        let devel = devel(
+            "libfoo-devel",
+            "foo-1-1.src.rpm",
+            vec![dep_versioned("libfoo.so.1()(64bit)", RPMSENSE_EQUAL)],
+        );
+        let results = run_set(&[&lib, &devel]);
+        assert_eq!(results.len(), 1, "exactly one finding: {results:?}");
+    }
+
+    #[test]
+    fn devel_rich_versioned_require_is_quiet() {
+        let lib = shlib("libfoo1", "foo-1-1.src.rpm");
+        let devel = devel(
+            "libfoo-devel",
+            "foo-1-1.src.rpm",
+            vec![DepInfo {
+                name: "(libfoo1 >= 1.0 with libfoo1-32bit)".to_string(),
+                flags: 0,
+                epoch: None,
+                version: None,
+                release: None,
+            }],
+        );
+        assert!(run_set(&[&lib, &devel]).is_empty());
+    }
+
+    #[test]
+    fn devel_rich_bare_require_warns() {
+        let lib = shlib("libfoo1", "foo-1-1.src.rpm");
+        let devel = devel(
+            "libfoo-devel",
+            "foo-1-1.src.rpm",
+            vec![DepInfo {
+                name: "(libfoo1 or libbar1)".to_string(),
+                flags: 0,
+                epoch: None,
+                version: None,
+                release: None,
+            }],
+        );
+        let results = run_set(&[&lib, &devel]);
+        assert_eq!(results.len(), 1, "exactly one finding: {results:?}");
+    }
+
+    #[test]
+    fn devel_pairing_merges_worker_state() {
+        let config = Config::default();
+        let lib = shlib("libfoo1", "foo-1-1.src.rpm");
+        let devel = devel("libfoo-devel", "foo-1-1.src.rpm", vec![dep("unrelated")]);
+        let mut w0 = checker();
+        let mut out0 = Filter::new(&config, Color::for_tty(false)).unwrap();
+        w0.check_binary(&lib, &config, &mut out0);
+        let s0 = w0.export_state().expect("worker 0 exports");
+        let mut w1 = checker();
+        let mut out1 = Filter::new(&config, Color::for_tty(false)).unwrap();
+        w1.check_binary(&devel, &config, &mut out1);
+        let s1 = w1.export_state().expect("worker 1 exports");
+        let mut main = checker();
+        main.import_state(s0);
+        main.import_state(s1);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        main.after_checks(&config, &mut out);
+        let results: Vec<_> = out
+            .results()
+            .iter()
+            .filter(|(n, _)| n == "shlib-devel-unversioned-requires")
+            .collect();
+        assert_eq!(results.len(), 1, "merged state must pair: {results:?}");
+    }
+
+    #[test]
+    fn devel_pairing_reset_drops_state() {
+        let config = Config::default();
+        let lib = shlib("libfoo1", "foo-1-1.src.rpm");
+        let devel = devel("libfoo-devel", "foo-1-1.src.rpm", vec![dep("unrelated")]);
+        let mut check = checker();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(&lib, &config, &mut out);
+        check.check_binary(&devel, &config, &mut out);
+        check.reset();
+        check.after_checks(&config, &mut out);
+        assert!(out.results().is_empty(), "state leaked across reset");
     }
 }
