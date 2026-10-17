@@ -2308,3 +2308,11 @@ kind = "behaviour"
 reason = "Deliberate output-contract break (plusky/rpmcrab#595, decided in plusky/rpmcrab#289 D7 with plusky's go-ahead recorded there): the text renderer shows the (Badness: N) column whenever badness > 0; the reference shows it only when N > 1 (filter.py). Any finding that counts toward the score now shows its weight in text output — in practice, unscored errors (default badness 1) and findings scored exactly 1 gain the column. The filter-match string (DESIGN §4.2) carries no badness column on either side, and the JSON form already carried the exact badness per finding."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/595"
+
+[[divergence]]
+case = "global"
+check = "filelist-forbidden-opt"
+kind = "behaviour"
+reason = "Deliberate false-positive fix (issue #605): the port requires the /opt/ prefix, i.e. a component boundary, and skips empty providers. The reference matches the bare '/opt' prefix (FilelistCheck.py:132), so a payload under a longer sibling such as /optical/foo/... yields a bogus /opt/foo finding there, and a bare /opt directory entry yields a malformed /opt/ finding with an empty provider; the port reports neither. Genuine /opt/<provider> payloads fire exactly as in the reference."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/605"
