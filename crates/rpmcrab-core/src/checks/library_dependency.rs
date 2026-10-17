@@ -574,28 +574,47 @@ mod tests {
         let (lib0, devel0) = lib_and_devel_as("libdep0", "libdep0-devel", &[]);
         let (lib1, devel1) = lib_and_devel_as("libdep1", "libdep1-devel", &[]);
 
-        // Sequential baseline.
+        // Sequential baseline: state accumulates across packages (no reset
+        // between `check_binary` calls), so `after_checks` sees both devel
+        // packages.
         let mut seq = LibraryDependencyCheck::new(&config);
         let mut seq_out = Filter::new(&config, Color::for_tty(false)).unwrap();
         for pkg in [&lib0, &devel0, &lib1, &devel1] {
             seq.check_binary(pkg, &config, &mut seq_out);
-            seq.reset();
         }
         seq.after_checks(&config, &mut seq_out);
 
+        // Neither devel package depends on its library, so the baseline is
+        // one `no-library-dependency-on` finding per devel package, in
+        // package order — the result the merged run must reproduce.
+        let seq_results = seq_out.results();
+        assert_eq!(seq_results.len(), 2, "{seq_results:?}");
+        assert_eq!(seq_results[0].0, "no-library-dependency-on");
+        assert!(
+            seq_results[0].1.starts_with("libdep0-devel.x86_64:"),
+            "first finding out of package order: {}",
+            seq_results[0].1
+        );
+        assert_eq!(seq_results[1].0, "no-library-dependency-on");
+        assert!(
+            seq_results[1].1.starts_with("libdep1-devel.x86_64:"),
+            "second finding out of package order: {}",
+            seq_results[1].1
+        );
+
         // Two workers, one package pair each, merged in package order.
+        // Production order is check → export → reset, and `export_state`
+        // takes the accumulated state, so the export must come first.
         let mut w0 = LibraryDependencyCheck::new(&config);
         let mut w0_out = Filter::new(&config, Color::for_tty(false)).unwrap();
         for pkg in [&lib0, &devel0] {
             w0.check_binary(pkg, &config, &mut w0_out);
-            w0.reset();
         }
         let s0 = w0.export_state().expect("worker 0 exports");
         let mut w1 = LibraryDependencyCheck::new(&config);
         let mut w1_out = Filter::new(&config, Color::for_tty(false)).unwrap();
         for pkg in [&lib1, &devel1] {
             w1.check_binary(pkg, &config, &mut w1_out);
-            w1.reset();
         }
         let s1 = w1.export_state().expect("worker 1 exports");
 
