@@ -90,8 +90,9 @@ Provenance, verified against the pinned reference (`84848c0`):
   each fix is a deliberate `kind="detail"` divergence, ledgered in
   `tests/parity/divergences.toml`.
 - `SharedLibraryPolicyCheck.toml` — the reference file, plus the
-  port-only `shlib-policy-obsoletes-sibling` entry. The reference has no
-  such finding, so `--explain` would print `Unknown message` for it;
+  port-only `shlib-policy-obsoletes-sibling` and
+  `shlib-policy-etc-payload` entries. The reference has no
+  such findings, so `--explain` would print `Unknown message` for them;
   ledgered in `tests/parity/divergences.toml`.
 - `FilesCheck.toml` — the reference file, minus the `outside-libdir-files`
   entry (openSUSE: "Doesn't seem to make sense") dropped with
