@@ -2,11 +2,12 @@
 # LibreOffice lint benchmark: rpmcrab vs reference rpmlint.
 #
 # Repeatable by design: the RPM set is pinned in manifest.tsv
-# (name, repo-relative path, size, sha256). Re-running downloads
-# only missing/corrupt files and verifies every hash.
+# (name, repo-relative path, size, checksum type, checksum).
+# Re-running downloads only missing/corrupt files and verifies
+# every hash.
 #
 # Usage:
-#   bench.sh download [RPMS_DIR]   fetch + sha256-verify all RPMs
+#   bench.sh download [RPMS_DIR]   fetch + hash-verify all RPMs
 #   bench.sh rpmcrab [RPMS_DIR]    time rpmcrab over the set, print JSON
 #   bench.sh rpmlint [RPMS_DIR]    time reference rpmlint over the set, print JSON
 #   bench.sh all [RPMS_DIR]        download + both runs, print combined JSON
@@ -57,7 +58,12 @@ for line in open(manifest):
     size = int(size)
     total += 1
     fn = os.path.join(dest, os.path.basename(relpath))
-    digest = lambda f: hashlib.new(ctype, open(f, "rb").read()).hexdigest()
+    def digest(fn):
+        h = hashlib.new(ctype)
+        with open(fn, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
     if os.path.exists(fn) and os.path.getsize(fn) == size:
         if digest(fn) == sha:
             skip += 1
@@ -133,9 +139,9 @@ cmd_run() {
     counts=$(summarize "$name" "$log")
     local total_mb
     total_mb=$(python3 -c "
-import glob, os
-fs = glob.glob('$dir/*.rpm')
-print(f'{sum(os.path.getsize(f) for f in fs)/1024/1024:.1f}')")
+import glob, os, sys
+fs = glob.glob(os.path.join(sys.argv[1], '*.rpm'))
+print(f'{sum(os.path.getsize(f) for f in fs)/1024/1024:.1f}')" "$dir")
     python3 - "$name" "$seconds" "$counts" "${#rpms[@]}" "$total_mb" "$rc" <<'EOF'
 import json, sys
 name, seconds, counts, n, mb, rc = sys.argv[1:]
