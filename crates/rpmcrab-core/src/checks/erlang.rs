@@ -244,17 +244,31 @@ fn read_compile_info(path: &str) -> Result<Option<CompileInfo>, String> {
 
     // Compile info is a list of {Key, Value} tuples (older) or a map (newer).
     let pairs: Vec<(Term, Term)> = match term {
-        Term::List(items) => items
-            .into_iter()
-            .filter_map(|t| match t {
-                Term::Tuple(mut elems) if elems.len() == 2 => {
-                    let v = elems.pop().unwrap();
-                    let k = elems.pop().unwrap();
-                    Some((k, v))
+        Term::List(items) => {
+            let mut pairs = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Term::Tuple(mut elems) | Term::List(mut elems) if elems.len() == 2 => {
+                        let v = elems.pop().unwrap();
+                        let k = elems.pop().unwrap();
+                        pairs.push((k, v));
+                    }
+                    // pybeam builds `dict(cinf)` from the list, and
+                    // `dict()` accepts any 2-element sequence as a pair:
+                    // a 2-byte binary is a sequence of two integers,
+                    // which can never match an atom key, so it is kept
+                    // as a pair of opaque terms.
+                    Term::Binary(b) if b.len() == 2 => {
+                        pairs.push((Term::Other, Term::Other));
+                    }
+                    // An element that is not a 2-element sequence
+                    // raises in `dict(cinf)` there; the reference
+                    // reports `pybeam-failed` for the file.
+                    _ => return Err("compile info entry is not a pair".to_string()),
                 }
-                _ => None,
-            })
-            .collect(),
+            }
+            pairs
+        }
         Term::Map(pairs) => pairs,
         // The chunk is present but holds no compile info structure:
         // pybeam raises when it builds a dict from such a term, so
@@ -624,6 +638,118 @@ mod tests {
                 "payload {payload:?} must fail"
             );
         }
+    }
+
+    /// External term for `[{options, [debug_info]}, junk]`: a valid pair
+    /// followed by an element that is not a pair at all.
+    fn compile_info_with_non_pair_term() -> Vec<u8> {
+        let mut t = vec![131];
+        // LIST_EXT, len 2
+        t.extend_from_slice(&[108, 0, 0, 0, 2]);
+        // {options, [debug_info]}
+        t.extend_from_slice(&[104, 2]); // SMALL_TUPLE_EXT arity 2
+        t.extend_from_slice(&[119, 7]); // SMALL_ATOM_UTF8_EXT "options"
+        t.extend_from_slice(b"options");
+        t.extend_from_slice(&[108, 0, 0, 0, 1]); // LIST_EXT len 1
+        t.extend_from_slice(&[119, 10]);
+        t.extend_from_slice(b"debug_info");
+        t.push(106); // NIL tail
+        // junk
+        t.extend_from_slice(&[119, 4]); // SMALL_ATOM_UTF8_EXT "junk"
+        t.extend_from_slice(b"junk");
+        t.push(106); // NIL tail
+        t
+    }
+
+    /// A compile-info element that is not a {Key, Value} pair fails the
+    /// whole chunk: pybeam builds `dict(cinf)`, which raises on such an
+    /// element, and the reference reports `pybeam-failed`. Dropping the
+    /// element instead would silently accept a chunk the reference
+    /// rejects.
+    #[test]
+    fn non_pair_compile_info_entry_fails() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("nonpair.beam");
+        std::fs::write(&path, beam_with_cinf(&compile_info_with_non_pair_term())).unwrap();
+        assert_eq!(
+            read_compile_info(path.to_str().unwrap()).err().as_deref(),
+            Some("compile info entry is not a pair")
+        );
+    }
+
+    /// A tuple of the wrong arity is not a pair either, and fails the
+    /// same way.
+    #[test]
+    fn non_pair_tuple_compile_info_entry_fails() {
+        let mut t = vec![131];
+        // LIST_EXT, len 1
+        t.extend_from_slice(&[108, 0, 0, 0, 1]);
+        // {options, [debug_info], extra}
+        t.extend_from_slice(&[104, 3]); // SMALL_TUPLE_EXT arity 3
+        t.extend_from_slice(&[119, 7]);
+        t.extend_from_slice(b"options");
+        t.extend_from_slice(&[108, 0, 0, 0, 1]);
+        t.extend_from_slice(&[119, 10]);
+        t.extend_from_slice(b"debug_info");
+        t.push(106); // NIL tail
+        t.extend_from_slice(&[119, 5]);
+        t.extend_from_slice(b"extra");
+        t.push(106); // NIL tail
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("tup3.beam");
+        std::fs::write(&path, beam_with_cinf(&t)).unwrap();
+        assert_eq!(
+            read_compile_info(path.to_str().unwrap()).err().as_deref(),
+            Some("compile info entry is not a pair")
+        );
+    }
+
+    /// A 2-element list element is a pair too: `dict(cinf)` accepts any
+    /// 2-element sequence, so `[options, [debug_info]]` written as a
+    /// list rather than a tuple is accepted by the reference and its
+    /// options are read.
+    #[test]
+    fn list_pair_compile_info_entry_is_accepted() {
+        let mut t = vec![131];
+        // LIST_EXT, len 1
+        t.extend_from_slice(&[108, 0, 0, 0, 1]);
+        // [options, [debug_info]] as a list
+        t.extend_from_slice(&[108, 0, 0, 0, 2]);
+        t.extend_from_slice(&[119, 7]);
+        t.extend_from_slice(b"options");
+        t.extend_from_slice(&[108, 0, 0, 0, 1]);
+        t.extend_from_slice(&[119, 10]);
+        t.extend_from_slice(b"debug_info");
+        t.push(106); // NIL tail
+        t.push(106); // NIL tail
+        t.push(106); // NIL tail
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("listpair.beam");
+        std::fs::write(&path, beam_with_cinf(&t)).unwrap();
+        let info = read_compile_info(path.to_str().unwrap())
+            .expect("2-element list entry is a pair")
+            .expect("compile info present");
+        assert_eq!(
+            info.options.expect("options read"),
+            vec!["debug_info".to_string()]
+        );
+    }
+
+    /// A 2-byte binary element is a 2-element sequence of integers for
+    /// `dict(cinf)`, so it is accepted as a pair (its integer key can
+    /// never match an atom key).
+    #[test]
+    fn two_byte_binary_compile_info_entry_is_accepted() {
+        let mut t = vec![131];
+        // LIST_EXT, len 1
+        t.extend_from_slice(&[108, 0, 0, 0, 1]);
+        // BINARY_EXT, len 2
+        t.extend_from_slice(&[109, 0, 0, 0, 2, 1, 2]);
+        t.push(106); // NIL tail
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("binpair.beam");
+        std::fs::write(&path, beam_with_cinf(&t)).unwrap();
+        assert!(read_compile_info(path.to_str().unwrap()).is_ok());
     }
 
     /// A crafted CInf of nothing but nested SMALL_TUPLE wrappers used
