@@ -148,11 +148,19 @@ jobs:
           packages: librpm-dev rpm file devscripts dash desktop-file-utils appstream-util
           version: ${{ steps.apt-cache-version.outputs.version }}
           execute_install_scripts: true
+      # Spellcheck tests need real hunspell dictionaries; grab the LibreOffice
+      # en_US pair (the same source openSUSE packages from).
+      - name: Install hunspell dictionaries
+        run: |
+          sudo mkdir -p /usr/share/hunspell
+          sudo curl -sL -o /usr/share/hunspell/en_US.aff https://cgit.freedesktop.org/libreoffice/dictionaries/plain/en/en_US.aff
+          sudo curl -sL -o /usr/share/hunspell/en_US.dic https://cgit.freedesktop.org/libreoffice/dictionaries/plain/en/en_US.dic
       - name: Assert beta toolchain
         run: |
           rustc --version
           rustc --version | grep -q beta
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --features gen --locked -- -D warnings
       - run: cargo test --workspace --all-targets --locked
 
   rust-msrv:
@@ -196,10 +204,11 @@ jobs:
           rustc --version | grep -q "${{ steps.msrv.outputs.value }}"
       # cargo check, not build, over --all-targets: an MSRV break in test code
       # or a dev-dependency otherwise passes here and only bites a contributor.
+      # --features gen so the feature-gated rpmcrab-gen bin is checked too.
       - name: cargo check at MSRV
         run: |
           export RUSTUP_TOOLCHAIN="${{ steps.msrv.outputs.value }}"
-          cargo check --workspace --all-targets --locked
+          cargo check --workspace --all-targets --features gen --locked
 
   rust-deny:
     runs-on: ubuntu-latest
