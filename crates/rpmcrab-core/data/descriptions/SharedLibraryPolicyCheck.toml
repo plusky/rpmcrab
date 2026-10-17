@@ -35,3 +35,9 @@ unversioned path by the package for the next SONAME generation conflicts
 with this one at file level, so the two generations cannot be installed
 in parallel. Move the files into a separate package.
 """
+shlib-devel-unversioned-requires="""
+Your library -devel package does not require the shared library package with a
+version constraint. The Shared Library Policy asks for a properly versioned
+requires on the shared library package, so that installing the -devel package
+cannot pull in a library generation it was not built against.
+"""

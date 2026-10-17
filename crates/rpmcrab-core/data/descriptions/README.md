@@ -26,6 +26,10 @@ Provenance, verified against the pinned reference (`84848c0`):
   `rpmlint/descriptions/` files of the same name.
 - `ZipCheck.toml` — the reference file, minus the `jar-not-indexed` and
   `uncompressed-zip` entries dropped with the findings (negligible value).
+- `SharedLibraryPolicyCheck.toml` — the reference file, plus the port-only
+  `shlib-devel-unversioned-requires` entry. The reference has no such
+  finding, so `--explain` would print `Unknown message` for it; ledgered in
+  `tests/parity/divergences.toml`.
 - `XinetdDepCheck.toml` — the reference's `descriptions/CheckForXinetd.toml`,
   renamed to the module name, plus the port-only `deprecated-xinetd-config`
   entry (ledgered in `tests/parity/divergences.toml`).
