@@ -246,18 +246,25 @@ impl FilelistCheck {
     /// The FHS-prefix violations, deduplicated to one report per directory.
     fn fhs_violations(&self, pkg: &Pkg) -> (Vec<String>, Vec<String>) {
         let mut invalid_fhs = std::collections::BTreeSet::new();
-        let mut invalid_opt = std::collections::BTreeSet::new();
         let is_suse = pkg
             .tag_str(librpm::Tag::VENDOR)
             .is_some_and(|v| v.contains("SUSE"));
 
-        for pkgfile in &pkg.files {
-            let mut f = pkgfile.name.clone();
-            let file_type = (pkgfile.mode >> 12) & 0o17;
-            if file_type == 4 {
-                f.push('/');
-            }
+        // Directory entries carry a trailing slash for the prefix
+        // matching below.
+        let paths: Vec<String> = pkg
+            .files
+            .iter()
+            .map(|pkgfile| {
+                let mut f = pkgfile.name.clone();
+                if (pkgfile.mode >> 12) & 0o17 == 4 {
+                    f.push('/');
+                }
+                f
+            })
+            .collect();
 
+        for f in &paths {
             if !self.good_prefixes.iter().any(|p| f.starts_with(p)) {
                 // Find the first invalid path component.
                 let mut base = f.as_str().rsplit_once('/').map(|(b, _)| b).unwrap_or("");
@@ -269,15 +276,32 @@ impl FilelistCheck {
                     pfx = Some(base);
                     base = base.rsplit_once('/').map(|(b, _)| b).unwrap_or("");
                 }
-                invalid_fhs.insert(pfx.unwrap_or(&f).to_string());
+                invalid_fhs.insert(pfx.unwrap_or(f).to_string());
             }
+        }
+        (
+            invalid_fhs.into_iter().collect(),
+            Self::invalid_opt_providers(paths.iter().map(String::as_str), is_suse),
+        )
+    }
 
-            // The provider is the first component under /opt, so the
-            // match must end at a component boundary: a longer sibling
-            // (`/optical/...`) is not an /opt payload, and the bare /opt
-            // directory itself has no provider to report.
+    /// The `/opt/<provider>` directories a payload installs into,
+    /// deduplicated to one report per provider. The provider is the
+    /// first component under /opt, so the match must end at a component
+    /// boundary: a longer sibling (`/optical/...`) is not an /opt
+    /// payload, and the bare /opt directory itself has no provider to
+    /// report. A SUSE-vendor package is exempt for the `suse` and
+    /// `novell` providers.
+    fn invalid_opt_providers<'a>(
+        paths: impl IntoIterator<Item = &'a str>,
+        is_suse: bool,
+    ) -> Vec<String> {
+        let mut invalid_opt = std::collections::BTreeSet::new();
+        for f in paths {
             if let Some(rest) = f.strip_prefix("/opt/") {
-                let provider = rest.split('/').next().unwrap_or("");
+                // A split always yields a first segment, even for an
+                // empty remainder.
+                let provider = rest.split('/').next().expect("split yields one segment");
                 if !provider.is_empty()
                     && !(is_suse && (provider == "suse" || provider == "novell"))
                 {
@@ -285,10 +309,7 @@ impl FilelistCheck {
                 }
             }
         }
-        (
-            invalid_fhs.into_iter().collect(),
-            invalid_opt.into_iter().collect(),
-        )
+        invalid_opt.into_iter().collect()
     }
 }
 
@@ -790,6 +811,45 @@ mod tests {
             ),
             "name, level and detail: {}",
             lines[0]
+        );
+    }
+
+    #[test]
+    fn suse_vendor_opt_providers_are_exempt() {
+        // A SUSE-vendor package may install under the `suse` and
+        // `novell` providers; any other provider is still reported.
+        let providers = FilelistCheck::invalid_opt_providers(
+            [
+                "/opt/suse/bin/tool",
+                "/opt/suse/lib/libsuse.so",
+                "/opt/novell/bin/tool",
+                "/opt/acme/bin/tool",
+                "/opt/acme/lib/libacme.so",
+            ],
+            true,
+        );
+        assert_eq!(providers, vec!["/opt/acme".to_string()]);
+    }
+
+    #[test]
+    fn non_suse_vendor_opt_providers_all_fire() {
+        // The exemption is gated on the SUSE vendor: the same payload
+        // from any other vendor reports every provider.
+        let providers = FilelistCheck::invalid_opt_providers(
+            [
+                "/opt/suse/bin/tool",
+                "/opt/novell/bin/tool",
+                "/opt/acme/bin/tool",
+            ],
+            false,
+        );
+        assert_eq!(
+            providers,
+            vec![
+                "/opt/acme".to_string(),
+                "/opt/novell".to_string(),
+                "/opt/suse".to_string()
+            ]
         );
     }
 
