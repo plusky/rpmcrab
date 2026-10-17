@@ -341,6 +341,7 @@ symlink-has-too-many-up-segments = E
 symlink-should-be-absolute = W
 symlink-should-be-relative = W
 symlink-to-binary-with-shebang = W
+systemd-preset-packaged = W
 systemd-service-without-service_add_post = W
 systemd-service-without-service_add_pre = W
 systemd-service-without-service_del_postun = W

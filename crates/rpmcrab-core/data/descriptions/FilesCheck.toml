@@ -34,6 +34,12 @@ systemd-unit-in-etc="""
 A systemd unit has been packaged in /etc/systemd/system. These units should
 be installed in the system unit dir instead.
 """
+systemd-preset-packaged="""
+A systemd preset file has been packaged. Preset files encode the
+distribution's default enablement policy and must be shipped only by the
+distribution's preset packages; enablement belongs in those central preset
+files, not in individual packages.
+"""
 udev-rule-in-etc="""
 A udev rule has been packaged in /etc/udev/rules.d. These rules should be
 installed in the system rules dir instead.

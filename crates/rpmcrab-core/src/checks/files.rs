@@ -6,8 +6,10 @@
 //!
 //! Deliberate gaps are ledgered in `tests/parity/divergences.toml`.
 //!
-//! One finding has no reference counterpart: `debug-files-in-non-debug-package`
-//! (upstream feature request rpm-software-management/rpmlint#11).
+//! Two findings have no reference counterpart: `debug-files-in-non-debug-package`
+//! (upstream feature request rpm-software-management/rpmlint#11) and
+//! `systemd-preset-packaged` (preset files are distro policy, shipped only
+//! by the packages named in the `SystemdPresetPackages` config key).
 
 #![allow(clippy::collapsible_if, clippy::bool_comparison)]
 
@@ -433,6 +435,7 @@ pub struct FilesCheck {
     standard_users: Vec<String>,
     standard_groups: Vec<String>,
     disallowed_dirs: Vec<String>,
+    preset_packages: Vec<String>,
     dangling_exceptions: Vec<(String, Regex)>,
     ldconfig_re: Regex,
     python_default_version: String,
@@ -553,6 +556,7 @@ impl FilesCheck {
             standard_users: get_strings("StandardUsers"),
             standard_groups: get_strings("StandardGroups"),
             disallowed_dirs: get_strings("DisallowedDirs"),
+            preset_packages: get_strings("SystemdPresetPackages"),
             dangling_exceptions: dangling,
             ldconfig_re: Regex::new(r"(?m)^[^#]*ldconfig").expect("static regex"),
             python_default_version: get_str("PythonDefaultVersion"),
@@ -1059,6 +1063,7 @@ impl FilesCheck {
         self.check_file_non_ghost_in_run(pkg, fname, pkg, out);
         self.check_file_mimeinfo_cache(pkg, fname, pkgfile, out);
         self.check_file_systemd_unit_in_etc(pkg, fname, out);
+        self.check_file_systemd_preset(pkg, fname, pkgfile, out);
         self.check_file_udev_rule_in_etc(pkg, fname, out);
         self.check_file_tmpfiles_conf_in_etc(pkg, fname, out);
         self.check_file_subdir_in_bin(pkg, fname, out);
@@ -1686,6 +1691,43 @@ impl FilesCheck {
     fn check_file_systemd_unit_in_etc(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
         if fname.starts_with("/etc/systemd/system/") {
             add_info(out, Level::Warning, pkg, "systemd-unit-in-etc", &[fname]);
+        }
+    }
+
+    fn check_file_systemd_preset(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        out: &mut Filter,
+    ) {
+        // Preset files encode the distribution's default enablement policy
+        // and are shipped only by its preset packages (the
+        // `SystemdPresetPackages` config key); any other package shipping
+        // one sets enablement policy outside that central place.
+        if self.preset_packages.iter().any(|n| n == &pkg.name) {
+            return;
+        }
+        if !pkgfile::is_reg(pkgfile.mode) {
+            return;
+        }
+        for dir in [
+            "/usr/lib/systemd/system-preset/",
+            "/usr/lib/systemd/user-preset/",
+        ] {
+            if let Some(base) = fname.strip_prefix(dir) {
+                if !base.contains('/') && base.len() > ".preset".len() && base.ends_with(".preset")
+                {
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "systemd-preset-packaged",
+                        &[fname],
+                    );
+                }
+                break;
+            }
         }
     }
 
@@ -6964,6 +7006,144 @@ mod tests {
                 .iter()
                 .any(|(n, _)| n == "debug-files-in-non-debug-package"),
             "segment equality must not match debugfoo: {results:?}"
+        );
+    }
+    /// `test_config` plus a `SystemdPresetPackages` exemption list, the
+    /// config key the vendored openSUSE/SLFO distro configs carry.
+    fn preset_test_config() -> Config {
+        let mut cfg = test_config();
+        cfg.configuration.insert(
+            "SystemdPresetPackages".to_string(),
+            toml::Value::Array(vec![
+                toml::Value::String("systemd".to_string()),
+                toml::Value::String("systemd-presets-common-SUSE".to_string()),
+                toml::Value::String("systemd-presets-branding-openSUSE".to_string()),
+            ]),
+        );
+        cfg
+    }
+
+    fn run_check_binary_with_config(pkg: &Pkg, config: &Config) -> Vec<(String, String)> {
+        let mut check = FilesCheck::new(config);
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        check.check_binary(pkg, config, &mut out);
+        out.results().to_vec()
+    }
+
+    fn preset_findings(results: &[(String, String)]) -> Vec<&(String, String)> {
+        results
+            .iter()
+            .filter(|(n, _)| n == "systemd-preset-packaged")
+            .collect()
+    }
+
+    #[test]
+    fn systemd_preset_file_in_other_package_fires() {
+        let (mut pkg, _dir) = pkg_with_files(vec![mkfile(
+            "/usr/lib/systemd/system-preset/99-foo.preset",
+            0o100644,
+            31,
+        )]);
+        pkg.name = "foo".to_string();
+        let results = run_check_binary_with_config(&pkg, &preset_test_config());
+        let hits = preset_findings(&results);
+        assert_eq!(hits.len(), 1, "exactly one preset finding: {results:?}");
+        assert!(
+            hits[0].1.contains(
+                ": W: systemd-preset-packaged /usr/lib/systemd/system-preset/99-foo.preset"
+            ),
+            "name, level and detail must render, got: {}",
+            hits[0].1
+        );
+    }
+
+    #[test]
+    fn systemd_user_preset_file_in_other_package_fires() {
+        let (mut pkg, _dir) = pkg_with_files(vec![mkfile(
+            "/usr/lib/systemd/user-preset/99-foo.preset",
+            0o100644,
+            32,
+        )]);
+        pkg.name = "foo".to_string();
+        let results = run_check_binary_with_config(&pkg, &preset_test_config());
+        assert_eq!(
+            preset_findings(&results).len(),
+            1,
+            "user-preset files fire too: {results:?}"
+        );
+    }
+
+    #[test]
+    fn systemd_preset_file_in_preset_packages_is_quiet() {
+        for name in [
+            "systemd",
+            "systemd-presets-common-SUSE",
+            "systemd-presets-branding-openSUSE",
+        ] {
+            let (mut pkg, _dir) = pkg_with_files(vec![mkfile(
+                "/usr/lib/systemd/system-preset/90-default.preset",
+                0o100644,
+                33,
+            )]);
+            pkg.name = name.to_string();
+            let results = run_check_binary_with_config(&pkg, &preset_test_config());
+            assert!(
+                preset_findings(&results).is_empty(),
+                "preset package {name} must stay quiet: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn systemd_preset_file_fires_without_exemption_config() {
+        // No SystemdPresetPackages key configured: no package is exempt,
+        // including a distro preset package name.
+        let (mut pkg, _dir) = pkg_with_files(vec![mkfile(
+            "/usr/lib/systemd/system-preset/90-default.preset",
+            0o100644,
+            34,
+        )]);
+        pkg.name = "systemd-presets-common-SUSE".to_string();
+        let results = run_check_binary(&pkg);
+        assert_eq!(
+            preset_findings(&results).len(),
+            1,
+            "without the exemption config every preset shipper fires: {results:?}"
+        );
+    }
+
+    #[test]
+    fn preset_like_paths_outside_preset_dirs_are_quiet() {
+        let (mut pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/lib/systemd/system/99-foo.preset", 0o100644, 35),
+            mkfile("/usr/share/foo/99-foo.preset", 0o100644, 36),
+            mkfile("/usr/lib/systemd/system-preset/99-foo.conf", 0o100644, 37),
+            mkfile(
+                "/usr/lib/systemd/system-preset/sub/99-foo.preset",
+                0o100644,
+                38,
+            ),
+            mkfile("/etc/systemd/system-preset/99-foo.preset", 0o100644, 39),
+        ]);
+        pkg.name = "foo".to_string();
+        let results = run_check_binary_with_config(&pkg, &preset_test_config());
+        assert!(
+            preset_findings(&results).is_empty(),
+            "only *.preset directly in the preset dirs fires: {results:?}"
+        );
+    }
+
+    #[test]
+    fn systemd_preset_dir_entry_is_quiet() {
+        let (mut pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/lib/systemd/system-preset", 0o040755, 40),
+            mkfile("/usr/lib/systemd/user-preset", 0o040755, 41),
+        ]);
+        pkg.name = "foo".to_string();
+        let results = run_check_binary_with_config(&pkg, &preset_test_config());
+        assert!(
+            preset_findings(&results).is_empty(),
+            "bare directory entries must stay quiet: {results:?}"
         );
     }
 }
