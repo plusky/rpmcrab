@@ -44,9 +44,10 @@ die() { echo "bench.sh: $*" >&2; exit 1; }
 
 # The rpmlint run invokes "$RPMLINT_PYTHON" directly; without this
 # preflight a missing interpreter (fresh clone, setup not run yet)
-# surfaces only as a bare rc=127 inside the run's JSON.
+# surfaces only as a bare rc=127 inside the run's JSON. A bare name
+# resolves via PATH, mirroring the RPMCRAB_BIN check in cmd_run.
 require_rpmlint_python() {
-    [ -x "$RPMLINT_PYTHON" ] || die "RPMLINT_PYTHON is not executable: $RPMLINT_PYTHON (set RPMLINT_PYTHON to the python built by scripts/setup-rpmlint-ref.sh, e.g. $RPMLINT_REF_DIR/venv/bin/python, or run scripts/setup-rpmlint-ref.sh first)"
+    [ -x "$(command -v "$RPMLINT_PYTHON")" ] || [ -x "$RPMLINT_PYTHON" ] || die "RPMLINT_PYTHON is not executable: $RPMLINT_PYTHON (set RPMLINT_PYTHON to the python built by scripts/setup-rpmlint-ref.sh, e.g. $RPMLINT_REF_DIR/venv/bin/python, or run scripts/setup-rpmlint-ref.sh first)"
 }
 
 cmd_download() {
