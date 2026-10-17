@@ -72,9 +72,21 @@ impl<'a> TermParser<'a> {
         Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
     }
 
-    fn atom_bytes(&mut self, len: usize) -> Option<Term> {
+    /// Decode an atom carried by a Latin-1 tag (`ATOM_EXT`,
+    /// `SMALL_ATOM_EXT`): each byte is the codepoint of the same value,
+    /// so the decode cannot fail.
+    fn atom_latin1(&mut self, len: usize) -> Option<Term> {
         let b = self.bytes(len)?;
-        Some(Term::Atom(String::from_utf8_lossy(b).into_owned()))
+        Some(Term::Atom(b.iter().map(|&byte| char::from(byte)).collect()))
+    }
+
+    /// Decode an atom carried by a UTF-8 tag (`ATOM_UTF8_EXT`,
+    /// `SMALL_ATOM_UTF8_EXT`): bytes that are not valid UTF-8 fail the
+    /// parse, matching pybeam's strict decode.
+    fn atom_utf8(&mut self, len: usize) -> Option<Term> {
+        let b = self.bytes(len)?;
+        let s = String::from_utf8(b.to_vec()).ok()?;
+        Some(Term::Atom(s))
     }
 
     /// Decode one external term. A term nested deeper than
@@ -104,7 +116,7 @@ impl<'a> TermParser<'a> {
             // ATOM_EXT (latin-1)
             100 => {
                 let len = self.u16()? as usize;
-                self.atom_bytes(len)
+                self.atom_latin1(len)
             }
             // SMALL_TUPLE_EXT
             104 => {
@@ -149,15 +161,20 @@ impl<'a> TermParser<'a> {
                 let b = self.bytes(len)?;
                 Some(Term::Binary(b.to_vec()))
             }
-            // SMALL_ATOM_EXT / SMALL_ATOM_UTF8_EXT
-            115 | 119 => {
+            // SMALL_ATOM_EXT (latin-1)
+            115 => {
                 let len = self.byte()? as usize;
-                self.atom_bytes(len)
+                self.atom_latin1(len)
             }
             // ATOM_UTF8_EXT
             118 => {
                 let len = self.u16()? as usize;
-                self.atom_bytes(len)
+                self.atom_utf8(len)
+            }
+            // SMALL_ATOM_UTF8_EXT
+            119 => {
+                let len = self.byte()? as usize;
+                self.atom_utf8(len)
             }
             // MAP_EXT
             116 => {
@@ -266,6 +283,10 @@ fn read_compile_info(path: &str) -> Result<Option<CompileInfo>, String> {
                 }
             }
             "source" => {
+                // The reference decodes the source with errors replaced
+                // (byte_to_string), so a path that is not valid UTF-8 is
+                // reported with replacement characters rather than
+                // failing the parse.
                 let s = match v {
                     Term::Binary(b) => String::from_utf8_lossy(&b).into_owned(),
                     Term::Atom(s) => s,
@@ -414,24 +435,45 @@ mod tests {
         out
     }
 
-    /// External term for `[{options, [debug_info]}, {source, <<"/home/abuild/rpmbuild/BUILD/foo">>}]`.
-    fn compile_info_term() -> Vec<u8> {
+    /// Every atom tag the parser accepts: the Latin-1 pair
+    /// (`ATOM_EXT`, `SMALL_ATOM_EXT`) and the UTF-8 pair
+    /// (`ATOM_UTF8_EXT`, `SMALL_ATOM_UTF8_EXT`). Tests build their
+    /// atoms through each tag in turn so no tag's decode can drift
+    /// from its sibling's unnoticed.
+    const ATOM_TAGS: [u8; 4] = [100, 115, 118, 119];
+    /// The Latin-1 atom tags (`ATOM_EXT`, `SMALL_ATOM_EXT`).
+    const LATIN1_ATOM_TAGS: [u8; 2] = [100, 115];
+    /// The UTF-8 atom tags (`ATOM_UTF8_EXT`, `SMALL_ATOM_UTF8_EXT`).
+    const UTF8_ATOM_TAGS: [u8; 2] = [118, 119];
+
+    /// Append an atom encoded with `tag`: the long forms (100, 118)
+    /// carry a u16 length, the small forms (115, 119) a u8 length.
+    fn push_atom(t: &mut Vec<u8>, tag: u8, bytes: &[u8]) {
+        t.push(tag);
+        match tag {
+            100 | 118 => t.extend_from_slice(&(bytes.len() as u16).to_be_bytes()),
+            115 | 119 => t.push(bytes.len() as u8),
+            _ => panic!("not an atom tag: {tag}"),
+        }
+        t.extend_from_slice(bytes);
+    }
+
+    /// External term for `[{options, [debug_info]}, {source, <<"/home/abuild/rpmbuild/BUILD/foo">>}]`
+    /// with every atom encoded via `atom_tag`.
+    fn compile_info_term(atom_tag: u8) -> Vec<u8> {
         let mut t = vec![131];
         // LIST_EXT, len 2
         t.extend_from_slice(&[108, 0, 0, 0, 2]);
         // {options, [debug_info]}
         t.extend_from_slice(&[104, 2]); // SMALL_TUPLE_EXT arity 2
-        t.extend_from_slice(&[119, 7]); // SMALL_ATOM_UTF8_EXT "options"
-        t.extend_from_slice(b"options");
+        push_atom(&mut t, atom_tag, b"options");
         t.extend_from_slice(&[108, 0, 0, 0, 1]); // LIST_EXT len 1
-        t.extend_from_slice(&[119, 10]);
-        t.extend_from_slice(b"debug_info");
+        push_atom(&mut t, atom_tag, b"debug_info");
         t.push(106); // NIL tail
         // {source, Binary}
         let source = b"/home/abuild/rpmbuild/BUILD/foo.erl";
         t.extend_from_slice(&[104, 2]);
-        t.extend_from_slice(&[119, 6]);
-        t.extend_from_slice(b"source");
+        push_atom(&mut t, atom_tag, b"source");
         t.extend_from_slice(&[109]); // BINARY_EXT
         t.extend_from_slice(&(source.len() as u32).to_be_bytes());
         t.extend_from_slice(source);
@@ -441,33 +483,37 @@ mod tests {
 
     #[test]
     fn term_parser_reads_compile_info() {
-        let term = compile_info_term();
-        assert_eq!(term[0], 131);
-        let mut parser = TermParser::new(&term[1..]);
-        let parsed = parser.parse_term().expect("parses");
-        match parsed {
-            Term::List(items) => assert_eq!(items.len(), 2),
-            other => panic!("expected list, got {other:?}"),
+        for tag in ATOM_TAGS {
+            let term = compile_info_term(tag);
+            assert_eq!(term[0], 131);
+            let mut parser = TermParser::new(&term[1..]);
+            let parsed = parser.parse_term().expect("parses");
+            match parsed {
+                Term::List(items) => assert_eq!(items.len(), 2),
+                other => panic!("expected list, got {other:?}"),
+            }
         }
     }
 
     #[test]
     fn beam_chunk_walking_finds_cinf() {
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let path = tmp.path().join("test.beam");
-        std::fs::write(&path, beam_with_cinf(&compile_info_term())).unwrap();
-        let info = read_compile_info(path.to_str().unwrap())
-            .expect("reads")
-            .expect("has compile info");
-        assert!(
-            info.options
-                .expect("options")
-                .contains(&"debug_info".to_string())
-        );
-        assert_eq!(
-            info.source.as_deref(),
-            Some("/home/abuild/rpmbuild/BUILD/foo.erl")
-        );
+        for tag in ATOM_TAGS {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let path = tmp.path().join("test.beam");
+            std::fs::write(&path, beam_with_cinf(&compile_info_term(tag))).unwrap();
+            let info = read_compile_info(path.to_str().unwrap())
+                .expect("reads")
+                .expect("has compile info");
+            assert!(
+                info.options
+                    .expect("options")
+                    .contains(&"debug_info".to_string())
+            );
+            assert_eq!(
+                info.source.as_deref(),
+                Some("/home/abuild/rpmbuild/BUILD/foo.erl")
+            );
+        }
     }
 
     #[test]
@@ -483,7 +529,7 @@ mod tests {
         // B4: a missing CInf chunk is not a parse failure. pybeam returns
         // None for `compileinfo`, so the reference emits
         // `beam-compile-info-missed` (W), not `pybeam-failed` (E).
-        let mut beam = beam_with_cinf(&compile_info_term());
+        let mut beam = beam_with_cinf(&compile_info_term(119));
         // Corrupt the chunk name.
         beam[12..16].copy_from_slice(b"XXXX");
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -614,5 +660,123 @@ mod tests {
             }
         }
         assert_eq!(term, Term::List(Vec::new()));
+    }
+
+    /// Build the external term for `[{options, [debug_info]}]` with the
+    /// `options` key encoded via the UTF-8 atom tag `tag`, holding
+    /// bytes that are not valid UTF-8 (`opti\xffons`).
+    fn bad_utf8_key_term(tag: u8) -> Vec<u8> {
+        let mut t = vec![131];
+        t.extend_from_slice(&[108, 0, 0, 0, 1]); // LIST_EXT, len 1
+        t.extend_from_slice(&[104, 2]); // SMALL_TUPLE_EXT arity 2
+        push_atom(&mut t, tag, b"opti\xffons");
+        t.extend_from_slice(&[108, 0, 0, 0, 1]); // LIST_EXT len 1
+        push_atom(&mut t, tag, b"debug_info");
+        t.push(106); // NIL tail (options list)
+        t.push(106); // NIL tail (outer list)
+        t
+    }
+
+    #[test]
+    fn invalid_utf8_atom_fails_the_parse() {
+        // pybeam decodes the UTF-8 atom tags strictly, so a CInf term
+        // holding an atom that is not valid UTF-8 makes the reference
+        // report pybeam-failed; the parse must fail here too instead of
+        // decoding the atom with replacement characters. Each UTF-8
+        // tag is pinned in turn: a lossy decode on either one alone
+        // fails this test.
+        for tag in UTF8_ATOM_TAGS {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let path = tmp.path().join("badatom.beam");
+            std::fs::write(&path, beam_with_cinf(&bad_utf8_key_term(tag))).unwrap();
+            assert!(
+                read_compile_info(path.to_str().unwrap()).is_err(),
+                "tag {tag}"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_utf8_atoms_parse() {
+        // A multibyte UTF-8 atom is valid input and survives the strict
+        // decode unchanged, under either UTF-8 atom tag.
+        for tag in UTF8_ATOM_TAGS {
+            let mut t = vec![131];
+            t.extend_from_slice(&[108, 0, 0, 0, 1]);
+            t.extend_from_slice(&[104, 2]);
+            push_atom(&mut t, tag, b"options");
+            t.extend_from_slice(&[108, 0, 0, 0, 2]); // LIST_EXT len 2
+            push_atom(&mut t, tag, b"debug_info");
+            push_atom(&mut t, tag, "café".as_bytes());
+            t.push(106);
+            t.push(106);
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let path = tmp.path().join("utf8.beam");
+            std::fs::write(&path, beam_with_cinf(&t)).unwrap();
+            let info = read_compile_info(path.to_str().unwrap())
+                .expect("reads")
+                .expect("has compile info");
+            let options = info.options.expect("options");
+            assert!(options.contains(&"debug_info".to_string()), "tag {tag}");
+            assert!(options.contains(&"café".to_string()), "tag {tag}");
+        }
+    }
+
+    #[test]
+    fn latin1_atom_decodes_as_latin1() {
+        // The non-UTF-8 atom tags carry Latin-1: byte 0xE9 is the
+        // character é, not part of a UTF-8 sequence. pybeam decodes
+        // these tags as Latin-1, so a Latin-1 source atom comes through
+        // as the characters its bytes name. Each Latin-1 tag is pinned
+        // in turn: a UTF-8 decode on either one alone fails this test.
+        let source: &[u8] = b"/home/abuild/rpmbuild/BUILD/caf\xe9.erl";
+        for tag in LATIN1_ATOM_TAGS {
+            let mut t = vec![131];
+            t.extend_from_slice(&[108, 0, 0, 0, 1]);
+            t.extend_from_slice(&[104, 2]);
+            t.extend_from_slice(&[119, 6]);
+            t.extend_from_slice(b"source");
+            push_atom(&mut t, tag, source);
+            t.push(106);
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let path = tmp.path().join("latin1.beam");
+            std::fs::write(&path, beam_with_cinf(&t)).unwrap();
+            let info = read_compile_info(path.to_str().unwrap())
+                .expect("reads")
+                .expect("has compile info");
+            assert_eq!(
+                info.source.as_deref(),
+                Some("/home/abuild/rpmbuild/BUILD/café.erl"),
+                "tag {tag}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_binary_decodes_lossy_like_the_reference() {
+        // The reference passes the source through byte_to_string, which
+        // decodes UTF-8 with errors replaced; a source path that is not
+        // valid UTF-8 is reported with replacement characters, not as
+        // a parse failure.
+        let source: &[u8] = b"/home/abuild/rpmbuild/BUILD/bad\xffname.erl";
+        let mut t = vec![131];
+        t.extend_from_slice(&[108, 0, 0, 0, 1]);
+        t.extend_from_slice(&[104, 2]);
+        t.extend_from_slice(&[119, 6]);
+        t.extend_from_slice(b"source");
+        t.push(109); // BINARY_EXT
+        t.extend_from_slice(&(source.len() as u32).to_be_bytes());
+        t.extend_from_slice(source);
+        t.push(106);
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("lossysource.beam");
+        std::fs::write(&path, beam_with_cinf(&t)).unwrap();
+        let info = read_compile_info(path.to_str().unwrap())
+            .expect("reads")
+            .expect("has compile info");
+        assert_eq!(
+            info.source.as_deref(),
+            Some("/home/abuild/rpmbuild/BUILD/bad\u{FFFD}name.erl")
+        );
     }
 }
