@@ -791,6 +791,58 @@ mod tests {
         assert_eq!(term, Term::List(Vec::new()));
     }
 
+    /// External term nested `levels` deep: `levels - 1` nested
+    /// SMALL_TUPLE wrappers around a NIL leaf, so the leaf is parsed by
+    /// the `levels`-th nested `parse_term` call.
+    fn nested_tuple_payload(levels: usize) -> Vec<u8> {
+        let mut payload = vec![131u8];
+        for _ in 0..levels - 1 {
+            payload.extend_from_slice(&[104, 1]); // SMALL_TUPLE_EXT, arity 1
+        }
+        payload.push(106); // NIL
+        payload
+    }
+
+    #[test]
+    fn term_at_max_depth_parses() {
+        // `parse_term` refuses a term once the nesting depth reaches
+        // `MAX_TERM_DEPTH`, so a term nested exactly that deep is the
+        // deepest one that still parses.
+        let payload = nested_tuple_payload(MAX_TERM_DEPTH);
+        let mut parser = TermParser::new(&payload[1..]);
+        assert!(
+            parser.parse_term().is_some(),
+            "term at MAX_TERM_DEPTH must parse"
+        );
+    }
+
+    #[test]
+    fn term_past_max_depth_fails_to_parse() {
+        let payload = nested_tuple_payload(MAX_TERM_DEPTH + 1);
+        let mut parser = TermParser::new(&payload[1..]);
+        assert!(
+            parser.parse_term().is_none(),
+            "term at MAX_TERM_DEPTH + 1 must not parse"
+        );
+    }
+
+    #[test]
+    fn term_past_max_depth_reports_term_parse_failed() {
+        // The depth refusal surfaces through `read_compile_info` as the
+        // `term parse failed` error (the check reports it as
+        // `pybeam-failed`); a term that parses but is not compile info
+        // fails with a different error, so the text pins the failure to
+        // the depth cap.
+        let payload = nested_tuple_payload(MAX_TERM_DEPTH + 1);
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("toodeep.beam");
+        std::fs::write(&path, beam_with_cinf(&payload)).unwrap();
+        let err = read_compile_info(path.to_str().unwrap())
+            .err()
+            .expect("must fail");
+        assert_eq!(err, "term parse failed");
+    }
+
     /// Build the external term for `[{options, [debug_info]}]` with the
     /// `options` key encoded via the UTF-8 atom tag `tag`, holding
     /// bytes that are not valid UTF-8 (`opti\xffons`).
