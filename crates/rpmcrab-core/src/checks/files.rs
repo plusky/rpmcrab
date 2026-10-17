@@ -1086,6 +1086,43 @@ fn is_utf8(bytes: &[u8]) -> bool {
     std::str::from_utf8(bytes).is_ok()
 }
 
+/// Read at most the given limit of bytes from the reader; the source is
+/// never asked for more than that in total.
+fn read_prefix(reader: impl std::io::Read, limit: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut buf = Vec::new();
+    reader.take(limit).read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
+/// Whether the full contents of the reader are valid UTF-8, validated in
+/// bounded chunks so arbitrarily large inputs are never buffered whole.
+/// The verdict is identical to validating the buffered contents; a read
+/// error propagates so the caller can apply its own fallback.
+fn stream_is_utf8(reader: &mut impl std::io::Read) -> std::io::Result<bool> {
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        pending.extend_from_slice(&buf[..n]);
+        match std::str::from_utf8(&pending) {
+            Ok(_) => pending.clear(),
+            Err(e) => {
+                if e.error_len().is_some() {
+                    return Ok(false);
+                }
+                // Incomplete multi-byte sequence at the tail: keep the
+                // unvalidated bytes for the next chunk.
+                pending.drain(..e.valid_up_to());
+            }
+        }
+    }
+    Ok(pending.is_empty())
+}
+
 /// Kept in sync with the filesystem package, mirroring the reference's
 /// `STANDARD_DIRS`.
 const STANDARD_DIRS: &[&str] = &[
@@ -1291,14 +1328,13 @@ impl FilesCheck {
     /// Read up to 2048 bytes and decide text-vs-binary, mirroring the
     /// reference's `peek` (including its `read-error` on `OSError`).
     fn peek(&self, pkg: &Pkg, pkgfile: &PkgFile, out: &mut Filter) -> (Vec<u8>, bool) {
-        let bytes = match std::fs::read(&pkgfile.path) {
-            Ok(b) => b,
+        let chunk = match std::fs::File::open(&pkgfile.path).and_then(|f| read_prefix(f, 2048)) {
+            Ok(c) => c,
             Err(e) => {
                 add_info(out, Level::Warning, pkg, "read-error", &[&e.to_string()]);
                 return (Vec::new(), false);
             }
         };
-        let chunk: Vec<u8> = bytes.into_iter().take(2048).collect();
         if chunk.contains(&0) {
             return (chunk, false);
         }
@@ -1478,6 +1514,9 @@ impl FilesCheck {
     /// a decompressor binary and always gets to the real bytes; reading the
     /// still-compressed file instead would report `file-not-utf8` for every
     /// `.gz` man page on a host without gzip, which the reference never does.
+    ///
+    /// The content is validated in chunks rather than buffered whole (the
+    /// reference buffers it); the verdict is the same either way.
     fn is_utf8_file(&self, fname: &str, path: &str) -> bool {
         match self.decompressor_for(fname) {
             Some(tool) => {
@@ -1486,11 +1525,25 @@ impl FilesCheck {
                 };
                 cmd.arg("-dc")
                     .arg(path)
-                    .output()
-                    .map(|o| !o.status.success() || is_utf8(&o.stdout))
-                    .unwrap_or(true)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null());
+                let mut child = match cmd.spawn() {
+                    Ok(c) => c,
+                    Err(_) => return true,
+                };
+                let valid = child
+                    .stdout
+                    .take()
+                    .and_then(|mut s| stream_is_utf8(&mut s).ok());
+                match child.wait() {
+                    Ok(status) => !status.success() || valid.unwrap_or(true),
+                    Err(_) => true,
+                }
             }
-            None => std::fs::read(path).map(|b| is_utf8(&b)).unwrap_or(true),
+            None => match std::fs::File::open(path) {
+                Ok(mut f) => stream_is_utf8(&mut f).unwrap_or(true),
+                Err(_) => true,
+            },
         }
     }
 }
@@ -6583,6 +6636,89 @@ mod tests {
                 && d.contains("/etc/foo.conf")),
             "missing W-level non-conffile-in-etc on /etc/foo.conf: {results:?}"
         );
+    }
+
+    struct CountingReader {
+        inner: std::io::Cursor<Vec<u8>>,
+        consumed: usize,
+    }
+
+    impl std::io::Read for CountingReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.consumed += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn read_prefix_consumes_only_the_prefix() {
+        // Regression for issue #606: peek() loaded the whole file to
+        // sniff 2048 bytes. The bounded read must not drain the source.
+        let mut reader = CountingReader {
+            inner: std::io::Cursor::new(vec![97u8; 100_000]),
+            consumed: 0,
+        };
+        let chunk = read_prefix(&mut reader, 2048).expect("read");
+        assert_eq!(chunk.len(), 2048);
+        assert_eq!(reader.consumed, 2048, "source must not be drained");
+        let mut small = CountingReader {
+            inner: std::io::Cursor::new(b"short".to_vec()),
+            consumed: 0,
+        };
+        assert_eq!(read_prefix(&mut small, 2048).expect("read"), b"short");
+        assert_eq!(small.consumed, 5);
+    }
+
+    struct DripReader {
+        data: Vec<u8>,
+        pos: usize,
+    }
+
+    impl std::io::Read for DripReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos >= self.data.len() || buf.is_empty() {
+                return Ok(0);
+            }
+            buf[0] = self.data[self.pos];
+            self.pos += 1;
+            Ok(1)
+        }
+    }
+
+    #[test]
+    fn stream_is_utf8_matches_buffered_verdicts() {
+        // Byte-at-a-time delivery splits every multi-byte sequence; the
+        // streamed verdict must still match whole-buffer validation.
+        let euro = [0xE2u8, 0x82, 0xAC];
+        let mut mixed = b"hello ".to_vec();
+        mixed.extend_from_slice(&euro);
+        mixed.extend_from_slice(&[0xF0, 0x9F, 0x98, 0x80]);
+        let cases: Vec<&[u8]> = vec![
+            b"",
+            b"plain ascii",
+            &mixed,
+            &[0x61, 0xFF, 0x62],
+            &[0xE2, 0x82],
+            &[0xC3, 0x28],
+        ];
+        for case in cases {
+            let mut drip = DripReader {
+                data: case.to_vec(),
+                pos: 0,
+            };
+            assert_eq!(
+                stream_is_utf8(&mut drip).expect("read"),
+                is_utf8(case),
+                "verdict mismatch"
+            );
+        }
+        // A valid input long enough to split a sequence across the
+        // internal 8192-byte chunk boundary.
+        let mut long: Vec<u8> = (0..5000).flat_map(|_| euro).collect();
+        long.extend_from_slice(b"tail");
+        let mut cur = std::io::Cursor::new(long);
+        assert!(stream_is_utf8(&mut cur).expect("read"));
     }
 
     #[test]
