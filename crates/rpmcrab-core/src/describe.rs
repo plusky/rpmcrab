@@ -369,7 +369,7 @@ mod tests {
             ),
             (
                 "FilesCheck.toml",
-                "5bfcb3ca5e1f912905387f3b0d96ffa63904ecf8293248db8fb582421064be38",
+                "3e3a9163f5705c00b9162735a744264ddefdd32602703b91031d4c222574648a",
             ),
             (
                 "I18NCheck.toml",

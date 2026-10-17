@@ -1553,6 +1553,20 @@ fn explain_staged_filelist_check() {
     assert!(out.stderr.is_empty());
 }
 
+/// `--explain`: staged `FilesCheck.toml` resolves the port-only `sysconfig-fillup-usage` instead of "Unknown message".
+#[test]
+fn explain_staged_sysconfig_fillup_usage() {
+    let out = rpmcrab(&["-e", "sysconfig-fillup-usage"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "sysconfig-fillup-usage:\nThe package uses the legacy sysconfig/fillup configuration scheme: it ships a\nfile below /etc/sysconfig or a fillup template, calls fillup from a scriptlet,\nor points a systemd unit's EnvironmentFile into /etc/sysconfig. Migrate to\ndaemon-native configuration, or to systemd drop-ins and an EnvironmentFile\npointing at a package-owned path, instead of configuration merged into\n/etc/sysconfig by fillup.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
 /// `--explain`: staged `FilesCheck.toml` resolves `no-documentation` instead of "Unknown message".
 #[test]
 fn explain_staged_files_check() {
