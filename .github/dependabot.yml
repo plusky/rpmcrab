@@ -8,12 +8,6 @@ updates:
     groups:
       cargo-minor-patch:
         update-types: ["minor", "patch"]
-    # dtolnay/rust-toolchain is pinned to a commit on its master branch (see
-    # ci.yml); commits on the toolchain branches are garbage-collected upstream,
-    # so dependabot must not "helpfully" move it.
-    ignore:
-      - dependency-name: "dtolnay/rust-toolchain"
-
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
@@ -22,6 +16,11 @@ updates:
     groups:
       actions-minor-patch:
         update-types: ["minor", "patch"]
+    # dtolnay/rust-toolchain is pinned to a commit on its master branch (see
+    # ci.yml); commits on the toolchain branches are garbage-collected upstream,
+    # so dependabot must not "helpfully" move it.
+    ignore:
+      - dependency-name: "dtolnay/rust-toolchain"
 
   - package-ecosystem: docker
     directory: "/tests/fixtures/binaries-check"
