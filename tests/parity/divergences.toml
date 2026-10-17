@@ -2333,3 +2333,11 @@ kind = "behaviour"
 reason = "The `.+` filename capture that makes `manual-page-in-subfolder` reachable (plusky/rpmcrab#621) changes what prints for section-less files in a man subfolder, where the reference stays silent; what prints depends on the name, under a shipped (non-empty) `CompressExtension` (`gz`/`bz2`). A dotless subdir name such as `man1/foo/bar` prints only `manpage-not-compressed` (W): the suffix list holds just the whole filename, the compression step pops it unconditionally, and the empty remainder makes the `suffixes.first()` guard skip both error findings. A dotted section-less name such as `man1/foo/bar.baz` additionally fires `bad-manual-page-folder` (detail `expected folder: manfoo/bar`) and `manual-page-in-subfolder`. (Both error findings firing for the dotless shape would require an empty `CompressExtension` -- an unconfigured check, not a shipped config.) The shape is narrow, as narrowed in plusky's #621 review: top-level suffix-less files already matched before this change, and for suffixed subfolder pages such as `man1/foo/bar.3.gz` the reference fires both findings too (its `binary` group admits `/`); only suffix-less subdir files are a new fire-vs-silence shape."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/pull/621"
+
+[[divergence]]
+case = "global"
+check = "shlib-policy-obsoletes-sibling"
+kind = "behaviour"
+reason = "New port-only Error: a package whose name matches the versioned shared library scheme (lib<name><SONAME-number>, with the -32bit/-64bit forms normalised away) that obsoletes a package with the same library stem and a different SONAME number emits E shlib-policy-obsoletes-sibling with the obsoleted package name as detail. The reference has no such finding. Deliberate: the openSUSE shared library packaging policy makes SONAME generations co-installable, and obsoleting a sibling generation breaks that; a version constraint on the obsoletes does not restore co-installability for the obsoleted range, so it still fires, while a same-number self-obsoletes (a rename) and targets outside the scheme stay silent. Pinned by unit tests in shared_library_policy.rs."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/636"
