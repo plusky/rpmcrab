@@ -239,7 +239,10 @@ fn read_compile_info(path: &str) -> Result<Option<CompileInfo>, String> {
             })
             .collect(),
         Term::Map(pairs) => pairs,
-        _ => return Ok(None),
+        // The chunk is present but holds no compile info structure:
+        // pybeam raises when it builds a dict from such a term, so
+        // this is a parse failure, not missed compile info.
+        _ => return Err("compile info is not a list or map".to_string()),
     };
 
     let mut options = None;
@@ -534,6 +537,44 @@ mod tests {
             &check.source_re,
             "/home/abuild/rpmbuild/BUILD/foo-1.0/src/foo.erl"
         ));
+    }
+
+    /// A CInf chunk whose term parses but is neither the {key, value}
+    /// list nor the map form is malformed compile info: pybeam raises
+    /// when it builds a dict from such a term, so this is a parse
+    /// failure (`pybeam-failed`), not missed compile info.
+    #[test]
+    fn misshapen_compile_info_term_fails() {
+        let bare_tuple = {
+            let mut t = vec![131, 104, 2];
+            t.extend_from_slice(&[119, 7]);
+            t.extend_from_slice(b"options");
+            t.extend_from_slice(&[108, 0, 0, 0, 1]);
+            t.extend_from_slice(&[119, 10]);
+            t.extend_from_slice(b"debug_info");
+            t.push(106);
+            t
+        };
+        let bare_binary = {
+            let mut t = vec![131, 109, 0, 0, 0, 3];
+            t.extend_from_slice(b"foo");
+            t
+        };
+        let payloads: Vec<Vec<u8>> = vec![
+            vec![131, 119, 3, 102, 111, 111], // a bare atom
+            vec![131, 97, 42],                // a bare integer
+            bare_tuple,                       // one {key, value} pair, no list
+            bare_binary,                      // a bare binary
+        ];
+        for payload in payloads {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let path = tmp.path().join("bad.beam");
+            std::fs::write(&path, beam_with_cinf(&payload)).unwrap();
+            assert!(
+                read_compile_info(path.to_str().unwrap()).is_err(),
+                "payload {payload:?} must fail"
+            );
+        }
     }
 
     /// A crafted CInf of nothing but nested SMALL_TUPLE wrappers used
