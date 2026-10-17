@@ -1678,11 +1678,16 @@ impl FilesCheck {
     /// soelim include); when the target page is not shipped, `man`
     /// fails to display the referencing page. The reference is judged
     /// within the package alone, like the dangling-symlink family: a
-    /// target shipped by another package does not satisfy it. Targets
-    /// resolve against the man root (the referencing page's locale
-    /// directory plays no part), and a shipped file matches under any
-    /// compression suffix, or none. One finding per (referencing page,
-    /// missing target).
+    /// target shipped by another package does not satisfy it. A shipped
+    /// file matches under any compression suffix, or none. One finding
+    /// per (referencing page, missing target).
+    ///
+    /// Resolution mirrors how the target is found at display time: a
+    /// `man<section>/<page>` argument resolves against the man root,
+    /// a bare filename against the referencing page's own directory,
+    /// and a page under a locale directory (`/usr/share/man/de/...`)
+    /// also resolves against that locale directory, which is where
+    /// localised page sets keep their redirect targets.
     fn check_manpage_so_refs(&self, pkg: &Pkg, out: &mut Filter) {
         let shipped: HashSet<&str> = pkg
             .files
@@ -1693,25 +1698,43 @@ impl FilesCheck {
             if !is_reg(pkgfile.mode) {
                 continue;
             }
-            if !matches!(self.man_base_re.captures(&pkgfile.name), Ok(Some(_))) {
+            let Ok(Some(caps)) = self.man_base_re.captures(&pkgfile.name) else {
                 continue;
-            }
+            };
+            let page_root = caps.name("path").map(|m| m.as_str()).unwrap_or("");
+            let page_lang = caps.name("lang").map(|m| m.as_str());
             let Some(text) = self.manpage_text(pkgfile) else {
                 continue;
             };
             let mut seen: HashSet<String> = HashSet::new();
             for arg in manpage_so_targets(&text) {
-                let Some(rel) = manpage_so_root_relative(&arg) else {
-                    continue;
+                let candidates: Vec<String> = if !arg.contains('/') {
+                    let dir = pkgfile
+                        .name
+                        .rsplit_once('/')
+                        .map(|(d, _)| d)
+                        .unwrap_or_default();
+                    vec![format!("{dir}/{arg}")]
+                } else {
+                    let Some(rel) = manpage_so_root_relative(&arg) else {
+                        continue;
+                    };
+                    let rel = strip_man_compression_suffix(&rel);
+                    let mut cands =
+                        vec![format!("/usr/share/man/{rel}"), format!("/usr/man/{rel}")];
+                    if let Some(lang) = page_lang {
+                        cands.push(format!("{page_root}/{lang}/{rel}"));
+                    }
+                    cands
                 };
-                let rel = strip_man_compression_suffix(&rel);
-                if !seen.insert(rel.to_string()) {
+                let candidates: Vec<&str> = candidates
+                    .iter()
+                    .map(|c| strip_man_compression_suffix(c))
+                    .collect();
+                if !seen.insert(candidates[0].to_string()) {
                     continue;
                 }
-                let satisfied = ["/usr/share/man/", "/usr/man/"]
-                    .iter()
-                    .any(|root| shipped.contains(format!("{root}{rel}").as_str()));
-                if !satisfied {
+                if !candidates.iter().any(|c| shipped.contains(c)) {
                     add_info(
                         out,
                         Level::Warning,
@@ -7797,10 +7820,10 @@ mod tests {
     }
 
     #[test]
-    fn manpage_so_ref_locale_only_target_still_fires() {
-        // Resolution is against the man root only: a target shipped
-        // solely under the referencing page's locale directory does not
-        // satisfy the reference.
+    fn manpage_so_ref_locale_target_in_same_locale_is_quiet() {
+        // Localised page sets keep their redirect targets in the same
+        // locale directory: a target shipped solely under the
+        // referencing page's locale directory satisfies the reference.
         let dir = tempfile::TempDir::new().expect("tmpdir");
         let pkg = manpage_pkg(
             &dir,
@@ -7818,10 +7841,71 @@ mod tests {
             ],
         );
         let results = run_check_binary(&pkg);
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "a same-locale target satisfies the reference: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_locale_target_in_other_locale_fires() {
+        // Only the referencing page's own locale directory counts: a
+        // target shipped under a different locale does not satisfy it.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/man/de/man1/alias.1",
+                    0o100644,
+                    b".so man1/real.1\n".as_slice(),
+                ),
+                (
+                    "/usr/share/man/fr/man1/real.1.gz",
+                    0o100644,
+                    b"compressed\n".as_slice(),
+                ),
+            ],
+        );
+        let results = run_check_binary(&pkg);
         assert_eq!(
             so_ref_hits(&results).len(),
             1,
-            "a locale-only target does not resolve a man-root reference: {results:?}"
+            "a target in another locale does not resolve the reference: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_bare_target_resolves_in_page_directory() {
+        // A bare filename names a page in the referencing page's own
+        // directory (the systemd/pmem stub shape).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/man/man3/alias.3",
+                    0o100644,
+                    b".so popen.3\n.so missing.3\n".as_slice(),
+                ),
+                (
+                    "/usr/share/man/man3/popen.3.gz",
+                    0o100644,
+                    b"compressed\n".as_slice(),
+                ),
+            ],
+        );
+        let results = run_check_binary(&pkg);
+        let hits = so_ref_hits(&results);
+        assert_eq!(
+            hits.len(),
+            1,
+            "only the missing bare target fires: {results:?}"
+        );
+        assert!(
+            hits[0].1.contains("missing.3"),
+            "the detail names the missing bare target: {}",
+            hits[0].1
         );
     }
 
