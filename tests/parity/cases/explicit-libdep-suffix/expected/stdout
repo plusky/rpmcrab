@@ -22,5 +22,5 @@ configuration:
     <distro:opensuse>/zypper-plugins.toml
 checks: 43, packages: 1
 
-explicit-libdep-probe.noarch: E: explicit-lib-dependency libfoo
+explicit-libdep-probe.noarch: E: explicit-lib-dependency (Badness: 1) libfoo
  1 packages and 0 specfiles checked; 1 errors, 0 warnings, 0 filtered, 1 badness; has taken <DURATION> s 
