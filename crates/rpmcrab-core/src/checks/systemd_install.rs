@@ -107,6 +107,12 @@ impl Check for SystemdInstallCheck {
         "SystemdInstallCheck"
     }
 
+    /// This check never emits errors (its only emission site passes
+    /// `Level::Warning`), so `--errors-only` skips it.
+    fn max_severity(&self) -> Level {
+        Level::Warning
+    }
+
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
         let unit_re = self.unit_regex();
         let pre = script_body_or_prog(pkg, Tag::PREIN, Tag::PREINPROG);

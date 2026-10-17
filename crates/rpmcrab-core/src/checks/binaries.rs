@@ -3958,7 +3958,7 @@ mod tests {
             "binary-or-shlib-defines-rpath should fire for rpathbin: {results:?}"
         );
 
-        // setuidbin: setuid without setgroups, installed setuid -> Error (#1462 flip)
+        // setuidbin: setuid without setgroups, installed setuid -> Error
         let setgroups_lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
         assert_eq!(
             setgroups_lines.len(),
@@ -3971,7 +3971,7 @@ mod tests {
         );
         assert!(
             setgroups_lines[0].contains(" E: "),
-            "setgroups finding should be Error for setuid binary (#1462): {}",
+            "setgroups finding should be Error for setuid binary: {}",
             setgroups_lines[0]
         );
 

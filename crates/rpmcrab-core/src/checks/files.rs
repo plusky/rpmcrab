@@ -2029,14 +2029,7 @@ impl FilesCheck {
         None
     }
 
-    fn report_dangling(
-        &self,
-        pkg: &Pkg,
-        fname: &str,
-        link: &str,
-        relative: bool,
-        out: &mut Filter,
-    ) {
+    fn report_dangling(&self, pkg: &Pkg, fname: &str, link: &str, out: &mut Filter) {
         match self.dangling_exception(link) {
             // An empty exception name behaves like no exception.
             Some(name) if !name.is_empty() => {
@@ -2045,19 +2038,7 @@ impl FilesCheck {
                 }
             }
             _ => {
-                if relative {
-                    // Deliberate divergence (#593): the relative form
-                    // is info; the absolute form stays a warning.
-                    add_info(
-                        out,
-                        Level::Info,
-                        pkg,
-                        "dangling-relative-symlink",
-                        &[fname, link],
-                    );
-                } else {
-                    add_info(out, Level::Warning, pkg, "dangling-symlink", &[fname, link]);
-                }
+                add_info(out, Level::Warning, pkg, "dangling-symlink", &[fname, link]);
             }
         }
     }
@@ -2080,7 +2061,7 @@ impl FilesCheck {
             && !pkg.files.iter().any(|f| f.name == *link)
             && !pkg.req_names.iter().any(|n| n == link)
         {
-            self.report_dangling(pkg, fname, link, false, out);
+            self.report_dangling(pkg, fname, link, out);
         }
         let linktop = caps.get(1).map(|m| m.as_str()).unwrap_or("");
         if let Ok(Some(fcaps)) = self.absolute_re.captures(fname) {

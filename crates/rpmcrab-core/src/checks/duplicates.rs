@@ -703,7 +703,7 @@ mod tests {
         // reference's two-level prefix suppression zeroes `diff` and the
         // waste total; the narrowed top-level comparison keeps both, so
         // 2 * 60000 = 120000 exceeds the threshold and the port reports
-        // E: files-duplicated-waste with that total. Restoring the
+        // W: files-duplicated-waste with that total. Restoring the
         // two-level suppression, or raising the threshold, must fail
         // this test.
         let files = [
