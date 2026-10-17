@@ -6957,7 +6957,13 @@ description = "explicit priority string bypasses the system crypto policy"
             ("libdb-4_8", "libdb-4.8.so", false), // SLPP table
             ("libfoo1", "libfoo-1.so", false),    // glued pkgversion-only form
             ("libfoo-1", "libfoo-1.so", false),   // dash pkgversion-only form
-            ("libfoo11", "libfoo-1.so", true),    // longer run, pkgversion-only
+            // The glued twin of a digit-ending stem fires: the
+            // pkgversion branch derives only the dash form
+            // (libfoo2-1), and limb B's non-digit boundary rejects
+            // the glued digit run. Pinned asymmetry (issue #673):
+            // tolerated nowhere else, and no corpus pair needs it.
+            ("libfoo21", "libfoo2-1.so", true),
+            ("libfoo11", "libfoo-1.so", true), // longer run, pkgversion-only
             ("libfoo2", "libfoo-1.so", true),
             ("libzziplib-0-13", "libzziplib-0.so.13", false), // SLPP table
             ("libmwaw-0_3-3_0_11", "libmwaw-0.3.so.3.0.11", false), // SLPP page
@@ -7002,6 +7008,14 @@ description = "explicit priority string bypasses the system crypto policy"
             ("libfoo1-32bit", "libfoo.so.1", false),
             ("libx111-32bit", "libx11.so.1", false),
             ("libfoo1-64bit", "libfoo.so.1", false),
+            // Combined flavour+baselibs tails: the baselibs suffix
+            // strips before the flavour strip runs, so the HPC shape
+            // resolves (issue #673). The reverse tail order leaves
+            // the version buried mid-name: the flavour strip sees
+            // the whole name, the baselibs strip never applies, and
+            // it fires.
+            ("libnetcdf22-openmpi5-32bit", "libnetcdf.so.22", false),
+            ("libnetcdf22-32bit-openmpi5", "libnetcdf.so.22", true),
             // Corpus pairs every predicate fires on: pre-existing
             // Factory naming violations, unchanged by this guard.
             ("libLLVM18", "libLLVM.so.18.1", true), // suffix is 18_1
@@ -7010,6 +7024,15 @@ description = "explicit priority string bypasses the system crypto policy"
             // are outside the check entirely.
             ("libfoo", "libfoo.so", false),
             ("foo1", "libfoo.so.1", false),
+            // A version-less SONAME whose stem carries the version
+            // digits (the libtcl8.6.so shape): soversion_str is
+            // empty, so the emission guard stays shut even when the
+            // package name does not derive from the stem at all.
+            // Unlike the libfoo.so row above, whose SONAME exits via
+            // invalid-soname before the guard, these rows reach it
+            // (issue #673).
+            ("libfoo1", "libfoo1.so", false),
+            ("libfoo2", "libfoo1.so", false),
         ];
         // Collect every mismatching row so one run reports the whole
         // failing set, not just the first cell.
