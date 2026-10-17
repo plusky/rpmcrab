@@ -83,6 +83,7 @@ GoodPrefixes = [
         "/etc/sysconfig/*",
         "/etc/rc.config.d/*",
     ]
+    IgnoreFileIf = "ghostfile"
 [[Check]]
     Message = "filelist-forbidden-perl-dir"
     Bad = [
