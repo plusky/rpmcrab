@@ -13,7 +13,8 @@ Provenance, verified against the pinned reference (`84848c0`):
   `shared-library-not-executable` entry dropped with the check in #267 and
   the `invalid-ldconfig-symlink`,
   `only-non-binary-in-usr-lib` entries dropped with the findings
-  (openSUSE: "Doesn't seem to make sense"), plus
+  (openSUSE: "Doesn't seem to make sense") and the
+  `missing-mandatory-optflags` entry dropped with the finding in #645, plus
   the restored `shared-library-without-dependency-information` entry (copied
   verbatim from the pre-deletion upstream file; upstream removed entry and
   check in `cf619f717bc3`), plus the four port-only rpmcrab#17 hardening

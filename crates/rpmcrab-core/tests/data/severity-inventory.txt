@@ -178,7 +178,6 @@ missing-dependency-to-logrotate = E
 missing-fortify = W
 missing-gnu-hash-section = W
 missing-hash-section = E
-missing-mandatory-optflags = W
 missing-menu-command = W
 missing-relro = W
 missing-stack-protector = W
