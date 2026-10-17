@@ -642,6 +642,12 @@ mod tests {
     }
 
     fn pkg_with_ghosts(files: &[&str], ghosts: &[&str]) -> Pkg {
+        for ghost in ghosts {
+            assert!(
+                files.contains(ghost),
+                "{ghost} is not in the package files, so this test would pass vacuously"
+            );
+        }
         let mut pkg = pkg_with_files(files);
         pkg.ghost_files = ghosts.iter().map(|g| g.to_string()).collect();
         pkg
@@ -675,16 +681,49 @@ mod tests {
     }
 
     #[test]
-    fn sysconfig_ghost_in_good_subdir_is_quiet() {
-        let pkg = pkg_with_ghosts(
-            &["/etc/sysconfig/scripts/munge"],
-            &["/etc/sysconfig/scripts/munge"],
-        );
+    fn sysconfig_ghost_in_rc_config_d_is_quiet() {
+        // /etc/rc.config.d/* is a Bad-only pattern: it matches no Good
+        // entry, so only the ghost exemption keeps this quiet.
+        let pkg = pkg_with_ghosts(&["/etc/rc.config.d/munge"], &["/etc/rc.config.d/munge"]);
         let config = Config::default();
         let results = run(&config, &pkg);
         assert!(
             lines_for(&results, "filelist-forbidden-sysconfig").is_empty(),
             "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn sysconfig_real_file_in_rc_config_d_still_fires() {
+        let pkg = pkg_with_files(&["/etc/rc.config.d/munge"]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "filelist-forbidden-sysconfig");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0]
+                .contains("E: filelist-forbidden-sysconfig (Badness: 1) /etc/rc.config.d/munge"),
+            "name, level and detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn sysconfig_ghost_and_real_sibling_fires_once_for_real_file() {
+        // The exemption is per-file, not per-package: the ghost sibling
+        // stays quiet while the real sibling in the same rule still fires.
+        let pkg = pkg_with_ghosts(
+            &["/etc/sysconfig/ghosted", "/etc/sysconfig/real"],
+            &["/etc/sysconfig/ghosted"],
+        );
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "filelist-forbidden-sysconfig");
+        assert_eq!(lines.len(), 1, "lines: {lines:?}");
+        assert!(
+            lines[0].contains("E: filelist-forbidden-sysconfig (Badness: 1) /etc/sysconfig/real"),
+            "name, level and detail: {}",
+            lines[0]
         );
     }
 
