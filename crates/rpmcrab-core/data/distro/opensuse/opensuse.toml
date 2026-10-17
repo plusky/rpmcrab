@@ -269,6 +269,23 @@ BlockedFilters = [
     "zypperplugin-file-unauthorized"
 ]
 
+# Packages allowed to ship systemd preset files (not from upstream;
+# see SYSTEMD_PRESET_PACKAGES in scripts/generate-distro-configs.py).
+SystemdPresetPackages = [
+    "systemd",
+    "systemd-mini",
+    "systemd-presets-branding-Aeon",
+    "systemd-presets-branding-Kalpa",
+    "systemd-presets-branding-MicroOS",
+    "systemd-presets-branding-openSUSE",
+    "systemd-presets-branding-transactional-server",
+    "systemd-presets-common-SUSE",
+    "systemd-presets-branding-SLE",
+    "systemd-presets-branding-SLE_immutable",
+    "systemd-presets-branding-Elemental",
+    "systemd-presets-branding-SLE-SAP",
+    "systemd-presets-branding-SLE-SAP_immutable",
+]
 [DanglingSymlinkExceptions."/usr/share/doc/licenses/"]
 path = "/usr/share/doc/licenses/"
 name = "licenses"
@@ -318,16 +335,3 @@ repository.
 '''
 no-changelogname-tag = '''There is no changelog. Please insert a '%changelog' section heading in your
 spec file and prepare your changes file using e.g. the 'osc vc' command.'''
-
-# Packages allowed to ship systemd preset files (not from upstream;
-# see SYSTEMD_PRESET_PACKAGES in scripts/generate-distro-configs.py).
-SystemdPresetPackages = [
-    "systemd",
-    "systemd-mini",
-    "systemd-presets-branding-Aeon",
-    "systemd-presets-branding-Kalpa",
-    "systemd-presets-branding-MicroOS",
-    "systemd-presets-branding-openSUSE",
-    "systemd-presets-branding-transactional-server",
-    "systemd-presets-common-SUSE",
-]

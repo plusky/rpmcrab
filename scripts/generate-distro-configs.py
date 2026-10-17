@@ -232,13 +232,19 @@ EXCLUDED_OPENSUSE_CHECKS = [
 ]
 
 # Packages the vendored distro configs name in the `SystemdPresetPackages`
-# key: the distribution's preset packages, the only packages allowed to
+# key: the distributions' preset packages, the only packages allowed to
 # ship systemd preset files (the `systemd-preset-packaged` finding exempts
-# exactly these names). The list is the Factory-verified shipper set: the
-# systemd-presets-* packages plus systemd/systemd-mini, which ship
-# systemd's own fallback presets. The key is rpmcrab-only; upstream
-# configs carry no such list, so both flavors get the same set appended
-# to their opensuse.toml.
+# exactly these names). The key is rpmcrab-only; upstream configs carry
+# no such list, so both flavors carry the same set in their
+# opensuse.toml. The set is the union of the preset shippers verified in
+# openSUSE Factory and in SLFO:Main: the openSUSE branding packages and
+# `systemd-presets-common-SUSE` ship in Factory, the SLE/Elemental
+# branding packages ship in SLFO:Main, and a name shipped by only one
+# flavor is inert in the other. `systemd` and `systemd-mini` ship
+# systemd's own fallback presets in both flavors; `systemd-mini` is not
+# a standalone source package in either — it is the `mini` multibuild
+# flavor of the `systemd` source package, and its binary ships the same
+# preset files as `systemd`.
 SYSTEMD_PRESET_PACKAGES = [
     "systemd",
     "systemd-mini",
@@ -248,6 +254,11 @@ SYSTEMD_PRESET_PACKAGES = [
     "systemd-presets-branding-openSUSE",
     "systemd-presets-branding-transactional-server",
     "systemd-presets-common-SUSE",
+    "systemd-presets-branding-SLE",
+    "systemd-presets-branding-SLE_immutable",
+    "systemd-presets-branding-Elemental",
+    "systemd-presets-branding-SLE-SAP",
+    "systemd-presets-branding-SLE-SAP_immutable",
 ]
 
 # Findings rpmcrab deliberately killed (see tests/parity/divergences.toml).
@@ -1898,22 +1909,31 @@ def append_extra_checks(text, checks):
 
 
 def append_systemd_preset_packages(text, packages):
-    """Append the `SystemdPresetPackages` key to a TOML document.
+    """Insert the `SystemdPresetPackages` key into a TOML document.
 
     Used for the distro preset packages rpmcrab exempts from the
     `systemd-preset-packaged` finding (see SYSTEMD_PRESET_PACKAGES).
-    Appended at the end of the document so the monthly sync re-emits it
-    deterministically.
+    The key goes at the end of the top-level preamble, before the first
+    table header, so it stays a top-level key: at the end of the
+    document it would fall inside the trailing [Descriptions] table and
+    never reach the check. The monthly sync re-emits it deterministically.
     """
-    out = text if text.endswith("\n") else text + "\n"
-    out += "\n"
-    out += "# Packages allowed to ship systemd preset files (not from upstream;\n"
-    out += "# see SYSTEMD_PRESET_PACKAGES in scripts/generate-distro-configs.py).\n"
-    out += "SystemdPresetPackages = [\n"
+    block = "\n"
+    block += "# Packages allowed to ship systemd preset files (not from upstream;\n"
+    block += "# see SYSTEMD_PRESET_PACKAGES in scripts/generate-distro-configs.py).\n"
+    block += "SystemdPresetPackages = [\n"
     for pkg in packages:
-        out += "    %s,\n" % json.dumps(pkg)
-    out += "]\n"
-    return out
+        block += "    %s,\n" % json.dumps(pkg)
+    block += "]\n"
+    lines = text.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.startswith("["):
+            if i and lines[i - 1] == "\n":
+                block = block[1:]
+            lines.insert(i, block)
+            return "".join(lines)
+    out = text if text.endswith("\n") else text + "\n"
+    return out + block
 
 
 def remove_excluded_checks(text, checks):
@@ -2119,6 +2139,12 @@ def generate(ref_dir=None, pins=None):
             f"#   Checks: added {c!r} (deliberate rpmcrab divergence, ledgered in"
             " tests/parity/divergences.toml)"
         )
+    provenance.append("#")
+    provenance.append(
+        "# SystemdPresetPackages appended (not from upstream; see SYSTEMD_PRESET_PACKAGES):"
+    )
+    for p in SYSTEMD_PRESET_PACKAGES:
+        provenance.append(f"#   SystemdPresetPackages: added {p!r}")
     provenance.append("#")
     provenance.append("# Excluded Checks (removed from the opensuse flavor; see EXCLUDED_OPENSUSE_CHECKS):")
     for c in EXCLUDED_OPENSUSE_CHECKS:
