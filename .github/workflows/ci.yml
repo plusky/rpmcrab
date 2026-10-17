@@ -52,10 +52,7 @@ jobs:
       # Spellcheck tests need real hunspell dictionaries; grab the LibreOffice
       # en_US pair (the same source openSUSE packages from).
       - name: Install hunspell dictionaries
-        run: |
-          sudo mkdir -p /usr/share/hunspell
-          sudo curl -sL -o /usr/share/hunspell/en_US.aff https://cgit.freedesktop.org/libreoffice/dictionaries/plain/en/en_US.aff
-          sudo curl -sL -o /usr/share/hunspell/en_US.dic https://cgit.freedesktop.org/libreoffice/dictionaries/plain/en/en_US.dic
+        run: sudo scripts/install-hunspell-dicts.sh /usr/share/hunspell
       - run: cargo fmt --all -- --check
       # The second clippy line is not optional: --all-targets skips the
       # feature-gated rpmcrab-gen bin unless gen is enabled.
@@ -101,10 +98,7 @@ jobs:
       # Spellcheck tests need real hunspell dictionaries; the spellchecker
       # looks in /opt/homebrew/share/hunspell on Apple Silicon Macs.
       - name: Install hunspell dictionaries
-        run: |
-          sudo mkdir -p /opt/homebrew/share/hunspell
-          sudo curl -sL -o /opt/homebrew/share/hunspell/en_US.aff https://cgit.freedesktop.org/libreoffice/dictionaries/plain/en/en_US.aff
-          sudo curl -sL -o /opt/homebrew/share/hunspell/en_US.dic https://cgit.freedesktop.org/libreoffice/dictionaries/plain/en/en_US.dic
+        run: sudo scripts/install-hunspell-dicts.sh /opt/homebrew/share/hunspell
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo clippy --workspace --all-targets --features gen --locked -- -D warnings
       - run: cargo test --workspace --all-targets --locked
@@ -152,10 +146,7 @@ jobs:
       # Spellcheck tests need real hunspell dictionaries; grab the LibreOffice
       # en_US pair (the same source openSUSE packages from).
       - name: Install hunspell dictionaries
-        run: |
-          sudo mkdir -p /usr/share/hunspell
-          sudo curl -sL -o /usr/share/hunspell/en_US.aff https://cgit.freedesktop.org/libreoffice/dictionaries/plain/en/en_US.aff
-          sudo curl -sL -o /usr/share/hunspell/en_US.dic https://cgit.freedesktop.org/libreoffice/dictionaries/plain/en/en_US.dic
+        run: sudo scripts/install-hunspell-dicts.sh /usr/share/hunspell
       - name: Assert beta toolchain
         run: |
           rustc --version
