@@ -1749,6 +1749,20 @@ fn explain_staged_shlib_policy_etc_payload() {
     assert!(out.stderr.is_empty());
 }
 
+/// `--explain`: staged `SharedLibraryPolicyCheck.toml` resolves the port-only `shlib-devel-unversioned-requires` instead of "Unknown message".
+#[test]
+fn explain_staged_shlib_devel_unversioned_requires() {
+    let out = rpmcrab(&["-e", "shlib-devel-unversioned-requires"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "shlib-devel-unversioned-requires:\nYour library -devel package does not require the shared library package with a\nversion constraint. The Shared Library Policy asks for a properly versioned\nrequires on the shared library package, so that installing the -devel package\ncannot pull in a library generation it was not built against.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
 /// `--explain`: staged `SpecCheck.toml` resolves `no-spec-file` instead of "Unknown message".
 #[test]
 fn explain_staged_spec_check() {
