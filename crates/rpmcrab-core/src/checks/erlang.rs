@@ -796,7 +796,7 @@ mod tests {
     /// the `levels`-th nested `parse_term` call.
     fn nested_tuple_payload(levels: usize) -> Vec<u8> {
         let mut payload = vec![131u8];
-        for _ in 0..levels - 1 {
+        for _ in 0..levels.saturating_sub(1) {
             payload.extend_from_slice(&[104, 1]); // SMALL_TUPLE_EXT, arity 1
         }
         payload.push(106); // NIL

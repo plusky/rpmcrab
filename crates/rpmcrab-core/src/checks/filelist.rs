@@ -251,23 +251,26 @@ impl FilelistCheck {
             .is_some_and(|v| v.contains("SUSE"));
 
         // Directory entries carry a trailing slash for the prefix
-        // matching below.
-        let paths: Vec<String> = pkg
+        // matching below; other names are borrowed as-is.
+        let paths: Vec<std::borrow::Cow<'_, str>> = pkg
             .files
             .iter()
             .map(|pkgfile| {
-                let mut f = pkgfile.name.clone();
                 if (pkgfile.mode >> 12) & 0o17 == 4 {
+                    let mut f = pkgfile.name.clone();
                     f.push('/');
+                    std::borrow::Cow::Owned(f)
+                } else {
+                    std::borrow::Cow::Borrowed(pkgfile.name.as_str())
                 }
-                f
             })
             .collect();
 
         for f in &paths {
+            let f: &str = f;
             if !self.good_prefixes.iter().any(|p| f.starts_with(p)) {
                 // Find the first invalid path component.
-                let mut base = f.as_str().rsplit_once('/').map(|(b, _)| b).unwrap_or("");
+                let mut base = f.rsplit_once('/').map(|(b, _)| b).unwrap_or("");
                 let mut pfx: Option<&str> = None;
                 while !base.is_empty()
                     && !self.good_prefixes.iter().any(|p| base.starts_with(p))
@@ -281,7 +284,7 @@ impl FilelistCheck {
         }
         (
             invalid_fhs.into_iter().collect(),
-            Self::invalid_opt_providers(paths.iter().map(String::as_str), is_suse),
+            Self::invalid_opt_providers(paths.iter().map(|p| p.as_ref()), is_suse),
         )
     }
 
@@ -299,9 +302,7 @@ impl FilelistCheck {
         let mut invalid_opt = std::collections::BTreeSet::new();
         for f in paths {
             if let Some(rest) = f.strip_prefix("/opt/") {
-                // A split always yields a first segment, even for an
-                // empty remainder.
-                let provider = rest.split('/').next().expect("split yields one segment");
+                let provider = rest.split('/').next().unwrap_or("");
                 if !provider.is_empty()
                     && !(is_suse && (provider == "suse" || provider == "novell"))
                 {
