@@ -1055,7 +1055,7 @@ impl FilesCheck {
         self.check_file_non_standard_uid(pkg, fname, pkgfile, out);
         self.check_file_non_standard_gid(pkg, fname, pkgfile, out);
         self.check_file_kernel_modules(pkg, fname, &st.is_kernel_package, out);
-        self.check_file_dir_or_file(pkg, fname, out);
+        self.check_file_dir_or_file(pkg, fname, pkgfile, out);
         self.check_file_non_ghost_in_run(pkg, fname, pkg, out);
         self.check_file_mimeinfo_cache(pkg, fname, pkgfile, out);
         self.check_file_systemd_unit_in_etc(pkg, fname, out);
@@ -1717,7 +1717,12 @@ impl FilesCheck {
         }
     }
 
-    fn check_file_dir_or_file(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
+    fn check_file_dir_or_file(&self, pkg: &Pkg, fname: &str, pkgfile: &PkgFile, out: &mut Filter) {
+        // A %ghost entry installs no payload, so there is nothing in the
+        // directory to forbid.
+        if pkgfile.is_ghost() || pkg.ghost_files.iter().any(|g| g == fname) {
+            return;
+        }
         for d in &self.disallowed_dirs {
             if fname.starts_with(d.as_str()) {
                 let tag = format!(
@@ -3587,6 +3592,11 @@ mod tests {
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
         let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.ghost_files = files
+            .iter()
+            .filter(|f| f.is_ghost())
+            .map(|f| f.name.clone())
+            .collect();
         pkg.files = files;
         let config = test_config();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
@@ -3601,6 +3611,46 @@ mod tests {
             path: name.to_string(),
             ..Default::default()
         }
+    }
+
+    fn ghost_file(name: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            flags: RPMFILE_GHOST,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn dir_or_file_in_var_run_quiet_for_ghost() {
+        let names = finding_names(&run_files_check_with_files(vec![ghost_file(
+            "/var/run/fcprobe",
+        )]));
+        assert_lacks(&names, "dir-or-file-in-var-run");
+    }
+
+    #[test]
+    fn dir_or_file_in_other_disallowed_dir_quiet_for_ghost() {
+        let names = finding_names(&run_files_check_with_files(vec![ghost_file(
+            "/opt/fcprobe",
+        )]));
+        assert_lacks(&names, "dir-or-file-in-opt");
+    }
+
+    #[test]
+    fn dir_or_file_in_var_run_still_fires_for_real_file() {
+        let results = run_files_check_with_files(vec![plain_file("/var/run/fcprobe")]);
+        let names = finding_names(&results);
+        assert_has(&names, "dir-or-file-in-var-run");
+        let (_, line) = results
+            .iter()
+            .find(|(n, _)| n == "dir-or-file-in-var-run")
+            .expect("finding fires");
+        assert!(
+            line.contains(": E: dir-or-file-in-var-run"),
+            "real file stays an error: {line}"
+        );
     }
 
     fn finding_names(results: &[(String, String)]) -> Vec<String> {
