@@ -149,7 +149,7 @@ impl PostCheck {
         static CACHE_UPDATER_REGEX: OnceLock<Regex> = OnceLock::new();
         CACHE_UPDATER_REGEX.get_or_init(|| {
             Regex::new(
-                r"(?m)(^|[;`|]|&&|\$\()\s*(?:then\s+|do\s+|else\s+)?(?:\S*/)?(update-desktop-database|gtk-update-icon-cache|update-mime-database|glib-compile-schemas|install-info)\b",
+                r"(?m)((?:^|[;`|]|&&|\$\()\s*(?:then\s+|do\s+|else\s+)?|^\s*[\w*?|]+\)\s*)(?:[A-Za-z_]\w*=\S*\s+)*(?:[^\s=]*/)?(update-desktop-database|gtk-update-icon-cache|update-mime-database|glib-compile-schemas|install-info)\b([^\n;|&]*)",
             )
             .expect("static regex")
         })
@@ -159,10 +159,12 @@ impl PostCheck {
     /// writes out (an update message, a generated file) is not executed,
     /// so a command named inside it is not an invocation.
     fn without_heredoc_bodies(script: &str) -> String {
-        // Parse the delimiter following a `<<` at byte offset `at`.
+        // Parse the delimiter following a `<<` at byte offset `at` in
+        // `line`: the delimiter word, and whether the operator is the
+        // `<<-` form (whose terminator may be indented with tabs).
         // Handles the plain (`<<EOF`), quoted (`<<'EOF'`, `<<"EOF"`),
         // escaped (`<<\EOF`) and ANSI-C-quoted (`<<$'EOF'`) forms.
-        fn delimiter_after(line: &str, at: usize) -> Option<String> {
+        fn delimiter_after(line: &str, at: usize) -> Option<(String, bool)> {
             // A delimiter word ends at whitespace or a shell
             // metacharacter; `-`, `.` and `:` are ordinary delimiter
             // characters (`<<'END-OF-MESSAGE'`, `<<EOF.2`).
@@ -185,7 +187,10 @@ impl PostCheck {
                 finish(s.chars().take_while(|c| *c != q).collect())
             }
             let rest = &line[at + 2..];
-            let rest = rest.strip_prefix('-').unwrap_or(rest);
+            let (rest, strip_tabs) = match rest.strip_prefix('-') {
+                Some(r) => (r, true),
+                None => (rest, false),
+            };
             let rest = rest.trim_start();
             if let Some(quoted) = rest.strip_prefix('$') {
                 // `$'EOF'` / `$"EOF"`: the delimiter is the quoted text.
@@ -193,10 +198,10 @@ impl PostCheck {
                 if q != '\'' && q != '"' {
                     return None;
                 }
-                return quoted_word(&quoted[q.len_utf8()..], q);
+                return quoted_word(&quoted[q.len_utf8()..], q).map(|w| (w, strip_tabs));
             }
             if let Some(escaped) = rest.strip_prefix('\\') {
-                // `\\EOF`: a backslash quotes the next character into
+                // `\EOF`: a backslash quotes the next character into
                 // the delimiter; the word ends at an unquoted stop.
                 let mut word = String::new();
                 let mut chars = escaped.chars();
@@ -211,23 +216,23 @@ impl PostCheck {
                         Some(c) => word.push(c),
                     }
                 }
-                return finish(word);
+                return finish(word).map(|w| (w, strip_tabs));
             }
             if let Some(quoted) = rest
                 .strip_prefix('\'')
                 .map(|s| (s, '\''))
                 .or_else(|| rest.strip_prefix('"').map(|s| (s, '"')))
             {
-                return quoted_word(quoted.0, quoted.1);
+                return quoted_word(quoted.0, quoted.1).map(|w| (w, strip_tabs));
             }
-            finish(rest.chars().take_while(|c| !is_stop(*c)).collect())
+            finish(rest.chars().take_while(|c| !is_stop(*c)).collect()).map(|w| (w, strip_tabs))
         }
         // Delimiters introduced by unquoted `<<` operators on `line`.
         // A `<<` inside single/double quotes, inside a `#` comment, or
         // inside a `$((...))` arithmetic expansion (where it is the
         // left-shift operator) is not a heredoc operator, and `<<<`
         // is a herestring, not a heredoc.
-        fn delimiters_in_line(line: &str) -> Vec<String> {
+        fn delimiters_in_line(line: &str) -> Vec<(String, bool)> {
             // Context stack: a `$(...)` or backtick substitution
             // re-enters code even inside double quotes, so a heredoc
             // operator inside one is live; `$((...))` arithmetic is
@@ -377,12 +382,23 @@ impl PostCheck {
             }
             out
         }
+        // Whether `line` terminates the heredoc: an exact match for
+        // the plain form, leading tabs stripped for the `<<-` form —
+        // the shell's own rule, so an indented body line that merely
+        // looks like the delimiter does not end the body early.
+        fn is_terminator(line: &str, delim: &str, strip_tabs: bool) -> bool {
+            if strip_tabs {
+                line.trim_start_matches('\t') == delim
+            } else {
+                line == delim
+            }
+        }
         let lines: Vec<&str> = script.lines().collect();
-        let mut pending: Vec<String> = Vec::new();
+        let mut pending: Vec<(String, bool)> = Vec::new();
         let mut out: Vec<&str> = Vec::new();
         for (idx, line) in lines.iter().enumerate() {
-            if let Some(delim) = pending.first() {
-                if line.trim() == delim.as_str() {
+            if let Some((delim, strip_tabs)) = pending.first().cloned() {
+                if is_terminator(line, &delim, strip_tabs) {
                     pending.remove(0);
                     out.push(line);
                 } else {
@@ -392,10 +408,13 @@ impl PostCheck {
             }
             // Only blank when a terminator actually appears later in
             // the scriptlet: a false opener otherwise blanks the rest
-            // of the scriptlet and hides genuine activations.
-            for delim in delimiters_in_line(line) {
-                if lines[idx + 1..].iter().any(|l| l.trim() == delim) {
-                    pending.push(delim);
+            // of the scriptlet and hides genuine invocations.
+            for (delim, strip_tabs) in delimiters_in_line(line) {
+                if lines[idx + 1..]
+                    .iter()
+                    .any(|l| is_terminator(l, &delim, strip_tabs))
+                {
+                    pending.push((delim, strip_tabs));
                 }
             }
             out.push(line);
@@ -403,14 +422,16 @@ impl PostCheck {
         out.join("\n")
     }
 
-    /// A scriptlet line with comments removed and quoted-string
-    /// contents blanked to spaces, for command matching: text inside
-    /// a comment or a quoted string never executes, so a shell
-    /// separator there does not put a following command name at
-    /// command position. Command substitutions are the exception --
-    /// `$(...)` and backticks execute even inside double quotes, so
-    /// their contents stay live. The quote characters are kept; only
-    /// the contents go. Scanned per line, like `delimiters_in_line`.
+    /// A scriptlet with comments removed and quoted-string contents
+    /// blanked to spaces, for command matching: text inside a comment
+    /// or a quoted string never executes, so a shell separator there
+    /// does not put a following command name at command position.
+    /// Command substitutions are the exception — `$(...)` and
+    /// backticks execute even inside double quotes, so their contents
+    /// stay live. The quote characters are kept; only the contents go.
+    /// The result is length-preserving (comment text is blanked, not
+    /// cut), so a match span in the result is the same span in the
+    /// input. Scanned per line, like `delimiters_in_line`.
     fn code_only(script: &str) -> String {
         #[derive(Clone, Copy)]
         enum Frame {
@@ -523,13 +544,16 @@ impl PostCheck {
                         }
                         '#' => {
                             // A `#` starting a word begins a comment
-                            // (the `delimiters_in_line` rule).
+                            // (the `delimiters_in_line` rule); blank
+                            // the rest of the line rather than cutting
+                            // it, keeping the line's length.
                             if i == 0
                                 || matches!(
                                     bytes[i - 1] as char,
                                     ' ' | '\t' | ';' | '|' | '&' | '('
                                 )
                             {
+                                out.resize(bytes.len(), b' ');
                                 break;
                             }
                             out.push(bytes[i]);
@@ -545,6 +569,110 @@ impl PostCheck {
             String::from_utf8(out).expect("blanking preserves UTF-8")
         }
         script.lines().map(code_line).collect::<Vec<_>>().join("\n")
+    }
+
+    /// Cache and database updaters invoked at command position in a
+    /// scriptlet and aimed at a directory the RPM file triggers own,
+    /// in first-seen order, each named once. The triggers already run
+    /// these commands when the files they index change, so a
+    /// hand-rolled invocation duplicates the trigger. Matching runs on
+    /// the heredoc-blanked, comment-stripped, quote-blanked text
+    /// (`code_only`) and is command-position only (start of line or
+    /// after a command separator, a `then`/`do`/`else` keyword, an
+    /// environment assignment, or a `case` pattern), so comments,
+    /// quoted or echoed text and heredoc bodies do not fire.
+    fn cache_updaters(script: &str) -> Vec<String> {
+        let blanked = Self::without_heredoc_bodies(script);
+        let text = Self::code_only(&blanked);
+        let mut out: Vec<String> = Vec::new();
+        for caps in Self::cache_updater_regex().captures_iter(&text).flatten() {
+            let (Some(cmd), Some(args)) = (caps.get(2), caps.get(3)) else {
+                continue;
+            };
+            // `code_only` is length-preserving, so the args span in
+            // the matched text is the same span in the heredoc-blanked
+            // text, where quoted arguments survive for classification.
+            if !Self::cache_target_is_trigger_owned(&blanked[args.range()]) {
+                continue;
+            }
+            let cmd = cmd.as_str().to_string();
+            if !out.contains(&cmd) {
+                out.push(cmd);
+            }
+        }
+        out
+    }
+
+    /// Whether an invocation with argument tail `args` (the raw text
+    /// following the command name, up to the next command separator)
+    /// is pointed at a directory the RPM file triggers own. The
+    /// indexed directory is the `--info-dir`/`--targetdir` value when
+    /// one is given, else the first positional argument; no positional
+    /// argument means the tool's default directory. The triggers own
+    /// the system data directories (`/usr/share`, `/usr/local/share`);
+    /// a literal absolute target anywhere else (e.g.
+    /// `/opt/<app>/schemas`) is a private directory no file trigger
+    /// indexes — the manual call is the only thing building that
+    /// cache, so it stays quiet. A target that is not a literal
+    /// absolute path (relative, a shell variable, a macro) cannot be
+    /// proven private and counts as trigger-owned.
+    fn cache_target_is_trigger_owned(args: &str) -> bool {
+        let mut tokens = args.split_whitespace().peekable();
+        let mut explicit_dir: Option<String> = None;
+        let mut positional: Option<String> = None;
+        while let Some(tok) = tokens.next() {
+            let tok = tok.trim_matches(|c| c == '"' || c == '\'');
+            if tok.is_empty() {
+                continue;
+            }
+            if let Some(v) = tok
+                .strip_prefix("--info-dir=")
+                .or_else(|| tok.strip_prefix("--targetdir="))
+                .or_else(|| tok.strip_prefix("--infodir="))
+            {
+                explicit_dir = Some(v.to_string());
+                continue;
+            }
+            if matches!(
+                tok,
+                "--info-dir" | "--targetdir" | "--infodir" | "--dir-file"
+            ) {
+                if let Some(v) = tokens.next()
+                    && tok != "--dir-file"
+                {
+                    explicit_dir = Some(v.trim_matches(|c| c == '"' || c == '\'').to_string());
+                }
+                continue;
+            }
+            if tok.starts_with('-') {
+                continue;
+            }
+            if tok.starts_with('>') || tok.starts_with('<') {
+                // A bare redirection operator consumes the next token
+                // as its target file.
+                if tok
+                    .chars()
+                    .all(|c| matches!(c, '>' | '<' | '&' | '0'..='9'))
+                {
+                    tokens.next();
+                }
+                continue;
+            }
+            if positional.is_none() {
+                positional = Some(tok.to_string());
+            }
+        }
+        let target = explicit_dir.as_deref().or(positional.as_deref());
+        match target {
+            None => true,
+            Some(t) => {
+                !t.starts_with('/')
+                    || t == "/usr/share"
+                    || t == "/usr/local/share"
+                    || t.starts_with("/usr/share/")
+                    || t.starts_with("/usr/local/share/")
+            }
+        }
     }
 
     /// Daemon activations in a scriptlet: an `insserv` invocation that
@@ -602,27 +730,6 @@ impl PostCheck {
                 && !out.iter().any(|o| o == detail)
             {
                 out.push(detail.to_string());
-            }
-        }
-        out
-    }
-
-    /// Cache and database updaters invoked at command position in a
-    /// scriptlet, in first-seen order, each named once. RPM file
-    /// triggers already run these commands when the files they index
-    /// change, so a hand-rolled invocation duplicates the trigger.
-    /// Matching is command-position only (start of line or after a
-    /// command separator), so comments, echoed text and heredoc bodies
-    /// do not fire.
-    fn cache_updaters(script: &str) -> Vec<String> {
-        let text = Self::without_heredoc_bodies(script);
-        let mut out: Vec<String> = Vec::new();
-        for caps in Self::cache_updater_regex().captures_iter(&text).flatten() {
-            if let Some(cmd) = caps.get(2) {
-                let cmd = cmd.as_str().to_string();
-                if !out.contains(&cmd) {
-                    out.push(cmd);
-                }
             }
         }
         out
@@ -694,20 +801,6 @@ impl PostCheck {
             }
         }
 
-        // The daemon-activation scan also runs for an empty prog: a
-        // missing `-p` flag defaults to /bin/sh, which is exactly how
-        // macro-expanded %post/%preun bodies arrive, so gating the scan
-        // on a named interpreter would skip the common form.
-        if prog.is_empty() || prog == "/bin/sh" || prog == "/bin/bash" || prog == "/usr/bin/perl" {
-            for activation in Self::daemon_activations(script) {
-                out.push((
-                    Level::Error,
-                    finding("daemon-activation-in"),
-                    vec![activation],
-                ));
-            }
-        }
-
         if prog == "/bin/sh" || prog == "/bin/bash" || prog == "/usr/bin/perl" {
             if is_match(Self::percent_regex(), script) {
                 out.push((Level::Warning, finding("percent-in"), vec![]));
@@ -735,18 +828,6 @@ impl PostCheck {
                     finding("forbidden-selinux-command-in"),
                     vec![m.as_str().to_string()],
                 ));
-            }
-            // Trigger scriptlets are the file-trigger mechanism itself:
-            // an updater invoked there is the trigger doing its work,
-            // not a hand-rolled duplicate of it.
-            if !matches!(tag, "%trigger" | "%filetrigger" | "%transfiletrigger") {
-                for cmd in Self::cache_updaters(script) {
-                    out.push((
-                        Level::Warning,
-                        finding("deprecated-cache-updater-in"),
-                        vec![cmd],
-                    ));
-                }
             }
             if script.contains("update-menus") {
                 let menu_re = POST_MENU_RE.get_or_init(|| {
@@ -779,6 +860,39 @@ impl PostCheck {
                         Level::Error,
                         "no-prereq-on".to_string(),
                         vec![bins[0].to_string()],
+                    ));
+                }
+            }
+        }
+
+        // The daemon-activation scan also runs for an empty prog: a
+        // missing `-p` flag defaults to /bin/sh, which is exactly how
+        // macro-expanded %post/%preun bodies arrive, so gating the scan
+        // on a named interpreter would skip the common form.
+        if prog.is_empty() || prog == "/bin/sh" || prog == "/bin/bash" || prog == "/usr/bin/perl" {
+            for activation in Self::daemon_activations(script) {
+                out.push((
+                    Level::Error,
+                    finding("daemon-activation-in"),
+                    vec![activation],
+                ));
+            }
+        }
+
+        // The cache-updater scan also covers scriptlets without a
+        // `-p` flag: a missing prog defaults to /bin/sh (the default
+        // the %pretrans check above relies on), so an empty prog must
+        // not skip the scan.
+        if prog.is_empty() || prog == "/bin/sh" || prog == "/bin/bash" || prog == "/usr/bin/perl" {
+            // Trigger scriptlets are the file-trigger mechanism itself:
+            // an updater invoked there is the trigger doing its work,
+            // not a hand-rolled duplicate of it.
+            if !matches!(tag, "%trigger" | "%filetrigger" | "%transfiletrigger") {
+                for cmd in Self::cache_updaters(script) {
+                    out.push((
+                        Level::Warning,
+                        finding("deprecated-cache-updater-in"),
+                        vec![cmd],
                     ));
                 }
             }
@@ -843,7 +957,7 @@ const FORBIDDEN_SELINUX_DETAIL: &str = "A command which requires intimate knowle
 /// `daemon-activation-in-<scriptlet>`:
 const DAEMON_ACTIVATION_DETAIL: &str = "The scriptlet activates a daemon at installation time. Packages must not enable or start services on installation; enablement is governed by systemd presets, not by insserv, chkconfig or systemctl calls in scriptlets.";
 /// `deprecated-cache-updater-in-<scriptlet>`:
-const DEPRECATED_CACHE_UPDATER_DETAIL: &str = "The scriptlet runs a cache or database updater (update-desktop-database, gtk-update-icon-cache, update-mime-database, glib-compile-schemas or install-info) by hand. RPM file triggers already run the updater when the files it indexes change, so the manual call is redundant; remove it and rely on the file trigger.";
+const DEPRECATED_CACHE_UPDATER_DETAIL: &str = "The scriptlet runs a cache or database updater (update-desktop-database, gtk-update-icon-cache, update-mime-database, glib-compile-schemas or install-info) by hand, pointed at a directory the RPM file triggers own. The triggers already run the updater when the files it indexes change, so the manual call is redundant; remove it and rely on the file trigger.";
 /// `non-empty-<scriptlet>`:
 const NON_EMPTY_DETAIL: &str = "Scriptlets for the interpreter mentioned in the message should be empty.\n        One common case where they are unintentionally not is when the specfile\n        contains comments after the scriptlet and before the next section. Review\n        and clean up the scriptlet contents if appropriate.";
 pub fn register_error_details(out: &mut Filter) {
@@ -1417,6 +1531,455 @@ mod tests {
     }
 
     #[test]
+    fn deprecated_cache_updaters_in_post_are_flagged() {
+        for (script, cmd) in [
+            (
+                "update-desktop-database /usr/share/applications",
+                "update-desktop-database",
+            ),
+            (
+                "gtk-update-icon-cache -f /usr/share/icons/hicolor",
+                "gtk-update-icon-cache",
+            ),
+            (
+                "update-mime-database /usr/share/mime",
+                "update-mime-database",
+            ),
+            (
+                "glib-compile-schemas /usr/share/glib-2.0/schemas",
+                "glib-compile-schemas",
+            ),
+            (
+                "install-info /usr/share/info/foo.info /usr/share/info/dir",
+                "install-info",
+            ),
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Warning
+                    && f == "deprecated-cache-updater-in-%post"
+                    && d == &vec![cmd.to_string()]),
+                "{script}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deprecated_cache_updater_in_postun_is_flagged() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "glib-compile-schemas /usr/share/glib-2.0/schemas",
+            "%postun",
+            &[],
+            &[],
+        );
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
+            && f == "deprecated-cache-updater-in-%postun"
+            && d == &vec!["glib-compile-schemas".to_string()]));
+    }
+
+    #[test]
+    fn deprecated_cache_updater_path_prefixed_is_flagged() {
+        for script in [
+            "/usr/bin/update-desktop-database",
+            "/usr/bin/gtk-update-icon-cache /usr/share/icons/hicolor",
+            "/usr/sbin/install-info --info-dir=/usr/share/info /usr/share/info/foo.info",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found
+                    .iter()
+                    .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+                "{script}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deprecated_cache_updater_after_separator_is_flagged() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "true && update-mime-database /usr/share/mime; gtk-update-icon-cache /usr/share/icons/hicolor",
+            "%post",
+            &[],
+            &[],
+        );
+        let cmds: Vec<&str> = found
+            .iter()
+            .filter(|(_, f, _)| f == "deprecated-cache-updater-in-%post")
+            .map(|(_, _, d)| d[0].as_str())
+            .collect();
+        assert_eq!(cmds, vec!["update-mime-database", "gtk-update-icon-cache"]);
+    }
+
+    #[test]
+    fn deprecated_cache_updater_repeated_is_reported_once() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "update-desktop-database\nupdate-desktop-database /usr/share/applications",
+            "%post",
+            &[],
+            &[],
+        );
+        assert_eq!(
+            found
+                .iter()
+                .filter(|(_, f, _)| f == "deprecated-cache-updater-in-%post")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn deprecated_cache_updater_in_comment_and_echo_is_quiet() {
+        let script = "# update-desktop-database\n\
+            echo \"glib-compile-schemas /usr/share/glib-2.0/schemas\"\n\
+            echo install-info";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn deprecated_cache_updater_in_heredoc_text_is_quiet() {
+        let script = "cat >> /var/adm/update-messages/foo << EOF\n\
+            glib-compile-schemas /usr/share/glib-2.0/schemas\n\
+            EOF";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn unrelated_scriptlet_is_quiet_for_cache_updaters() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "update-ca-certificates\ntouch /usr/share/icons/hicolor/icon-theme.cache",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn deprecated_cache_updater_in_trigger_scriptlets_is_quiet() {
+        // A trigger scriptlet is the file-trigger mechanism itself: the
+        // packages providing a trigger (desktop-file-utils,
+        // shared-mime-info) and packages registering their own run the
+        // updater there legitimately.
+        for tag in ["%trigger", "%filetrigger", "%transfiletrigger"] {
+            let found = check().check_scriptlet(
+                "/bin/sh",
+                "update-desktop-database /usr/share/applications",
+                tag,
+                &[],
+                &[],
+            );
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f.starts_with("deprecated-cache-updater-in-")),
+                "{tag}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deprecated_cache_updater_with_private_target_dir_is_quiet() {
+        // Scoping decision: the finding covers invocations aimed at
+        // the directories the file triggers own. A literal private
+        // target is indexed by no file trigger, so there the manual
+        // call is the only thing building the cache and the "rely on
+        // the file trigger" advice would be false.
+        for script in [
+            "glib-compile-schemas /opt/myapp/schemas",
+            "glib-compile-schemas \"/opt/myapp/schemas\"",
+            "gtk-update-icon-cache /opt/myapp/icons/hicolor",
+            "install-info --info-dir=/opt/myapp/info /opt/myapp/info/foo.info",
+            "update-desktop-database /srv/myapp/applications",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+                "{script}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deprecated_cache_updater_with_explicit_system_dir_is_flagged() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "install-info --info-dir=/usr/share/info /usr/share/info/foo.info",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
+            && f == "deprecated-cache-updater-in-%post"
+            && d == &vec!["install-info".to_string()]));
+    }
+
+    #[test]
+    fn deprecated_cache_updater_in_then_do_else_forms_is_flagged() {
+        // The dominant scriptlet shape: `if ...; then updater || :`.
+        for script in [
+            "if [ $1 -eq 1 ]; then update-desktop-database /usr/share/applications || :; fi",
+            "if [ $1 -eq 0 ]; then :; else gtk-update-icon-cache /usr/share/icons/hicolor; fi",
+            "for d in /usr/share/icons/*; do update-mime-database /usr/share/mime; done",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found
+                    .iter()
+                    .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+                "{script}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deprecated_cache_updater_in_command_substitution_is_flagged() {
+        for script in [
+            "x=$(update-desktop-database)",
+            "x=`update-mime-database /usr/share/mime`",
+            "echo \"$(glib-compile-schemas /usr/share/glib-2.0/schemas)\"",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found
+                    .iter()
+                    .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+                "{script}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deprecated_cache_updater_in_case_arm_is_flagged() {
+        let script = "case \"$1\" in\n  1) update-desktop-database /usr/share/applications ;;\n  0) gtk-update-icon-cache /usr/share/icons/hicolor ;;\nesac";
+        let found = check().check_scriptlet("/bin/sh", script, "%postun", &[], &[]);
+        let cmds: Vec<&str> = found
+            .iter()
+            .filter(|(_, f, _)| f == "deprecated-cache-updater-in-%postun")
+            .map(|(_, _, d)| d[0].as_str())
+            .collect();
+        assert_eq!(
+            cmds,
+            vec!["update-desktop-database", "gtk-update-icon-cache"]
+        );
+    }
+
+    #[test]
+    fn deprecated_cache_updater_after_env_assignment_is_flagged() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "NO_GTK_UPDATE=1 gtk-update-icon-cache /usr/share/icons/hicolor",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post")
+        );
+    }
+
+    #[test]
+    fn cache_updater_name_as_assignment_value_is_quiet() {
+        // Merely naming the tool (even by absolute path) in an
+        // assignment is not an invocation.
+        for script in [
+            "UPDATER=/usr/bin/update-desktop-database",
+            "UPDATER=update-desktop-database",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+                "{script}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deprecated_cache_updater_without_prog_is_flagged() {
+        // A scriptlet without -p runs under the default shell, so the
+        // scan covers it exactly like an explicit /bin/sh one; the
+        // bash and perl forms are covered by the same gate.
+        for prog in ["", "/bin/bash", "/usr/bin/perl"] {
+            let found = check().check_scriptlet(
+                prog,
+                "update-desktop-database /usr/share/applications",
+                "%post",
+                &[],
+                &[],
+            );
+            assert!(
+                found
+                    .iter()
+                    .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+                "prog {prog:?}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deprecated_cache_updater_after_comment_separator_is_quiet() {
+        // A separator inside a comment does not put the following
+        // text at command position.
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "echo done # note; update-desktop-database /usr/share/applications",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn deprecated_cache_updater_in_quoted_text_is_quiet() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "echo \"please run: update-desktop-database; gtk-update-icon-cache\"",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn quoted_shift_opener_does_not_blank_following_lines() {
+        // `<<` inside quotes is not a heredoc operator; the genuine
+        // invocation on the next line must still be seen.
+        let script =
+            "echo \"append with << FILE\"\nupdate-desktop-database /usr/share/applications";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post")
+        );
+    }
+
+    #[test]
+    fn arithmetic_shift_opener_does_not_blank_following_lines() {
+        // `<<` inside $((...)) is the left-shift operator.
+        let script = "flags=$((flags << shift))\nupdate-mime-database /usr/share/mime";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post")
+        );
+    }
+
+    #[test]
+    fn escaped_delimiter_heredoc_text_is_quiet() {
+        let script = "cat <<\\EOF\nupdate-desktop-database\nEOF";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn ansi_c_delimiter_heredoc_text_is_quiet() {
+        let script = "cat <<$'EOF'\nupdate-desktop-database\nEOF";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn dotted_delimiter_heredoc_ends_at_its_terminator() {
+        // The delimiter is the whole word `EOF.txt`: the body stays
+        // silent and the invocation after the terminator is seen.
+        let script =
+            "cat <<EOF.txt\nupdate-desktop-database\nEOF.txt\nupdate-mime-database /usr/share/mime";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        let cmds: Vec<&str> = found
+            .iter()
+            .filter(|(_, f, _)| f == "deprecated-cache-updater-in-%post")
+            .map(|(_, _, d)| d[0].as_str())
+            .collect();
+        assert_eq!(cmds, vec!["update-mime-database"]);
+    }
+
+    #[test]
+    fn indented_line_does_not_end_plain_heredoc() {
+        // Only `<<-` tolerates an indented terminator (tabs); a
+        // space-indented lookalike inside a plain heredoc is body
+        // text, so the invocation after it is still body text too.
+        let script =
+            "cat <<EOF\n EOF\nupdate-desktop-database\nEOF\nupdate-mime-database /usr/share/mime";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        let cmds: Vec<&str> = found
+            .iter()
+            .filter(|(_, f, _)| f == "deprecated-cache-updater-in-%post")
+            .map(|(_, _, d)| d[0].as_str())
+            .collect();
+        assert_eq!(cmds, vec!["update-mime-database"]);
+    }
+
+    #[test]
+    fn dash_heredoc_ends_at_tab_indented_terminator() {
+        let script =
+            "cat <<-EOF\nupdate-desktop-database\n\tEOF\nupdate-mime-database /usr/share/mime";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        let cmds: Vec<&str> = found
+            .iter()
+            .filter(|(_, f, _)| f == "deprecated-cache-updater-in-%post")
+            .map(|(_, _, d)| d[0].as_str())
+            .collect();
+        assert_eq!(cmds, vec!["update-mime-database"]);
+    }
+
+    #[test]
+    fn no_prereq_on_chkfontpath_is_flagged() {
+        let found = check().check_scriptlet("/bin/sh", " chkfontpath --add /x", "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "no-prereq-on"
+            && d == &vec!["chkfontpath".to_string()]));
+    }
+    #[test]
     fn insserv_in_post_is_flagged() {
         let found = check().check_scriptlet("/bin/sh", "insserv foo", "%post", &[], &[]);
         assert!(found.iter().any(|(l, f, d)| *l == Level::Error
@@ -1980,198 +2543,5 @@ mod tests {
                 .any(|(_, f, _)| f == "daemon-activation-in-%post"),
             "must stay silent for unquoted substitution: {found2:?}"
         );
-    }
-
-    #[test]
-    fn no_prereq_on_chkfontpath_is_flagged() {
-        let found = check().check_scriptlet("/bin/sh", " chkfontpath --add /x", "%post", &[], &[]);
-        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
-            && f == "no-prereq-on"
-            && d == &vec!["chkfontpath".to_string()]));
-    }
-    #[test]
-    fn deprecated_cache_updaters_in_post_are_flagged() {
-        for (script, cmd) in [
-            (
-                "update-desktop-database /usr/share/applications",
-                "update-desktop-database",
-            ),
-            (
-                "gtk-update-icon-cache -f /usr/share/icons/hicolor",
-                "gtk-update-icon-cache",
-            ),
-            (
-                "update-mime-database /usr/share/mime",
-                "update-mime-database",
-            ),
-            (
-                "glib-compile-schemas /usr/share/glib-2.0/schemas",
-                "glib-compile-schemas",
-            ),
-            (
-                "install-info /usr/share/info/foo.info /usr/share/info/dir",
-                "install-info",
-            ),
-        ] {
-            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
-            assert!(
-                found.iter().any(|(l, f, d)| *l == Level::Warning
-                    && f == "deprecated-cache-updater-in-%post"
-                    && d == &vec![cmd.to_string()]),
-                "{script}: {found:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn deprecated_cache_updater_in_postun_is_flagged() {
-        let found = check().check_scriptlet(
-            "/bin/sh",
-            "glib-compile-schemas /usr/share/glib-2.0/schemas",
-            "%postun",
-            &[],
-            &[],
-        );
-        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
-            && f == "deprecated-cache-updater-in-%postun"
-            && d == &vec!["glib-compile-schemas".to_string()]));
-    }
-
-    #[test]
-    fn deprecated_cache_updater_path_prefixed_is_flagged() {
-        for script in [
-            "/usr/bin/update-desktop-database",
-            "/usr/bin/gtk-update-icon-cache /usr/share/icons/hicolor",
-            "/usr/sbin/install-info --info-dir=/usr/share/info /usr/share/info/foo.info",
-        ] {
-            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
-            assert!(
-                found
-                    .iter()
-                    .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
-                "{script}: {found:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn deprecated_cache_updater_after_separator_is_flagged() {
-        let found = check().check_scriptlet(
-            "/bin/sh",
-            "true && update-mime-database /usr/share/mime; gtk-update-icon-cache /usr/share/icons/hicolor",
-            "%post",
-            &[],
-            &[],
-        );
-        let cmds: Vec<&str> = found
-            .iter()
-            .filter(|(_, f, _)| f == "deprecated-cache-updater-in-%post")
-            .map(|(_, _, d)| d[0].as_str())
-            .collect();
-        assert_eq!(cmds, vec!["update-mime-database", "gtk-update-icon-cache"]);
-    }
-
-    #[test]
-    fn deprecated_cache_updater_repeated_is_reported_once() {
-        let found = check().check_scriptlet(
-            "/bin/sh",
-            "update-desktop-database\nupdate-desktop-database /usr/share/applications",
-            "%post",
-            &[],
-            &[],
-        );
-        assert_eq!(
-            found
-                .iter()
-                .filter(|(_, f, _)| f == "deprecated-cache-updater-in-%post")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn deprecated_cache_updater_in_comment_and_echo_is_quiet() {
-        let script = "# update-desktop-database\n\
-            echo \"glib-compile-schemas /usr/share/glib-2.0/schemas\"\n\
-            echo install-info";
-        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
-        assert!(
-            !found
-                .iter()
-                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
-            "must stay silent: {found:?}"
-        );
-    }
-
-    #[test]
-    fn deprecated_cache_updater_in_heredoc_text_is_quiet() {
-        let script = "cat >> /var/adm/update-messages/foo << EOF\n\
-            glib-compile-schemas /usr/share/glib-2.0/schemas\n\
-            EOF";
-        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
-        assert!(
-            !found
-                .iter()
-                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
-            "must stay silent: {found:?}"
-        );
-    }
-
-    #[test]
-    fn unrelated_scriptlet_is_quiet_for_cache_updaters() {
-        let found = check().check_scriptlet(
-            "/bin/sh",
-            "update-ca-certificates\ntouch /usr/share/icons/hicolor/icon-theme.cache",
-            "%post",
-            &[],
-            &[],
-        );
-        assert!(
-            !found
-                .iter()
-                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
-            "must stay silent: {found:?}"
-        );
-    }
-
-    #[test]
-    fn deprecated_cache_updater_in_trigger_scriptlets_is_quiet() {
-        // A trigger scriptlet is the file-trigger mechanism itself: the
-        // packages providing a trigger (desktop-file-utils,
-        // shared-mime-info) and packages registering their own run the
-        // updater there legitimately.
-        for tag in ["%trigger", "%filetrigger", "%transfiletrigger"] {
-            let found = check().check_scriptlet(
-                "/bin/sh",
-                "update-desktop-database /usr/share/applications",
-                tag,
-                &[],
-                &[],
-            );
-            assert!(
-                !found
-                    .iter()
-                    .any(|(_, f, _)| f.starts_with("deprecated-cache-updater-in-")),
-                "{tag}: {found:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn deprecated_cache_updater_with_private_target_dir_is_flagged() {
-        // Scoping decision: the check fires on any invocation in a
-        // non-trigger scriptlet, whatever directory the updater is
-        // pointed at; the warning is the packager's signal to check
-        // whether a file trigger owns that directory.
-        let found = check().check_scriptlet(
-            "/bin/sh",
-            "glib-compile-schemas /opt/myapp/schemas",
-            "%post",
-            &[],
-            &[],
-        );
-        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
-            && f == "deprecated-cache-updater-in-%post"
-            && d == &vec!["glib-compile-schemas".to_string()]));
     }
 }
