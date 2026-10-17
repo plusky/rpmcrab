@@ -2622,7 +2622,59 @@ impl BinariesCheck {
                             if let Some(idx) = pkgname.rfind('.') {
                                 pkgname = &pkgname[..idx];
                             }
-                            if !soversion_str.is_empty() && !pkgname.ends_with(&soversion_str) {
+                            // A baselibs package carries the version before
+                            // a trailing -32bit.
+                            let pkgname = pkgname.strip_suffix("-32bit").unwrap_or(pkgname);
+                            // The expected package name is derived from
+                            // the SONAME itself: its stem ('.' folded to
+                            // '_') plus the version — glued when the
+                            // SONAME carries no -<pkgversion>
+                            // (libx11.so.1 -> libx111, libfoo.so.1 ->
+                            // libfoo1), dash-separated as an alternative
+                            // (libfoo-1), and stem + '-' + soversion when
+                            // it does (libgame2-1.9.so.10.0.0 ->
+                            // libgame2-1_9-10_0_0). Comparing whole
+                            // derived names is what tells a longer
+                            // version run (libkdecorations3private11
+                            // for .so.1) from a digit that belongs to
+                            // the stem (libx111): a bare
+                            // non-digit-before-the-suffix rule fires on
+                            // both. A trailing -<letters><digits>
+                            // flavour segment (libgfortran5-gcc15 for
+                            // .so.5) is not part of the name either, so
+                            // retry once with it stripped.
+                            let stem = soname
+                                .split(".so")
+                                .next()
+                                .unwrap_or(soname)
+                                .replace('.', "_");
+                            let soversion_pkgform = soversion.replace('.', "_");
+                            let expected: Vec<String> = if pkgversion.is_empty() {
+                                vec![
+                                    format!("{stem}{soversion_pkgform}"),
+                                    format!("{stem}-{soversion_pkgform}"),
+                                ]
+                            } else if soversion.is_empty() {
+                                vec![stem.clone()]
+                            } else {
+                                vec![format!("{stem}-{soversion_pkgform}")]
+                            };
+                            fn strip_flavour(name: &str) -> Option<&str> {
+                                let (head, tail) = name.rsplit_once('-')?;
+                                if !head.is_empty()
+                                    && tail.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                                    && tail.chars().last().is_some_and(|c| c.is_ascii_digit())
+                                    && tail.chars().all(|c| c.is_ascii_alphanumeric())
+                                {
+                                    Some(head)
+                                } else {
+                                    None
+                                }
+                            }
+                            let name_matches = expected.iter().any(|e| e == pkgname)
+                                || strip_flavour(pkgname)
+                                    .is_some_and(|stripped| expected.iter().any(|e| e == stripped));
+                            if !soversion_str.is_empty() && !name_matches {
                                 add_info(
                                     out,
                                     Level::Error,
@@ -6775,6 +6827,182 @@ description = "explicit priority string bypasses the system crypto policy"
             lines[0]
         );
         assert_lacks(&results, "no-ldconfig-symlink");
+    }
+
+    /// Run the shared-library policy-name test for one package/SONAME
+    /// pair and return the rendered shlib-policy-name-error lines.
+    fn shlib_policy_lines(pkgname: &str, soname: &str, file: &str) -> Vec<String> {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let parent = Path::new(file)
+            .parent()
+            .and_then(|p| p.to_str())
+            .unwrap_or("");
+        let soname_path = if parent.is_empty() {
+            soname.to_string()
+        } else {
+            format!("{parent}/{soname}")
+        };
+        let pkg = synthetic_pkg(pkgname, "x86_64", vec![syn_link(&soname_path, "libfoo.so")]);
+        let pkgfile = syn_file(file, "ELF 64-bit LSB shared object");
+        let mut info = syn_info();
+        info.is_shlib = true;
+        info.soname = Some(soname.to_string());
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_shared_library(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        lines_for(&results, "shlib-policy-name-error")
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn shlib_policy_name_suffix_must_match_wholly() {
+        // A longer trailing number run must not satisfy a shorter expected
+        // version: the package name's version run must equal the SONAME
+        // version exactly, not merely end with it.
+        let lines = shlib_policy_lines(
+            "libkdecorations3private11",
+            "libkdecorations3private.so.1",
+            "/usr/lib64/libkdecorations3private.so.1",
+        );
+        assert_eq!(lines.len(), 1, "exactly one finding: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("expected package suffix: 1"),
+            "detail: {}",
+            lines[0]
+        );
+
+        // Correct names stay quiet: single-digit, multi-component, and a
+        // suffix preceded by a non-digit separator.
+        for (pkgname, soname, file) in [
+            ("libfoo1", "libfoo.so.1", "/usr/lib64/libfoo.so.1"),
+            (
+                "libfoo10_0_0",
+                "libfoo.so.10.0.0",
+                "/usr/lib64/libfoo.so.10.0.0",
+            ),
+            ("libfoo-1", "libfoo.so.1", "/usr/lib64/libfoo.so.1"),
+            (
+                "libgame2-1_9-10_0_0",
+                "libgame2-1.9.so.10.0.0",
+                "/usr/lib64/libgame2-1.9.so.10.0.0",
+            ),
+        ] {
+            let lines = shlib_policy_lines(pkgname, soname, file);
+            assert!(lines.is_empty(), "{pkgname} must be quiet: {lines:?}");
+        }
+
+        // Wrong versions fire: a different version entirely, and a
+        // composite name whose suffix match is preceded by a digit.
+        for (pkgname, soname, file) in [
+            ("libfoo2", "libfoo.so.1", "/usr/lib64/libfoo.so.1"),
+            (
+                "libgame2-11_9-10_0_0",
+                "libgame2-1.9.so.10.0.0",
+                "/usr/lib64/libgame2-1.9.so.10.0.0",
+            ),
+            (
+                "libfoo110_0_0",
+                "libfoo.so.10.0.0",
+                "/usr/lib64/libfoo.so.10.0.0",
+            ),
+        ] {
+            let lines = shlib_policy_lines(pkgname, soname, file);
+            assert_eq!(lines.len(), 1, "{pkgname} must fire once: {lines:?}");
+            assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        }
+    }
+
+    #[test]
+    fn shlib_policy_name_32bit_suffix() {
+        // Baselibs packages carry the version before a trailing -32bit:
+        // the comparison applies to the name without that suffix. This
+        // loosens the reference, whose plain endswith test fires on a
+        // correct libfoo1-32bit (the name ends in -32bit, not the
+        // suffix); the divergence is ledgered in divergences.toml.
+        let lines = shlib_policy_lines("libfoo1-32bit", "libfoo.so.1", "/usr/lib/libfoo.so.1");
+        assert!(lines.is_empty(), "libfoo1-32bit must be quiet: {lines:?}");
+
+        // The -32bit strip composes with a digit-ending stem.
+        let lines = shlib_policy_lines("libx111-32bit", "libx11.so.1", "/usr/lib/libx11.so.1");
+        assert!(lines.is_empty(), "libx111-32bit must be quiet: {lines:?}");
+
+        let lines = shlib_policy_lines("libfoo11-32bit", "libfoo.so.1", "/usr/lib/libfoo.so.1");
+        assert_eq!(lines.len(), 1, "libfoo11-32bit must fire once: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+    }
+
+    #[test]
+    fn shlib_policy_name_digit_ending_stem_and_flavour() {
+        // Conformant names whose SONAME stem itself ends in a digit:
+        // the glued version merges into the stem's trailing digits, so
+        // only the SONAME-derived whole name can accept them. The old
+        // endswith test accepted them and the reference still does; a
+        // bare non-digit-before-the-suffix guard fired on all of them.
+        for (pkgname, soname, file) in [
+            ("libx111", "libx11.so.1", "/usr/lib64/libx11.so.1"),
+            (
+                "libnvidia-egl-x111",
+                "libnvidia-egl-x11.so.1",
+                "/usr/lib64/libnvidia-egl-x11.so.1",
+            ),
+            (
+                "libnvidia-egl-wayland21",
+                "libnvidia-egl-wayland2.so.1",
+                "/usr/lib64/libnvidia-egl-wayland2.so.1",
+            ),
+        ] {
+            let lines = shlib_policy_lines(pkgname, soname, file);
+            assert!(lines.is_empty(), "{pkgname} must be quiet: {lines:?}");
+        }
+
+        // Compiler-flavour names: the version sits before a trailing
+        // -gcc<N> segment. Quiet under the reference (its endswith
+        // test happens to match the flavour's last digit); the guard
+        // strips one flavour segment and compares whole names.
+        for (pkgname, soname, file) in [
+            (
+                "libgfortran5-gcc15",
+                "libgfortran.so.5",
+                "/usr/lib64/libgfortran.so.5",
+            ),
+            ("libobjc4-gcc14", "libobjc.so.4", "/usr/lib64/libobjc.so.4"),
+        ] {
+            let lines = shlib_policy_lines(pkgname, soname, file);
+            assert!(lines.is_empty(), "{pkgname} must be quiet: {lines:?}");
+        }
+
+        // Wrong versions still fire on digit-ending stems and behind
+        // flavour tails: neither the stem's digits nor the flavour
+        // strip excuse a version that is not the SONAME's.
+        for (pkgname, soname, file) in [
+            ("libx112", "libx11.so.1", "/usr/lib64/libx11.so.1"),
+            (
+                "libgfortran6-gcc15",
+                "libgfortran.so.5",
+                "/usr/lib64/libgfortran.so.5",
+            ),
+        ] {
+            let lines = shlib_policy_lines(pkgname, soname, file);
+            assert_eq!(lines.len(), 1, "{pkgname} must fire once: {lines:?}");
+            assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        }
+
+        // A sibling SONAME whose stem the package name does not derive
+        // from still fires: libnvidia-egl-x111 is the conformant name
+        // for libnvidia-egl-x11.so.1, not for the xcb library the same
+        // package ships. This is one of the measured newly-firing
+        // pairs, ledgered in divergences.toml.
+        let lines = shlib_policy_lines(
+            "libnvidia-egl-x111",
+            "libnvidia-egl-xcb.so.1",
+            "/usr/lib64/libnvidia-egl-xcb.so.1",
+        );
+        assert_eq!(lines.len(), 1, "xcb in x111 package must fire: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
     }
 
     #[test]

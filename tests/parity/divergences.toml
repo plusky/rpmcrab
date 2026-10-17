@@ -2341,3 +2341,11 @@ kind = "behaviour"
 reason = "Deliberate false-positive fix: the port skips %ghost entries in dir-or-file-in-* for every DisallowedDirs entry. The reference applies the finding to %ghost entries with no exemption, so a tmpfiles-created path such as /var/run/<pkg> cannot satisfy both tmpfile-not-in-filelist, which requires the path in %files as %ghost, and dir-or-file-in-var-run. A %ghost installs no payload, so there is nothing in the disallowed directory to forbid; real payload files there still fire at Error. Provenance: bsc#1173166 and bsc#1190386."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/643"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
+reason = "shlib-policy-name-error derives the expected package name from the SONAME (stem with '.' folded to '_', plus the version glued or dash-separated; stem + '-' + soversion when the SONAME carries a -<pkgversion>) and compares whole names, retrying once with a trailing -<letters><digits> flavour segment (-gcc15-style) stripped and with a trailing -32bit (baselibs) stripped. The reference (BinariesCheck.py _check_shared_library) uses a plain endswith test on the suffix, so a longer trailing digit run passes — libkdecorations3private11 was accepted for a .so.1 library (bsc#1237372; that package was renamed libkdecorations3private1 in February 2025, so the 2026-10-16 Factory sweep corpus — 51,589 RPMs, 4,429 lib packages with a checkable SONAME, 6,548 package/SONAME pairs — no longer contains the misnamed package and the case is pinned by unit test instead). The port diverges in two directions: stricter — longer version runs and sibling-SONAME stem mismatches now fire (measured newly firing: the libnvidia-egl-x111 package's libnvidia-egl-xcb.so.1 and libnvidia-egl-xlib.so.1 pairs, whose names derive from a sibling SONAME); looser — a correct libfoo1-32bit is quiet where the reference fires (its name ends in -32bit, not the suffix). Digit-ending stems (libx11.so.1 -> libx111, libnvidia-egl-wayland2.so.1 -> libnvidia-egl-wayland21) and -gcc15 flavour names (libgfortran5-gcc15 for .so.5, libobjc4-gcc14 for .so.4) stay quiet, as under the reference; a bare whole-suffix guard fired on all of them."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/646"
