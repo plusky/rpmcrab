@@ -190,8 +190,15 @@ pub fn load_whitelists(config: &Config, key: &str, required: &[&str]) -> Vec<Whi
                 valid = false;
                 break;
             }
+            let Some(path) = ft.get("path").and_then(toml::Value::as_str) else {
+                log::error!(
+                    "{key}: whitelist file entry \"path\" must be a string, skipping entry"
+                );
+                valid = false;
+                break;
+            };
             wfiles.push(WhitelistedFile {
-                path: ft["path"].as_str().unwrap_or_default().to_string(),
+                path: path.to_string(),
                 attrs: ft.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             });
         }
@@ -514,6 +521,35 @@ path = '/dev/x'
             &["path", "owner", "group", "mode"],
         );
         assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn non_string_path_invalidates_whitelist_entry() {
+        // Every other malformed shape is logged and skipped; a `path` of
+        // the wrong type must be too, not silently read as an empty path.
+        for bad_path in ["42", "[\"/tempus\"]"] {
+            let toml_src = format!(
+                r#"
+[[WorldWritableWhitelist]]
+package = "dummy"
+[[WorldWritableWhitelist.files]]
+path = {bad_path}
+mode = "drw-rw---t"
+owner = "root"
+group = "tty"
+"#
+            );
+            let table: toml::Table = toml::from_str(&toml_src).expect("parse");
+            let config = Config {
+                configuration: table,
+                ..Default::default()
+            };
+            let parsed = load_whitelists(&config, "WorldWritableWhitelist", WW_REQUIRED);
+            assert!(
+                parsed.is_empty(),
+                "path = {bad_path} must invalidate the entry"
+            );
+        }
     }
 
     #[test]
