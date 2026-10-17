@@ -758,6 +758,15 @@ kind = "behaviour"
 reason = "Emits E: pretrans-not-lua when a %pretrans scriptlet is not written in Lua (upstream rpmlint#396, rationale rpm#714): %pretrans runs before any payload is installed, so only the internal Lua interpreter is guaranteed to exist. The reference 2.10.0 has no such check — #396 is still open upstream — so this is a deliberate fix-in-port, not a parity gap."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/396"
+
+[[divergence]]
+case = "global"
+check = "PostCheck"
+kind = "behaviour"
+reason = "New port-only Error: a scriptlet whose interpreter is /bin/sh, /bin/bash or /usr/bin/perl -- or which has no interpreter, a missing -p defaulting to /bin/sh -- invoking insserv (other than the -r/--remove removal form), chkconfig in an enable form (chkconfig <name> on, chkconfig --add <name>, chkconfig --level <levels> <name> on; off/--del/--remove/--delete stay quiet), or systemctl with the enable, start, restart, reload-or-restart or reenable verb at command position emits E daemon-activation-in-<scriptlet> with the invoked command as detail. Scriptlets for other interpreters (e.g. /sbin/sash, /usr/bin/python3) are not scanned. The systemctl try-forms (try-restart, condrestart, reload-or-try-restart) no-op on inactive units and stay quiet. The reference has no such finding. Deliberate: the openSUSE package security guidelines forbid activating a daemon at installation time; enablement is governed by systemd presets, and the preset-based systemd-update-helper expansions of the %service_* macros never invoke systemctl enable/start, so they stay silent, as do comments, echoed text and heredoc bodies: comments are stripped and quoted-string contents are blanked quote-aware before matching (a command substitution inside quotes still fires, as it executes), and heredoc bodies are blanked under their full delimiter, hyphenated, dotted and colon forms included. Case delta: the parity case's %post runs chkconfig --add parity, so over its frozen expected/stdout the port emits one additional E daemon-activation-in-%post (chkconfig --add) and the case badness rises 10000 to 10001. Pinned by unit tests in post.rs."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/635"
+
 [[divergence]]
 case = "global"
 check = "PolkitCheck"
