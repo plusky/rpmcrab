@@ -236,13 +236,15 @@ impl FilelistCheck {
                 invalid_fhs.insert(pfx.unwrap_or(&f).to_string());
             }
 
-            if f.starts_with("/opt") {
-                let parts: Vec<&str> = f.split('/').collect();
-                if parts.len() > 2 {
-                    let provider = parts[2];
-                    if is_suse && (provider == "suse" || provider == "novell") {
-                        continue;
-                    }
+            // The provider is the first component under /opt, so the
+            // match must end at a component boundary: a longer sibling
+            // (`/optical/...`) is not an /opt payload, and the bare /opt
+            // directory itself has no provider to report.
+            if let Some(rest) = f.strip_prefix("/opt/") {
+                let provider = rest.split('/').next().unwrap_or("");
+                if !provider.is_empty()
+                    && !(is_suse && (provider == "suse" || provider == "novell"))
+                {
                     invalid_opt.insert(format!("/opt/{provider}"));
                 }
             }
@@ -561,6 +563,81 @@ mod tests {
         assert!(
             lines_for(&results, "filelist-forbidden-xinetd-configuration").is_empty(),
             "unexpected: {results:?}"
+        );
+    }
+
+    // Issue #605: the /opt guard matched the bare "/opt" prefix, so a
+    // payload under a longer sibling (`/optical/...`) produced a bogus
+    // filelist-forbidden-opt finding naming a directory the package does
+    // not install, and a bare `/opt` directory entry produced a malformed
+    // `/opt/` finding with an empty provider.
+    fn pkg_with_modes(entries: &[(&str, u32)]) -> Pkg {
+        let rpm = format!(
+            "{}/../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut pkg = Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture shell");
+        pkg.files = entries
+            .iter()
+            .map(|(f, mode)| PkgFile {
+                name: f.to_string(),
+                path: f.to_string(),
+                mode: *mode,
+                ..Default::default()
+            })
+            .collect();
+        pkg
+    }
+
+    #[test]
+    fn opt_prefix_siblings_are_quiet() {
+        let pkg = pkg_with_files(&[
+            "/optical/foo/bin/tool",
+            "/opts/foo/bin/tool",
+            "/opt-foo/bin/tool",
+        ]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        assert!(
+            lines_for(&results, "filelist-forbidden-opt").is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn opt_bare_directory_entry_is_quiet() {
+        // A directory entry for /opt itself (mode 0o040755) has no
+        // provider component to report.
+        let pkg = pkg_with_modes(&[("/opt", 0o040755), ("/usr/bin/foo", 0o100644)]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        assert!(
+            lines_for(&results, "filelist-forbidden-opt").is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn opt_provider_still_fires_once_per_provider() {
+        let pkg = pkg_with_modes(&[
+            ("/opt/acme", 0o040755),
+            ("/opt/acme/bin/tool", 0o100755),
+            ("/opt/acme/lib/libacme.so", 0o100644),
+            ("/opt/other/bin/tool", 0o100755),
+        ]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "filelist-forbidden-opt");
+        assert_eq!(lines.len(), 2, "lines: {lines:?}");
+        assert!(
+            lines[0].contains("E: filelist-forbidden-opt (Badness: 1) /opt/acme"),
+            "name, level and detail: {}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("E: filelist-forbidden-opt (Badness: 1) /opt/other"),
+            "name, level and detail: {}",
+            lines[1]
         );
     }
 
