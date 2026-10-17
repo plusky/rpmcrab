@@ -2341,3 +2341,11 @@ kind = "behaviour"
 reason = "Deliberate false-positive fix: the port skips %ghost entries in dir-or-file-in-* for every DisallowedDirs entry. The reference applies the finding to %ghost entries with no exemption, so a tmpfiles-created path such as /var/run/<pkg> cannot satisfy both tmpfile-not-in-filelist, which requires the path in %files as %ghost, and dir-or-file-in-var-run. A %ghost installs no payload, so there is nothing in the disallowed directory to forbid; real payload files there still fire at Error. Provenance: bsc#1173166 and bsc#1190386."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/643"
+
+[[divergence]]
+case = "global"
+check = "non-ghost-in-run"
+kind = "behaviour"
+reason = "Deliberate tightening beyond the reference (issue #639): the reference matches /run/ only (FilesCheck.py _check_file_non_ghost_in_run), so a non-ghost payload under /var/run/ passes silently there. The port also matches /var/run/, which is the same directory via symlink on openSUSE (/var/run -> /run, both tmpfs), per the openSUSE systemd packaging guidelines: packages should not contain directories or files under /var/run or /run, and runtime directories belong in tmpfiles.d snippets. Tag, Warning severity and the %ghost exemption are unchanged; only the path coverage widens."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/639"

@@ -1754,7 +1754,11 @@ impl FilesCheck {
     }
 
     fn check_file_non_ghost_in_run(&self, pkg: &Pkg, fname: &str, pkg_ref: &Pkg, out: &mut Filter) {
-        if fname.starts_with("/run/") && !pkg_ref.ghost_files.contains(&fname.to_string()) {
+        // /var/run is a symlink to /run on openSUSE, so both spellings name
+        // the same tmpfs directory.
+        if (fname.starts_with("/run/") || fname.starts_with("/var/run/"))
+            && !pkg_ref.ghost_files.contains(&fname.to_string())
+        {
             add_info(out, Level::Warning, pkg, "non-ghost-in-run", &[fname]);
         }
     }
@@ -3655,6 +3659,60 @@ mod tests {
 
     fn finding_names(results: &[(String, String)]) -> Vec<String> {
         results.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    #[test]
+    fn non_ghost_in_run_fires_for_var_run_file() {
+        // /var/run is a symlink to /run on openSUSE, so a non-ghost file
+        // under either spelling is a file in the same tmpfs directory.
+        for path in ["/run/fcprobe/pid", "/var/run/fcprobe/pid"] {
+            let results = run_files_check_with_files(vec![plain_file(path)]);
+            let names = finding_names(&results);
+            assert_has(&names, "non-ghost-in-run");
+            let (_, line) = results
+                .iter()
+                .find(|(n, _)| n == "non-ghost-in-run")
+                .expect("finding fires");
+            assert!(
+                line.contains(": W: non-ghost-in-run") && line.contains(path),
+                "warning line names the path: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_ghost_in_run_ghost_var_run_is_quiet() {
+        for path in ["/run/fcprobe/pid", "/var/run/fcprobe/pid"] {
+            let names = finding_names(&run_files_check_with_files(vec![ghost_file(path)]));
+            assert_lacks(&names, "non-ghost-in-run");
+        }
+    }
+
+    #[test]
+    fn non_ghost_in_run_ignores_other_var_dirs() {
+        for path in [
+            "/var/lib/fcprobe/pid",
+            "/var/log/fcprobe/pid",
+            "/var/spool/fcprobe/pid",
+        ] {
+            let names = finding_names(&run_files_check_with_files(vec![plain_file(path)]));
+            assert_lacks(&names, "non-ghost-in-run");
+        }
+    }
+
+    #[test]
+    fn non_ghost_in_run_bare_dir_symmetry() {
+        // The /run/ spelling fires only on paths carrying the trailing
+        // slash: the bare directory name itself stays quiet. The
+        // /var/run spelling mirrors that exactly.
+        for path in ["/run", "/var/run"] {
+            let names = finding_names(&run_files_check_with_files(vec![plain_file(path)]));
+            assert_lacks(&names, "non-ghost-in-run");
+        }
+        for path in ["/run/", "/var/run/"] {
+            let names = finding_names(&run_files_check_with_files(vec![plain_file(path)]));
+            assert_has(&names, "non-ghost-in-run");
+        }
     }
 
     #[test]
