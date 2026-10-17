@@ -112,6 +112,491 @@ impl PostCheck {
             .get_or_init(|| Regex::new(r"(\$\{?RPM_BUILD_(ROOT|DIR)}?)").expect("static regex"))
     }
 
+    fn insserv_regex() -> &'static Regex {
+        static INSSERV_REGEX: OnceLock<Regex> = OnceLock::new();
+        INSSERV_REGEX.get_or_init(|| {
+            Regex::new(
+                r"(?m)(^|[;`|]|&&|\$\()\s*(?:then\s+|do\s+|else\s+)?(?:\S*/)?insserv\b([^\n;|&]*)",
+            )
+            .expect("static regex")
+        })
+    }
+    fn systemctl_regex() -> &'static Regex {
+        static SYSTEMCTL_REGEX: OnceLock<Regex> = OnceLock::new();
+        SYSTEMCTL_REGEX.get_or_init(|| {
+            // `restart` and `reload-or-restart` unconditionally start an
+            // inactive unit, and `reenable` disables then enables, so all
+            // three activate just as `enable`/`start` do. The try-forms
+            // (`try-restart`, `condrestart`, `reload-or-try-restart`)
+            // genuinely no-op when the unit is inactive and stay quiet.
+            Regex::new(
+                r"(?m)(^|[;`|]|&&|\$\()\s*(?:then\s+|do\s+|else\s+)?(?:\S*/)?systemctl\s+(?:--?\S+\s+)*(reload-or-restart|reenable|enable|start|restart)\b",
+            )
+            .expect("static regex")
+        })
+    }
+    fn chkconfig_regex() -> &'static Regex {
+        static CHKCONFIG_REGEX: OnceLock<Regex> = OnceLock::new();
+        CHKCONFIG_REGEX.get_or_init(|| {
+            Regex::new(
+                r"(?m)(^|[;`|]|&&|\$\()\s*(?:then\s+|do\s+|else\s+)?(?:\S*/)?chkconfig\b([^\n;|&]*)",
+            )
+            .expect("static regex")
+        })
+    }
+
+    /// Scriptlet text with heredoc bodies blanked. Text a scriptlet
+    /// writes out (an update message, a generated file) is not executed,
+    /// so a command named inside it is not an invocation.
+    fn without_heredoc_bodies(script: &str) -> String {
+        // Parse the delimiter following a `<<` at byte offset `at`.
+        // Handles the plain (`<<EOF`), quoted (`<<'EOF'`, `<<"EOF"`),
+        // escaped (`<<\EOF`) and ANSI-C-quoted (`<<$'EOF'`) forms.
+        fn delimiter_after(line: &str, at: usize) -> Option<String> {
+            // A delimiter word ends at whitespace or a shell
+            // metacharacter; `-`, `.` and `:` are ordinary delimiter
+            // characters (`<<'END-OF-MESSAGE'`, `<<EOF.2`).
+            fn is_stop(c: char) -> bool {
+                c.is_whitespace()
+                    || matches!(
+                        c,
+                        ';' | '|' | '&' | '<' | '>' | '(' | ')' | '`' | '\'' | '"'
+                    )
+            }
+            fn finish(word: String) -> Option<String> {
+                if word.is_empty() || word.starts_with(|c: char| c.is_ascii_digit()) {
+                    None
+                } else {
+                    Some(word)
+                }
+            }
+            // The quoted text up to the matching closing quote.
+            fn quoted_word(s: &str, q: char) -> Option<String> {
+                finish(s.chars().take_while(|c| *c != q).collect())
+            }
+            let rest = &line[at + 2..];
+            let rest = rest.strip_prefix('-').unwrap_or(rest);
+            let rest = rest.trim_start();
+            if let Some(quoted) = rest.strip_prefix('$') {
+                // `$'EOF'` / `$"EOF"`: the delimiter is the quoted text.
+                let q = quoted.chars().next()?;
+                if q != '\'' && q != '"' {
+                    return None;
+                }
+                return quoted_word(&quoted[q.len_utf8()..], q);
+            }
+            if let Some(escaped) = rest.strip_prefix('\\') {
+                // `\\EOF`: a backslash quotes the next character into
+                // the delimiter; the word ends at an unquoted stop.
+                let mut word = String::new();
+                let mut chars = escaped.chars();
+                loop {
+                    match chars.next() {
+                        None => break,
+                        Some('\\') => match chars.next() {
+                            Some(c) => word.push(c),
+                            None => break,
+                        },
+                        Some(c) if is_stop(c) => break,
+                        Some(c) => word.push(c),
+                    }
+                }
+                return finish(word);
+            }
+            if let Some(quoted) = rest
+                .strip_prefix('\'')
+                .map(|s| (s, '\''))
+                .or_else(|| rest.strip_prefix('"').map(|s| (s, '"')))
+            {
+                return quoted_word(quoted.0, quoted.1);
+            }
+            finish(rest.chars().take_while(|c| !is_stop(*c)).collect())
+        }
+        // Delimiters introduced by unquoted `<<` operators on `line`.
+        // A `<<` inside single/double quotes, inside a `#` comment, or
+        // inside a `$((...))` arithmetic expansion (where it is the
+        // left-shift operator) is not a heredoc operator, and `<<<`
+        // is a herestring, not a heredoc.
+        fn delimiters_in_line(line: &str) -> Vec<String> {
+            // Context stack: a `$(...)` or backtick substitution
+            // re-enters code even inside double quotes, so a heredoc
+            // operator inside one is live; `$((...))` arithmetic is
+            // skipped whole (its `<<` is the left-shift operator).
+            #[derive(Clone, Copy)]
+            enum Frame {
+                Subst(usize),
+                Backtick(usize),
+                Arith(usize),
+                Single,
+                Double,
+            }
+            let bytes = line.as_bytes();
+            let mut out = Vec::new();
+            let mut stack: Vec<Frame> = Vec::new();
+            let mut i = 0;
+            while i < bytes.len() {
+                let c = bytes[i] as char;
+                if matches!(stack.last(), Some(Frame::Single)) {
+                    if c == '\'' {
+                        stack.pop();
+                    }
+                    i += 1;
+                    continue;
+                }
+                if matches!(stack.last(), Some(Frame::Arith(_))) {
+                    match c {
+                        '(' => {
+                            if let Some(Frame::Arith(d)) = stack.last_mut() {
+                                *d += 1;
+                            }
+                        }
+                        ')' => {
+                            let done = match stack.last_mut() {
+                                Some(Frame::Arith(d)) => {
+                                    *d -= 1;
+                                    *d == 0
+                                }
+                                _ => false,
+                            };
+                            if done {
+                                stack.pop();
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                    continue;
+                }
+                if matches!(stack.last(), Some(Frame::Double)) {
+                    match c {
+                        '\\' => i += 2,
+                        '"' => {
+                            stack.pop();
+                            i += 1;
+                        }
+                        '$' if line[i..].starts_with("$((") => {
+                            stack.push(Frame::Arith(2));
+                            i += 3;
+                        }
+                        '$' if line[i..].starts_with("$(") => {
+                            stack.push(Frame::Subst(0));
+                            i += 2;
+                        }
+                        '`' => {
+                            stack.push(Frame::Backtick(0));
+                            i += 1;
+                        }
+                        _ => i += 1,
+                    }
+                    continue;
+                }
+                match c {
+                    '\\' => {
+                        i += 2;
+                    }
+                    '\'' => {
+                        stack.push(Frame::Single);
+                        i += 1;
+                    }
+                    '"' => {
+                        stack.push(Frame::Double);
+                        i += 1;
+                    }
+                    '`' => {
+                        if matches!(stack.last(), Some(Frame::Backtick(_))) {
+                            stack.pop();
+                        } else {
+                            stack.push(Frame::Backtick(0));
+                        }
+                        i += 1;
+                    }
+                    '#' => {
+                        // A `#` starting a word begins a comment.
+                        if i == 0
+                            || matches!(bytes[i - 1] as char, ' ' | '\t' | ';' | '|' | '&' | '(')
+                        {
+                            break;
+                        }
+                        i += 1;
+                    }
+                    '$' if line[i..].starts_with("$((") => {
+                        stack.push(Frame::Arith(2));
+                        i += 3;
+                    }
+                    '$' if line[i..].starts_with("$(") => {
+                        stack.push(Frame::Subst(0));
+                        i += 2;
+                    }
+                    '(' => {
+                        match stack.last_mut() {
+                            Some(Frame::Subst(d)) | Some(Frame::Backtick(d)) => *d += 1,
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    ')' => {
+                        match stack.last_mut() {
+                            Some(Frame::Subst(d)) | Some(Frame::Backtick(d)) if *d > 0 => {
+                                *d -= 1;
+                            }
+                            Some(Frame::Subst(_)) => {
+                                stack.pop();
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    '<' => {
+                        if line[i..].starts_with("<<<") {
+                            i += 3;
+                            continue;
+                        }
+                        if line[i..].starts_with("<<")
+                            && let Some(delim) = delimiter_after(line, i)
+                        {
+                            out.push(delim);
+                            i += 2;
+                            continue;
+                        }
+                        i += 1;
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+            out
+        }
+        let lines: Vec<&str> = script.lines().collect();
+        let mut pending: Vec<String> = Vec::new();
+        let mut out: Vec<&str> = Vec::new();
+        for (idx, line) in lines.iter().enumerate() {
+            if let Some(delim) = pending.first() {
+                if line.trim() == delim.as_str() {
+                    pending.remove(0);
+                    out.push(line);
+                } else {
+                    out.push("");
+                }
+                continue;
+            }
+            // Only blank when a terminator actually appears later in
+            // the scriptlet: a false opener otherwise blanks the rest
+            // of the scriptlet and hides genuine activations.
+            for delim in delimiters_in_line(line) {
+                if lines[idx + 1..].iter().any(|l| l.trim() == delim) {
+                    pending.push(delim);
+                }
+            }
+            out.push(line);
+        }
+        out.join("\n")
+    }
+
+    /// A scriptlet line with comments removed and quoted-string
+    /// contents blanked to spaces, for command matching: text inside
+    /// a comment or a quoted string never executes, so a shell
+    /// separator there does not put a following command name at
+    /// command position. Command substitutions are the exception --
+    /// `$(...)` and backticks execute even inside double quotes, so
+    /// their contents stay live. The quote characters are kept; only
+    /// the contents go. Scanned per line, like `delimiters_in_line`.
+    fn code_only(script: &str) -> String {
+        #[derive(Clone, Copy)]
+        enum Frame {
+            // Parenthesis depth within a `$(...)` frame.
+            Subst(usize),
+            // Parenthesis depth within a backtick frame.
+            Backtick(usize),
+            Single,
+            Double,
+        }
+        fn code_line(line: &str) -> String {
+            let bytes = line.as_bytes();
+            let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+            let mut stack: Vec<Frame> = Vec::new();
+            let mut i = 0;
+            while i < bytes.len() {
+                let c = bytes[i] as char;
+                match stack.last() {
+                    Some(Frame::Single) => {
+                        if c == '\'' {
+                            out.push(bytes[i]);
+                            stack.pop();
+                        } else {
+                            out.push(b' ');
+                        }
+                        i += 1;
+                    }
+                    Some(Frame::Double) => match c {
+                        '\\' => {
+                            out.push(b' ');
+                            if i + 1 < bytes.len() {
+                                out.push(b' ');
+                                i += 1;
+                            }
+                            i += 1;
+                        }
+                        '"' => {
+                            out.push(bytes[i]);
+                            stack.pop();
+                            i += 1;
+                        }
+                        '$' if line[i..].starts_with("$(") => {
+                            out.extend_from_slice(b"$(");
+                            stack.push(Frame::Subst(0));
+                            i += 2;
+                        }
+                        '`' => {
+                            out.push(bytes[i]);
+                            stack.push(Frame::Backtick(0));
+                            i += 1;
+                        }
+                        _ => {
+                            out.push(b' ');
+                            i += 1;
+                        }
+                    },
+                    _ => match c {
+                        '\\' => {
+                            out.push(bytes[i]);
+                            if i + 1 < bytes.len() {
+                                out.push(bytes[i + 1]);
+                                i += 1;
+                            }
+                            i += 1;
+                        }
+                        '\'' => {
+                            out.push(bytes[i]);
+                            stack.push(Frame::Single);
+                            i += 1;
+                        }
+                        '"' => {
+                            out.push(bytes[i]);
+                            stack.push(Frame::Double);
+                            i += 1;
+                        }
+                        '`' => {
+                            out.push(bytes[i]);
+                            if matches!(stack.last(), Some(Frame::Backtick(_))) {
+                                stack.pop();
+                            } else {
+                                stack.push(Frame::Backtick(0));
+                            }
+                            i += 1;
+                        }
+                        '$' if line[i..].starts_with("$(") => {
+                            out.extend_from_slice(b"$(");
+                            stack.push(Frame::Subst(0));
+                            i += 2;
+                        }
+                        '(' => {
+                            match stack.last_mut() {
+                                Some(Frame::Subst(d)) | Some(Frame::Backtick(d)) => *d += 1,
+                                _ => {}
+                            }
+                            out.push(bytes[i]);
+                            i += 1;
+                        }
+                        ')' => {
+                            match stack.last_mut() {
+                                Some(Frame::Subst(d)) | Some(Frame::Backtick(d)) if *d > 0 => {
+                                    *d -= 1;
+                                }
+                                Some(Frame::Subst(_)) => {
+                                    stack.pop();
+                                }
+                                _ => {}
+                            }
+                            out.push(bytes[i]);
+                            i += 1;
+                        }
+                        '#' => {
+                            // A `#` starting a word begins a comment
+                            // (the `delimiters_in_line` rule).
+                            if i == 0
+                                || matches!(
+                                    bytes[i - 1] as char,
+                                    ' ' | '\t' | ';' | '|' | '&' | '('
+                                )
+                            {
+                                break;
+                            }
+                            out.push(bytes[i]);
+                            i += 1;
+                        }
+                        _ => {
+                            out.push(bytes[i]);
+                            i += 1;
+                        }
+                    },
+                }
+            }
+            String::from_utf8(out).expect("blanking preserves UTF-8")
+        }
+        script.lines().map(code_line).collect::<Vec<_>>().join("\n")
+    }
+
+    /// Daemon activations in a scriptlet: an `insserv` invocation that
+    /// installs an init script (the removal form, `-r`/`--remove`,
+    /// deactivates and is not an activation), each distinct
+    /// activating `systemctl` verb form, and the `chkconfig` enable
+    /// forms (`chkconfig <name> on`, `chkconfig --add <name>` and
+    /// `chkconfig --level <levels> <name> on`), in first-seen order.
+    /// `chkconfig <name> off` and `chkconfig --del`/`--remove <name>`
+    /// deactivate or remove and stay quiet, like the insserv removal
+    /// form. Matching runs on the heredoc-blanked, comment-stripped,
+    /// quote-blanked text (`code_only`) and is command-position only
+    /// (start of line or after a command separator), so comments,
+    /// echoed or otherwise quoted text and the preset-based
+    /// `systemd-update-helper` expansions of the `%service_*` macros
+    /// do not fire.
+    fn daemon_activations(script: &str) -> Vec<String> {
+        let text = Self::code_only(&Self::without_heredoc_bodies(script));
+        let mut out: Vec<String> = Vec::new();
+        for caps in Self::insserv_regex().captures_iter(&text).flatten() {
+            let args = caps.get(2).map_or("", |m| m.as_str());
+            let removal = args.split_whitespace().any(|a| {
+                a == "--remove"
+                    || (a.starts_with('-') && !a.starts_with("--") && a[1..].contains('r'))
+            });
+            if !removal && !out.iter().any(|o| o == "insserv") {
+                out.push("insserv".to_string());
+            }
+        }
+        for caps in Self::systemctl_regex().captures_iter(&text).flatten() {
+            if let Some(verb) = caps.get(2) {
+                let detail = format!("systemctl {}", verb.as_str());
+                if !out.contains(&detail) {
+                    out.push(detail);
+                }
+            }
+        }
+        for caps in Self::chkconfig_regex().captures_iter(&text).flatten() {
+            let args = caps.get(2).map_or("", |m| m.as_str());
+            let tokens: Vec<&str> = args.split_whitespace().collect();
+            if tokens
+                .iter()
+                .any(|t| matches!(*t, "--del" | "--remove" | "--delete"))
+            {
+                continue;
+            }
+            let detail = if tokens.contains(&"--add") {
+                Some("chkconfig --add")
+            } else if tokens.contains(&"on") {
+                Some("chkconfig on")
+            } else {
+                None
+            };
+            if let Some(detail) = detail
+                && !out.iter().any(|o| o == detail)
+            {
+                out.push(detail.to_string());
+            }
+        }
+        out
+    }
+
     /// `sh -n` / `perl -wc` syntax check via subprocess. `None` when the
     /// interpreter is unavailable (skipped, not an error).
     fn syntax_ok(prog: &str, args: &[&str], script: &str) -> Option<bool> {
@@ -175,6 +660,20 @@ impl PostCheck {
             }
             if self.empty_shells.iter().any(|s| s == prog) {
                 out.push((Level::Error, finding("non-empty"), vec![prog.to_string()]));
+            }
+        }
+
+        // The daemon-activation scan also runs for an empty prog: a
+        // missing `-p` flag defaults to /bin/sh, which is exactly how
+        // macro-expanded %post/%preun bodies arrive, so gating the scan
+        // on a named interpreter would skip the common form.
+        if prog.is_empty() || prog == "/bin/sh" || prog == "/bin/bash" || prog == "/usr/bin/perl" {
+            for activation in Self::daemon_activations(script) {
+                out.push((
+                    Level::Error,
+                    finding("daemon-activation-in"),
+                    vec![activation],
+                ));
             }
         }
 
@@ -298,6 +797,8 @@ impl PostCheck {
 const PERCENT_IN_DETAIL: &str = "The {tag} scriptlet contains a '%' in a context which might indicate it being\n        fallout from an rpm macro/variable which was not expanded during build.\n        Investigate whether this is the case and fix if appropriate.";
 /// `forbidden-selinux-command-in-<scriptlet>`:
 const FORBIDDEN_SELINUX_DETAIL: &str = "A command which requires intimate knowledge about a specific SELinux\n        policy type was found in the scriptlet. These types are subject to change\n        on a policy version upgrade. Use the restorecon command which queries the\n        currently loaded policy for the correct type instead.";
+/// `daemon-activation-in-<scriptlet>`:
+const DAEMON_ACTIVATION_DETAIL: &str = "The scriptlet activates a daemon at installation time. Packages must not enable or start services on installation; enablement is governed by systemd presets, not by insserv, chkconfig or systemctl calls in scriptlets.";
 /// `non-empty-<scriptlet>`:
 const NON_EMPTY_DETAIL: &str = "Scriptlets for the interpreter mentioned in the message should be empty.\n        One common case where they are unintentionally not is when the specfile\n        contains comments after the scriptlet and before the next section. Review\n        and clean up the scriptlet contents if appropriate.";
 pub fn register_error_details(out: &mut Filter) {
@@ -350,6 +851,11 @@ pub fn register_error_details(out: &mut Filter) {
         out.set_error_detail(
             &format!("forbidden-selinux-command-in-{tag}"),
             FORBIDDEN_SELINUX_DETAIL.replace("{tag}", &tag),
+        );
+        // `daemon-activation-in-<scriptlet>`:
+        out.set_error_detail(
+            &format!("daemon-activation-in-{tag}"),
+            DAEMON_ACTIVATION_DETAIL.to_string(),
         );
         // `non-empty-<scriptlet>`:
         out.set_error_detail(
@@ -858,6 +1364,572 @@ mod tests {
         assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
             && f == "dangerous-command-in-%post"
             && d == &vec!["rm".to_string()]));
+    }
+
+    #[test]
+    fn insserv_in_post_is_flagged() {
+        let found = check().check_scriptlet("/bin/sh", "insserv foo", "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "daemon-activation-in-%post"
+            && d == &vec!["insserv".to_string()]));
+    }
+
+    #[test]
+    fn insserv_path_prefixed_is_flagged() {
+        let found = check().check_scriptlet("/bin/sh", "/sbin/insserv foo", "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "daemon-activation-in-%post"
+            && d == &vec!["insserv".to_string()]));
+    }
+
+    #[test]
+    fn systemctl_enable_in_post_is_flagged() {
+        let found =
+            check().check_scriptlet("/bin/sh", "systemctl enable foo.service", "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "daemon-activation-in-%post"
+            && d == &vec!["systemctl enable".to_string()]));
+    }
+
+    #[test]
+    fn systemctl_enable_path_prefixed_is_flagged() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "/usr/bin/systemctl enable foo.service",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "daemon-activation-in-%post"
+            && d == &vec!["systemctl enable".to_string()]));
+    }
+
+    #[test]
+    fn systemctl_enable_now_after_verb_is_flagged() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "systemctl enable --now foo.service",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post")
+        );
+    }
+
+    #[test]
+    fn systemctl_enable_now_before_verb_is_flagged() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "systemctl --now enable foo.service",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post")
+        );
+    }
+
+    #[test]
+    fn systemctl_start_is_flagged() {
+        let found =
+            check().check_scriptlet("/bin/sh", "systemctl start foo.service", "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "daemon-activation-in-%post"
+            && d == &vec!["systemctl start".to_string()]));
+    }
+
+    #[test]
+    fn daemon_activation_is_flagged_in_pre_and_postun() {
+        let found = check().check_scriptlet("/bin/sh", "insserv foo", "%pre", &[], &[]);
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%pre")
+        );
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "systemctl enable foo.service",
+            "%postun",
+            &[],
+            &[],
+        );
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%postun")
+        );
+    }
+
+    #[test]
+    fn daemon_activation_after_separator_is_flagged() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "true && systemctl enable foo.service",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post")
+        );
+    }
+
+    #[test]
+    fn service_macro_expansion_is_quiet() {
+        // The expanded form of the %service_* macros in a binary package:
+        // systemd-update-helper drives presets and enablement state, and
+        // no command here enables or starts a unit directly.
+        let script = "if [ -x /usr/lib/systemd/systemd-update-helper ]; then\n\
+            /usr/lib/systemd/systemd-update-helper install-system-units foo.service || :\n\
+            fi\n\
+            if [ -x /usr/lib/systemd/systemd-update-helper ]; then\n\
+            /usr/lib/systemd/systemd-update-helper mark-install-system-units foo.service || :\n\
+            fi\n\
+            if [ $1 -eq 1 ] ; then\n\
+            /usr/bin/systemctl preset foo.service >/dev/null 2>&1 || :\n\
+            fi";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn systemctl_non_activation_verbs_are_quiet() {
+        // The try-forms genuinely no-op when the unit is inactive, so
+        // they stay quiet; `restart`/`reload-or-restart` do not (they
+        // start an inactive unit) and are pinned firing below.
+        let script = "systemctl preset foo.service\n\
+            systemctl daemon-reload\n\
+            systemctl is-enabled foo.service\n\
+            systemctl try-restart foo.service\n\
+            systemctl condrestart foo.service\n\
+            systemctl reload-or-try-restart foo.service";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn systemctl_restart_is_flagged() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "systemctl restart foo.service",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "daemon-activation-in-%post"
+            && d == &vec!["systemctl restart".to_string()]));
+    }
+
+    #[test]
+    fn systemctl_reload_or_restart_is_flagged() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "systemctl reload-or-restart foo.service",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "daemon-activation-in-%post"
+            && d == &vec!["systemctl reload-or-restart".to_string()]));
+    }
+
+    #[test]
+    fn systemctl_reenable_is_flagged() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "systemctl reenable foo.service",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "daemon-activation-in-%post"
+            && d == &vec!["systemctl reenable".to_string()]));
+    }
+
+    #[test]
+    fn systemctl_in_command_substitution_is_flagged() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "$(systemctl enable foo.service)",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "daemon-activation-in-%post"
+            && d == &vec!["systemctl enable".to_string()]));
+    }
+
+    #[test]
+    fn chkconfig_on_is_flagged() {
+        let found = check().check_scriptlet("/bin/sh", "chkconfig foo on", "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "daemon-activation-in-%post"
+            && d == &vec!["chkconfig on".to_string()]));
+        let found =
+            check().check_scriptlet("/bin/sh", "/sbin/chkconfig foo on", "%preun", &[], &[]);
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%preun")
+        );
+    }
+
+    #[test]
+    fn chkconfig_add_is_flagged() {
+        let found = check().check_scriptlet("/bin/sh", "chkconfig --add foo", "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "daemon-activation-in-%post"
+            && d == &vec!["chkconfig --add".to_string()]));
+        let found =
+            check().check_scriptlet("/bin/sh", "/sbin/chkconfig --add foo", "%post", &[], &[]);
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post")
+        );
+    }
+
+    #[test]
+    fn chkconfig_level_on_is_flagged() {
+        let found =
+            check().check_scriptlet("/bin/sh", "chkconfig --level 345 foo on", "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "daemon-activation-in-%post"
+            && d == &vec!["chkconfig on".to_string()]));
+    }
+
+    #[test]
+    fn chkconfig_off_and_removal_are_quiet() {
+        for script in [
+            "chkconfig foo off",
+            "chkconfig --del foo",
+            "chkconfig --remove foo",
+            "/sbin/chkconfig --del foo",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+                "must stay silent for {script:?}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_activation_in_empty_prog_is_flagged() {
+        // No `-p` flag defaults to /bin/sh: macro-expanded bodies
+        // arrive this way and must still be scanned.
+        let found = check().check_scriptlet("", "systemctl enable foo.service", "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "daemon-activation-in-%post"
+            && d == &vec!["systemctl enable".to_string()]));
+        let found = check().check_scriptlet("", "insserv foo", "%preun", &[], &[]);
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%preun")
+        );
+    }
+
+    #[test]
+    fn systemctl_in_comment_and_echo_is_quiet() {
+        // Command-position matching: a mention in a comment or as an
+        // argument to echo is not an invocation.
+        let script = "# systemctl enable foo.service\n\
+            echo \"systemctl enable foo.service\"\n\
+            echo systemctl start foo.service";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn systemctl_single_dash_option_before_verb_is_flagged() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "systemctl -f enable foo.service",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post")
+        );
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "/usr/bin/systemctl --quiet enable foo.service",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post")
+        );
+    }
+
+    #[test]
+    fn insserv_removal_is_quiet() {
+        // `insserv -r` removes the service from the runlevels; it
+        // deactivates, so it is not an activation.
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "/sbin/insserv -r /etc/init.d/foo",
+            "%preun",
+            &[],
+            &[],
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%preun"),
+            "must stay silent: {found:?}"
+        );
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "/sbin/insserv ${YAST_IS_RUNNING:+-f} -r /etc/init.d/foo",
+            "%postun",
+            &[],
+            &[],
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%postun"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn systemctl_in_heredoc_text_is_quiet() {
+        // An update message written through a heredoc is text the
+        // scriptlet prints, not a command it runs.
+        let script = "cat >> /var/adm/update-messages/foo << EOF\n\
+            You can start it via:\n\
+             systemctl start foo\n\
+            EOF";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn heredoc_escaped_delimiter_text_is_quiet() {
+        for opener in ["cat <<\\EOF", "cat <<$'EOF'"] {
+            let script = format!("{opener}\nsystemctl start foo\nEOF");
+            let found = check().check_scriptlet("/bin/sh", &script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+                "must stay silent for {opener:?}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_heredoc_shift_does_not_hide_activation() {
+        // `$((x << bits))` is an arithmetic left-shift, not a
+        // heredoc: a genuine activation after it must still fire.
+        let script = "echo $((x << bits))\nsystemctl enable foo.service";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "must fire: {found:?}"
+        );
+    }
+
+    #[test]
+    fn non_heredoc_double_less_than_does_not_hide_activation() {
+        for script in [
+            "# see <<EOF\nsystemctl enable foo.service",
+            "echo '<< orphan'\nsystemctl enable foo.service",
+            "echo \"<< orphan\"\nsystemctl enable foo.service",
+            "cat <<EOF\nsystemctl enable foo.service",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found
+                    .iter()
+                    .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+                "must fire for {script:?}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn heredoc_hyphenated_delimiter_text_is_quiet() {
+        // The delimiter runs to the closing quote or the first shell
+        // metacharacter, not to the first `-`, `.` or `:`: a body under
+        // a hyphenated, dotted or colon delimiter is heredoc text.
+        for (opener, term) in [
+            ("cat <<'END-OF-MESSAGE'", "END-OF-MESSAGE"),
+            ("cat <<EOF.2", "EOF.2"),
+            ("cat <<end:of:msg", "end:of:msg"),
+        ] {
+            let script = format!("{opener}\nsystemctl start foo\n{term}");
+            let found = check().check_scriptlet("/bin/sh", &script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+                "must stay silent for {opener:?}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn systemctl_after_separator_in_comment_or_quotes_is_quiet() {
+        // A separator inside a comment or a quoted string does not put
+        // the following text at command position: it never executes.
+        for script in [
+            "# foo; systemctl enable bar.service",
+            "# cmd && systemctl enable bar.service",
+            "echo \"a; systemctl enable foo.service\"",
+            "echo 'a; systemctl start foo.service'",
+            "echo \"a; /sbin/insserv foo\"",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+                "must stay silent for {script:?}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn systemctl_in_command_substitution_inside_quotes_is_flagged() {
+        // A command substitution executes even inside double quotes,
+        // so blanking quoted text must not hide it.
+        let script = "echo \"$(systemctl enable foo.service)\"";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "must fire: {found:?}"
+        );
+    }
+
+    #[test]
+    fn chkconfig_off_with_trailing_comment_mentioning_on_is_quiet() {
+        // The trailing comment is stripped before the argument tokens
+        // are classified, so its `on` does not flip an `off` command.
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "chkconfig foo off # turn on at your own risk",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "must stay silent: {found:?}"
+        );
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "chkconfig foo on # freshly installed",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "must fire: {found:?}"
+        );
+    }
+
+    #[test]
+    fn insserv_long_remove_and_chkconfig_delete_are_quiet() {
+        for (script, tag) in [
+            ("/sbin/insserv --remove /etc/init.d/foo", "%preun"),
+            ("chkconfig --delete foo", "%preun"),
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, tag, &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == &format!("daemon-activation-in-{tag}")),
+                "must stay silent for {script:?}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn activation_after_heredoc_terminator_is_flagged() {
+        // Blanking stops at the terminator: code after it is scanned.
+        let script = "cat <<EOF\nsome text\nEOF\nsystemctl enable foo.service";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "must fire: {found:?}"
+        );
+    }
+
+    #[test]
+    fn heredoc_in_command_substitution_text_is_quiet() {
+        let script = "msg=\"$(cat <<EOF\nsystemctl start foo\nEOF\n)\"";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "must stay silent for quoted substitution: {found:?}"
+        );
+        let script2 = "x=$(cat <<EOF\nsystemctl start foo\nEOF\n)";
+        let found2 = check().check_scriptlet("/bin/sh", script2, "%post", &[], &[]);
+        assert!(
+            !found2
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "must stay silent for unquoted substitution: {found2:?}"
+        );
     }
 
     #[test]
