@@ -160,6 +160,7 @@ make-check-outside-check-section = W
 makefile-junk = W
 man-entry-value-not-found = W
 manifest-in-perl-module = W
+manpage-dangling-so-ref = W
 manpage-not-compressed = W
 manual-page-in-subfolder = E
 menu-command-not-in-package = W
