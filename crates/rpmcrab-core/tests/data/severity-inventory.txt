@@ -309,6 +309,7 @@ setup-not-in-prep = W
 shared-dir-glob-in-files = W
 shared-library-without-dependency-information = E
 shlib-fixed-dependency = W
+shlib-policy-etc-payload = W
 shlib-policy-excessive-dependency = E
 shlib-policy-missing-lib = E
 shlib-policy-name-error = E
