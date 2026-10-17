@@ -19,6 +19,7 @@ use std::path::Path;
 use fancy_regex::Regex;
 use indexmap::IndexMap;
 
+use super::filelist::sysconfig_good_matches;
 use super::is_match;
 use super::shared::{
     devel_regex, is_mingw_package, lib_package_regex, macro_regex, python_str_repr,
@@ -880,7 +881,7 @@ fn sysconfig_fillup_exempt(pkg_name: &str, sourcerpm: Option<&str>) -> bool {
 fn fillup_invocation_re() -> &'static Regex {
     static FILLUP_INVOCATION_RE: OnceLock<Regex> = OnceLock::new();
     FILLUP_INVOCATION_RE.get_or_init(|| {
-        Regex::new(r"(?m)(^|[;`|]|&&|$\()\s*(?:\S+/)?fillup(?:\s|$|[;|&])").expect("static regex")
+        Regex::new(r"(?m)(^|[;`|]|&&|\$\()\s*(?:\S+/)?fillup(?:\s|$|[;|&])").expect("static regex")
     })
 }
 
@@ -911,16 +912,22 @@ fn sysconfig_environment_file(content: &str) -> Option<String> {
 /// The sysconfig/fillup uses of one package, as one evidence phrase per
 /// category, in category order. `scriptlets` pairs each scriptlet's
 /// macro name with its body; `units` pairs each shipped unit file's name
-/// with its contents.
+/// with its contents. The payload category skips files matching the
+/// `Good` patterns of the `filelist-forbidden-sysconfig` rule (see
+/// `sysconfig_good_matches`).
 fn sysconfig_fillup_uses(
     files: &[&str],
     scriptlets: &[(&str, &str)],
     units: &[(&str, &str)],
 ) -> Vec<String> {
     let mut uses = Vec::new();
+    // A payload file the `filelist-forbidden-sysconfig` rule blesses
+    // through its `Good` patterns is not a use: the distro's own rule
+    // data permits those subtrees, so a migration nudge must not flag
+    // them either. The remaining categories carry no such allowlist.
     if let Some(path) = files
         .iter()
-        .find(|name| name.starts_with("/etc/sysconfig/"))
+        .find(|name| name.starts_with("/etc/sysconfig/") && !sysconfig_good_matches(name))
     {
         uses.push(format!("ships file {path}"));
     }
@@ -1057,9 +1064,12 @@ impl FilesCheck {
     /// directory, a `fillup` invocation in a scriptlet, or a shipped
     /// systemd unit whose `EnvironmentFile` points into
     /// `/etc/sysconfig/`. The mechanism's own packages are exempt (see
-    /// `sysconfig_fillup_exempt`). Port-only: the reference has no
-    /// counterpart beyond config comments. The `--explain` text proposes
-    /// the migration, which is the point of the check.
+    /// `sysconfig_fillup_exempt`). Port-only as a finding: the
+    /// reference's `filelist-forbidden-sysconfig` Error (ported in
+    /// `FilelistCheck`) covers the Bad-pattern payloads, so this Warning
+    /// double-emits with it there and adds the categories that Error
+    /// does not cover. The `--explain` text proposes the migration,
+    /// which is the point of the check.
     fn check_sysconfig_fillup_usage(&self, pkg: &Pkg, out: &mut Filter) {
         if sysconfig_fillup_exempt(&pkg.name, pkg.tag_str(librpm::Tag::SOURCERPM).as_deref()) {
             return;
@@ -8828,6 +8838,108 @@ mod tests {
         assert!(
             sysconfig_findings(&pkg).is_empty(),
             "the fillup package is exempt"
+        );
+    }
+
+    #[test]
+    fn sysconfig_fillup_command_substitution_fires() {
+        // `$(...)` is a command position: the substitution runs fillup.
+        // The substitution sits mid-line after a word, so no other
+        // separator (line start, `;`, `&&`) can reach the invocation:
+        // only the `$(` separator itself can, which pins it -- a bare
+        // `x=$(/bin/fillup ...)` at line start would also be reached by
+        // the line-start separator through the path-prefix group.
+        assert_eq!(
+            sysconfig_fillup_uses(
+                &[],
+                &[(
+                    "%post",
+                    "echo x=$(/bin/fillup -q /etc/sysconfig/demo /usr/share/fillup-templates/sysconfig.demo)\n"
+                )],
+                &[]
+            ),
+            vec!["calls fillup from the %post scriptlet".to_string()]
+        );
+        let post = "echo x=$(/bin/fillup -q /etc/sysconfig/demo /usr/share/fillup-templates/sysconfig.demo)\n";
+        let (pkg, _src, _extract) = sysconfig_test_pkg("demo", &[], Some(post));
+        let found = sysconfig_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert_eq!(found[0].2, Level::Warning);
+        assert!(
+            found[0].1.contains("%post"),
+            "detail names the scriptlet: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn sysconfig_uses_blessed_subdirs_are_quiet() {
+        // The Good patterns of the `filelist-forbidden-sysconfig` rule
+        // bless these subtrees; a payload there is not a category-1 use.
+        assert!(sysconfig_fillup_uses(&["/etc/sysconfig/network/ifcfg-eth0"], &[], &[]).is_empty());
+        assert!(sysconfig_fillup_uses(&["/etc/sysconfig/scripts/ifup-route"], &[], &[]).is_empty());
+        assert!(sysconfig_fillup_uses(&["/etc/sysconfig/cbq"], &[], &[]).is_empty());
+        // A blessed file does not mask an ordinary one: the ordinary
+        // file is the use that is named.
+        assert_eq!(
+            sysconfig_fillup_uses(
+                &["/etc/sysconfig/network/ifcfg-eth0", "/etc/sysconfig/demo"],
+                &[],
+                &[]
+            ),
+            vec!["ships file /etc/sysconfig/demo".to_string()]
+        );
+    }
+
+    #[test]
+    fn sysconfig_blessed_network_payload_is_quiet() {
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[("/etc/sysconfig/network/ifcfg-eth0", "BOOTPROTO=dhcp\n")],
+            None,
+        );
+        assert!(
+            sysconfig_findings(&pkg).is_empty(),
+            "a Good-pattern payload is not a use"
+        );
+    }
+
+    #[test]
+    fn sysconfig_blessed_scripts_payload_is_quiet() {
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[("/etc/sysconfig/scripts/ifup-route", "#!/bin/sh\n")],
+            None,
+        );
+        assert!(
+            sysconfig_findings(&pkg).is_empty(),
+            "a Good-pattern payload is not a use"
+        );
+    }
+
+    #[test]
+    fn sysconfig_blessed_payload_does_not_mask_scriptlet_use() {
+        // The Good allowlist covers only the payload category: a fillup
+        // call from a scriptlet still fires, and the blessed payload is
+        // not named as evidence.
+        let post =
+            "/bin/fillup -q /etc/sysconfig/demo /usr/share/fillup-templates/sysconfig.demo\n";
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[("/etc/sysconfig/network/ifcfg-eth0", "BOOTPROTO=dhcp\n")],
+            Some(post),
+        );
+        let found = sysconfig_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert!(
+            found[0].1.contains("%post"),
+            "detail names the scriptlet: {}",
+            found[0].1
+        );
+        assert!(
+            !found[0].1.contains("ifcfg-eth0"),
+            "blessed payload is not evidence: {}",
+            found[0].1
         );
     }
 
