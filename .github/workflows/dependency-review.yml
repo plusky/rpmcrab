@@ -5,13 +5,15 @@ on:
 
 permissions:
   contents: read
-  # comment-summary-in-pr posts the review summary as a PR comment.
-  pull-requests: write
 
 jobs:
   dependency-review:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      # comment-summary-in-pr posts the review summary as a PR comment.
+      pull-requests: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
