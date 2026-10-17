@@ -274,16 +274,17 @@ impl Check for SharedLibraryPolicyCheck {
         }
 
         // A versioned library package ships nothing but the libraries
-        // themselves: payload under /etc is shipped identically by the
-        // sibling package for the next SONAME generation, and the two
-        // conflict at file level. Directory entries are shared by
-        // design and %ghost entries are not shipped payload, so only
+        // themselves: payload under /etc (or its vendor-default
+        // counterpart /usr/etc) is shipped identically by the sibling
+        // package for the next SONAME generation, and the two conflict
+        // at file level. Directory entries are shared by design and
+        // %ghost entries are not shipped payload, so only
         // non-directory, non-ghost entries fire.
         if is_match(&self.re_soname_pkg, &pkg.name) {
             let mut etc_files: Vec<&str> = pkg
                 .files
                 .iter()
-                .filter(|f| f.name.starts_with("/etc/"))
+                .filter(|f| f.name.starts_with("/etc/") || f.name.starts_with("/usr/etc/"))
                 .filter(|f| !is_dir(f.mode))
                 .filter(|f| !f.is_ghost())
                 .map(|f| f.name.as_str())
@@ -1035,6 +1036,45 @@ mod tests {
     }
 
     #[test]
+    fn usr_etc_config_file_in_versioned_shlib_warns() {
+        // /usr/etc is the vendor-default counterpart of /etc (treated
+        // as /etc elsewhere in the tree), so payload there conflicts
+        // between SONAME generations in exactly the same way.
+        let results = etc_results("libfoo1", vec![etc_file("/usr/etc/foo/foo.conf")]);
+        let lines = etc_lines(&results);
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/etc/foo/foo.conf"),
+            "detail names the shipped path: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn usr_etc_directory_and_ghost_entries_are_quiet() {
+        let dir_entry = PkgFile {
+            name: "/usr/etc/foo".to_string(),
+            mode: 0o40755,
+            ..Default::default()
+        };
+        let results = etc_results("libfoo1", vec![dir_entry]);
+        assert!(
+            etc_lines(&results).is_empty(),
+            "directory entry must stay quiet: {results:?}"
+        );
+        let ghost = PkgFile {
+            flags: crate::pkg::pkgfile::RPMFILE_GHOST,
+            ..etc_file("/usr/etc/foo/foo.conf")
+        };
+        let results = etc_results("libfoo1", vec![ghost]);
+        assert!(
+            etc_lines(&results).is_empty(),
+            "ghost entry must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
     fn etc_symlink_in_versioned_shlib_warns() {
         // A symlink occupies the path just like a regular file.
         let link = PkgFile {
@@ -1141,7 +1181,7 @@ mod tests {
         let results = etc_results("libfoo1", vec![etc_file("/usr/share/foo/foo.conf")]);
         assert!(
             etc_lines(&results).is_empty(),
-            "payload outside /etc must stay quiet: {results:?}"
+            "payload outside /etc and /usr/etc must stay quiet: {results:?}"
         );
     }
 

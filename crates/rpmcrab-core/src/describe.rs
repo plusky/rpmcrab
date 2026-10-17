@@ -429,7 +429,7 @@ mod tests {
             ),
             (
                 "SharedLibraryPolicyCheck.toml",
-                "efe07a47e345b52758355d90005fc979bad5de18b30e4feb5acc114936133186",
+                "7735cc2574ea65a9ce019d0bd504de3d51fb7dc95cb7cac44f452f61acd7d03f",
             ),
             (
                 "SignatureCheck.toml",

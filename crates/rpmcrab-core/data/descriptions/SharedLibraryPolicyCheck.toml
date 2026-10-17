@@ -29,8 +29,8 @@ obsoletes so both generations can be installed together.
 """
 shlib-policy-etc-payload="""
 Your package name follows the Shared Library Policy naming scheme, but it
-ships files under /etc. Only the libraries themselves may be part of a
-versioned shared library package: a file shipped under the same
+ships files under /etc or /usr/etc. Only the libraries themselves may be
+part of a versioned shared library package: a file shipped under the same
 unversioned path by the package for the next SONAME generation conflicts
 with this one at file level, so the two generations cannot be installed
 in parallel. Move the files into a separate package.
