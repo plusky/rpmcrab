@@ -15,6 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use fancy_regex::Regex;
 use indexmap::IndexMap;
@@ -66,6 +67,11 @@ fn man_binary_basename(filename: &str) -> Option<&str> {
 const MAN_COMPRESSION_SUFFIXES: &[&str] =
     &[".gz", ".z", ".Z", ".zip", ".bz2", ".lzma", ".xz", ".zst"];
 
+/// Cap on the decompressed text of one man page: real pages stay far
+/// below this bound; it only limits a decompressor runaway or an
+/// oversized plain page.
+const MANPAGE_TEXT_LIMIT: u64 = 8 * 1024 * 1024;
+
 /// `path` with one trailing man page compression suffix removed, when it
 /// carries one.
 fn strip_man_compression_suffix(path: &str) -> &str {
@@ -102,7 +108,11 @@ fn manpage_so_targets(text: &str) -> Vec<String> {
 /// (`man3/popen.3`), or `None` when the argument names no man-root page:
 /// relative arguments are already man-root-relative, absolute arguments
 /// count only in their `/usr/share/man/...` or `/usr/man/...` form, and
-/// bare filenames or other absolute paths name no man-root page.
+/// bare filenames or other absolute paths name no man-root page. The
+/// first directory of a relative argument must have the section shape
+/// `MAN_REGEX` accepts (`man` plus a digit with an optional `p`/`x`,
+/// or `mann`): a merely `man`-prefixed directory (`manual/`,
+/// `management/`) names no man page.
 fn manpage_so_root_relative(arg: &str) -> Option<String> {
     if let Some(rel) = arg.strip_prefix("/usr/share/man/") {
         return Some(rel.to_string());
@@ -114,11 +124,12 @@ fn manpage_so_root_relative(arg: &str) -> Option<String> {
         return None;
     }
     let (dir, _) = arg.split_once('/')?;
-    if dir.len() > 3 && dir.starts_with("man") {
-        Some(arg.to_string())
-    } else {
-        None
-    }
+    let section = dir.strip_prefix("man")?;
+    let valid = section == "n"
+        || (section.len() <= 2
+            && section.as_bytes().first().is_some_and(u8::is_ascii_digit)
+            && (section.len() == 1 || matches!(section.as_bytes()[1], b'p' | b'x')));
+    if valid { Some(arg.to_string()) } else { None }
 }
 
 /// Whether the `spurious-executable-perm` finding is suppressed for
@@ -517,6 +528,11 @@ pub struct FilesCheck {
     /// been seen.
     session_files: HashSet<String>,
     dangling_candidates: Vec<DanglingCandidate>,
+    /// Decompressed bytes per file path, shared between `is_utf8_file`
+    /// and `manpage_text` (see `decompressed_bytes`); `None` entries
+    /// record outputs that could not be obtained or exceeded the text
+    /// limit, so the fallback read is not repeated either.
+    decompressed_cache: std::cell::RefCell<HashMap<String, Option<Arc<[u8]>>>>,
 }
 
 impl FilesCheck {
@@ -628,6 +644,7 @@ impl FilesCheck {
             documented_sources: HashSet::new(),
             session_files: HashSet::new(),
             dangling_candidates: Vec::new(),
+            decompressed_cache: std::cell::RefCell::new(HashMap::new()),
         }
     }
 
@@ -793,6 +810,7 @@ impl Check for FilesCheck {
         self.documented_sources.clear();
         self.session_files.clear();
         self.dangling_candidates.clear();
+        self.decompressed_cache.borrow_mut().clear();
     }
 
     fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
@@ -1781,6 +1799,44 @@ impl FilesCheck {
         self.decompressors.iter().find(|t| t.name() == name)
     }
 
+    /// The decompressed bytes of `path` through `fname`'s decompressor,
+    /// shared between `is_utf8_file` and `manpage_text`: a `%doc` man
+    /// page would otherwise run the same `<tool> -dc` pipeline twice per
+    /// package. A complete output up to `MANPAGE_TEXT_LIMIT` is cached
+    /// per path on this instance. `None` — no decompressor for the
+    /// suffix, an absent or failing decompressor, or an output past the
+    /// limit — is cached as well; callers then apply their own read for
+    /// those cases (streaming validation, a capped prefix) exactly as
+    /// when no cache entry exists.
+    fn decompressed_bytes(&self, fname: &str, path: &str) -> Option<Arc<[u8]>> {
+        if let Some(hit) = self.decompressed_cache.borrow().get(path) {
+            return hit.clone();
+        }
+        let result = self.decompressor_for(fname).and_then(|tool| {
+            let mut cmd = tool.command()?;
+            cmd.arg("-dc")
+                .arg(path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null());
+            let mut child = cmd.spawn().ok()?;
+            let bytes = child
+                .stdout
+                .take()
+                .and_then(|s| read_prefix(s, MANPAGE_TEXT_LIMIT + 1).ok())?;
+            let status = child.wait().ok()?;
+            if status.success() && bytes.len() as u64 <= MANPAGE_TEXT_LIMIT {
+                Some(Arc::from(bytes))
+            } else {
+                None
+            }
+        });
+        self.decompressed_cache
+            .borrow_mut()
+            .insert(path.to_string(), result.clone());
+        result
+    }
+
     /// rpmlint's `is_utf8`: strict UTF-8, transparently decompressing the
     /// compression formats the reference knows. A failed decompression reads
     /// as UTF-8, matching the reference's `except OSError: return True`.
@@ -1796,6 +1852,13 @@ impl FilesCheck {
     fn is_utf8_file(&self, fname: &str, path: &str) -> bool {
         match self.decompressor_for(fname) {
             Some(tool) => {
+                // A previous decompression of this path (by either
+                // consumer) is validated from memory instead of running
+                // the pipeline again.
+                if let Some(bytes) = self.decompressed_bytes(fname, path) {
+                    let mut slice: &[u8] = &bytes;
+                    return stream_is_utf8(&mut slice).unwrap_or(true);
+                }
                 let Some(mut cmd) = tool.command() else {
                     return true;
                 };
@@ -1831,13 +1894,19 @@ impl FilesCheck {
     /// content cannot be obtained (unreadable file, missing or failing
     /// decompressor): the page's references cannot be judged, so the
     /// page is skipped rather than guessed at — the absent-tool stance
-    /// `is_utf8_file` takes.
+    /// `is_utf8_file` takes. A name carrying a compression suffix the
+    /// codebase recognises but has no decompressor for (`.zip`) is
+    /// skipped the same way: its bytes are compressed content, not
+    /// page text to scan.
     fn manpage_text(&self, pkgfile: &PkgFile) -> Option<String> {
-        /// Decompressed man pages stay far below this bound; it only
-        /// caps a decompressor runaway.
-        const MANPAGE_TEXT_LIMIT: u64 = 8 * 1024 * 1024;
         match self.decompressor_for(&pkgfile.name) {
             Some(tool) => {
+                if let Some(bytes) = self.decompressed_bytes(&pkgfile.name, &pkgfile.path) {
+                    return Some(String::from_utf8_lossy(&bytes).into_owned());
+                }
+                // The shared helper could not serve the page (a failing
+                // decompressor, or output past the text limit): fall
+                // back to this page's own capped run.
                 let mut cmd = tool.command()?;
                 cmd.arg("-dc")
                     .arg(&pkgfile.path)
@@ -1849,14 +1918,24 @@ impl FilesCheck {
                     .stdout
                     .take()
                     .and_then(|s| read_prefix(s, MANPAGE_TEXT_LIMIT).ok());
+                let bytes = bytes?;
                 let status = child.wait().ok()?;
-                if !status.success() {
+                // A saturated read means the output ran past the text
+                // limit and the decompressor then died of SIGPIPE on
+                // the closed pipe: the prefix is the page text to
+                // judge, so the exit status only decides the verdict
+                // for outputs that fit under the limit.
+                if (bytes.len() as u64) < MANPAGE_TEXT_LIMIT && !status.success() {
                     return None;
                 }
-                Some(String::from_utf8_lossy(&bytes?).into_owned())
+                Some(String::from_utf8_lossy(&bytes).into_owned())
             }
             None => {
-                let bytes = std::fs::read(&pkgfile.path).ok()?;
+                if strip_man_compression_suffix(&pkgfile.name) != pkgfile.name {
+                    return None;
+                }
+                let file = std::fs::File::open(&pkgfile.path).ok()?;
+                let bytes = read_prefix(file, MANPAGE_TEXT_LIMIT).ok()?;
                 Some(String::from_utf8_lossy(&bytes).into_owned())
             }
         }
@@ -1865,10 +1944,17 @@ impl FilesCheck {
     /// A man page can redirect to another page with a `.so` line (a
     /// soelim include); when the target page is not shipped, `man`
     /// fails to display the referencing page. The reference is judged
-    /// within the package alone, like the dangling-symlink family: a
-    /// target shipped by another package does not satisfy it. A shipped
-    /// file matches under any compression suffix, or none. One finding
-    /// per (referencing page, missing target).
+    /// within the package, like the reference's dangling-symlink
+    /// family: a target shipped by another package satisfies it only
+    /// when this package declares the dependency, through the same
+    /// `req_names` escape `check_link_absolute` uses (a file Require
+    /// on the target page's path). The check deliberately stays
+    /// package-local even though the port's relative-symlink form is
+    /// session-aware (issue #547); the parity ledger records the
+    /// approximation. A shipped file, and likewise a file Require,
+    /// matches under any compression suffix, or none. One finding
+    /// per (referencing page, missing
+    /// target).
     ///
     /// Resolution mirrors how the target is found at display time: a
     /// `man<section>/<page>` argument resolves against the man root,
@@ -1922,7 +2008,13 @@ impl FilesCheck {
                 if !seen.insert(candidates[0].to_string()) {
                     continue;
                 }
-                if !candidates.iter().any(|c| shipped.contains(c)) {
+                if !candidates.iter().any(|c| {
+                    shipped.contains(c)
+                        || pkg
+                            .req_names
+                            .iter()
+                            .any(|n| strip_man_compression_suffix(n) == *c)
+                }) {
                     add_info(
                         out,
                         Level::Warning,
@@ -7857,6 +7949,24 @@ mod tests {
     }
 
     #[test]
+    fn manpage_so_root_relative_rejects_man_prefixed_dirs() {
+        // The first directory must carry the section shape `MAN_REGEX`
+        // accepts, not just the `man` prefix: `manual/` and
+        // `management/` name no man page (issue #672).
+        assert_eq!(manpage_so_root_relative("manual/x.1"), None);
+        assert_eq!(manpage_so_root_relative("management/x.1"), None);
+        assert_eq!(manpage_so_root_relative("manx/x.1"), None);
+        assert_eq!(
+            manpage_so_root_relative("man1p/x.1p"),
+            Some("man1p/x.1p".to_string())
+        );
+        assert_eq!(
+            manpage_so_root_relative("man3p/x.3p"),
+            Some("man3p/x.3p".to_string())
+        );
+    }
+
+    #[test]
     fn strip_man_compression_suffix_cases() {
         assert_eq!(
             strip_man_compression_suffix("/usr/share/man/man3/popen.3.gz"),
@@ -7942,6 +8052,229 @@ mod tests {
             "the detail names the missing target: {}",
             hits[0].1
         );
+    }
+
+    #[test]
+    fn manpage_so_ref_required_target_is_quiet() {
+        // The `req_names` escape (issue #672): a file Require on the
+        // target page's path declares the sibling dependency, so the
+        // reference is satisfied even though this package does not
+        // ship the target — the escape `check_link_absolute` uses.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = manpage_pkg(
+            &dir,
+            &[(
+                "/usr/share/man/man3/alias.3",
+                0o100644,
+                b".so man3/popen.3\n".as_slice(),
+            )],
+        );
+        pkg.req_names
+            .push("/usr/share/man/man3/popen.3".to_string());
+        let results = run_check_binary(&pkg);
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "a required target satisfies the reference: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_required_compressed_target_is_quiet() {
+        // A file Require names the target as the sibling package
+        // ships it — compressed (popen.3.gz) — while the resolved
+        // candidate is suffix-stripped; the escape must strip the
+        // Require side too, or it never matches a compressed target
+        // (issue #672).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = manpage_pkg(
+            &dir,
+            &[(
+                "/usr/share/man/man3/alias.3",
+                0o100644,
+                b".so man3/popen.3\n".as_slice(),
+            )],
+        );
+        pkg.req_names
+            .push("/usr/share/man/man3/popen.3.gz".to_string());
+        let results = run_check_binary(&pkg);
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "a required compressed target satisfies the reference: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_usr_man_root_candidate_is_quiet() {
+        // Both man roots are accepted for both argument forms
+        // (issue #672): an absolute `/usr/man` argument is satisfied
+        // by the target shipped under `/usr/share/man`.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/man/man1/alias.1",
+                    0o100644,
+                    b".so /usr/man/man1/real.1\n".as_slice(),
+                ),
+                (
+                    "/usr/share/man/man1/real.1",
+                    0o100644,
+                    b".TH real 1\n".as_slice(),
+                ),
+            ],
+        );
+        let results = run_check_binary(&pkg);
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "the /usr/man root candidate resolves: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_zip_page_is_skipped() {
+        // `.zip` is a recognised man page compression suffix with no
+        // decompressor: the page is skipped rather than scanned as
+        // raw text (issue #672).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[(
+                "/usr/share/man/man3/alias.3.zip",
+                0o100644,
+                b".so man3/popen.3\n".as_slice(),
+            )],
+        );
+        let results = run_check_binary(&pkg);
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "an undecompressible .zip page must not be scanned as text: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_unreadable_page_is_skipped() {
+        // A page whose content cannot be read is skipped, not judged
+        // (issue #672).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[(
+                "/usr/share/man/man3/alias.3",
+                0o100644,
+                b".so man3/popen.3\n".as_slice(),
+            )],
+        );
+        std::fs::remove_file(&pkg.files[0].path).expect("remove page content");
+        let results = run_check_binary(&pkg);
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "an unreadable page is skipped: {results:?}"
+        );
+    }
+
+    /// Write an executable fake tool `name` holding `script` under a
+    /// fresh tempdir and return the dir.
+    fn fake_tool_dir(name: &str, script: &str) -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().expect("tool tmpdir");
+        let tool = dir.path().join(name);
+        std::fs::write(&tool, script).expect("write fake tool");
+        let mut perms = std::fs::metadata(&tool)
+            .expect("stat fake tool")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&tool, perms).expect("chmod fake tool");
+        dir
+    }
+
+    #[test]
+    fn manpage_so_ref_absent_decompressor_skips_page() {
+        // No gzip in the tool dir: the `.gz` page cannot be read, so
+        // it is skipped rather than guessed at (issue #672).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let empty = tempfile::TempDir::new().expect("empty tool dir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[(
+                "/usr/share/man/man3/alias.3.gz",
+                0o100644,
+                b".so man3/popen.3\n".as_slice(),
+            )],
+        );
+        let config = test_config();
+        let mut check = FilesCheck::with_tool_dir(&config, Some(empty.path()));
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "a page whose decompressor is absent is skipped: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_failing_decompressor_skips_page() {
+        // A decompressor that exits non-zero leaves the page
+        // unreadable: skipped, not guessed at (issue #672).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let tools = fake_tool_dir("gzip", "#!/bin/sh\nexit 1\n");
+        let pkg = manpage_pkg(
+            &dir,
+            &[(
+                "/usr/share/man/man3/alias.3.gz",
+                0o100644,
+                b"not really gzip".as_slice(),
+            )],
+        );
+        let config = test_config();
+        let mut check = FilesCheck::with_tool_dir(&config, Some(tools.path()));
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "a page whose decompressor fails is skipped: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_over_limit_output_hides_late_targets() {
+        // Decompressed output is capped at the man page text limit: a
+        // `.so` line past the cap is never seen, so nothing fires;
+        // the same line ahead of the cap fires as usual (issue #672).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[(
+                "/usr/share/man/man3/alias.3.gz",
+                0o100644,
+                b"not really gzip".as_slice(),
+            )],
+        );
+        let filler = "head -c 9000000 /dev/zero | tr '\\0' 'x'";
+        for (script, expect_hits) in [
+            (
+                format!("#!/bin/sh\n{filler}\nprintf '\\n.so man3/popen.3\\n'\n"),
+                0,
+            ),
+            (
+                format!("#!/bin/sh\nprintf '.so man3/popen.3\\n'\n{filler}\n"),
+                1,
+            ),
+        ] {
+            let tools = fake_tool_dir("gzip", &script);
+            let config = test_config();
+            let mut check = FilesCheck::with_tool_dir(&config, Some(tools.path()));
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_binary(&pkg, &config, &mut out);
+            let results = out.results().to_vec();
+            assert_eq!(
+                so_ref_hits(&results).len(),
+                expect_hits,
+                "over-limit output handling: {results:?}"
+            );
+        }
     }
 
     #[test]

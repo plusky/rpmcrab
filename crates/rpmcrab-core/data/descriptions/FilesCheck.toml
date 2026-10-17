@@ -393,6 +393,12 @@ This info page is not compressed. Compress info pages with gzip.
 kernel-modules-not-in-kernel-packages="""
 Kernel modules must be shipped in kernel packages, not in regular packages.
 """
+manpage-dangling-so-ref="""
+The manual page redirects to another manual page with a .so (soelim)
+line, but the target page is not included in this package, so man
+fails to display the referencing page. Include the target page in
+the package or remove the redirect.
+"""
 manpage-not-compressed="""
 This manual page is not compressed. Compress manual pages with gzip.
 """
@@ -413,12 +419,6 @@ The symlink contains more `..` segments than the path depth allows. The symlink 
 """
 symlink-should-be-absolute="""
 The symlink uses a relative target where an absolute one is required.
-"""
-manpage-dangling-so-ref="""
-The manual page redirects to another manual page with a .so (soelim)
-line, but the target page is not included in this package, so man
-fails to display the referencing page. Include the target page in
-the package or remove the redirect.
 """
 sysconfig-fillup-usage="""
 The package uses the legacy sysconfig/fillup configuration scheme: it ships
