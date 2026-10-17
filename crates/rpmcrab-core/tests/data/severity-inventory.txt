@@ -312,6 +312,7 @@ shlib-fixed-dependency = W
 shlib-policy-excessive-dependency = E
 shlib-policy-missing-lib = E
 shlib-policy-name-error = E
+shlib-policy-obsoletes-sibling = E
 shlib-unversioned-lib = W
 shlib-with-non-pic-code = E
 siteperl-in-perl-module = W
