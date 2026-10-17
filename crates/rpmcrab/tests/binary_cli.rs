@@ -1721,6 +1721,20 @@ fn explain_staged_shlib_policy_obsoletes_sibling() {
     assert!(out.stderr.is_empty());
 }
 
+/// `--explain`: staged `SharedLibraryPolicyCheck.toml` resolves the port-only `shlib-policy-etc-payload` instead of "Unknown message".
+#[test]
+fn explain_staged_shlib_policy_etc_payload() {
+    let out = rpmcrab(&["-e", "shlib-policy-etc-payload"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "shlib-policy-etc-payload:\nYour package name follows the Shared Library Policy naming scheme, but it\nships files under /etc. Only the libraries themselves may be part of a\nversioned shared library package: a file shipped under the same unversioned\npath by the package for the next SONAME generation conflicts with this one at\nfile level, so the two generations cannot be installed in parallel. Move the\nfiles into a separate package.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
 /// `--explain`: staged `SpecCheck.toml` resolves `no-spec-file` instead of "Unknown message".
 #[test]
 fn explain_staged_spec_check() {
