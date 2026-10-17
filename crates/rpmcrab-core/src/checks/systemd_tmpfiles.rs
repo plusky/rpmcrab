@@ -333,7 +333,7 @@ impl SystemdTmpfilesCheck {
                 }
             }
             'b' => {
-                if !entry.target.starts_with("/dev") {
+                if !(entry.target == "/dev" || entry.target.starts_with("/dev/")) {
                     return true;
                 }
                 if entry.has_non_root_owner() || entry.has_non_root_group() {
@@ -522,6 +522,49 @@ mod tests {
         let check = SystemdTmpfilesCheck::new(&Config::default());
         let entry = TmpfilesEntry::parse("t.conf", "d /opt/foo - - - -");
         assert!(check.is_sensitive_entry(&entry));
+    }
+
+    #[test]
+    fn device_in_dev_with_root_only_access_is_not_sensitive() {
+        let check = SystemdTmpfilesCheck::new(&Config::default());
+        let entry = TmpfilesEntry::parse("t.conf", "b /dev/null 0600 root root -");
+        assert!(!check.is_sensitive_entry(&entry));
+    }
+
+    #[test]
+    fn device_at_dev_itself_with_root_only_access_is_not_sensitive() {
+        let check = SystemdTmpfilesCheck::new(&Config::default());
+        // The target == "/dev" arm: /dev itself is in /dev, so a root-only
+        // device entry there is not sensitive; world access still is.
+        let entry = TmpfilesEntry::parse("t.conf", "b /dev 0600 root root -");
+        assert!(!check.is_sensitive_entry(&entry));
+        let entry = TmpfilesEntry::parse("t.conf", "b /dev 0666 root root -");
+        assert!(check.is_sensitive_entry(&entry));
+    }
+
+    #[test]
+    fn device_in_dev_with_world_access_is_sensitive() {
+        let check = SystemdTmpfilesCheck::new(&Config::default());
+        let entry = TmpfilesEntry::parse("t.conf", "b /dev/null 0666 root root -");
+        assert!(check.is_sensitive_entry(&entry));
+    }
+
+    #[test]
+    fn device_outside_dev_is_sensitive() {
+        let check = SystemdTmpfilesCheck::new(&Config::default());
+        // Only "/dev" itself and paths below it are in /dev; a target that
+        // merely starts with the characters "/dev" is outside it and a
+        // device entry there is always sensitive.
+        for line in [
+            "b /device 0600 root root -",
+            "b /devicefoo 0600 root root -",
+            "b /dev-foo 0600 root root -",
+            "b /devfoo/bar 0600 root root -",
+            "b /etc/foo 0600 root root -",
+        ] {
+            let entry = TmpfilesEntry::parse("t.conf", line);
+            assert!(check.is_sensitive_entry(&entry), "{line}");
+        }
     }
 
     #[test]
