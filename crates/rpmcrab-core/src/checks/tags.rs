@@ -1723,7 +1723,7 @@ mod tests {
         assert_eq!(
             hits[0].1,
             format!(
-                "w6-tmpfiles.noarch: E: changelog-time-in-future {}",
+                "w6-tmpfiles.noarch: E: changelog-time-in-future (Badness: 1) {}",
                 format_date(first - 26 * 3600)
             ),
             "unexpected line"
@@ -2410,7 +2410,7 @@ mod tests {
         assert_eq!(hits.len(), 1, "all: {results:?}");
         assert_eq!(
             hits[0].1,
-            "tags-emission-pins-longsummary.noarch: E: summary-too-long This is a deliberately overlong summary that stretches well past seventy nine characters"
+            "tags-emission-pins-longsummary.noarch: E: summary-too-long (Badness: 1) This is a deliberately overlong summary that stretches well past seventy nine characters"
         );
     }
 
@@ -2511,7 +2511,7 @@ mod tests {
         assert_eq!(hits.len(), 1, "all: {results:?}");
         assert_eq!(
             hits[0].1,
-            "tags-emission-pins-multiline.noarch: E: summary-on-multiple-lines"
+            "tags-emission-pins-multiline.noarch: E: summary-on-multiple-lines (Badness: 1)"
         );
     }
 
@@ -2523,7 +2523,7 @@ mod tests {
         assert_eq!(hits.len(), 1, "all: {results:?}");
         assert_eq!(
             hits[0].1,
-            "tags-emission-pins-nodesc.noarch: E: no-description-tag"
+            "tags-emission-pins-nodesc.noarch: E: no-description-tag (Badness: 1)"
         );
     }
 
@@ -2592,7 +2592,7 @@ mod tests {
         assert_eq!(hits.len(), 1, "all: {results:?}");
         assert!(
             hits[0].1.starts_with(
-                "tags-emission-pins-spell.noarch: E: spelling-error %description -l C packag"
+                "tags-emission-pins-spell.noarch: E: spelling-error (Badness: 1) %description -l C packag"
             ),
             "line: {}",
             hits[0].1
@@ -2622,7 +2622,7 @@ mod tests {
         assert_eq!(hits.len(), 1, "all: {results:?}");
         assert_eq!(
             hits[0].1,
-            "tags-emission-pins-pcreq-devel.noarch: E: no-pkg-config-provides"
+            "tags-emission-pins-pcreq-devel.noarch: E: no-pkg-config-provides (Badness: 1)"
         );
     }
 
@@ -2632,7 +2632,10 @@ mod tests {
         let results = run_check(&pkg);
         let hits = tag_hits(&results, "invalid-version");
         assert_eq!(hits.len(), 1, "all: {results:?}");
-        assert_eq!(hits[0].1, "tags-badversion.noarch: E: invalid-version 0pre");
+        assert_eq!(
+            hits[0].1,
+            "tags-badversion.noarch: E: invalid-version (Badness: 1) 0pre"
+        );
     }
 
     #[test]

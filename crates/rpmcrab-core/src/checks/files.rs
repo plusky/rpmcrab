@@ -3966,7 +3966,8 @@ mod tests {
             [(
                 "script-without-shebang".to_string(),
                 Level::Error,
-                "spurious-test.noarch: E: script-without-shebang /usr/bin/noshebang".to_string(),
+                "spurious-test.noarch: E: script-without-shebang (Badness: 1) /usr/bin/noshebang"
+                    .to_string(),
             )],
             "script paths keep script-without-shebang, not spurious"
         );
@@ -4246,9 +4247,9 @@ mod tests {
         assert_eq!(
             details,
             [
-                "w6-sourced-script.noarch: E: sourced-script-with-shebang /etc/profile.d/w6-args.sh /bin/sh -x -e",
-                "w6-sourced-script.noarch: E: sourced-script-with-shebang /etc/profile.d/w6-exec.sh /bin/sh",
-                "w6-sourced-script.noarch: E: sourced-script-with-shebang /etc/profile.d/w6-shebang.sh /bin/sh",
+                "w6-sourced-script.noarch: E: sourced-script-with-shebang (Badness: 1) /etc/profile.d/w6-args.sh /bin/sh -x -e",
+                "w6-sourced-script.noarch: E: sourced-script-with-shebang (Badness: 1) /etc/profile.d/w6-exec.sh /bin/sh",
+                "w6-sourced-script.noarch: E: sourced-script-with-shebang (Badness: 1) /etc/profile.d/w6-shebang.sh /bin/sh",
             ],
             "name+level+detail: {findings:?}"
         );
@@ -4781,8 +4782,8 @@ mod tests {
         assert_eq!(
             fsf,
             [
-                "fsf-address-fixture.noarch: E: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-early",
-                "fsf-address-fixture.noarch: E: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-late",
+                "fsf-address-fixture.noarch: E: incorrect-fsf-address (Badness: 1) /usr/share/doc/packages/fsf-address-fixture/LICENSE-early",
+                "fsf-address-fixture.noarch: E: incorrect-fsf-address (Badness: 1) /usr/share/doc/packages/fsf-address-fixture/LICENSE-late",
             ],
         );
     }
@@ -6435,8 +6436,9 @@ mod tests {
             .collect();
         assert_eq!(lines.len(), 1, "unexpected: {results:?}");
         assert!(
-            lines[0]
-                .contains(": E: mimeinfo-cache-packaged /usr/share/applications/mimeinfo.cache"),
+            lines[0].contains(
+                ": E: mimeinfo-cache-packaged (Badness: 1) /usr/share/applications/mimeinfo.cache"
+            ),
             "name, level and detail: {}",
             lines[0]
         );

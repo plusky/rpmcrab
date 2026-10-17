@@ -638,7 +638,7 @@ mod tests {
         assert_eq!(results[0].0, "invalid-appdata-file");
         assert_eq!(
             results[0].1,
-            "appdata-test.noarch: E: invalid-appdata-file \
+            "appdata-test.noarch: E: invalid-appdata-file (Badness: 1) \
              /usr/share/metainfo/org.example.foo.metainfo.xml: missing required tag(s): id"
         );
     }
@@ -659,7 +659,7 @@ mod tests {
         assert_eq!(results[0].0, "invalid-appdata-file");
         assert_eq!(
             results[0].1,
-            "appdata-test.noarch: E: invalid-appdata-file \
+            "appdata-test.noarch: E: invalid-appdata-file (Badness: 1) \
              /usr/share/metainfo/org.example.foo.metainfo.xml: missing required tag(s): summary, metadata_license, description"
         );
     }
@@ -806,7 +806,7 @@ mod tests {
         assert_eq!(results[0].0, "invalid-appdata-file");
         assert_eq!(
             results[0].1,
-            "appdata-test.noarch: E: invalid-appdata-file \
+            "appdata-test.noarch: E: invalid-appdata-file (Badness: 1) \
              /usr/share/metainfo/org.example.foo.metainfo.xml"
         );
     }

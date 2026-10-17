@@ -2035,7 +2035,7 @@ mod tests {
         let results = run_mini("Name: foo\nBuildArch: x86_64\n");
         let lines = lines_for(&results, "buildarch-instead-of-exclusivearch-tag");
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("E: buildarch-instead-of-exclusivearch-tag x86_64"));
+        assert!(lines[0].contains("E: buildarch-instead-of-exclusivearch-tag (Badness: 1) x86_64"));
     }
 
     #[test]
@@ -2345,7 +2345,7 @@ mod tests {
         let results = run_mini("Name: foo\n%if %{?suse_version} < 1314\n%endif\n");
         let lines = lines_for(&results, "obsolete-suse-version-check");
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("E: obsolete-suse-version-check 1314"));
+        assert!(lines[0].contains("E: obsolete-suse-version-check (Badness: 1) 1314"));
     }
 
     #[test]
@@ -2353,7 +2353,7 @@ mod tests {
         let results = run_mini("Name: foo\n%if %{?suse_version} > 1700\n%endif\n");
         let lines = lines_for(&results, "invalid-suse-version-check");
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("E: invalid-suse-version-check 1700"));
+        assert!(lines[0].contains("E: invalid-suse-version-check (Badness: 1) 1700"));
     }
 
     // Upstream rpmlint#554: NBSP in prose is not a syntax hazard.
@@ -3510,7 +3510,7 @@ Patch0: foo.patch
         let lines = lines_for(&results, "hardcoded-library-path");
         assert_eq!(lines.len(), 1, "results: {results:?}");
         assert!(
-            lines[0].contains("E: hardcoded-library-path in /usr/lib"),
+            lines[0].contains("E: hardcoded-library-path (Badness: 1) in /usr/lib"),
             "line: {}",
             lines[0]
         );
@@ -3567,12 +3567,12 @@ Patch0: foo.patch
         let lines = lines_for(&results, "prereq-use");
         assert_eq!(lines.len(), 2, "results: {results:?}");
         assert!(
-            lines[0].contains("E: prereq-use none"),
+            lines[0].contains("E: prereq-use (Badness: 1) none"),
             "line: {}",
             lines[0]
         );
         assert!(
-            lines[1].contains("E: prereq-use none_other"),
+            lines[1].contains("E: prereq-use (Badness: 1) none_other"),
             "line: {}",
             lines[1]
         );
@@ -3594,7 +3594,7 @@ Patch0: foo.patch
         let lines = lines_for(&results, "buildprereq-use");
         assert_eq!(lines.len(), 1, "results: {results:?}");
         assert!(
-            lines[0].contains("E: buildprereq-use Something"),
+            lines[0].contains("E: buildprereq-use (Badness: 1) Something"),
             "line: {}",
             lines[0]
         );
@@ -3606,7 +3606,7 @@ Patch0: foo.patch
         let lines = lines_for(&results, "rpm-buildroot-usage");
         assert_eq!(lines.len(), 1, "results: {results:?}");
         assert!(
-            lines[0].contains("E: rpm-buildroot-usage %prep echo $RPM_BUILD_ROOT"),
+            lines[0].contains("E: rpm-buildroot-usage (Badness: 1) %prep echo $RPM_BUILD_ROOT"),
             "line: {}",
             lines[0]
         );

@@ -1,12 +1,13 @@
 //! Integration test: a full `Lint` run over a synthetic check set must produce
 //! the frozen report wire format (header, sorted findings, footer, exit code).
 //!
-//! The expected block below is a hand-transcribed rendering of the captured
-//! `tests/parity/cases/llvm21-gold/expected/stdout`, with the wall-clock
-//! duration rendered as a fixed `0.1`; it is verified byte-for-byte against
-//! that capture, except for the session banner: the banner identifies rpmcrab
-//! itself (`rpmcrab: <crate version>`) rather than the emulated reference
-//! (`docs/DESIGN.md` §4.5, ledgered in `tests/parity/divergences.toml`).
+//! The expected block below is the rendering of the captured
+//! `tests/parity/cases/llvm21-gold` case, with the wall-clock duration
+//! rendered as a fixed `0.1`. It departs from the captured reference
+//! output in two ledgered places (`tests/parity/divergences.toml`): the
+//! session banner identifies rpmcrab itself (`rpmcrab: <crate version>`,
+//! `docs/DESIGN.md` §4.5), and unscored errors carry the
+//! `(Badness: 1)` column the reference omits (`docs/DESIGN.md` §4.1).
 //!
 //! The package is a real one from the corpus driven through the same
 //! `check_batch` loop the binary uses; the checks themselves are synthetic, so
@@ -118,8 +119,8 @@ configuration:
     <XDG>/rpmlint/zypper-plugins.toml
 checks: 43, packages: 1
 
-llvm21-gold.aarch64: E: suse-zypp-packageand packageand(clang21:binutils)
-llvm21-gold.aarch64: E: suse-zypp-packageand packageand(clang21:binutils-gold)
+llvm21-gold.aarch64: E: suse-zypp-packageand (Badness: 1) packageand(clang21:binutils)
+llvm21-gold.aarch64: E: suse-zypp-packageand (Badness: 1) packageand(clang21:binutils-gold)
 llvm21-gold.aarch64: W: no-soname /usr/lib64/LLVMgold.so
  1 packages and 0 specfiles checked; 2 errors, 1 warnings, 1 filtered, 2 badness; has taken 0.1 s \n",
     );

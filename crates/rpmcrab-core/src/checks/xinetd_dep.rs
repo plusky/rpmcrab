@@ -119,7 +119,7 @@ mod tests {
         let (name, line) = &results[0];
         assert_eq!(name, "deprecated-xinetd-config");
         assert!(
-            line.contains(": E: deprecated-xinetd-config /etc/xinetd.d/daytime"),
+            line.contains(": E: deprecated-xinetd-config (Badness: 1) /etc/xinetd.d/daytime"),
             "unexpected line: {line}"
         );
         assert!(

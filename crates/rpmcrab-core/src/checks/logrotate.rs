@@ -307,7 +307,7 @@ mod tests {
         assert_eq!(writable.len(), 1, "{rendered:?}");
         assert!(
             writable[0].starts_with(
-                "logrotate-test.noarch: E: logrotate-user-writable-log-dir /var/log app:app 0775"
+                "logrotate-test.noarch: E: logrotate-user-writable-log-dir (Badness: 1) /var/log app:app 0775"
             ),
             "unexpected line: {}",
             writable[0]
@@ -367,7 +367,9 @@ mod tests {
                 assert_eq!(hits.len(), 1, "case {log_path}: {rendered:?}");
                 assert_eq!(
                     hits[0],
-                    &format!("logrotate-test.noarch: E: logrotate-log-dir-not-packaged {dir}"),
+                    &format!(
+                        "logrotate-test.noarch: E: logrotate-log-dir-not-packaged (Badness: 1) {dir}"
+                    ),
                     "case {log_path}"
                 );
             } else {
@@ -432,7 +434,7 @@ mod tests {
         );
         assert_eq!(
             duplicates[0].as_str(),
-            "logrotate-test.noarch: E: logrotate-duplicate /var/log/myapp",
+            "logrotate-test.noarch: E: logrotate-duplicate (Badness: 1) /var/log/myapp",
             "level/name/detail",
         );
     }

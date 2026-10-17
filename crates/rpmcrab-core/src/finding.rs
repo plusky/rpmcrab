@@ -21,8 +21,8 @@ pub struct Finding {
     /// prefixed with a single space.
     pub details: Vec<String>,
     /// Final badness after scoring (signed: a negative configured badness
-    /// subtracts from the score, per Python `int()`). The column prints only
-    /// when `> 1`.
+    /// subtracts from the score, per Python `int()`). The column prints
+    /// whenever the badness is positive.
     pub badness: i64,
     /// `Path(package.name).name` — the `Name:` tag for binaries, the spec
     /// filename for `.spec`.
@@ -109,7 +109,7 @@ impl Finding {
 
     /// The printed line. Coloured iff `color` is the tty table.
     pub fn line(&self, color: &Color) -> String {
-        let bad_output = if self.badness > 1 {
+        let bad_output = if self.badness > 0 {
             format!(" (Badness: {})", self.badness)
         } else {
             String::new()
@@ -204,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn badness_column_only_when_over_one() {
+    fn badness_column_renders_when_positive() {
         let mut f = pkg("shlib-policy-name-error", Level::Error);
         f.badness = 10000;
         f.details = vec!["SONAME: libLTO.so.21.1".to_string()];
@@ -212,7 +212,17 @@ mod tests {
             f.line(&Color::for_tty(false)),
             "llvm21-gold.aarch64: E: shlib-policy-name-error (Badness: 10000) SONAME: libLTO.so.21.1"
         );
+        // A badness of 1 renders too: any finding that counts toward the
+        // score shows its weight (DESIGN §4.1).
         f.badness = 1;
+        assert_eq!(
+            f.line(&Color::for_tty(false)),
+            "llvm21-gold.aarch64: E: shlib-policy-name-error (Badness: 1) SONAME: libLTO.so.21.1"
+        );
+        // Zero and negative badness stay unrendered.
+        f.badness = 0;
+        assert!(!f.line(&Color::for_tty(false)).contains("Badness"));
+        f.badness = -5;
         assert!(!f.line(&Color::for_tty(false)).contains("Badness"));
     }
 

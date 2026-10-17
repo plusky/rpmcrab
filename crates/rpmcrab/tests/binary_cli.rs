@@ -800,16 +800,22 @@ fn format_json_matches_text_findings() {
                 break;
             }
         }
-        let Some((level, mut rest)) = found else {
+        let Some((level, rest)) = found else {
             continue;
         };
-        // Strip the badness suffix the text renderer appends.
-        if let Some((det, _)) = rest.rsplit_once(" (Badness: ") {
-            rest = det;
-        }
         let mut parts = rest.splitn(2, " ");
         let check = parts.next().unwrap_or("").to_string();
-        let details = parts.next().unwrap_or("").trim().to_string();
+        let mut details = parts.next().unwrap_or("").trim().to_string();
+        // The text renderer places a `(Badness: N)` column between the
+        // check name and the details whenever the badness is positive;
+        // drop it so the triple matches the JSON form, which carries the
+        // badness as a separate field.
+        if let Some(stripped) = details.strip_prefix("(Badness: ") {
+            details = stripped
+                .split_once(')')
+                .map(|(_, after)| after.trim().to_string())
+                .unwrap_or_default();
+        }
         text_findings.push((check, level.to_string(), details));
     }
     json_findings.sort();
