@@ -90,7 +90,12 @@ impl Canonicalizer {
                         self.version_1_1 = v.trim() == "1.1";
                     }
                 }
-                Event::DocType(e) => self.parse_doctype_entities(&e),
+                Event::DocType(e) => {
+                    if self.seen_root {
+                        return Err("XML parse error: junk after document element".to_string());
+                    }
+                    self.parse_doctype_entities(&e);
+                }
                 // Comments neither emit nor break text coalescing.
                 Event::Comment(_) => {}
                 Event::PI(e) => self.emit_pi(&e)?,
@@ -102,8 +107,8 @@ impl Canonicalizer {
                     let name = e.name().as_ref().to_string();
                     let attrs = collect_attrs(&e)?;
                     self.flush_prolog_pis();
-                    self.seen_root = true;
                     self.flush_text()?;
+                    self.seen_root = true;
                     self.start_element(&name, &attrs, false)?;
                     self.depth += 1;
                 }
@@ -114,8 +119,8 @@ impl Canonicalizer {
                     let name = e.name().as_ref().to_string();
                     let attrs = collect_attrs(&e)?;
                     self.flush_prolog_pis();
-                    self.seen_root = true;
                     self.flush_text()?;
+                    self.seen_root = true;
                     self.start_element(&name, &attrs, true)?;
                 }
                 Event::End(e) => {
@@ -192,12 +197,12 @@ impl Canonicalizer {
     /// expand recursively.
     fn push_ref(&mut self, name: &str) -> Result<(), String> {
         if let Some(num) = name.strip_prefix('#') {
-            self.pending_text
-                .push(decode_char_ref(num, self.version_1_1)?);
+            self.pending_text.push(decode_char_ref(num)?);
         } else if let Some(value) = resolve_predefined_entity(name) {
             self.pending_text.push_str(value);
         } else if let Some(value) = self.entities.get(name).cloned() {
             let expanded = self.expand_entities(&value, 8)?;
+            self.charge_expansion(expanded.len())?;
             self.pending_text.push_str(&expanded);
         } else {
             return Err(format!("undefined entity {name:?}"));
@@ -263,6 +268,7 @@ impl Canonicalizer {
         for (key, value) in attrs {
             if key == "xmlns" {
                 let uri = self.expand_entities(value, 8)?;
+                self.charge_expansion(uri.len())?;
                 push_decl(&mut scope_frame, None, &uri)?;
             } else if let Some(p) = key.strip_prefix("xmlns:") {
                 if p == "xml" {
@@ -271,6 +277,7 @@ impl Canonicalizer {
                     );
                 }
                 let uri = self.expand_entities(value, 8)?;
+                self.charge_expansion(uri.len())?;
                 push_decl(&mut scope_frame, Some(p), &uri)?;
             } else {
                 regular.push((key.clone(), value.clone()));
@@ -397,6 +404,7 @@ impl Canonicalizer {
             // normalization); character references survive as characters.
             let normalized = eol_normalize(value).replace(['\t', '\n'], " ");
             let expanded = self.expand_entities(&normalized, 8)?;
+            self.charge_expansion(expanded.len())?;
             self.out.extend_from_slice(b" ");
             self.out.extend_from_slice(key.as_bytes());
             self.out.extend_from_slice(b"=\"");
@@ -413,6 +421,16 @@ impl Canonicalizer {
             self.scope.pop();
             self.rendered.pop();
             self.space_preserve.pop();
+        }
+        Ok(())
+    }
+
+    /// Charge one general-entity production to the cumulative expansion
+    /// budget, rejecting the document once the budget is exceeded.
+    fn charge_expansion(&mut self, len: usize) -> Result<(), String> {
+        self.expanded_bytes = self.expanded_bytes.saturating_add(len);
+        if self.expanded_bytes > MAX_ENTITY_EXPANSION_BYTES {
+            return Err("entity expansion too large".to_string());
         }
         Ok(())
     }
@@ -439,15 +457,12 @@ impl Canonicalizer {
                 };
                 let pat = &rest[..semi];
                 if let Some(num) = pat.strip_prefix('#') {
-                    out.push(decode_char_ref(num, self.version_1_1)?);
+                    out.push(decode_char_ref(num)?);
                 } else if let Some(value) = resolve_predefined_entity(pat) {
                     out.push_str(value);
                 } else if let Some(value) = self.entities.get(pat).cloned() {
                     let expanded = self.expand_entities(&value, depth - 1)?;
-                    self.expanded_bytes = self.expanded_bytes.saturating_add(expanded.len());
-                    if self.expanded_bytes > MAX_ENTITY_EXPANSION_BYTES {
-                        return Err("entity expansion too large".to_string());
-                    }
+                    self.charge_expansion(expanded.len())?;
                     out.push_str(&expanded);
                 } else {
                     return Err(format!("undefined entity {pat:?}"));
@@ -585,31 +600,30 @@ fn eol_normalize(s: &str) -> String {
     out
 }
 
-fn decode_char_ref(num: &str, version_1_1: bool) -> Result<char, String> {
+fn decode_char_ref(num: &str) -> Result<char, String> {
     let n = if let Some(hex) = num.strip_prefix('x').or_else(|| num.strip_prefix('X')) {
         u32::from_str_radix(hex, 16)
     } else {
         num.parse::<u32>()
     }
     .map_err(|_| format!("invalid character reference &#{num};"))?;
-    if !is_xml_char(n, version_1_1) {
+    if !is_xml_char(n) {
         return Err(format!("invalid character reference &#{num};"));
     }
     char::from_u32(n).ok_or_else(|| format!("invalid character reference &#{num};"))
 }
 
-/// Whether `n` is in the XML `Char` production. XML 1.0 excludes the C0
-/// controls other than tab, LF and CR; XML 1.1 admits them but still
-/// excludes NUL. Both exclude the non-characters U+FFFE and U+FFFF.
-fn is_xml_char(n: u32, version_1_1: bool) -> bool {
-    if version_1_1 {
-        matches!(n, 0x1..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF)
-    } else {
-        matches!(
-            n,
-            0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF
-        )
-    }
+/// Whether `n` is in the XML `Char` production. Validation always uses
+/// the XML 1.0 production, whatever version the document declares: the
+/// reference parser (expat) applies the 1.0 `Char` rules even to XML 1.1
+/// documents, so admitting the C0 controls other than tab, LF and CR for
+/// a declared 1.1 document would diverge from it. NUL and the
+/// non-characters U+FFFE and U+FFFF are excluded as well.
+fn is_xml_char(n: u32) -> bool {
+    matches!(
+        n,
+        0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF
+    )
 }
 
 fn escape_text(out: &mut Vec<u8>, s: &str) {
@@ -766,9 +780,59 @@ mod tests {
     }
 
     #[test]
-    fn xml_1_1_admits_control_references_but_not_nul() {
-        let out = canon("<?xml version=\"1.1\"?><a x=\"&#xB;\"/>").unwrap();
-        assert!(out.contains('\u{b}'), "{out}");
-        assert!(canon("<?xml version=\"1.1\"?><a>&#x0;</a>").is_err());
+    fn xml_1_1_control_references_are_rejected_like_the_reference() {
+        // The reference (expat) applies the XML 1.0 `Char` production even
+        // to documents declaring version 1.1, so C0 control references are
+        // rejected there too, in text and in attributes alike.
+        for num in ["x0", "xB", "x1F"] {
+            let in_text = format!("<?xml version=\"1.1\"?><a>&#{num};</a>");
+            assert!(canon(&in_text).is_err(), "{in_text} must be rejected");
+            let in_attr = format!("<?xml version=\"1.1\"?><a x=\"&#{num};\"/>");
+            assert!(canon(&in_attr).is_err(), "{in_attr} must be rejected");
+        }
+        // Ordinary references in a 1.1 document still decode.
+        assert_eq!(
+            canon("<?xml version=\"1.1\"?><a>&#x41;</a>").unwrap(),
+            "<a>A</a>"
+        );
+    }
+
+    #[test]
+    fn flat_repeated_entity_references_are_capped() {
+        // No nesting at all: one 8000-byte entity referenced 1300 times in
+        // a row would produce 10,400,000 bytes. The outermost production
+        // of each reference is charged, so the budget still bites.
+        let entity = "A".repeat(8000);
+        let refs = "&a;".repeat(1300);
+        let in_text = format!("<!DOCTYPE r [<!ENTITY a \"{entity}\">]><r>{refs}</r>");
+        let err = canon(&in_text).expect_err("flat repeated refs must be rejected");
+        assert!(err.contains("too large"), "unexpected error: {err}");
+        let in_attr = format!("<!DOCTYPE r [<!ENTITY a \"{entity}\">]><r x=\"{refs}\"/>");
+        let err = canon(&in_attr).expect_err("flat repeated refs in an attribute must be rejected");
+        assert!(err.contains("too large"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn doctype_after_the_root_is_rejected() {
+        for xml in [
+            "<a/><!DOCTYPE x []>",
+            "<a></a><!DOCTYPE x [<!ENTITY e \"v\">]>",
+        ] {
+            let err = canon(xml).expect_err("a post-root DOCTYPE must be rejected");
+            assert!(
+                err.contains("junk after document element"),
+                "{xml}: unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn pre_root_entity_text_is_reported_as_before_the_root() {
+        let xml = "<!DOCTYPE a [<!ENTITY e \"junk\">]>&e;<a/>";
+        let err = canon(xml).expect_err("pre-root entity text must be rejected");
+        assert!(
+            err.contains("content before document element"),
+            "unexpected error: {err}"
+        );
     }
 }
