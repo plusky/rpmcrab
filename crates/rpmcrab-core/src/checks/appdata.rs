@@ -115,6 +115,31 @@ fn type_attr(attrs: &[char]) -> Option<String> {
     None
 }
 
+/// Skip the construct starting at `chars[*i]` (the `?` or `!` just past
+/// a `<`), leaving `i` just past its terminator. A processing
+/// instruction ends at `?>`, a comment at `-->`, a CDATA section at
+/// `]]>`; any other `<!...>` declaration (e.g. a doctype) ends at the
+/// first `>`. Returns `None` when no terminator appears before the end
+/// of the input: the construct is unterminated.
+fn skip_construct(chars: &[char], i: &mut usize) -> Option<()> {
+    let start = *i;
+    let terminator: &[char] = if chars[start] == '?' {
+        &['?', '>']
+    } else if chars[start..].starts_with(&['!', '-', '-']) {
+        &['-', '-', '>']
+    } else if chars[start..].starts_with(&['!', '[', 'C', 'D', 'A', 'T', 'A', '[']) {
+        &[']', ']', '>']
+    } else {
+        &['>']
+    };
+    let after = chars[start..]
+        .windows(terminator.len())
+        .position(|w| w == terminator)
+        .map(|pos| start + pos + terminator.len())?;
+    *i = after;
+    Some(())
+}
+
 /// Walk the document, checking XML well-formedness. Undefined entity
 /// references (the reference's ElementTree.parse rejects them) also fail
 /// the walk. Returns the component shape, or `None` when malformed.
@@ -146,12 +171,11 @@ fn walk_xml(text: &str) -> Option<ComponentShape> {
             return None;
         }
 
-        // Processing instruction or comment/doctype: skip to '>'
+        // Processing instruction, comment, CDATA section or other
+        // `<!...>` declaration: skip to the construct's own terminator,
+        // not the first `>` — a `>` inside the construct does not end it.
         if chars[i] == '?' || chars[i] == '!' {
-            while i < n && chars[i] != '>' {
-                i += 1;
-            }
-            i += 1;
+            skip_construct(&chars, &mut i)?;
             continue;
         }
 
@@ -823,6 +847,126 @@ mod tests {
         assert_eq!(results.len(), 1, "results: {results:?}");
         assert_eq!(results[0].0, "invalid-appdata-file");
         assert!(results[0].1.contains("missing required tag(s): id"));
+    }
+
+    #[test]
+    fn comment_with_gt_and_tag_tail_is_skipped() {
+        // The tag-like tail is comment text, not a second root element.
+        assert!(AppDataCheck::is_well_formed_xml(
+            "<?xml version=\"1.0\"?><!-- a > b <foo/> --><component><name>Foo</name></component>"
+        ));
+    }
+
+    #[test]
+    fn comment_tail_does_not_invent_children() {
+        // Every required tag appears only inside the comment, so all of
+        // them are missing from the component itself.
+        let xml = "<component type=\"generic\"><!-- c > <id>x</id><name>y</name><summary>z</summary><metadata_license>L</metadata_license> --></component>";
+        assert_eq!(
+            native_validate(xml),
+            NativeOutcome::MissingTags(vec![
+                "id".to_string(),
+                "name".to_string(),
+                "summary".to_string(),
+                "metadata_license".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn comment_tail_entities_are_not_checked() {
+        // Entities inside a comment are not entity references.
+        assert!(AppDataCheck::is_well_formed_xml(
+            "<!-- a > &bogus; --><component><name>Foo</name></component>"
+        ));
+    }
+
+    #[test]
+    fn empty_and_gt_leading_comments_pass() {
+        assert!(AppDataCheck::is_well_formed_xml(
+            "<!----><component><name>Foo</name></component>"
+        ));
+        assert!(AppDataCheck::is_well_formed_xml(
+            "<!--> x --><component><name>Foo</name></component>"
+        ));
+    }
+
+    #[test]
+    fn cdata_with_markup_like_text_is_skipped() {
+        // Close-tag text and entity references inside CDATA are literal
+        // character data, not markup.
+        assert!(AppDataCheck::is_well_formed_xml(
+            "<component><description><p><![CDATA[ a > </b> ]]></p></description></component>"
+        ));
+        assert!(AppDataCheck::is_well_formed_xml(
+            "<component><description><p><![CDATA[ a > &bogus; ]]></p></description></component>"
+        ));
+    }
+
+    #[test]
+    fn pi_with_gt_and_tag_tail_is_skipped() {
+        assert!(AppDataCheck::is_well_formed_xml(
+            "<?target a > <foo/> ?><component><name>Foo</name></component>"
+        ));
+        assert!(AppDataCheck::is_well_formed_xml(
+            "<?target a > b ?><component><name>Foo</name></component>"
+        ));
+    }
+
+    #[test]
+    fn unterminated_constructs_fail() {
+        assert!(!AppDataCheck::is_well_formed_xml(
+            "<component><name>Foo</name></component><!-- tail"
+        ));
+        assert!(!AppDataCheck::is_well_formed_xml(
+            "<component><description><p><![CDATA[ never ends</p></description></component>"
+        ));
+        assert!(!AppDataCheck::is_well_formed_xml(
+            "<?target never ends <component><name>Foo</name></component>"
+        ));
+    }
+
+    #[test]
+    fn content_after_tricky_constructs_is_still_checked() {
+        // The walk resumes after the real terminator: a genuinely
+        // mismatched close after the construct still fails, and a root
+        // child after a CDATA section is still collected.
+        assert!(!AppDataCheck::is_well_formed_xml(
+            "<!-- a > b --><component><name>Foo</component></name>"
+        ));
+        let shape = walk_xml(
+            "<component><description><p><![CDATA[ a > b ]]></p></description><name>Foo</name></component>",
+        )
+        .unwrap();
+        assert!(shape.children.contains("description"));
+        assert!(shape.children.contains("name"));
+    }
+
+    /// A complete metainfo file stays silent when its comment, CDATA
+    /// section and processing instructions contain `>` and markup-like
+    /// text.
+    const TRICKY_CONSTRUCTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!-- release > notes <draft/> -->
+<component type="generic">
+  <id>org.example.foo</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <name>Foo</name>
+  <summary>Does foo things</summary>
+  <description><p><![CDATA[ a > b &bogus; ]]></p></description>
+</component>
+"#;
+
+    #[test]
+    fn comments_cdata_and_pis_do_not_corrupt_a_complete_file() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let (pkg, tool_dir) = appdata_pkg(
+            dir.path(),
+            &[(
+                "usr/share/metainfo/org.example.foo.metainfo.xml",
+                TRICKY_CONSTRUCTS,
+            )],
+        );
+        assert!(findings_for(&pkg, tool_dir.path()).is_empty());
     }
 
     #[test]
