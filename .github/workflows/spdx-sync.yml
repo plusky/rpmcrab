@@ -44,6 +44,13 @@ jobs:
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        if: steps.diff.outputs.changed == 'true'
+        with:
+          toolchain: stable
+      - name: Check the regenerated list compiles
+        if: steps.diff.outputs.changed == 'true'
+        run: cargo check -p rpmcrab-core --locked
       - name: Open refresh PR
         if: steps.diff.outputs.changed == 'true'
         env:
