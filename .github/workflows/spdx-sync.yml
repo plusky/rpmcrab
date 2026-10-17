@@ -64,13 +64,24 @@ jobs:
           git add crates/rpmcrab-core/src/checks/spdx.rs
           git -c user.name=github-actions -c user.email=github-actions@github.com \
             commit -m "Refresh SPDX license IDs to ${new_ver}"
-          git push -u origin "$branch"
-          if [ -z "$(gh pr list --head "$branch" --json number --jq '.[].number')" ]; then
-            added=$(git show --format= --unified=0 HEAD -- crates/rpmcrab-core/src/checks/spdx.rs \
-              | grep -c '^\+    "[^"]*", *$' || true)
-            removed=$(git show --format= --unified=0 HEAD -- crates/rpmcrab-core/src/checks/spdx.rs \
-              | grep -c '^\-    "[^"]*", *$' || true)
+          # Same-day reruns reset this date-named branch: force-with-lease
+          # updates the existing PR instead of failing non-fast-forward
+          # (and still refuses if someone else pushed meanwhile). Fetch
+          # first so the lease has a baseline on a fresh clone.
+          git fetch origin "$branch" || true
+          git push --force-with-lease -u origin "$branch"
+          added=$(git show --format= --unified=0 HEAD -- crates/rpmcrab-core/src/checks/spdx.rs \
+            | grep -c '^\+    "[^"]*", *$' || true)
+          removed=$(git show --format= --unified=0 HEAD -- crates/rpmcrab-core/src/checks/spdx.rs \
+            | grep -c '^\-    "[^"]*", *$' || true)
+          body="SPDX license-list-data released ${new_ver}: ${added} IDs added, ${removed} removed from the spellcheck suggestion pool. Produced by the monthly spdx-sync job."
+          existing=$(gh pr list --head "$branch" --json number --jq '.[0].number // empty')
+          if [ -z "$existing" ]; then
             gh pr create --base main --head "$branch" \
               --title "Refresh SPDX license IDs to ${new_ver}" \
-              --body "SPDX license-list-data released ${new_ver}: ${added} IDs added, ${removed} removed from the spellcheck suggestion pool. Produced by the monthly spdx-sync job."
+              --body "$body"
+          else
+            # Same-day rerun: refresh the existing PR body, or it keeps
+            # describing the first run's counts.
+            gh pr edit "$existing" --body "$body"
           fi
