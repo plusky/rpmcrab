@@ -1704,10 +1704,10 @@ impl FilesCheck {
                 let Some(rel) = manpage_so_root_relative(&arg) else {
                     continue;
                 };
-                if !seen.insert(rel.clone()) {
+                let rel = strip_man_compression_suffix(&rel);
+                if !seen.insert(rel.to_string()) {
                     continue;
                 }
-                let rel = strip_man_compression_suffix(&rel);
                 let satisfied = ["/usr/share/man/", "/usr/man/"]
                     .iter()
                     .any(|root| shipped.contains(format!("{root}{rel}").as_str()));
@@ -7931,7 +7931,7 @@ mod tests {
             &[(
                 "/usr/share/man/man1/alias.1",
                 0o100644,
-                b".so man1/a.1\n.so man1/a.1\n.so man1/b.1\n".as_slice(),
+                b".so man1/a.1\n.so man1/a.1\n.so man1/a.1.gz\n.so man1/b.1\n".as_slice(),
             )],
         );
         let results = run_check_binary(&pkg);
