@@ -283,12 +283,15 @@ fn read_compile_info(path: &str) -> Result<Option<CompileInfo>, String> {
                 }
             }
             "source" => {
-                // The reference decodes the source with errors replaced
-                // (byte_to_string), so a path that is not valid UTF-8 is
-                // reported with replacement characters rather than
-                // failing the parse.
+                // The source path is UTF-8 in any current BEAM file,
+                // so bytes that are not valid UTF-8 are garbage:
+                // decoding them with replacement characters would
+                // corrupt the build-dir comparison and the reported
+                // path, so the parse fails instead.
                 let s = match v {
-                    Term::Binary(b) => String::from_utf8_lossy(&b).into_owned(),
+                    Term::Binary(b) => {
+                        String::from_utf8(b).map_err(|_| "source is not valid UTF-8".to_string())?
+                    }
                     Term::Atom(s) => s,
                     _ => continue,
                 };
@@ -753,11 +756,11 @@ mod tests {
     }
 
     #[test]
-    fn source_binary_decodes_lossy_like_the_reference() {
-        // The reference passes the source through byte_to_string, which
-        // decodes UTF-8 with errors replaced; a source path that is not
-        // valid UTF-8 is reported with replacement characters, not as
-        // a parse failure.
+    fn source_binary_with_invalid_utf8_fails_the_parse() {
+        // The source path is UTF-8 in any current BEAM file, so a
+        // binary holding bytes that are not valid UTF-8 is garbage:
+        // the parse fails (pybeam-failed) instead of decoding the
+        // path with replacement characters.
         let source: &[u8] = b"/home/abuild/rpmbuild/BUILD/bad\xffname.erl";
         let mut t = vec![131];
         t.extend_from_slice(&[108, 0, 0, 0, 1]);
@@ -769,14 +772,31 @@ mod tests {
         t.extend_from_slice(source);
         t.push(106);
         let tmp = tempfile::tempdir().expect("tmpdir");
-        let path = tmp.path().join("lossysource.beam");
+        let path = tmp.path().join("badsource.beam");
+        std::fs::write(&path, beam_with_cinf(&t)).unwrap();
+        assert!(read_compile_info(path.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn source_binary_with_valid_utf8_parses() {
+        // A multibyte UTF-8 source path in a binary survives the
+        // strict decode unchanged.
+        let source = "/home/abuild/rpmbuild/BUILD/caf\u{e9}.erl";
+        let mut t = vec![131];
+        t.extend_from_slice(&[108, 0, 0, 0, 1]);
+        t.extend_from_slice(&[104, 2]);
+        t.extend_from_slice(&[119, 6]);
+        t.extend_from_slice(b"source");
+        t.push(109); // BINARY_EXT
+        t.extend_from_slice(&(source.len() as u32).to_be_bytes());
+        t.extend_from_slice(source.as_bytes());
+        t.push(106);
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("utf8source.beam");
         std::fs::write(&path, beam_with_cinf(&t)).unwrap();
         let info = read_compile_info(path.to_str().unwrap())
             .expect("reads")
             .expect("has compile info");
-        assert_eq!(
-            info.source.as_deref(),
-            Some("/home/abuild/rpmbuild/BUILD/bad\u{FFFD}name.erl")
-        );
+        assert_eq!(info.source.as_deref(), Some(source));
     }
 }

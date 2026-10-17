@@ -427,6 +427,14 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "pybeam-failed"
+kind = "behaviour"
+reason = "The port decodes the compile-info source path as strict UTF-8 and fails the parse (pybeam-failed) when the bytes are not valid UTF-8; the reference decodes it with errors replaced (helpers.byte_to_string) and lints on with the mangled path. Source paths in current BEAM files are UTF-8, so non-UTF-8 bytes are garbage; decoding them with replacement characters would corrupt the build-dir comparison and the reported path (plusky/rpmcrab#613)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/613"
+
+[[divergence]]
+case = "global"
 check = "polkit-xml-exception"
 kind = "detail"
 reason = "The reference formats the caught expat error via str(expat.ExpatError); the port formats quick-xml's Display for the parse error. The finding name and severity match; the detail text differs."
