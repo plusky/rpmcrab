@@ -9,7 +9,7 @@
 //! One finding has no reference counterpart: `debug-files-in-non-debug-package`
 //! (upstream feature request rpm-software-management/rpmlint#11).
 
-#![allow(clippy::collapsible_if, clippy::bool_comparison)]
+#![allow(clippy::collapsible_if)]
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -37,7 +37,7 @@ fn man_regex() -> &'static Regex {
 
 static MAN_BASE_REGEX: OnceLock<Regex> = OnceLock::new();
 fn man_base_regex() -> &'static Regex {
-    MAN_BASE_REGEX.get_or_init(|| Regex::new(r"(?i)^(?P<path>/usr/share/man|/usr/man)/(?:(?P<lang>[a-z_]+)/)?man(?P<category>[^/]+)/(?P<filename>[^/]+)$")
+    MAN_BASE_REGEX.get_or_init(|| Regex::new(r"(?i)^(?P<path>/usr/share/man|/usr/man)/(?:(?P<lang>[a-z_]+)/)?man(?P<category>[^/]+)/(?P<filename>.+)$")
         .expect("static regex"))
 }
 
@@ -1596,17 +1596,8 @@ impl FilesCheck {
                     &[fname, &format!("expected folder: man{file_category}")],
                 );
             }
-            if !filename.contains('/')
-                || Path::new(filename)
-                    .parent()
-                    .map(|p| p.as_os_str().is_empty())
-                    .unwrap_or(true)
-                    == false
-            {
-                // filename has a parent dir component
-                if filename.contains('/') {
-                    add_info(out, Level::Error, pkg, "manual-page-in-subfolder", &[fname]);
-                }
+            if filename.contains('/') {
+                add_info(out, Level::Error, pkg, "manual-page-in-subfolder", &[fname]);
             }
         }
     }
@@ -6719,6 +6710,61 @@ mod tests {
         long.extend_from_slice(b"tail");
         let mut cur = std::io::Cursor::new(long);
         assert!(stream_is_utf8(&mut cur).expect("read"));
+    }
+
+    #[test]
+    fn manual_page_in_subfolder_fires() {
+        // The reference expects man3/foo/bar/baz.3.gz to fire
+        // manual-page-in-subfolder (test_files.py); the port captured
+        // the filename as a single path component, so the finding was
+        // unreachable. Normal and wrong-folder pages pin the rest of
+        // the flow.
+        let (pkg, _dir) = pkg_with_files(vec![
+            PkgFile {
+                name: "/usr/share/man/man3/foo/bar/baz.3.gz".to_string(),
+                path: "/usr/share/man/man3/foo/bar/baz.3.gz".to_string(),
+                mode: 0o100644,
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/share/man/man1/foo.1.gz".to_string(),
+                path: "/usr/share/man/man1/foo.1.gz".to_string(),
+                mode: 0o100644,
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/share/man/man1/wrong.3.gz".to_string(),
+                path: "/usr/share/man/man1/wrong.3.gz".to_string(),
+                mode: 0o100644,
+                ..Default::default()
+            },
+        ]);
+        let results = run_check_binary(&pkg);
+        let hits =
+            |tag: &str, path: &str| results.iter().any(|(n, d)| n == tag && d.contains(path));
+        assert!(
+            hits(
+                "manual-page-in-subfolder",
+                "/usr/share/man/man3/foo/bar/baz.3.gz"
+            ),
+            "subfolder man page must fire: {results:?}"
+        );
+        assert!(!hits(
+            "manual-page-in-subfolder",
+            "/usr/share/man/man1/foo.1.gz"
+        ));
+        assert!(!hits(
+            "manual-page-in-subfolder",
+            "/usr/share/man/man1/wrong.3.gz"
+        ));
+        assert!(hits(
+            "bad-manual-page-folder",
+            "/usr/share/man/man1/wrong.3.gz"
+        ));
+        assert!(!hits(
+            "bad-manual-page-folder",
+            "/usr/share/man/man3/foo/bar/baz.3.gz"
+        ));
     }
 
     #[test]
