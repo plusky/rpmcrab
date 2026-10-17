@@ -408,3 +408,9 @@ The symlink contains more `..` segments than the path depth allows. The symlink 
 symlink-should-be-absolute="""
 The symlink uses a relative target where an absolute one is required.
 """
+manpage-dangling-so-ref="""
+The manual page redirects to another manual page with a .so (soelim)
+line, but the target page is not included in this package, so man
+fails to display the referencing page. Include the target page in
+the package or remove the redirect.
+"""

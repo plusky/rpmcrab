@@ -97,7 +97,10 @@ Provenance, verified against the pinned reference (`84848c0`):
 - `FilesCheck.toml` — the reference file, minus the `outside-libdir-files`
   entry (openSUSE: "Doesn't seem to make sense") dropped with
   the findings, and minus the port-only `zero-length` entry dropped with
-  the deliberately removed `zero-length` finding (issue #479).
+  the deliberately removed `zero-length` finding (issue #479). Plus the
+  port-only `manpage-dangling-so-ref` entry: the reference has no such
+  finding, so `--explain` would print `Unknown message` for it;
+  ledgered in `tests/parity/divergences.toml`.
 - Every other `*.toml` file — byte-identical to the reference
   `rpmlint/descriptions/` file of the same name.
 
