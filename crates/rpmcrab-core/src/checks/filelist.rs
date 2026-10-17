@@ -544,7 +544,7 @@ mod tests {
         let lines = lines_for(&results, "filelist-forbidden-fhs23");
         assert_eq!(lines.len(), 1);
         assert!(
-            lines[0].contains("E: filelist-forbidden-fhs23 /usr/foobar"),
+            lines[0].contains("E: filelist-forbidden-fhs23 (Badness: 1) /usr/foobar"),
             "name, level and detail: {}",
             lines[0]
         );
@@ -572,8 +572,9 @@ mod tests {
         let lines = lines_for(&results, "filelist-forbidden-bashcomp-userdirs");
         assert_eq!(lines.len(), 1);
         assert!(
-            lines[0]
-                .contains("E: filelist-forbidden-bashcomp-userdirs /etc/bash_completion.d/w6comp"),
+            lines[0].contains(
+                "E: filelist-forbidden-bashcomp-userdirs (Badness: 1) /etc/bash_completion.d/w6comp"
+            ),
             "name, level and detail: {}",
             lines[0]
         );

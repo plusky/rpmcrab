@@ -352,7 +352,7 @@ mod tests {
         assert_eq!(results[0].0, "invalid-pkgconfig-file");
         assert_eq!(
             results[0].1,
-            "pkgconfig-test.x86_64: E: invalid-pkgconfig-file /usr/lib64/pkgconfig/foo.pc"
+            "pkgconfig-test.x86_64: E: invalid-pkgconfig-file (Badness: 1) /usr/lib64/pkgconfig/foo.pc"
         );
     }
 }

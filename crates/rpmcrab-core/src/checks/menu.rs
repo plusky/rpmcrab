@@ -755,10 +755,13 @@ mod menu_icon_xdg_tests {
     }
 
     fn rendered(name: &str, level: &str, detail: &str) -> (String, String) {
+        // Unscored findings carry the default badness — 1 for an error,
+        // which the line renders as the `(Badness: 1)` column.
+        let badness = if level == "E" { " (Badness: 1)" } else { "" };
         let line = if detail.is_empty() {
-            format!("menu-test.noarch: {level}: {name}")
+            format!("menu-test.noarch: {level}: {name}{badness}")
         } else {
-            format!("menu-test.noarch: {level}: {name} {detail}")
+            format!("menu-test.noarch: {level}: {name}{badness} {detail}")
         };
         (name.to_string(), line)
     }

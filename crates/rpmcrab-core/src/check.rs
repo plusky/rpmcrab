@@ -795,7 +795,7 @@ mod add_info_tests {
         let config = Config::default();
         let mut out = Filter::new(&config, crate::color::Color::for_tty(false)).unwrap();
         add_info(&mut out, Level::Error, &pkg, "no-name", &[]);
-        assert_eq!(out.results()[0].1, ": E: no-name");
+        assert_eq!(out.results()[0].1, ": E: no-name (Badness: 1)");
     }
 
     /// A path-shaped package name is reduced to its basename, as

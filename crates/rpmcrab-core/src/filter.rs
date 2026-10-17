@@ -807,7 +807,7 @@ mod tests {
             d
         });
         let out = f.render_results(&c);
-        let expected = "llvm21-gold.aarch64: E: suse-zypp-packageand packageand(clang21:binutils)\nThe 'packageand(package1:package2)' syntax is obsolete, please use boolean\ndependencies like: 'Supplements: (package1 and package2)'\n\nllvm21-gold.aarch64: W: no-soname /usr/lib64/LLVMgold.so\nThe library has no soname.\n\n";
+        let expected = "llvm21-gold.aarch64: E: suse-zypp-packageand (Badness: 1) packageand(clang21:binutils)\nThe 'packageand(package1:package2)' syntax is obsolete, please use boolean\ndependencies like: 'Supplements: (package1 and package2)'\n\nllvm21-gold.aarch64: W: no-soname /usr/lib64/LLVMgold.so\nThe library has no soname.\n\n";
         assert_eq!(out, expected);
     }
 
