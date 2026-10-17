@@ -123,19 +123,24 @@ fn type_attr(attrs: &[char]) -> Option<String> {
 /// of the input: the construct is unterminated.
 fn skip_construct(chars: &[char], i: &mut usize) -> Option<()> {
     let start = *i;
-    let terminator: &[char] = if chars[start] == '?' {
-        &['?', '>']
+    // The terminator scan starts just past the opening delimiter, so
+    // the opener itself can never match: `<!--` ends in `--`, and a
+    // comment whose content begins with `>` (`<!--> ... -->`) would
+    // otherwise close at its own opener.
+    let (terminator, scan_offset): (&[char], usize) = if chars[start] == '?' {
+        (&['?', '>'], 1)
     } else if chars[start..].starts_with(&['!', '-', '-']) {
-        &['-', '-', '>']
+        (&['-', '-', '>'], 3)
     } else if chars[start..].starts_with(&['!', '[', 'C', 'D', 'A', 'T', 'A', '[']) {
-        &[']', ']', '>']
+        (&[']', ']', '>'], 8)
     } else {
-        &['>']
+        (&['>'], 1)
     };
-    let after = chars[start..]
+    let scan_from = start + scan_offset;
+    let after = chars[scan_from..]
         .windows(terminator.len())
         .position(|w| w == terminator)
-        .map(|pos| start + pos + terminator.len())?;
+        .map(|pos| scan_from + pos + terminator.len())?;
     *i = after;
     Some(())
 }
@@ -889,6 +894,32 @@ mod tests {
         assert!(AppDataCheck::is_well_formed_xml(
             "<!--> x --><component><name>Foo</name></component>"
         ));
+    }
+
+    #[test]
+    fn gt_leading_comment_entities_are_not_checked() {
+        // The comment opener itself must not match `-->`: in
+        // `<!--> ... -->` the comment runs to the real terminator, so
+        // the entity-looking text inside it is comment text.
+        assert!(AppDataCheck::is_well_formed_xml(
+            "<!--> &bogus; --><component><name>Foo</name></component>"
+        ));
+    }
+
+    #[test]
+    fn gt_leading_comment_tail_does_not_invent_children() {
+        // Same opener trap inside a component: the `<id>` is comment
+        // text and must not satisfy the required id tag.
+        let xml = "<component type=\"generic\"><!--> <id>x</id> --></component>";
+        assert_eq!(
+            native_validate(xml),
+            NativeOutcome::MissingTags(vec![
+                "id".to_string(),
+                "name".to_string(),
+                "summary".to_string(),
+                "metadata_license".to_string(),
+            ])
+        );
     }
 
     #[test]
