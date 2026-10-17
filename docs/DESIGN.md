@@ -807,11 +807,12 @@ diverge at any version (§5.1), so the version tracks the stability of the
 milestone — the frozen surface (§4) matched rpmlint 2.10.0 (openSUSE
 flavour) — and since then the project deliberately diverges wherever
 rpmlint is wrong, with every departure recorded in the ledger (§6). The
-current release is **0.2.1**. The project stays **0.x** until the output
+current release is **0.3.0**. The project stays **0.x** until the output
 contract is proven substitutable (M4); **1.0** at that point means
 "substitutable", not "bug-for-bug identical", and taking that step is a
-deliberate decision that is still open. A change to the frozen output
-contract itself would be a deliberate major-version bump. This avoids
+deliberate decision that is still open. A deliberate change to the
+frozen output contract is versioned deliberately too: while the
+project is 0.x, a minor bump carries it. This avoids
 `rpmcrab 1.x` masquerading as `rpmlint 2.x` for packagers. Tags are
 `vX.Y.Z`. Distribution is primarily the OBS package (`rpmcrab`, plus an
 `rpmcrab-mini` build-root flavour mirroring `rpmlint-mini`); crates.io is
@@ -820,6 +821,24 @@ reserve the name and is not kept current. The release workflow ships two
 target assets, `x86_64-unknown-linux-gnu` and
 `aarch64-unknown-linux-gnu`; macOS builds work (§3.1) but no macOS
 release asset is planned.
+
+**0.3.0** carries the severity recalibration (#289), a deliberate
+break in the levels findings print at. The calibration rule is that a
+finding is an error only when it always implies the damage, so style
+and judgement findings moved down: `description-line-too-long` and
+`files-duplicated-waste` print as warnings, `no-%check-section` as
+info, the `systemd-service-without-service_*` family as warnings.
+`missing-call-to-setgroups-before-setuid` moved the other way and is
+now always an error. The vendored distro configs no longer bundle the
+strict scoring layer by default; `invalid-license` keeps its badness
+of 100000 in the base scoring, and six `[Scoring]` promotions that
+printed warnings as errors are gone. Text output renders
+`(Badness: N)` whenever the badness is above 0 (§4.1). The exit-code
+model (§4.6) is unchanged and was re-pinned against the recalibrated
+levels, and a generated inventory of every finding tag's level and
+scoring guards the calibration against silent drift. None of this
+decides 1.0: substitutability is still unproven and the step is still
+open.
 
 ---
 
