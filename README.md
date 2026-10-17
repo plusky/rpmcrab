@@ -30,8 +30,9 @@ ledger. The current release is **0.3.0**.
 
 Pre-1.0, post-parity: 43 checks matching rpmlint 2.10.0 (openSUSE flavour),
 packaged for OBS, with deliberate divergences from the reference recorded in
-the ledger. 1.0 will mark proven substitutability of the output contract
-(see `docs/DESIGN.md` §9); that decision is still open.
+the ledger. Versioning carries no parity claim: a minor bump may change
+behaviour substantially, and a major bump is reserved for an utter
+breaking change (see `docs/DESIGN.md` §9).
 
 ## Building
 

@@ -802,18 +802,17 @@ a scheduling detail, not a behaviour change.
 ## 9. Versioning and release
 
 `[workspace.package] version` is the single source of truth. Findings may
-diverge at any version (§5.1), so the version tracks the stability of the
-*output contract*, not the set of findings. **0.2.0** was the parity
-milestone — the frozen surface (§4) matched rpmlint 2.10.0 (openSUSE
-flavour) — and since then the project deliberately diverges wherever
-rpmlint is wrong, with every departure recorded in the ledger (§6). The
-current release is **0.3.0**. The project stays **0.x** until the output
-contract is proven substitutable (M4); **1.0** at that point means
-"substitutable", not "bug-for-bug identical", and taking that step is a
-deliberate decision that is still open. A deliberate change to the
-frozen output contract is versioned deliberately too: while the
-project is 0.x, a minor bump carries it. This avoids
-`rpmcrab 1.x` masquerading as `rpmlint 2.x` for packagers. Tags are
+diverge at any version (§5.1), and the version promises stability for
+neither the set of findings nor the *output contract*. **0.2.0** was
+the parity milestone — the frozen surface (§4) matched rpmlint
+2.10.0 (openSUSE flavour) — and since then the project deliberately
+diverges wherever rpmlint is wrong, with every departure recorded in
+the ledger (§6). The current release is **0.3.0**. A minor bump may
+change behaviour substantially, including a deliberate change to the
+frozen output contract. A major bump is reserved for an utter breaking
+change, such as dropping rpmlint compatibility entirely. **1.0** is an
+ordinary version under this scheme: it marks no substitutability proof
+and gates nothing. Tags are
 `vX.Y.Z`. Distribution is primarily the OBS package (`rpmcrab`, plus an
 `rpmcrab-mini` build-root flavour mirroring `rpmlint-mini`); crates.io is
 the secondary channel — `rpmcrab-core` was published at 0.1.0 early on to
@@ -836,9 +835,7 @@ printed warnings as errors are gone. Text output renders
 `(Badness: N)` whenever the badness is above 0 (§4.1). The exit-code
 model (§4.6) is unchanged and was re-pinned against the recalibrated
 levels, and a generated inventory of every finding tag's level and
-scoring guards the calibration against silent drift. None of this
-decides 1.0: substitutability is still unproven and the step is still
-open.
+scoring guards the calibration against silent drift.
 
 ---
 
