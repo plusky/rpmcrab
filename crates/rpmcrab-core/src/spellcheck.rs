@@ -120,6 +120,10 @@ impl Spellchecker {
 
             let mut suggestions = Vec::new();
             self.dict.suggest(word, &mut suggestions);
+            // The dictionary returns candidates in per-process order; sort
+            // before truncating so the kept suggestions are deterministic
+            // for any dictionary bytes.
+            suggestions.sort();
             suggestions.truncate(3);
             result.push((word.to_string(), suggestions));
         }
