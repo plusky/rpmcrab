@@ -107,7 +107,7 @@ jobs:
           ${prunes:-none}
 
           Produced by the monthly distro-config-sync job. Upstream remains the owner of these configs until rpmlint is fully superseded."
-          existing=$(gh pr list --head "$branch" --json number --jq '.[].number')
+          existing=$(gh pr list --head "$branch" --json number --jq '.[0].number // empty')
           if [ -z "$existing" ]; then
             gh pr create --base main --head "$branch" \
               --title "Refresh vendored distro configs to upstream ${date}" \
