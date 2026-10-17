@@ -18,8 +18,11 @@ use quick_xml::reader::Reader;
 const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 
 /// Total bytes general-entity expansion may produce across one document.
-/// The reference parser refuses documents past an amplification limit;
-/// entities in real configuration files expand to a tiny fraction of
+/// This is an intentional absolute ceiling on the expanded size, not a
+/// ratio: the reference parser (expat) instead limits amplification --
+/// the ratio of expanded size to input size, once an activation
+/// threshold is passed -- so it imposes no fixed expanded-byte limit.
+/// Entities in real configuration files expand to a tiny fraction of
 /// this, so the cap only bites on crafted internal subsets.
 const MAX_ENTITY_EXPANSION_BYTES: usize = 8 * 1024 * 1024;
 
@@ -54,6 +57,11 @@ struct Canonicalizer {
     prolog_pis: Vec<(String, String)>,
     /// Coalesced character data not yet emitted.
     pending_text: String,
+    /// A reference was coalesced into `pending_text` while outside the
+    /// document element. Such a reference is character data by event,
+    /// even when it expands to whitespace, so `flush_text` must not
+    /// apply its literal-whitespace allowance to it.
+    pending_ref_outside_root: bool,
     seen_root: bool,
     seen_doctype: bool,
     depth: usize,
@@ -70,6 +78,7 @@ impl Canonicalizer {
             expanded_bytes: 0,
             prolog_pis: Vec::new(),
             pending_text: String::new(),
+            pending_ref_outside_root: false,
             space_preserve: Vec::new(),
             seen_root: false,
             seen_doctype: false,
@@ -179,10 +188,11 @@ impl Canonicalizer {
     fn flush_text(&mut self) -> Result<(), String> {
         validate_xml_chars(&self.pending_text)?;
         if self.depth == 0
-            && !self
-                .pending_text
-                .trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r'))
-                .is_empty()
+            && (self.pending_ref_outside_root
+                || !self
+                    .pending_text
+                    .trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r'))
+                    .is_empty())
         {
             return Err(if self.seen_root {
                 "XML parse error: junk after document element".to_string()
@@ -202,6 +212,7 @@ impl Canonicalizer {
             self.out.append(&mut escaped);
         }
         self.pending_text.clear();
+        self.pending_ref_outside_root = false;
         Ok(())
     }
 
@@ -209,6 +220,9 @@ impl Canonicalizer {
     /// Predefined and character references are terminal; general entities
     /// expand recursively.
     fn push_ref(&mut self, name: &str) -> Result<(), String> {
+        if self.depth == 0 {
+            self.pending_ref_outside_root = true;
+        }
         if let Some(num) = name.strip_prefix('#') {
             self.pending_text.push(decode_char_ref(num)?);
         } else if let Some(value) = resolve_predefined_entity(name) {
@@ -627,9 +641,18 @@ fn eol_normalize(s: &str) -> String {
 }
 
 fn decode_char_ref(num: &str) -> Result<char, String> {
+    // The `CharRef` production admits only decimal digits, or hex
+    // digits after a lowercase `x`: check the digit class first,
+    // because the integer parsers below also accept a leading `+`.
     let n = if let Some(hex) = num.strip_prefix('x') {
+        if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!("invalid character reference &#{num};"));
+        }
         u32::from_str_radix(hex, 16)
     } else {
+        if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!("invalid character reference &#{num};"));
+        }
         num.parse::<u32>()
     }
     .map_err(|_| format!("invalid character reference &#{num};"))?;
@@ -923,6 +946,37 @@ mod tests {
         assert!(canon("\u{a0}<a/>").is_err());
         assert!(canon("<a/>\u{a0}").is_err());
         assert!(canon(" \t\r\n<a/> \n").is_ok());
+    }
+
+    #[test]
+    fn plus_prefixed_character_references_are_rejected() {
+        // The `CharRef` production allows only digits after `#` (or
+        // hex digits after `#x`); a `+` sign is not part of either,
+        // and the integer parsers used here would otherwise accept
+        // one. Cf. `appdata.rs::has_undefined_entity`.
+        for num in ["+65", "x+41"] {
+            let in_text = format!("<a>&#{num};</a>");
+            assert!(canon(&in_text).is_err(), "{in_text} must be rejected");
+            let in_attr = format!("<a x=\"&#{num};\"/>");
+            assert!(canon(&in_attr).is_err(), "{in_attr} must be rejected");
+        }
+    }
+
+    #[test]
+    fn whitespace_references_outside_the_root_are_rejected() {
+        // A reference outside the root is judged by the event, not by
+        // its expanded text: even a reference expanding to plain
+        // whitespace is content there, where literal whitespace is
+        // the only character data allowed.
+        assert!(canon("&#32;<a/>").is_err());
+        assert!(canon("<a/>&#x20;").is_err());
+        let entity = "<!DOCTYPE a [<!ENTITY e \" \">]>";
+        assert!(canon(&format!("{entity}&e;<a/>")).is_err());
+        assert!(canon(&format!("{entity}<a/>&e;")).is_err());
+        // Literal whitespace around the root stays legal, and a
+        // whitespace reference inside the root still decodes.
+        assert!(canon(" \t\r\n<a/> \n").is_ok());
+        assert_eq!(canon("<a>x&#32;y</a>").unwrap(), "<a>x y</a>");
     }
 
     #[test]
