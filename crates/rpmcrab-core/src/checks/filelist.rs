@@ -4,6 +4,8 @@
 //! the FHS prefix list come from the bundled `FilelistCheck.toml`, mirroring
 //! the reference.
 
+use std::sync::OnceLock;
+
 use fancy_regex::Regex;
 
 use crate::check::{Check, add_info};
@@ -17,13 +19,13 @@ use crate::pkg::Pkg;
 const FILELIST_TOML: &str = include_str!("../../data/FilelistCheck.toml");
 
 /// A compiled Good/Bad pattern: either a literal or a regex.
-enum Pattern {
+pub(crate) enum Pattern {
     Literal(String),
     Regex(Regex),
 }
 
 impl Pattern {
-    fn matches(&self, path: &str) -> bool {
+    pub(crate) fn matches(&self, path: &str) -> bool {
         match self {
             Pattern::Literal(lit) => lit == path,
             Pattern::Regex(re) => is_match(re, path),
@@ -32,7 +34,7 @@ impl Pattern {
 
     /// The reference translates a pattern only when it contains `*`
     /// (FilelistCheck.py:63); anything else stays a str compared with `==`.
-    fn compile(pattern: &str) -> Self {
+    pub(crate) fn compile(pattern: &str) -> Self {
         if pattern.contains('*') {
             // fnmatch.translate, anchored at both ends. The reference applies
             // the result with `re.match`, so an end-anchor alone is not enough:
@@ -52,6 +54,40 @@ impl Pattern {
             Pattern::Literal(pattern.to_string())
         }
     }
+}
+
+/// Whether `path` matches a `Good` pattern of the
+/// `filelist-forbidden-sysconfig` rule: the patterns compile from the
+/// `Good` list of that rule's `[[Check]]` entry in the bundled
+/// `FilelistCheck.toml`, the same data `FilelistCheck` applies before
+/// the rule's `Bad` patterns. Other checks consult this so a path the
+/// rule blesses is blessed consistently across checks.
+pub(crate) fn sysconfig_good_matches(path: &str) -> bool {
+    static GOOD: OnceLock<Vec<Pattern>> = OnceLock::new();
+    GOOD.get_or_init(|| {
+        let table: toml::Table = toml::from_str(FILELIST_TOML).expect("bundled FilelistCheck.toml");
+        let checks = table
+            .get("Check")
+            .and_then(|v| v.as_array())
+            .expect("bundled FilelistCheck.toml [[Check]] list");
+        let rule = checks
+            .iter()
+            .find(|c| {
+                c.get("Message").and_then(|v| v.as_str()) == Some("filelist-forbidden-sysconfig")
+            })
+            .expect("bundled filelist-forbidden-sysconfig rule");
+        rule.get("Good")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(Pattern::compile)
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+    .iter()
+    .any(|g| g.matches(path))
 }
 
 struct FilelistRule {
