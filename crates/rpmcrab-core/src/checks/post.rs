@@ -118,10 +118,7 @@ impl PostCheck {
             }
             // The reference's `^[^#]*` prefix cannot cross a `#`.
             let code = line.split('#').next().unwrap_or("");
-            let exempt = Self::invokes_systemd_tmpfiles(code);
-            for delim in Self::heredoc_delimiters(code) {
-                pending.push((delim, exempt));
-            }
+            pending.extend(Self::heredoc_delimiters(code));
         }
         false
     }
@@ -146,62 +143,175 @@ impl PostCheck {
         .any(|tok| tok == "systemd-tmpfiles" || tok.ends_with("/systemd-tmpfiles"))
     }
 
-    /// Heredoc delimiters opened on a line, in order. Handles the plain,
-    /// `<<-`, and quoted-delimiter forms; a herestring is not a heredoc.
-    fn heredoc_delimiters(code: &str) -> Vec<String> {
+    /// Whether a command segment feeds `systemd-tmpfiles` from stdin:
+    /// it invokes the tool and passes the standalone `-` path argument
+    /// whose content the heredoc supplies.
+    fn segment_feeds_tmpfiles_stdin(segment: &str) -> bool {
+        Self::invokes_systemd_tmpfiles(segment)
+            && segment
+                .split(|c: char| {
+                    c.is_whitespace()
+                        || matches!(
+                            c,
+                            ';' | '|' | '&' | '(' | ')' | '`' | '"' | '\'' | '<' | '>'
+                        )
+                })
+                .any(|tok| tok == "-")
+    }
+
+    /// Heredocs opened on a line, in order, each paired with whether
+    /// its body is fed to `systemd-tmpfiles`. Handles the plain, `<<-`,
+    /// and quoted-delimiter forms; a herestring is not a heredoc. A
+    /// `<<` inside single/double quotes or inside a `$((...))`
+    /// arithmetic expansion (where it is the left-shift operator) is
+    /// not a heredoc operator. The exemption is per heredoc, not per
+    /// line: only the first heredoc of a command segment that feeds
+    /// `systemd-tmpfiles` its `-` stdin is exempt, so a second heredoc
+    /// opened by another command on the same line is still scanned.
+    fn heredoc_delimiters(code: &str) -> Vec<(String, bool)> {
         let bytes = code.as_bytes();
-        let mut out = Vec::new();
+        // (byte offset of the `<<`, delimiter), plus the byte offsets
+        // of the command separators (`;`, `|`, `&`) seen in code
+        // position — each heredoc belongs to the segment around it.
+        let mut found: Vec<(usize, String)> = Vec::new();
+        let mut separators: Vec<usize> = Vec::new();
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut arith_depth = 0usize;
         let mut i = 0;
-        while i + 1 < bytes.len() {
-            if bytes[i] != b'<' || bytes[i + 1] != b'<' {
+        while i < bytes.len() {
+            let c = bytes[i];
+            if in_single {
+                if c == b'\'' {
+                    in_single = false;
+                }
                 i += 1;
                 continue;
             }
-            if i + 2 < bytes.len() && bytes[i + 2] == b'<' {
-                i += 3;
+            if in_double {
+                if c == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if c == b'"' {
+                    in_double = false;
+                }
+                i += 1;
                 continue;
             }
-            let mut j = i + 2;
-            if j < bytes.len() && bytes[j] == b'-' {
-                j += 1;
-            }
-            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
-                j += 1;
-            }
-            let delim;
-            if j < bytes.len() && (bytes[j] == b'\'' || bytes[j] == b'"') {
-                let quote = bytes[j];
-                j += 1;
-                let start = j;
-                while j < bytes.len() && bytes[j] != quote {
-                    j += 1;
+            if arith_depth > 0 {
+                if c == b'(' {
+                    arith_depth += 1;
+                } else if c == b')' {
+                    arith_depth -= 1;
                 }
-                if j == start {
+                i += 1;
+                continue;
+            }
+            match c {
+                b'\\' => {
                     i += 2;
                     continue;
                 }
-                delim = code[start..j].to_string();
-                if j < bytes.len() {
-                    j += 1;
+                b'\'' => in_single = true,
+                b'"' => in_double = true,
+                b'$' => {
+                    if code[i..].starts_with("$((") {
+                        arith_depth = 2;
+                        i += 3;
+                        continue;
+                    }
                 }
-            } else {
-                if j < bytes.len() && bytes[j] == b'\\' {
-                    j += 1;
+                b';' | b'|' | b'&' => separators.push(i),
+                b'<' => {
+                    if code[i..].starts_with("<<<") {
+                        i += 3;
+                        continue;
+                    }
+                    if code[i..].starts_with("<<") {
+                        if let Some((delim, next)) = Self::delimiter_after(code, i) {
+                            found.push((i, delim));
+                            i = next;
+                            continue;
+                        }
+                        i += 2;
+                        continue;
+                    }
                 }
-                let start = j;
-                while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
-                    j += 1;
-                }
-                if j == start || !(bytes[start].is_ascii_alphabetic() || bytes[start] == b'_') {
-                    i += 2;
-                    continue;
-                }
-                delim = code[start..j].to_string();
+                _ => {}
             }
-            out.push(delim);
-            i = j.max(i + 2);
+            i += 1;
         }
-        out
+        let mut exempted_segments: Vec<usize> = Vec::new();
+        found
+            .into_iter()
+            .map(|(at, delim)| {
+                let start = separators
+                    .iter()
+                    .copied()
+                    .filter(|s| *s < at)
+                    .max()
+                    .map_or(0, |s| s + 1);
+                let end = separators
+                    .iter()
+                    .copied()
+                    .filter(|s| *s > at)
+                    .min()
+                    .unwrap_or(code.len());
+                let exempt = !exempted_segments.contains(&start)
+                    && Self::segment_feeds_tmpfiles_stdin(&code[start..end]);
+                if exempt {
+                    exempted_segments.push(start);
+                }
+                (delim, exempt)
+            })
+            .collect()
+    }
+
+    /// Parse the delimiter following a `<<` at byte offset `at` in
+    /// `code`; returns the delimiter and the offset just past it. The
+    /// delimiter is the full shell word, so a hyphen or dot inside it
+    /// (`<<MY-DELIM`, `<<MY.DELIM`) is part of the delimiter, not its
+    /// end. A leading `-` is the `<<-` strip-tabs marker, not part of
+    /// the word.
+    fn delimiter_after(code: &str, at: usize) -> Option<(String, usize)> {
+        let bytes = code.as_bytes();
+        let mut j = at + 2;
+        if j < bytes.len() && bytes[j] == b'-' {
+            j += 1;
+        }
+        while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+            j += 1;
+        }
+        if j < bytes.len() && (bytes[j] == b'\'' || bytes[j] == b'"') {
+            let quote = bytes[j];
+            j += 1;
+            let start = j;
+            while j < bytes.len() && bytes[j] != quote {
+                j += 1;
+            }
+            if j == start {
+                return None;
+            }
+            let delim = code[start..j].to_string();
+            if j < bytes.len() {
+                j += 1;
+            }
+            return Some((delim, j));
+        }
+        if j < bytes.len() && bytes[j] == b'\\' {
+            j += 1;
+        }
+        let start = j;
+        while j < bytes.len()
+            && (bytes[j].is_ascii_alphanumeric() || matches!(bytes[j], b'_' | b'-' | b'.'))
+        {
+            j += 1;
+        }
+        if j == start || !(bytes[start].is_ascii_alphabetic() || bytes[start] == b'_') {
+            return None;
+        }
+        Some((code[start..j].to_string(), j))
     }
     fn bogus_var_regex() -> &'static Regex {
         static BOGUS_VAR_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -1477,6 +1587,47 @@ mod tests {
         // heredoc is present in the same scriptlet.
         let loud = "cat <<EOF\nd /tmp/myapp 0755 root root -\nEOF\nsystemd-tmpfiles --create - <<SYSTEMD_INLINE_EOF\nd /tmp/other 0755 root root -\nSYSTEMD_INLINE_EOF";
         assert!(tmp_finding(loud));
+    }
+
+    #[test]
+    fn two_heredocs_one_line_tmpfiles_exemption_does_not_leak() {
+        // The exemption belongs to the heredoc attached to the
+        // tmpfiles `-` stdin, not to the whole line: the `cat` body on
+        // the same opener line is still scanned.
+        let quiet =
+            "systemd-tmpfiles --create - <<A; cat <<B\nd /tmp/myapp 0755 root root -\nA\nhello\nB";
+        assert!(!tmp_finding(quiet));
+        let loud = "systemd-tmpfiles --create - <<A; cat <<B\nd /tmp/myapp 0755 root root -\nA\necho hi > /tmp/scratch\nB";
+        assert!(tmp_finding(loud));
+    }
+
+    #[test]
+    fn hyphenated_heredoc_delimiter_terminates_block() {
+        // The delimiter is the full shell word: `MY-DELIM` does not
+        // terminate at `MY`, so entries inside stay quiet and a
+        // scratch use after the block still fires.
+        let inside =
+            "systemd-tmpfiles --create - <<MY-DELIM\nd /tmp/myapp 0755 root root -\nMY-DELIM";
+        assert!(!tmp_finding(inside));
+        let after = "systemd-tmpfiles --create - <<MY-DELIM\nd /tmp/myapp 0755 root root -\nMY-DELIM\necho hi > /tmp/after";
+        assert!(tmp_finding(after));
+        // A dotted delimiter is one word too.
+        let dotted = "systemd-tmpfiles --create - <<MY.DELIM\nd /tmp/myapp 0755 root root -\nMY.DELIM\necho hi > /tmp/after";
+        assert!(tmp_finding(dotted));
+    }
+
+    #[test]
+    fn phantom_heredoc_does_not_swallow_tmpfiles_block() {
+        // A `<<` inside quotes or arithmetic is not a heredoc opener:
+        // it must not swallow the genuine tmpfiles block after it.
+        for phantom in ["echo \"a << b\"", "echo $((x << y))"] {
+            let quiet = format!(
+                "{phantom}\nsystemd-tmpfiles --create - <<SYSTEMD_INLINE_EOF\nd /tmp/myapp 0755 root root -\nSYSTEMD_INLINE_EOF"
+            );
+            assert!(!tmp_finding(&quiet), "phantom: {phantom}");
+            let after = format!("{quiet}\necho hi > /tmp/after");
+            assert!(tmp_finding(&after), "phantom: {phantom}");
+        }
     }
 
     #[test]
