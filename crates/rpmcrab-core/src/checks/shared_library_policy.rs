@@ -863,6 +863,78 @@ mod tests {
     }
 
     #[test]
+    fn leading_zero_soname_obsoletes_is_quiet() {
+        // The SONAME number is the trailing digit run with leading
+        // zeroes dropped, so `libfoo01` and `libfoo1` name the same
+        // generation: an obsoletes between them is a self-obsoletes,
+        // not a sibling one, in either direction.
+        for (name, obs) in [
+            ("libfoo1", "libfoo01"),
+            ("libfoo01", "libfoo1"),
+            ("libfoo0", "libfoo00"),
+        ] {
+            let results = obsoletes_results(name, vec![dep(obs)]);
+            assert!(
+                sibling_lines(&results).is_empty(),
+                "{name} obsoleting {obs} must stay quiet: {results:?}"
+            );
+        }
+        // A leading-zero name for a different generation still fires:
+        // the quiet cases above come from the number normalisation,
+        // not from leading-zero names falling outside the scheme.
+        let results = obsoletes_results("libfoo02", vec![dep("libfoo1")]);
+        assert_eq!(
+            sibling_lines(&results).len(),
+            1,
+            "libfoo02 obsoleting libfoo1 must fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn less_alone_sibling_obsoletes_fires() {
+        // The check does not consult the obsoletes relation: an entry
+        // carrying only a `<` relation, with no version at all, still
+        // fires on a sibling generation.
+        let results = obsoletes_results(
+            "libfoo2",
+            vec![DepInfo {
+                name: "libfoo1".to_string(),
+                flags: RPMSENSE_LESS,
+                epoch: None,
+                version: None,
+                release: None,
+            }],
+        );
+        assert_eq!(
+            sibling_lines(&results).len(),
+            1,
+            "LESS-alone sibling must fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn less_alone_self_obsoletes_is_quiet() {
+        // The same LESS-alone shape naming the package's own
+        // generation stays quiet: the relation neither creates a
+        // finding for a self-obsoletes nor suppresses one for a
+        // sibling.
+        let results = obsoletes_results(
+            "libfoo2",
+            vec![DepInfo {
+                name: "libfoo2".to_string(),
+                flags: RPMSENSE_LESS,
+                epoch: None,
+                version: None,
+                release: None,
+            }],
+        );
+        assert!(
+            sibling_lines(&results).is_empty(),
+            "LESS-alone self-obsoletes must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
     fn fixed_dependency_on_non_lib_package_warns() {
         // A versioned library package with a hard (=) dependency on a
         // non-library package: W shlib-fixed-dependency.
