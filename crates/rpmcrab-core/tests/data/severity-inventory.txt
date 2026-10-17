@@ -172,6 +172,7 @@ menu-without-postun = E
 mimeinfo-cache-packaged = E
 missing-PT_GNU_STACK-section = E
 missing-call-to-setgroups-before-setuid = E
+missing-cf-protection = W
 missing-dependency-on = W
 missing-dependency-to-crontabs = E
 missing-dependency-to-logrotate = E
