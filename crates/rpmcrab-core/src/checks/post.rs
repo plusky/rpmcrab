@@ -90,21 +90,118 @@ impl PostCheck {
     /// template (a run of `X`, the mktemp/mkstemp convention — the name is
     /// generated at runtime, not predictable) or a shell glob pattern (it
     /// matches existing files instead of naming a creation target) is not
-    /// a predictable path and does not fire. Ledgered in
+    /// a predictable path and does not fire. Lines inside a heredoc fed to
+    /// `systemd-tmpfiles` are declarative tmpfiles.d entries, not scriptlet
+    /// scratch use, and do not fire either. Ledgered in
     /// tests/parity/divergences.toml.
     fn uses_tmp_literal(script: &str) -> bool {
-        script.lines().any(|line| {
+        // Pending heredocs in the order their bodies appear:
+        // (delimiter, body is fed to `systemd-tmpfiles`).
+        let mut pending: Vec<(String, bool)> = Vec::new();
+        for line in script.lines() {
+            if !pending.is_empty() {
+                let (delim, exempt) = pending[0].clone();
+                if line.trim() == delim {
+                    pending.remove(0);
+                    continue;
+                }
+                if exempt {
+                    continue;
+                }
+                if Self::line_has_tmp_literal(line) {
+                    return true;
+                }
+                continue;
+            }
+            if Self::line_has_tmp_literal(line) {
+                return true;
+            }
             // The reference's `^[^#]*` prefix cannot cross a `#`.
             let code = line.split('#').next().unwrap_or("");
-            Self::tmp_token_regex()
-                .captures_iter(code)
-                .filter_map(|c| c.ok())
-                .filter_map(|c| c.get(1))
-                .any(|m| {
-                    let token = m.as_str();
-                    !token.contains('*') && !token.contains('[') && !token.contains("XXX")
-                })
+            let exempt = Self::invokes_systemd_tmpfiles(code);
+            for delim in Self::heredoc_delimiters(code) {
+                pending.push((delim, exempt));
+            }
+        }
+        false
+    }
+
+    fn line_has_tmp_literal(line: &str) -> bool {
+        // The reference's `^[^#]*` prefix cannot cross a `#`.
+        let code = line.split('#').next().unwrap_or("");
+        Self::tmp_token_regex()
+            .captures_iter(code)
+            .filter_map(|c| c.ok())
+            .filter_map(|c| c.get(1))
+            .any(|m| {
+                let token = m.as_str();
+                !token.contains('*') && !token.contains('[') && !token.contains("XXX")
+            })
+    }
+
+    fn invokes_systemd_tmpfiles(code: &str) -> bool {
+        code.split(|c: char| {
+            c.is_whitespace() || matches!(c, ';' | '|' | '&' | '(' | ')' | '`' | '"' | '\'')
         })
+        .any(|tok| tok == "systemd-tmpfiles" || tok.ends_with("/systemd-tmpfiles"))
+    }
+
+    /// Heredoc delimiters opened on a line, in order. Handles the plain,
+    /// `<<-`, and quoted-delimiter forms; a herestring is not a heredoc.
+    fn heredoc_delimiters(code: &str) -> Vec<String> {
+        let bytes = code.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i + 1 < bytes.len() {
+            if bytes[i] != b'<' || bytes[i + 1] != b'<' {
+                i += 1;
+                continue;
+            }
+            if i + 2 < bytes.len() && bytes[i + 2] == b'<' {
+                i += 3;
+                continue;
+            }
+            let mut j = i + 2;
+            if j < bytes.len() && bytes[j] == b'-' {
+                j += 1;
+            }
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                j += 1;
+            }
+            let delim;
+            if j < bytes.len() && (bytes[j] == b'\'' || bytes[j] == b'"') {
+                let quote = bytes[j];
+                j += 1;
+                let start = j;
+                while j < bytes.len() && bytes[j] != quote {
+                    j += 1;
+                }
+                if j == start {
+                    i += 2;
+                    continue;
+                }
+                delim = code[start..j].to_string();
+                if j < bytes.len() {
+                    j += 1;
+                }
+            } else {
+                if j < bytes.len() && bytes[j] == b'\\' {
+                    j += 1;
+                }
+                let start = j;
+                while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                    j += 1;
+                }
+                if j == start || !(bytes[start].is_ascii_alphabetic() || bytes[start] == b'_') {
+                    i += 2;
+                    continue;
+                }
+                delim = code[start..j].to_string();
+            }
+            out.push(delim);
+            i = j.max(i + 2);
+        }
+        out
     }
     fn bogus_var_regex() -> &'static Regex {
         static BOGUS_VAR_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -1313,6 +1410,73 @@ mod tests {
     #[test]
     fn tmp_in_comment_is_not_flagged() {
         assert!(!tmp_finding("# scratch lives in /tmp/foo\necho ok"));
+    }
+
+    #[test]
+    fn tmpfiles_heredoc_tmp_entry_is_not_flagged() {
+        // The expanded `%tmpfiles_create_package` shape: the entry is a
+        // declarative tmpfiles.d line, not scriptlet scratch use.
+        let script = "systemd-tmpfiles --create - <<SYSTEMD_INLINE_EOF\nd /tmp/myapp 0755 root root -\nSYSTEMD_INLINE_EOF";
+        assert!(!tmp_finding(script));
+        let found = check().check_scriptlet("/bin/sh", script, "%pre", &[], &[]);
+        assert!(
+            !found.iter().any(|(_, f, _)| f == "use-tmp-in-%pre"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn tmpfiles_heredoc_var_tmp_entry_is_not_flagged() {
+        let script = "systemd-tmpfiles --create - <<SYSTEMD_INLINE_EOF\nd /var/tmp/myapp 0755 root root -\nSYSTEMD_INLINE_EOF";
+        assert!(!tmp_finding(script));
+    }
+
+    #[test]
+    fn tmpfiles_heredoc_variants_are_not_flagged() {
+        // Path-prefixed invocation.
+        assert!(!tmp_finding(
+            "/usr/bin/systemd-tmpfiles --create - <<SYSTEMD_INLINE_EOF\nd /tmp/myapp 0755 root root -\nSYSTEMD_INLINE_EOF"
+        ));
+        // `<<-` with an indented terminator.
+        assert!(!tmp_finding(
+            "systemd-tmpfiles --create - <<-SYSTEMD_INLINE_EOF\n\td /tmp/myapp 0755 root root -\n\tSYSTEMD_INLINE_EOF"
+        ));
+        // Quoted delimiter.
+        assert!(!tmp_finding(
+            "systemd-tmpfiles --create - <<'SYSTEMD_INLINE_EOF'\nd /tmp/myapp 0755 root root -\nSYSTEMD_INLINE_EOF"
+        ));
+    }
+
+    #[test]
+    fn tmp_scratch_around_tmpfiles_heredoc_is_flagged() {
+        let before = "echo hi > /tmp/before\nsystemd-tmpfiles --create - <<SYSTEMD_INLINE_EOF\nd /tmp/myapp 0755 root root -\nSYSTEMD_INLINE_EOF";
+        assert!(tmp_finding(before));
+        let after = "systemd-tmpfiles --create - <<SYSTEMD_INLINE_EOF\nd /tmp/myapp 0755 root root -\nSYSTEMD_INLINE_EOF\necho hi > /tmp/after";
+        assert!(tmp_finding(after));
+    }
+
+    #[test]
+    fn tmp_in_non_tmpfiles_heredoc_is_flagged() {
+        let script = "cat <<EOF\nd /tmp/myapp 0755 root root -\nEOF";
+        assert!(tmp_finding(script));
+    }
+
+    #[test]
+    fn tmpfiles_without_heredoc_is_flagged() {
+        let script = "systemd-tmpfiles --create -\necho hi > /tmp/foo";
+        assert!(tmp_finding(script));
+    }
+
+    #[test]
+    fn multiple_heredocs_only_tmpfiles_is_exempt() {
+        // A tmpfiles heredoc alongside a plain heredoc stays quiet when
+        // neither holds scratch use outside the tmpfiles entries.
+        let quiet = "cat <<EOF\nhello\nEOF\nsystemd-tmpfiles --create - <<SYSTEMD_INLINE_EOF\nd /tmp/myapp 0755 root root -\nSYSTEMD_INLINE_EOF";
+        assert!(!tmp_finding(quiet));
+        // The `cat` heredoc's /tmp line still fires even when a tmpfiles
+        // heredoc is present in the same scriptlet.
+        let loud = "cat <<EOF\nd /tmp/myapp 0755 root root -\nEOF\nsystemd-tmpfiles --create - <<SYSTEMD_INLINE_EOF\nd /tmp/other 0755 root root -\nSYSTEMD_INLINE_EOF";
+        assert!(tmp_finding(loud));
     }
 
     #[test]
