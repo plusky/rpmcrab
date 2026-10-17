@@ -344,8 +344,6 @@ SystemLibPaths = [
 PieExecutables = []
 # Architecture dependent paths in which packages are allowed to install files
 # even if they are all non-binary
-# List of compilation flags that are mandatory
-MandatoryOptflags = []
 # List of forbidden compilation flags
 ForbiddenOptflags = []
 # Interpreters whose scriptlets are allowed to be empty

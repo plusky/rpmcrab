@@ -2413,3 +2413,11 @@ kind = "behaviour"
 reason = "New port-only Warning: SharedLibraryPolicyCheck reports a library -devel package whose sibling versioned shared library package (same source package, policy naming scheme, shipping a versioned .so file) is not required with a version relation, under the sibling's name or one of its non-SONAME provides names. The frozen 2.10.0 reference has no such finding; the reference has no source-scoped sibling pairing: its `no-version-dependency-on` matches the devel package's name stem, not the co-built sibling. Warning only: automatic SONAME dependencies often bind the right library generation anyway, so a missing or unversioned pairing does not always produce a broken install. Measured on the Factory corpus: 14 findings over 988 evaluated (devel, shlib) pairs in 860 source sets. Rich (boolean) requires satisfy the rule only through a versioned leaf naming the sibling. It can co-fire with the existing no-library-dependency-on and no-version-dependency-on findings, which judge a package's own dependencies in isolation; the delta this check adds is the named cross-package pairing: the specific co-built shared-library sibling (base and -32bit/-64bit flavours grouped as one) must be required, by its package name or a non-SONAME provides name, with a version relation."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/637"
+
+[[divergence]]
+case = "global"
+check = "missing-mandatory-optflags"
+kind = "missing"
+reason = "Deliberate removal: the port does not emit this finding. MandatoryOptflags is empty in the bundled defaults and in every shipped flavour, so the check could never fire as shipped, and a user config that still sets the key is a no-op. Its semantics are superseded by the artifact-level hardening findings (missing-fortify, missing-stack-protector, missing-relro, partial-relro, non-position-independent-executable, position-independent-executable-suggested), which verify the produced binary's effective state, including later flag overrides a recorded-flag check cannot see. ForbiddenOptflags is a separate prohibition list and is unchanged. The reference still emits it."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/645"

@@ -174,9 +174,6 @@ shared-library-without-dependency-information="""
 The listed shared library doesn't include information about which other
 libraries the library was linked against.
 """
-missing-mandatory-optflags="""
-This executable was not compiled with expected flags.
-"""
 forbidden-optflags="""
 This executable was compiled with an unexpected flag.
 """

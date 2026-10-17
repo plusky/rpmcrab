@@ -967,6 +967,7 @@ def test_stale_check_catches_name_keyed_entry():
         "lengthy-symlink",
         "lib-package-without-%mklibname",
         "missing-dependency-to-xinetd",
+        "missing-mandatory-optflags",
         "module-without-depmod-postin",
         "module-without-depmod-postun",
         "no-buildroot-tag",
