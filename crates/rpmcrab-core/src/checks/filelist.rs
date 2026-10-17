@@ -641,6 +641,83 @@ mod tests {
         );
     }
 
+    fn pkg_with_ghosts(files: &[&str], ghosts: &[&str]) -> Pkg {
+        let mut pkg = pkg_with_files(files);
+        pkg.ghost_files = ghosts.iter().map(|g| g.to_string()).collect();
+        pkg
+    }
+
+    #[test]
+    fn sysconfig_ghost_file_is_quiet() {
+        // A %ghost sysconfig file carries no payload: the file is
+        // generated at install time, so the rule does not report it.
+        let pkg = pkg_with_ghosts(&["/etc/sysconfig/munge"], &["/etc/sysconfig/munge"]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        assert!(
+            lines_for(&results, "filelist-forbidden-sysconfig").is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn sysconfig_real_file_still_fires() {
+        let pkg = pkg_with_files(&["/etc/sysconfig/munge"]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "filelist-forbidden-sysconfig");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("E: filelist-forbidden-sysconfig (Badness: 1) /etc/sysconfig/munge"),
+            "name, level and detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn sysconfig_ghost_in_good_subdir_is_quiet() {
+        let pkg = pkg_with_ghosts(
+            &["/etc/sysconfig/scripts/munge"],
+            &["/etc/sysconfig/scripts/munge"],
+        );
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        assert!(
+            lines_for(&results, "filelist-forbidden-sysconfig").is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn fillup_template_ghost_file_is_quiet() {
+        let pkg = pkg_with_ghosts(
+            &["/var/adm/fillup-templates/sysconfig.munge"],
+            &["/var/adm/fillup-templates/sysconfig.munge"],
+        );
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        assert!(
+            lines_for(&results, "filelist-forbidden-sysconfig").is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn fillup_template_real_file_still_fires() {
+        let pkg = pkg_with_files(&["/var/adm/fillup-templates/sysconfig.munge"]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "filelist-forbidden-sysconfig");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains(
+                "E: filelist-forbidden-sysconfig (Badness: 1) /var/adm/fillup-templates/sysconfig.munge"
+            ),
+            "name, level and detail: {}",
+            lines[0]
+        );
+    }
+
     #[test]
     fn sibling_forbidden_path_still_fires() {
         let pkg = pkg_with_files(&["/etc/bash_completion.d/w6comp"]);
