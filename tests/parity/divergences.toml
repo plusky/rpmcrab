@@ -1046,6 +1046,14 @@ upstream = "https://github.com/rpm-software-management/rpmlint/issues/11"
 
 [[divergence]]
 case = "global"
+check = "FilesCheck"
+kind = "behaviour"
+reason = "New `systemd-preset-packaged` warning with no reference counterpart: a regular file shipped directly under `/usr/lib/systemd/system-preset/` or `/usr/lib/systemd/user-preset/` fires unless the package is named in the `SystemdPresetPackages` config key, which the vendored openSUSE and SLFO distro configs set to the distribution's preset packages. The frozen 2.10.0 reference has no such check and no shipped config names preset packages. Where the key is not configured no package is exempt, so every preset shipper fires."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/634"
+
+[[divergence]]
+case = "global"
 check = "SpecCheck"
 kind = "behaviour"
 reason = "Upstream rpmlint#554: a non-breaking space in %description bodies, Summary: tag lines and %changelog entries is harmless prose typesetting, not a syntax hazard, so the port no longer emits `non-break-space` there; the frozen 2.10.0 reference flags every spec line containing U+00A0 (SpecCheck.py:428-432). Code and scriptlet sections keep the warning."
