@@ -614,6 +614,21 @@ mod tests {
     }
 
     #[test]
+    fn strict_promotes_info_findings() {
+        // --strict promotion applies to every level, Info included
+        // (filter.py:134-140): the finding prints as an error, counts as
+        // promoted, and scores the post-promotion default badness of 1.
+        let mut c = cfg();
+        c.strict = true;
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        f.add_info(finding("no-%check-section", Level::Info, 0));
+        assert_eq!(f.printed(Level::Error), 1);
+        assert_eq!(f.printed(Level::Info), 0);
+        assert_eq!(f.promoted_to_error, 1);
+        assert_eq!(f.score, 1);
+    }
+
+    #[test]
     fn severity_override_downgrades_error_to_warning() {
         let mut c = cfg();
         c.severity_overrides

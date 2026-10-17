@@ -482,6 +482,73 @@ mod exit_code_tests {
         assert_eq!(lint.exit_code(), 66);
     }
 
+    fn add(lint: &mut Lint, check: &str, level: Level) {
+        lint.filter.add_info(Finding {
+            level,
+            check: check.to_string(),
+            details: vec![],
+            badness: 0,
+            pkg_name: "testpkg".to_string(),
+            arch: None,
+            line: None,
+            filter_alias: None,
+        });
+    }
+
+    /// Info findings alone never fail a run, even with permissive off: no
+    /// printed errors means the 64/65 branch is never reached. This pins
+    /// the post-recalibration shape — the tags the buckets pass demoted to
+    /// I (e.g. `no-%check-section`, #593) cannot fail a build outside
+    /// `--strict`.
+    #[test]
+    fn info_findings_alone_exit_zero() {
+        let config = Config {
+            permissive: false,
+            ..Default::default()
+        };
+        let mut lint = Lint::new(config, vec![], Color::for_tty(false), 80).unwrap();
+        add(&mut lint, "no-%check-section", Level::Info);
+        assert_eq!(lint.filter.printed(Level::Info), 1);
+        assert_eq!(lint.filter.printed(Level::Error), 0);
+        assert_eq!(lint.exit_code(), 0);
+    }
+
+    /// D3: --strict promotion stays reference-exact and applies to Info
+    /// findings too (filter.py:134-140). A run whose only printed error is
+    /// a strict-promoted info exits 65 — every printed error is a
+    /// promotion (DESIGN §4.6).
+    #[test]
+    fn strict_promoted_info_exits_65() {
+        let config = Config {
+            strict: true,
+            permissive: false,
+            ..Default::default()
+        };
+        let mut lint = Lint::new(config, vec![], Color::for_tty(false), 80).unwrap();
+        add(&mut lint, "no-%check-section", Level::Info);
+        assert_eq!(lint.filter.printed(Level::Error), 1);
+        assert_eq!(lint.filter.promoted_to_error, 1);
+        assert_eq!(lint.exit_code(), 65);
+    }
+
+    /// The 64/65 split with recalibrated inputs: a genuine error beside a
+    /// strict-promoted info exits 64 — not every printed error is a
+    /// promotion.
+    #[test]
+    fn genuine_error_beside_promoted_info_exits_64() {
+        let config = Config {
+            strict: true,
+            permissive: false,
+            ..Default::default()
+        };
+        let mut lint = Lint::new(config, vec![], Color::for_tty(false), 80).unwrap();
+        add(&mut lint, "genuine-error", Level::Error);
+        add(&mut lint, "no-%check-section", Level::Info);
+        assert_eq!(lint.filter.printed(Level::Error), 2);
+        assert_eq!(lint.filter.promoted_to_error, 1);
+        assert_eq!(lint.exit_code(), 64);
+    }
+
     #[test]
     fn unused_severity_override_is_reported() {
         let config = Config {
