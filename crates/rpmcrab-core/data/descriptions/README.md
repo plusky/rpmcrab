@@ -78,7 +78,7 @@ Provenance, verified against the pinned reference (`84848c0`):
   (minus the dropped `filelist-forbidden-xinetd-configuration` entry),
   `FilesCheck.toml`, `KMPPolicyCheck.toml`,
   `LogrotateCheck.toml`, `MenuCheck.toml`, `MenuXDGCheck.toml`,
-  `PythonCheck.toml`, `SharedLibraryPolicyCheck.toml`, `SpecCheck.toml`
+  `PythonCheck.toml`, `SpecCheck.toml`
   (besides its one port-only entry above, minus the dropped
   `hardcoded-prefix-tag` and `lib-package-without-%mklibname` entries),
   `SystemdTmpfilesCheck.toml`,
@@ -89,6 +89,10 @@ Provenance, verified against the pinned reference (`84848c0`):
   scriptlet phase, self-contradictory sentences, ungrammatical wording);
   each fix is a deliberate `kind="detail"` divergence, ledgered in
   `tests/parity/divergences.toml`.
+- `SharedLibraryPolicyCheck.toml` — the reference file, plus the
+  port-only `shlib-policy-obsoletes-sibling` entry. The reference has no
+  such finding, so `--explain` would print `Unknown message` for it;
+  ledgered in `tests/parity/divergences.toml`.
 - `FilesCheck.toml` — the reference file, minus the `outside-libdir-files`
   entry (openSUSE: "Doesn't seem to make sense") dropped with
   the findings, and minus the port-only `zero-length` entry dropped with

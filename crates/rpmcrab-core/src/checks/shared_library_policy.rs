@@ -2,7 +2,8 @@
 //!
 //! Ported from `rpmlint/checks/SharedLibraryPolicyCheck.py`. Findings:
 //! `shlib-policy-missing-lib`, `readelf-failed`, `shlib-unversioned-lib`,
-//! `shlib-fixed-dependency`, `shlib-policy-excessive-dependency`.
+//! `shlib-fixed-dependency`, `shlib-policy-excessive-dependency`,
+//! `shlib-policy-obsoletes-sibling`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -65,6 +66,39 @@ impl SharedLibraryPolicyCheck {
     }
 }
 
+/// `(stem, SONAME number)` for a package name in the versioned shared
+/// library scheme (`libfoo1`, `libfoo12-32bit`), or `None` for a name
+/// outside the scheme. The `-32bit`/`-64bit` suffix is normalised away,
+/// matching how the scheme pattern treats those forms, and the number
+/// is the full trailing digit run with leading zeroes dropped.
+fn soname_package_parts(re_soname_pkg: &Regex, name: &str) -> Option<(String, String)> {
+    if !is_match(re_soname_pkg, name) {
+        return None;
+    }
+    let core = name
+        .strip_suffix("-32bit")
+        .or_else(|| name.strip_suffix("-64bit"))
+        .unwrap_or(name);
+    let digits_start = core.len()
+        - core
+            .bytes()
+            .rev()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+    if digits_start == core.len() {
+        return None;
+    }
+    let number = core[digits_start..].trim_start_matches('0');
+    Some((
+        core[..digits_start].to_string(),
+        if number.is_empty() {
+            "0".to_string()
+        } else {
+            number.to_string()
+        },
+    ))
+}
+
 impl Check for SharedLibraryPolicyCheck {
     fn name(&self) -> &'static str {
         "SharedLibraryPolicyCheck"
@@ -80,6 +114,29 @@ impl Check for SharedLibraryPolicyCheck {
             || pkg.name.ends_with("-lang")
         {
             return;
+        }
+
+        // A versioned library package must not obsolete a sibling SONAME
+        // generation: the scheme exists so the generations are
+        // co-installable, and an obsoletes of one by another removes it.
+        // A version constraint does not change that for the obsoleted
+        // range, so the dependency's flags and version are not consulted.
+        if let Some((stem, number)) = soname_package_parts(&self.re_soname_pkg, &pkg.name) {
+            for obs in &pkg.obsoletes {
+                if let Some((obs_stem, obs_number)) =
+                    soname_package_parts(&self.re_soname_pkg, &obs.name)
+                    && obs_stem == stem
+                    && obs_number != number
+                {
+                    add_info(
+                        out,
+                        Level::Error,
+                        pkg,
+                        "shlib-policy-obsoletes-sibling",
+                        &[obs.name.as_str()],
+                    );
+                }
+            }
         }
 
         // A policy-named package with no library files at all.
@@ -407,6 +464,146 @@ mod tests {
         elf.extend_from_slice(&strtab);
         assert_eq!(elf.len() as u64, total);
         elf
+    }
+
+    fn obsoletes_results(name: &str, obsoletes: Vec<DepInfo>) -> Vec<(String, String)> {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture header");
+        pkg.name = name.to_string();
+        pkg.files = vec![];
+        pkg.requires = vec![];
+        pkg.obsoletes = obsoletes;
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = checker();
+        check.check_binary(&pkg, &config, &mut out);
+        out.results().to_vec()
+    }
+
+    fn sibling_lines(results: &[(String, String)]) -> Vec<&str> {
+        results
+            .iter()
+            .filter(|(n, _)| n == "shlib-policy-obsoletes-sibling")
+            .map(|(_, line)| line.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn sibling_soname_obsoletes_fires_at_error() {
+        let results = obsoletes_results("libfoo2", vec![dep("libfoo1")]);
+        let lines = sibling_lines(&results);
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("libfoo1"),
+            "detail names the obsoleted sibling: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn self_obsoletes_is_quiet() {
+        // A rename-style self-obsoletes with a version cap names the
+        // package's own SONAME generation, not a sibling.
+        let results = obsoletes_results(
+            "libfoo2",
+            vec![DepInfo {
+                name: "libfoo2".to_string(),
+                flags: RPMSENSE_LESS,
+                epoch: None,
+                version: Some("1.0".to_string()),
+                release: None,
+            }],
+        );
+        assert!(
+            sibling_lines(&results).is_empty(),
+            "self-obsoletes must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn unrelated_obsoletes_is_quiet() {
+        let results = obsoletes_results("libfoo2", vec![dep("libbar1")]);
+        assert!(
+            sibling_lines(&results).is_empty(),
+            "unrelated package must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn unversioned_obsoletes_is_quiet() {
+        let results = obsoletes_results("libfoo2", vec![dep("libfoo")]);
+        assert!(
+            sibling_lines(&results).is_empty(),
+            "unversioned target must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn bit_suffix_sibling_obsoletes_fires() {
+        // The module's scheme pattern treats the -32bit form as the same
+        // versioned package name, so the suffix is normalised away on
+        // both sides before the stem and number are compared.
+        let results = obsoletes_results("libfoo2-32bit", vec![dep("libfoo1-32bit")]);
+        assert_eq!(
+            sibling_lines(&results).len(),
+            1,
+            "32bit sibling must fire: {results:?}"
+        );
+        let results = obsoletes_results("libfoo2", vec![dep("libfoo1-32bit")]);
+        assert_eq!(
+            sibling_lines(&results).len(),
+            1,
+            "mixed-suffix sibling must fire: {results:?}"
+        );
+        let results = obsoletes_results(
+            "libfoo2-32bit",
+            vec![DepInfo {
+                name: "libfoo2-32bit".to_string(),
+                flags: RPMSENSE_LESS,
+                epoch: None,
+                version: Some("1.0".to_string()),
+                release: None,
+            }],
+        );
+        assert!(
+            sibling_lines(&results).is_empty(),
+            "32bit self-obsoletes must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn multi_digit_soname_obsoletes_fires() {
+        // The full trailing number is the SONAME generation: 10 differs
+        // from both 9 and 1.
+        let results = obsoletes_results("libfoo10", vec![dep("libfoo9"), dep("libfoo1")]);
+        assert_eq!(
+            sibling_lines(&results).len(),
+            2,
+            "both multi-digit siblings must fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn versioned_sibling_obsoletes_fires() {
+        // A version constraint does not restore co-installability for
+        // the obsoleted range, so a capped sibling obsoletes still fires.
+        let results = obsoletes_results(
+            "libfoo2",
+            vec![DepInfo {
+                name: "libfoo1".to_string(),
+                flags: RPMSENSE_LESS,
+                epoch: None,
+                version: Some("1.0".to_string()),
+                release: None,
+            }],
+        );
+        assert_eq!(
+            sibling_lines(&results).len(),
+            1,
+            "version-capped sibling must fire: {results:?}"
+        );
     }
 
     #[test]
