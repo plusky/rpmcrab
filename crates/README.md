@@ -32,6 +32,7 @@ dep-version drift is a per-crate edit — is accepted.
 
 ## Versioning
 
-`[workspace.package] version` is the single source of truth. `0.x` until parity
-is proven (M4), `1.0` at drop-in parity, behavioural divergence permitted from
-`2.0`. This avoids `rpmcrab 1.x` masquerading as `rpmlint 2.x` for packagers.
+`[workspace.package] version` is the single source of truth. A minor bump
+may change behaviour substantially; a major bump is reserved for an utter
+breaking change, such as dropping rpmlint compatibility entirely
+(`docs/DESIGN.md` §9).
