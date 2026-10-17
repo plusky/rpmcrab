@@ -13,10 +13,11 @@
 #
 # Environment:
 #   RPMCRAB_BIN     rpmcrab binary (default: rpmcrab on PATH)
-#   RPMLINT_REF_DIR reference rpmlint checkout dir (default: ./rpmlint-ref)
+#   RPMLINT_REF_DIR reference rpmlint environment dir, as built by
+#                   scripts/setup-rpmlint-ref.sh (default: ../../.parity-ref)
 #   RPMLINT_PYTHON  python with rpmlint's deps (python3-rpm etc.)
-#                   (default: python3). For containers, point this at a
-#                   wrapper script, e.g.:
+#                   (default: the venv python in RPMLINT_REF_DIR). For
+#                   containers, point this at a wrapper script, e.g.:
 #                     #!/bin/sh
 #                     exec podman run --rm -v "$REF:/ref:ro" -v "$RPMS:/rpms:ro" \
 #                       opensuse/tumbleweed python3 "$@"
@@ -33,10 +34,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANIFEST="$HERE/manifest.tsv"
 MIRROR="${MIRROR:-https://download.opensuse.org/tumbleweed/repo/oss/}"
 RPMCRAB_BIN="${RPMCRAB_BIN:-rpmcrab}"
-RPMLINT_REF_DIR="${RPMLINT_REF_DIR:-$HERE/rpmlint-ref}"
-RPMLINT_PYTHON="${RPMLINT_PYTHON:-python3}"
+RPMLINT_REF_DIR="${RPMLINT_REF_DIR:-$HERE/../../.parity-ref}"
+RPMLINT_PYTHON="${RPMLINT_PYTHON:-$RPMLINT_REF_DIR/venv/bin/python}"
 RESULTS_DIR="${RESULTS_DIR:-$HERE/results}"
-REF_CONFIG="${RPMLINT_REF_CONFIG:-$RPMLINT_REF_DIR/configs/openSUSE}"
+REF_CONFIG="${RPMLINT_REF_CONFIG:-$RPMLINT_REF_DIR/xdg/rpmlint}"
 
 die() { echo "bench.sh: $*" >&2; exit 1; }
 
@@ -90,7 +91,7 @@ run_tool() {
     if [ "$name" = "rpmcrab" ]; then
         "$RPMCRAB_BIN" "$@" >"$log" 2>&1
     else
-        PYTHONPATH="$RPMLINT_REF_DIR" "$RPMLINT_PYTHON" -c \
+        PYTHONPATH="$RPMLINT_REF_DIR/rpmlint-src" "$RPMLINT_PYTHON" -c \
             "import sys; from rpmlint.cli import lint; sys.exit(lint())" \
             -c "$REF_CONFIG" "$@" >"$log" 2>&1
     fi
@@ -125,7 +126,7 @@ cmd_run() {
     [ -x "$(command -v "$RPMCRAB_BIN")" ] || [ -x "$RPMCRAB_BIN" ] || \
         { [ "$name" = "rpmlint" ] || die "rpmcrab not found: $RPMCRAB_BIN"; }
     if [ "$name" = "rpmlint" ]; then
-        [ -f "$REF_CONFIG" ] || die "reference config missing: $REF_CONFIG"
+        [ -d "$REF_CONFIG" ] || die "reference config missing: $REF_CONFIG"
     fi
     { read -r seconds; read -r log rc; } < <(run_tool "$name" "${rpms[@]}")
     local counts
