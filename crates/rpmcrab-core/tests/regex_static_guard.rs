@@ -89,6 +89,11 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ("tags.rs", "pkg_config_re", "ctor-once"),
     ("tags.rs", "tag_re:", "ctor-once"),
     ("shared_library_policy.rs", "re_so_files", "ctor-once"),
+    (
+        "shared_library_policy.rs",
+        "re_versioned_so_file",
+        "ctor-once",
+    ),
     ("icon_sizes.rs", "info_size_re", "ctor-once"),
     ("branding_policy.rs", "re_branding_generic", "ctor-once"),
     // Config-driven with format!.
