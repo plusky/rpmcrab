@@ -737,6 +737,7 @@ impl Check for FilesCheck {
         self.check_log_files_without_logrotate(pkg, &st, out);
         self.check_debuginfo_without_sources(pkg, &st, out);
         self.check_bindir_exes(pkg, &st, out);
+        self.check_sysconfig_fillup_usage(pkg, out);
     }
 
     fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
@@ -839,6 +840,109 @@ fn source_key(pkg: &Pkg) -> String {
         Some(srpm) if !srpm.is_empty() => srpm,
         _ => pkg.name.clone(),
     }
+}
+
+/// The source package name a `SOURCERPM` value names: the value is
+/// `<name>-<version>-<release>.src.rpm`, and only the name is stable
+/// across the subpackages of one build. A value in any other shape is
+/// returned whole, so it never equals a real package name by accident.
+fn source_pkg_name(sourcerpm: &str) -> &str {
+    let stem = sourcerpm.strip_suffix(".src.rpm").unwrap_or(sourcerpm);
+    match stem.rsplit_once('-') {
+        Some((rest, _release)) => match rest.rsplit_once('-') {
+            Some((name, _version)) if !name.is_empty() => name,
+            _ => stem,
+        },
+        None => stem,
+    }
+}
+
+/// Whether the package belongs to the sysconfig/fillup mechanism itself:
+/// a binary named `sysconfig` or `fillup`, or one built from that source
+/// package (the shape of `sysconfig-netconfig`, whose source package is
+/// `sysconfig`). The mechanism's own packages ship the payload, the
+/// templates and the fillup calls by definition.
+fn sysconfig_fillup_exempt(pkg_name: &str, sourcerpm: Option<&str>) -> bool {
+    pkg_name == "sysconfig"
+        || pkg_name == "fillup"
+        || matches!(
+            sourcerpm.map(source_pkg_name),
+            Some("sysconfig") | Some("fillup")
+        )
+}
+
+/// A `fillup` invocation at command position in a scriptlet: the shape
+/// the `%fillup_only` / `%fillup_and_insserv` macros expand to in a built
+/// package (e.g. `/bin/fillup -q /etc/sysconfig/<name> <template>`). The
+/// anchors mirror the command-position convention of the scriptlet
+/// matchers in `post.rs`, so a guard testing for the binary
+/// (`[ -x /bin/fillup ]`) or a mention in prose does not count.
+fn fillup_invocation_re() -> &'static Regex {
+    static FILLUP_INVOCATION_RE: OnceLock<Regex> = OnceLock::new();
+    FILLUP_INVOCATION_RE.get_or_init(|| {
+        Regex::new(r"(?m)(^|[;`|]|&&|$\()\s*(?:\S+/)?fillup(?:\s|$|[;|&])").expect("static regex")
+    })
+}
+
+/// The first `EnvironmentFile` target in a systemd unit that points into
+/// `/etc/sysconfig/`, spelled as written (including the optional-file
+/// `-` prefix), or `None`.
+fn sysconfig_environment_file(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("EnvironmentFile") else {
+            continue;
+        };
+        let Some(value) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        let token = value
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches('"');
+        let target = token.strip_prefix('-').unwrap_or(token);
+        if target.starts_with("/etc/sysconfig/") {
+            return Some(token.to_string());
+        }
+    }
+    None
+}
+
+/// The sysconfig/fillup uses of one package, as one evidence phrase per
+/// category, in category order. `scriptlets` pairs each scriptlet's
+/// macro name with its body; `units` pairs each shipped unit file's name
+/// with its contents.
+fn sysconfig_fillup_uses(
+    files: &[&str],
+    scriptlets: &[(&str, &str)],
+    units: &[(&str, &str)],
+) -> Vec<String> {
+    let mut uses = Vec::new();
+    if let Some(path) = files
+        .iter()
+        .find(|name| name.starts_with("/etc/sysconfig/"))
+    {
+        uses.push(format!("ships file {path}"));
+    }
+    if let Some(path) = files.iter().find(|name| {
+        let comps: Vec<&str> = name.split('/').collect();
+        comps[..comps.len().saturating_sub(1)].contains(&"fillup-templates")
+    }) {
+        uses.push(format!("ships fillup template {path}"));
+    }
+    if let Some((label, _)) = scriptlets
+        .iter()
+        .find(|(_, body)| is_match(fillup_invocation_re(), body))
+    {
+        uses.push(format!("calls fillup from the {label} scriptlet"));
+    }
+    for (unit, content) in units {
+        if let Some(target) = sysconfig_environment_file(content) {
+            uses.push(format!("unit {unit} sets EnvironmentFile={target}"));
+            break;
+        }
+    }
+    uses
 }
 
 /// One relative symlink whose normalised target the emitting package
@@ -947,6 +1051,75 @@ fn strip_quotes(re: &Regex, s: &str) -> String {
 }
 
 impl FilesCheck {
+    /// One Warning per package that uses the legacy sysconfig/fillup
+    /// configuration scheme, naming every use found: a payload file
+    /// below `/etc/sysconfig/`, a template below a `fillup-templates/`
+    /// directory, a `fillup` invocation in a scriptlet, or a shipped
+    /// systemd unit whose `EnvironmentFile` points into
+    /// `/etc/sysconfig/`. The mechanism's own packages are exempt (see
+    /// `sysconfig_fillup_exempt`). Port-only: the reference has no
+    /// counterpart beyond config comments. The `--explain` text proposes
+    /// the migration, which is the point of the check.
+    fn check_sysconfig_fillup_usage(&self, pkg: &Pkg, out: &mut Filter) {
+        if sysconfig_fillup_exempt(&pkg.name, pkg.tag_str(librpm::Tag::SOURCERPM).as_deref()) {
+            return;
+        }
+        let files: Vec<&str> = pkg.files.iter().map(|f| f.name.as_str()).collect();
+        let mut scriptlets: Vec<(&str, String)> = Vec::new();
+        for (tag, label) in [
+            (librpm::Tag::PREIN, "%pre"),
+            (librpm::Tag::POSTIN, "%post"),
+            (librpm::Tag::PREUN, "%preun"),
+            (librpm::Tag::POSTUN, "%postun"),
+            (librpm::Tag::PRETRANS, "%pretrans"),
+            (librpm::Tag::POSTTRANS, "%posttrans"),
+            (librpm::Tag::VERIFYSCRIPT, "%verifyscript"),
+        ] {
+            let body = pkg.tag_str(tag).unwrap_or_default();
+            if !body.is_empty() {
+                scriptlets.push((label, body));
+            }
+        }
+        for (tag, label) in [
+            (librpm::Tag::TRIGGERSCRIPTS, "%trigger"),
+            (librpm::Tag::FILETRIGGERSCRIPTS, "%filetrigger"),
+            (librpm::Tag::TRANSFILETRIGGERSCRIPTS, "%transfiletrigger"),
+        ] {
+            for body in pkg.tag_str_array(tag) {
+                if !body.is_empty() {
+                    scriptlets.push((label, body));
+                }
+            }
+        }
+        let scriptlet_refs: Vec<(&str, &str)> = scriptlets
+            .iter()
+            .map(|(label, body)| (*label, body.as_str()))
+            .collect();
+        let mut units: Vec<(&str, String)> = Vec::new();
+        for f in &pkg.files {
+            if f.name.contains("/systemd/system/") || f.name.contains("/systemd/user/") {
+                let content = pkg.read_file(&f.name);
+                if !content.is_empty() {
+                    units.push((f.name.as_str(), content));
+                }
+            }
+        }
+        let unit_refs: Vec<(&str, &str)> = units
+            .iter()
+            .map(|(name, content)| (*name, content.as_str()))
+            .collect();
+        let uses = sysconfig_fillup_uses(&files, &scriptlet_refs, &unit_refs);
+        if !uses.is_empty() {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "sysconfig-fillup-usage",
+                &[&uses.join("; ")],
+            );
+        }
+    }
+
     fn check_utf8(&self, pkg: &Pkg, out: &mut Filter) {
         use librpm::Tag;
         for name in pkg.tag_str_array(Tag::FILENAMES) {
@@ -8166,6 +8339,7 @@ mod tests {
             "segment equality must not match debugfoo: {results:?}"
         );
     }
+
     /// `test_config` plus a `SystemdPresetPackages` exemption list, the
     /// config key the vendored openSUSE/SLFO distro configs carry.
     fn preset_test_config() -> Config {
@@ -8339,6 +8513,337 @@ mod tests {
         assert!(
             preset_findings(&results).is_empty(),
             "bare directory entries must stay quiet: {results:?}"
+        );
+    }
+
+    /// Build a binary RPM at test time with the given payload files
+    /// (path, contents) and an optional %post scriptlet, then open it
+    /// with real payload extraction.
+    fn sysconfig_test_pkg(
+        name: &str,
+        files: &[(&str, &str)],
+        post: Option<&str>,
+    ) -> (Pkg, tempfile::TempDir, tempfile::TempDir) {
+        use rpm::{BuildConfig, FileMode, FileOptions, PackageBuilder};
+        let src = tempfile::tempdir().unwrap();
+        let rpm_path = src.path().join(format!("{name}-1.0-1.noarch.rpm"));
+        let mut b = PackageBuilder::new(name, "1.0", "MIT", "noarch", "sysconfig test package");
+        b.using_config(BuildConfig::default());
+        for &(path, contents) in files {
+            b.with_file_contents(
+                contents.as_bytes().to_vec(),
+                FileOptions::new(path).mode(FileMode::regular(0o644)),
+            )
+            .unwrap();
+        }
+        if let Some(post) = post {
+            b.post_install_script(post);
+        }
+        let built = b.build().unwrap();
+        built
+            .write(&mut std::fs::File::create(&rpm_path).unwrap())
+            .unwrap();
+        let extract = tempfile::tempdir().unwrap();
+        let pkg = Pkg::open(&rpm_path, extract.path(), true).expect("open test pkg");
+        (pkg, src, extract)
+    }
+
+    /// The `sysconfig-fillup-usage` findings (name, rendered line, level)
+    /// `FilesCheck` emits for `pkg`.
+    fn sysconfig_findings(pkg: &Pkg) -> Vec<(String, String, Level)> {
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check_binary(pkg, &config, &mut out);
+        out.results()
+            .iter()
+            .zip(out.result_levels().iter())
+            .filter(|((n, _), _)| n == "sysconfig-fillup-usage")
+            .map(|((n, line), l)| (n.clone(), line.clone(), *l))
+            .collect()
+    }
+
+    #[test]
+    fn sysconfig_source_pkg_name_strips_version_and_release() {
+        assert_eq!(source_pkg_name("sysconfig-0.90.5-1.2.src.rpm"), "sysconfig");
+        assert_eq!(source_pkg_name("fillup-1.42-281.7.src.rpm"), "fillup");
+        assert_eq!(source_pkg_name("libvirt-12.7.0-3.1.src.rpm"), "libvirt");
+        assert_eq!(
+            source_pkg_name("python3.14-3.14.0-1.1.src.rpm"),
+            "python3.14"
+        );
+        // Builder-made packages carry the placeholder, which names no
+        // real source package.
+        assert_eq!(source_pkg_name("(none)"), "(none)");
+    }
+
+    #[test]
+    fn sysconfig_fillup_exemption_shapes() {
+        // By binary name.
+        assert!(sysconfig_fillup_exempt("sysconfig", None));
+        assert!(sysconfig_fillup_exempt("fillup", None));
+        // By source package: the sysconfig-netconfig shape.
+        assert!(sysconfig_fillup_exempt(
+            "sysconfig-netconfig",
+            Some("sysconfig-0.90.5-1.2.src.rpm")
+        ));
+        assert!(sysconfig_fillup_exempt(
+            "fillup-lang",
+            Some("fillup-1.42-281.7.src.rpm")
+        ));
+        // Lookalikes and ordinary packages are not exempt.
+        assert!(!sysconfig_fillup_exempt(
+            "sysconfigfoo",
+            Some("sysconfigfoo-1.0-1.src.rpm")
+        ));
+        assert!(!sysconfig_fillup_exempt("demo", Some("demo-1.0-1.src.rpm")));
+        assert!(!sysconfig_fillup_exempt("demo", Some("(none)")));
+        assert!(!sysconfig_fillup_exempt("demo", None));
+    }
+
+    #[test]
+    fn sysconfig_uses_collector_edges() {
+        // The bare directories are not uses: only entries below them.
+        assert!(sysconfig_fillup_uses(&["/etc/sysconfig"], &[], &[]).is_empty());
+        assert!(sysconfig_fillup_uses(&["/usr/share/fillup-templates"], &[], &[]).is_empty());
+        // A template under any fillup-templates directory counts.
+        assert_eq!(
+            sysconfig_fillup_uses(&["/opt/fillup-templates/sysconfig.demo"], &[], &[]),
+            vec!["ships fillup template /opt/fillup-templates/sysconfig.demo".to_string()]
+        );
+        // A lookalike directory name does not count.
+        assert!(sysconfig_fillup_uses(&["/usr/share/fillup-templates-old/x"], &[], &[]).is_empty());
+        // Spacing around the `=` and a quoted value still resolve.
+        assert_eq!(
+            sysconfig_environment_file("[Service]\nEnvironmentFile = -/etc/sysconfig/demo\n"),
+            Some("-/etc/sysconfig/demo".to_string())
+        );
+        assert_eq!(
+            sysconfig_environment_file("EnvironmentFile=\"/etc/sysconfig/demo\"\n"),
+            Some("/etc/sysconfig/demo".to_string())
+        );
+        // A sysconfig-shaped path that is not inside /etc/sysconfig does
+        // not count.
+        assert_eq!(
+            sysconfig_environment_file("EnvironmentFile=/usr/share/demo/etc/sysconfig/demo\n"),
+            None
+        );
+        assert_eq!(
+            sysconfig_environment_file("ExecStart=/usr/bin/demo\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn sysconfig_payload_file_fires() {
+        let (pkg, _src, _extract) =
+            sysconfig_test_pkg("demo", &[("/etc/sysconfig/demo", "FOO=1\n")], None);
+        let found = sysconfig_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert_eq!(found[0].2, Level::Warning);
+        assert!(
+            found[0].1.contains("/etc/sysconfig/demo"),
+            "detail names the payload file: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn sysconfig_fillup_template_fires() {
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[("/usr/share/fillup-templates/sysconfig.demo", "# template\n")],
+            None,
+        );
+        let found = sysconfig_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert_eq!(found[0].2, Level::Warning);
+        assert!(
+            found[0]
+                .1
+                .contains("/usr/share/fillup-templates/sysconfig.demo"),
+            "detail names the template: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn sysconfig_legacy_fillup_template_fires() {
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[("/var/adm/fillup-templates/sysconfig.demo", "# template\n")],
+            None,
+        );
+        let found = sysconfig_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert!(
+            found[0]
+                .1
+                .contains("/var/adm/fillup-templates/sysconfig.demo"),
+            "detail names the template: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn sysconfig_fillup_scriptlet_fires() {
+        // The macro-expanded shape: a guard testing for the binary, then
+        // the invocation at command position.
+        let post = "PNAME=demo\n\
+                    if [ -x /bin/fillup ]; then\n\
+                    \t/bin/fillup -q /etc/sysconfig/$PNAME /usr/share/fillup-templates/sysconfig.$PNAME\n\
+                    fi\n";
+        let (pkg, _src, _extract) = sysconfig_test_pkg("demo", &[], Some(post));
+        let found = sysconfig_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert_eq!(found[0].2, Level::Warning);
+        assert!(
+            found[0].1.contains("%post"),
+            "detail names the scriptlet: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn sysconfig_fillup_mention_without_invocation_is_quiet() {
+        // The guard alone tests for the binary without invoking it, and
+        // the word in prose is not a command position either.
+        let post = "if [ -x /bin/fillup ]; then\n\
+                    \techo fillup is available\n\
+                    fi\n\
+                    # fillup would merge the template here\necho done\n";
+        let (pkg, _src, _extract) = sysconfig_test_pkg("demo", &[], Some(post));
+        assert!(
+            sysconfig_findings(&pkg).is_empty(),
+            "no invocation, no finding"
+        );
+    }
+
+    #[test]
+    fn sysconfig_unit_environment_file_fires() {
+        let unit = "[Service]\nEnvironmentFile=/etc/sysconfig/demo\nExecStart=/usr/bin/demo\n";
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[("/usr/lib/systemd/system/demo.service", unit)],
+            None,
+        );
+        let found = sysconfig_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert_eq!(found[0].2, Level::Warning);
+        assert!(
+            found[0].1.contains("/etc/sysconfig/demo"),
+            "detail names the EnvironmentFile target: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn sysconfig_unit_environment_file_dash_prefixed_fires() {
+        // The `-` prefix marks the file optional; the unit still reads
+        // its configuration from /etc/sysconfig.
+        let unit = "[Service]\nEnvironmentFile=-/etc/sysconfig/demo\nExecStart=/usr/bin/demo\n";
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[("/usr/lib/systemd/system/demo.service", unit)],
+            None,
+        );
+        let found = sysconfig_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert!(
+            found[0].1.contains("/etc/sysconfig/demo"),
+            "detail names the EnvironmentFile target: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn sysconfig_unit_environment_file_elsewhere_is_quiet() {
+        let unit = "[Service]\nEnvironmentFile=/etc/default/demo\n\
+                    EnvironmentFile=-/usr/share/demo/demo.env\nExecStart=/usr/bin/demo\n";
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[("/usr/lib/systemd/system/demo.service", unit)],
+            None,
+        );
+        assert!(
+            sysconfig_findings(&pkg).is_empty(),
+            "EnvironmentFile outside /etc/sysconfig is not a use"
+        );
+    }
+
+    #[test]
+    fn sysconfig_multiple_uses_fire_once() {
+        let post =
+            "/bin/fillup -q /etc/sysconfig/demo /usr/share/fillup-templates/sysconfig.demo\n";
+        let unit = "[Service]\nEnvironmentFile=-/etc/sysconfig/demo\n";
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[
+                ("/etc/sysconfig/demo", "FOO=1\n"),
+                ("/usr/share/fillup-templates/sysconfig.demo", "# template\n"),
+                ("/usr/lib/systemd/system/demo.service", unit),
+            ],
+            Some(post),
+        );
+        let found = sysconfig_findings(&pkg);
+        assert_eq!(found.len(), 1, "one finding per package: {found:?}");
+        let line = &found[0].1;
+        for evidence in [
+            "/etc/sysconfig/demo",
+            "/usr/share/fillup-templates/sysconfig.demo",
+            "%post",
+            "demo.service",
+        ] {
+            assert!(line.contains(evidence), "detail covers {evidence}: {line}");
+        }
+    }
+
+    #[test]
+    fn sysconfig_package_itself_is_quiet() {
+        // The mechanism's own package ships the payload, the templates
+        // and the fillup calls; it is exempt by name.
+        let post =
+            "/bin/fillup -q /etc/sysconfig/network /usr/share/fillup-templates/sysconfig.network\n";
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "sysconfig",
+            &[
+                ("/etc/sysconfig/network/config", "NETWORKING=yes\n"),
+                (
+                    "/usr/share/fillup-templates/sysconfig.network",
+                    "# template\n",
+                ),
+            ],
+            Some(post),
+        );
+        assert!(
+            sysconfig_findings(&pkg).is_empty(),
+            "the sysconfig package is exempt"
+        );
+    }
+
+    #[test]
+    fn fillup_package_itself_is_quiet() {
+        let (pkg, _src, _extract) =
+            sysconfig_test_pkg("fillup", &[("/etc/sysconfig/fillup", "FOO=1\n")], None);
+        assert!(
+            sysconfig_findings(&pkg).is_empty(),
+            "the fillup package is exempt"
+        );
+    }
+
+    #[test]
+    fn sysconfig_ordinary_package_is_quiet() {
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[
+                ("/usr/bin/demo", "#!/bin/sh\n"),
+                ("/usr/share/demo/README", "demo\n"),
+            ],
+            Some("echo installed\n"),
+        );
+        assert!(
+            sysconfig_findings(&pkg).is_empty(),
+            "no sysconfig use, no finding"
         );
     }
 }

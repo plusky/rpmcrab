@@ -420,3 +420,11 @@ line, but the target page is not included in this package, so man
 fails to display the referencing page. Include the target page in
 the package or remove the redirect.
 """
+sysconfig-fillup-usage="""
+The package uses the legacy sysconfig/fillup configuration scheme: it ships
+a file below /etc/sysconfig or a fillup template, calls fillup from a
+scriptlet, or points a systemd unit's EnvironmentFile into /etc/sysconfig.
+Migrate to daemon-native configuration, or to systemd drop-ins and an
+EnvironmentFile pointing at a package-owned path, instead of configuration
+merged into /etc/sysconfig by fillup.
+"""
