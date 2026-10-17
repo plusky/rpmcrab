@@ -42,6 +42,13 @@ REF_CONFIG="${RPMLINT_REF_CONFIG:-$RPMLINT_REF_DIR/xdg/rpmlint}"
 
 die() { echo "bench.sh: $*" >&2; exit 1; }
 
+# The rpmlint run invokes "$RPMLINT_PYTHON" directly; without this
+# preflight a missing interpreter (fresh clone, setup not run yet)
+# surfaces only as a bare rc=127 inside the run's JSON.
+require_rpmlint_python() {
+    [ -x "$RPMLINT_PYTHON" ] || die "RPMLINT_PYTHON is not executable: $RPMLINT_PYTHON (set RPMLINT_PYTHON to the python built by scripts/setup-rpmlint-ref.sh, e.g. $RPMLINT_REF_DIR/venv/bin/python, or run scripts/setup-rpmlint-ref.sh first)"
+}
+
 cmd_download() {
     local dir="${1:-$HERE/rpms}"
     mkdir -p "$dir"
@@ -128,6 +135,9 @@ EOF
 cmd_run() {
     local name="$1"
     local dir="${2:-$HERE/rpms}"
+    if [ "$name" = "rpmlint" ]; then
+        require_rpmlint_python
+    fi
     local rpms=( "$dir"/*.rpm )
     [ -e "${rpms[0]}" ] || die "no RPMs in $dir (run 'bench.sh download' first)"
     [ -x "$(command -v "$RPMCRAB_BIN")" ] || [ -x "$RPMCRAB_BIN" ] || \
@@ -160,6 +170,7 @@ EOF
 
 cmd_all() {
     local dir="${1:-$HERE/rpms}"
+    require_rpmlint_python
     cmd_download "$dir"
     local a b
     a=$(cmd_run rpmcrab "$dir")
