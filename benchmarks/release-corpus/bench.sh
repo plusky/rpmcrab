@@ -165,7 +165,7 @@ cmd_run() {
     n=${#rpms[@]}
     total_mb=$(python3 -c "
 import glob, os, sys
-fs = glob.glob(os.path.join(sys.argv[1], '*.rpm'))
+fs = glob.glob(glob.escape(sys.argv[1]) + '/*.rpm')
 print(f'{sum(os.path.getsize(f) for f in fs)/1024/1024:.1f}')" "$dir")
     # Median of the runs + runner metadata.
     python3 - "$n" "$total_mb" "${times[@]}" <<'EOF'
