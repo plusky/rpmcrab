@@ -27,8 +27,10 @@ environment dir, as built by `scripts/setup-rpmlint-ref.sh`),
 `RPMLINT_PYTHON` (python with rpmlint deps; point at a wrapper script for
 containers), `MIRROR`, `RESULTS_DIR`. See header of `bench.sh`.
 
-`run_rpmlint.py` is the container entry point used for the reference
-(`sys.path` insert + `rpmlint.cli:lint`).
+The reference is invoked inline by `bench.sh`: `PYTHONPATH` points at
+the reference checkout and `RPMLINT_PYTHON` runs `rpmlint.cli:lint`
+through `python3 -c`. For containers, `RPMLINT_PYTHON` is a wrapper
+script around that same invocation (see the header of `bench.sh`).
 
 ## Reference environment (what the baseline needed)
 
