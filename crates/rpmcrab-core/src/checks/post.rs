@@ -145,6 +145,16 @@ impl PostCheck {
         })
     }
 
+    fn cache_updater_regex() -> &'static Regex {
+        static CACHE_UPDATER_REGEX: OnceLock<Regex> = OnceLock::new();
+        CACHE_UPDATER_REGEX.get_or_init(|| {
+            Regex::new(
+                r"(?m)(^|[;`|]|&&|\$\()\s*(?:then\s+|do\s+|else\s+)?(?:\S*/)?(update-desktop-database|gtk-update-icon-cache|update-mime-database|glib-compile-schemas|install-info)\b",
+            )
+            .expect("static regex")
+        })
+    }
+
     /// Scriptlet text with heredoc bodies blanked. Text a scriptlet
     /// writes out (an update message, a generated file) is not executed,
     /// so a command named inside it is not an invocation.
@@ -597,6 +607,27 @@ impl PostCheck {
         out
     }
 
+    /// Cache and database updaters invoked at command position in a
+    /// scriptlet, in first-seen order, each named once. RPM file
+    /// triggers already run these commands when the files they index
+    /// change, so a hand-rolled invocation duplicates the trigger.
+    /// Matching is command-position only (start of line or after a
+    /// command separator), so comments, echoed text and heredoc bodies
+    /// do not fire.
+    fn cache_updaters(script: &str) -> Vec<String> {
+        let text = Self::without_heredoc_bodies(script);
+        let mut out: Vec<String> = Vec::new();
+        for caps in Self::cache_updater_regex().captures_iter(&text).flatten() {
+            if let Some(cmd) = caps.get(2) {
+                let cmd = cmd.as_str().to_string();
+                if !out.contains(&cmd) {
+                    out.push(cmd);
+                }
+            }
+        }
+        out
+    }
+
     /// `sh -n` / `perl -wc` syntax check via subprocess. `None` when the
     /// interpreter is unavailable (skipped, not an error).
     fn syntax_ok(prog: &str, args: &[&str], script: &str) -> Option<bool> {
@@ -705,6 +736,18 @@ impl PostCheck {
                     vec![m.as_str().to_string()],
                 ));
             }
+            // Trigger scriptlets are the file-trigger mechanism itself:
+            // an updater invoked there is the trigger doing its work,
+            // not a hand-rolled duplicate of it.
+            if !matches!(tag, "%trigger" | "%filetrigger" | "%transfiletrigger") {
+                for cmd in Self::cache_updaters(script) {
+                    out.push((
+                        Level::Warning,
+                        finding("deprecated-cache-updater-in"),
+                        vec![cmd],
+                    ));
+                }
+            }
             if script.contains("update-menus") {
                 let menu_re = POST_MENU_RE.get_or_init(|| {
                     Regex::new(r"^/usr/lib/menu/|^/etc/menu-methods/|^/usr/share/applications/")
@@ -799,6 +842,8 @@ const PERCENT_IN_DETAIL: &str = "The {tag} scriptlet contains a '%' in a context
 const FORBIDDEN_SELINUX_DETAIL: &str = "A command which requires intimate knowledge about a specific SELinux\n        policy type was found in the scriptlet. These types are subject to change\n        on a policy version upgrade. Use the restorecon command which queries the\n        currently loaded policy for the correct type instead.";
 /// `daemon-activation-in-<scriptlet>`:
 const DAEMON_ACTIVATION_DETAIL: &str = "The scriptlet activates a daemon at installation time. Packages must not enable or start services on installation; enablement is governed by systemd presets, not by insserv, chkconfig or systemctl calls in scriptlets.";
+/// `deprecated-cache-updater-in-<scriptlet>`:
+const DEPRECATED_CACHE_UPDATER_DETAIL: &str = "The scriptlet runs a cache or database updater (update-desktop-database, gtk-update-icon-cache, update-mime-database, glib-compile-schemas or install-info) by hand. RPM file triggers already run the updater when the files it indexes change, so the manual call is redundant; remove it and rely on the file trigger.";
 /// `non-empty-<scriptlet>`:
 const NON_EMPTY_DETAIL: &str = "Scriptlets for the interpreter mentioned in the message should be empty.\n        One common case where they are unintentionally not is when the specfile\n        contains comments after the scriptlet and before the next section. Review\n        and clean up the scriptlet contents if appropriate.";
 pub fn register_error_details(out: &mut Filter) {
@@ -856,6 +901,11 @@ pub fn register_error_details(out: &mut Filter) {
         out.set_error_detail(
             &format!("daemon-activation-in-{tag}"),
             DAEMON_ACTIVATION_DETAIL.to_string(),
+        );
+        // `deprecated-cache-updater-in-<scriptlet>`:
+        out.set_error_detail(
+            &format!("deprecated-cache-updater-in-{tag}"),
+            DEPRECATED_CACHE_UPDATER_DETAIL.to_string(),
         );
         // `non-empty-<scriptlet>`:
         out.set_error_detail(
@@ -1938,5 +1988,190 @@ mod tests {
         assert!(found.iter().any(|(l, f, d)| *l == Level::Error
             && f == "no-prereq-on"
             && d == &vec!["chkfontpath".to_string()]));
+    }
+    #[test]
+    fn deprecated_cache_updaters_in_post_are_flagged() {
+        for (script, cmd) in [
+            (
+                "update-desktop-database /usr/share/applications",
+                "update-desktop-database",
+            ),
+            (
+                "gtk-update-icon-cache -f /usr/share/icons/hicolor",
+                "gtk-update-icon-cache",
+            ),
+            (
+                "update-mime-database /usr/share/mime",
+                "update-mime-database",
+            ),
+            (
+                "glib-compile-schemas /usr/share/glib-2.0/schemas",
+                "glib-compile-schemas",
+            ),
+            (
+                "install-info /usr/share/info/foo.info /usr/share/info/dir",
+                "install-info",
+            ),
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Warning
+                    && f == "deprecated-cache-updater-in-%post"
+                    && d == &vec![cmd.to_string()]),
+                "{script}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deprecated_cache_updater_in_postun_is_flagged() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "glib-compile-schemas /usr/share/glib-2.0/schemas",
+            "%postun",
+            &[],
+            &[],
+        );
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
+            && f == "deprecated-cache-updater-in-%postun"
+            && d == &vec!["glib-compile-schemas".to_string()]));
+    }
+
+    #[test]
+    fn deprecated_cache_updater_path_prefixed_is_flagged() {
+        for script in [
+            "/usr/bin/update-desktop-database",
+            "/usr/bin/gtk-update-icon-cache /usr/share/icons/hicolor",
+            "/usr/sbin/install-info --info-dir=/usr/share/info /usr/share/info/foo.info",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found
+                    .iter()
+                    .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+                "{script}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deprecated_cache_updater_after_separator_is_flagged() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "true && update-mime-database /usr/share/mime; gtk-update-icon-cache /usr/share/icons/hicolor",
+            "%post",
+            &[],
+            &[],
+        );
+        let cmds: Vec<&str> = found
+            .iter()
+            .filter(|(_, f, _)| f == "deprecated-cache-updater-in-%post")
+            .map(|(_, _, d)| d[0].as_str())
+            .collect();
+        assert_eq!(cmds, vec!["update-mime-database", "gtk-update-icon-cache"]);
+    }
+
+    #[test]
+    fn deprecated_cache_updater_repeated_is_reported_once() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "update-desktop-database\nupdate-desktop-database /usr/share/applications",
+            "%post",
+            &[],
+            &[],
+        );
+        assert_eq!(
+            found
+                .iter()
+                .filter(|(_, f, _)| f == "deprecated-cache-updater-in-%post")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn deprecated_cache_updater_in_comment_and_echo_is_quiet() {
+        let script = "# update-desktop-database\n\
+            echo \"glib-compile-schemas /usr/share/glib-2.0/schemas\"\n\
+            echo install-info";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn deprecated_cache_updater_in_heredoc_text_is_quiet() {
+        let script = "cat >> /var/adm/update-messages/foo << EOF\n\
+            glib-compile-schemas /usr/share/glib-2.0/schemas\n\
+            EOF";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn unrelated_scriptlet_is_quiet_for_cache_updaters() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "update-ca-certificates\ntouch /usr/share/icons/hicolor/icon-theme.cache",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn deprecated_cache_updater_in_trigger_scriptlets_is_quiet() {
+        // A trigger scriptlet is the file-trigger mechanism itself: the
+        // packages providing a trigger (desktop-file-utils,
+        // shared-mime-info) and packages registering their own run the
+        // updater there legitimately.
+        for tag in ["%trigger", "%filetrigger", "%transfiletrigger"] {
+            let found = check().check_scriptlet(
+                "/bin/sh",
+                "update-desktop-database /usr/share/applications",
+                tag,
+                &[],
+                &[],
+            );
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f.starts_with("deprecated-cache-updater-in-")),
+                "{tag}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deprecated_cache_updater_with_private_target_dir_is_flagged() {
+        // Scoping decision: the check fires on any invocation in a
+        // non-trigger scriptlet, whatever directory the updater is
+        // pointed at; the warning is the packager's signal to check
+        // whether a file trigger owns that directory.
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "glib-compile-schemas /opt/myapp/schemas",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
+            && f == "deprecated-cache-updater-in-%post"
+            && d == &vec!["glib-compile-schemas".to_string()]));
     }
 }
