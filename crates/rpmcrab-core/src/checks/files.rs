@@ -1098,29 +1098,55 @@ fn read_prefix(reader: impl std::io::Read, limit: u64) -> std::io::Result<Vec<u8
 /// Whether the full contents of the reader are valid UTF-8, validated in
 /// bounded chunks so arbitrarily large inputs are never buffered whole.
 /// The verdict is identical to validating the buffered contents; a read
-/// error propagates so the caller can apply its own fallback.
+/// error propagates so the caller can apply its own fallback, unless the
+/// invalid verdict has already latched, in which case it is kept.
+///
+/// The reader is always drained to end-of-stream, even after an invalid
+/// sequence is seen: the reader may be a decompressor child's stdout
+/// pipe, and abandoning it mid-stream would SIGPIPE the child, whose
+/// failed exit status the caller would then read as "valid".
 fn stream_is_utf8(reader: &mut impl std::io::Read) -> std::io::Result<bool> {
     let mut pending: Vec<u8> = Vec::new();
+    let mut invalid = false;
     let mut buf = [0u8; 8192];
     loop {
-        let n = reader.read(&mut buf)?;
+        // A read error after the verdict has latched invalid must not
+        // discard it: the caller collapses `Err` to "valid", and
+        // abandoning the pipe mid-stream would SIGPIPE a decompressor
+        // child and flip the verdict the same way. An error before any
+        // invalid sequence still propagates.
+        let n = match reader.read(&mut buf) {
+            Ok(n) => n,
+            // A signal interrupting the read is not an error: retry it
+            // rather than discarding the stream (or the latched verdict).
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) if invalid => break,
+            Err(e) => return Err(e),
+        };
         if n == 0 {
             break;
+        }
+        if invalid {
+            // Verdict already latched; keep draining so a piped writer
+            // is never cut off mid-stream.
+            continue;
         }
         pending.extend_from_slice(&buf[..n]);
         match std::str::from_utf8(&pending) {
             Ok(_) => pending.clear(),
             Err(e) => {
                 if e.error_len().is_some() {
-                    return Ok(false);
+                    invalid = true;
+                    pending.clear();
+                } else {
+                    // Incomplete multi-byte sequence at the tail: keep
+                    // the unvalidated bytes for the next chunk.
+                    pending.drain(..e.valid_up_to());
                 }
-                // Incomplete multi-byte sequence at the tail: keep the
-                // unvalidated bytes for the next chunk.
-                pending.drain(..e.valid_up_to());
             }
         }
     }
-    Ok(pending.is_empty())
+    Ok(!invalid && pending.is_empty())
 }
 
 /// Kept in sync with the filesystem package, mirroring the reference's
@@ -1525,6 +1551,7 @@ impl FilesCheck {
                 };
                 cmd.arg("-dc")
                     .arg(path)
+                    .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::null());
                 let mut child = match cmd.spawn() {
@@ -6566,6 +6593,60 @@ mod tests {
         );
     }
 
+    /// The decompressor branch end to end: a present `gzip` tool is
+    /// spawned and its stdout is what gets validated, so bytes the tool
+    /// emits decide the verdict -- here a stand-in tool that emits
+    /// invalid UTF-8 for one package file and valid UTF-8 for another.
+    #[test]
+    #[cfg(unix)]
+    fn decompressor_branch_validates_the_child_output() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        // The fake gzip ignores `-dc <path>` and prints the payload named
+        // by the input file's stem, so each input gets its own bytes.
+        let bad = dir.path().join("bad.out");
+        std::fs::write(&bad, [0xff, 0xfe, 0x61]).expect("write bad payload");
+        let good = dir.path().join("good.out");
+        std::fs::write(&good, "plain text\n").expect("write good payload");
+        let script = dir.path().join("gzip");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nfor last; do :; done\ncat \"${last%.*}.out\"\n",
+        )
+        .expect("write fake gzip");
+        let mut perms = std::fs::metadata(&script)
+            .expect("stat fake gzip")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod fake gzip");
+        // A just-written script can still be "text file busy" (ETXTBSY) on
+        // first spawn under parallel load; settle it so the probe below
+        // sees an exec-ready tool.
+        for _ in 0..100 {
+            match std::process::Command::new(&script)
+                .arg("--version")
+                .output()
+            {
+                Ok(_) => break,
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(e) => panic!("fake gzip failed: {e}"),
+            }
+        }
+        let config = Config::default();
+        let check = FilesCheck::with_tool_dir(&config, Some(dir.path()));
+        for (stem, expected) in [("bad", false), ("good", true)] {
+            let doc = dir.path().join(format!("{stem}.gz"));
+            std::fs::write(&doc, b"not really gzip").expect("write doc");
+            assert_eq!(
+                check.is_utf8_file(&doc.to_string_lossy(), &doc.to_string_lossy()),
+                expected,
+                "decompressor output for {stem}.gz must decide the verdict"
+            );
+        }
+    }
+
     #[test]
     fn non_conf_in_etc_exempts_managed_dropins() {
         // Upstream rpmlint#1137: entries under /etc/alternatives/ are managed
@@ -6713,6 +6794,58 @@ mod tests {
     }
 
     #[test]
+    fn stream_is_utf8_drains_the_reader_after_invalid_input() {
+        // The first byte is invalid, but the reader must still be
+        // consumed to the end: abandoning a decompressor child's pipe
+        // mid-stream SIGPIPEs the child and flips the caller's verdict.
+        let mut data = vec![0xFFu8];
+        data.extend(vec![0x61u8; 100_000]);
+        let total = data.len();
+        let mut reader = CountingReader {
+            inner: std::io::Cursor::new(data),
+            consumed: 0,
+        };
+        assert!(!stream_is_utf8(&mut reader).expect("read"));
+        assert_eq!(reader.consumed, total, "reader must be fully drained");
+    }
+
+    struct FailAfterReader {
+        data: Vec<u8>,
+        pos: usize,
+    }
+
+    impl std::io::Read for FailAfterReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos >= self.data.len() {
+                return Err(std::io::Error::other("read failed after data"));
+            }
+            let n = (self.data.len() - self.pos).min(buf.len());
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn stream_is_utf8_keeps_invalid_verdict_when_a_later_read_fails() {
+        // Regression: the invalid verdict latches, but a read error
+        // afterwards used to propagate as `Err`, which the caller
+        // collapses to "valid" -- flipping an already-proven-invalid
+        // stream to UTF-8.
+        let mut reader = FailAfterReader {
+            data: vec![0xFF, 0x61, 0x62],
+            pos: 0,
+        };
+        assert!(!stream_is_utf8(&mut reader).expect("latched verdict"));
+        // An error before any invalid byte still propagates.
+        let mut reader = FailAfterReader {
+            data: b"plain ascii".to_vec(),
+            pos: 0,
+        };
+        assert!(stream_is_utf8(&mut reader).is_err());
+    }
+
+    #[test]
     fn manual_page_in_subfolder_fires() {
         // The reference expects man3/foo/bar/baz.3.gz to fire
         // manual-page-in-subfolder (test_files.py); the port captured
@@ -6765,6 +6898,52 @@ mod tests {
             "bad-manual-page-folder",
             "/usr/share/man/man3/foo/bar/baz.3.gz"
         ));
+    }
+
+    #[test]
+    fn manual_page_sectionless_subfolder_shapes() {
+        // Pins the ledgered behaviour (tests/parity/divergences.toml,
+        // manual-page-in-subfolder) under the shipped CompressExtension
+        // (bz2 in configdefaults): a dotless subdir name prints only
+        // manpage-not-compressed -- the compression step pops the sole
+        // suffix-list entry (the whole filename), and the empty remainder
+        // makes the suffix guard skip both error findings -- while a
+        // dotted section-less name also fires bad-manual-page-folder and
+        // manual-page-in-subfolder.
+        for (path, errors_fire) in [
+            ("/usr/share/man/man1/foo/bar", false),
+            ("/usr/share/man/man1/foo/bar.baz", true),
+        ] {
+            let (pkg, _dir) = pkg_with_files(vec![PkgFile {
+                name: path.to_string(),
+                path: path.to_string(),
+                mode: 0o100644,
+                ..Default::default()
+            }]);
+            let results = run_check_binary(&pkg);
+            let hits = |tag: &str| results.iter().any(|(n, _)| n == tag);
+            assert!(
+                hits("manpage-not-compressed"),
+                "{path} must warn manpage-not-compressed: {results:?}"
+            );
+            assert_eq!(
+                hits("bad-manual-page-folder"),
+                errors_fire,
+                "{path} bad-manual-page-folder: {results:?}"
+            );
+            assert_eq!(
+                hits("manual-page-in-subfolder"),
+                errors_fire,
+                "{path} manual-page-in-subfolder: {results:?}"
+            );
+            if errors_fire {
+                assert!(
+                    results.iter().any(|(n, d)| n == "bad-manual-page-folder"
+                        && d.contains("expected folder: manfoo/bar")),
+                    "{path} bad-folder detail: {results:?}"
+                );
+            }
+        }
     }
 
     #[test]
