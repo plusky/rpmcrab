@@ -110,10 +110,13 @@ impl Canonicalizer {
                         return Err("XML parse error: multiple DOCTYPE declarations".to_string());
                     }
                     self.seen_doctype = true;
-                    self.parse_doctype_entities(&e);
+                    self.parse_doctype_entities(&e)?;
                 }
-                // Comments neither emit nor break text coalescing.
-                Event::Comment(_) => {}
+                // Comments neither emit nor break text coalescing, but
+                // their content is still validated: the reference
+                // rejects a comment holding a character outside the XML
+                // `Char` production even though the comment is dropped.
+                Event::Comment(e) => validate_xml_chars(&e)?,
                 Event::PI(e) => self.emit_pi(&e)?,
                 Event::GeneralRef(e) => self.push_ref(&e)?,
                 Event::Start(e) => {
@@ -254,8 +257,12 @@ impl Canonicalizer {
     }
 
     /// Route a PI: prolog buffer, epilog (`\n<?...?>`), or inline.
+    /// The raw content is validated first: the reference rejects a PI
+    /// holding a character outside the XML `Char` production, in the
+    /// data just as in character data.
     fn emit_pi(&mut self, raw: &str) -> Result<(), String> {
         self.flush_text()?;
+        validate_xml_chars(raw)?;
         let (target, data) = split_pi(raw);
         if !self.seen_root {
             self.prolog_pis.push((target, data));
@@ -530,7 +537,7 @@ impl Canonicalizer {
     /// delimiters (UTF-8 continuation bytes never match one) and the
     /// fallthrough steps over a whole character, so no index can land
     /// inside a multi-byte character.
-    fn parse_doctype_entities(&mut self, inner: &str) {
+    fn parse_doctype_entities(&mut self, inner: &str) -> Result<(), String> {
         let bytes = inner.as_bytes();
         let mut i = 0;
         while i < bytes.len() {
@@ -566,6 +573,7 @@ impl Canonicalizer {
                         i += 1;
                     }
                     if !name.is_empty() {
+                        validate_entity_value(value)?;
                         self.entities.insert(name.to_string(), Rc::from(value));
                     }
                 }
@@ -573,6 +581,32 @@ impl Canonicalizer {
             }
             i += inner[i..].chars().next().map_or(1, char::len_utf8);
         }
+        Ok(())
+    }
+}
+
+/// Validate one general-entity value at declaration time, the way the
+/// reference validates it while building its entity table: character
+/// references must decode to XML characters, literal runs must consist
+/// of XML characters, and every reference must be terminated. A general
+/// reference is checked for termination only — whether the named entity
+/// exists is decided when the value is used, so an unreferenced value
+/// may mention an entity that is never declared.
+fn validate_entity_value(value: &str) -> Result<(), String> {
+    let mut rest = value;
+    loop {
+        let Some(amp) = rest.find('&') else {
+            return validate_xml_chars(rest);
+        };
+        validate_xml_chars(&rest[..amp])?;
+        let after = &rest[amp + 1..];
+        let Some(semi) = after.find(';') else {
+            return Err("unterminated entity reference".to_string());
+        };
+        if let Some(num) = after[..semi].strip_prefix('#') {
+            decode_char_ref(num)?;
+        }
+        rest = &after[semi + 1..];
     }
 }
 
@@ -984,6 +1018,7 @@ mod tests {
         // the only character data allowed.
         assert!(canon("&#32;<a/>").is_err());
         assert!(canon("<a/>&#x20;").is_err());
+        assert!(canon("<a/> &#x20;").is_err());
         let entity = "<!DOCTYPE a [<!ENTITY e \" \">]>";
         assert!(canon(&format!("{entity}&e;<a/>")).is_err());
         assert!(canon(&format!("{entity}<a/>&e;")).is_err());
@@ -991,6 +1026,8 @@ mod tests {
         // whitespace reference inside the root still decodes.
         assert!(canon(" \t\r\n<a/> \n").is_ok());
         assert_eq!(canon("<a>x&#32;y</a>").unwrap(), "<a>x y</a>");
+        // Whitespace-only referenced content inside the root trims away.
+        assert_eq!(canon("<a>&#32;</a>").unwrap(), "<a></a>");
     }
 
     #[test]
@@ -1006,6 +1043,47 @@ mod tests {
         assert!(canon("<a>\u{b}</a>").is_err());
         assert!(canon("<a x=\"\u{b}\"/>").is_err());
         assert!(canon("<a>\u{fffe}</a>").is_err());
+    }
+
+    #[test]
+    fn pi_and_comment_content_is_validated() {
+        // A literal vertical tab inside a PI or a comment: the
+        // reference rejects both even though comments are dropped from
+        // the canonical form entirely.
+        assert!(canon("<?p \u{b}?><r/>").is_err());
+        assert!(canon("<r><?p a\u{b}b?></r>").is_err());
+        assert!(canon("<!-- \u{b} --><r/>").is_err());
+        assert!(canon("<r/><!-- x\u{b}y -->").is_err());
+        // Well-formed PIs and comments still pass.
+        assert!(canon("<!-- c --> <?p d?> <r/>").is_ok());
+    }
+
+    #[test]
+    fn entity_values_are_validated_at_declaration() {
+        // An invalid character reference in a value the document never
+        // references: the reference validates values while building
+        // its entity table, not at first use.
+        assert!(canon("<!DOCTYPE r [<!ENTITY e \"&#x0;\">]><r/>").is_err());
+        assert!(canon("<!DOCTYPE r [<!ENTITY e \"&#xB;\">]><r/>").is_err());
+        // A bare `&` (unterminated reference), likewise unreferenced.
+        assert!(canon("<!DOCTYPE r [<!ENTITY e \"a&b\">]><r/>").is_err());
+        // Signed character references fail the digit-class check.
+        assert!(canon("<!DOCTYPE r [<!ENTITY e \"&#+65;\">]><r/>").is_err());
+        // Valid values stay accepted, referenced or not, and a general
+        // reference inside a value is only resolved at use: undeclared
+        // is fine while the holding entity is never used, an error once
+        // it is.
+        assert!(canon("<!DOCTYPE r [<!ENTITY e \"&#65;\">]><r/>").is_ok());
+        assert!(canon("<!DOCTYPE r [<!ENTITY a \"&b;\">]><r/>").is_ok());
+        assert!(canon("<!DOCTYPE r [<!ENTITY a \"&b;\">]><r>&a;</r>").is_err());
+    }
+
+    #[test]
+    fn signed_character_references_are_rejected() {
+        assert!(canon("<a>&#+65;</a>").is_err());
+        assert!(canon("<a>&#x+41;</a>").is_err());
+        assert!(canon("<a x=\"&#+65;\"/>").is_err());
+        assert_eq!(canon("<a>&#65;&#x41;</a>").unwrap(), "<a>AA</a>");
     }
 
     #[test]
