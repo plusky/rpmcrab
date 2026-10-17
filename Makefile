@@ -3,10 +3,10 @@
 # parity corpus. Keep this fast and deterministic; `--locked` everywhere.
 # ==========================================================================
 
-.PHONY: check fmt clippy test deny layer gen doc doctest audit auditor-test
+.PHONY: check fmt clippy test deny layer versions gen doc doctest audit auditor-test
 
 # The local gate: everything a change must pass before review.
-check: fmt clippy test deny layer
+check: fmt clippy test deny layer versions
 
 fmt:
 	cargo fmt --all -- --check
@@ -27,6 +27,11 @@ deny:
 # Architectural layering: `rpmcrab-core` must not depend on CLI concerns.
 layer:
 	bash scripts/check-rust-layering.sh
+
+# Version consistency: every restatement of the release version agrees
+# with [workspace.package] (docs/DESIGN.md §9).
+versions:
+	bash scripts/check-version-consistency.sh
 
 # Regenerate man pages and shell completions into crates/rpmcrab/{man,completions}.
 gen:

@@ -62,6 +62,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo clippy --workspace --all-targets --features gen --locked -- -D warnings
       - run: bash scripts/check-rust-layering.sh
+      - run: bash scripts/check-version-consistency.sh
       - run: cargo test --workspace --all-targets --locked
 
   # Platform spread: Homebrew ships librpm, so the crate builds natively on
