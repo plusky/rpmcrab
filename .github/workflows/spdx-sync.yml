@@ -44,6 +44,28 @@ jobs:
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
+      # librpm-sys generates bindings with bindgen, so the compile check
+      # below needs the RPM development headers (pkg-config `rpm.pc`)
+      # installed first -- the same apt block as ci.yml. The
+      # cache-apt-pkgs-action key is md5(packages + version + repos
+      # [+arch iff non-x86_64]) - no distro dimension. Fold the runner OS
+      # release into `version` so a floating `ubuntu-latest` image
+      # (24.04 -> 26.04) never restores stale .debs onto a new distro, and
+      # rotate on the ISO week so a cache hit never tests against
+      # weeks-old packages.
+      - name: Compute apt cache version
+        id: apt-cache-version
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          . /etc/os-release
+          echo "version=1.0-${VERSION_ID}-$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+      - name: Install RPM toolchain (headers + tools)
+        if: steps.diff.outputs.changed == 'true'
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
+        with:
+          packages: librpm-dev rpm file devscripts dash desktop-file-utils appstream-util
+          version: ${{ steps.apt-cache-version.outputs.version }}
+          execute_install_scripts: true
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         if: steps.diff.outputs.changed == 'true'
         with:
