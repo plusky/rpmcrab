@@ -202,8 +202,11 @@ impl SharedLibraryPolicyCheck {
 /// `(stem, SONAME number)` for a package name in the versioned shared
 /// library scheme (`libfoo1`, `libfoo12-32bit`), or `None` for a name
 /// outside the scheme. The `-32bit`/`-64bit` suffix is normalised away,
-/// matching how the scheme pattern treats those forms, and the number
-/// is the full trailing digit run with leading zeroes dropped.
+/// matching how the scheme pattern treats those forms: RPM `Obsoletes`
+/// is arch-agnostic and the baselibs `-32bit` forms carry the host arch,
+/// so an obsoletes in any bitness form removes the sibling generation
+/// in every form. The number is the full trailing digit run with
+/// leading zeroes dropped.
 fn soname_package_parts(re_soname_pkg: &Regex, name: &str) -> Option<(String, String)> {
     if !is_match(re_soname_pkg, name) {
         return None;
@@ -255,6 +258,9 @@ impl Check for SharedLibraryPolicyCheck {
         // co-installable, and an obsoletes of one by another removes it.
         // A version constraint does not change that for the obsoleted
         // range, so the dependency's flags and version are not consulted.
+        // The bitness suffix is not compared: `Obsoletes` is
+        // arch-agnostic, so a cross-bitness obsoletes removes the
+        // sibling generation just as a same-bitness one does.
         if let Some((stem, number)) = soname_package_parts(&self.re_soname_pkg, &pkg.name) {
             for obs in &pkg.obsoletes {
                 if let Some((obs_stem, obs_number)) =
@@ -781,35 +787,46 @@ mod tests {
 
     #[test]
     fn bit_suffix_sibling_obsoletes_fires() {
-        // The module's scheme pattern treats the -32bit form as the same
-        // versioned package name, so the suffix is normalised away on
-        // both sides before the stem and number are compared.
-        let results = obsoletes_results("libfoo2-32bit", vec![dep("libfoo1-32bit")]);
-        assert_eq!(
-            sibling_lines(&results).len(),
-            1,
-            "32bit sibling must fire: {results:?}"
-        );
-        let results = obsoletes_results("libfoo2", vec![dep("libfoo1-32bit")]);
-        assert_eq!(
-            sibling_lines(&results).len(),
-            1,
-            "mixed-suffix sibling must fire: {results:?}"
-        );
-        let results = obsoletes_results(
-            "libfoo2-32bit",
-            vec![DepInfo {
-                name: "libfoo2-32bit".to_string(),
-                flags: RPMSENSE_LESS,
-                epoch: None,
-                version: Some("1.0".to_string()),
-                release: None,
-            }],
-        );
-        assert!(
-            sibling_lines(&results).is_empty(),
-            "32bit self-obsoletes must stay quiet: {results:?}"
-        );
+        // The scheme pattern treats the -32bit/-64bit forms as the same
+        // versioned package name, and RPM `Obsoletes` is arch-agnostic,
+        // so every pairing of bitness forms fires: the suffix is
+        // normalised away on both sides before the stem and number are
+        // compared. All nine form pairings are pinned here.
+        for pkg_suffix in ["", "-32bit", "-64bit"] {
+            for obs_suffix in ["", "-32bit", "-64bit"] {
+                let name = format!("libfoo2{pkg_suffix}");
+                let obs = format!("libfoo1{obs_suffix}");
+                let results = obsoletes_results(&name, vec![dep(&obs)]);
+                assert_eq!(
+                    sibling_lines(&results).len(),
+                    1,
+                    "sibling must fire ({name} vs {obs}): {results:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bit_suffix_self_obsoletes_is_quiet() {
+        // A rename-style self-obsoletes names the package's own SONAME
+        // generation in every bitness form, not a sibling.
+        for suffix in ["", "-32bit", "-64bit"] {
+            let name = format!("libfoo2{suffix}");
+            let results = obsoletes_results(
+                &name,
+                vec![DepInfo {
+                    name: name.clone(),
+                    flags: RPMSENSE_LESS,
+                    epoch: None,
+                    version: Some("1.0".to_string()),
+                    release: None,
+                }],
+            );
+            assert!(
+                sibling_lines(&results).is_empty(),
+                "self-obsoletes must stay quiet ({name}): {results:?}"
+            );
+        }
     }
 
     #[test]
