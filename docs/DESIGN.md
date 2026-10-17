@@ -191,16 +191,22 @@ corpus (§6).
 - `line` = `{n}:` only for spec linting; omitted for binary findings.
 - `L` ∈ {`E`, `W`, `I`}.
 - `check` is space-free (rpmlint raises otherwise).
-- `badness` = ` (Badness: {n})` **only when n > 1**, positioned after the check
+- `badness` = ` (Badness: {n})` **only when n > 0**, positioned after the check
   name and before details.
 - `details` = each non-empty detail prefixed with a single space, concatenated.
+
+The badness threshold is the one deliberate departure in this section:
+the reference renders the column only when n > 1, rpmcrab renders it
+whenever n > 0, so any finding that counts toward the score shows its
+weight in text output (decided in #289 D7; ledgered in
+`tests/parity/divergences.toml`).
 
 Examples that must reproduce exactly:
 
 ```
-llvm21.src: E: unused-rpmlintrc-filter "devel-file-in-non-devel-package .*/usr/include/.*"
+llvm21.src: E: unused-rpmlintrc-filter (Badness: 1) "devel-file-in-non-devel-package .*/usr/include/.*"
 qdmr.spec:24: W: mixed-use-of-spaces-and-tabs (spaces: line 24, tab: line 2)
-llvm21-gold.aarch64: E: suse-zypp-packageand packageand(clang21:binutils)
+llvm21-gold.aarch64: E: suse-zypp-packageand (Badness: 1) packageand(clang21:binutils)
 ```
 
 ### 4.2 The filter-match string
