@@ -20,7 +20,6 @@ configuration:
     <distro:opensuse>/varlink-whitelist.toml
     <distro:opensuse>/world-writable-whitelist.toml
     <distro:opensuse>/zypper-plugins.toml
-    <distro:opensuse>/scoring-strict.override.toml
 checks: 43, packages: 1
 
 explicit-libdep-probe.noarch: E: explicit-lib-dependency libfoo
