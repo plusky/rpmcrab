@@ -34,6 +34,12 @@ systemd-unit-in-etc="""
 A systemd unit has been packaged in /etc/systemd/system. These units should
 be installed in the system unit dir instead.
 """
+systemd-preset-packaged="""
+A systemd preset file has been packaged. Preset files encode the
+distribution's default enablement policy and must be shipped only by the
+distribution's preset packages; enablement belongs in those central preset
+files, not in individual packages.
+"""
 udev-rule-in-etc="""
 A udev rule has been packaged in /etc/udev/rules.d. These rules should be
 installed in the system rules dir instead.
@@ -407,4 +413,10 @@ The symlink contains more `..` segments than the path depth allows. The symlink 
 """
 symlink-should-be-absolute="""
 The symlink uses a relative target where an absolute one is required.
+"""
+manpage-dangling-so-ref="""
+The manual page redirects to another manual page with a .so (soelim)
+line, but the target page is not included in this package, so man
+fails to display the referencing page. Include the target page in
+the package or remove the redirect.
 """

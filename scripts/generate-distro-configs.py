@@ -231,6 +231,36 @@ EXCLUDED_OPENSUSE_CHECKS = [
     "AtomicUpdateCheck",
 ]
 
+# Packages the vendored distro configs name in the `SystemdPresetPackages`
+# key: the distributions' preset packages, the only packages allowed to
+# ship systemd preset files (the `systemd-preset-packaged` finding exempts
+# exactly these names). The key is rpmcrab-only; upstream configs carry
+# no such list, so both flavors carry the same set in their
+# opensuse.toml. The set is the union of the preset shippers verified in
+# openSUSE Factory and in SLFO:Main: the openSUSE branding packages and
+# `systemd-presets-common-SUSE` ship in Factory, the SLE/Elemental
+# branding packages ship in SLFO:Main, and a name shipped by only one
+# flavor is inert in the other. `systemd` and `systemd-mini` ship
+# systemd's own fallback presets in both flavors; `systemd-mini` is not
+# a standalone source package in either — it is the `mini` multibuild
+# flavor of the `systemd` source package, and its binary ships the same
+# preset files as `systemd`.
+SYSTEMD_PRESET_PACKAGES = [
+    "systemd",
+    "systemd-mini",
+    "systemd-presets-branding-Aeon",
+    "systemd-presets-branding-Kalpa",
+    "systemd-presets-branding-MicroOS",
+    "systemd-presets-branding-openSUSE",
+    "systemd-presets-branding-transactional-server",
+    "systemd-presets-common-SUSE",
+    "systemd-presets-branding-SLE",
+    "systemd-presets-branding-SLE_immutable",
+    "systemd-presets-branding-Elemental",
+    "systemd-presets-branding-SLE-SAP",
+    "systemd-presets-branding-SLE-SAP_immutable",
+]
+
 # Findings rpmcrab deliberately killed (see tests/parity/divergences.toml).
 # A Filters/BlockedFilters entry that references *only* one of these findings
 # is pruned — but ONLY when the finding is actually gone from the tree, so the
@@ -1878,6 +1908,34 @@ def append_extra_checks(text, checks):
     return "".join(out)
 
 
+def append_systemd_preset_packages(text, packages):
+    """Insert the `SystemdPresetPackages` key into a TOML document.
+
+    Used for the distro preset packages rpmcrab exempts from the
+    `systemd-preset-packaged` finding (see SYSTEMD_PRESET_PACKAGES).
+    The key goes at the end of the top-level preamble, before the first
+    table header, so it stays a top-level key: at the end of the
+    document it would fall inside the trailing [Descriptions] table and
+    never reach the check. The monthly sync re-emits it deterministically.
+    """
+    block = "\n"
+    block += "# Packages allowed to ship systemd preset files (not from upstream;\n"
+    block += "# see SYSTEMD_PRESET_PACKAGES in scripts/generate-distro-configs.py).\n"
+    block += "SystemdPresetPackages = [\n"
+    for pkg in packages:
+        block += "    %s,\n" % json.dumps(pkg)
+    block += "]\n"
+    lines = text.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.startswith("["):
+            if i and lines[i - 1] == "\n":
+                block = block[1:]
+            lines.insert(i, block)
+            return "".join(lines)
+    out = text if text.endswith("\n") else text + "\n"
+    return out + block
+
+
 def remove_excluded_checks(text, checks):
     """Remove check names from the `Checks = [...]` list in a TOML document.
 
@@ -2032,6 +2090,10 @@ def generate(ref_dir=None, pins=None):
             # the reference effective SLFO config includes it for mingw
             # packages too. Extending this gate to the slfo flavor is the
             # natural fix; kept separate for review (follow-up to #412).
+            if filename == "opensuse.toml":
+                text = append_systemd_preset_packages(
+                    text, SYSTEMD_PRESET_PACKAGES
+                )
             if flavor == "opensuse" and filename == "opensuse.toml":
                 text = append_extra_filters(text, EXTRA_OPENSUSE_FILTERS)
                 # Same gate as the extra filters: SLFO's vendored config
@@ -2077,6 +2139,12 @@ def generate(ref_dir=None, pins=None):
             f"#   Checks: added {c!r} (deliberate rpmcrab divergence, ledgered in"
             " tests/parity/divergences.toml)"
         )
+    provenance.append("#")
+    provenance.append(
+        "# SystemdPresetPackages appended (not from upstream; see SYSTEMD_PRESET_PACKAGES):"
+    )
+    for p in SYSTEMD_PRESET_PACKAGES:
+        provenance.append(f"#   SystemdPresetPackages: added {p!r}")
     provenance.append("#")
     provenance.append("# Excluded Checks (removed from the opensuse flavor; see EXCLUDED_OPENSUSE_CHECKS):")
     for c in EXCLUDED_OPENSUSE_CHECKS:

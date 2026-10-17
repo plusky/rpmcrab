@@ -1046,6 +1046,14 @@ upstream = "https://github.com/rpm-software-management/rpmlint/issues/11"
 
 [[divergence]]
 case = "global"
+check = "FilesCheck"
+kind = "behaviour"
+reason = "New `systemd-preset-packaged` warning with no reference counterpart: a regular file shipped directly under `/usr/lib/systemd/system-preset/` or `/usr/lib/systemd/user-preset/` fires unless the package is named in the `SystemdPresetPackages` config key, which the vendored openSUSE and SLFO distro configs set to the distribution's preset packages. The frozen 2.10.0 reference has no such check and no shipped config names preset packages. Where the key is not configured no package is exempt, so every preset shipper fires."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/634"
+
+[[divergence]]
+case = "global"
 check = "SpecCheck"
 kind = "behaviour"
 reason = "Upstream rpmlint#554: a non-breaking space in %description bodies, Summary: tag lines and %changelog entries is harmless prose typesetting, not a syntax hazard, so the port no longer emits `non-break-space` there; the frozen 2.10.0 reference flags every spec line containing U+00A0 (SpecCheck.py:428-432). Code and scriptlet sections keep the warning."
@@ -2341,3 +2349,51 @@ kind = "behaviour"
 reason = "Deliberate false-positive fix: the port skips %ghost entries in dir-or-file-in-* for every DisallowedDirs entry. The reference applies the finding to %ghost entries with no exemption, so a tmpfiles-created path such as /var/run/<pkg> cannot satisfy both tmpfile-not-in-filelist, which requires the path in %files as %ghost, and dir-or-file-in-var-run. A %ghost installs no payload, so there is nothing in the disallowed directory to forbid; real payload files there still fire at Error. Provenance: bsc#1173166 and bsc#1190386."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/643"
+
+[[divergence]]
+case = "global"
+check = "non-ghost-in-run"
+kind = "behaviour"
+reason = "Deliberate tightening beyond the reference (issue #639): the reference matches /run/ only (FilesCheck.py _check_file_non_ghost_in_run), so a non-ghost payload under /var/run/ passes silently there. The port also matches /var/run/, which is the same directory via symlink on openSUSE (/var/run -> /run, both tmpfs), per the openSUSE systemd packaging guidelines: packages should not contain directories or files under /var/run or /run, and runtime directories belong in tmpfiles.d snippets. Tag, Warning severity and the %ghost exemption are unchanged; only the path coverage widens."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/639"
+
+[[divergence]]
+case = "global"
+check = "shlib-policy-obsoletes-sibling"
+kind = "behaviour"
+reason = "New port-only Error: a package whose name matches the versioned shared library scheme (lib<name><SONAME-number>, with the -32bit/-64bit forms normalised away) that obsoletes a package with the same library stem and a different SONAME number emits E shlib-policy-obsoletes-sibling with the obsoleted package name as detail. The reference has no such finding. Deliberate: the openSUSE shared library packaging policy makes SONAME generations co-installable, and obsoleting a sibling generation breaks that; a version constraint on the obsoletes does not restore co-installability for the obsoleted range, so it still fires, while a same-number self-obsoletes (a rename) and targets outside the scheme stay silent. Pinned by unit tests in shared_library_policy.rs."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/636"
+
+[[divergence]]
+case = "global"
+check = "shlib-policy-etc-payload"
+kind = "behaviour"
+reason = "New port-only Warning: a package whose name matches the versioned shared library scheme (lib<name><SONAME-number>, with the -32bit/-64bit forms normalised away) that ships a non-directory, non-%ghost file under /etc emits W shlib-policy-etc-payload with the path as detail, one finding per path. The reference has no such finding: the SUSE LibraryPolicyCheck file loop skips /etc entirely, so this is deliberate new coverage of a gap in both implementations, not a parity break. The shared library policy makes SONAME generations co-installable only if a versioned package ships nothing but the libraries themselves; an unversioned /etc file shipped identically by the sibling package for the next SONAME generation conflicts at file level (libsemanage1 shipped /etc/selinux/semanage.conf in Leap 15, and libsemanage2 shipping the same path conflicted). Warning only: the conflict materialises only when a sibling SONAME package ships the same path. Directory entries under /etc stay quiet (shared directories are normal) and %ghost entries stay quiet (a ghost is not shipped payload). Pinned by unit tests in shared_library_policy.rs."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/656"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
+reason = "shlib-policy-name-error accepts a package name on either of two limbs: (A) it equals a name derived from the SONAME (stem with '.' folded to '_', plus the version glued or dash-separated per the SLPP construction; stem + '-' + soversion when the SONAME carries a -<pkgversion>), or (B) it ends with the expected suffix at a non-digit boundary, so the trailing version run matches as a whole while the stem is not policed. Both limbs are tried on the name as-is and with a trailing -<letters><digits> flavour segment (libgfortran5-gcc15, libnetcdf22-openmpi5) stripped, and after stripping a trailing -32bit/-64bit (baselibs). The reference (BinariesCheck.py _check_shared_library) uses a plain endswith test on the suffix. Measured over the 2026-10-16 Factory sweep corpus (51,589 RPMs; SONAMEs from RPM provides; 6,537 checkable package/SONAME pairs over 4,429 lib packages, excluding 12 pairs whose SONAMEs take the invalid-soname path): the reference fires on 611 pairs, this guard on 180, and 178 of those fire under both. The port diverges in two directions: stricter — a longer trailing version run no longer satisfies a shorter expected version (libkdecorations3private11 for a .so.1 library, bsc#1237372; that package was renamed libkdecorations3private1 in February 2025, so the shape is pinned by unit test; the only newly firing corpus pairs are the libnvidia-egl-x111 package's libnvidia-egl-xcb.so.1 and libnvidia-egl-xlib.so.1, whose trailing run 111 is not those SONAMEs' version 1); looser — names carrying a flavour or MPI tail after the version are quiet where the reference fires (433 pairs: 375 MPI-tail, 56 gcc-tail, 2 toolkit-tail), and a correct libfoo1-32bit/-64bit is quiet where the reference fires (no baselibs packages in the corpus; pinned by unit test). Names ending in the SONAME version with an unrelated stem stay quiet, as under the reference (libopenssl3 ships libssl.so.3; libicu73 ships libicuuc.so.73); a whole-name-only comparison fires on 1,873 such corpus pairs. A firing of this check carries badness 10000, so under a distro flavour (BadnessThreshold 999) one of the newly firing pairs aborts the run (exit 66) where the reference exits 0."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/646"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "behaviour"
+reason = "Fedora bug 624410: a new `manpage-dangling-so-ref` warning fires when a man page's `.so` (soelim) line names a target page the package does not ship, so `man` fails to display the referencing page. The frozen 2.10.0 reference has no such check: symlink-based man page redirects are covered by the dangling-symlink family, but a `.so` line is file content, and neither tool read man page contents for `.so` references. The target is judged within the package alone, like the dangling-symlink family: a target shipped by another package does not satisfy the reference. Targets resolve against the man root (`/usr/share/man`; the `/usr/man` root is accepted in the absolute form); a referencing page under a locale directory also resolves against its own locale directory, where localised page sets keep their redirect targets, a bare-filename argument resolves against the referencing page's own directory, and a shipped file matches under any compression suffix the codebase recognises for man pages, or none. One finding per (referencing page, missing target). Its staged `--explain` description lives in `crates/rpmcrab-core/data/descriptions/FilesCheck.toml`."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/649"
+
+[[divergence]]
+case = "global"
+check = "FilelistCheck"
+kind = "behaviour"
+reason = "The reference fires filelist-forbidden-sysconfig on %ghost files under /etc/sysconfig: its sysconfig rule has no ghost exemption. Those files are generated by fillup at install time and carry no payload, so the port exempts %ghost files from the rule. Real files under /etc/sysconfig, in /var/adm/fillup-templates and in /etc/rc.config.d still fire. Provenance: bsc#1173167."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/644"

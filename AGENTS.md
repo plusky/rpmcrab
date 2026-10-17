@@ -14,6 +14,7 @@ cargo clippy --workspace --all-targets --features gen --locked -- -D warnings
 cargo test --workspace --all-targets --locked
 cargo deny check
 bash scripts/check-rust-layering.sh
+bash scripts/check-version-consistency.sh
 ```
 
 The second clippy line is **not optional**: `--all-targets` silently skips the

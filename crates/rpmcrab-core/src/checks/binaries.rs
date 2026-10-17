@@ -2622,7 +2622,90 @@ impl BinariesCheck {
                             if let Some(idx) = pkgname.rfind('.') {
                                 pkgname = &pkgname[..idx];
                             }
-                            if !soversion_str.is_empty() && !pkgname.ends_with(&soversion_str) {
+                            // A baselibs package carries the version
+                            // before a trailing -32bit or -64bit.
+                            let pkgname = pkgname
+                                .strip_suffix("-32bit")
+                                .or_else(|| pkgname.strip_suffix("-64bit"))
+                                .unwrap_or(pkgname);
+                            // A name matches when either limb accepts
+                            // it:
+                            //
+                            // (A) It equals a name derived from the
+                            // SONAME itself, per the SLPP construction:
+                            // the stem ('.' folded to '_') plus the
+                            // version, glued (libfoo.so.1 -> libfoo1)
+                            // or dash-separated (libbz2.so.1 ->
+                            // libbz2-1); stem + '-' + soversion when
+                            // the SONAME carries a -<pkgversion>
+                            // (libgame2-1.9.so.10.0.0 ->
+                            // libgame2-1_9-10_0_0). Comparing whole
+                            // derived names is what tells a digit that
+                            // belongs to the stem (libx11.so.1 ->
+                            // libx111) from a longer version run
+                            // (libkdecorations3private11 for .so.1,
+                            // bsc#1237372).
+                            //
+                            // (B) It ends with the expected suffix at a
+                            // non-digit boundary: the trailing version
+                            // run matches as a whole, but the stem is
+                            // not policed. A package legitimately ships
+                            // libraries whose stems its name does not
+                            // derive from (libopenssl3 ships
+                            // libssl.so.3, libicu73 ships
+                            // libicuuc.so.73), and the reference stays
+                            // quiet there.
+                            //
+                            // Both limbs are tried on the name as-is and
+                            // once more with a trailing
+                            // -<letters><digits> flavour segment
+                            // (libgfortran5-gcc15, libnetcdf22-openmpi5)
+                            // stripped: the version sits before the
+                            // flavour tail, which is not part of the
+                            // name.
+                            let stem = match soname.split_once(".so") {
+                                Some((head, _)) => head,
+                                None => soname,
+                            }
+                            .replace('.', "_");
+                            let soversion_pkgform = soversion.replace('.', "_");
+                            let expected: Vec<String> = if pkgversion.is_empty() {
+                                vec![
+                                    format!("{stem}{soversion_pkgform}"),
+                                    format!("{stem}-{soversion_pkgform}"),
+                                ]
+                            } else if soversion.is_empty() {
+                                vec![stem]
+                            } else {
+                                vec![format!("{stem}-{soversion_pkgform}")]
+                            };
+                            fn strip_flavour(name: &str) -> Option<&str> {
+                                let (head, tail) = name.rsplit_once('-')?;
+                                if !head.is_empty()
+                                    && tail.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                                    && tail.chars().last().is_some_and(|c| c.is_ascii_digit())
+                                    && tail.chars().all(|c| c.is_ascii_alphanumeric())
+                                {
+                                    Some(head)
+                                } else {
+                                    None
+                                }
+                            }
+                            fn whole_suffix(name: &str, suffix: &str) -> bool {
+                                name.strip_suffix(suffix).is_some_and(|prefix| {
+                                    prefix
+                                        .chars()
+                                        .next_back()
+                                        .is_none_or(|c| !c.is_ascii_digit())
+                                })
+                            }
+                            let accepts = |name: &str| {
+                                expected.iter().any(|e| e == name)
+                                    || whole_suffix(name, &soversion_str)
+                            };
+                            let name_matches =
+                                accepts(pkgname) || strip_flavour(pkgname).is_some_and(accepts);
+                            if !soversion_str.is_empty() && !name_matches {
                                 add_info(
                                     out,
                                     Level::Error,
@@ -6775,6 +6858,187 @@ description = "explicit priority string bypasses the system crypto policy"
             lines[0]
         );
         assert_lacks(&results, "no-ldconfig-symlink");
+    }
+
+    /// Run the shared-library policy-name test for one package/SONAME
+    /// pair and return the rendered shlib-policy-name-error lines.
+    fn shlib_policy_lines(pkgname: &str, soname: &str, file: &str) -> Vec<String> {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let parent = Path::new(file)
+            .parent()
+            .and_then(|p| p.to_str())
+            .unwrap_or("");
+        let soname_path = if parent.is_empty() {
+            soname.to_string()
+        } else {
+            format!("{parent}/{soname}")
+        };
+        let pkg = synthetic_pkg(pkgname, "x86_64", vec![syn_link(&soname_path, "libfoo.so")]);
+        let pkgfile = syn_file(file, "ELF 64-bit LSB shared object");
+        let mut info = syn_info();
+        info.is_shlib = true;
+        info.soname = Some(soname.to_string());
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_shared_library(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        lines_for(&results, "shlib-policy-name-error")
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The shlib-policy-name-error permutation matrix: every row pins
+    /// one (package name, SONAME) pair to its verdict under the guard.
+    /// Verdicts are pinned from, in order, the SLPP package-naming
+    /// construction (openSUSE:Shared_library_packaging_policy#Package_naming),
+    /// the reference's actual behaviour, and the review traces on
+    /// PR #650; rows mined from the 2026-10-16 Factory sweep corpus
+    /// (51,589 RPMs, SONAMEs from RPM provides) are marked as such.
+    /// The guard accepts a name when it equals a SONAME-derived
+    /// expected name (limb A: stem with '.' folded to '_', version
+    /// glued or dash-separated per the SLPP construction) or when it
+    /// ends with the expected suffix at a non-digit boundary (limb B:
+    /// the trailing version run matches as a whole, the stem is not
+    /// policed), after stripping a trailing baselibs (-32bit/-64bit)
+    /// or flavour (-gcc15, -openmpi4) segment.
+    #[test]
+    fn shlib_policy_name_matrix() {
+        // (package name, SONAME, fires?)
+        let rows: &[(&str, &str, bool)] = &[
+            // Straightforward conformant names.
+            ("libfoo1", "libfoo.so.1", false),
+            ("libfoo-1", "libfoo.so.1", false),
+            ("libblkid1", "libblkid.so.1", false), // SLPP table
+            ("libz1", "libz.so.1", false),         // corpus
+            ("libcurl4", "libcurl.so.4", false),   // corpus
+            ("libstdc++6", "libstdc++.so.6", false), // corpus, '+' stem
+            ("libFLAC14", "libFLAC.so.14", false), // corpus, multi-digit
+            ("libpoppler164", "libpoppler.so.164", false), // corpus, 3-digit
+            ("libgcc_s1", "libgcc_s.so.1", false), // corpus, '_' in stem
+            // Digit-ending stems: the glued form merges the version
+            // into the stem's own digits (limb A); the SLPP dash form
+            // is equally conformant.
+            ("libx111", "libx11.so.1", false), // review trace, PR #650 round 1
+            ("libx11-1", "libx11.so.1", false), // SLPP dash-between-numbers
+            ("libbz2-1", "libbz2.so.1", false), // SLPP table
+            ("libbz21", "libbz2.so.1", false), // glued twin of the SLPP row
+            ("libxml2-2", "libxml2.so.2", false), // corpus (real name)
+            ("libpng16-16", "libpng16.so.16", false), // corpus (real name)
+            ("libpng1616", "libpng16.so.16", false), // glued twin
+            ("libk5crypto3", "libk5crypto.so.3", false), // digits inside stem
+            (
+                "libnvidia-egl-wayland21",
+                "libnvidia-egl-wayland2.so.1",
+                false,
+            ), // corpus
+            ("libnvidia-egl-x111", "libnvidia-egl-x11.so.1", false), // round 1
+            ("libx112", "libx11.so.1", true),  // wrong version, digit stem
+            ("libfoo12", "libfoo.so.2", true), // trailing run 12 != 2
+            // The bsc#1237372 defect class: a longer trailing version
+            // run must not satisfy a shorter expected version.
+            (
+                "libkdecorations3private11",
+                "libkdecorations3private.so.1",
+                true,
+            ),
+            (
+                "libkdecorations3private2",
+                "libkdecorations3private.so.2",
+                false,
+            ), // corpus: the renamed package, correct pairing
+            ("libfoo11", "libfoo.so.1", true),
+            ("libfoo11-32bit", "libfoo.so.1", true),
+            ("libfoo110_0_0", "libfoo.so.10.0.0", true),
+            ("libfoo2", "libfoo.so.1", true),
+            // Composite and -<pkgversion> forms (SLPP construction).
+            ("libgame2-1_9-10_0_0", "libgame2-1.9.so.10.0.0", false), // SLPP table
+            ("libgame2-11_9-10_0_0", "libgame2-1.9.so.10.0.0", true),
+            ("libdb-4_8", "libdb-4.8.so", false), // SLPP table
+            ("libfoo1", "libfoo-1.so", false),    // glued pkgversion-only form
+            ("libfoo-1", "libfoo-1.so", false),   // dash pkgversion-only form
+            ("libfoo11", "libfoo-1.so", true),    // longer run, pkgversion-only
+            ("libfoo2", "libfoo-1.so", true),
+            ("libzziplib-0-13", "libzziplib-0.so.13", false), // SLPP table
+            ("libmwaw-0_3-3_0_11", "libmwaw-0.3.so.3.0.11", false), // SLPP page
+            ("libSDL2_image-2_0-0", "libSDL2_image-2.0.so.0", false), // SLPP page
+            ("libfoo10_0_0", "libfoo.so.10.0.0", false),
+            ("libfoo1_0", "libfoo.so.1.0", false),
+            // Cross-stem names: the name ends in the SONAME version
+            // but derives from a different stem (a sibling library, a
+            // renamed project). The reference stays quiet and the
+            // check polices the version run, not the stem (limb B).
+            ("libopenssl3", "libssl.so.3", false), // review trace, round 2
+            ("libicu73", "libicuuc.so.73", false), // review trace, round 2
+            ("libicu74", "libicuuc.so.73", true),  // wrong version, cross-stem
+            ("libext2fs2", "libe2p.so.2", false),  // corpus
+            ("libgc1", "libcord.so.1", false),     // corpus
+            ("libgomp1", "libgomp-plugin-gcn.so.1", false), // corpus, sibling
+            ("libQt5Gui5", "libQt5EglFSDeviceIntegration.so.5", false), // corpus
+            ("libcasacore9", "libcasa_casa.so.9", false), // corpus
+            ("libapr1-0", "libapr-1.so.0", false), // corpus: glued pkgversion, dashed SO
+            // ...but a sibling whose version run does not match still
+            // fires: the name belongs to libnvidia-egl-x11.so.1, whose
+            // trailing run is 111, not the xcb library's 1.
+            ("libnvidia-egl-x111", "libnvidia-egl-xcb.so.1", true),
+            // Flavour and MPI tails: the version sits before a
+            // trailing -<letters><digits> segment. The strip loosens
+            // the reference where the tail's last digit does not
+            // coincide with the version (libgomp1-gcc15 for .so.1);
+            // the divergence is ledgered with its corpus measurement.
+            ("libgfortran5-gcc15", "libgfortran.so.5", false), // round 1 trace
+            ("libobjc4-gcc14", "libobjc.so.4", false),         // corpus
+            ("libgomp1-gcc15", "libgomp.so.1", false),         // loosening row
+            ("libgomp1-gcc15", "libgomp-plugin-gcn.so.1", false), // corpus
+            ("libstdc++6-gcc15", "libstdc++.so.6", false),     // corpus
+            ("libgfortran6-gcc15", "libgfortran.so.5", true),  // wrong version
+            ("libHYPRE301-openmpi4", "libHYPRE.so.301", false), // corpus, MPI tail
+            ("libnetcdf22-openmpi5", "libnetcdf.so.22", false), // corpus, MPI tail
+            ("libdeal_II9_7_1-openmpi4", "libdeal_II.so.9.7.1", false), // corpus
+            ("libpetsc3_25-openmpi4", "libpetsc.so.3.25", false), // corpus
+            // Baselibs tails: the version sits before -32bit/-64bit.
+            // The reference fires on the correct names; the loosening
+            // is ledgered.
+            ("libfoo1-32bit", "libfoo.so.1", false),
+            ("libx111-32bit", "libx11.so.1", false),
+            ("libfoo1-64bit", "libfoo.so.1", false),
+            // Corpus pairs every predicate fires on: pre-existing
+            // Factory naming violations, unchanged by this guard.
+            ("libLLVM18", "libLLVM.so.18.1", true), // suffix is 18_1
+            ("liblua5_3-5", "liblua.so.5.3", true), // suffix is 5_3
+            // Gates: no version in the SONAME, and non-lib packages,
+            // are outside the check entirely.
+            ("libfoo", "libfoo.so", false),
+            ("foo1", "libfoo.so.1", false),
+        ];
+        // Collect every mismatching row so one run reports the whole
+        // failing set, not just the first cell.
+        let mut failures = Vec::new();
+        for (pkgname, soname, fires) in rows {
+            let file = format!("/usr/lib64/{soname}");
+            let lines = shlib_policy_lines(pkgname, soname, &file);
+            if *fires {
+                if lines.len() != 1 {
+                    failures.push(format!(
+                        "{pkgname} for {soname} must fire once, got: {lines:?}"
+                    ));
+                } else if !lines[0].contains(" E: ") {
+                    failures.push(format!(
+                        "{pkgname} for {soname} must fire at Error level: {}",
+                        lines[0]
+                    ));
+                }
+            } else if !lines.is_empty() {
+                failures.push(format!(
+                    "{pkgname} for {soname} must be quiet, got: {lines:?}"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "matrix mismatches:\n{}",
+            failures.join("\n")
+        );
     }
 
     #[test]

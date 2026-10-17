@@ -369,7 +369,7 @@ mod tests {
             ),
             (
                 "FilesCheck.toml",
-                "271815425b0792a02e74e88b995a73ae138317fa2249c48f7c5a45aa763f0f2e",
+                "5bfcb3ca5e1f912905387f3b0d96ffa63904ecf8293248db8fb582421064be38",
             ),
             (
                 "I18NCheck.toml",
@@ -429,7 +429,7 @@ mod tests {
             ),
             (
                 "SharedLibraryPolicyCheck.toml",
-                "5c86008e156d20ed9000ffc7a1af8beeef25981878730ae25f14d4720faf2342",
+                "c8fc04bebf3c28c69ce0a4766b62fa6f1a076ff449a2e94b9aa8013da74b49e5",
             ),
             (
                 "SignatureCheck.toml",

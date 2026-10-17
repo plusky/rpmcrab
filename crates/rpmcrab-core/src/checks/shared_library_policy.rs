@@ -2,7 +2,8 @@
 //!
 //! Ported from `rpmlint/checks/SharedLibraryPolicyCheck.py`. Findings:
 //! `shlib-policy-missing-lib`, `readelf-failed`, `shlib-unversioned-lib`,
-//! `shlib-fixed-dependency`, `shlib-policy-excessive-dependency`.
+//! `shlib-fixed-dependency`, `shlib-policy-excessive-dependency`,
+//! `shlib-policy-obsoletes-sibling`, `shlib-policy-etc-payload`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -14,6 +15,7 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
+use crate::pkg::pkgfile::is_dir;
 
 const RPMSENSE_EQUAL: u32 = 8;
 const RPMSENSE_GREATER: u32 = 4;
@@ -65,6 +67,39 @@ impl SharedLibraryPolicyCheck {
     }
 }
 
+/// `(stem, SONAME number)` for a package name in the versioned shared
+/// library scheme (`libfoo1`, `libfoo12-32bit`), or `None` for a name
+/// outside the scheme. The `-32bit`/`-64bit` suffix is normalised away,
+/// matching how the scheme pattern treats those forms, and the number
+/// is the full trailing digit run with leading zeroes dropped.
+fn soname_package_parts(re_soname_pkg: &Regex, name: &str) -> Option<(String, String)> {
+    if !is_match(re_soname_pkg, name) {
+        return None;
+    }
+    let core = name
+        .strip_suffix("-32bit")
+        .or_else(|| name.strip_suffix("-64bit"))
+        .unwrap_or(name);
+    let digits_start = core.len()
+        - core
+            .bytes()
+            .rev()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+    if digits_start == core.len() {
+        return None;
+    }
+    let number = core[digits_start..].trim_start_matches('0');
+    Some((
+        core[..digits_start].to_string(),
+        if number.is_empty() {
+            "0".to_string()
+        } else {
+            number.to_string()
+        },
+    ))
+}
+
 impl Check for SharedLibraryPolicyCheck {
     fn name(&self) -> &'static str {
         "SharedLibraryPolicyCheck"
@@ -80,6 +115,56 @@ impl Check for SharedLibraryPolicyCheck {
             || pkg.name.ends_with("-lang")
         {
             return;
+        }
+
+        // A versioned library package must not obsolete a sibling SONAME
+        // generation: the scheme exists so the generations are
+        // co-installable, and an obsoletes of one by another removes it.
+        // A version constraint does not change that for the obsoleted
+        // range, so the dependency's flags and version are not consulted.
+        if let Some((stem, number)) = soname_package_parts(&self.re_soname_pkg, &pkg.name) {
+            for obs in &pkg.obsoletes {
+                if let Some((obs_stem, obs_number)) =
+                    soname_package_parts(&self.re_soname_pkg, &obs.name)
+                    && obs_stem == stem
+                    && obs_number != number
+                {
+                    add_info(
+                        out,
+                        Level::Error,
+                        pkg,
+                        "shlib-policy-obsoletes-sibling",
+                        &[obs.name.as_str()],
+                    );
+                }
+            }
+        }
+
+        // A versioned library package ships nothing but the libraries
+        // themselves: payload under /etc is shipped identically by the
+        // sibling package for the next SONAME generation, and the two
+        // conflict at file level. Directory entries are shared by
+        // design and %ghost entries are not shipped payload, so only
+        // non-directory, non-ghost entries fire.
+        if is_match(&self.re_soname_pkg, &pkg.name) {
+            let mut etc_files: Vec<&str> = pkg
+                .files
+                .iter()
+                .filter(|f| f.name.starts_with("/etc/"))
+                .filter(|f| !is_dir(f.mode))
+                .filter(|f| !f.is_ghost())
+                .map(|f| f.name.as_str())
+                .collect();
+            etc_files.sort_unstable();
+            for path in etc_files {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "shlib-policy-etc-payload",
+                    &[path],
+                );
+            }
         }
 
         // A policy-named package with no library files at all.
@@ -409,6 +494,146 @@ mod tests {
         elf
     }
 
+    fn obsoletes_results(name: &str, obsoletes: Vec<DepInfo>) -> Vec<(String, String)> {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture header");
+        pkg.name = name.to_string();
+        pkg.files = vec![];
+        pkg.requires = vec![];
+        pkg.obsoletes = obsoletes;
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = checker();
+        check.check_binary(&pkg, &config, &mut out);
+        out.results().to_vec()
+    }
+
+    fn sibling_lines(results: &[(String, String)]) -> Vec<&str> {
+        results
+            .iter()
+            .filter(|(n, _)| n == "shlib-policy-obsoletes-sibling")
+            .map(|(_, line)| line.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn sibling_soname_obsoletes_fires_at_error() {
+        let results = obsoletes_results("libfoo2", vec![dep("libfoo1")]);
+        let lines = sibling_lines(&results);
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("libfoo1"),
+            "detail names the obsoleted sibling: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn self_obsoletes_is_quiet() {
+        // A rename-style self-obsoletes with a version cap names the
+        // package's own SONAME generation, not a sibling.
+        let results = obsoletes_results(
+            "libfoo2",
+            vec![DepInfo {
+                name: "libfoo2".to_string(),
+                flags: RPMSENSE_LESS,
+                epoch: None,
+                version: Some("1.0".to_string()),
+                release: None,
+            }],
+        );
+        assert!(
+            sibling_lines(&results).is_empty(),
+            "self-obsoletes must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn unrelated_obsoletes_is_quiet() {
+        let results = obsoletes_results("libfoo2", vec![dep("libbar1")]);
+        assert!(
+            sibling_lines(&results).is_empty(),
+            "unrelated package must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn unversioned_obsoletes_is_quiet() {
+        let results = obsoletes_results("libfoo2", vec![dep("libfoo")]);
+        assert!(
+            sibling_lines(&results).is_empty(),
+            "unversioned target must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn bit_suffix_sibling_obsoletes_fires() {
+        // The module's scheme pattern treats the -32bit form as the same
+        // versioned package name, so the suffix is normalised away on
+        // both sides before the stem and number are compared.
+        let results = obsoletes_results("libfoo2-32bit", vec![dep("libfoo1-32bit")]);
+        assert_eq!(
+            sibling_lines(&results).len(),
+            1,
+            "32bit sibling must fire: {results:?}"
+        );
+        let results = obsoletes_results("libfoo2", vec![dep("libfoo1-32bit")]);
+        assert_eq!(
+            sibling_lines(&results).len(),
+            1,
+            "mixed-suffix sibling must fire: {results:?}"
+        );
+        let results = obsoletes_results(
+            "libfoo2-32bit",
+            vec![DepInfo {
+                name: "libfoo2-32bit".to_string(),
+                flags: RPMSENSE_LESS,
+                epoch: None,
+                version: Some("1.0".to_string()),
+                release: None,
+            }],
+        );
+        assert!(
+            sibling_lines(&results).is_empty(),
+            "32bit self-obsoletes must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn multi_digit_soname_obsoletes_fires() {
+        // The full trailing number is the SONAME generation: 10 differs
+        // from both 9 and 1.
+        let results = obsoletes_results("libfoo10", vec![dep("libfoo9"), dep("libfoo1")]);
+        assert_eq!(
+            sibling_lines(&results).len(),
+            2,
+            "both multi-digit siblings must fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn versioned_sibling_obsoletes_fires() {
+        // A version constraint does not restore co-installability for
+        // the obsoleted range, so a capped sibling obsoletes still fires.
+        let results = obsoletes_results(
+            "libfoo2",
+            vec![DepInfo {
+                name: "libfoo1".to_string(),
+                flags: RPMSENSE_LESS,
+                epoch: None,
+                version: Some("1.0".to_string()),
+                release: None,
+            }],
+        );
+        assert_eq!(
+            sibling_lines(&results).len(),
+            1,
+            "version-capped sibling must fire: {results:?}"
+        );
+    }
+
     #[test]
     fn fixed_dependency_on_non_lib_package_warns() {
         // A versioned library package with a hard (=) dependency on a
@@ -538,6 +763,198 @@ mod tests {
             lines[0].contains("libfoo = 1.0-1"),
             "detail names the pinned dependency: {}",
             lines[0]
+        );
+    }
+
+    fn etc_results(name: &str, extra: Vec<PkgFile>) -> Vec<(String, String)> {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let so_path = dir.path().join("libfoo.so.1");
+        std::fs::write(&so_path, minimal_elf("libfoo.so.1")).expect("write elf");
+
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture header");
+        pkg.name = name.to_string();
+        let mut files = vec![PkgFile {
+            name: "/usr/lib64/libfoo.so.1".to_string(),
+            path: so_path.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            magic: "ELF 64-bit LSB shared object".to_string(),
+            ..Default::default()
+        }];
+        files.extend(extra);
+        pkg.files = files;
+        pkg.requires = vec![];
+
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = checker();
+        check.check_binary(&pkg, &config, &mut out);
+        out.results().to_vec()
+    }
+
+    fn etc_file(name: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            mode: 0o100644,
+            ..Default::default()
+        }
+    }
+
+    fn etc_lines(results: &[(String, String)]) -> Vec<&str> {
+        results
+            .iter()
+            .filter(|(n, _)| n == "shlib-policy-etc-payload")
+            .map(|(_, line)| line.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn etc_config_file_in_versioned_shlib_warns() {
+        // The libsemanage shape: a versioned shlib package shipping an
+        // unversioned config file under /etc.
+        let results = etc_results("libsemanage1", vec![etc_file("/etc/selinux/semanage.conf")]);
+        let lines = etc_lines(&results);
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/etc/selinux/semanage.conf"),
+            "detail names the shipped path: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn etc_symlink_in_versioned_shlib_warns() {
+        // A symlink occupies the path just like a regular file.
+        let link = PkgFile {
+            name: "/etc/selinux/semanage.conf".to_string(),
+            mode: 0o120777,
+            linkto: "/etc/selinux/semanage.conf.real".to_string(),
+            ..Default::default()
+        };
+        let results = etc_results("libfoo1", vec![link]);
+        let lines = etc_lines(&results);
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+    }
+
+    #[test]
+    fn etc_directory_entry_is_quiet() {
+        // Directory entries are shared by design; only payload files fire.
+        let dir_entry = PkgFile {
+            name: "/etc/selinux".to_string(),
+            mode: 0o40755,
+            ..Default::default()
+        };
+        let results = etc_results("libfoo1", vec![dir_entry]);
+        assert!(
+            etc_lines(&results).is_empty(),
+            "directory entry must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn etc_ghost_entry_is_quiet() {
+        // A %ghost entry is not shipped payload, so no sibling package
+        // can conflict over it at file level.
+        let ghost = PkgFile {
+            flags: crate::pkg::pkgfile::RPMFILE_GHOST,
+            ..etc_file("/etc/selinux/semanage.conf")
+        };
+        let results = etc_results("libfoo1", vec![ghost]);
+        assert!(
+            etc_lines(&results).is_empty(),
+            "ghost entry must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn etc_payload_in_non_shlib_package_is_quiet() {
+        let results = etc_results("foo-daemon", vec![etc_file("/etc/foo/foo.conf")]);
+        assert!(
+            etc_lines(&results).is_empty(),
+            "non-library package must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn etc_payload_in_devel_package_is_quiet() {
+        let results = etc_results("libfoo1-devel", vec![etc_file("/etc/foo/foo.conf")]);
+        assert!(
+            etc_lines(&results).is_empty(),
+            "-devel package must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn etc_payload_in_lang_package_is_quiet() {
+        let results = etc_results("libfoo1-lang", vec![etc_file("/etc/foo/foo.conf")]);
+        assert!(
+            etc_lines(&results).is_empty(),
+            "-lang package must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn etc_payload_in_unversioned_lib_is_quiet() {
+        // The classifier is the module naming-scheme pattern, which
+        // requires the trailing SONAME number: an unversioned lib
+        // package is outside the versioned shlib population.
+        let results = etc_results("libfoo", vec![etc_file("/etc/foo/foo.conf")]);
+        assert!(
+            etc_lines(&results).is_empty(),
+            "unversioned lib package must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn etc_payload_in_32bit_shlib_warns() {
+        // The naming scheme treats the -32bit form as the same
+        // versioned package name.
+        let results = etc_results("libfoo1-32bit", vec![etc_file("/etc/foo/foo.conf")]);
+        assert_eq!(
+            etc_lines(&results).len(),
+            1,
+            "exactly one finding: {results:?}"
+        );
+    }
+
+    #[test]
+    fn library_only_shlib_is_quiet() {
+        let results = etc_results("libfoo1", vec![]);
+        assert!(results.is_empty(), "no findings at all: {results:?}");
+    }
+
+    #[test]
+    fn non_etc_payload_in_versioned_shlib_is_quiet() {
+        let results = etc_results("libfoo1", vec![etc_file("/usr/share/foo/foo.conf")]);
+        assert!(
+            etc_lines(&results).is_empty(),
+            "payload outside /etc must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn multiple_etc_files_each_warn_sorted() {
+        let results = etc_results(
+            "libfoo1",
+            vec![
+                etc_file("/etc/selinux/semanage.conf"),
+                etc_file("/etc/ld.so.conf.d/foo.conf"),
+            ],
+        );
+        let lines = etc_lines(&results);
+        assert_eq!(lines.len(), 2, "one finding per path: {results:?}");
+        assert!(
+            lines[0].contains("/etc/ld.so.conf.d/foo.conf"),
+            "findings sorted by path: {}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("/etc/selinux/semanage.conf"),
+            "findings sorted by path: {}",
+            lines[1]
         );
     }
 }

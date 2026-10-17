@@ -6,8 +6,10 @@
 //!
 //! Deliberate gaps are ledgered in `tests/parity/divergences.toml`.
 //!
-//! One finding has no reference counterpart: `debug-files-in-non-debug-package`
-//! (upstream feature request rpm-software-management/rpmlint#11).
+//! Two findings have no reference counterpart: `debug-files-in-non-debug-package`
+//! (upstream feature request rpm-software-management/rpmlint#11) and
+//! `systemd-preset-packaged` (preset files are distro policy, shipped only
+//! by the packages named in the `SystemdPresetPackages` config key).
 
 #![allow(clippy::collapsible_if)]
 
@@ -55,6 +57,67 @@ fn man_binary_basename(filename: &str) -> Option<&str> {
         }
     }
     split.map(|i| &filename[..i])
+}
+
+/// Compression suffixes a shipped man page target may carry, mirroring
+/// `compr_regex`: a `.so` reference is satisfied by the target name with
+/// any of these suffixes, or with none.
+const MAN_COMPRESSION_SUFFIXES: &[&str] =
+    &[".gz", ".z", ".Z", ".zip", ".bz2", ".lzma", ".xz", ".zst"];
+
+/// `path` with one trailing man page compression suffix removed, when it
+/// carries one.
+fn strip_man_compression_suffix(path: &str) -> &str {
+    for suffix in MAN_COMPRESSION_SUFFIXES {
+        if let Some(stripped) = path.strip_suffix(suffix) {
+            return stripped;
+        }
+    }
+    path
+}
+
+/// The `.so` targets named by one man page's text: the first
+/// whitespace-delimited token of every line that opens with the soelim
+/// request (`.so` followed by whitespace). Comment lines (`.\"`) never
+/// open with the request, and a request without an argument names no
+/// target.
+fn manpage_so_targets(text: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix(".so") else {
+            continue;
+        };
+        if !rest.starts_with([' ', '\t']) {
+            continue;
+        }
+        if let Some(target) = rest.split_whitespace().next() {
+            targets.push(target.to_string());
+        }
+    }
+    targets
+}
+
+/// Resolve one `.so` argument to the man-root-relative path it names
+/// (`man3/popen.3`), or `None` when the argument names no man-root page:
+/// relative arguments are already man-root-relative, absolute arguments
+/// count only in their `/usr/share/man/...` or `/usr/man/...` form, and
+/// bare filenames or other absolute paths name no man-root page.
+fn manpage_so_root_relative(arg: &str) -> Option<String> {
+    if let Some(rel) = arg.strip_prefix("/usr/share/man/") {
+        return Some(rel.to_string());
+    }
+    if let Some(rel) = arg.strip_prefix("/usr/man/") {
+        return Some(rel.to_string());
+    }
+    if arg.starts_with('/') {
+        return None;
+    }
+    let (dir, _) = arg.split_once('/')?;
+    if dir.len() > 3 && dir.starts_with("man") {
+        Some(arg.to_string())
+    } else {
+        None
+    }
 }
 
 /// Whether the `spurious-executable-perm` finding is suppressed for
@@ -433,6 +496,7 @@ pub struct FilesCheck {
     standard_users: Vec<String>,
     standard_groups: Vec<String>,
     disallowed_dirs: Vec<String>,
+    preset_packages: Vec<String>,
     dangling_exceptions: Vec<(String, Regex)>,
     ldconfig_re: Regex,
     python_default_version: String,
@@ -553,6 +617,7 @@ impl FilesCheck {
             standard_users: get_strings("StandardUsers"),
             standard_groups: get_strings("StandardGroups"),
             disallowed_dirs: get_strings("DisallowedDirs"),
+            preset_packages: get_strings("SystemdPresetPackages"),
             dangling_exceptions: dangling,
             ldconfig_re: Regex::new(r"(?m)^[^#]*ldconfig").expect("static regex"),
             python_default_version: get_str("PythonDefaultVersion"),
@@ -667,6 +732,7 @@ impl Check for FilesCheck {
         for f in &pkg.files {
             self.check_file(pkg, &f.name, f, &mut st, out);
         }
+        self.check_manpage_so_refs(pkg, out);
         self.check_debug_files_in_non_debug_package(pkg, &st, out);
         self.check_log_files_without_logrotate(pkg, &st, out);
         self.check_debuginfo_without_sources(pkg, &st, out);
@@ -1059,6 +1125,7 @@ impl FilesCheck {
         self.check_file_non_ghost_in_run(pkg, fname, pkg, out);
         self.check_file_mimeinfo_cache(pkg, fname, pkgfile, out);
         self.check_file_systemd_unit_in_etc(pkg, fname, out);
+        self.check_file_systemd_preset(pkg, fname, pkgfile, out);
         self.check_file_udev_rule_in_etc(pkg, fname, out);
         self.check_file_tmpfiles_conf_in_etc(pkg, fname, out);
         self.check_file_subdir_in_bin(pkg, fname, out);
@@ -1576,6 +1643,117 @@ impl FilesCheck {
 }
 
 impl FilesCheck {
+    /// The text of a man page, decompressed through the probed tools
+    /// when its name carries a compression suffix. `None` when the
+    /// content cannot be obtained (unreadable file, missing or failing
+    /// decompressor): the page's references cannot be judged, so the
+    /// page is skipped rather than guessed at — the absent-tool stance
+    /// `is_utf8_file` takes.
+    fn manpage_text(&self, pkgfile: &PkgFile) -> Option<String> {
+        /// Decompressed man pages stay far below this bound; it only
+        /// caps a decompressor runaway.
+        const MANPAGE_TEXT_LIMIT: u64 = 8 * 1024 * 1024;
+        match self.decompressor_for(&pkgfile.name) {
+            Some(tool) => {
+                let mut cmd = tool.command()?;
+                cmd.arg("-dc")
+                    .arg(&pkgfile.path)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null());
+                let mut child = cmd.spawn().ok()?;
+                let bytes = child
+                    .stdout
+                    .take()
+                    .and_then(|s| read_prefix(s, MANPAGE_TEXT_LIMIT).ok());
+                let status = child.wait().ok()?;
+                if !status.success() {
+                    return None;
+                }
+                Some(String::from_utf8_lossy(&bytes?).into_owned())
+            }
+            None => {
+                let bytes = std::fs::read(&pkgfile.path).ok()?;
+                Some(String::from_utf8_lossy(&bytes).into_owned())
+            }
+        }
+    }
+
+    /// A man page can redirect to another page with a `.so` line (a
+    /// soelim include); when the target page is not shipped, `man`
+    /// fails to display the referencing page. The reference is judged
+    /// within the package alone, like the dangling-symlink family: a
+    /// target shipped by another package does not satisfy it. A shipped
+    /// file matches under any compression suffix, or none. One finding
+    /// per (referencing page, missing target).
+    ///
+    /// Resolution mirrors how the target is found at display time: a
+    /// `man<section>/<page>` argument resolves against the man root,
+    /// a bare filename against the referencing page's own directory,
+    /// and a page under a locale directory (`/usr/share/man/de/...`)
+    /// also resolves against that locale directory, which is where
+    /// localised page sets keep their redirect targets.
+    fn check_manpage_so_refs(&self, pkg: &Pkg, out: &mut Filter) {
+        let shipped: HashSet<&str> = pkg
+            .files
+            .iter()
+            .map(|f| strip_man_compression_suffix(&f.name))
+            .collect();
+        for pkgfile in &pkg.files {
+            if !is_reg(pkgfile.mode) {
+                continue;
+            }
+            let Ok(Some(caps)) = self.man_base_re.captures(&pkgfile.name) else {
+                continue;
+            };
+            let page_root = caps.name("path").map(|m| m.as_str()).unwrap_or("");
+            let page_lang = caps.name("lang").map(|m| m.as_str());
+            let Some(text) = self.manpage_text(pkgfile) else {
+                continue;
+            };
+            let mut seen: HashSet<String> = HashSet::new();
+            for arg in manpage_so_targets(&text) {
+                let candidates: Vec<String> = if !arg.contains('/') {
+                    let dir = pkgfile
+                        .name
+                        .rsplit_once('/')
+                        .map(|(d, _)| d)
+                        .unwrap_or_default();
+                    vec![format!("{dir}/{arg}")]
+                } else {
+                    let Some(rel) = manpage_so_root_relative(&arg) else {
+                        continue;
+                    };
+                    let rel = strip_man_compression_suffix(&rel);
+                    let mut cands =
+                        vec![format!("/usr/share/man/{rel}"), format!("/usr/man/{rel}")];
+                    if let Some(lang) = page_lang {
+                        cands.push(format!("{page_root}/{lang}/{rel}"));
+                    }
+                    cands
+                };
+                let candidates: Vec<&str> = candidates
+                    .iter()
+                    .map(|c| strip_man_compression_suffix(c))
+                    .collect();
+                if !seen.insert(candidates[0].to_string()) {
+                    continue;
+                }
+                if !candidates.iter().any(|c| shipped.contains(c)) {
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "manpage-dangling-so-ref",
+                        &[&pkgfile.name, &arg],
+                    );
+                }
+            }
+        }
+    }
+}
+
+impl FilesCheck {
     fn check_file_manpage(
         &self,
         pkg: &Pkg,
@@ -1754,7 +1932,11 @@ impl FilesCheck {
     }
 
     fn check_file_non_ghost_in_run(&self, pkg: &Pkg, fname: &str, pkg_ref: &Pkg, out: &mut Filter) {
-        if fname.starts_with("/run/") && !pkg_ref.ghost_files.contains(&fname.to_string()) {
+        // /var/run is a symlink to /run on openSUSE, so both spellings name
+        // the same tmpfs directory.
+        if (fname.starts_with("/run/") || fname.starts_with("/var/run/"))
+            && !pkg_ref.ghost_files.contains(&fname.to_string())
+        {
             add_info(out, Level::Warning, pkg, "non-ghost-in-run", &[fname]);
         }
     }
@@ -1762,6 +1944,43 @@ impl FilesCheck {
     fn check_file_systemd_unit_in_etc(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
         if fname.starts_with("/etc/systemd/system/") {
             add_info(out, Level::Warning, pkg, "systemd-unit-in-etc", &[fname]);
+        }
+    }
+
+    fn check_file_systemd_preset(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        out: &mut Filter,
+    ) {
+        // Preset files encode the distribution's default enablement policy
+        // and are shipped only by its preset packages (the
+        // `SystemdPresetPackages` config key); any other package shipping
+        // one sets enablement policy outside that central place.
+        if self.preset_packages.iter().any(|n| n == &pkg.name) {
+            return;
+        }
+        if !pkgfile::is_reg(pkgfile.mode) {
+            return;
+        }
+        for dir in [
+            "/usr/lib/systemd/system-preset/",
+            "/usr/lib/systemd/user-preset/",
+        ] {
+            if let Some(base) = fname.strip_prefix(dir) {
+                if !base.contains('/') && base.len() > ".preset".len() && base.ends_with(".preset")
+                {
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "systemd-preset-packaged",
+                        &[fname],
+                    );
+                }
+                break;
+            }
         }
     }
 
@@ -3655,6 +3874,60 @@ mod tests {
 
     fn finding_names(results: &[(String, String)]) -> Vec<String> {
         results.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    #[test]
+    fn non_ghost_in_run_fires_for_var_run_file() {
+        // /var/run is a symlink to /run on openSUSE, so a non-ghost file
+        // under either spelling is a file in the same tmpfs directory.
+        for path in ["/run/fcprobe/pid", "/var/run/fcprobe/pid"] {
+            let results = run_files_check_with_files(vec![plain_file(path)]);
+            let names = finding_names(&results);
+            assert_has(&names, "non-ghost-in-run");
+            let (_, line) = results
+                .iter()
+                .find(|(n, _)| n == "non-ghost-in-run")
+                .expect("finding fires");
+            assert!(
+                line.contains(": W: non-ghost-in-run") && line.contains(path),
+                "warning line names the path: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_ghost_in_run_ghost_var_run_is_quiet() {
+        for path in ["/run/fcprobe/pid", "/var/run/fcprobe/pid"] {
+            let names = finding_names(&run_files_check_with_files(vec![ghost_file(path)]));
+            assert_lacks(&names, "non-ghost-in-run");
+        }
+    }
+
+    #[test]
+    fn non_ghost_in_run_ignores_other_var_dirs() {
+        for path in [
+            "/var/lib/fcprobe/pid",
+            "/var/log/fcprobe/pid",
+            "/var/spool/fcprobe/pid",
+        ] {
+            let names = finding_names(&run_files_check_with_files(vec![plain_file(path)]));
+            assert_lacks(&names, "non-ghost-in-run");
+        }
+    }
+
+    #[test]
+    fn non_ghost_in_run_bare_dir_symmetry() {
+        // The /run/ spelling fires only on paths carrying the trailing
+        // slash: the bare directory name itself stays quiet. The
+        // /var/run spelling mirrors that exactly.
+        for path in ["/run", "/var/run"] {
+            let names = finding_names(&run_files_check_with_files(vec![plain_file(path)]));
+            assert_lacks(&names, "non-ghost-in-run");
+        }
+        for path in ["/run/", "/var/run/"] {
+            let names = finding_names(&run_files_check_with_files(vec![plain_file(path)]));
+            assert_has(&names, "non-ghost-in-run");
+        }
     }
 
     #[test]
@@ -7364,6 +7637,522 @@ mod tests {
     }
 
     #[test]
+    fn manpage_so_targets_parsing() {
+        let text = ".so man3/popen.3\n.so\tman1/foo.1 trailing\n.\\\" .so man1/no.1\n.so\n.sox man1/no.1\nplain text\n.so man2/bar.2\n";
+        assert_eq!(
+            manpage_so_targets(text),
+            vec![
+                "man3/popen.3".to_string(),
+                "man1/foo.1".to_string(),
+                "man2/bar.2".to_string()
+            ]
+        );
+        assert!(manpage_so_targets("").is_empty());
+    }
+
+    #[test]
+    fn manpage_so_root_relative_forms() {
+        assert_eq!(
+            manpage_so_root_relative("man3/popen.3"),
+            Some("man3/popen.3".to_string())
+        );
+        assert_eq!(
+            manpage_so_root_relative("mann/intro.n"),
+            Some("mann/intro.n".to_string())
+        );
+        assert_eq!(
+            manpage_so_root_relative("/usr/share/man/man3/popen.3"),
+            Some("man3/popen.3".to_string())
+        );
+        assert_eq!(
+            manpage_so_root_relative("/usr/man/man1/x.1"),
+            Some("man1/x.1".to_string())
+        );
+        assert_eq!(manpage_so_root_relative("/etc/passwd"), None);
+        assert_eq!(manpage_so_root_relative("popen.3"), None);
+        assert_eq!(manpage_so_root_relative("otherdir/x.1"), None);
+    }
+
+    #[test]
+    fn strip_man_compression_suffix_cases() {
+        assert_eq!(
+            strip_man_compression_suffix("/usr/share/man/man3/popen.3.gz"),
+            "/usr/share/man/man3/popen.3"
+        );
+        assert_eq!(
+            strip_man_compression_suffix("/usr/share/man/man3/popen.3.zst"),
+            "/usr/share/man/man3/popen.3"
+        );
+        assert_eq!(
+            strip_man_compression_suffix("/usr/share/man/man3/popen.3"),
+            "/usr/share/man/man3/popen.3"
+        );
+        assert_eq!(
+            strip_man_compression_suffix("/usr/share/man/man3/popen.3x"),
+            "/usr/share/man/man3/popen.3x"
+        );
+    }
+
+    /// Build a package whose files carry real on-disk content, so the
+    /// man page `.so` scan reads actual bytes: `(name, mode, content)`
+    /// triples written under a fresh tempdir.
+    fn manpage_pkg(dir: &tempfile::TempDir, files: &[(&str, u32, &[u8])]) -> Pkg {
+        let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
+        let mut pkg =
+            Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        pkg.files = files
+            .iter()
+            .map(|(name, mode, content)| {
+                let path = dir.path().join(name.trim_start_matches('/'));
+                std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+                std::fs::write(&path, content).expect("write temp file");
+                PkgFile {
+                    name: name.to_string(),
+                    path: path.to_string_lossy().into_owned(),
+                    mode: *mode,
+                    user: "root".to_string(),
+                    group: "root".to_string(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        pkg
+    }
+
+    fn so_ref_hits(results: &[(String, String)]) -> Vec<&(String, String)> {
+        results
+            .iter()
+            .filter(|(n, _)| n == "manpage-dangling-so-ref")
+            .collect()
+    }
+
+    #[test]
+    fn manpage_so_ref_missing_target_fires_warning() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[(
+                "/usr/share/man/man3/alias.3",
+                0o100644,
+                b".so man3/popen.3\n".as_slice(),
+            )],
+        );
+        let results = run_check_binary(&pkg);
+        let hits = so_ref_hits(&results);
+        assert_eq!(
+            hits.len(),
+            1,
+            "one missing .so target must fire once: {results:?}"
+        );
+        assert!(
+            hits[0].1.contains(": W: manpage-dangling-so-ref"),
+            "the finding is a warning: {}",
+            hits[0].1
+        );
+        assert!(
+            hits[0].1.contains("/usr/share/man/man3/alias.3"),
+            "the detail names the referencing page: {}",
+            hits[0].1
+        );
+        assert!(
+            hits[0].1.contains("man3/popen.3"),
+            "the detail names the missing target: {}",
+            hits[0].1
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_shipped_target_is_quiet() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/man/man3/alias.3",
+                    0o100644,
+                    b".so man3/popen.3\n".as_slice(),
+                ),
+                (
+                    "/usr/share/man/man3/popen.3",
+                    0o100644,
+                    b".TH popen 3\n".as_slice(),
+                ),
+            ],
+        );
+        let results = run_check_binary(&pkg);
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "a shipped uncompressed target satisfies the reference: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_shipped_gz_target_is_quiet() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/man/man3/alias.3",
+                    0o100644,
+                    b".so man3/popen.3\n".as_slice(),
+                ),
+                (
+                    "/usr/share/man/man3/popen.3.gz",
+                    0o100644,
+                    b"compressed\n".as_slice(),
+                ),
+            ],
+        );
+        let results = run_check_binary(&pkg);
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "a shipped .gz target satisfies the reference: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_shipped_xz_target_is_quiet() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/man/man3/alias.3",
+                    0o100644,
+                    b".so man3/popen.3\n".as_slice(),
+                ),
+                (
+                    "/usr/share/man/man3/popen.3.xz",
+                    0o100644,
+                    b"compressed\n".as_slice(),
+                ),
+            ],
+        );
+        let results = run_check_binary(&pkg);
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "a shipped .xz target satisfies the reference: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_locale_page_resolves_against_man_root() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/man/de/man1/alias.1",
+                    0o100644,
+                    b".so man1/real.1\n".as_slice(),
+                ),
+                (
+                    "/usr/share/man/man1/real.1.gz",
+                    0o100644,
+                    b"compressed\n".as_slice(),
+                ),
+            ],
+        );
+        let results = run_check_binary(&pkg);
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "a locale page resolves its target against the man root: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_locale_target_in_same_locale_is_quiet() {
+        // Localised page sets keep their redirect targets in the same
+        // locale directory: a target shipped solely under the
+        // referencing page's locale directory satisfies the reference.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/man/de/man1/alias.1",
+                    0o100644,
+                    b".so man1/real.1\n".as_slice(),
+                ),
+                (
+                    "/usr/share/man/de/man1/real.1.gz",
+                    0o100644,
+                    b"compressed\n".as_slice(),
+                ),
+            ],
+        );
+        let results = run_check_binary(&pkg);
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "a same-locale target satisfies the reference: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_locale_target_in_other_locale_fires() {
+        // Only the referencing page's own locale directory counts: a
+        // target shipped under a different locale does not satisfy it.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/man/de/man1/alias.1",
+                    0o100644,
+                    b".so man1/real.1\n".as_slice(),
+                ),
+                (
+                    "/usr/share/man/fr/man1/real.1.gz",
+                    0o100644,
+                    b"compressed\n".as_slice(),
+                ),
+            ],
+        );
+        let results = run_check_binary(&pkg);
+        assert_eq!(
+            so_ref_hits(&results).len(),
+            1,
+            "a target in another locale does not resolve the reference: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_bare_target_resolves_in_page_directory() {
+        // A bare filename names a page in the referencing page's own
+        // directory (the systemd/pmem stub shape).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/man/man3/alias.3",
+                    0o100644,
+                    b".so popen.3\n.so missing.3\n".as_slice(),
+                ),
+                (
+                    "/usr/share/man/man3/popen.3.gz",
+                    0o100644,
+                    b"compressed\n".as_slice(),
+                ),
+            ],
+        );
+        let results = run_check_binary(&pkg);
+        let hits = so_ref_hits(&results);
+        assert_eq!(
+            hits.len(),
+            1,
+            "only the missing bare target fires: {results:?}"
+        );
+        assert!(
+            hits[0].1.contains("missing.3"),
+            "the detail names the missing bare target: {}",
+            hits[0].1
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_symlink_target_counts_as_shipped() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/man/man3/alias.3",
+                    0o100644,
+                    b".so man3/popen.3\n".as_slice(),
+                ),
+                (
+                    "/usr/share/man/man3/popen.3.gz",
+                    0o120777,
+                    b"compressed\n".as_slice(),
+                ),
+            ],
+        );
+        let results = run_check_binary(&pkg);
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "a target shipped as a symlink counts as shipped: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_comments_and_non_requests_are_quiet() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[(
+                "/usr/share/man/man1/quiet.1",
+                0o100644,
+                b".\\\" .so man1/ghost.1\n.TH quiet 1\n.so\n.sox man1/ghost.1\nplain .so man1/ghost.1\n"
+                    .as_slice(),
+            )],
+        );
+        let results = run_check_binary(&pkg);
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "comments, argument-less requests and prose name no target: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_ignores_non_man_files() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[
+                ("/usr/bin/foo", 0o100755, b".so man1/ghost.1\n".as_slice()),
+                (
+                    "/usr/share/doc/foo/README",
+                    0o100644,
+                    b".so man1/ghost.1\n".as_slice(),
+                ),
+            ],
+        );
+        let results = run_check_binary(&pkg);
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "only man pages are scanned for .so references: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_absolute_form() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/man/man3/alias.3",
+                    0o100644,
+                    b".so /usr/share/man/man3/popen.3\n.so /usr/share/man/man1/missing.1\n"
+                        .as_slice(),
+                ),
+                (
+                    "/usr/share/man/man3/popen.3",
+                    0o100644,
+                    b".TH popen 3\n".as_slice(),
+                ),
+            ],
+        );
+        let results = run_check_binary(&pkg);
+        let hits = so_ref_hits(&results);
+        assert_eq!(
+            hits.len(),
+            1,
+            "only the missing absolute target fires: {results:?}"
+        );
+        assert!(
+            hits[0].1.contains("/usr/share/man/man1/missing.1"),
+            "the detail names the missing absolute target: {}",
+            hits[0].1
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_one_finding_per_missing_target() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[(
+                "/usr/share/man/man1/alias.1",
+                0o100644,
+                b".so man1/a.1\n.so man1/a.1\n.so man1/a.1.gz\n.so man1/b.1\n".as_slice(),
+            )],
+        );
+        let results = run_check_binary(&pkg);
+        assert_eq!(
+            so_ref_hits(&results).len(),
+            2,
+            "a repeated target fires once, distinct targets fire each: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_argument_may_carry_a_compression_suffix() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/man/man3/alias.3",
+                    0o100644,
+                    b".so man3/popen.3.gz\n".as_slice(),
+                ),
+                (
+                    "/usr/share/man/man3/popen.3",
+                    0o100644,
+                    b".TH popen 3\n".as_slice(),
+                ),
+            ],
+        );
+        let results = run_check_binary(&pkg);
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "a suffixed argument matches the target under any suffix: {results:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn manpage_so_ref_reads_gzipped_page_via_decompressor() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        // A stand-in gzip whose output is the payload named by the input
+        // file's stem, mirroring decompressor_branch_validates_the_child_output.
+        let payload = dir.path().join("alias.3.out");
+        std::fs::write(&payload, ".so man3/popen.3\n").expect("write payload");
+        let script = dir.path().join("gzip");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nfor last; do :; done\ncat \"${last%.*}.out\"\n",
+        )
+        .expect("write fake gzip");
+        let mut perms = std::fs::metadata(&script)
+            .expect("stat fake gzip")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod fake gzip");
+        for _ in 0..100 {
+            match std::process::Command::new(&script)
+                .arg("--version")
+                .output()
+            {
+                Ok(_) => break,
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(e) => panic!("fake gzip failed: {e}"),
+            }
+        }
+        let pkg = manpage_pkg(
+            &dir,
+            &[(
+                "/usr/share/man/man3/alias.3.gz",
+                0o100644,
+                b"not really gzip".as_slice(),
+            )],
+        );
+        // manpage_pkg rooted the on-disk path under a subdirectory; the
+        // fake gzip maps <dir>/alias.3.gz to the payload, so point the
+        // file entry at the flat path the script expects.
+        let mut pkg = pkg;
+        let flat = dir.path().join("alias.3.gz");
+        std::fs::write(&flat, b"not really gzip").expect("write flat page");
+        pkg.files[0].path = flat.to_string_lossy().into_owned();
+        let config = test_config();
+        let mut check = FilesCheck::with_tool_dir(&config, Some(dir.path()));
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(
+            so_ref_hits(&results).len(),
+            1,
+            "a gzipped page is decompressed and its missing target fires: {results:?}"
+        );
+    }
+
+    #[test]
     fn debug_lookalike_paths_are_quiet_11() {
         let (pkg, _dir) = pkg_with_files(vec![
             mkfile("/usr/share/debugfoo/bar", 0o100644, 21),
@@ -7375,6 +8164,181 @@ mod tests {
                 .iter()
                 .any(|(n, _)| n == "debug-files-in-non-debug-package"),
             "segment equality must not match debugfoo: {results:?}"
+        );
+    }
+    /// `test_config` plus a `SystemdPresetPackages` exemption list, the
+    /// config key the vendored openSUSE/SLFO distro configs carry.
+    fn preset_test_config() -> Config {
+        let mut cfg = test_config();
+        cfg.configuration.insert(
+            "SystemdPresetPackages".to_string(),
+            toml::Value::Array(vec![
+                toml::Value::String("systemd".to_string()),
+                toml::Value::String("systemd-presets-common-SUSE".to_string()),
+                toml::Value::String("systemd-presets-branding-openSUSE".to_string()),
+            ]),
+        );
+        cfg
+    }
+
+    fn run_check_binary_with_config(pkg: &Pkg, config: &Config) -> Vec<(String, String)> {
+        let mut check = FilesCheck::new(config);
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        check.check_binary(pkg, config, &mut out);
+        out.results().to_vec()
+    }
+
+    fn preset_findings(results: &[(String, String)]) -> Vec<&(String, String)> {
+        results
+            .iter()
+            .filter(|(n, _)| n == "systemd-preset-packaged")
+            .collect()
+    }
+
+    #[test]
+    fn systemd_preset_file_in_other_package_fires() {
+        let (mut pkg, _dir) = pkg_with_files(vec![mkfile(
+            "/usr/lib/systemd/system-preset/99-foo.preset",
+            0o100644,
+            31,
+        )]);
+        pkg.name = "foo".to_string();
+        let results = run_check_binary_with_config(&pkg, &preset_test_config());
+        let hits = preset_findings(&results);
+        assert_eq!(hits.len(), 1, "exactly one preset finding: {results:?}");
+        assert!(
+            hits[0].1.contains(
+                ": W: systemd-preset-packaged /usr/lib/systemd/system-preset/99-foo.preset"
+            ),
+            "name, level and detail must render, got: {}",
+            hits[0].1
+        );
+    }
+
+    #[test]
+    fn systemd_user_preset_file_in_other_package_fires() {
+        let (mut pkg, _dir) = pkg_with_files(vec![mkfile(
+            "/usr/lib/systemd/user-preset/99-foo.preset",
+            0o100644,
+            32,
+        )]);
+        pkg.name = "foo".to_string();
+        let results = run_check_binary_with_config(&pkg, &preset_test_config());
+        assert_eq!(
+            preset_findings(&results).len(),
+            1,
+            "user-preset files fire too: {results:?}"
+        );
+    }
+
+    #[test]
+    fn systemd_preset_file_in_preset_packages_is_quiet() {
+        for name in [
+            "systemd",
+            "systemd-presets-common-SUSE",
+            "systemd-presets-branding-openSUSE",
+        ] {
+            let (mut pkg, _dir) = pkg_with_files(vec![mkfile(
+                "/usr/lib/systemd/system-preset/90-default.preset",
+                0o100644,
+                33,
+            )]);
+            pkg.name = name.to_string();
+            let results = run_check_binary_with_config(&pkg, &preset_test_config());
+            assert!(
+                preset_findings(&results).is_empty(),
+                "preset package {name} must stay quiet: {results:?}"
+            );
+        }
+    }
+
+    /// The vendored SLFO config's `SystemdPresetPackages` list is the
+    /// exemption source for the SLFO branding-preset packages: a package
+    /// named e.g. `systemd-presets-branding-SLE` shipping a regular preset
+    /// file stays quiet under it.
+    #[test]
+    fn slfo_preset_packages_are_quiet_under_vendored_slfo_config() {
+        let slfo_toml =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("data/distro/slfo/opensuse.toml");
+        let parsed: toml::Table =
+            toml::from_str(&std::fs::read_to_string(slfo_toml).expect("vendored slfo config"))
+                .expect("vendored slfo config parses");
+        let mut cfg = test_config();
+        cfg.configuration.insert(
+            "SystemdPresetPackages".to_string(),
+            parsed["SystemdPresetPackages"].clone(),
+        );
+        for name in [
+            "systemd-presets-branding-SLE",
+            "systemd-presets-branding-SLE_immutable",
+            "systemd-presets-branding-Elemental",
+            "systemd-presets-branding-SLE-SAP",
+            "systemd-presets-branding-SLE-SAP_immutable",
+        ] {
+            let (mut pkg, _dir) = pkg_with_files(vec![mkfile(
+                "/usr/lib/systemd/system-preset/90-default.preset",
+                0o100644,
+                42,
+            )]);
+            pkg.name = name.to_string();
+            let results = run_check_binary_with_config(&pkg, &cfg);
+            assert!(
+                preset_findings(&results).is_empty(),
+                "SLFO preset package {name} must stay quiet: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn systemd_preset_file_fires_without_exemption_config() {
+        // No SystemdPresetPackages key configured: no package is exempt,
+        // including a distro preset package name.
+        let (mut pkg, _dir) = pkg_with_files(vec![mkfile(
+            "/usr/lib/systemd/system-preset/90-default.preset",
+            0o100644,
+            34,
+        )]);
+        pkg.name = "systemd-presets-common-SUSE".to_string();
+        let results = run_check_binary(&pkg);
+        assert_eq!(
+            preset_findings(&results).len(),
+            1,
+            "without the exemption config every preset shipper fires: {results:?}"
+        );
+    }
+
+    #[test]
+    fn preset_like_paths_outside_preset_dirs_are_quiet() {
+        let (mut pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/lib/systemd/system/99-foo.preset", 0o100644, 35),
+            mkfile("/usr/share/foo/99-foo.preset", 0o100644, 36),
+            mkfile("/usr/lib/systemd/system-preset/99-foo.conf", 0o100644, 37),
+            mkfile(
+                "/usr/lib/systemd/system-preset/sub/99-foo.preset",
+                0o100644,
+                38,
+            ),
+            mkfile("/etc/systemd/system-preset/99-foo.preset", 0o100644, 39),
+        ]);
+        pkg.name = "foo".to_string();
+        let results = run_check_binary_with_config(&pkg, &preset_test_config());
+        assert!(
+            preset_findings(&results).is_empty(),
+            "only *.preset directly in the preset dirs fires: {results:?}"
+        );
+    }
+
+    #[test]
+    fn systemd_preset_dir_entry_is_quiet() {
+        let (mut pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/lib/systemd/system-preset", 0o040755, 40),
+            mkfile("/usr/lib/systemd/user-preset", 0o040755, 41),
+        ]);
+        pkg.name = "foo".to_string();
+        let results = run_check_binary_with_config(&pkg, &preset_test_config());
+        assert!(
+            preset_findings(&results).is_empty(),
+            "bare directory entries must stay quiet: {results:?}"
         );
     }
 }
