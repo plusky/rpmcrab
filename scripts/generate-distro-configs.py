@@ -231,6 +231,25 @@ EXCLUDED_OPENSUSE_CHECKS = [
     "AtomicUpdateCheck",
 ]
 
+# Packages the vendored distro configs name in the `SystemdPresetPackages`
+# key: the distribution's preset packages, the only packages allowed to
+# ship systemd preset files (the `systemd-preset-packaged` finding exempts
+# exactly these names). The list is the Factory-verified shipper set: the
+# systemd-presets-* packages plus systemd/systemd-mini, which ship
+# systemd's own fallback presets. The key is rpmcrab-only; upstream
+# configs carry no such list, so both flavors get the same set appended
+# to their opensuse.toml.
+SYSTEMD_PRESET_PACKAGES = [
+    "systemd",
+    "systemd-mini",
+    "systemd-presets-branding-Aeon",
+    "systemd-presets-branding-Kalpa",
+    "systemd-presets-branding-MicroOS",
+    "systemd-presets-branding-openSUSE",
+    "systemd-presets-branding-transactional-server",
+    "systemd-presets-common-SUSE",
+]
+
 # Findings rpmcrab deliberately killed (see tests/parity/divergences.toml).
 # A Filters/BlockedFilters entry that references *only* one of these findings
 # is pruned — but ONLY when the finding is actually gone from the tree, so the
@@ -1878,6 +1897,25 @@ def append_extra_checks(text, checks):
     return "".join(out)
 
 
+def append_systemd_preset_packages(text, packages):
+    """Append the `SystemdPresetPackages` key to a TOML document.
+
+    Used for the distro preset packages rpmcrab exempts from the
+    `systemd-preset-packaged` finding (see SYSTEMD_PRESET_PACKAGES).
+    Appended at the end of the document so the monthly sync re-emits it
+    deterministically.
+    """
+    out = text if text.endswith("\n") else text + "\n"
+    out += "\n"
+    out += "# Packages allowed to ship systemd preset files (not from upstream;\n"
+    out += "# see SYSTEMD_PRESET_PACKAGES in scripts/generate-distro-configs.py).\n"
+    out += "SystemdPresetPackages = [\n"
+    for pkg in packages:
+        out += "    %s,\n" % json.dumps(pkg)
+    out += "]\n"
+    return out
+
+
 def remove_excluded_checks(text, checks):
     """Remove check names from the `Checks = [...]` list in a TOML document.
 
@@ -2032,6 +2070,10 @@ def generate(ref_dir=None, pins=None):
             # the reference effective SLFO config includes it for mingw
             # packages too. Extending this gate to the slfo flavor is the
             # natural fix; kept separate for review (follow-up to #412).
+            if filename == "opensuse.toml":
+                text = append_systemd_preset_packages(
+                    text, SYSTEMD_PRESET_PACKAGES
+                )
             if flavor == "opensuse" and filename == "opensuse.toml":
                 text = append_extra_filters(text, EXTRA_OPENSUSE_FILTERS)
                 # Same gate as the extra filters: SLFO's vendored config
