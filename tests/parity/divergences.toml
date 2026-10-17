@@ -2357,3 +2357,11 @@ kind = "behaviour"
 reason = "New port-only Error: a package whose name matches the versioned shared library scheme (lib<name><SONAME-number>, with the -32bit/-64bit forms normalised away) that obsoletes a package with the same library stem and a different SONAME number emits E shlib-policy-obsoletes-sibling with the obsoleted package name as detail. The reference has no such finding. Deliberate: the openSUSE shared library packaging policy makes SONAME generations co-installable, and obsoleting a sibling generation breaks that; a version constraint on the obsoletes does not restore co-installability for the obsoleted range, so it still fires, while a same-number self-obsoletes (a rename) and targets outside the scheme stay silent. Pinned by unit tests in shared_library_policy.rs."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/636"
+
+[[divergence]]
+case = "global"
+check = "shlib-policy-etc-payload"
+kind = "behaviour"
+reason = "New port-only Warning: a package whose name matches the versioned shared library scheme (lib<name><SONAME-number>, with the -32bit/-64bit forms normalised away) that ships a non-directory, non-%ghost file under /etc emits W shlib-policy-etc-payload with the path as detail, one finding per path. The reference has no such finding: the SUSE LibraryPolicyCheck file loop skips /etc entirely, so this is deliberate new coverage of a gap in both implementations, not a parity break. The shared library policy makes SONAME generations co-installable only if a versioned package ships nothing but the libraries themselves; an unversioned /etc file shipped identically by the sibling package for the next SONAME generation conflicts at file level (libsemanage1 shipped /etc/selinux/semanage.conf in Leap 15, and libsemanage2 shipping the same path conflicted). Warning only: the conflict materialises only when a sibling SONAME package ships the same path. Directory entries under /etc stay quiet (shared directories are normal) and %ghost entries stay quiet (a ghost is not shipped payload). Pinned by unit tests in shared_library_policy.rs."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/656"
