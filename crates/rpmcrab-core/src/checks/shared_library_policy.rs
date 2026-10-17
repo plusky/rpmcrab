@@ -20,6 +20,12 @@
 //! sibling's own name or one of its non-SONAME provides names — with a
 //! version relation. SONAME provides (`libfoo.so.1()(64bit)`) never count:
 //! they are the automatic file dependencies, not the package pairing.
+//! Sibling candidates are grouped by their normalised base: the base
+//! package and its `-32bit`/`-64bit` flavours (`libfoo1`,
+//! `libfoo1-32bit`) form one group, a versioned require naming any member
+//! satisfies the whole group (a `-devel` package must not be made to drag
+//! in the 32-bit flavour), and the check emits at most one finding per
+//! (`-devel`, group), naming the group's canonical base name.
 //! Rich (boolean) requires are read through their leaves: a leaf naming the
 //! sibling with a version relation satisfies the rule, a bare leaf does not.
 
@@ -116,8 +122,21 @@ impl SharedLibraryPolicyCheck {
     /// `-32bit`/`-64bit` suffix on the number normalised away. Empty when
     /// the name does not match the naming scheme.
     fn devel_names_for(&self, shlib: &str) -> Vec<String> {
-        if !is_match(&self.re_soname_pkg, shlib) {
+        let Some((stem, number)) = self.sibling_group(shlib) else {
             return Vec::new();
+        };
+        let base = format!("{stem}{number}");
+        vec![format!("{base}-devel"), format!("{stem}-devel")]
+    }
+
+    /// The normalised group of a policy-named shared library package:
+    /// `(stem, number)` with a `-32bit`/`-64bit` flavour suffix removed,
+    /// so `libfoo1`, `libfoo1-32bit` and `libfoo1-64bit` are one group
+    /// whose canonical name is `libfoo1`. `None` when the name does not
+    /// match the naming scheme.
+    fn sibling_group(&self, shlib: &str) -> Option<(String, String)> {
+        if !is_match(&self.re_soname_pkg, shlib) {
+            return None;
         }
         // The scheme number is the trailing digit run (plus a normalised
         // `-32bit`/`-64bit` suffix); the regex capture alone does not pin
@@ -128,10 +147,10 @@ impl SharedLibraryPolicyCheck {
             .unwrap_or(shlib);
         let num_len = base.len() - base.trim_end_matches(|c: char| c.is_ascii_digit()).len();
         if num_len == 0 {
-            return Vec::new();
+            return None;
         }
         let stem = &base[..base.len() - num_len];
-        vec![format!("{base}-devel"), format!("{stem}-devel")]
+        Some((stem.to_string(), base[base.len() - num_len..].to_string()))
     }
 
     /// Whether the `-devel` package requires the sibling with a version
@@ -461,6 +480,10 @@ impl Check for SharedLibraryPolicyCheck {
             let Some(source_rpm) = self.seen[d].source_rpm.clone() else {
                 continue;
             };
+            // Group the sibling candidates by normalised base, in
+            // first-seen order: the base package and its flavours are
+            // one pairing, not one pairing per sibling.
+            let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
             for s in 0..self.seen.len() {
                 if s == d {
                     continue;
@@ -474,7 +497,24 @@ impl Check for SharedLibraryPolicyCheck {
                 {
                     continue;
                 }
-                if Self::versioned_sibling_require(&self.seen[d], sibling) {
+                let Some((stem, number)) = self.sibling_group(&sibling.name) else {
+                    continue;
+                };
+                let base = format!("{stem}{number}");
+                if let Some(group) = groups.iter_mut().find(|group| group.0 == base) {
+                    group.1.push(s);
+                } else {
+                    groups.push((base, vec![s]));
+                }
+            }
+            for (base, members) in groups {
+                // A versioned require naming any member of the group (or
+                // one of its non-SONAME provides names) satisfies the
+                // whole group.
+                if members
+                    .iter()
+                    .any(|&s| Self::versioned_sibling_require(&self.seen[d], &self.seen[s]))
+                {
                     continue;
                 }
                 let devel = &self.seen[d];
@@ -483,7 +523,7 @@ impl Check for SharedLibraryPolicyCheck {
                     &devel.arch,
                     Level::Warning,
                     "shlib-devel-unversioned-requires",
-                    vec![sibling.name.clone()],
+                    vec![base],
                     None,
                 ));
             }
@@ -1284,9 +1324,74 @@ mod tests {
         let devel = devel("libfoo-devel", "foo-1-1.src.rpm", vec![dep("unrelated")]);
         let results = run_set(&[&lib, &devel]);
         assert_eq!(results.len(), 1, "exactly one finding: {results:?}");
+        // The finding names the group's canonical base name, not the
+        // flavour suffix of the only sibling present.
         assert_eq!(
             results[0].1,
-            "libfoo-devel.x86_64: W: shlib-devel-unversioned-requires libfoo1-32bit"
+            "libfoo-devel.x86_64: W: shlib-devel-unversioned-requires libfoo1"
+        );
+    }
+
+    #[test]
+    fn devel_baselibs_versioned_require_on_base_is_quiet() {
+        // Standard baselibs layout: one source builds the base and the
+        // -32bit flavour; a versioned require on the base satisfies the
+        // whole group and must not fire for the -32bit sibling.
+        let lib = shlib("libfoo1", "foo-1-1.src.rpm");
+        let lib32 = shlib("libfoo1-32bit", "foo-1-1.src.rpm");
+        let devel = devel(
+            "libfoo-devel",
+            "foo-1-1.src.rpm",
+            vec![dep_versioned("libfoo1", RPMSENSE_EQUAL)],
+        );
+        assert!(run_set(&[&lib, &lib32, &devel]).is_empty());
+    }
+
+    #[test]
+    fn devel_baselibs_versioned_require_on_32bit_is_quiet() {
+        // A versioned require naming any group member satisfies the group.
+        let lib = shlib("libfoo1", "foo-1-1.src.rpm");
+        let lib32 = shlib("libfoo1-32bit", "foo-1-1.src.rpm");
+        let devel = devel(
+            "libfoo-devel",
+            "foo-1-1.src.rpm",
+            vec![dep_versioned("libfoo1-32bit", RPMSENSE_EQUAL)],
+        );
+        assert!(run_set(&[&lib, &lib32, &devel]).is_empty());
+    }
+
+    #[test]
+    fn devel_baselibs_without_versioned_require_warns_once() {
+        // No versioned require on any group member: exactly one finding
+        // for the group, naming its canonical (non-flavoured) sibling.
+        let lib = shlib("libfoo1", "foo-1-1.src.rpm");
+        let lib32 = shlib("libfoo1-32bit", "foo-1-1.src.rpm");
+        let devel = devel("libfoo-devel", "foo-1-1.src.rpm", vec![dep("unrelated")]);
+        let results = run_set(&[&lib, &lib32, &devel]);
+        assert_eq!(results.len(), 1, "exactly one finding: {results:?}");
+        assert_eq!(
+            results[0].1,
+            "libfoo-devel.x86_64: W: shlib-devel-unversioned-requires libfoo1"
+        );
+    }
+
+    #[test]
+    fn devel_distinct_groups_are_not_merged() {
+        // libfoo1 and libbar2 are distinct groups: satisfying foo's group
+        // leaves bar's group firing exactly once, on its own -devel.
+        let foo = shlib("libfoo1", "foo-1-1.src.rpm");
+        let bar = shlib("libbar2", "foo-1-1.src.rpm");
+        let foo_devel = devel(
+            "libfoo-devel",
+            "foo-1-1.src.rpm",
+            vec![dep_versioned("libfoo1", RPMSENSE_EQUAL)],
+        );
+        let bar_devel = devel("libbar-devel", "foo-1-1.src.rpm", vec![dep("unrelated")]);
+        let results = run_set(&[&foo, &bar, &foo_devel, &bar_devel]);
+        assert_eq!(results.len(), 1, "exactly one finding: {results:?}");
+        assert_eq!(
+            results[0].1,
+            "libbar-devel.x86_64: W: shlib-devel-unversioned-requires libbar2"
         );
     }
 
@@ -1316,7 +1421,13 @@ mod tests {
     #[test]
     fn devel_soname_require_does_not_satisfy() {
         // A SONAME require binds the library file, not the package pairing.
-        let lib = shlib("libfoo1", "foo-1-1.src.rpm");
+        // The sibling carries the SONAME provide real library packages
+        // carry, so only the `.so` exclusion in the provides scan keeps
+        // this require from satisfying the pairing: without that
+        // exclusion the require would match the provide's base name and
+        // this test would go quiet.
+        let mut lib = shlib("libfoo1", "foo-1-1.src.rpm");
+        lib.provides = vec![dep_versioned("libfoo.so.1()(64bit)", RPMSENSE_EQUAL)];
         let devel = devel(
             "libfoo-devel",
             "foo-1-1.src.rpm",
