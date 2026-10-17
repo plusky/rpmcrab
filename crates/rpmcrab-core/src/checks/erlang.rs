@@ -29,14 +29,25 @@ enum Term {
     Other,
 }
 
+/// Maximum nesting depth [`TermParser`] accepts. Compile info is a
+/// flat list of `{key, value}` pairs, so real BEAM files nest only a
+/// few levels; the cap keeps a crafted file from overflowing the
+/// stack through recursive terms.
+const MAX_TERM_DEPTH: usize = 128;
+
 struct TermParser<'a> {
     data: &'a [u8],
     pos: usize,
+    depth: usize,
 }
 
 impl<'a> TermParser<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
+        Self {
+            data,
+            pos: 0,
+            depth: 0,
+        }
     }
 
     fn byte(&mut self) -> Option<u8> {
@@ -66,7 +77,19 @@ impl<'a> TermParser<'a> {
         Some(Term::Atom(String::from_utf8_lossy(b).into_owned()))
     }
 
+    /// Decode one external term. A term nested deeper than
+    /// [`MAX_TERM_DEPTH`] fails to parse (returns `None`).
     fn parse_term(&mut self) -> Option<Term> {
+        if self.depth >= MAX_TERM_DEPTH {
+            return None;
+        }
+        self.depth += 1;
+        let term = self.parse_term_inner();
+        self.depth -= 1;
+        term
+    }
+
+    fn parse_term_inner(&mut self) -> Option<Term> {
         match self.byte()? {
             // SMALL_INTEGER_EXT
             97 => {
@@ -511,5 +534,44 @@ mod tests {
             &check.source_re,
             "/home/abuild/rpmbuild/BUILD/foo-1.0/src/foo.erl"
         ));
+    }
+
+    /// A crafted CInf of nothing but nested SMALL_TUPLE wrappers used
+    /// to recurse once per level and overflow the stack. The depth cap
+    /// must turn it into a plain parse failure (`pybeam-failed`).
+    #[test]
+    fn deeply_nested_term_fails_instead_of_overflowing() {
+        let mut payload = vec![131u8];
+        for _ in 0..200_000 {
+            payload.extend_from_slice(&[104, 1]); // SMALL_TUPLE_EXT, arity 1
+        }
+        payload.push(106); // NIL
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("deep.beam");
+        std::fs::write(&path, beam_with_cinf(&payload)).unwrap();
+        assert!(read_compile_info(path.to_str().unwrap()).is_err());
+    }
+
+    /// Terms nested far past anything a real BEAM carries, but within
+    /// the depth cap, still parse.
+    #[test]
+    fn nested_term_within_depth_cap_parses() {
+        let mut payload = vec![131u8];
+        for _ in 0..64 {
+            payload.extend_from_slice(&[104, 1]); // SMALL_TUPLE_EXT, arity 1
+        }
+        payload.push(106); // NIL
+        let mut parser = TermParser::new(&payload[1..]);
+        let mut term = parser.parse_term().expect("parses");
+        for _ in 0..64 {
+            match term {
+                Term::Tuple(mut elems) => {
+                    assert_eq!(elems.len(), 1);
+                    term = elems.pop().unwrap();
+                }
+                other => panic!("expected tuple, got {other:?}"),
+            }
+        }
+        assert_eq!(term, Term::List(Vec::new()));
     }
 }
