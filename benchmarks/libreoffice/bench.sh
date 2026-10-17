@@ -85,8 +85,9 @@ sys.exit(1 if fail else 0)
 EOF
 }
 
-# run_tool <name> <rpms...> -> prints the wall-clock seconds on one line
-# and "<logfile> <exit-code>" on the next; the raw output is left in
+# run_tool <name> <rpms...> -> prints the wall-clock seconds, the
+# logfile path and the exit code, each on its own line (paths may
+# contain spaces, so no field packing); the raw output is left in
 # $RESULTS_DIR/<name>.log
 run_tool() {
     local name="$1"; shift
@@ -104,7 +105,7 @@ run_tool() {
     local rc=$?
     end=$(date +%s.%N)
     python3 -c "print(f'{$end - $start:.3f}')"
-    echo "$log $rc"
+    printf '%s\n%s\n' "$log" "$rc"
 }
 
 # Count findings from a saved log: prefer the "<N> errors, <M> warnings"
@@ -134,13 +135,13 @@ cmd_run() {
     if [ "$name" = "rpmlint" ]; then
         [ -d "$REF_CONFIG" ] || die "reference config missing: $REF_CONFIG"
     fi
-    { read -r seconds; read -r log rc; } < <(run_tool "$name" "${rpms[@]}")
+    { read -r seconds; read -r log; read -r rc; } < <(run_tool "$name" "${rpms[@]}")
     local counts
     counts=$(summarize "$name" "$log")
     local total_mb
     total_mb=$(python3 -c "
 import glob, os, sys
-fs = glob.glob(os.path.join(sys.argv[1], '*.rpm'))
+fs = glob.glob(glob.escape(sys.argv[1]) + '/*.rpm')
 print(f'{sum(os.path.getsize(f) for f in fs)/1024/1024:.1f}')" "$dir")
     python3 - "$name" "$seconds" "$counts" "${#rpms[@]}" "$total_mb" "$rc" <<'EOF'
 import json, sys

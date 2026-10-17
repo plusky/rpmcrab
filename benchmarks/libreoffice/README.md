@@ -22,7 +22,8 @@ openSUSE Tumbleweed oss, and compares finding counts.
 ./bench.sh all                # download + both, combined JSON
 ```
 
-Env overrides: `RPMCRAB_BIN`, `RPMLINT_REF_DIR` (reference checkout),
+Env overrides: `RPMCRAB_BIN`, `RPMLINT_REF_DIR` (reference rpmlint
+environment dir, as built by `scripts/setup-rpmlint-ref.sh`),
 `RPMLINT_PYTHON` (python with rpmlint deps; point at a wrapper script for
 containers), `MIRROR`, `RESULTS_DIR`. See header of `bench.sh`.
 
