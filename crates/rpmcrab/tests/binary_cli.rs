@@ -651,7 +651,10 @@ fn permissive_by_default_string_value_is_inert() {
     ]);
     assert_eq!(out.status.code(), Some(64));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!stderr.contains("fatal error in configuration"), "got {stderr}");
+    assert!(
+        !stderr.contains("fatal error in configuration"),
+        "got {stderr}"
+    );
 }
 
 #[test]
@@ -769,7 +772,10 @@ fn format_json_emits_parseable_report() {
         Some(64),
         "summary exit code matches the process"
     );
-    assert!(summary.get("score").is_none(), "no badness score: {summary}");
+    assert!(
+        summary.get("score").is_none(),
+        "no badness score: {summary}"
+    );
     assert!(summary.get("aborted").is_none(), "no abort flag: {summary}");
 }
 

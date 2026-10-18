@@ -1368,9 +1368,7 @@ hash = "{}"
             .map(|(_, l)| l.as_str())
             .unwrap();
         assert!(
-            line.starts_with(
-                "testpkg.noarch: E: pam-file-unauthorized /etc/pam.d/login"
-            ),
+            line.starts_with("testpkg.noarch: E: pam-file-unauthorized /etc/pam.d/login"),
             "level/name/detail: {line}"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -2388,9 +2386,9 @@ hash = "{}"
             "wrong package must not validate: {results:?}"
         );
         assert!(
-            unauthorized[0].1.starts_with(
-                "otherpkg.noarch: E: pam-file-unauthorized /etc/pam.d/login"
-            ),
+            unauthorized[0]
+                .1
+                .starts_with("otherpkg.noarch: E: pam-file-unauthorized /etc/pam.d/login"),
             "level/name/detail: {}",
             unauthorized[0].1
         );
@@ -2491,9 +2489,9 @@ nodigests = ["/etc/pam.d/skipped"]
             "extra file must be flagged: {results:?}"
         );
         assert!(
-            unauthorized[0].1.starts_with(
-                "testpkg.noarch: E: pam-file-unauthorized /etc/pam.d/evil"
-            ),
+            unauthorized[0]
+                .1
+                .starts_with("testpkg.noarch: E: pam-file-unauthorized /etc/pam.d/evil"),
             "level/name/detail: {}",
             unauthorized[0].1
         );

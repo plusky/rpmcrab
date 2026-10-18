@@ -4667,8 +4667,7 @@ mod tests {
             [(
                 "script-without-shebang".to_string(),
                 Level::Error,
-                "spurious-test.noarch: E: script-without-shebang /usr/bin/noshebang"
-                    .to_string(),
+                "spurious-test.noarch: E: script-without-shebang /usr/bin/noshebang".to_string(),
             )],
             "script paths keep script-without-shebang, not spurious"
         );
@@ -7137,9 +7136,8 @@ mod tests {
             .collect();
         assert_eq!(lines.len(), 1, "unexpected: {results:?}");
         assert!(
-            lines[0].contains(
-                ": E: mimeinfo-cache-packaged /usr/share/applications/mimeinfo.cache"
-            ),
+            lines[0]
+                .contains(": E: mimeinfo-cache-packaged /usr/share/applications/mimeinfo.cache"),
             "name, level and detail: {}",
             lines[0]
         );
