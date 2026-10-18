@@ -8,10 +8,13 @@
 # fires.
 #
 # atomic-scriptlet-clean: the near-miss negatives -- a lua scriptlet
-# whose body only looks like shell writes, a prog-only ldconfig
-# scriptlet, commented/quoted/heredoc lookalikes, transient targets
-# (/var/run is /run), an inside destination fed from an outside source,
-# and a dynamic target. Must produce no findings at all.
+# whose body is a bare shell write line (only the interpreter gate
+# keeps it quiet), a prog-only ldconfig scriptlet,
+# commented/quoted/heredoc lookalikes, transient targets
+# (/var/run is /run, /var/lock is /run/lock), an inside destination
+# fed from an outside source, and dynamic targets (a variable target
+# and an absolute path with a dynamic suffix). Must produce no
+# findings at all.
 #
 # Usage: bash tests/parity/pkg/inputs/build-atomic-scriptlet-parity.sh
 # Needs: podman (or PODMAN=/path/to/podman), an openSUSE container image with rpm-build
@@ -75,7 +78,7 @@ mkdir -p %{buildroot}/usr/share/atomic-fixture
 echo default > %{buildroot}/usr/share/atomic-fixture/default
 
 %pre -p /usr/bin/lua
-os.execute("mkdir /var/lib/lua-target")
+mkdir /var/lib/lua-target
 
 %post
 # mkdir /var/lib/commented
@@ -86,11 +89,13 @@ INNER
 mkdir -p /usr/share/atomic-fixture
 echo ok > /dev/null
 touch /var/run/atomic-fixture.flag
+touch /var/lock/atomic-fixture.lock
 echo note > /var/adm/update-messages/atomic-fixture-1.0-1-notify
 /usr/bin/systemd-tmpfiles --create /usr/lib/tmpfiles.d/atomic-fixture.conf || :
 cp /var/lib/upstream-source /usr/share/atomic-fixture/dest
 DEST=/var/lib/dynamic
 mkdir $DEST/sub
+mkdir /var/lib/$SUFFIX
 
 %preun
 rm -f /var/run/atomic-fixture.flag
@@ -101,11 +106,12 @@ rm -f /var/run/atomic-fixture.flag
 /usr/share/atomic-fixture/default
 EOF
 
+# Both specs build in a single container run (one zypper install).
+"$podman_bin" run --rm \
+  -v "$work/rpmbuild:/rpmbuild:z" \
+  registry.opensuse.org/opensuse/tumbleweed:latest \
+  bash -c "zypper -n in -y rpm-build >/dev/null 2>&1; rpmbuild --define '_topdir /rpmbuild' --nosignature -bb /rpmbuild/SPECS/fires.spec; rpmbuild --define '_topdir /rpmbuild' --nosignature -bb /rpmbuild/SPECS/clean.spec" >/dev/null
 for spec in fires clean; do
-  "$podman_bin" run --rm \
-    -v "$work/rpmbuild:/rpmbuild:z" \
-    registry.opensuse.org/opensuse/tumbleweed:latest \
-    bash -c "zypper -n in -y rpm-build >/dev/null 2>&1; rpmbuild --define '_topdir /rpmbuild' --nosignature -bb /rpmbuild/SPECS/$spec.spec" >/dev/null
   built="$(find "$work/rpmbuild/RPMS" -name "atomic-scriptlet-$spec-*.rpm" -print -quit)"
   [ -n "$built" ] || { echo "rpmbuild produced no package for $spec" >&2; exit 1; }
   cp "$built" "$here/"
