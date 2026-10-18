@@ -2293,6 +2293,9 @@ fn rpmcrab_flavoured(args: &[&str]) -> std::process::Output {
     cmd.args(args)
         .env("XDG_CONFIG_HOME", xdg.path().join("home"))
         .env("XDG_CONFIG_DIRS", xdg.path().join("dirs"))
+        // Mirror the plain harness's explicit ngram switch, so an
+        // ambient value cannot leak into flavoured runs.
+        .env("RPMCRAB_DISABLE_NGRAM_SUGGESTIONS", "1")
         .env_remove("CONFIG_DISABLE_AUTOLOADING")
         .env_remove("PYTEST_XDIST_TESTRUNUID")
         .env_remove("COLUMNS")
@@ -2323,4 +2326,81 @@ fn no_manual_page_for_binary_surfaces_as_info_under_opensuse_flavour() {
         "info level, detail is the exe name: {}",
         hits[0]
     );
+}
+
+/// Whether the system hunspell en_US pair the spellchecker loads is
+/// installed. CI installs the pinned pair; where it is absent the
+/// spelling check degrades to silence and there is no output to pin.
+fn system_dictionary_installed() -> bool {
+    [
+        "/usr/share/hunspell",
+        "/usr/share/myspell",
+        "/opt/homebrew/share/hunspell",
+    ]
+    .iter()
+    .any(|dir| {
+        let dir = Path::new(dir);
+        dir.join("en_US.aff").exists() && dir.join("en_US.dic").exists()
+    })
+}
+
+/// Run the binary without the harness's ngram switch, for the runs
+/// that pin the production default (ngram suggester on) end to end.
+fn rpmcrab_default_env(args: &[&str]) -> std::process::Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rpmcrab"));
+    cmd.args(args)
+        .env("CONFIG_DISABLE_AUTOLOADING", "1")
+        .env_remove("RPMCRAB_DISABLE_NGRAM_SUGGESTIONS")
+        .env_remove("COLUMNS")
+        .env_remove("NO_COLOR")
+        .env_remove("CLICOLOR");
+    cmd.output().expect("spawn rpmcrab")
+}
+
+#[test]
+fn spelling_suggestions_are_reproducible_across_spawns() {
+    if !system_dictionary_installed() {
+        // No dictionary: the spelling check is silent, so there is
+        // nothing to compare. CI installs the pinned pair.
+        return;
+    }
+    // The committed fixture whose %description misspells "package" as
+    // "packag" (the tags emission pins use it with an inline
+    // dictionary). A bare .spec will not do: the binary spellchecks
+    // binary packages, not spec files.
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/parity/pkg/inputs/tags-emission-pins-spell-1.0-1.noarch.rpm")
+        .canonicalize()
+        .expect("spelling fixture is committed");
+    let fixture = fixture.to_str().unwrap();
+    let spelling_lines = |out: &std::process::Output| -> Vec<String> {
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| l.contains("spelling-error"))
+            .map(str::to_string)
+            .collect()
+    };
+    // The harness sets RPMCRAB_DISABLE_NGRAM_SUGGESTIONS, so two
+    // spawns must print identical suggestion lines for the misspelled
+    // fixture (issue #688: the ngram candidate set is not
+    // reproducible across processes).
+    let first = spelling_lines(&rpmcrab(&[fixture]));
+    assert_eq!(first.len(), 1, "one spelling finding expected: {first:?}");
+    assert!(
+        first[0].contains("packag ->"),
+        "the misspelling is flagged with suggestions: {}",
+        first[0]
+    );
+    let second = spelling_lines(&rpmcrab(&[fixture]));
+    assert_eq!(first, second, "suggestion lines differ across spawns");
+    // With the variable removed the production default runs: the
+    // misspelling is still flagged with suggestions. The ngram set
+    // itself is not reproducible, so only its presence is pinned.
+    let default = spelling_lines(&rpmcrab_default_env(&[fixture]));
+    assert_eq!(
+        default.len(),
+        1,
+        "the default run flags the misspelling: {default:?}"
+    );
+    assert!(default[0].contains("packag"), "{}", default[0]);
 }
