@@ -154,10 +154,9 @@ fn spec_input_is_linted_and_counted() {
     let out = rpmcrab(&[spec.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stdout.contains("specfile-error") || stderr.contains("specfile-error"),
-        "spec was not linted: stdout: {stdout} stderr: {stderr}"
+        stdout.contains("W: specfile-error"),
+        "specfile-error must render on stdout at its temporary W level: stdout: {stdout}"
     );
     assert!(
         stdout.contains("0 packages and 1 specfiles checked"),
@@ -629,10 +628,9 @@ fn permissive_by_default_key_is_inert() {
     // `PermissiveByDefault` is no longer read: neither value changes the
     // outcome — errors fail the run unless `-P` is passed. Its presence
     // warns on stderr instead of going silently inert.
-    let dir = std::env::temp_dir().join("rpmcrab-permissive-test");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     for (name, value) in [("test.toml", "false"), ("test-true.toml", "true")] {
-        let cfg = dir.join(name);
+        let cfg = dir.path().join(name);
         std::fs::write(&cfg, format!("PermissiveByDefault = {value}\n")).unwrap();
         let out = rpmcrab(&[
             "-c",
@@ -653,9 +651,8 @@ fn permissive_by_default_string_value_is_inert() {
     // A string `PermissiveByDefault` used to be a fatal config error via
     // the bool read; the key is not read at all now, so the run proceeds
     // and the parity RPM's errors fail it with 64.
-    let dir = std::env::temp_dir().join("rpmcrab-permissive-test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let cfg = dir.join("test-str.toml");
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("test-str.toml");
     std::fs::write(&cfg, "PermissiveByDefault = \"true\"\n").unwrap();
     let out = rpmcrab(&[
         "-c",
@@ -678,9 +675,8 @@ fn permissive_by_default_string_value_is_inert() {
 fn non_table_scoring_warns_on_stderr_and_is_ignored() {
     // `Scoring = 5` is not a table: the value is ignored (the run proceeds
     // with no scoring) but the ignore leaves a warning on stderr.
-    let dir = std::env::temp_dir().join("rpmcrab-scoring-notice-test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let cfg = dir.join("scoring-int.toml");
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("scoring-int.toml");
     std::fs::write(&cfg, "Scoring = 5\n").unwrap();
     let out = rpmcrab(&[
         "-c",
@@ -702,9 +698,8 @@ fn non_table_scoring_warns_on_stderr_and_is_ignored() {
 
 #[test]
 fn string_scoring_warns_on_stderr_and_is_ignored() {
-    let dir = std::env::temp_dir().join("rpmcrab-scoring-notice-test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let cfg = dir.join("scoring-str.toml");
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("scoring-str.toml");
     std::fs::write(&cfg, "Scoring = \"abc\"\n").unwrap();
     let out = rpmcrab(&[
         "-c",
@@ -725,28 +720,39 @@ fn badness_threshold_key_is_inert() {
     // in a user config; it is read by nothing — no abort — and the parity
     // RPM's errors fail the run with 64. Its presence warns on stderr
     // instead of going silently inert.
-    let dir = std::env::temp_dir().join("rpmcrab-scoring-notice-test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let cfg = dir.join("threshold-str.toml");
-    std::fs::write(&cfg, "BadnessThreshold = \"abc\"\n").unwrap();
-    let out = rpmcrab(&[
-        "-c",
-        cfg.to_str().unwrap(),
-        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
-    ]);
-    assert_eq!(out.status.code(), Some(64));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("'BadnessThreshold' has no effect since #699; ignoring it"),
-        "got {stderr}"
-    );
+    let dir = tempfile::tempdir().unwrap();
+    // The string value and the integer 999 — the openSUSE flavour's
+    // real-world abort threshold — are both inert: no abort (the
+    // reference exits 66 over the threshold), and the parity RPM's
+    // errors fail the run with 64 either way.
+    for (name, value) in [
+        ("threshold-str.toml", "\"abc\""),
+        ("threshold-999.toml", "999"),
+    ] {
+        let cfg = dir.path().join(name);
+        std::fs::write(&cfg, format!("BadnessThreshold = {value}\n")).unwrap();
+        let out = rpmcrab(&[
+            "-c",
+            cfg.to_str().unwrap(),
+            "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+        ]);
+        assert_eq!(out.status.code(), Some(64), "BadnessThreshold = {value}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("'BadnessThreshold' has no effect since #699; ignoring it"),
+            "got {stderr}"
+        );
+        assert!(
+            !stderr.contains("exceeds threshold"),
+            "no threshold abort may fire, got {stderr}"
+        );
+    }
 }
 
 #[test]
 fn valid_scoring_table_produces_no_notice() {
-    let dir = std::env::temp_dir().join("rpmcrab-scoring-notice-test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let cfg = dir.join("scoring-ok.toml");
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("scoring-ok.toml");
     std::fs::write(&cfg, "[Scoring]\n\"no-%check-section\" = 50\n").unwrap();
     let out = rpmcrab(&[
         "-c",
