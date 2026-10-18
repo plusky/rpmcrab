@@ -19,13 +19,13 @@ use crate::pkg::Pkg;
 const FILELIST_TOML: &str = include_str!("../../data/FilelistCheck.toml");
 
 /// A compiled Good/Bad pattern: either a literal or a regex.
-pub(crate) enum Pattern {
+enum Pattern {
     Literal(String),
     Regex(Regex),
 }
 
 impl Pattern {
-    pub(crate) fn matches(&self, path: &str) -> bool {
+    fn matches(&self, path: &str) -> bool {
         match self {
             Pattern::Literal(lit) => lit == path,
             Pattern::Regex(re) => is_match(re, path),
@@ -34,7 +34,7 @@ impl Pattern {
 
     /// The reference translates a pattern only when it contains `*`
     /// (FilelistCheck.py:63); anything else stays a str compared with `==`.
-    pub(crate) fn compile(pattern: &str) -> Self {
+    fn compile(pattern: &str) -> Self {
         if pattern.contains('*') {
             // fnmatch.translate, anchored at both ends. The reference applies
             // the result with `re.match`, so an end-anchor alone is not enough:

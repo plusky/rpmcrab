@@ -919,7 +919,7 @@ fn sysconfig_environment_file(content: &str) -> Option<String> {
             .next()
             .unwrap_or("")
             .trim_matches('"');
-        let target = token.strip_prefix('-').unwrap_or(token);
+        let target = token.strip_prefix('-').unwrap_or(token).trim_matches('"');
         if target.starts_with("/etc/sysconfig/") {
             return Some(token.to_string());
         }
@@ -950,8 +950,8 @@ fn sysconfig_fillup_uses(
         uses.push(format!("ships file {path}"));
     }
     if let Some(path) = files.iter().find(|name| {
-        let comps: Vec<&str> = name.split('/').collect();
-        comps[..comps.len().saturating_sub(1)].contains(&"fillup-templates")
+        name.rsplit_once('/')
+            .is_some_and(|(parent, _)| parent.split('/').any(|c| c == "fillup-templates"))
     }) {
         uses.push(format!("ships fillup template {path}"));
     }
@@ -1094,26 +1094,12 @@ impl FilesCheck {
         }
         let files: Vec<&str> = pkg.files.iter().map(|f| f.name.as_str()).collect();
         let mut scriptlets: Vec<(&str, String)> = Vec::new();
-        for (tag, label) in [
-            (librpm::Tag::PREIN, "%pre"),
-            (librpm::Tag::POSTIN, "%post"),
-            (librpm::Tag::PREUN, "%preun"),
-            (librpm::Tag::POSTUN, "%postun"),
-            (librpm::Tag::PRETRANS, "%pretrans"),
-            (librpm::Tag::POSTTRANS, "%posttrans"),
-            (librpm::Tag::VERIFYSCRIPT, "%verifyscript"),
-        ] {
-            let body = pkg.tag_str(tag).unwrap_or_default();
-            if !body.is_empty() {
-                scriptlets.push((label, body));
-            }
-        }
-        for (tag, label) in [
-            (librpm::Tag::TRIGGERSCRIPTS, "%trigger"),
-            (librpm::Tag::FILETRIGGERSCRIPTS, "%filetrigger"),
-            (librpm::Tag::TRANSFILETRIGGERSCRIPTS, "%transfiletrigger"),
-        ] {
-            for body in pkg.tag_str_array(tag) {
+        // The canonical scriptlet list (rpmlint SCRIPT_TAGS): a tag
+        // upstream adds is picked up here instead of drifting past a
+        // hand-kept copy. `tag_str_array` accepts both the scalar and
+        // the trigger (parallel-array) shapes.
+        for (tag, _prog, label) in crate::pkg::SCRIPT_TAGS {
+            for body in pkg.tag_str_array(*tag) {
                 if !body.is_empty() {
                     scriptlets.push((label, body));
                 }
@@ -8915,11 +8901,7 @@ mod tests {
 
     #[test]
     fn systemd_preset_ghost_entry_is_quiet() {
-        let mut ghost = mkfile(
-            "/usr/lib/systemd/system-preset/99-foo.preset",
-            0o100644,
-            45,
-        );
+        let mut ghost = mkfile("/usr/lib/systemd/system-preset/99-foo.preset", 0o100644, 45);
         ghost.flags = RPMFILE_GHOST;
         let (mut pkg, _dir) = pkg_with_files(vec![ghost]);
         pkg.name = "foo".to_string();
@@ -9049,6 +9031,17 @@ mod tests {
         assert_eq!(
             sysconfig_environment_file("EnvironmentFile=\"/etc/sysconfig/demo\"\n"),
             Some("/etc/sysconfig/demo".to_string())
+        );
+        // The optional-file dash next to a quoted value resolves too,
+        // in either order: the quote trim runs again after the dash
+        // strip, since systemd applies the `-` to the unquoted value.
+        assert_eq!(
+            sysconfig_environment_file("EnvironmentFile=-\"/etc/sysconfig/demo\"\n"),
+            Some("-\"/etc/sysconfig/demo".to_string())
+        );
+        assert_eq!(
+            sysconfig_environment_file("EnvironmentFile=\"-/etc/sysconfig/demo\"\n"),
+            Some("-/etc/sysconfig/demo".to_string())
         );
         // A sysconfig-shaped path that is not inside /etc/sysconfig does
         // not count.
