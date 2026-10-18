@@ -1186,7 +1186,7 @@ mod tests {
     }
 
     #[test]
-    fn usr_etc_directory_and_ghost_entries_are_quiet() {
+    fn usr_etc_directory_entry_is_quiet() {
         let dir_entry = PkgFile {
             name: "/usr/etc/foo".to_string(),
             mode: 0o40755,
@@ -1197,6 +1197,10 @@ mod tests {
             etc_lines(&results).is_empty(),
             "directory entry must stay quiet: {results:?}"
         );
+    }
+
+    #[test]
+    fn usr_etc_ghost_entry_is_quiet() {
         let ghost = PkgFile {
             flags: crate::pkg::pkgfile::RPMFILE_GHOST,
             ..etc_file("/usr/etc/foo/foo.conf")
@@ -1312,7 +1316,15 @@ mod tests {
 
     #[test]
     fn non_etc_payload_in_versioned_shlib_is_quiet() {
-        let results = etc_results("libfoo1", vec![etc_file("/usr/share/foo/foo.conf")]);
+        // /usr/etcfoo only shares a prefix with /usr/etc: the boundary
+        // is the slash, so it stays ordinary payload.
+        let results = etc_results(
+            "libfoo1",
+            vec![
+                etc_file("/usr/share/foo/foo.conf"),
+                etc_file("/usr/etcfoo/foo.conf"),
+            ],
+        );
         assert!(
             etc_lines(&results).is_empty(),
             "payload outside /etc and /usr/etc must stay quiet: {results:?}"
