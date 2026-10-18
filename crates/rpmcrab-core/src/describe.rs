@@ -317,7 +317,7 @@ mod tests {
             ),
             (
                 "BinariesCheck.toml",
-                "875d4ddf4336c67404ccd7c2eee1adf2d972fc5d844c31907849ff0572165b07",
+                "6a8d9c791b88b934e6792769f740e2db111eb7a9a6f28c968c9f5927a9fb2ac9",
             ),
             (
                 "BrandingPolicyCheck.toml",
@@ -369,7 +369,7 @@ mod tests {
             ),
             (
                 "FilesCheck.toml",
-                "20a711647c63c6adfd61e05c6e1980c6cbb0de22fb468cf7c895ad7e97d53f0c",
+                "7223534bc48268a15a30fbc64113cc434bcbbc0ce161e25d2f9e9dddf97d4128",
             ),
             (
                 "I18NCheck.toml",
@@ -429,7 +429,7 @@ mod tests {
             ),
             (
                 "SharedLibraryPolicyCheck.toml",
-                "c8fc04bebf3c28c69ce0a4766b62fa6f1a076ff449a2e94b9aa8013da74b49e5",
+                "7735cc2574ea65a9ce019d0bd504de3d51fb7dc95cb7cac44f452f61acd7d03f",
             ),
             (
                 "SignatureCheck.toml",

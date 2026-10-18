@@ -1553,6 +1553,20 @@ fn explain_staged_filelist_check() {
     assert!(out.stderr.is_empty());
 }
 
+/// `--explain`: staged `FilesCheck.toml` resolves the port-only `sysconfig-fillup-usage` instead of "Unknown message".
+#[test]
+fn explain_staged_sysconfig_fillup_usage() {
+    let out = rpmcrab(&["-e", "sysconfig-fillup-usage"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "sysconfig-fillup-usage:\nThe package uses the legacy sysconfig/fillup configuration scheme: it ships a\nfile below /etc/sysconfig or a fillup template, calls fillup from a scriptlet,\nor points a systemd unit's EnvironmentFile into /etc/sysconfig. Migrate to\ndaemon-native configuration, or to systemd drop-ins and an EnvironmentFile\npointing at a package-owned path, instead of configuration merged into\n/etc/sysconfig by fillup.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
 /// `--explain`: staged `FilesCheck.toml` resolves `no-documentation` instead of "Unknown message".
 #[test]
 fn explain_staged_files_check() {
@@ -1729,7 +1743,21 @@ fn explain_staged_shlib_policy_etc_payload() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         stdout,
-        "shlib-policy-etc-payload:\nYour package name follows the Shared Library Policy naming scheme, but it\nships files under /etc. Only the libraries themselves may be part of a\nversioned shared library package: a file shipped under the same unversioned\npath by the package for the next SONAME generation conflicts with this one at\nfile level, so the two generations cannot be installed in parallel. Move the\nfiles into a separate package.\n\n\n",
+        "shlib-policy-etc-payload:\nYour package name follows the Shared Library Policy naming scheme, but it\nships files under /etc or /usr/etc. Only the libraries themselves may be part\nof a versioned shared library package: a file shipped under the same\nunversioned path by the package for the next SONAME generation conflicts with\nthis one at file level, so the two generations cannot be installed in\nparallel. Move the files into a separate package.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `SharedLibraryPolicyCheck.toml` resolves the port-only `shlib-devel-unversioned-requires` instead of "Unknown message".
+#[test]
+fn explain_staged_shlib_devel_unversioned_requires() {
+    let out = rpmcrab(&["-e", "shlib-devel-unversioned-requires"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "shlib-devel-unversioned-requires:\nYour library -devel package does not require the shared library package with a\nversion constraint. The Shared Library Policy asks for a properly versioned\nrequires on the shared library package, so that installing the -devel package\ncannot pull in a library generation it was not built against.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());

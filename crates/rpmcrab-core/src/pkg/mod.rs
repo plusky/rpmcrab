@@ -239,6 +239,10 @@ pub struct Pkg {
     pub filename: String,
     pub name: String,
     pub arch: String,
+    /// The `SOURCERPM` header value: the source package this binary was
+    /// built from, shared by every subpackage of one build. `None` for a
+    /// source package itself (its header carries no `SOURCERPM`).
+    pub source_rpm: Option<String>,
     pub is_source: bool,
     pub requires: Vec<DepInfo>,
     pub prereq: Vec<DepInfo>,
@@ -444,6 +448,7 @@ impl Pkg {
     ) -> Self {
         let is_source = is_source.unwrap_or_else(|| header.get_owned(Tag::SOURCERPM).is_none());
         let name = tags::str_tag(&header, Tag::NAME).unwrap_or_default();
+        let source_rpm = tags::str_tag(&header, Tag::SOURCERPM);
 
         let (requires, prereq) = gather_requires(&header);
         let provides = gather_deps(
@@ -523,6 +528,7 @@ impl Pkg {
             filename,
             name,
             arch,
+            source_rpm,
             is_source,
             requires,
             prereq,

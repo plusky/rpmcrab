@@ -13,7 +13,8 @@ Provenance, verified against the pinned reference (`84848c0`):
   `shared-library-not-executable` entry dropped with the check in #267 and
   the `invalid-ldconfig-symlink`,
   `only-non-binary-in-usr-lib` entries dropped with the findings
-  (openSUSE: "Doesn't seem to make sense"), plus
+  (openSUSE: "Doesn't seem to make sense") and the
+  `missing-mandatory-optflags` entry dropped with the finding in #645, plus
   the restored `shared-library-without-dependency-information` entry (copied
   verbatim from the pre-deletion upstream file; upstream removed entry and
   check in `cf619f717bc3`), plus the four port-only rpmcrab#17 hardening
@@ -26,6 +27,10 @@ Provenance, verified against the pinned reference (`84848c0`):
   `rpmlint/descriptions/` files of the same name.
 - `ZipCheck.toml` — the reference file, minus the `jar-not-indexed` and
   `uncompressed-zip` entries dropped with the findings (negligible value).
+- `SharedLibraryPolicyCheck.toml` — the reference file, plus the port-only
+  `shlib-devel-unversioned-requires` entry. The reference has no such
+  finding, so `--explain` would print `Unknown message` for it; ledgered in
+  `tests/parity/divergences.toml`.
 - `XinetdDepCheck.toml` — the reference's `descriptions/CheckForXinetd.toml`,
   renamed to the module name, plus the port-only `deprecated-xinetd-config`
   entry (ledgered in `tests/parity/divergences.toml`).
@@ -98,9 +103,10 @@ Provenance, verified against the pinned reference (`84848c0`):
   entry (openSUSE: "Doesn't seem to make sense") dropped with
   the findings, and minus the port-only `zero-length` entry dropped with
   the deliberately removed `zero-length` finding (issue #479). Plus the
-  port-only `manpage-dangling-so-ref` entry: the reference has no such
-  finding, so `--explain` would print `Unknown message` for it;
-  ledgered in `tests/parity/divergences.toml`.
+  port-only `manpage-dangling-so-ref` and `sysconfig-fillup-usage`
+  entries: the reference has no such findings, so `--explain` would
+  print `Unknown message` for them; ledgered in
+  `tests/parity/divergences.toml`.
 - Every other `*.toml` file — byte-identical to the reference
   `rpmlint/descriptions/` file of the same name.
 

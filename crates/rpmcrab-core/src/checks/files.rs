@@ -6,17 +6,21 @@
 //!
 //! Deliberate gaps are ledgered in `tests/parity/divergences.toml`.
 //!
-//! One finding has no reference counterpart: `debug-files-in-non-debug-package`
-//! (upstream feature request rpm-software-management/rpmlint#11).
+//! Two findings have no reference counterpart: `debug-files-in-non-debug-package`
+//! (upstream feature request rpm-software-management/rpmlint#11) and
+//! `systemd-preset-packaged` (preset files are distro policy, shipped only
+//! by the packages named in the `SystemdPresetPackages` config key).
 
 #![allow(clippy::collapsible_if)]
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use fancy_regex::Regex;
 use indexmap::IndexMap;
 
+use super::filelist::sysconfig_good_matches;
 use super::is_match;
 use super::shared::{
     devel_regex, is_mingw_package, lib_package_regex, macro_regex, python_str_repr,
@@ -63,6 +67,11 @@ fn man_binary_basename(filename: &str) -> Option<&str> {
 const MAN_COMPRESSION_SUFFIXES: &[&str] =
     &[".gz", ".z", ".Z", ".zip", ".bz2", ".lzma", ".xz", ".zst"];
 
+/// Cap on the decompressed text of one man page: real pages stay far
+/// below this bound; it only limits a decompressor runaway or an
+/// oversized plain page.
+const MANPAGE_TEXT_LIMIT: u64 = 8 * 1024 * 1024;
+
 /// `path` with one trailing man page compression suffix removed, when it
 /// carries one.
 fn strip_man_compression_suffix(path: &str) -> &str {
@@ -99,7 +108,11 @@ fn manpage_so_targets(text: &str) -> Vec<String> {
 /// (`man3/popen.3`), or `None` when the argument names no man-root page:
 /// relative arguments are already man-root-relative, absolute arguments
 /// count only in their `/usr/share/man/...` or `/usr/man/...` form, and
-/// bare filenames or other absolute paths name no man-root page.
+/// bare filenames or other absolute paths name no man-root page. The
+/// first directory of a relative argument must have the section shape
+/// `MAN_REGEX` accepts (`man` plus a digit with an optional `p`/`x`,
+/// or `mann`): a merely `man`-prefixed directory (`manual/`,
+/// `management/`) names no man page.
 fn manpage_so_root_relative(arg: &str) -> Option<String> {
     if let Some(rel) = arg.strip_prefix("/usr/share/man/") {
         return Some(rel.to_string());
@@ -111,11 +124,12 @@ fn manpage_so_root_relative(arg: &str) -> Option<String> {
         return None;
     }
     let (dir, _) = arg.split_once('/')?;
-    if dir.len() > 3 && dir.starts_with("man") {
-        Some(arg.to_string())
-    } else {
-        None
-    }
+    let section = dir.strip_prefix("man")?;
+    let valid = section == "n"
+        || (section.len() <= 2
+            && section.as_bytes().first().is_some_and(u8::is_ascii_digit)
+            && (section.len() == 1 || matches!(section.as_bytes()[1], b'p' | b'x')));
+    if valid { Some(arg.to_string()) } else { None }
 }
 
 /// Whether the `spurious-executable-perm` finding is suppressed for
@@ -494,6 +508,7 @@ pub struct FilesCheck {
     standard_users: Vec<String>,
     standard_groups: Vec<String>,
     disallowed_dirs: Vec<String>,
+    preset_packages: Vec<String>,
     dangling_exceptions: Vec<(String, Regex)>,
     ldconfig_re: Regex,
     python_default_version: String,
@@ -513,6 +528,11 @@ pub struct FilesCheck {
     /// been seen.
     session_files: HashSet<String>,
     dangling_candidates: Vec<DanglingCandidate>,
+    /// Decompressed bytes per file path, shared between `is_utf8_file`
+    /// and `manpage_text` (see `decompressed_bytes`); `None` entries
+    /// record outputs that could not be obtained or exceeded the text
+    /// limit, so the fallback read is not repeated either.
+    decompressed_cache: std::cell::RefCell<HashMap<String, Option<Arc<[u8]>>>>,
 }
 
 impl FilesCheck {
@@ -614,6 +634,7 @@ impl FilesCheck {
             standard_users: get_strings("StandardUsers"),
             standard_groups: get_strings("StandardGroups"),
             disallowed_dirs: get_strings("DisallowedDirs"),
+            preset_packages: get_strings("SystemdPresetPackages"),
             dangling_exceptions: dangling,
             ldconfig_re: Regex::new(r"(?m)^[^#]*ldconfig").expect("static regex"),
             python_default_version: get_str("PythonDefaultVersion"),
@@ -623,6 +644,7 @@ impl FilesCheck {
             documented_sources: HashSet::new(),
             session_files: HashSet::new(),
             dangling_candidates: Vec::new(),
+            decompressed_cache: std::cell::RefCell::new(HashMap::new()),
         }
     }
 
@@ -733,6 +755,7 @@ impl Check for FilesCheck {
         self.check_log_files_without_logrotate(pkg, &st, out);
         self.check_debuginfo_without_sources(pkg, &st, out);
         self.check_bindir_exes(pkg, &st, out);
+        self.check_sysconfig_fillup_usage(pkg, out);
     }
 
     fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
@@ -787,6 +810,7 @@ impl Check for FilesCheck {
         self.documented_sources.clear();
         self.session_files.clear();
         self.dangling_candidates.clear();
+        self.decompressed_cache.borrow_mut().clear();
     }
 
     fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
@@ -835,6 +859,115 @@ fn source_key(pkg: &Pkg) -> String {
         Some(srpm) if !srpm.is_empty() => srpm,
         _ => pkg.name.clone(),
     }
+}
+
+/// The source package name a `SOURCERPM` value names: the value is
+/// `<name>-<version>-<release>.src.rpm`, and only the name is stable
+/// across the subpackages of one build. A value in any other shape is
+/// returned whole, so it never equals a real package name by accident.
+fn source_pkg_name(sourcerpm: &str) -> &str {
+    let stem = sourcerpm.strip_suffix(".src.rpm").unwrap_or(sourcerpm);
+    match stem.rsplit_once('-') {
+        Some((rest, _release)) => match rest.rsplit_once('-') {
+            Some((name, _version)) if !name.is_empty() => name,
+            _ => stem,
+        },
+        None => stem,
+    }
+}
+
+/// Whether the package belongs to the sysconfig/fillup mechanism itself:
+/// a binary named `sysconfig` or `fillup`, or one built from that source
+/// package (the shape of `sysconfig-netconfig`, whose source package is
+/// `sysconfig`). The mechanism's own packages ship the payload, the
+/// templates and the fillup calls by definition.
+fn sysconfig_fillup_exempt(pkg_name: &str, sourcerpm: Option<&str>) -> bool {
+    pkg_name == "sysconfig"
+        || pkg_name == "fillup"
+        || matches!(
+            sourcerpm.map(source_pkg_name),
+            Some("sysconfig") | Some("fillup")
+        )
+}
+
+/// A `fillup` invocation at command position in a scriptlet: the shape
+/// the `%fillup_only` / `%fillup_and_insserv` macros expand to in a built
+/// package (e.g. `/bin/fillup -q /etc/sysconfig/<name> <template>`). The
+/// anchors mirror the command-position convention of the scriptlet
+/// matchers in `post.rs`, so a guard testing for the binary
+/// (`[ -x /bin/fillup ]`) or a mention in prose does not count.
+fn fillup_invocation_re() -> &'static Regex {
+    static FILLUP_INVOCATION_RE: OnceLock<Regex> = OnceLock::new();
+    FILLUP_INVOCATION_RE.get_or_init(|| {
+        Regex::new(r"(?m)(^|[;`|]|&&|\$\()\s*(?:\S+/)?fillup(?:\s|$|[;|&])").expect("static regex")
+    })
+}
+
+/// The first `EnvironmentFile` target in a systemd unit that points into
+/// `/etc/sysconfig/`, spelled as written (including the optional-file
+/// `-` prefix), or `None`.
+fn sysconfig_environment_file(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("EnvironmentFile") else {
+            continue;
+        };
+        let Some(value) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        let token = value
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches('"');
+        let target = token.strip_prefix('-').unwrap_or(token);
+        if target.starts_with("/etc/sysconfig/") {
+            return Some(token.to_string());
+        }
+    }
+    None
+}
+
+/// The sysconfig/fillup uses of one package, as one evidence phrase per
+/// category, in category order. `scriptlets` pairs each scriptlet's
+/// macro name with its body; `units` pairs each shipped unit file's name
+/// with its contents. The payload category skips files matching the
+/// `Good` patterns of the `filelist-forbidden-sysconfig` rule (see
+/// `sysconfig_good_matches`).
+fn sysconfig_fillup_uses(
+    files: &[&str],
+    scriptlets: &[(&str, &str)],
+    units: &[(&str, &str)],
+) -> Vec<String> {
+    let mut uses = Vec::new();
+    // A payload file the `filelist-forbidden-sysconfig` rule blesses
+    // through its `Good` patterns is not a use: the distro's own rule
+    // data permits those subtrees, so a migration nudge must not flag
+    // them either. The remaining categories carry no such allowlist.
+    if let Some(path) = files
+        .iter()
+        .find(|name| name.starts_with("/etc/sysconfig/") && !sysconfig_good_matches(name))
+    {
+        uses.push(format!("ships file {path}"));
+    }
+    if let Some(path) = files.iter().find(|name| {
+        let comps: Vec<&str> = name.split('/').collect();
+        comps[..comps.len().saturating_sub(1)].contains(&"fillup-templates")
+    }) {
+        uses.push(format!("ships fillup template {path}"));
+    }
+    if let Some((label, _)) = scriptlets
+        .iter()
+        .find(|(_, body)| is_match(fillup_invocation_re(), body))
+    {
+        uses.push(format!("calls fillup from the {label} scriptlet"));
+    }
+    for (unit, content) in units {
+        if let Some(target) = sysconfig_environment_file(content) {
+            uses.push(format!("unit {unit} sets EnvironmentFile={target}"));
+            break;
+        }
+    }
+    uses
 }
 
 /// One relative symlink whose normalised target the emitting package
@@ -943,6 +1076,78 @@ fn strip_quotes(re: &Regex, s: &str) -> String {
 }
 
 impl FilesCheck {
+    /// One Warning per package that uses the legacy sysconfig/fillup
+    /// configuration scheme, naming every use found: a payload file
+    /// below `/etc/sysconfig/`, a template below a `fillup-templates/`
+    /// directory, a `fillup` invocation in a scriptlet, or a shipped
+    /// systemd unit whose `EnvironmentFile` points into
+    /// `/etc/sysconfig/`. The mechanism's own packages are exempt (see
+    /// `sysconfig_fillup_exempt`). Port-only as a finding: the
+    /// reference's `filelist-forbidden-sysconfig` Error (ported in
+    /// `FilelistCheck`) covers the Bad-pattern payloads, so this Warning
+    /// double-emits with it there and adds the categories that Error
+    /// does not cover. The `--explain` text proposes the migration,
+    /// which is the point of the check.
+    fn check_sysconfig_fillup_usage(&self, pkg: &Pkg, out: &mut Filter) {
+        if sysconfig_fillup_exempt(&pkg.name, pkg.tag_str(librpm::Tag::SOURCERPM).as_deref()) {
+            return;
+        }
+        let files: Vec<&str> = pkg.files.iter().map(|f| f.name.as_str()).collect();
+        let mut scriptlets: Vec<(&str, String)> = Vec::new();
+        for (tag, label) in [
+            (librpm::Tag::PREIN, "%pre"),
+            (librpm::Tag::POSTIN, "%post"),
+            (librpm::Tag::PREUN, "%preun"),
+            (librpm::Tag::POSTUN, "%postun"),
+            (librpm::Tag::PRETRANS, "%pretrans"),
+            (librpm::Tag::POSTTRANS, "%posttrans"),
+            (librpm::Tag::VERIFYSCRIPT, "%verifyscript"),
+        ] {
+            let body = pkg.tag_str(tag).unwrap_or_default();
+            if !body.is_empty() {
+                scriptlets.push((label, body));
+            }
+        }
+        for (tag, label) in [
+            (librpm::Tag::TRIGGERSCRIPTS, "%trigger"),
+            (librpm::Tag::FILETRIGGERSCRIPTS, "%filetrigger"),
+            (librpm::Tag::TRANSFILETRIGGERSCRIPTS, "%transfiletrigger"),
+        ] {
+            for body in pkg.tag_str_array(tag) {
+                if !body.is_empty() {
+                    scriptlets.push((label, body));
+                }
+            }
+        }
+        let scriptlet_refs: Vec<(&str, &str)> = scriptlets
+            .iter()
+            .map(|(label, body)| (*label, body.as_str()))
+            .collect();
+        let mut units: Vec<(&str, String)> = Vec::new();
+        for f in &pkg.files {
+            if f.name.contains("/systemd/system/") || f.name.contains("/systemd/user/") {
+                let content = pkg.read_file(&f.name);
+                if !content.is_empty() {
+                    units.push((f.name.as_str(), content));
+                }
+            }
+        }
+        let unit_refs: Vec<(&str, &str)> = units
+            .iter()
+            .map(|(name, content)| (*name, content.as_str()))
+            .collect();
+        let uses = sysconfig_fillup_uses(&files, &scriptlet_refs, &unit_refs);
+        if !uses.is_empty() {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "sysconfig-fillup-usage",
+                &[&uses.join("; ")],
+            );
+        }
+    }
+
     fn check_utf8(&self, pkg: &Pkg, out: &mut Filter) {
         use librpm::Tag;
         for name in pkg.tag_str_array(Tag::FILENAMES) {
@@ -1121,6 +1326,7 @@ impl FilesCheck {
         self.check_file_non_ghost_in_run(pkg, fname, pkg, out);
         self.check_file_mimeinfo_cache(pkg, fname, pkgfile, out);
         self.check_file_systemd_unit_in_etc(pkg, fname, out);
+        self.check_file_systemd_preset(pkg, fname, pkgfile, out);
         self.check_file_udev_rule_in_etc(pkg, fname, out);
         self.check_file_tmpfiles_conf_in_etc(pkg, fname, out);
         self.check_file_subdir_in_bin(pkg, fname, out);
@@ -1593,6 +1799,44 @@ impl FilesCheck {
         self.decompressors.iter().find(|t| t.name() == name)
     }
 
+    /// The decompressed bytes of `path` through `fname`'s decompressor,
+    /// shared between `is_utf8_file` and `manpage_text`: a `%doc` man
+    /// page would otherwise run the same `<tool> -dc` pipeline twice per
+    /// package. A complete output up to `MANPAGE_TEXT_LIMIT` is cached
+    /// per path on this instance. `None` — no decompressor for the
+    /// suffix, an absent or failing decompressor, or an output past the
+    /// limit — is cached as well; callers then apply their own read for
+    /// those cases (streaming validation, a capped prefix) exactly as
+    /// when no cache entry exists.
+    fn decompressed_bytes(&self, fname: &str, path: &str) -> Option<Arc<[u8]>> {
+        if let Some(hit) = self.decompressed_cache.borrow().get(path) {
+            return hit.clone();
+        }
+        let result = self.decompressor_for(fname).and_then(|tool| {
+            let mut cmd = tool.command()?;
+            cmd.arg("-dc")
+                .arg(path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null());
+            let mut child = cmd.spawn().ok()?;
+            let bytes = child
+                .stdout
+                .take()
+                .and_then(|s| read_prefix(s, MANPAGE_TEXT_LIMIT + 1).ok())?;
+            let status = child.wait().ok()?;
+            if status.success() && bytes.len() as u64 <= MANPAGE_TEXT_LIMIT {
+                Some(Arc::from(bytes))
+            } else {
+                None
+            }
+        });
+        self.decompressed_cache
+            .borrow_mut()
+            .insert(path.to_string(), result.clone());
+        result
+    }
+
     /// rpmlint's `is_utf8`: strict UTF-8, transparently decompressing the
     /// compression formats the reference knows. A failed decompression reads
     /// as UTF-8, matching the reference's `except OSError: return True`.
@@ -1608,6 +1852,13 @@ impl FilesCheck {
     fn is_utf8_file(&self, fname: &str, path: &str) -> bool {
         match self.decompressor_for(fname) {
             Some(tool) => {
+                // A previous decompression of this path (by either
+                // consumer) is validated from memory instead of running
+                // the pipeline again.
+                if let Some(bytes) = self.decompressed_bytes(fname, path) {
+                    let mut slice: &[u8] = &bytes;
+                    return stream_is_utf8(&mut slice).unwrap_or(true);
+                }
                 let Some(mut cmd) = tool.command() else {
                     return true;
                 };
@@ -1643,13 +1894,19 @@ impl FilesCheck {
     /// content cannot be obtained (unreadable file, missing or failing
     /// decompressor): the page's references cannot be judged, so the
     /// page is skipped rather than guessed at — the absent-tool stance
-    /// `is_utf8_file` takes.
+    /// `is_utf8_file` takes. A name carrying a compression suffix the
+    /// codebase recognises but has no decompressor for (`.zip`) is
+    /// skipped the same way: its bytes are compressed content, not
+    /// page text to scan.
     fn manpage_text(&self, pkgfile: &PkgFile) -> Option<String> {
-        /// Decompressed man pages stay far below this bound; it only
-        /// caps a decompressor runaway.
-        const MANPAGE_TEXT_LIMIT: u64 = 8 * 1024 * 1024;
         match self.decompressor_for(&pkgfile.name) {
             Some(tool) => {
+                if let Some(bytes) = self.decompressed_bytes(&pkgfile.name, &pkgfile.path) {
+                    return Some(String::from_utf8_lossy(&bytes).into_owned());
+                }
+                // The shared helper could not serve the page (a failing
+                // decompressor, or output past the text limit): fall
+                // back to this page's own capped run.
                 let mut cmd = tool.command()?;
                 cmd.arg("-dc")
                     .arg(&pkgfile.path)
@@ -1661,14 +1918,24 @@ impl FilesCheck {
                     .stdout
                     .take()
                     .and_then(|s| read_prefix(s, MANPAGE_TEXT_LIMIT).ok());
+                let bytes = bytes?;
                 let status = child.wait().ok()?;
-                if !status.success() {
+                // A saturated read means the output ran past the text
+                // limit and the decompressor then died of SIGPIPE on
+                // the closed pipe: the prefix is the page text to
+                // judge, so the exit status only decides the verdict
+                // for outputs that fit under the limit.
+                if (bytes.len() as u64) < MANPAGE_TEXT_LIMIT && !status.success() {
                     return None;
                 }
-                Some(String::from_utf8_lossy(&bytes?).into_owned())
+                Some(String::from_utf8_lossy(&bytes).into_owned())
             }
             None => {
-                let bytes = std::fs::read(&pkgfile.path).ok()?;
+                if strip_man_compression_suffix(&pkgfile.name) != pkgfile.name {
+                    return None;
+                }
+                let file = std::fs::File::open(&pkgfile.path).ok()?;
+                let bytes = read_prefix(file, MANPAGE_TEXT_LIMIT).ok()?;
                 Some(String::from_utf8_lossy(&bytes).into_owned())
             }
         }
@@ -1677,10 +1944,17 @@ impl FilesCheck {
     /// A man page can redirect to another page with a `.so` line (a
     /// soelim include); when the target page is not shipped, `man`
     /// fails to display the referencing page. The reference is judged
-    /// within the package alone, like the dangling-symlink family: a
-    /// target shipped by another package does not satisfy it. A shipped
-    /// file matches under any compression suffix, or none. One finding
-    /// per (referencing page, missing target).
+    /// within the package, like the reference's dangling-symlink
+    /// family: a target shipped by another package satisfies it only
+    /// when this package declares the dependency, through the same
+    /// `req_names` escape `check_link_absolute` uses (a file Require
+    /// on the target page's path). The check deliberately stays
+    /// package-local even though the port's relative-symlink form is
+    /// session-aware (issue #547); the parity ledger records the
+    /// approximation. A shipped file, and likewise a file Require,
+    /// matches under any compression suffix, or none. One finding
+    /// per (referencing page, missing
+    /// target).
     ///
     /// Resolution mirrors how the target is found at display time: a
     /// `man<section>/<page>` argument resolves against the man root,
@@ -1734,7 +2008,13 @@ impl FilesCheck {
                 if !seen.insert(candidates[0].to_string()) {
                     continue;
                 }
-                if !candidates.iter().any(|c| shipped.contains(c)) {
+                if !candidates.iter().any(|c| {
+                    shipped.contains(c)
+                        || pkg
+                            .req_names
+                            .iter()
+                            .any(|n| strip_man_compression_suffix(n) == *c)
+                }) {
                     add_info(
                         out,
                         Level::Warning,
@@ -1939,6 +2219,43 @@ impl FilesCheck {
     fn check_file_systemd_unit_in_etc(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
         if fname.starts_with("/etc/systemd/system/") {
             add_info(out, Level::Warning, pkg, "systemd-unit-in-etc", &[fname]);
+        }
+    }
+
+    fn check_file_systemd_preset(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        out: &mut Filter,
+    ) {
+        // Preset files encode the distribution's default enablement policy
+        // and are shipped only by its preset packages (the
+        // `SystemdPresetPackages` config key); any other package shipping
+        // one sets enablement policy outside that central place.
+        if self.preset_packages.iter().any(|n| n == &pkg.name) {
+            return;
+        }
+        if !pkgfile::is_reg(pkgfile.mode) {
+            return;
+        }
+        for dir in [
+            "/usr/lib/systemd/system-preset/",
+            "/usr/lib/systemd/user-preset/",
+        ] {
+            if let Some(base) = fname.strip_prefix(dir) {
+                if !base.contains('/') && base.len() > ".preset".len() && base.ends_with(".preset")
+                {
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "systemd-preset-packaged",
+                        &[fname],
+                    );
+                }
+                break;
+            }
         }
     }
 
@@ -7632,6 +7949,24 @@ mod tests {
     }
 
     #[test]
+    fn manpage_so_root_relative_rejects_man_prefixed_dirs() {
+        // The first directory must carry the section shape `MAN_REGEX`
+        // accepts, not just the `man` prefix: `manual/` and
+        // `management/` name no man page (issue #672).
+        assert_eq!(manpage_so_root_relative("manual/x.1"), None);
+        assert_eq!(manpage_so_root_relative("management/x.1"), None);
+        assert_eq!(manpage_so_root_relative("manx/x.1"), None);
+        assert_eq!(
+            manpage_so_root_relative("man1p/x.1p"),
+            Some("man1p/x.1p".to_string())
+        );
+        assert_eq!(
+            manpage_so_root_relative("man3p/x.3p"),
+            Some("man3p/x.3p".to_string())
+        );
+    }
+
+    #[test]
     fn strip_man_compression_suffix_cases() {
         assert_eq!(
             strip_man_compression_suffix("/usr/share/man/man3/popen.3.gz"),
@@ -7717,6 +8052,229 @@ mod tests {
             "the detail names the missing target: {}",
             hits[0].1
         );
+    }
+
+    #[test]
+    fn manpage_so_ref_required_target_is_quiet() {
+        // The `req_names` escape (issue #672): a file Require on the
+        // target page's path declares the sibling dependency, so the
+        // reference is satisfied even though this package does not
+        // ship the target — the escape `check_link_absolute` uses.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = manpage_pkg(
+            &dir,
+            &[(
+                "/usr/share/man/man3/alias.3",
+                0o100644,
+                b".so man3/popen.3\n".as_slice(),
+            )],
+        );
+        pkg.req_names
+            .push("/usr/share/man/man3/popen.3".to_string());
+        let results = run_check_binary(&pkg);
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "a required target satisfies the reference: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_required_compressed_target_is_quiet() {
+        // A file Require names the target as the sibling package
+        // ships it — compressed (popen.3.gz) — while the resolved
+        // candidate is suffix-stripped; the escape must strip the
+        // Require side too, or it never matches a compressed target
+        // (issue #672).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = manpage_pkg(
+            &dir,
+            &[(
+                "/usr/share/man/man3/alias.3",
+                0o100644,
+                b".so man3/popen.3\n".as_slice(),
+            )],
+        );
+        pkg.req_names
+            .push("/usr/share/man/man3/popen.3.gz".to_string());
+        let results = run_check_binary(&pkg);
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "a required compressed target satisfies the reference: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_usr_man_root_candidate_is_quiet() {
+        // Both man roots are accepted for both argument forms
+        // (issue #672): an absolute `/usr/man` argument is satisfied
+        // by the target shipped under `/usr/share/man`.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/man/man1/alias.1",
+                    0o100644,
+                    b".so /usr/man/man1/real.1\n".as_slice(),
+                ),
+                (
+                    "/usr/share/man/man1/real.1",
+                    0o100644,
+                    b".TH real 1\n".as_slice(),
+                ),
+            ],
+        );
+        let results = run_check_binary(&pkg);
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "the /usr/man root candidate resolves: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_zip_page_is_skipped() {
+        // `.zip` is a recognised man page compression suffix with no
+        // decompressor: the page is skipped rather than scanned as
+        // raw text (issue #672).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[(
+                "/usr/share/man/man3/alias.3.zip",
+                0o100644,
+                b".so man3/popen.3\n".as_slice(),
+            )],
+        );
+        let results = run_check_binary(&pkg);
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "an undecompressible .zip page must not be scanned as text: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_unreadable_page_is_skipped() {
+        // A page whose content cannot be read is skipped, not judged
+        // (issue #672).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[(
+                "/usr/share/man/man3/alias.3",
+                0o100644,
+                b".so man3/popen.3\n".as_slice(),
+            )],
+        );
+        std::fs::remove_file(&pkg.files[0].path).expect("remove page content");
+        let results = run_check_binary(&pkg);
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "an unreadable page is skipped: {results:?}"
+        );
+    }
+
+    /// Write an executable fake tool `name` holding `script` under a
+    /// fresh tempdir and return the dir.
+    fn fake_tool_dir(name: &str, script: &str) -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().expect("tool tmpdir");
+        let tool = dir.path().join(name);
+        std::fs::write(&tool, script).expect("write fake tool");
+        let mut perms = std::fs::metadata(&tool)
+            .expect("stat fake tool")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&tool, perms).expect("chmod fake tool");
+        dir
+    }
+
+    #[test]
+    fn manpage_so_ref_absent_decompressor_skips_page() {
+        // No gzip in the tool dir: the `.gz` page cannot be read, so
+        // it is skipped rather than guessed at (issue #672).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let empty = tempfile::TempDir::new().expect("empty tool dir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[(
+                "/usr/share/man/man3/alias.3.gz",
+                0o100644,
+                b".so man3/popen.3\n".as_slice(),
+            )],
+        );
+        let config = test_config();
+        let mut check = FilesCheck::with_tool_dir(&config, Some(empty.path()));
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "a page whose decompressor is absent is skipped: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_failing_decompressor_skips_page() {
+        // A decompressor that exits non-zero leaves the page
+        // unreadable: skipped, not guessed at (issue #672).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let tools = fake_tool_dir("gzip", "#!/bin/sh\nexit 1\n");
+        let pkg = manpage_pkg(
+            &dir,
+            &[(
+                "/usr/share/man/man3/alias.3.gz",
+                0o100644,
+                b"not really gzip".as_slice(),
+            )],
+        );
+        let config = test_config();
+        let mut check = FilesCheck::with_tool_dir(&config, Some(tools.path()));
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            so_ref_hits(&results).is_empty(),
+            "a page whose decompressor fails is skipped: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_over_limit_output_hides_late_targets() {
+        // Decompressed output is capped at the man page text limit: a
+        // `.so` line past the cap is never seen, so nothing fires;
+        // the same line ahead of the cap fires as usual (issue #672).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[(
+                "/usr/share/man/man3/alias.3.gz",
+                0o100644,
+                b"not really gzip".as_slice(),
+            )],
+        );
+        let filler = "head -c 9000000 /dev/zero | tr '\\0' 'x'";
+        for (script, expect_hits) in [
+            (
+                format!("#!/bin/sh\n{filler}\nprintf '\\n.so man3/popen.3\\n'\n"),
+                0,
+            ),
+            (
+                format!("#!/bin/sh\nprintf '.so man3/popen.3\\n'\n{filler}\n"),
+                1,
+            ),
+        ] {
+            let tools = fake_tool_dir("gzip", &script);
+            let config = test_config();
+            let mut check = FilesCheck::with_tool_dir(&config, Some(tools.path()));
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_binary(&pkg, &config, &mut out);
+            let results = out.results().to_vec();
+            assert_eq!(
+                so_ref_hits(&results).len(),
+                expect_hits,
+                "over-limit output handling: {results:?}"
+            );
+        }
     }
 
     #[test]
@@ -8122,6 +8680,615 @@ mod tests {
                 .iter()
                 .any(|(n, _)| n == "debug-files-in-non-debug-package"),
             "segment equality must not match debugfoo: {results:?}"
+        );
+    }
+
+    /// `test_config` plus a `SystemdPresetPackages` exemption list, the
+    /// config key the vendored openSUSE/SLFO distro configs carry.
+    fn preset_test_config() -> Config {
+        let mut cfg = test_config();
+        cfg.configuration.insert(
+            "SystemdPresetPackages".to_string(),
+            toml::Value::Array(vec![
+                toml::Value::String("systemd".to_string()),
+                toml::Value::String("systemd-presets-common-SUSE".to_string()),
+                toml::Value::String("systemd-presets-branding-openSUSE".to_string()),
+            ]),
+        );
+        cfg
+    }
+
+    fn run_check_binary_with_config(pkg: &Pkg, config: &Config) -> Vec<(String, String)> {
+        let mut check = FilesCheck::new(config);
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        check.check_binary(pkg, config, &mut out);
+        out.results().to_vec()
+    }
+
+    fn preset_findings(results: &[(String, String)]) -> Vec<&(String, String)> {
+        results
+            .iter()
+            .filter(|(n, _)| n == "systemd-preset-packaged")
+            .collect()
+    }
+
+    #[test]
+    fn systemd_preset_file_in_other_package_fires() {
+        let (mut pkg, _dir) = pkg_with_files(vec![mkfile(
+            "/usr/lib/systemd/system-preset/99-foo.preset",
+            0o100644,
+            31,
+        )]);
+        pkg.name = "foo".to_string();
+        let results = run_check_binary_with_config(&pkg, &preset_test_config());
+        let hits = preset_findings(&results);
+        assert_eq!(hits.len(), 1, "exactly one preset finding: {results:?}");
+        assert!(
+            hits[0].1.contains(
+                ": W: systemd-preset-packaged /usr/lib/systemd/system-preset/99-foo.preset"
+            ),
+            "name, level and detail must render, got: {}",
+            hits[0].1
+        );
+    }
+
+    #[test]
+    fn systemd_user_preset_file_in_other_package_fires() {
+        let (mut pkg, _dir) = pkg_with_files(vec![mkfile(
+            "/usr/lib/systemd/user-preset/99-foo.preset",
+            0o100644,
+            32,
+        )]);
+        pkg.name = "foo".to_string();
+        let results = run_check_binary_with_config(&pkg, &preset_test_config());
+        assert_eq!(
+            preset_findings(&results).len(),
+            1,
+            "user-preset files fire too: {results:?}"
+        );
+    }
+
+    #[test]
+    fn systemd_preset_file_in_preset_packages_is_quiet() {
+        for name in [
+            "systemd",
+            "systemd-presets-common-SUSE",
+            "systemd-presets-branding-openSUSE",
+        ] {
+            let (mut pkg, _dir) = pkg_with_files(vec![mkfile(
+                "/usr/lib/systemd/system-preset/90-default.preset",
+                0o100644,
+                33,
+            )]);
+            pkg.name = name.to_string();
+            let results = run_check_binary_with_config(&pkg, &preset_test_config());
+            assert!(
+                preset_findings(&results).is_empty(),
+                "preset package {name} must stay quiet: {results:?}"
+            );
+        }
+    }
+
+    /// The vendored SLFO config's `SystemdPresetPackages` list is the
+    /// exemption source for the SLFO branding-preset packages: a package
+    /// named e.g. `systemd-presets-branding-SLE` shipping a regular preset
+    /// file stays quiet under it.
+    #[test]
+    fn slfo_preset_packages_are_quiet_under_vendored_slfo_config() {
+        let slfo_toml =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("data/distro/slfo/opensuse.toml");
+        let parsed: toml::Table =
+            toml::from_str(&std::fs::read_to_string(slfo_toml).expect("vendored slfo config"))
+                .expect("vendored slfo config parses");
+        let mut cfg = test_config();
+        cfg.configuration.insert(
+            "SystemdPresetPackages".to_string(),
+            parsed["SystemdPresetPackages"].clone(),
+        );
+        for name in [
+            "systemd-presets-branding-SLE",
+            "systemd-presets-branding-SLE_immutable",
+            "systemd-presets-branding-Elemental",
+            "systemd-presets-branding-SLE-SAP",
+            "systemd-presets-branding-SLE-SAP_immutable",
+        ] {
+            let (mut pkg, _dir) = pkg_with_files(vec![mkfile(
+                "/usr/lib/systemd/system-preset/90-default.preset",
+                0o100644,
+                42,
+            )]);
+            pkg.name = name.to_string();
+            let results = run_check_binary_with_config(&pkg, &cfg);
+            assert!(
+                preset_findings(&results).is_empty(),
+                "SLFO preset package {name} must stay quiet: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn systemd_preset_file_fires_without_exemption_config() {
+        // No SystemdPresetPackages key configured: no package is exempt,
+        // including a distro preset package name.
+        let (mut pkg, _dir) = pkg_with_files(vec![mkfile(
+            "/usr/lib/systemd/system-preset/90-default.preset",
+            0o100644,
+            34,
+        )]);
+        pkg.name = "systemd-presets-common-SUSE".to_string();
+        let results = run_check_binary(&pkg);
+        assert_eq!(
+            preset_findings(&results).len(),
+            1,
+            "without the exemption config every preset shipper fires: {results:?}"
+        );
+    }
+
+    #[test]
+    fn preset_like_paths_outside_preset_dirs_are_quiet() {
+        let (mut pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/lib/systemd/system/99-foo.preset", 0o100644, 35),
+            mkfile("/usr/share/foo/99-foo.preset", 0o100644, 36),
+            mkfile("/usr/lib/systemd/system-preset/99-foo.conf", 0o100644, 37),
+            mkfile(
+                "/usr/lib/systemd/system-preset/sub/99-foo.preset",
+                0o100644,
+                38,
+            ),
+            mkfile("/etc/systemd/system-preset/99-foo.preset", 0o100644, 39),
+        ]);
+        pkg.name = "foo".to_string();
+        let results = run_check_binary_with_config(&pkg, &preset_test_config());
+        assert!(
+            preset_findings(&results).is_empty(),
+            "only *.preset directly in the preset dirs fires: {results:?}"
+        );
+    }
+
+    #[test]
+    fn systemd_preset_dir_entry_is_quiet() {
+        let (mut pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/lib/systemd/system-preset", 0o040755, 40),
+            mkfile("/usr/lib/systemd/user-preset", 0o040755, 41),
+        ]);
+        pkg.name = "foo".to_string();
+        let results = run_check_binary_with_config(&pkg, &preset_test_config());
+        assert!(
+            preset_findings(&results).is_empty(),
+            "bare directory entries must stay quiet: {results:?}"
+        );
+    }
+
+    /// Build a binary RPM at test time with the given payload files
+    /// (path, contents) and an optional %post scriptlet, then open it
+    /// with real payload extraction.
+    fn sysconfig_test_pkg(
+        name: &str,
+        files: &[(&str, &str)],
+        post: Option<&str>,
+    ) -> (Pkg, tempfile::TempDir, tempfile::TempDir) {
+        use rpm::{BuildConfig, FileMode, FileOptions, PackageBuilder};
+        let src = tempfile::tempdir().unwrap();
+        let rpm_path = src.path().join(format!("{name}-1.0-1.noarch.rpm"));
+        let mut b = PackageBuilder::new(name, "1.0", "MIT", "noarch", "sysconfig test package");
+        b.using_config(BuildConfig::default());
+        for &(path, contents) in files {
+            b.with_file_contents(
+                contents.as_bytes().to_vec(),
+                FileOptions::new(path).mode(FileMode::regular(0o644)),
+            )
+            .unwrap();
+        }
+        if let Some(post) = post {
+            b.post_install_script(post);
+        }
+        let built = b.build().unwrap();
+        built
+            .write(&mut std::fs::File::create(&rpm_path).unwrap())
+            .unwrap();
+        let extract = tempfile::tempdir().unwrap();
+        let pkg = Pkg::open(&rpm_path, extract.path(), true).expect("open test pkg");
+        (pkg, src, extract)
+    }
+
+    /// The `sysconfig-fillup-usage` findings (name, rendered line, level)
+    /// `FilesCheck` emits for `pkg`.
+    fn sysconfig_findings(pkg: &Pkg) -> Vec<(String, String, Level)> {
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check_binary(pkg, &config, &mut out);
+        out.results()
+            .iter()
+            .zip(out.result_levels().iter())
+            .filter(|((n, _), _)| n == "sysconfig-fillup-usage")
+            .map(|((n, line), l)| (n.clone(), line.clone(), *l))
+            .collect()
+    }
+
+    #[test]
+    fn sysconfig_source_pkg_name_strips_version_and_release() {
+        assert_eq!(source_pkg_name("sysconfig-0.90.5-1.2.src.rpm"), "sysconfig");
+        assert_eq!(source_pkg_name("fillup-1.42-281.7.src.rpm"), "fillup");
+        assert_eq!(source_pkg_name("libvirt-12.7.0-3.1.src.rpm"), "libvirt");
+        assert_eq!(
+            source_pkg_name("python3.14-3.14.0-1.1.src.rpm"),
+            "python3.14"
+        );
+        // Builder-made packages carry the placeholder, which names no
+        // real source package.
+        assert_eq!(source_pkg_name("(none)"), "(none)");
+    }
+
+    #[test]
+    fn sysconfig_fillup_exemption_shapes() {
+        // By binary name.
+        assert!(sysconfig_fillup_exempt("sysconfig", None));
+        assert!(sysconfig_fillup_exempt("fillup", None));
+        // By source package: the sysconfig-netconfig shape.
+        assert!(sysconfig_fillup_exempt(
+            "sysconfig-netconfig",
+            Some("sysconfig-0.90.5-1.2.src.rpm")
+        ));
+        assert!(sysconfig_fillup_exempt(
+            "fillup-lang",
+            Some("fillup-1.42-281.7.src.rpm")
+        ));
+        // Lookalikes and ordinary packages are not exempt.
+        assert!(!sysconfig_fillup_exempt(
+            "sysconfigfoo",
+            Some("sysconfigfoo-1.0-1.src.rpm")
+        ));
+        assert!(!sysconfig_fillup_exempt("demo", Some("demo-1.0-1.src.rpm")));
+        assert!(!sysconfig_fillup_exempt("demo", Some("(none)")));
+        assert!(!sysconfig_fillup_exempt("demo", None));
+    }
+
+    #[test]
+    fn sysconfig_uses_collector_edges() {
+        // The bare directories are not uses: only entries below them.
+        assert!(sysconfig_fillup_uses(&["/etc/sysconfig"], &[], &[]).is_empty());
+        assert!(sysconfig_fillup_uses(&["/usr/share/fillup-templates"], &[], &[]).is_empty());
+        // A template under any fillup-templates directory counts.
+        assert_eq!(
+            sysconfig_fillup_uses(&["/opt/fillup-templates/sysconfig.demo"], &[], &[]),
+            vec!["ships fillup template /opt/fillup-templates/sysconfig.demo".to_string()]
+        );
+        // A lookalike directory name does not count.
+        assert!(sysconfig_fillup_uses(&["/usr/share/fillup-templates-old/x"], &[], &[]).is_empty());
+        // Spacing around the `=` and a quoted value still resolve.
+        assert_eq!(
+            sysconfig_environment_file("[Service]\nEnvironmentFile = -/etc/sysconfig/demo\n"),
+            Some("-/etc/sysconfig/demo".to_string())
+        );
+        assert_eq!(
+            sysconfig_environment_file("EnvironmentFile=\"/etc/sysconfig/demo\"\n"),
+            Some("/etc/sysconfig/demo".to_string())
+        );
+        // A sysconfig-shaped path that is not inside /etc/sysconfig does
+        // not count.
+        assert_eq!(
+            sysconfig_environment_file("EnvironmentFile=/usr/share/demo/etc/sysconfig/demo\n"),
+            None
+        );
+        assert_eq!(
+            sysconfig_environment_file("ExecStart=/usr/bin/demo\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn sysconfig_payload_file_fires() {
+        let (pkg, _src, _extract) =
+            sysconfig_test_pkg("demo", &[("/etc/sysconfig/demo", "FOO=1\n")], None);
+        let found = sysconfig_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert_eq!(found[0].2, Level::Warning);
+        assert!(
+            found[0].1.contains("/etc/sysconfig/demo"),
+            "detail names the payload file: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn sysconfig_fillup_template_fires() {
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[("/usr/share/fillup-templates/sysconfig.demo", "# template\n")],
+            None,
+        );
+        let found = sysconfig_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert_eq!(found[0].2, Level::Warning);
+        assert!(
+            found[0]
+                .1
+                .contains("/usr/share/fillup-templates/sysconfig.demo"),
+            "detail names the template: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn sysconfig_legacy_fillup_template_fires() {
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[("/var/adm/fillup-templates/sysconfig.demo", "# template\n")],
+            None,
+        );
+        let found = sysconfig_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert!(
+            found[0]
+                .1
+                .contains("/var/adm/fillup-templates/sysconfig.demo"),
+            "detail names the template: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn sysconfig_fillup_scriptlet_fires() {
+        // The macro-expanded shape: a guard testing for the binary, then
+        // the invocation at command position.
+        let post = "PNAME=demo\n\
+                    if [ -x /bin/fillup ]; then\n\
+                    \t/bin/fillup -q /etc/sysconfig/$PNAME /usr/share/fillup-templates/sysconfig.$PNAME\n\
+                    fi\n";
+        let (pkg, _src, _extract) = sysconfig_test_pkg("demo", &[], Some(post));
+        let found = sysconfig_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert_eq!(found[0].2, Level::Warning);
+        assert!(
+            found[0].1.contains("%post"),
+            "detail names the scriptlet: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn sysconfig_fillup_mention_without_invocation_is_quiet() {
+        // The guard alone tests for the binary without invoking it, and
+        // the word in prose is not a command position either.
+        let post = "if [ -x /bin/fillup ]; then\n\
+                    \techo fillup is available\n\
+                    fi\n\
+                    # fillup would merge the template here\necho done\n";
+        let (pkg, _src, _extract) = sysconfig_test_pkg("demo", &[], Some(post));
+        assert!(
+            sysconfig_findings(&pkg).is_empty(),
+            "no invocation, no finding"
+        );
+    }
+
+    #[test]
+    fn sysconfig_unit_environment_file_fires() {
+        let unit = "[Service]\nEnvironmentFile=/etc/sysconfig/demo\nExecStart=/usr/bin/demo\n";
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[("/usr/lib/systemd/system/demo.service", unit)],
+            None,
+        );
+        let found = sysconfig_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert_eq!(found[0].2, Level::Warning);
+        assert!(
+            found[0].1.contains("/etc/sysconfig/demo"),
+            "detail names the EnvironmentFile target: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn sysconfig_unit_environment_file_dash_prefixed_fires() {
+        // The `-` prefix marks the file optional; the unit still reads
+        // its configuration from /etc/sysconfig.
+        let unit = "[Service]\nEnvironmentFile=-/etc/sysconfig/demo\nExecStart=/usr/bin/demo\n";
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[("/usr/lib/systemd/system/demo.service", unit)],
+            None,
+        );
+        let found = sysconfig_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert!(
+            found[0].1.contains("/etc/sysconfig/demo"),
+            "detail names the EnvironmentFile target: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn sysconfig_unit_environment_file_elsewhere_is_quiet() {
+        let unit = "[Service]\nEnvironmentFile=/etc/default/demo\n\
+                    EnvironmentFile=-/usr/share/demo/demo.env\nExecStart=/usr/bin/demo\n";
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[("/usr/lib/systemd/system/demo.service", unit)],
+            None,
+        );
+        assert!(
+            sysconfig_findings(&pkg).is_empty(),
+            "EnvironmentFile outside /etc/sysconfig is not a use"
+        );
+    }
+
+    #[test]
+    fn sysconfig_multiple_uses_fire_once() {
+        let post =
+            "/bin/fillup -q /etc/sysconfig/demo /usr/share/fillup-templates/sysconfig.demo\n";
+        let unit = "[Service]\nEnvironmentFile=-/etc/sysconfig/demo\n";
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[
+                ("/etc/sysconfig/demo", "FOO=1\n"),
+                ("/usr/share/fillup-templates/sysconfig.demo", "# template\n"),
+                ("/usr/lib/systemd/system/demo.service", unit),
+            ],
+            Some(post),
+        );
+        let found = sysconfig_findings(&pkg);
+        assert_eq!(found.len(), 1, "one finding per package: {found:?}");
+        let line = &found[0].1;
+        for evidence in [
+            "/etc/sysconfig/demo",
+            "/usr/share/fillup-templates/sysconfig.demo",
+            "%post",
+            "demo.service",
+        ] {
+            assert!(line.contains(evidence), "detail covers {evidence}: {line}");
+        }
+    }
+
+    #[test]
+    fn sysconfig_package_itself_is_quiet() {
+        // The mechanism's own package ships the payload, the templates
+        // and the fillup calls; it is exempt by name.
+        let post =
+            "/bin/fillup -q /etc/sysconfig/network /usr/share/fillup-templates/sysconfig.network\n";
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "sysconfig",
+            &[
+                ("/etc/sysconfig/network/config", "NETWORKING=yes\n"),
+                (
+                    "/usr/share/fillup-templates/sysconfig.network",
+                    "# template\n",
+                ),
+            ],
+            Some(post),
+        );
+        assert!(
+            sysconfig_findings(&pkg).is_empty(),
+            "the sysconfig package is exempt"
+        );
+    }
+
+    #[test]
+    fn fillup_package_itself_is_quiet() {
+        let (pkg, _src, _extract) =
+            sysconfig_test_pkg("fillup", &[("/etc/sysconfig/fillup", "FOO=1\n")], None);
+        assert!(
+            sysconfig_findings(&pkg).is_empty(),
+            "the fillup package is exempt"
+        );
+    }
+
+    #[test]
+    fn sysconfig_fillup_command_substitution_fires() {
+        // `$(...)` is a command position: the substitution runs fillup.
+        // The substitution sits mid-line after a word, so no other
+        // separator (line start, `;`, `&&`) can reach the invocation:
+        // only the `$(` separator itself can, which pins it -- a bare
+        // `x=$(/bin/fillup ...)` at line start would also be reached by
+        // the line-start separator through the path-prefix group.
+        assert_eq!(
+            sysconfig_fillup_uses(
+                &[],
+                &[(
+                    "%post",
+                    "echo x=$(/bin/fillup -q /etc/sysconfig/demo /usr/share/fillup-templates/sysconfig.demo)\n"
+                )],
+                &[]
+            ),
+            vec!["calls fillup from the %post scriptlet".to_string()]
+        );
+        let post = "echo x=$(/bin/fillup -q /etc/sysconfig/demo /usr/share/fillup-templates/sysconfig.demo)\n";
+        let (pkg, _src, _extract) = sysconfig_test_pkg("demo", &[], Some(post));
+        let found = sysconfig_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert_eq!(found[0].2, Level::Warning);
+        assert!(
+            found[0].1.contains("%post"),
+            "detail names the scriptlet: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn sysconfig_uses_blessed_subdirs_are_quiet() {
+        // The Good patterns of the `filelist-forbidden-sysconfig` rule
+        // bless these subtrees; a payload there is not a category-1 use.
+        assert!(sysconfig_fillup_uses(&["/etc/sysconfig/network/ifcfg-eth0"], &[], &[]).is_empty());
+        assert!(sysconfig_fillup_uses(&["/etc/sysconfig/scripts/ifup-route"], &[], &[]).is_empty());
+        assert!(sysconfig_fillup_uses(&["/etc/sysconfig/cbq"], &[], &[]).is_empty());
+        // A blessed file does not mask an ordinary one: the ordinary
+        // file is the use that is named.
+        assert_eq!(
+            sysconfig_fillup_uses(
+                &["/etc/sysconfig/network/ifcfg-eth0", "/etc/sysconfig/demo"],
+                &[],
+                &[]
+            ),
+            vec!["ships file /etc/sysconfig/demo".to_string()]
+        );
+    }
+
+    #[test]
+    fn sysconfig_blessed_network_payload_is_quiet() {
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[("/etc/sysconfig/network/ifcfg-eth0", "BOOTPROTO=dhcp\n")],
+            None,
+        );
+        assert!(
+            sysconfig_findings(&pkg).is_empty(),
+            "a Good-pattern payload is not a use"
+        );
+    }
+
+    #[test]
+    fn sysconfig_blessed_scripts_payload_is_quiet() {
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[("/etc/sysconfig/scripts/ifup-route", "#!/bin/sh\n")],
+            None,
+        );
+        assert!(
+            sysconfig_findings(&pkg).is_empty(),
+            "a Good-pattern payload is not a use"
+        );
+    }
+
+    #[test]
+    fn sysconfig_blessed_payload_does_not_mask_scriptlet_use() {
+        // The Good allowlist covers only the payload category: a fillup
+        // call from a scriptlet still fires, and the blessed payload is
+        // not named as evidence.
+        let post =
+            "/bin/fillup -q /etc/sysconfig/demo /usr/share/fillup-templates/sysconfig.demo\n";
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[("/etc/sysconfig/network/ifcfg-eth0", "BOOTPROTO=dhcp\n")],
+            Some(post),
+        );
+        let found = sysconfig_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert!(
+            found[0].1.contains("%post"),
+            "detail names the scriptlet: {}",
+            found[0].1
+        );
+        assert!(
+            !found[0].1.contains("ifcfg-eth0"),
+            "blessed payload is not evidence: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn sysconfig_ordinary_package_is_quiet() {
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[
+                ("/usr/bin/demo", "#!/bin/sh\n"),
+                ("/usr/share/demo/README", "demo\n"),
+            ],
+            Some("echo installed\n"),
+        );
+        assert!(
+            sysconfig_findings(&pkg).is_empty(),
+            "no sysconfig use, no finding"
         );
     }
 }

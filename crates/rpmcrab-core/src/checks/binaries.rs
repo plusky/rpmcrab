@@ -3054,9 +3054,8 @@ impl BinariesCheck {
                 })
                 .unwrap_or_default()
         };
-        let mandatory = get_strings("MandatoryOptflags");
         let forbidden = get_strings("ForbiddenOptflags");
-        if mandatory.is_empty() && forbidden.is_empty() {
+        if forbidden.is_empty() {
             return;
         }
         let objdump = ObjdumpInfo::parse(&pkgfile.path);
@@ -3072,25 +3071,11 @@ impl BinariesCheck {
         }
         for producer in &objdump.producers {
             let tokens: Vec<&str> = producer.split(' ').collect();
-            let missing: Vec<&str> = mandatory
-                .iter()
-                .filter(|mo| !tokens.contains(&mo.as_str()))
-                .map(|s| s.as_str())
-                .collect();
             let forbidden_found: Vec<&str> = forbidden
                 .iter()
                 .filter(|f| tokens.contains(&f.as_str()))
                 .map(|s| s.as_str())
                 .collect();
-            if !missing.is_empty() {
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "missing-mandatory-optflags",
-                    &[&pkgfile.name, &missing.join(" ")],
-                );
-            }
             if !forbidden_found.is_empty() {
                 add_info(
                     out,
@@ -4065,8 +4050,8 @@ mod tests {
             "readelf-failed should fire for truncated: {results:?}"
         );
 
-        // Absent under the default config: the optflags lists are empty there,
-        // so the check returns before touching DWARF.
+        // Absent under the default config: the forbidden optflags list is
+        // empty there, so the check returns before touching DWARF.
         assert_lacks(&results, "unused-direct-shlib-dependency");
         assert_lacks(&results, "missing-mandatory-optflags");
     }
@@ -5630,17 +5615,14 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
-    fn optflags_config(mandatory: &[&str], forbidden: &[&str]) -> Config {
+    fn optflags_config(forbidden: &[&str]) -> Config {
         let mut config = test_config();
-        let arr = |ss: &[&str]| {
-            toml::Value::Array(
-                ss.iter()
-                    .map(|s| toml::Value::String((*s).to_string()))
-                    .collect(),
-            )
-        };
-        config.configuration["MandatoryOptflags"] = arr(mandatory);
-        config.configuration["ForbiddenOptflags"] = arr(forbidden);
+        config.configuration["ForbiddenOptflags"] = toml::Value::Array(
+            forbidden
+                .iter()
+                .map(|s| toml::Value::String((*s).to_string()))
+                .collect(),
+        );
         config
     }
 
@@ -5755,27 +5737,24 @@ mod tests {
     }
 
     #[test]
-    fn optflags_missing_mandatory() {
+    fn optflags_mandatory_config_is_inert() {
         let pkg_dir = tempfile::TempDir::new().expect("tmpdir");
         let pkg = optflags_test_pkg(&pkg_dir);
         let elf_dir = tempfile::TempDir::new().expect("tmpdir");
         let path = write_dwarf_elf(&elf_dir, "prog", &[("GNU C17 12.3.1 -O2", false)]);
-        let config = optflags_config(&["-O2", "-D_FORTIFY_SOURCE=2"], &[]);
+        // A config that still sets MandatoryOptflags is a no-op: the
+        // finding is not emitted, whatever the producer carries.
+        let mut config = optflags_config(&[]);
+        config.configuration.insert(
+            "MandatoryOptflags".to_string(),
+            toml::Value::Array(vec![
+                toml::Value::String("-O2".to_string()),
+                toml::Value::String("-D_FORTIFY_SOURCE=2".to_string()),
+            ]),
+        );
         let results = run_optflags(&pkg, &path, &config);
-        let lines = lines_for(&results, "missing-mandatory-optflags");
-        assert_eq!(lines.len(), 1, "results: {results:?}");
-        assert!(lines[0].contains(" W: "), "must be Warning: {}", lines[0]);
-        assert!(
-            lines[0].contains("-D_FORTIFY_SOURCE=2"),
-            "detail lists the missing flag: {}",
-            lines[0]
-        );
-        assert!(
-            !lines[0].contains("-O2"),
-            "present flags are not missing: {}",
-            lines[0]
-        );
-        assert_lacks(&results, "forbidden-optflags");
+        assert_lacks(&results, "missing-mandatory-optflags");
+        assert!(results.is_empty(), "results: {results:?}");
     }
 
     #[test]
@@ -5788,7 +5767,7 @@ mod tests {
             "prog",
             &[("GNU C17 12.3.1 -O2 -fno-stack-protector", false)],
         );
-        let config = optflags_config(&[], &["-fno-stack-protector"]);
+        let config = optflags_config(&["-fno-stack-protector"]);
         let results = run_optflags(&pkg, &path, &config);
         let lines = lines_for(&results, "forbidden-optflags");
         assert_eq!(lines.len(), 1, "results: {results:?}");
@@ -5811,14 +5790,14 @@ mod tests {
             "prog",
             &[("GNU C17 12.3.1 -O2 -D_FORTIFY_SOURCE=2", false)],
         );
-        let config = optflags_config(&["-O2", "-D_FORTIFY_SOURCE=2"], &["-fno-stack-protector"]);
+        let config = optflags_config(&["-fno-stack-protector"]);
         let results = run_optflags(&pkg, &path, &config);
         assert_lacks(&results, "missing-mandatory-optflags");
         assert_lacks(&results, "forbidden-optflags");
     }
 
     #[test]
-    fn optflags_evaluated_per_compilation_unit() {
+    fn optflags_forbidden_evaluated_per_compilation_unit() {
         let pkg_dir = tempfile::TempDir::new().expect("tmpdir");
         let pkg = optflags_test_pkg(&pkg_dir);
         let elf_dir = tempfile::TempDir::new().expect("tmpdir");
@@ -5830,16 +5809,12 @@ mod tests {
                 ("GNU AS 2.33.1", true),
             ],
         );
-        let config = optflags_config(&["-D_FORTIFY_SOURCE=2"], &[]);
+        let config = optflags_config(&["-O2"]);
         let results = run_optflags(&pkg, &path, &config);
-        // Only the assembler unit is missing the flag: exactly one finding.
-        let lines = lines_for(&results, "missing-mandatory-optflags");
+        // Only the C unit carries the forbidden flag: exactly one finding.
+        let lines = lines_for(&results, "forbidden-optflags");
         assert_eq!(lines.len(), 1, "results: {results:?}");
-        assert!(
-            lines[0].contains("-D_FORTIFY_SOURCE=2"),
-            "detail: {}",
-            lines[0]
-        );
+        assert!(lines[0].contains("-O2"), "detail: {}", lines[0]);
     }
 
     fn warn_on_function_config() -> Config {

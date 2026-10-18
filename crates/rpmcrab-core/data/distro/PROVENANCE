@@ -15,6 +15,21 @@
 #   Checks: added 'XinetdDepCheck' (deliberate rpmcrab divergence, ledgered in tests/parity/divergences.toml)
 #   Checks: added 'PAMModulesCheck' (deliberate rpmcrab divergence, ledgered in tests/parity/divergences.toml)
 #
+# SystemdPresetPackages appended (not from upstream; see SYSTEMD_PRESET_PACKAGES):
+#   SystemdPresetPackages: added 'systemd'
+#   SystemdPresetPackages: added 'systemd-mini'
+#   SystemdPresetPackages: added 'systemd-presets-branding-Aeon'
+#   SystemdPresetPackages: added 'systemd-presets-branding-Kalpa'
+#   SystemdPresetPackages: added 'systemd-presets-branding-MicroOS'
+#   SystemdPresetPackages: added 'systemd-presets-branding-openSUSE'
+#   SystemdPresetPackages: added 'systemd-presets-branding-transactional-server'
+#   SystemdPresetPackages: added 'systemd-presets-common-SUSE'
+#   SystemdPresetPackages: added 'systemd-presets-branding-SLE'
+#   SystemdPresetPackages: added 'systemd-presets-branding-SLE_immutable'
+#   SystemdPresetPackages: added 'systemd-presets-branding-Elemental'
+#   SystemdPresetPackages: added 'systemd-presets-branding-SLE-SAP'
+#   SystemdPresetPackages: added 'systemd-presets-branding-SLE-SAP_immutable'
+#
 # Excluded Checks (removed from the opensuse flavor; see EXCLUDED_OPENSUSE_CHECKS):
 #   Checks: removed 'AtomicUpdateCheck' from the opensuse flavor (deliberate rpmcrab divergence, ledgered in tests/parity/divergences.toml)
 #
