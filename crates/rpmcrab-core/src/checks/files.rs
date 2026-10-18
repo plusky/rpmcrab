@@ -4152,6 +4152,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dir_or_file_in_usr_local_exemption_is_per_entry() {
+        // One package carrying both shapes in the same disallowed
+        // directory: the %ghost entry stays quiet while the real
+        // payload entry still fires -- the exemption is per entry,
+        // not per package.
+        let results = run_files_check_with_files(vec![
+            ghost_file("/usr/local/share/fcprobe"),
+            plain_file("/usr/local/bin/fcprobe"),
+        ]);
+        let hits: Vec<&(String, String)> = results
+            .iter()
+            .filter(|(n, _)| n == "dir-or-file-in-usr-local")
+            .collect();
+        assert_eq!(hits.len(), 1, "exactly one entry fires: {results:?}");
+        let (_, line) = hits[0];
+        assert!(
+            line.contains(": E: dir-or-file-in-usr-local")
+                && line.contains("/usr/local/bin/fcprobe"),
+            "the real entry fires at error: {line}"
+        );
+    }
+
     fn finding_names(results: &[(String, String)]) -> Vec<String> {
         results.iter().map(|(n, _)| n.clone()).collect()
     }
