@@ -1879,6 +1879,53 @@ mod tests {
         );
     }
 
+    /// End-to-end bzip2 payload: a `BzEncoder`-compressed cpio payload
+    /// spliced into a real RPM container must go through
+    /// `CompressionType::detect` and `extract`. The decoder-level tests
+    /// above pass an explicit `&CompressionType::Bzip2`, so a miswired
+    /// detect (or a cpio-after-bzip2 failure in `extract`) would
+    /// otherwise go uncaught.
+    #[test]
+    fn extract_bzip2_payload_roundtrips() {
+        let mut payload = newc_bytes(
+            b"usr/share/hello.txt",
+            S_IFREG | 0o644,
+            1,
+            1,
+            b"hello bzip2\n",
+        );
+        payload.extend(newc_bytes(b"TRAILER!!!", 0, 1, 0, b""));
+        let mut enc = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+        std::io::Write::write_all(&mut enc, &payload).unwrap();
+        let bz = enc.finish().unwrap();
+
+        use rpm::{BuildConfig, FileMode, FileOptions, PackageBuilder, Timestamp};
+        let src = tempfile::tempdir().unwrap();
+        let rpm_path = src.path().join("bzprobe.rpm");
+        let mut b = PackageBuilder::new("bzprobe", "1.0", "MIT", "x86_64", "probe");
+        b.using_config(BuildConfig::default().source_date(Timestamp(1_577_922_245)));
+        b.with_file_contents(
+            b"keep\n".to_vec(),
+            FileOptions::new("/usr/share/keepme").mode(FileMode::regular(0o644)),
+        )
+        .unwrap();
+        let pkg = b.build().unwrap();
+        pkg.write(&mut File::create(&rpm_path).unwrap()).unwrap();
+
+        let at = payload_offset(&mut BufReader::new(File::open(&rpm_path).unwrap())).unwrap();
+        let mut rpm = std::fs::read(&rpm_path).unwrap();
+        rpm.truncate(at as usize);
+        rpm.extend_from_slice(&bz);
+        std::fs::write(&rpm_path, &rpm).unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        extract(&rpm_path, out.path(), true).unwrap();
+        assert_eq!(
+            std::fs::read(out.path().join("usr/share/hello.txt")).unwrap(),
+            b"hello bzip2\n"
+        );
+    }
+
     /// Build one synthetic cpio entry for direct `materialize` tests.
     fn collide_entry(name: &[u8], mode: u32, data: &[u8]) -> (CpioEntry, std::io::Cursor<Vec<u8>>) {
         // Pad to the cpio 4-byte alignment: materialize consumes the entry
