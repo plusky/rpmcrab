@@ -1,4 +1,4 @@
-//! `AtomicUpdateCheck` — files must live inside the snapshot (`/etc`, `/usr`).
+//! `AtomicUpdateCheck` — the transactional-update (atomic) requirements.
 //!
 //! Ported from `rpmlint/checks/AtomicUpdateCheck.py`. Two findings:
 //! `dir-or-file-outside-snapshot` (E) and `ghost-outside-snapshot` (W).
@@ -10,6 +10,14 @@
 //! they take effect immediately and vanish or turn inconsistent on a
 //! rollback; the packaging guidelines require them deferred to the
 //! first boot of the new snapshot instead.
+//! The reference docstring also states that (re)starting daemons is not
+//! possible during a transactional update, but the reference implements
+//! no such rule; `scriptlet-service-restart` (W) implements it here: a
+//! scriptlet that invokes `systemctl`/`service`/`rc*` to (re)start a
+//! service directly, instead of going through the distribution macros
+//! (which defer via `systemd-update-helper`), silently does nothing on
+//! an atomic system, where scriptlets run inside the new snapshot with
+//! systemd offline.
 //!
 //! Directory entries are exempt from the error: a shipped directory
 //! carries no payload that a snapshot switch could lose or leave
@@ -124,6 +132,151 @@ pub(crate) fn usr_etc_conffile(file: &PkgFile) -> bool {
         && (file.name == "/usr/etc" || file.name.starts_with("/usr/etc/"))
 }
 
+/// `systemctl` verbs that (re)start a daemon.
+const RESTART_VERBS: &[&str] = &[
+    "restart",
+    "try-restart",
+    "reload-or-restart",
+    "try-reload-or-restart",
+    "start",
+];
+
+/// Verbs of the legacy `service`/`rc*` command forms that (re)start a daemon.
+const LEGACY_RESTART_VERBS: &[&str] = &["restart", "start"];
+
+/// `systemctl` options that consume the following token as their value;
+/// the verb scan steps over both tokens.
+const SYSTEMCTL_VALUE_OPTIONS: &[&str] = &[
+    "--host",
+    "-H",
+    "--machine",
+    "--root",
+    "--job-mode",
+    "--type",
+    "-t",
+    "--signal",
+    "-s",
+    "--property",
+    "-p",
+    "--state",
+    "--kill-whom",
+    "--lines",
+    "-n",
+];
+
+/// True for scriptlet tags whose bodies run during the install
+/// transaction. `%verifyscript` is excluded: it runs on demand
+/// (`rpm -V`) against the live system, where a restart can work.
+fn scanned_scriptlet(tag: librpm::Tag) -> bool {
+    tag != librpm::Tag::VERIFYSCRIPT
+}
+
+/// The (re)start invocations in one scriptlet body, as trimmed lines.
+///
+/// The scan is lexical and line-based: each line is split into command
+/// segments on `;`, `|` and `&`, and only a `systemctl`/`service`/`rc*`
+/// word in command position (after leading braces, shell keywords and
+/// environment assignments) counts, so comments, `echo` text and
+/// status/preset plumbing stay quiet. A body that mentions
+/// `TRANSACTIONAL_UPDATE` is exempt as a whole: the packager gates the
+/// scriptlet on the update mechanism explicitly, and which lines the
+/// gate covers is not decidable lexically.
+fn service_restarts_in_body(body: &str) -> Vec<String> {
+    if body.contains("TRANSACTIONAL_UPDATE") {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    for raw_line in body.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Strip a trailing comment (` #...` at a word boundary).
+        let code = match line.find(" #") {
+            Some(i) => &line[..i],
+            None => line,
+        };
+        for segment in code.split([';', '|', '&']) {
+            if segment_restarts(segment) {
+                hits.push(line.to_string());
+                break;
+            }
+        }
+    }
+    hits
+}
+
+/// True when one command segment invokes a service (re)start.
+fn segment_restarts(segment: &str) -> bool {
+    let words: Vec<&str> = segment
+        .split_whitespace()
+        .map(|w| w.trim_matches(['{', '}', '(', ')', '"', '\'']))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let mut i = 0;
+    // Skip command-position decoration: shell keywords and VAR=value
+    // environment assignments.
+    while i < words.len()
+        && (matches!(
+            words[i],
+            "if" | "elif" | "while" | "until" | "then" | "do" | "else" | "!"
+        ) || is_assignment(words[i]))
+    {
+        i += 1;
+    }
+    if i >= words.len() {
+        return false;
+    }
+    let command = words[i];
+    let args = &words[i + 1..];
+    if command == "systemctl" || command.ends_with("/systemctl") {
+        return systemctl_verb(args).is_some_and(|v| RESTART_VERBS.contains(&v));
+    }
+    if command == "service" || command.ends_with("/service") {
+        // `service NAME VERB`; the pair is positional.
+        return args.len() >= 2 && LEGACY_RESTART_VERBS.contains(&args[1]);
+    }
+    // The legacy rc form is `rc<name> VERB`, invoked bare or by path.
+    let base = command.rsplit('/').next().unwrap_or(command);
+    if base.len() > 2 && base.starts_with("rc") {
+        return args
+            .first()
+            .is_some_and(|v| LEGACY_RESTART_VERBS.contains(v));
+    }
+    false
+}
+
+/// The verb of a `systemctl` invocation: the first non-option token,
+/// stepping over options and the values of options that take one.
+fn systemctl_verb<'a>(args: &[&'a str]) -> Option<&'a str> {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i];
+        if arg.starts_with('-') {
+            i += if SYSTEMCTL_VALUE_OPTIONS.contains(&arg) {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+        return Some(arg);
+    }
+    None
+}
+
+/// All (re)start invocations across a package's scriptlets: pairs of
+/// the scriptlet label (`%post`, ...) and the offending line.
+fn service_restarts<'a>(scriptlets: &[(&'a str, &'a str)]) -> Vec<(&'a str, String)> {
+    let mut hits = Vec::new();
+    for (label, body) in scriptlets {
+        for line in service_restarts_in_body(body) {
+            hits.push((*label, line));
+        }
+    }
+    hits
+}
+
 impl Check for AtomicUpdateCheck {
     fn name(&self) -> &'static str {
         "AtomicUpdateCheck"
@@ -182,6 +335,30 @@ impl Check for AtomicUpdateCheck {
                     );
                 }
             }
+        }
+        let mut scriptlets: Vec<(&str, String)> = Vec::new();
+        for (tag, _prog, label) in crate::pkg::SCRIPT_TAGS {
+            if !scanned_scriptlet(*tag) {
+                continue;
+            }
+            for body in pkg.tag_str_array(*tag) {
+                if !body.is_empty() {
+                    scriptlets.push((label, body));
+                }
+            }
+        }
+        let scriptlet_refs: Vec<(&str, &str)> = scriptlets
+            .iter()
+            .map(|(label, body)| (*label, body.as_str()))
+            .collect();
+        for (label, line) in service_restarts(&scriptlet_refs) {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "scriptlet-service-restart",
+                &[label, line.as_str()],
+            );
         }
     }
 }
@@ -802,6 +979,145 @@ mod tests {
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check(pkg, &config, &mut out);
         out.results().to_vec()
+    }
+
+    #[test]
+    fn verifyscript_is_not_scanned() {
+        assert!(!scanned_scriptlet(librpm::Tag::VERIFYSCRIPT));
+        assert!(scanned_scriptlet(librpm::Tag::POSTIN));
+        assert!(scanned_scriptlet(librpm::Tag::POSTTRANS));
+        assert!(scanned_scriptlet(librpm::Tag::TRIGGERSCRIPTS));
+    }
+
+    #[test]
+    fn bare_systemctl_restart_fires() {
+        let hits = service_restarts(&[("%post", "/usr/bin/systemctl restart apache2.service\n")]);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, "%post");
+        assert!(hits[0].1.contains("restart apache2.service"));
+    }
+
+    #[test]
+    fn restart_verb_family_fires() {
+        for body in [
+            "systemctl try-restart foo.service || :",
+            "systemctl reload-or-restart foo.service",
+            "systemctl try-reload-or-restart foo.service",
+            "systemctl start foo.service",
+        ] {
+            assert_eq!(service_restarts_in_body(body).len(), 1, "{body}");
+        }
+    }
+
+    #[test]
+    fn systemctl_options_are_stepped_over() {
+        for body in [
+            "systemctl --no-reload restart foo.service",
+            "systemctl --machine=host1 restart foo.service",
+            "systemctl --machine host1 try-restart foo.service",
+            "systemctl --root /srv/target restart foo.service",
+        ] {
+            assert_eq!(service_restarts_in_body(body).len(), 1, "{body}");
+        }
+    }
+
+    #[test]
+    fn status_guarded_compound_line_fires_once() {
+        // bluez-auto-enable-devices %post/%postun, verbatim.
+        let body = "{  systemctl status -n0 bluetooth.service > /dev/null \
+                    && systemctl restart bluetooth.service ; } ||:";
+        assert_eq!(service_restarts_in_body(body).len(), 1);
+    }
+
+    #[test]
+    fn apache_posttrans_fixture_fires_on_restarts_only() {
+        // apache2 %posttrans (Factory): flag-driven restarts; the
+        // daemon-reload lines in the same body must stay quiet.
+        let body = "\
+if [ -x /usr/bin/systemctl ]; then
+    if [ -e /var/run/httpd.restart.flag ]; then
+      /usr/bin/systemctl daemon-reload > /dev/null 2>&1 || :
+      /usr/bin/systemctl restart apache2.target > /dev/null 2>&1 || :
+      rm /var/run/httpd.restart.flag*
+    else
+      /usr/bin/systemctl daemon-reload > /dev/null 2>&1 || :
+      /usr/bin/systemctl restart apache2${instance_suffix}.service > /dev/null 2>&1 || :
+    fi
+fi
+";
+        let hits = service_restarts_in_body(body);
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert!(hits.iter().all(|l| l.contains("restart")));
+    }
+
+    #[test]
+    fn legacy_service_and_rc_forms_fire() {
+        for body in [
+            "service httpd restart",
+            "/sbin/service httpd start",
+            "rchapache2 restart",
+            "/usr/sbin/rchapache2 restart",
+        ] {
+            assert_eq!(service_restarts_in_body(body).len(), 1, "{body}");
+        }
+    }
+
+    #[test]
+    fn non_restart_systemctl_verbs_are_quiet() {
+        for body in [
+            "systemctl daemon-reload",
+            "systemctl preset foo.service",
+            "systemctl enable foo.service",
+            "systemctl is-active foo.service",
+            "systemctl status foo.service",
+            // Scope is (re)starts, per the reference docstring; a stop
+            // is pinned quiet here deliberately.
+            "systemctl stop foo.service",
+        ] {
+            assert!(service_restarts_in_body(body).is_empty(), "{body}");
+        }
+    }
+
+    #[test]
+    fn comments_and_echo_text_are_quiet() {
+        for body in [
+            "# systemctl restart foo.service",
+            "echo 'run systemctl restart foo.service manually'",
+            "systemctl daemon-reload # then systemctl restart foo.service",
+            "xsystemctl restart foo.service",
+            "/usr/sbin/myrc restart",
+        ] {
+            assert!(service_restarts_in_body(body).is_empty(), "{body}");
+        }
+    }
+
+    #[test]
+    fn transactional_update_guard_exempts_body() {
+        let body = "if [ -z \"${TRANSACTIONAL_UPDATE}\" ]; then\n\
+                    systemctl restart foo.service\nfi\n";
+        assert!(service_restarts_in_body(body).is_empty());
+    }
+
+    #[test]
+    fn macro_helper_body_is_quiet() {
+        let body = "/usr/lib/systemd/systemd-update-helper mark-restart-system-units foo.service\n\
+                    /usr/bin/systemctl preset foo.service\n";
+        assert!(service_restarts_in_body(body).is_empty());
+    }
+
+    #[test]
+    fn env_assignment_and_keyword_prefixes_still_fire() {
+        assert_eq!(
+            service_restarts_in_body("SYSTEMD_LOG_LEVEL=debug systemctl restart foo.service").len(),
+            1
+        );
+        assert_eq!(
+            service_restarts_in_body(
+                "if systemctl is-active foo.service; then systemctl restart foo.service; fi"
+            )
+            .len(),
+            1
+        );
     }
 
     #[test]
