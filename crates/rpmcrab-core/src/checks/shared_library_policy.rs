@@ -480,6 +480,10 @@ impl Check for SharedLibraryPolicyCheck {
     }
 
     fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
+        // The export-clears contract: the index goes with the records,
+        // or a reuse without an intervening `reset()` would make
+        // `record_seen` index into the drained vector.
+        self.seen_index.clear();
         Some(Box::new(DevelPairingState {
             seen: std::mem::take(&mut self.seen),
         }))
@@ -1738,5 +1742,32 @@ mod tests {
         check.reset();
         check.after_checks(&config, &mut out);
         assert!(out.results().is_empty(), "state leaked across reset");
+    }
+
+    #[test]
+    fn devel_pairing_export_clears_the_seen_index() {
+        // `export_state` takes the records, and the export-clears
+        // contract (check.rs) lets the check be reused without an
+        // intervening `reset()`; a stale index would make
+        // `record_seen` write into the drained vector (panic) or
+        // dedup against a slot that now holds another package.
+        let config = Config::default();
+        let lib = shlib("libfoo1", "foo-1-1.src.rpm");
+        let devel = devel("libfoo-devel", "foo-1-1.src.rpm", vec![dep("unrelated")]);
+        let mut check = checker();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(&lib, &config, &mut out);
+        let exported = check.export_state().expect("exports");
+        assert!(check.seen.is_empty());
+        assert!(check.seen_index.is_empty(), "export left a stale index");
+        // Reuse without `reset()`: re-recording the exported package
+        // appends a fresh entry instead of indexing the drained vector.
+        check.check_binary(&lib, &config, &mut out);
+        assert_eq!(check.seen.len(), 1);
+        // Dedup on the fresh index still replaces, not duplicates.
+        check.check_binary(&devel, &config, &mut out);
+        check.check_binary(&lib, &config, &mut out);
+        assert_eq!(check.seen.len(), 2);
+        drop(exported);
     }
 }

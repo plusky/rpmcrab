@@ -218,6 +218,23 @@ fn is_hashable(term: &Term) -> bool {
     }
 }
 
+/// Whether every map in the term could be built by pybeam. pybeam
+/// decodes the whole chunk into Python objects, building a `dict` for
+/// every map wherever it nests — as a pair key or value, inside
+/// another map's value, or under a list or tuple — and building a
+/// dict raises `TypeError` on an unhashable key, so one bad key
+/// anywhere fails the whole parse, even in a value that the pair
+/// handling would discard unread.
+fn map_keys_hashable(term: &Term) -> bool {
+    match term {
+        Term::Map(pairs) => pairs
+            .iter()
+            .all(|(k, v)| is_hashable(k) && map_keys_hashable(k) && map_keys_hashable(v)),
+        Term::List(elems) | Term::Tuple(elems) => elems.iter().all(map_keys_hashable),
+        _ => true,
+    }
+}
+
 /// The compile info from a BEAM file: `(options, source)`.
 struct CompileInfo {
     options: Option<Vec<String>>,
@@ -258,6 +275,11 @@ fn read_compile_info(path: &str) -> Result<Option<CompileInfo>, String> {
     let term = parser
         .parse_term()
         .ok_or_else(|| "term parse failed".to_string())?;
+    // pybeam builds every map in the chunk during decode (see
+    // `map_keys_hashable`), before the pairs below are read.
+    if !map_keys_hashable(&term) {
+        return Err("compile info key is not hashable".to_string());
+    }
 
     // Compile info is a list of {Key, Value} tuples (older) or a map (newer).
     let pairs: Vec<(Term, Term)> = match term {
@@ -904,6 +926,173 @@ mod tests {
                 "payload {payload:?} must fail"
             );
         }
+    }
+
+    /// A 2-entry map element is a pair of its two keys for `dict()`,
+    /// but pybeam builds the inner map first: both of its keys must
+    /// be hashable there, not only the one that becomes the pair key.
+    /// `{<<"options">> => 1, [1] => 2}` raises while the inner dict
+    /// is built, so the chunk fails even though the outer key (the
+    /// binary) is hashable.
+    #[test]
+    fn two_entry_map_with_unhashable_second_key_fails() {
+        let mut t = vec![131];
+        t.extend_from_slice(&[108, 0, 0, 0, 1]); // LIST_EXT, len 1
+        t.extend_from_slice(&[116, 0, 0, 0, 2]); // MAP_EXT, arity 2
+        t.extend_from_slice(&[109, 0, 0, 0, 7]); // BINARY_EXT, len 7
+        t.extend_from_slice(b"options");
+        t.extend_from_slice(&[97, 1]); // SMALL_INTEGER_EXT
+        t.extend_from_slice(&[108, 0, 0, 0, 1]); // LIST_EXT, len 1: the key [1]
+        t.extend_from_slice(&[97, 1]);
+        t.push(106); // NIL tail (key list)
+        t.extend_from_slice(&[97, 2]);
+        t.push(106); // NIL tail (outer list)
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("mapsecondkey.beam");
+        std::fs::write(&path, beam_with_cinf(&t)).unwrap();
+        assert_eq!(
+            read_compile_info(path.to_str().unwrap()).err().as_deref(),
+            Some("compile info key is not hashable")
+        );
+    }
+
+    /// The same 2-entry map with both keys hashable stays accepted:
+    /// `{<<"options">> => 1, source => 2}` is a pair of a binary and
+    /// an atom, neither of which the pair handling reads as a key of
+    /// interest, but building the inner dict is legal there.
+    #[test]
+    fn two_entry_map_with_hashable_keys_is_accepted() {
+        let mut t = vec![131];
+        t.extend_from_slice(&[108, 0, 0, 0, 1]); // LIST_EXT, len 1
+        t.extend_from_slice(&[116, 0, 0, 0, 2]); // MAP_EXT, arity 2
+        t.extend_from_slice(&[109, 0, 0, 0, 7]); // BINARY_EXT, len 7
+        t.extend_from_slice(b"options");
+        t.extend_from_slice(&[97, 1]); // SMALL_INTEGER_EXT
+        t.extend_from_slice(&[119, 6]); // SMALL_ATOM_UTF8_EXT "source"
+        t.extend_from_slice(b"source");
+        t.extend_from_slice(&[97, 2]);
+        t.push(106); // NIL tail (outer list)
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("maphashablekeys.beam");
+        std::fs::write(&path, beam_with_cinf(&t)).unwrap();
+        let info = read_compile_info(path.to_str().unwrap())
+            .expect("2-entry map with hashable keys is a pair")
+            .expect("compile info present");
+        assert!(info.options.is_none());
+        assert!(info.source.is_none());
+    }
+
+    /// A map nested in a pair value is built by pybeam during decode,
+    /// before `dict(cinf)` runs: `[{options, #{[1] => 2}}]` raises
+    /// `TypeError` there even though the value is never used as a
+    /// key. The same holds for a map nested in a top-level map value,
+    /// in a list value, and in a discarded inner-map value.
+    #[test]
+    fn nested_map_with_unhashable_key_fails() {
+        // [{options, #{[1] => 2}}]
+        let in_pair_value = {
+            let mut t = vec![131];
+            t.extend_from_slice(&[108, 0, 0, 0, 1]); // LIST_EXT, len 1
+            t.extend_from_slice(&[104, 2]); // SMALL_TUPLE_EXT arity 2
+            t.extend_from_slice(&[119, 7]);
+            t.extend_from_slice(b"options");
+            t.extend_from_slice(&[116, 0, 0, 0, 1]); // MAP_EXT, arity 1
+            t.extend_from_slice(&[108, 0, 0, 0, 1]); // LIST_EXT, len 1: the key [1]
+            t.extend_from_slice(&[97, 1]);
+            t.push(106); // NIL tail (key list)
+            t.extend_from_slice(&[97, 2]);
+            t.push(106); // NIL tail (outer list)
+            t
+        };
+        // #{options => #{[1] => 2}}
+        let in_top_map_value = {
+            let mut t = vec![131];
+            t.extend_from_slice(&[116, 0, 0, 0, 1]); // MAP_EXT, arity 1
+            t.extend_from_slice(&[119, 7]);
+            t.extend_from_slice(b"options");
+            t.extend_from_slice(&[116, 0, 0, 0, 1]); // MAP_EXT, arity 1
+            t.extend_from_slice(&[108, 0, 0, 0, 1]); // LIST_EXT, len 1: the key [1]
+            t.extend_from_slice(&[97, 1]);
+            t.push(106); // NIL tail (key list)
+            t.extend_from_slice(&[97, 2]);
+            t
+        };
+        // [{options, [#{[1] => 2}]}]
+        let in_list_value = {
+            let mut t = vec![131];
+            t.extend_from_slice(&[108, 0, 0, 0, 1]); // LIST_EXT, len 1
+            t.extend_from_slice(&[104, 2]); // SMALL_TUPLE_EXT arity 2
+            t.extend_from_slice(&[119, 7]);
+            t.extend_from_slice(b"options");
+            t.extend_from_slice(&[108, 0, 0, 0, 1]); // LIST_EXT, len 1
+            t.extend_from_slice(&[116, 0, 0, 0, 1]); // MAP_EXT, arity 1
+            t.extend_from_slice(&[108, 0, 0, 0, 1]); // LIST_EXT, len 1: the key [1]
+            t.extend_from_slice(&[97, 1]);
+            t.push(106); // NIL tail (key list)
+            t.extend_from_slice(&[97, 2]);
+            t.push(106); // NIL tail (value list)
+            t.push(106); // NIL tail (outer list)
+            t
+        };
+        // [#{a => #{[1] => 2}, b => 1}]: the bad map sits in a value
+        // of the 2-entry map element, which the pair handling drops.
+        let in_discarded_map_value = {
+            let mut t = vec![131];
+            t.extend_from_slice(&[108, 0, 0, 0, 1]); // LIST_EXT, len 1
+            t.extend_from_slice(&[116, 0, 0, 0, 2]); // MAP_EXT, arity 2
+            t.extend_from_slice(&[119, 1]);
+            t.extend_from_slice(b"a");
+            t.extend_from_slice(&[116, 0, 0, 0, 1]); // MAP_EXT, arity 1
+            t.extend_from_slice(&[108, 0, 0, 0, 1]); // LIST_EXT, len 1: the key [1]
+            t.extend_from_slice(&[97, 1]);
+            t.push(106); // NIL tail (key list)
+            t.extend_from_slice(&[97, 2]);
+            t.extend_from_slice(&[119, 1]);
+            t.extend_from_slice(b"b");
+            t.extend_from_slice(&[97, 1]);
+            t.push(106); // NIL tail (outer list)
+            t
+        };
+        for payload in [
+            in_pair_value,
+            in_top_map_value,
+            in_list_value,
+            in_discarded_map_value,
+        ] {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let path = tmp.path().join("nestedmap.beam");
+            std::fs::write(&path, beam_with_cinf(&payload)).unwrap();
+            assert_eq!(
+                read_compile_info(path.to_str().unwrap()).err().as_deref(),
+                Some("compile info key is not hashable"),
+                "payload {payload:?} must fail"
+            );
+        }
+    }
+
+    /// A nested map whose keys are all hashable decodes fine:
+    /// `[{options, #{a => 1}}]` parses (the map value is simply not
+    /// the list of option atoms the reader looks for).
+    #[test]
+    fn nested_map_with_hashable_keys_is_accepted() {
+        let mut t = vec![131];
+        t.extend_from_slice(&[108, 0, 0, 0, 1]); // LIST_EXT, len 1
+        t.extend_from_slice(&[104, 2]); // SMALL_TUPLE_EXT arity 2
+        t.extend_from_slice(&[119, 7]);
+        t.extend_from_slice(b"options");
+        t.extend_from_slice(&[116, 0, 0, 0, 1]); // MAP_EXT, arity 1
+        t.extend_from_slice(&[119, 1]);
+        t.extend_from_slice(b"a");
+        t.extend_from_slice(&[97, 1]);
+        t.push(106); // NIL tail (outer list)
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("nestedok.beam");
+        std::fs::write(&path, beam_with_cinf(&t)).unwrap();
+        let info = read_compile_info(path.to_str().unwrap())
+            .expect("nested map with hashable keys parses")
+            .expect("compile info present");
+        assert!(info.options.is_none());
+        assert!(info.source.is_none());
     }
 
     /// End to end: a BEAM file whose CInf chunk is not a pair list
