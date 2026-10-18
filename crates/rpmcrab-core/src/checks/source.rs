@@ -177,8 +177,8 @@ impl SourceCheck {
 
     /// `prebuilt-binary-in-sources` (issue #150, upstream rpmlint#4): scan
     /// every file of the source package for prebuilt binaries — directly by
-    /// magic bytes, and inside source archives (tar, gzip/xz/zstd-compressed
-    /// tar, zip), recursing into nested archives. The reference never
+    /// magic bytes, and inside source archives (tar, gzip/xz/zstd/bzip2-
+    /// compressed tar, zip), recursing into nested archives. The reference never
     /// implemented this (the upstream issue is still open), so the finding
     /// is rpmcrab-new and ledgered as `kind = "behaviour"`.
     fn check_prebuilt_binaries(&self, pkg: &Pkg, out: &mut Filter) {
@@ -209,9 +209,7 @@ impl SourceCheck {
 /// Prebuilt-binary detection inside source archives (issue #150).
 ///
 /// The walker is deliberately small: magic-byte archive detection, a minimal
-/// ustar reader, and capped in-memory decompression. bzip2 is not decoded
-/// (no pure-Rust decoder exists — the same limitation as native payload
-/// extraction, ledgered there); bzip2 archives are skipped silently.
+/// ustar reader, and capped in-memory decompression.
 ///
 /// Scope choices: only ustar tarballs are recognized - pre-POSIX V7 format
 /// has no magic bytes and is skipped - and of the zip-based Java archives
@@ -307,12 +305,16 @@ mod prebuilt {
             if let Some(d) = decompress_zstd(data) {
                 scan_decompressed(&d, ctx, depth, hits);
             }
+        } else if data.starts_with(b"BZh") {
+            if let Some(d) = decompress_bzip2(data) {
+                scan_decompressed(&d, ctx, depth, hits);
+            }
         } else if data.starts_with(b"PK\x03\x04") {
             walk_zip(data, ctx, depth, hits);
         } else if is_tar(data) {
             walk_tar(data, ctx, depth, hits);
         }
-        // Anything else (including bzip2, `BZh`) is opaque: skip silently.
+        // Anything else is opaque: skip silently.
     }
 
     /// A decompressed stream is either a tarball or a single file (e.g.
@@ -394,6 +396,10 @@ mod prebuilt {
 
     fn decompress_zstd(data: &[u8]) -> Option<Vec<u8>> {
         capped(zstd::stream::read::Decoder::new(data).ok()?)
+    }
+
+    fn decompress_bzip2(data: &[u8]) -> Option<Vec<u8>> {
+        capped(bzip2::read::BzDecoder::new(data))
     }
 
     /// Parse an octal field (tar size), strictly: only `[0-7]`, blank-padded.

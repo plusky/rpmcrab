@@ -32,6 +32,9 @@ librpm = { version = "0.6", default-features = false, features = ["build"] }
 rpm = { version = "0.30", default-features = false, features = ["payload"] }
 # xz payload decompression for native extraction. Pure Rust.
 liblzma = "0.4"
+# bzip2 payload decompression for native extraction. The default
+# backend is libbz2-rs-sys, a pure-Rust translation of libbz2.
+bzip2 = "0.6"
 # mkfifo/mknod for native extraction of special files (safe wrappers;
 # this crate keeps `unsafe_code = "forbid"`).
 nix = { version = "0.31", features = ["fs"] }
