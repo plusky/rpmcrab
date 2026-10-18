@@ -481,7 +481,7 @@ impl PostCheck {
         static CACHE_UPDATER_REGEX: OnceLock<Regex> = OnceLock::new();
         CACHE_UPDATER_REGEX.get_or_init(|| {
             Regex::new(
-                r"(?m)((?:^|[;`|]|&&|\$\()\s*(?:then\s+|do\s+|else\s+)?|^\s*[\w*?|]+\)\s*)(?:[A-Za-z_]\w*=\S*\s+)*(?:[^\s=]*/)?(update-desktop-database|gtk-update-icon-cache|update-mime-database|glib-compile-schemas|install-info)\b([^\n;|&]*)",
+                r"(?m)((?:^|[;`|{]|&&|&|\$\(|\()\s*(?:then\s+|do\s+|else\s+)?|^\s*[^\s()]+\s*\)\s*)(?:env\s+)?(?:[A-Za-z_]\w*=\S*\s+)*(?:[^\s=]*/)?(update-desktop-database|gtk-update-icon-cache|update-mime-database|glib-compile-schemas|install-info)\b((?:[^\n;|&]|&[\d-])*)",
             )
             .expect("static regex")
         })
@@ -939,9 +939,11 @@ impl PostCheck {
     /// hand-rolled invocation duplicates the trigger. Matching runs on
     /// the heredoc-blanked, comment-stripped, quote-blanked text
     /// (`code_only`) and is command-position only (start of line or
-    /// after a command separator, a `then`/`do`/`else` keyword, an
-    /// environment assignment, or a `case` pattern), so comments,
-    /// quoted or echoed text and heredoc bodies do not fire.
+    /// after a command separator — a bare `&` backgrounding included —
+    /// a `then`/`do`/`else` keyword, a subshell or group opener, an
+    /// `env` or environment assignment, or a `case` pattern; a `sudo`
+    /// prefix is not recognised), so comments, quoted or echoed text
+    /// and heredoc bodies do not fire.
     fn cache_updaters(script: &str) -> Vec<String> {
         let blanked = Self::without_heredoc_bodies(script);
         let text = Self::code_only(&blanked);
@@ -969,7 +971,10 @@ impl PostCheck {
     /// is pointed at a directory the RPM file triggers own. The
     /// indexed directory is the `--info-dir`/`--targetdir` value when
     /// one is given, else the first positional argument; no positional
-    /// argument means the tool's default directory. The triggers own
+    /// argument means the tool's default directory. Redirections are
+    /// not the target: fd-prefixed and attached forms are
+    /// self-contained and a bare operator consumes the following
+    /// token. The triggers own
     /// the system data directories (`/usr/share`, `/usr/local/share`);
     /// a literal absolute target anywhere else (e.g.
     /// `/opt/<app>/schemas`) is a private directory no file trigger
@@ -991,7 +996,7 @@ impl PostCheck {
                 .or_else(|| tok.strip_prefix("--targetdir="))
                 .or_else(|| tok.strip_prefix("--infodir="))
             {
-                explicit_dir = Some(v.to_string());
+                explicit_dir = Some(v.trim_matches(|c| c == '"' || c == '\'').to_string());
                 continue;
             }
             if matches!(
@@ -1008,13 +1013,15 @@ impl PostCheck {
             if tok.starts_with('-') {
                 continue;
             }
-            if tok.starts_with('>') || tok.starts_with('<') {
-                // A bare redirection operator consumes the next token
-                // as its target file.
-                if tok
-                    .chars()
-                    .all(|c| matches!(c, '>' | '<' | '&' | '0'..='9'))
-                {
+            // A redirection is not the target. Fd-prefixed and
+            // attached forms (`2>/dev/null`, `2>&1`) are
+            // self-contained; a bare operator (`>`, `2>`) consumes
+            // the next token as its target file.
+            let redir = tok
+                .trim_start_matches(|c: char| c.is_ascii_digit())
+                .trim_start_matches('&');
+            if redir.starts_with('>') || redir.starts_with('<') {
+                if redir.chars().all(|c| matches!(c, '>' | '<' | '&')) {
                     tokens.next();
                 }
                 continue;
@@ -2091,6 +2098,135 @@ mod tests {
                 "{script}: {found:?}"
             );
         }
+    }
+
+    #[test]
+    fn cache_updater_in_glob_case_arm_is_flagged() {
+        // The arm pattern is the token preceding `)`: glob characters
+        // beyond the word set (`.`, `[`, `-`, quotes) belong to it.
+        let script =
+            "case $f in\n*.desktop) update-desktop-database /usr/share/applications;;\nesac";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn cache_updater_fd_redirection_is_not_the_target() {
+        // The fd redirection is self-contained: the directory after
+        // it is the target that gets classified.
+        for script in [
+            "update-mime-database 2>/dev/null /opt/pkg/share/mime",
+            "update-mime-database 2>&1 /opt/pkg/share/mime",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+                "{script}: {found:?}"
+            );
+        }
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "update-mime-database 2>/dev/null /usr/share/mime",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn cache_updater_quoted_info_dir_is_classified_by_its_value() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "install-info --info-dir=\"/opt/pkg/info\" /opt/pkg/info/dir",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+            "{found:?}"
+        );
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "install-info --info-dir=\"/usr/share/info\" /usr/share/info/dir",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn cache_updater_after_background_opener_or_env_is_flagged() {
+        for script in [
+            "sleep 1 & update-mime-database /usr/share/mime",
+            "(update-mime-database /usr/share/mime)",
+            "{ update-mime-database /usr/share/mime; }",
+            "env update-mime-database /usr/share/mime",
+            "env FOO=1 update-mime-database /usr/share/mime",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found
+                    .iter()
+                    .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+                "{script}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cache_updater_after_sudo_is_quiet() {
+        // Deliberate narrowing: a `sudo` prefix is not a recognised
+        // command position, matching the documented scope.
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "sudo update-mime-database /usr/share/mime",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn cache_updater_after_escaped_separator_is_quiet() {
+        // The `\;` ends find's -exec clause; it is a literal argument
+        // character, not a separator, so the words after it are still
+        // find arguments, not an invocation.
+        let script = "find /usr/share/icons/hicolor -name '*.png' -exec touch {} \\; gtk-update-icon-cache /usr/share/icons/hicolor";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "deprecated-cache-updater-in-%post"),
+            "{found:?}"
+        );
     }
 
     #[test]
