@@ -216,20 +216,14 @@ EXTRA_OPENSUSE_CHECKS = [
 ]
 
 # Checks upstream lists in the openSUSE config that rpmcrab deliberately
-# does NOT run under the opensuse flavor. AtomicUpdateCheck enforces the
-# snapshot layout transactional updates require; that requirement binds
-# the slfo flavor (whose vendored config keeps the check), not general
-# openSUSE packages: /srv/www is the FHS web root the distro mandates for
-# web applications, and the /var state directories are persistent across
-# rollbacks by design. Under the opensuse flavor the check fired 44,107
-# times over 342 packages in the Factory sweep with no packager able to
-# act on it (issue #478). Ledgered in tests/parity/divergences.toml.
-# Config list merging appends, so the check is likewise absent from the
-# bundled default config (crates/rpmcrab-core/data/configdefaults.toml):
-# only the slfo flavour layer enables it.
-EXCLUDED_OPENSUSE_CHECKS = [
-    "AtomicUpdateCheck",
-]
+# does NOT run under the opensuse flavor. Currently empty: the snapshot
+# layout AtomicUpdateCheck enforces is a transactional-update requirement
+# that binds every flavor (issue #698), so the check runs in the bundled
+# default config and in both vendored flavor configs and nothing is
+# excluded here. Config list merging appends, so a check listed here must
+# also stay out of the bundled default config
+# (crates/rpmcrab-core/data/configdefaults.toml).
+EXCLUDED_OPENSUSE_CHECKS = []
 
 # Packages the vendored distro configs name in the `SystemdPresetPackages`
 # key: the distributions' preset packages, the only packages allowed to
@@ -435,6 +429,7 @@ DROP_SCORING = {
     "spurious-executable-perm": "a stray exec bit on a data file implies no damage by itself (3,989 promoted E lines in the 20261016 Factory sweep, e.g. test data and icon themes)",
     "summary-ended-with-dot": "summary punctuation is style, not damage",
     "summary-not-capitalized": "summary capitalisation is style, not damage",
+    "dir-or-file-outside-snapshot": "transactional updates are mandatory in every flavor (issue #698), and the vendored 0 demoted the emitted Error to a warning in both flavors; under the badness doctrine (issue #699) no shipped badness is set for it and the Error stands on its own",
 }
 
 # [Scoring] entries folded into the vendored base scoring.toml
@@ -492,18 +487,9 @@ PRUNE_RAW = {
 # while the other flavor runs the check and keeps the exemption. Matching
 # is byte-exact like PRUNE_RAW: when upstream rewords the line the entry
 # stops matching and the monthly sync surfaces the line again for a fresh
-# audit — a flavor prune can never silently widen.
-PRUNE_FLAVOURED = {
-    "opensuse": {
-        # AtomicUpdateCheck is excluded from the opensuse flavor at the
-        # Checks layer (EXCLUDED_OPENSUSE_CHECKS, issue #478), so the
-        # finding is never emitted there and this exemption can never
-        # fire. The slfo flavor runs the check and keeps the line: the
-        # snapshot layout binds the SLFO product layered on openSUSE,
-        # not every openSUSE package (issue #565).
-        r"^filesystem\..*: dir-or-file-outside-snapshot": "dead in the opensuse flavor only: AtomicUpdateCheck is excluded there (issue #478), so the finding is never emitted; the slfo flavor runs the check and keeps the exemption (issue #565)",
-    },
-}
+# audit — a flavor prune can never silently widen. Currently empty:
+# the filesystem snapshot exemption is live in both flavors (issue #698).
+PRUNE_FLAVOURED = {}
 
 # Filters lines whose exemption is still wanted but whose target moved:
 # old pattern -> (new pattern, reason). The PRUNE_* tables drop lines

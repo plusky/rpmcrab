@@ -28,9 +28,7 @@ Checks = [
     "SystemdTmpfilesCheck",
     "SUIDPermissionsCheck",
     "WorldWritableCheck",
-    # Excluded: "AtomicUpdateCheck" is not run under the opensuse
-    # flavor (deliberate, ledgered divergence); see
-    # EXCLUDED_OPENSUSE_CHECKS in scripts/generate-distro-configs.py.
+    "AtomicUpdateCheck",
 
     # Extra: enabled by rpmcrab; upstream lists these checks in no
     # shipped config (deliberate, ledgered divergence); see
@@ -95,6 +93,7 @@ Filters = [
     '^filesystem\..*: dir-or-file-in-tmp',
     '^filesystem\..*: dir-or-file-in-mnt',
     '^filesystem\..*: dir-or-file-in-home',
+    '^filesystem\..*: dir-or-file-outside-snapshot',
     '^filesystem\..*: hidden-file-or-dir /root/.gnupg',
     '^filesystem\..*: hidden-file-or-dir /usr/etc/skel/.config',
     '^filesystem\..*: hidden-file-or-dir /usr/etc/skel/.local',
