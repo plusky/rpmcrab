@@ -156,6 +156,14 @@ impl Canonicalizer {
                         .push_str(&e.xml_content(self.xml_version()));
                 }
                 Event::CData(e) => {
+                    // A CDATA section outside the document element is
+                    // content expat rejects, even holding only
+                    // whitespace: mark it like a reference outside the
+                    // root, so flush_text does not let it slip through
+                    // the whitespace trim.
+                    if self.depth == 0 {
+                        self.pending_ref_outside_root = true;
+                    }
                     self.pending_text
                         .push_str(&e.xml_content(self.xml_version()));
                 }
@@ -819,6 +827,12 @@ mod tests {
         assert!(canon("junk<a/>").is_err());
         // Whitespace, comments and PIs around the root stay legal.
         assert!(canon("  <a/> \n <!--c--> <?p d?> ").is_ok());
+        // A CDATA section outside the root is rejected too, even when
+        // it holds only whitespace; inside the root it is character data.
+        assert!(canon("<a/><![CDATA[x]]>").is_err());
+        assert!(canon("<a/><![CDATA[ ]]>").is_err());
+        assert!(canon("<![CDATA[ ]]><a/>").is_err());
+        assert!(canon("<a><![CDATA[ ]]></a>").is_ok());
     }
 
     #[test]
