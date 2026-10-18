@@ -931,31 +931,20 @@ mod tests {
     }
 
     #[test]
-    fn finalize_rejects_a_string_bool() {
-        // `PermissiveByDefault = "true"` (a string) must not silently become
-        // `false`: that flips the exit code from 0 to 64.
-        let mut cfg = Config::default();
-        cfg.configuration.insert(
-            "PermissiveByDefault".to_string(),
-            toml::Value::String("true".to_string()),
-        );
-        let err = cfg.finalize().expect_err("string bool must fail");
-        assert!(err.contains("PermissiveByDefault"), "got {err}");
-        assert!(err.contains("bool"), "got {err}");
-    }
-
-    #[test]
-    fn finalize_rejects_a_string_false_bool() {
-        // A misspelled string value must fail loudly, not silently
-        // enable permissive mode.
-        let mut cfg = Config::default();
-        cfg.configuration.insert(
-            "PermissiveByDefault".to_string(),
-            toml::Value::String("false".to_string()),
-        );
-        let err = cfg.finalize().expect_err("string bool must fail");
-        assert!(err.contains("PermissiveByDefault"), "got {err}");
-        assert!(err.contains("bool"), "got {err}");
+    fn permissive_by_default_key_is_inert_in_finalize() {
+        // #699 removed PermissiveByDefault: the key is not read at all,
+        // so even a string value (previously a fatal type error) passes
+        // finalize untouched and cannot enable a permissive default.
+        for value in ["true", "false"] {
+            let mut cfg = Config::default();
+            cfg.configuration.insert(
+                "PermissiveByDefault".to_string(),
+                toml::Value::String(value.to_string()),
+            );
+            cfg.finalize()
+                .unwrap_or_else(|e| panic!("key must be inert, got {e}"));
+            assert!(!cfg.permissive, "no permissive default from config");
+        }
     }
 
     fn table_with(pairs: &[(&str, &str)]) -> toml::Value {
