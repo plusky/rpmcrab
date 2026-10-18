@@ -418,7 +418,14 @@ DROP_LIVE_FILTERS = {
 # promotion only when it ALWAYS implies the damage (issue #289, D4).
 # The entries below fail that test -- style findings and packaging-shape
 # judgements with legitimate shapes -- so the promotion goes and the
-# findings print at their emitted W. Each drop is a deliberate
+# findings print at their emitted W. One entry is the opposite
+# shape: dir-or-file-outside-snapshot = 0 demotes an emitted Error
+# to a warning (the b == 0 rule); it is dropped under issues
+# #698/#699 -- transactional updates are mandatory and no shipped
+# badness is set for the finding -- not under the ALWAYS rule, and
+# pre-change its demote was live only in the slfo flavor (the
+# opensuse flavor never ran the check, so its entry was dead).
+# Each drop is a deliberate
 # divergence from the reference, ledgered in
 # tests/parity/divergences.toml.
 DROP_SCORING = {
@@ -429,7 +436,7 @@ DROP_SCORING = {
     "spurious-executable-perm": "a stray exec bit on a data file implies no damage by itself (3,989 promoted E lines in the 20261016 Factory sweep, e.g. test data and icon themes)",
     "summary-ended-with-dot": "summary punctuation is style, not damage",
     "summary-not-capitalized": "summary capitalisation is style, not damage",
-    "dir-or-file-outside-snapshot": "transactional updates are mandatory in every flavor (issue #698), and the vendored 0 demoted the emitted Error to a warning in both flavors; under the badness doctrine (issue #699) no shipped badness is set for it and the Error stands on its own",
+    "dir-or-file-outside-snapshot": "transactional updates are mandatory in every flavor (issue #698), and the vendored 0 demotes the emitted Error to a warning (live pre-change only in the slfo flavor; in the opensuse flavor the check never ran, so its entry was dead); under the badness doctrine (issue #699) no shipped badness is set for it and the Error stands on its own",
 }
 
 # [Scoring] entries folded into the vendored base scoring.toml
@@ -2336,7 +2343,8 @@ def generate(ref_dir=None, pins=None):
     if scoring_dropped_log:
         provenance.append("#")
         provenance.append("# Dropped [Scoring] entries (upstream promotions failing the")
-        provenance.append("# always-implies-damage rule; see DROP_SCORING):")
+        provenance.append("# always-implies-damage rule, plus the one upstream demote")
+        provenance.append("# dropped per issues #698/#699; see DROP_SCORING):")
         seen_scoring_dropped = set()
         for entry in scoring_dropped_log:
             if entry not in seen_scoring_dropped:
