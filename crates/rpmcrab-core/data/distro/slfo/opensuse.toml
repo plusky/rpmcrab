@@ -4,7 +4,6 @@
 CompressExtension = "gz"
 UseVarLockSubsys = false
 UseVersionInChangelog = false
-BadnessThreshold = 999
 
 # Set to true to issue a warning for ghost entries outside snapshots
 # when checking for atomic update compatibility

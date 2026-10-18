@@ -279,9 +279,15 @@ fn atomic_update_check_is_enabled_everywhere() {
             listed.iter().any(|n| n == "AtomicUpdateCheck"),
             "AtomicUpdateCheck must be listed in the {flavor} flavour config"
         );
-        let scoring =
-            std::fs::read_to_string(root.join(format!("data/distro/{flavor}/scoring.toml")))
-                .expect("read scoring.toml");
+        // Since #699 no flavour vendors scoring.toml at all: a
+        // missing file is the strongest form of "no scoring entry".
+        let scoring = match std::fs::read_to_string(
+            root.join(format!("data/distro/{flavor}/scoring.toml")),
+        ) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => panic!("read scoring.toml: {e}"),
+        };
         assert!(
             !scoring.contains("dir-or-file-outside-snapshot"),
             "the {flavor} flavour must not ship a scoring entry for \

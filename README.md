@@ -13,7 +13,7 @@ A drop-in replacement for [`rpmlint`](https://github.com/rpm-software-management
 **0.2.0 was the parity milestone:** rpmcrab matches rpmlint 2.10.0 — same
 command-line flags, same TOML configuration, same `rpmlintrc` filters, and the
 same output and exit-code contract that external tooling (OBS build summaries,
-openQA, the openSUSE badness-999 gate) already consumes — except for the
+openQA) already consumes — except for the
 deliberate divergences recorded in the machine-enforced ledger
 ([`tests/parity/divergences.toml`](tests/parity/divergences.toml)). It is not
 a bug-for-bug port: upstream false positives and never-firing checks are

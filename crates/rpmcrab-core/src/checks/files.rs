@@ -2207,11 +2207,15 @@ impl FilesCheck {
 
     fn check_file_non_ghost_in_run(&self, pkg: &Pkg, fname: &str, pkg_ref: &Pkg, out: &mut Filter) {
         // /var/run is a symlink to /run on openSUSE, so both spellings name
-        // the same tmpfs directory.
+        // the same tmpfs directory. An error outright (issue #699): payload
+        // under a tmpfs runtime directory is never legitimate package
+        // content — runtime directories belong in tmpfiles.d snippets.
+        // The reference emits W; the port previously reached E only via
+        // shipped scoring. The %ghost exemption is unchanged.
         if (fname.starts_with("/run/") || fname.starts_with("/var/run/"))
             && !pkg_ref.ghost_files.contains(&fname.to_string())
         {
-            add_info(out, Level::Warning, pkg, "non-ghost-in-run", &[fname]);
+            add_info(out, Level::Error, pkg, "non-ghost-in-run", &[fname]);
         }
     }
 
@@ -4192,8 +4196,8 @@ mod tests {
                 .find(|(n, _)| n == "non-ghost-in-run")
                 .expect("finding fires");
             assert!(
-                line.contains(": W: non-ghost-in-run") && line.contains(path),
-                "warning line names the path: {line}"
+                line.contains(": E: non-ghost-in-run") && line.contains(path),
+                "error line names the path: {line}"
             );
         }
     }
@@ -4663,7 +4667,7 @@ mod tests {
             [(
                 "script-without-shebang".to_string(),
                 Level::Error,
-                "spurious-test.noarch: E: script-without-shebang (Badness: 1) /usr/bin/noshebang"
+                "spurious-test.noarch: E: script-without-shebang /usr/bin/noshebang"
                     .to_string(),
             )],
             "script paths keep script-without-shebang, not spurious"
@@ -4944,9 +4948,9 @@ mod tests {
         assert_eq!(
             details,
             [
-                "w6-sourced-script.noarch: E: sourced-script-with-shebang (Badness: 1) /etc/profile.d/w6-args.sh /bin/sh -x -e",
-                "w6-sourced-script.noarch: E: sourced-script-with-shebang (Badness: 1) /etc/profile.d/w6-exec.sh /bin/sh",
-                "w6-sourced-script.noarch: E: sourced-script-with-shebang (Badness: 1) /etc/profile.d/w6-shebang.sh /bin/sh",
+                "w6-sourced-script.noarch: E: sourced-script-with-shebang /etc/profile.d/w6-args.sh /bin/sh -x -e",
+                "w6-sourced-script.noarch: E: sourced-script-with-shebang /etc/profile.d/w6-exec.sh /bin/sh",
+                "w6-sourced-script.noarch: E: sourced-script-with-shebang /etc/profile.d/w6-shebang.sh /bin/sh",
             ],
             "name+level+detail: {findings:?}"
         );
@@ -5479,8 +5483,8 @@ mod tests {
         assert_eq!(
             fsf,
             [
-                "fsf-address-fixture.noarch: E: incorrect-fsf-address (Badness: 1) /usr/share/doc/packages/fsf-address-fixture/LICENSE-early",
-                "fsf-address-fixture.noarch: E: incorrect-fsf-address (Badness: 1) /usr/share/doc/packages/fsf-address-fixture/LICENSE-late",
+                "fsf-address-fixture.noarch: E: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-early",
+                "fsf-address-fixture.noarch: E: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-late",
             ],
         );
     }
@@ -7134,7 +7138,7 @@ mod tests {
         assert_eq!(lines.len(), 1, "unexpected: {results:?}");
         assert!(
             lines[0].contains(
-                ": E: mimeinfo-cache-packaged (Badness: 1) /usr/share/applications/mimeinfo.cache"
+                ": E: mimeinfo-cache-packaged /usr/share/applications/mimeinfo.cache"
             ),
             "name, level and detail: {}",
             lines[0]

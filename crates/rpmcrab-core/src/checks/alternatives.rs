@@ -755,7 +755,7 @@ mod tests {
         );
         assert_eq!(
             missed[0].1.as_str(),
-            "alternatives-test.noarch: E: alts-requirement-missed (Badness: 1)",
+            "alternatives-test.noarch: E: alts-requirement-missed",
             "level/name",
         );
     }
@@ -786,7 +786,7 @@ mod tests {
         );
         assert!(
             missing[0].1.starts_with(
-                "alternatives-test.noarch: E: libalternatives-directory-not-exists (Badness: 1) \
+                "alternatives-test.noarch: E: libalternatives-directory-not-exists \
                  /usr/share/libalternatives/lonely"
             ),
             "level/name/detail: {}",
@@ -834,7 +834,7 @@ mod tests {
             .unwrap();
         assert!(
             line.starts_with(
-                "alternatives-test.noarch: E: empty-libalternatives-directory (Badness: 1) \
+                "alternatives-test.noarch: E: empty-libalternatives-directory \
                  /usr/share/libalternatives/lonely"
             ),
             "level/name/detail: {line}"
@@ -887,7 +887,7 @@ mod tests {
             .expect("real-file entry");
         assert!(
             real.1.starts_with(
-                "alternatives-test.noarch: E: libalternatives-conf-not-found (Badness: 1) \
+                "alternatives-test.noarch: E: libalternatives-conf-not-found \
                  /usr/share/libalternatives/gone/gone.conf"
             ),
             "real file is Error: {}",

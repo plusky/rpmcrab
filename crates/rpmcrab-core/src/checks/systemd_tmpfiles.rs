@@ -647,7 +647,7 @@ entries = [
             if expect_finding {
                 assert_eq!(
                     unauthorized[0].as_str(),
-                    "badpkg.noarch: E: systemd-tmpfile-entry-unauthorized (Badness: 1) \
+                    "badpkg.noarch: E: systemd-tmpfile-entry-unauthorized \
                      /tmpfiles1/some.conf \"d /tmp/.rpmlint-stuff 0777 root root -\"",
                     "level/name/detail",
                 );

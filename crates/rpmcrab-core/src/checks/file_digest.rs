@@ -1369,7 +1369,7 @@ hash = "{}"
             .unwrap();
         assert!(
             line.starts_with(
-                "testpkg.noarch: E: pam-file-unauthorized (Badness: 1) /etc/pam.d/login"
+                "testpkg.noarch: E: pam-file-unauthorized /etc/pam.d/login"
             ),
             "level/name/detail: {line}"
         );
@@ -2283,11 +2283,11 @@ hash = "0000000000000000000000000000000000000000"
         };
         assert_eq!(
             line_for("/etc/pam.d/login-md5"),
-            "testpkg.noarch: E: pam-file-digest-mismatch (Badness: 1) /etc/pam.d/login-md5 expected md5:00000000000000000000000000000000, has:5d41402abc4b2a76b9719d911017c592"
+            "testpkg.noarch: E: pam-file-digest-mismatch /etc/pam.d/login-md5 expected md5:00000000000000000000000000000000, has:5d41402abc4b2a76b9719d911017c592"
         );
         assert_eq!(
             line_for("/etc/pam.d/login-sha1"),
-            "testpkg.noarch: E: pam-file-digest-mismatch (Badness: 1) /etc/pam.d/login-sha1 expected sha1:0000000000000000000000000000000000000000, has:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
+            "testpkg.noarch: E: pam-file-digest-mismatch /etc/pam.d/login-sha1 expected sha1:0000000000000000000000000000000000000000, has:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2389,7 +2389,7 @@ hash = "{}"
         );
         assert!(
             unauthorized[0].1.starts_with(
-                "otherpkg.noarch: E: pam-file-unauthorized (Badness: 1) /etc/pam.d/login"
+                "otherpkg.noarch: E: pam-file-unauthorized /etc/pam.d/login"
             ),
             "level/name/detail: {}",
             unauthorized[0].1
@@ -2492,7 +2492,7 @@ nodigests = ["/etc/pam.d/skipped"]
         );
         assert!(
             unauthorized[0].1.starts_with(
-                "testpkg.noarch: E: pam-file-unauthorized (Badness: 1) /etc/pam.d/evil"
+                "testpkg.noarch: E: pam-file-unauthorized /etc/pam.d/evil"
             ),
             "level/name/detail: {}",
             unauthorized[0].1

@@ -3,10 +3,9 @@
 //! Two strings are derived from a finding, and the distinction is the frozen
 //! contract (`docs/DESIGN.md` §4.1, §4.2):
 //!
-//! - [`Finding::line`] is the printed line, optionally coloured, with the
-//!   `(Badness: N)` column.
+//! - [`Finding::line`] is the printed line, optionally coloured.
 //! - [`Finding::match_string`] is what `Filters` regexes run against: the same
-//!   layout, de-coloured, **without** the badness column.
+//!   layout, de-coloured.
 
 use crate::color::Color;
 use crate::level::Level;
@@ -20,10 +19,6 @@ pub struct Finding {
     /// Free-form details; empty strings are dropped, each kept detail is
     /// prefixed with a single space.
     pub details: Vec<String>,
-    /// Final badness after scoring (signed: a negative configured badness
-    /// subtracts from the score, per Python `int()`). The column prints
-    /// whenever the badness is positive.
-    pub badness: i64,
     /// `Path(package.name).name` — the `Name:` tag for binaries, the spec
     /// filename for `.spec`.
     pub pkg_name: String,
@@ -69,7 +64,7 @@ impl Finding {
             .collect()
     }
 
-    /// The de-coloured filter-match string: no colour, no `(Badness: N)`.
+    /// The de-coloured filter-match string: no colour.
     pub fn match_string(&self) -> String {
         self.match_string_as(&self.check)
     }
@@ -103,26 +98,19 @@ impl Finding {
                 .iter()
                 .filter(|d| !d.is_empty())
                 .collect::<Vec<_>>(),
-            "badness": self.badness,
         })
     }
 
     /// The printed line. Coloured iff `color` is the tty table.
     pub fn line(&self, color: &Color) -> String {
-        let bad_output = if self.badness > 0 {
-            format!(" (Badness: {})", self.badness)
-        } else {
-            String::new()
-        };
         format!(
-            "{bold}{prefix}{reset} {lc}{level}: {issue}{reset}{bad}{details}",
+            "{bold}{prefix}{reset} {lc}{level}: {issue}{reset}{details}",
             bold = color.bold,
             prefix = self.prefix(),
             reset = color.reset,
             lc = self.level.color(color),
             level = self.level.letter(),
             issue = self.check,
-            bad = bad_output,
             details = self.detail_output(),
         )
     }
@@ -137,7 +125,6 @@ mod tests {
             level,
             check: check.to_string(),
             details: vec![],
-            badness: 0,
             pkg_name: "llvm21-gold".to_string(),
             arch: Some("aarch64".to_string()),
             line: None,
@@ -149,7 +136,6 @@ mod tests {
     fn json_shape() {
         let mut f = pkg("suse-zypp-packageand", Level::Error);
         f.details = vec!["packageand(clang21:binutils)".to_string(), String::new()];
-        f.badness = 2;
         f.line = Some(42);
         let v = f.json_value();
         assert_eq!(v["level"], "E");
@@ -162,7 +148,7 @@ mod tests {
             v["details"],
             serde_json::json!(["packageand(clang21:binutils)"])
         );
-        assert_eq!(v["badness"], 2);
+        assert!(v.get("badness").is_none(), "no badness field: {v}");
     }
 
     #[test]
@@ -191,7 +177,6 @@ mod tests {
             level: Level::Warning,
             check: "mixed-use-of-spaces-and-tabs".to_string(),
             details: vec!["(spaces: line 24, tab: line 2)".to_string()],
-            badness: 0,
             pkg_name: "qdmr.spec".to_string(),
             arch: None,
             line: Some(24),
@@ -204,32 +189,8 @@ mod tests {
     }
 
     #[test]
-    fn badness_column_renders_when_positive() {
-        let mut f = pkg("shlib-policy-name-error", Level::Error);
-        f.badness = 10000;
-        f.details = vec!["SONAME: libLTO.so.21.1".to_string()];
-        assert_eq!(
-            f.line(&Color::for_tty(false)),
-            "llvm21-gold.aarch64: E: shlib-policy-name-error (Badness: 10000) SONAME: libLTO.so.21.1"
-        );
-        // A badness of 1 renders too: any finding that counts toward the
-        // score shows its weight (DESIGN §4.1).
-        f.badness = 1;
-        assert_eq!(
-            f.line(&Color::for_tty(false)),
-            "llvm21-gold.aarch64: E: shlib-policy-name-error (Badness: 1) SONAME: libLTO.so.21.1"
-        );
-        // Zero and negative badness stay unrendered.
-        f.badness = 0;
-        assert!(!f.line(&Color::for_tty(false)).contains("Badness"));
-        f.badness = -5;
-        assert!(!f.line(&Color::for_tty(false)).contains("Badness"));
-    }
-
-    #[test]
-    fn match_string_omits_badness() {
-        let mut f = pkg("shlib-policy-name-error", Level::Error);
-        f.badness = 10000;
+    fn match_string_layout() {
+        let f = pkg("shlib-policy-name-error", Level::Error);
         assert_eq!(
             f.match_string(),
             "llvm21-gold.aarch64: E: shlib-policy-name-error"
