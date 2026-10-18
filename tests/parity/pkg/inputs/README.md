@@ -10,6 +10,8 @@ each exercising a particular check behavior.
 |  | Rich deps , , nested,  (#49/#429) |
 |------|---------|
 | `fcprobe-1-1.noarch.rpm` | Hand-built binary-bearing RPM for smoke tests |
+| `atomic-post-restart-1.0-1.noarch.rpm` | AtomicUpdateCheck wiring fixture: %post body restarts a service directly (fires scriptlet-service-restart through the check) |
+| `atomic-verify-restart-1.0-1.noarch.rpm` | AtomicUpdateCheck wiring fixture: same restart in a %verifyscript body (excluded from the scan, stays quiet) |
 | `filescheck-depmod-missing-1.0-1.noarch.rpm` | .ko in non-kernel package, no depmod calls (negative pin for the removed depmod findings) |
 | `filescheck-depmod-wrong-1.0-1.noarch.rpm` | .ko in non-kernel package, wrong depmod form (negative pin for the removed depmod findings) |
 | `filescheck-devel-1.0-1.noarch.rpm` | devel package file placement |

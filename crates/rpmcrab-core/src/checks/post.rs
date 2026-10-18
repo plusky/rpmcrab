@@ -490,7 +490,7 @@ impl PostCheck {
     /// Scriptlet text with heredoc bodies blanked. Text a scriptlet
     /// writes out (an update message, a generated file) is not executed,
     /// so a command named inside it is not an invocation.
-    fn without_heredoc_bodies(script: &str) -> String {
+    pub(crate) fn without_heredoc_bodies(script: &str) -> String {
         // Parse the delimiter following a `<<` at byte offset `at` in
         // `line`: the delimiter word, and whether the operator is the
         // `<<-` form (whose terminator may be indented with tabs).
@@ -766,7 +766,7 @@ impl PostCheck {
     /// input. The frame stack threads across lines, like the heredoc
     /// scan: a quoted string spanning lines keeps its continuation
     /// lines blanked instead of letting them read as code.
-    fn code_only(script: &str) -> String {
+    pub(crate) fn code_only(script: &str) -> String {
         #[derive(Clone, Copy)]
         enum Frame {
             // Parenthesis depth within a `$(...)` frame.
