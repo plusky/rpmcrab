@@ -196,9 +196,10 @@ const SCRIPTLET_LABELS: [&str; 6] = [
 ];
 
 /// Runtime filesystems and their legacy spellings (`/var/run` and
-/// `/var/tmp` are the pre-systemd names of `/run` and the tmpfiles-managed
-/// part of `/var`). Paths here are not snapshot subvolumes at all, so a
-/// write to them is runtime state by definition, not a snapshot escape.
+/// `/var/lock` are the pre-systemd names of `/run` and `/run/lock`, and
+/// `/var/tmp` is the tmpfiles-managed part of `/var`). Paths here are
+/// not snapshot subvolumes at all, so a write to them is runtime state
+/// by definition, not a snapshot escape.
 /// Corpus evidence (issue #708 measurement): the apache2 family touches
 /// `/var/run/httpd.restart.flag` from %postun/%posttrans as its restart
 /// hand-off; flagging that spelling of `/run` would be a false positive.
@@ -209,6 +210,7 @@ const TRANSIENT_PREFIXES: &[&str] = &[
     "/run/",
     "/tmp/",
     "/var/run/",
+    "/var/lock/",
     "/var/tmp/",
 ];
 
@@ -1301,6 +1303,8 @@ mod tests {
             "/run/x",
             "/run",
             "/var/run/x",
+            "/var/lock/subsys/foo",
+            "/var/lock",
             "/tmp/x",
             "/var/tmp/x",
             "/dev/null",
