@@ -109,10 +109,11 @@ fn manpage_so_targets(text: &str) -> Vec<String> {
 /// relative arguments are already man-root-relative, absolute arguments
 /// count only in their `/usr/share/man/...` or `/usr/man/...` form, and
 /// bare filenames or other absolute paths name no man-root page. The
-/// first directory of a relative argument must have the section shape
-/// `MAN_REGEX` accepts (`man` plus a digit with an optional `p`/`x`,
-/// or `mann`): a merely `man`-prefixed directory (`manual/`,
-/// `management/`) names no man page.
+/// first directory of a relative argument must have the reference's
+/// loose section shape: `man` plus a first byte that is a digit or
+/// `n`, with an arbitrary tail, so real section directories such as
+/// `man3pm/` and `man3tcl/` resolve; a merely `man`-prefixed
+/// directory (`manual/`, `management/`) names no man page.
 fn manpage_so_root_relative(arg: &str) -> Option<String> {
     if let Some(rel) = arg.strip_prefix("/usr/share/man/") {
         return Some(rel.to_string());
@@ -125,10 +126,10 @@ fn manpage_so_root_relative(arg: &str) -> Option<String> {
     }
     let (dir, _) = arg.split_once('/')?;
     let section = dir.strip_prefix("man")?;
-    let valid = section == "n"
-        || (section.len() <= 2
-            && section.as_bytes().first().is_some_and(u8::is_ascii_digit)
-            && (section.len() == 1 || matches!(section.as_bytes()[1], b'p' | b'x')));
+    let valid = section
+        .as_bytes()
+        .first()
+        .is_some_and(|b| b.is_ascii_digit() || *b == b'n');
     if valid { Some(arg.to_string()) } else { None }
 }
 
@@ -1789,12 +1790,16 @@ impl FilesCheck {
     /// shared between `is_utf8_file` and `manpage_text`: a `%doc` man
     /// page would otherwise run the same `<tool> -dc` pipeline twice per
     /// package. A complete output up to `MANPAGE_TEXT_LIMIT` is cached
-    /// per path on this instance. `None` — no decompressor for the
+    /// per path on this instance when the caller passes `cache_result`
+    /// (the man-page consumer). The UTF-8 consumer reads through
+    /// without caching: it validates files the man-page check never
+    /// looks at, and pinning every compressed file's output until
+    /// `reset()` costs up to the limit per file for no second use. `None` — no decompressor for the
     /// suffix, an absent or failing decompressor, or an output past the
     /// limit — is cached as well; callers then apply their own read for
     /// those cases (streaming validation, a capped prefix) exactly as
     /// when no cache entry exists.
-    fn decompressed_bytes(&self, fname: &str, path: &str) -> Option<Arc<[u8]>> {
+    fn decompressed_bytes(&self, fname: &str, path: &str, cache_result: bool) -> Option<Arc<[u8]>> {
         if let Some(hit) = self.decompressed_cache.borrow().get(path) {
             return hit.clone();
         }
@@ -1809,17 +1814,22 @@ impl FilesCheck {
             let bytes = child
                 .stdout
                 .take()
-                .and_then(|s| read_prefix(s, MANPAGE_TEXT_LIMIT + 1).ok())?;
+                .and_then(|s| read_prefix(s, MANPAGE_TEXT_LIMIT + 1).ok());
+            // Reap the child before the read result propagates: an
+            // early return on a failed read would leave it a zombie.
             let status = child.wait().ok()?;
+            let bytes = bytes?;
             if status.success() && bytes.len() as u64 <= MANPAGE_TEXT_LIMIT {
                 Some(Arc::from(bytes))
             } else {
                 None
             }
         });
-        self.decompressed_cache
-            .borrow_mut()
-            .insert(path.to_string(), result.clone());
+        if cache_result {
+            self.decompressed_cache
+                .borrow_mut()
+                .insert(path.to_string(), result.clone());
+        }
         result
     }
 
@@ -1841,7 +1851,7 @@ impl FilesCheck {
                 // A previous decompression of this path (by either
                 // consumer) is validated from memory instead of running
                 // the pipeline again.
-                if let Some(bytes) = self.decompressed_bytes(fname, path) {
+                if let Some(bytes) = self.decompressed_bytes(fname, path, false) {
                     let mut slice: &[u8] = &bytes;
                     return stream_is_utf8(&mut slice).unwrap_or(true);
                 }
@@ -1887,7 +1897,7 @@ impl FilesCheck {
     fn manpage_text(&self, pkgfile: &PkgFile) -> Option<String> {
         match self.decompressor_for(&pkgfile.name) {
             Some(tool) => {
-                if let Some(bytes) = self.decompressed_bytes(&pkgfile.name, &pkgfile.path) {
+                if let Some(bytes) = self.decompressed_bytes(&pkgfile.name, &pkgfile.path, true) {
                     return Some(String::from_utf8_lossy(&bytes).into_owned());
                 }
                 // The shared helper could not serve the page (a failing
@@ -1904,8 +1914,11 @@ impl FilesCheck {
                     .stdout
                     .take()
                     .and_then(|s| read_prefix(s, MANPAGE_TEXT_LIMIT).ok());
-                let bytes = bytes?;
+                // Reap the child before the read result propagates:
+                // an early return on a failed read would leave it a
+                // zombie.
                 let status = child.wait().ok()?;
+                let bytes = bytes?;
                 // A saturated read means the output ran past the text
                 // limit and the decompressor then died of SIGPIPE on
                 // the closed pipe: the prefix is the page text to
@@ -7935,6 +7948,16 @@ mod tests {
             manpage_so_root_relative("/usr/man/man1/x.1"),
             Some("man1/x.1".to_string())
         );
+        // Multi-letter section directories resolve under the loose
+        // shape (first byte a digit or `n`, arbitrary tail).
+        assert_eq!(
+            manpage_so_root_relative("man3pm/x.3pm"),
+            Some("man3pm/x.3pm".to_string())
+        );
+        assert_eq!(
+            manpage_so_root_relative("man3tcl/x.3tcl"),
+            Some("man3tcl/x.3tcl".to_string())
+        );
         assert_eq!(manpage_so_root_relative("/etc/passwd"), None);
         assert_eq!(manpage_so_root_relative("popen.3"), None);
         assert_eq!(manpage_so_root_relative("otherdir/x.1"), None);
@@ -7942,9 +7965,9 @@ mod tests {
 
     #[test]
     fn manpage_so_root_relative_rejects_man_prefixed_dirs() {
-        // The first directory must carry the section shape `MAN_REGEX`
-        // accepts, not just the `man` prefix: `manual/` and
-        // `management/` name no man page (issue #672).
+        // The first directory must carry the loose section shape
+        // (a digit or `n` first), not just the `man` prefix:
+        // `manual/` and `management/` name no man page (issue #672).
         assert_eq!(manpage_so_root_relative("manual/x.1"), None);
         assert_eq!(manpage_so_root_relative("management/x.1"), None);
         assert_eq!(manpage_so_root_relative("manx/x.1"), None);
@@ -8603,6 +8626,47 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn utf8_reads_do_not_populate_the_decompression_cache() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let payload = dir.path().join("page.out");
+        std::fs::write(&payload, "plain text\n").expect("write payload");
+        let script = dir.path().join("gzip");
+        std::fs::write(&script, format!("#!/bin/sh\ncat {}\n", payload.display()))
+            .expect("write fake gzip");
+        let mut perms = std::fs::metadata(&script)
+            .expect("stat fake gzip")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod fake gzip");
+        let page = dir.path().join("page.3.gz");
+        std::fs::write(&page, b"not really gzip").expect("write page");
+        let page = page.to_string_lossy().into_owned();
+        let config = test_config();
+        let check = FilesCheck::with_tool_dir(&config, Some(dir.path()));
+        // The UTF-8 consumer validates through the decompressor but
+        // keeps nothing: its files are not the man-page check's.
+        assert!(check.is_utf8_file("page.3.gz", &page));
+        assert!(
+            check.decompressed_cache.borrow().is_empty(),
+            "an is_utf8-only read must not populate the cache"
+        );
+        // The man-page consumer does populate it: its pages are the
+        // UTF-8 consumer's likeliest re-reads.
+        let pkgfile = PkgFile {
+            name: "/usr/share/man/man3/page.3.gz".to_string(),
+            path: page,
+            mode: 0o100644,
+            ..Default::default()
+        };
+        assert_eq!(
+            check.manpage_text(&pkgfile).as_deref(),
+            Some("plain text\n")
+        );
+        assert_eq!(check.decompressed_cache.borrow().len(), 1);
+    }
+
+    #[test]
     fn manpage_so_ref_reads_gzipped_page_via_decompressor() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::TempDir::new().expect("tmpdir");
