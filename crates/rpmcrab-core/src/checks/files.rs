@@ -2239,9 +2239,15 @@ impl FilesCheck {
         if !pkgfile::is_reg(pkgfile.mode) {
             return;
         }
+        // A %ghost entry installs no payload, so nothing ships on disk.
+        if pkgfile.is_ghost() || pkg.ghost_files.iter().any(|g| g == fname) {
+            return;
+        }
         for dir in [
             "/usr/lib/systemd/system-preset/",
             "/usr/lib/systemd/user-preset/",
+            "/etc/systemd/system-preset/",
+            "/etc/systemd/user-preset/",
         ] {
             if let Some(base) = fname.strip_prefix(dir) {
                 if !base.contains('/') && base.len() > ".preset".len() && base.ends_with(".preset")
@@ -8806,6 +8812,49 @@ mod tests {
         }
     }
 
+    /// The vendored openSUSE config's `SystemdPresetPackages` list is the
+    /// exemption source default runs actually use: every package it names
+    /// stays quiet under it, so generator or typo drift in the list
+    /// surfaces here instead of false-firing on real preset packages.
+    #[test]
+    fn opensuse_preset_packages_are_quiet_under_vendored_opensuse_config() {
+        let opensuse_toml =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("data/distro/opensuse/opensuse.toml");
+        let parsed: toml::Table = toml::from_str(
+            &std::fs::read_to_string(opensuse_toml).expect("vendored opensuse config"),
+        )
+        .expect("vendored opensuse config parses");
+        let names: Vec<&str> = parsed["SystemdPresetPackages"]
+            .as_array()
+            .expect("SystemdPresetPackages is an array")
+            .iter()
+            .map(|v| v.as_str().expect("preset package names are strings"))
+            .collect();
+        assert_eq!(
+            names.len(),
+            13,
+            "the vendored openSUSE preset list changed: {names:?}"
+        );
+        let mut cfg = test_config();
+        cfg.configuration.insert(
+            "SystemdPresetPackages".to_string(),
+            parsed["SystemdPresetPackages"].clone(),
+        );
+        for name in &names {
+            let (mut pkg, _dir) = pkg_with_files(vec![mkfile(
+                "/usr/lib/systemd/system-preset/90-default.preset",
+                0o100644,
+                46,
+            )]);
+            pkg.name = name.to_string();
+            let results = run_check_binary_with_config(&pkg, &cfg);
+            assert!(
+                preset_findings(&results).is_empty(),
+                "openSUSE preset package {name} must stay quiet: {results:?}"
+            );
+        }
+    }
+
     #[test]
     fn systemd_preset_file_fires_without_exemption_config() {
         // No SystemdPresetPackages key configured: no package is exempt,
@@ -8835,13 +8884,49 @@ mod tests {
                 0o100644,
                 38,
             ),
-            mkfile("/etc/systemd/system-preset/99-foo.preset", 0o100644, 39),
         ]);
         pkg.name = "foo".to_string();
         let results = run_check_binary_with_config(&pkg, &preset_test_config());
         assert!(
             preset_findings(&results).is_empty(),
             "only *.preset directly in the preset dirs fires: {results:?}"
+        );
+    }
+
+    #[test]
+    fn systemd_preset_file_in_etc_fires() {
+        // systemd reads presets from /etc/systemd/{system,user}-preset/
+        // too (the higher-priority admin policy dirs), so a preset file
+        // shipped there sets enablement policy exactly as in /usr/lib.
+        for path in [
+            "/etc/systemd/system-preset/99-foo.preset",
+            "/etc/systemd/user-preset/99-foo.preset",
+        ] {
+            let (mut pkg, _dir) = pkg_with_files(vec![mkfile(path, 0o100644, 44)]);
+            pkg.name = "foo".to_string();
+            let results = run_check_binary_with_config(&pkg, &preset_test_config());
+            assert_eq!(
+                preset_findings(&results).len(),
+                1,
+                "/etc preset files fire too ({path}): {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn systemd_preset_ghost_entry_is_quiet() {
+        let mut ghost = mkfile(
+            "/usr/lib/systemd/system-preset/99-foo.preset",
+            0o100644,
+            45,
+        );
+        ghost.flags = RPMFILE_GHOST;
+        let (mut pkg, _dir) = pkg_with_files(vec![ghost]);
+        pkg.name = "foo".to_string();
+        let results = run_check_binary_with_config(&pkg, &preset_test_config());
+        assert!(
+            preset_findings(&results).is_empty(),
+            "a %ghost preset entry installs nothing and must stay quiet: {results:?}"
         );
     }
 

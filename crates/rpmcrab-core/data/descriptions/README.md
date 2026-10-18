@@ -104,8 +104,8 @@ Provenance, verified against the pinned reference (`84848c0`):
   entry (openSUSE: "Doesn't seem to make sense") dropped with
   the findings, and minus the port-only `zero-length` entry dropped with
   the deliberately removed `zero-length` finding (issue #479). Plus the
-  port-only `manpage-dangling-so-ref` and `sysconfig-fillup-usage`
-  entries: the reference has no such findings, so `--explain` would
+  port-only `manpage-dangling-so-ref`, `sysconfig-fillup-usage` and
+  `systemd-preset-packaged` entries: the reference has no such findings, so `--explain` would
   print `Unknown message` for them; ledgered in
   `tests/parity/divergences.toml`.
 - Every other `*.toml` file — byte-identical to the reference
