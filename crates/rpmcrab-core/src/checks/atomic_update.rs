@@ -14,7 +14,7 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
-use crate::pkg::pkgfile::PkgFile;
+use crate::pkg::pkgfile::{PkgFile, is_dir};
 
 pub struct AtomicUpdateCheck {
     check_ghosts: bool,
@@ -71,15 +71,20 @@ impl AtomicUpdateCheck {
     }
 }
 
-/// True when `file` is a `/usr/etc` entry marked `%config`.
+/// True when `file` is a shipped `/usr/etc` file marked `%config`.
 ///
 /// Under the UsrEtc layout `/usr/etc` ships vendor defaults and
 /// administrator configuration lives in `/etc`; the `%config` mark makes
 /// rpm preserve local edits to the vendor default across updates, which
-/// fights the split. The `RPMFILE_CONFIG` bit alone decides — every
-/// `%config` variant counts, and directory entries are included.
-pub fn usr_etc_conffile(file: &PkgFile) -> bool {
-    file.is_config() && (file.name == "/usr/etc" || file.name.starts_with("/usr/etc/"))
+/// fights the split. Every `%config` variant counts, but `%ghost` entries
+/// ship no vendor default and directory entries never get
+/// `.rpmnew`/`.rpmsave` treatment, so neither fires — the same scope as
+/// the sibling `shlib-policy-etc-payload` rule.
+pub(crate) fn usr_etc_conffile(file: &PkgFile) -> bool {
+    file.is_config()
+        && !file.is_ghost()
+        && !is_dir(file.mode)
+        && (file.name == "/usr/etc" || file.name.starts_with("/usr/etc/"))
 }
 
 impl Check for AtomicUpdateCheck {
@@ -389,7 +394,6 @@ mod tests {
             RPMFILE_CONFIG | RPMFILE_NOREPLACE,
             RPMFILE_CONFIG | RPMFILE_MISSINGOK,
             RPMFILE_CONFIG | RPMFILE_NOREPLACE | RPMFILE_MISSINGOK,
-            RPMFILE_CONFIG | RPMFILE_GHOST,
         ] {
             assert!(
                 usr_etc_conffile(&flagged("/usr/etc/foo.conf", flags)),
@@ -399,17 +403,36 @@ mod tests {
     }
 
     #[test]
-    fn usr_etc_conffile_covers_the_dir_itself_and_subdirs() {
-        let dir = PkgFile {
-            name: "/usr/etc".to_string(),
-            mode: 0o040755,
-            flags: RPMFILE_CONFIG,
-            ..Default::default()
-        };
-        assert!(usr_etc_conffile(&dir));
+    fn usr_etc_conffile_covers_subdirs_but_not_dir_entries() {
+        // A directory never gets .rpmnew/.rpmsave treatment, so a
+        // `%config`-marked directory entry — /usr/etc itself or a
+        // subdirectory — does not fire; files below them do.
+        for name in ["/usr/etc", "/usr/etc/sysctl.d"] {
+            let dir = PkgFile {
+                name: name.to_string(),
+                mode: 0o040755,
+                flags: RPMFILE_CONFIG,
+                ..Default::default()
+            };
+            assert!(!usr_etc_conffile(&dir), "dir {name} must not fire");
+        }
         assert!(usr_etc_conffile(&flagged(
             "/usr/etc/sysctl.d/10-x.conf",
             RPMFILE_CONFIG
+        )));
+    }
+
+    #[test]
+    fn usr_etc_conffile_ghost_does_not_fire() {
+        // A %ghost ships no vendor default in the package, so there is
+        // no vendor default for the %config mark to misclassify.
+        assert!(!usr_etc_conffile(&flagged(
+            "/usr/etc/foo.conf",
+            RPMFILE_CONFIG | RPMFILE_GHOST
+        )));
+        assert!(!usr_etc_conffile(&flagged(
+            "/usr/etc/foo.conf",
+            RPMFILE_CONFIG | RPMFILE_GHOST | RPMFILE_NOREPLACE
         )));
     }
 
