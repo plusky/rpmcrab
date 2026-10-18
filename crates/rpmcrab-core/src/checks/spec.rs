@@ -1099,7 +1099,15 @@ impl SpecCheck {
         let stderr = match String::from_utf8(output.stderr) {
             Ok(stderr) => stderr,
             Err(e) => {
-                self.info(out, pkg, Level::Error, "specfile-error", &[&e.to_string()]);
+                // Level follows specfile-error's temporary W levelling
+                // (issue #699, pending #702; see the stderr loop below).
+                self.info(
+                    out,
+                    pkg,
+                    Level::Warning,
+                    "specfile-error",
+                    &[&e.to_string()],
+                );
                 return;
             }
         };
@@ -1111,7 +1119,16 @@ impl SpecCheck {
             if line.contains("warning:") {
                 self.info(out, pkg, Level::Warning, "specfile-warning", &[line]);
             } else {
-                self.info(out, pkg, Level::Error, "specfile-error", &[line]);
+                // TEMPORARY W (issue #699 levelling pass, ledgered in
+                // tests/parity/divergences.toml): pending #702, which
+                // gives the spec parser the distro macro context (Factory
+                // prjconf plus the macro-providing packages). The
+                // 20261018 Factory sweep's 22,528 firings across 6,876
+                // srcpkgs are overwhelmingly missing-context artefacts
+                // (unknown tags for macros the parse environment lacks),
+                // not broken specs; at E they would fail about 40% of
+                // Factory under the #699 exit doctrine.
+                self.info(out, pkg, Level::Warning, "specfile-error", &[line]);
             }
         }
     }
@@ -1137,8 +1154,9 @@ impl SpecCheck {
         let _ = macros.pop("_sourcedir");
         let Some(parsed) = parsed else {
             // The reference also reports librpm's error text here, which
-            // `Spec::parse` does not surface (ledgered).
-            self.info(out, pkg, Level::Error, "specfile-error", &[spec_file]);
+            // `Spec::parse` does not surface (ledgered). The level is
+            // specfile-error's temporary W (issue #699, pending #702).
+            self.info(out, pkg, Level::Warning, "specfile-error", &[spec_file]);
             return;
         };
         for src in parsed.sources() {
