@@ -832,6 +832,14 @@ model (§4.6) is unchanged and was re-pinned against the recalibrated
 levels, and a generated inventory of every finding tag's level and
 scoring guards the calibration against silent drift.
 
+That account is superseded in part by #699: badness was removed
+entirely, so no finding keeps or renders a badness value —
+`invalid-license` carries no badness of 100000 and text output renders
+no `(Badness: N)` (§4.1); `[Scoring]` survives only as a
+promotion-only override (§4.9). The exit-code model was revised with
+it (§4.6): exits 65 and 66 are gone, the set is `0/2/3/4/64/130`, and
+any printed error fails the run by default.
+
 ---
 
 ## 10. Security
