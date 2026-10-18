@@ -218,17 +218,23 @@ fn service_restarts_in_body(body: &str) -> Vec<String> {
     hits
 }
 
-/// True when one command segment invokes a service (re)start.
-fn segment_restarts(segment: &str) -> bool {
-    let segment = skip_case_pattern(segment);
-    let words: Vec<&str> = segment
+/// The words of one command segment: split on whitespace, with the
+/// shell decoration characters (`{}`, `()`, quotes) trimmed off
+/// each word.
+fn segment_words(segment: &str) -> Vec<&str> {
+    segment
         .split_whitespace()
         .map(|w| w.trim_matches(['{', '}', '(', ')', '"', '\'']))
         .filter(|w| !w.is_empty())
-        .collect();
+        .collect()
+}
+
+/// The index of the command word in a segment's words: the first
+/// word past the command-position decoration — shell keywords and
+/// VAR=value environment assignments leave the next word in
+/// command position.
+fn segment_command_index(words: &[&str]) -> Option<usize> {
     let mut i = 0;
-    // Skip command-position decoration: shell keywords and VAR=value
-    // environment assignments.
     while i < words.len()
         && (matches!(
             words[i],
@@ -237,9 +243,29 @@ fn segment_restarts(segment: &str) -> bool {
     {
         i += 1;
     }
-    if i >= words.len() {
+    if i >= words.len() { None } else { Some(i) }
+}
+
+/// True when `command` — the word in command position — names an
+/// rc<service> link: basename `rc<name>`, invoked bare or by path.
+/// A path-qualified form only counts from a sbin directory, where
+/// the rc<service> links live; a same-shaped binary elsewhere
+/// (e.g. `/usr/bin/rclone`) is not an rc link. A bare `rc<name>`
+/// carries no path to judge and counts.
+pub(crate) fn rc_link_command(command: &str) -> bool {
+    let base = command.rsplit('/').next().unwrap_or(command);
+    if base.len() <= 2 || !base.starts_with("rc") {
         return false;
     }
+    !(command.contains('/') && !command.rsplit('/').nth(1).is_some_and(|dir| dir == "sbin"))
+}
+
+/// True when one command segment invokes a service (re)start.
+fn segment_restarts(segment: &str) -> bool {
+    let words = segment_words(skip_case_pattern(segment));
+    let Some(i) = segment_command_index(&words) else {
+        return false;
+    };
     let command = words[i];
     let args = &words[i + 1..];
     if command == "systemctl" || command.ends_with("/systemctl") {
@@ -250,15 +276,7 @@ fn segment_restarts(segment: &str) -> bool {
         return args.len() >= 2 && LEGACY_RESTART_VERBS.contains(&args[1]);
     }
     // The legacy rc form is `rc<name> VERB`, invoked bare or by path.
-    let base = command.rsplit('/').next().unwrap_or(command);
-    if base.len() > 2 && base.starts_with("rc") {
-        // A path-qualified rc command only counts from a sbin
-        // directory, where the rc<service> links live; a same-shaped
-        // binary elsewhere (e.g. /usr/bin/rclone) is not an rc script.
-        // A bare rc<name> carries no path to judge and counts.
-        if command.contains('/') && !command.rsplit('/').nth(1).is_some_and(|dir| dir == "sbin") {
-            return false;
-        }
+    if rc_link_command(command) {
         return args
             .first()
             .is_some_and(|v| LEGACY_RESTART_VERBS.contains(v));
@@ -458,6 +476,50 @@ fn segment_user_creation(segment: &str) -> Option<&'static str> {
         "groupadd" => Some("groupadd"),
         _ => None,
     }
+}
+
+/// The lines of one scriptlet body that invoke an rc<service>
+/// link, in first-seen order, each line once. The scan shares the
+/// tokenisation of `service_restarts_in_body` — the heredoc-blanked,
+/// quote-blanked lines (`PostCheck::without_heredoc_bodies` and
+/// `PostCheck::code_only`) split into command segments on `;`, `|`
+/// and `&`, command position only — but is verb-independent: the
+/// rc<name> invocation itself is the obsolete part, whatever verb
+/// follows it, so `rcfoo status` fires here while staying silent
+/// for `scriptlet-service-restart`. There is no
+/// `TRANSACTIONAL_UPDATE` exemption: the links are removed from
+/// the distribution outright, on classic and transactional systems
+/// alike. `PostCheck` reports the lines as
+/// `scriptlet-rc-link-invocation-in-<scriptlet>` (issue #731).
+pub(crate) fn rc_link_invocations_in_body(body: &str) -> Vec<String> {
+    let blanked = PostCheck::without_heredoc_bodies(body);
+    let coded = PostCheck::code_only(&blanked);
+    let mut hits: Vec<String> = Vec::new();
+    for (raw_line, code_line) in body.lines().zip(coded.lines()) {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        for segment in code_line.split([';', '|', '&']) {
+            if segment_rc_link(segment) {
+                if !hits.iter().any(|h| h == line) {
+                    hits.push(line.to_string());
+                }
+                break;
+            }
+        }
+    }
+    hits
+}
+
+/// True when one command segment's command word is an rc<service>
+/// link invocation.
+fn segment_rc_link(segment: &str) -> bool {
+    let words = segment_words(skip_case_pattern(segment));
+    let Some(i) = segment_command_index(&words) else {
+        return false;
+    };
+    rc_link_command(words[i])
 }
 
 impl Check for AtomicUpdateCheck {
