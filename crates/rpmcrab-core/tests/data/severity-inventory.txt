@@ -380,6 +380,7 @@ update-alternatives-requirement-missing = E
 use-of-RPM_SOURCE_DIR = E
 use-of-launcher-in-menu-but-no-requires-on = E
 useless-provides = E
+usr-etc-file-marked-as-conffile = W
 version-control-internal-file = E
 version-in-menu-longtitle = W
 version-in-menu-title = W

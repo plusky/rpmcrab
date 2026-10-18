@@ -2,12 +2,19 @@
 //!
 //! Ported from `rpmlint/checks/AtomicUpdateCheck.py`. Two findings:
 //! `dir-or-file-outside-snapshot` (E) and `ghost-outside-snapshot` (W).
+//!
+//! This file hosts the transactional-update family's predicates. It also
+//! carries `usr_etc_conffile`, the predicate behind the crab-only
+//! `usr-etc-file-marked-as-conffile` warning emitted by
+//! `ConfigFilesCheck`: under the UsrEtc layout `/usr/etc` holds vendor
+//! defaults, so no file there may be marked `%config`.
 
 use crate::check::{Check, add_info};
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
+use crate::pkg::pkgfile::PkgFile;
 
 pub struct AtomicUpdateCheck {
     check_ghosts: bool,
@@ -64,6 +71,17 @@ impl AtomicUpdateCheck {
     }
 }
 
+/// True when `file` is a `/usr/etc` entry marked `%config`.
+///
+/// Under the UsrEtc layout `/usr/etc` ships vendor defaults and
+/// administrator configuration lives in `/etc`; the `%config` mark makes
+/// rpm preserve local edits to the vendor default across updates, which
+/// fights the split. The `RPMFILE_CONFIG` bit alone decides — every
+/// `%config` variant counts, and directory entries are included.
+pub fn usr_etc_conffile(file: &PkgFile) -> bool {
+    file.is_config() && (file.name == "/usr/etc" || file.name.starts_with("/usr/etc/"))
+}
+
 impl Check for AtomicUpdateCheck {
     fn name(&self) -> &'static str {
         "AtomicUpdateCheck"
@@ -110,7 +128,9 @@ mod tests {
     use std::path::Path;
 
     use crate::color::Color;
-    use crate::pkg::pkgfile::{PkgFile, RPMFILE_GHOST};
+    use crate::pkg::pkgfile::{
+        PkgFile, RPMFILE_CONFIG, RPMFILE_GHOST, RPMFILE_MISSINGOK, RPMFILE_NOREPLACE,
+    };
 
     /// `Pkg` is header-backed with no test constructor, so open a tiny fixture
     /// and rewrite the public fields the check reads.
@@ -351,6 +371,78 @@ mod tests {
             ..Default::default()
         };
         let _ = AtomicUpdateCheck::new(&config);
+    }
+
+    fn flagged(name: &str, flags: u32) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            mode: 0o100644,
+            flags,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn usr_etc_conffile_fires_on_every_config_variant() {
+        for flags in [
+            RPMFILE_CONFIG,
+            RPMFILE_CONFIG | RPMFILE_NOREPLACE,
+            RPMFILE_CONFIG | RPMFILE_MISSINGOK,
+            RPMFILE_CONFIG | RPMFILE_NOREPLACE | RPMFILE_MISSINGOK,
+            RPMFILE_CONFIG | RPMFILE_GHOST,
+        ] {
+            assert!(
+                usr_etc_conffile(&flagged("/usr/etc/foo.conf", flags)),
+                "flags {flags:#x} must fire"
+            );
+        }
+    }
+
+    #[test]
+    fn usr_etc_conffile_covers_the_dir_itself_and_subdirs() {
+        let dir = PkgFile {
+            name: "/usr/etc".to_string(),
+            mode: 0o040755,
+            flags: RPMFILE_CONFIG,
+            ..Default::default()
+        };
+        assert!(usr_etc_conffile(&dir));
+        assert!(usr_etc_conffile(&flagged(
+            "/usr/etc/sysctl.d/10-x.conf",
+            RPMFILE_CONFIG
+        )));
+    }
+
+    #[test]
+    fn usr_etc_conffile_negatives() {
+        // No `%config` mark under /usr/etc: fine.
+        assert!(!usr_etc_conffile(&flagged("/usr/etc/foo.conf", 0)));
+        assert!(!usr_etc_conffile(&flagged(
+            "/usr/etc/foo.conf",
+            RPMFILE_NOREPLACE
+        )));
+        // `%config` outside /usr/etc is other findings' business.
+        assert!(!usr_etc_conffile(&flagged("/etc/foo.conf", RPMFILE_CONFIG)));
+        assert!(!usr_etc_conffile(&flagged(
+            "/var/lib/foo.conf",
+            RPMFILE_CONFIG
+        )));
+        assert!(!usr_etc_conffile(&flagged(
+            "/usr/share/foo.conf",
+            RPMFILE_CONFIG
+        )));
+        // Prefix trap: /usr/etcfoo is not /usr/etc.
+        assert!(!usr_etc_conffile(&flagged(
+            "/usr/etcfoo/foo.conf",
+            RPMFILE_CONFIG
+        )));
+        // The dir itself without the mark is fine.
+        let dir = PkgFile {
+            name: "/usr/etc".to_string(),
+            mode: 0o040755,
+            ..Default::default()
+        };
+        assert!(!usr_etc_conffile(&dir));
     }
 
     #[test]
