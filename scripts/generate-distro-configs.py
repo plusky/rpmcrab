@@ -389,16 +389,18 @@ DROP_LIVE_FILTERS = {
     # the 1.x-era fossil comment 'handled by CheckFilelist.py', and
     # the claim does not survive measurement -- FilelistCheck's
     # pattern rules cover 0 of the 45 suppressed lines. The check is
-    # a verbatim port of FilesCheck and measured over the Factory
-    # corpus (issue #583) misfires on 0 of those 45 lines; the whole
+    # a port of FilesCheck and measured over the Factory corpus
+    # (issue #583) misfires on 0 of those 45 lines; the whole
     # suppressed set is 45 E lines in 2 srcpkgs, both deliberate
     # carriers (filesystem's %ghost /usr/local skeleton tree,
     # reproducible-faketools' /usr/local/bin PATH-shadowing
-    # wrappers). Deliberate per-package placements belong in
-    # per-package rpmlintrc; Fedora ships the line commented out
-    # and lets the finding fire. Ledgered in
-    # tests/parity/divergences.toml.
-    "dir-or-file-in-usr-local": "blanket filter dropped by ruling (issue #583): verbatim-port check, 0/45 measured misfires; the suppressed set is 45 E lines in 2 srcpkgs, both deliberate carriers (filesystem's %ghost /usr/local skeleton, reproducible-faketools' PATH-shadowing wrappers) whose exceptions belong in per-package rpmlintrc; Fedora ships the line commented out",
+    # wrappers). Since the %ghost exemption (issue #643) the
+    # filesystem carrier no longer fires: 25 E lines in 1 srcpkg
+    # remain (re-measured 2026-10-18, issue #654). Deliberate
+    # per-package placements belong in per-package rpmlintrc;
+    # Fedora ships the line commented out and lets the finding
+    # fire. Ledgered in tests/parity/divergences.toml.
+    "dir-or-file-in-usr-local": "blanket filter dropped by ruling (issue #583): FilesCheck port with a %ghost exemption (issue #643), 0/45 measured misfires; the suppressed set is 45 E lines in 2 srcpkgs, both deliberate carriers (filesystem's %ghost /usr/local skeleton, reproducible-faketools' PATH-shadowing wrappers) whose exceptions belong in per-package rpmlintrc; since the exemption only reproducible-faketools' 25 real-payload lines still fire (re-measured 2026-10-18, issue #654); Fedora ships the line commented out",
     # item 7): upstream's line is one of the three carrying the
     # 1.x-era fossil comment 'handled by CheckFilelist.py'. The
     # FHSCheck fix (issue #582) whitelists in the check itself
