@@ -885,14 +885,14 @@ def test_remove_excluded_checks_drops_entry_and_explains():
         "    'AtomicUpdateCheck',\n"
         ']\n'
     )
-    out = gen.remove_excluded_checks(text, gen.EXCLUDED_OPENSUSE_CHECKS)
+    out = gen.remove_excluded_checks(text, ["AtomicUpdateCheck"])
     checks_part, filters_part = out.split("Filters = [", 1)
     assert '"AtomicUpdateCheck",' not in checks_part, checks_part
     assert "EXCLUDED_OPENSUSE_CHECKS" in checks_part, checks_part
     # The comment is inside the list: it precedes the closing bracket.
     assert checks_part.index("EXCLUDED_OPENSUSE_CHECKS") < checks_part.index("]"), checks_part
     assert "AtomicUpdateCheck" in filters_part, filters_part
-    assert gen.EXCLUDED_OPENSUSE_CHECKS == ["AtomicUpdateCheck"], gen.EXCLUDED_OPENSUSE_CHECKS
+    assert gen.EXCLUDED_OPENSUSE_CHECKS == [], gen.EXCLUDED_OPENSUSE_CHECKS
 
 
 def test_remove_excluded_checks_without_entry_raises():
@@ -955,12 +955,10 @@ def test_retarget_filters_byte_exact_only():
 
 
 def test_prune_flavoured_filters_drops_opensuse_snapshot_line():
-    """PRUNE_FLAVOURED drops the snapshot exemption for opensuse only.
+    """With a table entry, PRUNE_FLAVOURED drops the line for that flavor only.
 
-    AtomicUpdateCheck is excluded from the opensuse flavor at the Checks
-    layer (issue #478), so the line can never fire there; the slfo flavor
-    runs the check and keeps the exemption, so the same text passes
-    through untouched under that flavor (issue #565).
+    The fixture table stands in for the shipped one, which is empty since
+    issue #698 (see test_prune_flavoured_filters_shipped_table_is_empty).
     """
     text = (
         'Filters = [\n'
@@ -968,16 +966,25 @@ def test_prune_flavoured_filters_drops_opensuse_snapshot_line():
         "    ' dangerous-command.*',\n"
         ']\n'
     )
-    log = []
-    out = gen.prune_flavoured_filters(text, "opensuse", log)
-    assert 'dir-or-file-outside-snapshot' not in out, out
-    assert "    ' dangerous-command.*',\n" in out, out
-    assert len(log) == 1 and 'opensuse' in log[0], log
+    old = gen.PRUNE_FLAVOURED
+    gen.PRUNE_FLAVOURED = {
+        "opensuse": {
+            r"^filesystem\..*: dir-or-file-outside-snapshot": "fixture: dead in opensuse only",
+        },
+    }
+    try:
+        log = []
+        out = gen.prune_flavoured_filters(text, "opensuse", log)
+        assert 'dir-or-file-outside-snapshot' not in out, out
+        assert "    ' dangerous-command.*',\n" in out, out
+        assert len(log) == 1 and 'opensuse' in log[0], log
 
-    log = []
-    out = gen.prune_flavoured_filters(text, "slfo", log)
-    assert out == text, out
-    assert log == [], log
+        log = []
+        out = gen.prune_flavoured_filters(text, "slfo", log)
+        assert out == text, out
+        assert log == [], log
+    finally:
+        gen.PRUNE_FLAVOURED = old
 
 
 def test_prune_flavoured_filters_byte_exact_only():
@@ -990,10 +997,39 @@ def test_prune_flavoured_filters_byte_exact_only():
         "    '^filesystem\\..*: dir-or-file-outside-snapshot ',\n"
         ']\n'
     )
-    log = []
-    out = gen.prune_flavoured_filters(text, "opensuse", log)
-    assert out == text, out
-    assert log == [], log
+    old = gen.PRUNE_FLAVOURED
+    gen.PRUNE_FLAVOURED = {
+        "opensuse": {
+            r"^filesystem\..*: dir-or-file-outside-snapshot": "fixture: dead in opensuse only",
+        },
+    }
+    try:
+        log = []
+        out = gen.prune_flavoured_filters(text, "opensuse", log)
+        assert out == text, out
+        assert log == [], log
+    finally:
+        gen.PRUNE_FLAVOURED = old
+
+
+def test_prune_flavoured_filters_shipped_table_is_empty():
+    """The shipped PRUNE_FLAVOURED table prunes nothing.
+
+    Since issue #698 AtomicUpdateCheck runs under both flavors, so the
+    filesystem snapshot exemption is live in both and the line survives
+    generation untouched under each.
+    """
+    assert gen.PRUNE_FLAVOURED == {}, gen.PRUNE_FLAVOURED
+    text = (
+        'Filters = [\n'
+        "    '^filesystem\\..*: dir-or-file-outside-snapshot',\n"
+        ']\n'
+    )
+    for flavor in ("opensuse", "slfo"):
+        log = []
+        out = gen.prune_flavoured_filters(text, flavor, log)
+        assert out == text, out
+        assert log == [], log
 
 
 def test_drop_live_filters_drops_kernel_modules_line():
@@ -1569,8 +1605,8 @@ def test_adjust_scoring_drops_promotions_and_keeps_the_rest():
 
     The kept lines matter as much as the dropped ones: summary-too-long
     keeps its reference calibration (its E is an emission decision, not
-    a promotion) and the dir-or-file-outside-snapshot = 0 demote switch
-    is upstream's stated policy.
+    a promotion). The dir-or-file-outside-snapshot = 0 demote switch is
+    dropped too (issue #698): the finding prints at its emitted Error.
     """
     text = (
         "[Scoring]\n"
@@ -1588,7 +1624,6 @@ def test_adjust_scoring_drops_promotions_and_keeps_the_rest():
     for key in gen.DROP_SCORING:
         assert "%s =" % key not in out, out
     assert "summary-too-long = 200\n" in out, out
-    assert "dir-or-file-outside-snapshot = 0\n" in out, out
     assert len(dropped) == len(gen.DROP_SCORING), dropped
     # invalid-license is absent from the fixture, so it is appended
     # under its explanatory comment, inside the [Scoring] table.
