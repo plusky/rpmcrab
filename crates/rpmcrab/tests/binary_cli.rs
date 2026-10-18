@@ -627,7 +627,8 @@ fn permissive_flag_explicit() {
 #[test]
 fn permissive_by_default_key_is_inert() {
     // `PermissiveByDefault` is no longer read: neither value changes the
-    // outcome — errors fail the run unless `-P` is passed.
+    // outcome — errors fail the run unless `-P` is passed. Its presence
+    // warns on stderr instead of going silently inert.
     let dir = std::env::temp_dir().join("rpmcrab-permissive-test");
     std::fs::create_dir_all(&dir).unwrap();
     for (name, value) in [("test.toml", "false"), ("test-true.toml", "true")] {
@@ -639,6 +640,11 @@ fn permissive_by_default_key_is_inert() {
             "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
         ]);
         assert_eq!(out.status.code(), Some(64), "PermissiveByDefault = {value}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("'PermissiveByDefault' has no effect since #699; ignoring it"),
+            "got {stderr}"
+        );
     }
 }
 
@@ -660,6 +666,10 @@ fn permissive_by_default_string_value_is_inert() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !stderr.contains("fatal error in configuration"),
+        "got {stderr}"
+    );
+    assert!(
+        stderr.contains("'PermissiveByDefault' has no effect since #699; ignoring it"),
         "got {stderr}"
     );
 }
@@ -712,8 +722,9 @@ fn string_scoring_warns_on_stderr_and_is_ignored() {
 #[test]
 fn badness_threshold_key_is_inert() {
     // Issue #699: there is no badness threshold. The key may still appear
-    // in a user config; it is read by nothing — no warning, no abort —
-    // and the parity RPM's errors fail the run with 64.
+    // in a user config; it is read by nothing — no abort — and the parity
+    // RPM's errors fail the run with 64. Its presence warns on stderr
+    // instead of going silently inert.
     let dir = std::env::temp_dir().join("rpmcrab-scoring-notice-test");
     std::fs::create_dir_all(&dir).unwrap();
     let cfg = dir.join("threshold-str.toml");
@@ -725,7 +736,10 @@ fn badness_threshold_key_is_inert() {
     ]);
     assert_eq!(out.status.code(), Some(64));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!stderr.contains("BadnessThreshold"), "got {stderr}");
+    assert!(
+        stderr.contains("'BadnessThreshold' has no effect since #699; ignoring it"),
+        "got {stderr}"
+    );
 }
 
 #[test]

@@ -2052,7 +2052,7 @@ since = "0.3.0"
 case = "global"
 check = "config"
 kind = "behaviour"
-reason = "`BadnessThreshold` is not a recognised key since issue #699 removed the threshold machinery: any value, integer or not, is inert (no warning, no abort, no exit 66), where the reference compares the value directly (lint.py: `badness_threshold > 0`), so a string raises TypeError at the end of its run and an integer over the run score aborts it. The pre-#699 behaviour warned and fell back to -1 for non-integer values; the whole key is dead now because the concept it configured no longer exists."
+reason = "`BadnessThreshold` is not a recognised key since issue #699 removed the threshold machinery: any value, integer or not, is inert (a warning on stderr, no abort, no exit 66), where the reference compares the value directly (lint.py: `badness_threshold > 0`), so a string raises TypeError at the end of its run and an integer over the run score aborts it. The pre-#699 behaviour warned and fell back to -1 for non-integer values; the whole key is dead now because the concept it configured no longer exists."
 since = "0.3.0"
 
 [[divergence]]
