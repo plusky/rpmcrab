@@ -258,9 +258,11 @@ impl Check for SharedLibraryPolicyCheck {
         // co-installable, and an obsoletes of one by another removes it.
         // A version constraint does not change that for the obsoleted
         // range, so the dependency's flags and version are not consulted.
-        // The bitness suffix is not compared: `Obsoletes` is
-        // arch-agnostic, so a cross-bitness obsoletes removes the
-        // sibling generation just as a same-bitness one does.
+        // The bitness suffix is normalised away on both sides (see
+        // `soname_package_parts`): `Obsoletes` is arch-agnostic, so a
+        // cross-bitness obsoletes removes the sibling generation just
+        // as a same-bitness one does, and a same-number cross-suffix
+        // pair collapses to a self-obsoletes.
         if let Some((stem, number)) = soname_package_parts(&self.re_soname_pkg, &pkg.name) {
             for obs in &pkg.obsoletes {
                 if let Some((obs_stem, obs_number)) =
@@ -826,6 +828,28 @@ mod tests {
                 sibling_lines(&results).is_empty(),
                 "self-obsoletes must stay quiet ({name}): {results:?}"
             );
+        }
+    }
+
+    #[test]
+    fn bit_suffix_cross_suffix_self_obsoletes_is_quiet() {
+        // Same SONAME number, different bitness form on each side:
+        // with the suffix normalised away the pair names the package's
+        // own generation, so it is a self-obsoletes, not a sibling
+        // one, in every cross-suffix pairing.
+        for pkg_suffix in ["", "-32bit", "-64bit"] {
+            for obs_suffix in ["", "-32bit", "-64bit"] {
+                if pkg_suffix == obs_suffix {
+                    continue;
+                }
+                let name = format!("libfoo2{pkg_suffix}");
+                let obs = format!("libfoo2{obs_suffix}");
+                let results = obsoletes_results(&name, vec![dep(&obs)]);
+                assert!(
+                    sibling_lines(&results).is_empty(),
+                    "cross-suffix self-obsoletes must stay quiet ({name} vs {obs}): {results:?}"
+                );
+            }
         }
     }
 
