@@ -46,8 +46,10 @@ Provenance, verified against the pinned reference (`84848c0`):
   per the fix-in-port rule, and `conffile-without-noreplace-flag` carries
   the reword ruled in rpmcrab#556 (both `%config` forms valid; the text
   lays out the .rpmsave/.rpmnew upgrade semantics and asks for a per-file
-  choice instead of prescribing `noreplace`). Ledgered in
-  `tests/parity/divergences.toml`.
+  choice instead of prescribing `noreplace`), plus the port-only
+  `usr-etc-file-marked-as-conffile` entry (rpmcrab#712; the reference
+  has no UsrEtc finding, so `--explain` would print `Unknown message`
+  for it there). Ledgered in `tests/parity/divergences.toml`.
 - `Variables.toml` — the reference file, plus the `SUFFIX` entry lifted from
   the reference's `descriptions/FileMetadataCheck.toml` (the port stages the
   device/world-writable descriptions separately, but the `#SUFFIX#`
