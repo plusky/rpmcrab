@@ -23,8 +23,10 @@ aff_sha256="c7a8c4d08c29d237880844b1623099f59092602f189be38ce3912e457ff38bc1"
 dic_sha256="fa070979b1c5448bd7ab66eb6acb616d306f92879eb4218bc16ee35d39a608ee"
 
 # Verify "<sum>  <path>" lines on stdin. sha256sum on Linux; shasum -a 256
-# is the same check where sha256sum is absent (macOS). The lines go through
-# a temp file because not every sha256sum reads the check list from stdin.
+# is the same check where sha256sum is absent (macOS). With neither tool
+# available the verification fails loudly rather than passing unverified.
+# The lines go through a temp file because not every sha256sum reads the
+# check list from stdin.
 verify_checksum() {
     local sums_file
     sums_file="$(mktemp)"
@@ -32,8 +34,11 @@ verify_checksum() {
     local rc=0
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum -c "$sums_file" || rc=$?
-    else
+    elif command -v shasum >/dev/null 2>&1; then
         shasum -a 256 -c "$sums_file" || rc=$?
+    else
+        echo "error: neither sha256sum nor shasum is available to verify the pinned dictionaries" >&2
+        rc=1
     fi
     rm -f "$sums_file"
     return "$rc"
@@ -46,7 +51,7 @@ fetch() {
     for url in \
         "https://raw.githubusercontent.com/LibreOffice/dictionaries/${dict_commit}/en/${file}" \
         "https://cgit.freedesktop.org/libreoffice/dictionaries/plain/en/${file}?id=${dict_commit}"; do
-        if curl -fsSL --retry 3 -o "$target_dir/$file" "$url" \
+        if curl -fsSL --retry 3 --connect-timeout 10 --max-time 120 -o "$target_dir/$file" "$url" \
             && echo "$sum  $target_dir/$file" | verify_checksum >/dev/null; then
             return 0
         fi

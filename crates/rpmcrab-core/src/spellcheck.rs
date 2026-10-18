@@ -335,6 +335,25 @@ mod tests {
             expected.iter().any(|result| !result.is_empty()),
             "probes must yield suggestions for the comparison to mean anything"
         );
+        // Pin two probes' concrete output as well: a suggester that
+        // degenerated would still agree with itself across instances.
+        assert_eq!(
+            expected[0],
+            vec![("preum".to_string(), vec!["preunu".to_string()])],
+            "concrete suggestions for preum changed"
+        );
+        assert_eq!(
+            expected[2],
+            vec![(
+                "preunx".to_string(),
+                vec![
+                    "preeun".to_string(),
+                    "preun".to_string(),
+                    "preuun".to_string()
+                ]
+            )],
+            "concrete suggestions for preunx changed"
+        );
         for _ in 0..16 {
             let checker = Spellchecker::from_strings(TEST_AFF, &dic).expect("synthetic dictionary");
             for (probe, want) in probes.iter().zip(&expected) {
