@@ -208,9 +208,12 @@ pub fn cli_command() -> clap::Command {
 ///
 /// Returns `None` only when the diversion could not be set up at all
 /// (no child exists; the caller then runs in-process with a warning, as
-/// it did before the diversion existed). Every failure after the child
-/// has spawned is loud instead: a message on stderr and a failure code,
-/// never a silent empty stdout.
+/// it did before the diversion existed). After the child has spawned, a
+/// failure of the child itself is carried by the child's own stderr and
+/// exit code, which the parent forwards without adding noise; a
+/// failure of the hand-off (the pipe, the wait, or a child that claimed
+/// success but delivered no document) is loud instead: a message on
+/// stderr and a failure code, never a silent empty stdout.
 fn divert_json_run() -> Option<ExitCode> {
     let report = tempfile::NamedTempFile::new().ok()?;
     let exe = std::env::current_exe().ok()?;
@@ -241,7 +244,14 @@ fn divert_json_run() -> Option<ExitCode> {
         return Some(ExitCode::from(1));
     };
     let forwarder = std::thread::spawn(move || {
-        let _ = std::io::copy(&mut pipe, &mut std::io::stderr());
+        // Forward the child's stdout to stderr. If that write fails (a
+        // broken pipe downstream, a full device), keep draining the
+        // pipe into a sink instead of abandoning it: an unread pipe
+        // fills, the child wedges mid-print, and the `wait` below
+        // never returns.
+        if std::io::copy(&mut pipe, &mut std::io::stderr()).is_err() {
+            let _ = std::io::copy(&mut pipe, &mut std::io::sink());
+        }
     });
     let status = match child.wait() {
         Ok(status) => status,
@@ -256,6 +266,9 @@ fn divert_json_run() -> Option<ExitCode> {
     let _ = forwarder.join();
     let code = exit_code_of(&status);
     match std::fs::read(report.path()) {
+        // A delivered document is copied out whatever the child's
+        // verdict: a non-zero code is the normal lint outcome (errors
+        // found), not a hand-off failure.
         Ok(bytes) if !bytes.is_empty() => {
             use std::io::Write;
             match std::io::stdout().write_all(&bytes) {
@@ -266,23 +279,21 @@ fn divert_json_run() -> Option<ExitCode> {
                 }
             }
         }
+        // No document and a failed child: the child has already
+        // explained itself on the forwarded stderr (it died before
+        // rendering), so the parent stays silent and forwards the
+        // child's code. Only a child that claimed success yet
+        // delivered nothing is a hand-off failure of the parent's
+        // own, and that one stays loud.
+        Ok(_) if !status.success() => Some(code),
         Ok(_) => {
             eprintln!("(none): E: the diverted JSON run left an empty report");
-            Some(if status.success() {
-                ExitCode::from(1)
-            } else {
-                code
-            })
+            Some(ExitCode::from(1))
         }
+        Err(_) if !status.success() => Some(code),
         Err(e) => {
             eprintln!("(none): E: the diverted JSON run left no readable report: {e}");
-            // A child that failed keeps its code; a child that claimed
-            // success but delivered nothing failed here, loudly.
-            Some(if status.success() {
-                ExitCode::from(1)
-            } else {
-                code
-            })
+            Some(ExitCode::from(1))
         }
     }
 }
@@ -304,19 +315,76 @@ fn exit_code_of(status: &std::process::ExitStatus) -> ExitCode {
     ExitCode::from(1)
 }
 
+/// Write the rendered report to the hand-back file named by the hidden
+/// `--__diverted-json` flag (the child half of [`divert_json_run`]).
+///
+/// The flag alone does not entitle a run to write anywhere: the named
+/// path must be the parent's hand-back file, which the parent created
+/// as a [`tempfile::NamedTempFile`] -- an already-existing, empty,
+/// regular file that is not a symlink and, on Unix, has owner-only
+/// permissions. Anything else is a forged flag (a hand-typed or copied
+/// command line naming a real file such as `~/.bashrc`), and writing
+/// with create+truncate would destroy the named file, so the write is
+/// refused before the file is opened: the target is inspected with
+/// `symlink_metadata` and the open passes no `create`, hence a refused
+/// or vanished target is never created, truncated or followed through
+/// a symlink.
+///
+/// # Errors
+/// Returns a description of the refusal or write failure; the caller
+/// renders it as a loud stderr diagnostic with a failure code.
+fn write_diverted_report(path: &Path, report: &str) -> Result<(), String> {
+    let refuse = |why: String| {
+        format!(
+            "refusing the diverted report target {}: {why}",
+            path.display()
+        )
+    };
+    let md = std::fs::symlink_metadata(path).map_err(|e| {
+        refuse(format!(
+            "it cannot be inspected ({e}); the hand-back file exists"
+        ))
+    })?;
+    let file_type = md.file_type();
+    if file_type.is_symlink() {
+        return Err(refuse(
+            "it is a symlink, not the hand-back file".to_string(),
+        ));
+    }
+    if !file_type.is_file() {
+        return Err(refuse("it is not a regular file".to_string()));
+    }
+    if md.len() != 0 {
+        return Err(refuse(format!(
+            "it already holds {} bytes; the hand-back file starts empty",
+            md.len()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if md.permissions().mode() & 0o077 != 0 {
+            return Err(refuse(format!(
+                "its permissions {:#o} are not owner-only; the hand-back file is",
+                md.permissions().mode() & 0o777
+            )));
+        }
+    }
+    // No `.create(...)`: a target that vanished since the inspection
+    // fails loudly here instead of springing into existence.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    use std::io::Write;
+    file.write_all(report.as_bytes()).map_err(|e| e.to_string())
+}
+
 /// Parse arguments and run the linter, returning the process exit code.
 ///
 /// Exit-code semantics are part of the frozen compatibility contract (see
 /// `docs/DESIGN.md` §4.6); do not change the mapping without a ledger entry.
 pub fn run() -> ExitCode {
-    // Progress reporting (upstream rpmlint#255): `tracing` events render on
-    // stderr, so finding output on stdout is never perturbed. `RUST_LOG`
-    // overrides the default filter (see `tracing_filter`).
-    let _ = tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_ansi(std::io::stderr().is_terminal())
-        .with_env_filter(tracing_filter())
-        .try_init();
     // Bare invocation prints help and exits 0 (rpmlint `cli.py:92-94`). clap's
     // `arg_required_else_help` would exit 2, so handle it before parsing.
     if std::env::args_os().count() == 1 {
@@ -371,13 +439,64 @@ pub fn run() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    let mut cfg = match config::load(&cli.config) {
-        Ok(cfg) => cfg,
+    // The load warnings are collected, not printed: if the run diverts
+    // at the second point below, the child loads the same configuration
+    // and prints its own copies, so printing here as well would double
+    // every diagnostic (#703). They are flushed right after the
+    // diversion decision, ahead of every later diagnostic, in a run
+    // that stays in-process.
+    let (mut cfg, load_warnings) = match config::load_with_warnings(&cli.config) {
+        Ok(pair) => pair,
         Err(e) => {
             warn!(color, "(none): E: fatal error in configuration: {e}");
             return ExitCode::from(1);
         }
     };
+
+    // Second diversion point (#703): the format came from the config
+    // file, so it is only known now. The meta modes (`--print-config`,
+    // `--explain`) print to stdout themselves and never divert; they
+    // return further below, so the decision can sit ahead of them. The
+    // parent has printed nothing of its own yet -- no tracing init, no
+    // load warnings -- so everything the child prints for this run is
+    // emitted exactly once, by the child. (A command-line `--format
+    // json` run diverted earlier, before the configuration was even
+    // loaded.)
+    let format = resolve_output_format(cli.format.as_deref(), &cfg.output_format);
+    let mut diversion_fell_through = false;
+    if cli.diverted_json.is_none()
+        && cli.format.is_none()
+        && format == "json"
+        && !cli.print_config
+        && cli.explain.is_empty()
+    {
+        match divert_json_run() {
+            Some(code) => return code,
+            None => diversion_fell_through = true,
+        }
+    }
+    for warning in &load_warnings {
+        eprintln!("{warning}");
+    }
+    if diversion_fell_through {
+        warn!(
+            color,
+            "warning: the JSON run could not be diverted; spec output may corrupt the report"
+        );
+    }
+
+    // Progress reporting (upstream rpmlint#255): `tracing` events render on
+    // stderr, so finding output on stdout is never perturbed. `RUST_LOG`
+    // overrides the default filter (see `tracing_filter`). The init sits
+    // below both diversion points on purpose: a diverted run's parent
+    // never initialises a subscriber (nor prints the invalid-`RUST_LOG`
+    // warning in `tracing_filter`), so the child is the only process
+    // that can emit those diagnostics for the run (#703).
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .with_env_filter(tracing_filter())
+        .try_init();
 
     // Apply mode flags.
     cfg.strict = cli.strict;
@@ -418,22 +537,6 @@ pub fn run() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    // Second diversion point (#703): the format came from the config
-    // file, so it is only known now. Diverting here still precedes the
-    // rpmlintrc loading and every per-run diagnostic below, so those are
-    // emitted once, by the child. (A command-line `--format json` run
-    // diverted earlier, before the configuration was even loaded.)
-    let format = resolve_output_format(cli.format.as_deref(), &cfg.output_format);
-    if cli.diverted_json.is_none() && cli.format.is_none() && format == "json" {
-        match divert_json_run() {
-            Some(code) => return code,
-            None => warn!(
-                color,
-                "warning: the JSON run could not be diverted; spec output may corrupt the report"
-            ),
-        }
-    }
-
     // Validate positional paths (missing -> exit 2). This is `cli.py`'s job and
     // it runs before `Lint` is built, which is why an rpmlint package on a
     // non-existent path exits 2 rather than taking the skip path below.
@@ -465,7 +568,14 @@ pub fn run() -> ExitCode {
         );
     }
     for rc in &rc_files {
-        if let Err(e) = config::load_rpmlintrc(&mut cfg, rc) {
+        let loaded = config::load_rpmlintrc(&mut cfg, rc);
+        // `load_rpmlintrc` re-derives the typed fields (`finalize`), so
+        // it can collect fresh load warnings; show this file's before
+        // any error it returned, as they were emitted in that order.
+        for warning in cfg.take_load_warnings() {
+            eprintln!("{warning}");
+        }
+        if let Err(e) = loaded {
             warn!(
                 color,
                 "(none): E: error loading rpmlintrc {}: {e}",
@@ -653,7 +763,7 @@ pub fn run() -> ExitCode {
     if let Some(path) = &cli.diverted_json
         && format == "json"
     {
-        return match std::fs::write(path, &out) {
+        return match write_diverted_report(path, &out) {
             Ok(()) => ExitCode::from(u8::try_from(lint.exit_code()).unwrap_or(1)),
             Err(e) => {
                 eprintln!("(none): E: writing the JSON report failed: {e}");

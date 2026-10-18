@@ -27,7 +27,6 @@ _rpmcrab() {
 '--jobs=[Number of parallel worker threads for checking packages; 1 is sequential. Defaults to the machine'\''s parallelism]:n:_default' \
 '--checks=[Run only these checks (debug)]:a,b,c:_default' \
 '--format=[Report output format\: human-readable text (default) or machine-readable JSON (upstream rpmlint#1156). Overrides the \`OutputFormat\` config key]:format:(text json)' \
-'--__diverted-json=[Hand-back file of a diverted JSON run; set only by the parent'\''s re-exec (see \`divert_json_run\`). Hidden\: not a user interface]:path:_files' \
 '-V[Print version and exit]' \
 '--version[Print version and exit]' \
 '-v[Inline explanations (and re-raise internal errors)]' \
