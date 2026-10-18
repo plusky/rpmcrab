@@ -518,16 +518,10 @@ upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
 [[divergence]]
 case = "global"
 check = "SignatureCheck"
-kind = "detail"
-reason = "SignatureCheck runs `rpm -Kv` under `LC_ALL=C` instead of the reference's `en_US.UTF-8`/`LANGUAGE=en_US` environment. stderr is merged into the captured output like the reference."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "SignatureCheck"
 kind = "behaviour"
-reason = "The any-signature regex is widened to `[Ss]ignature|\\(sha1\\) dsa|\\(sha1\\) rsa` (the reference only matches `[Ss]ignature, key ID`), so `no-signature` fires less often on old-style `rpm -Kv` output lines."
-since = "0.1.0"
+reason = "Signature verification runs in-process through librpm (a verified `PackageHeader::from_file` read against the rpmdb keyring, with digest checks masked out) where the reference shells out to `rpm -Kv` and scrapes its output (SignatureCheck.py; pkg.py). Verdicts come from the structured result; the `unknown-key` key ID is read from the signature packet's issuer field (low 32 bits, as `rpm -Kv` prints it), and a verification failure is reported as `invalid-signature` only when a signature packet is itself unparsable \u2014 a parseable signature that fails verification, and digest failures, stay silent, matching the reference's text patterns. The library and keyring configuration are the same ones `rpm -Kv` uses, so findings agree; parity is pinned by signed/corrupt fixtures and a Factory-corpus before/after diff (plusky/rpmcrab#704)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/704"
 
 [[divergence]]
 case = "global"
@@ -622,13 +616,6 @@ case = "global"
 check = "FileDigestCheck"
 kind = "detail"
 reason = "FileDigestCheck drops the `({digest_hint})` detail argument on `{type}-file-unauthorized` findings; the reference appends the observed per-digester digests of the offending file."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "SignatureCheck"
-kind = "behaviour"
-reason = "The any-signature regex is widened to `[Ss]ignature|\\(sha1\\) dsa|\\(sha1\\) rsa` (the reference only matches `[Ss]ignature, key ID`), so `no-signature` fires less often on old-style `rpm -Kv` output lines. As a consequence the reference's `no-signature` + `invalid-signature` pair is unreachable here: any output matching `invalid OpenPGP signature` also matches the widened regex, so `no-signature` never fires alongside it."
 since = "0.1.0"
 
 [[divergence]]
