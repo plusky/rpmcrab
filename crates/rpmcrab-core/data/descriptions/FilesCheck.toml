@@ -143,6 +143,12 @@ The target of the symbolic link does not exist within this package or its
 file based dependencies. Verify spelling of the link target and that the
 target is included in a package in this package's dependency chain.
 """
+symlink-loop="""
+The symbolic link resolves in a circle: following its target chain
+within the package leads back to a link that was already visited, so
+the link can never resolve and opening it always fails. Point the
+link at a real file, or break the cycle.
+"""
 non-readable="""
 The file can't be read by everybody. Review if this is expected.
 """
