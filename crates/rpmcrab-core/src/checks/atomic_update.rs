@@ -90,8 +90,12 @@ impl AtomicUpdateCheck {
     /// A bare prefix names the directory itself (`mkdir /var`,
     /// `touch /run`), which a payload path never does, so the prefix
     /// test treats the bare form as under itself; runtime filesystems
-    /// (TRANSIENT_PREFIXES) are never outside.
+    /// (TRANSIENT_PREFIXES) are never outside. The verdict judges the
+    /// lexically normalised path (`/usr/../var/lib/x` is a `/var/lib`
+    /// write, `/run/../var/lib/x` does not inherit `/run`'s transient
+    /// status); the finding itself reports the literal target.
     fn scriptlet_target_outside(&self, path: &str) -> bool {
+        let path = &crate::pkg::normalize_path(path);
         let under = |prefix: &str| path == prefix.trim_end_matches('/') || path.starts_with(prefix);
         if TRANSIENT_PREFIXES.iter().any(|p| under(p))
             || SANCTIONED_PREFIXES.iter().any(|p| under(p))
@@ -475,7 +479,7 @@ fn tokenize(text: &str) -> Vec<Tok> {
                     i += 1;
                 }
             }
-            '(' | ')' => {
+            '(' | ')' | '{' | '}' => {
                 flush!();
                 toks.push(Tok {
                     kind: TokKind::Sep,
@@ -560,7 +564,8 @@ fn is_assignment(word: &str) -> bool {
 ///   path (`> /var/log/x`, `cat >> /srv/data/f`, `2> /var/log/err`).
 /// - C2: a write command in command position with literal absolute path
 ///   arguments: `mkdir`/`touch`/`rm`/`rmdir`/`tee` (every path argument),
-///   `cp`/`mv`/`ln` (the last path argument -- the rest are sources),
+///   `cp`/`mv`/`ln` (the last path argument -- the rest are sources --
+///   or the `-t`/`--target-directory` directory when one is given),
 ///   `install` (every path argument with `-d`, the last one without, the
 ///   `-t`/`--target-directory` directory in both modes), `dd` (its `of=`
 ///   argument).
@@ -643,42 +648,53 @@ fn scan_scriptlet(body: &str) -> Vec<String> {
                         }
                     }
                 }
+                // The `-t`/`--target-directory` directory (space forms;
+                // the `=` form is pushed by the loop above). With one,
+                // every operand is a source and the directory itself is
+                // the write target, for `install` and `cp`/`mv`/`ln`
+                // alike.
+                let mut target_dirs: Vec<&Tok> = Vec::new();
+                for (k, a) in args.iter().enumerate() {
+                    if (a.text == "-t" || a.text == "--target-directory")
+                        && let Some(t) = args.get(k + 1)
+                    {
+                        target_dirs.push(t);
+                    }
+                }
+                let has_t = !target_dirs.is_empty()
+                    || args
+                        .iter()
+                        .any(|a| a.text.starts_with("--target-directory="));
                 if WRITE_EVERY_ARG.contains(&base) {
                     cands.extend(plain.iter().copied());
                 } else if WRITE_LAST_ARG.contains(&base) {
-                    if let Some(last) = plain.last() {
+                    if has_t {
+                        cands.extend(target_dirs.iter().copied());
+                    } else if let Some(last) = plain.last() {
                         cands.push(last);
                     }
                 } else if base == "install" {
                     let dir_mode = args
                         .iter()
                         .any(|a| a.text == "-d" || a.text == "--directory");
-                    // With `-t DIR` every operand is a source; the `-t`
-                    // loop below names the directory itself.
-                    let has_t = args.iter().any(|a| {
-                        a.text == "-t"
-                            || a.text == "--target-directory"
-                            || a.text.starts_with("--target-directory=")
-                    });
                     if dir_mode {
                         cands.extend(plain.iter().copied());
-                    } else if !has_t && let Some(last) = plain.last() {
+                    } else if has_t {
+                        cands.extend(target_dirs.iter().copied());
+                    } else if let Some(last) = plain.last() {
                         cands.push(last);
-                    }
-                    for (k, a) in args.iter().enumerate() {
-                        if a.text == "-t"
-                            && let Some(t) = args.get(k + 1)
-                        {
-                            cands.push(t);
-                        }
                     }
                 } else if base == "dd" {
                     for a in &args {
-                        if let Some(of) = a.text.strip_prefix("of=")
-                            && !a.dynamic
-                            && of.starts_with('/')
-                        {
-                            push(of);
+                        if let Some(of) = a.text.strip_prefix("of=") {
+                            let owned = Tok {
+                                kind: TokKind::Word,
+                                text: of.to_string(),
+                                dynamic: a.dynamic,
+                            };
+                            if is_literal(&owned) && owned.text.starts_with('/') {
+                                push(&owned.text);
+                            }
                         }
                     }
                 }
@@ -1205,8 +1221,38 @@ mod tests {
                 "install --target-directory=/srv/dir /usr/share/a",
                 &["/srv/dir"],
             ),
+            (
+                "install --target-directory /srv/dir /usr/share/a",
+                &["/srv/dir"],
+            ),
             ("dd if=/dev/zero of=/var/lib/img bs=1M", &["/var/lib/img"]),
             ("dd if=/var/lib/src of=/dev/null", &["/dev/null"]),
+            // A quoted `%{` in `of=` is a macro, not a literal path:
+            // the tokeniser does not flag quoted text dynamic, so the
+            // `is_literal` text guard is what keeps this quiet.
+            ("dd if=/dev/zero of='/var/%{name}' bs=1M", &[]),
+            ("dd if=/dev/zero of=%{_localstatedir}/lib/img", &[]),
+            // C2: `-t`/`--target-directory` on the last-arg commands.
+            // The directory is the target and every operand a source,
+            // in the space forms as well as the `=` form: the source
+            // is never the candidate, and an outside source feeding an
+            // inside directory stays a scan hit on the directory only.
+            ("cp -t /var/lib/dir /usr/share/src", &["/var/lib/dir"]),
+            (
+                "cp --target-directory /var/lib/dir /usr/share/src",
+                &["/var/lib/dir"],
+            ),
+            (
+                "cp --target-directory=/var/lib/dir /usr/share/src",
+                &["/var/lib/dir"],
+            ),
+            ("cp -t /usr/share/dir /var/lib/src", &["/usr/share/dir"]),
+            ("mv -t /opt/dir /usr/share/src", &["/opt/dir"]),
+            ("ln -t /var/lib/dir /usr/share/src", &["/var/lib/dir"]),
+            // A dynamic `-t` directory names no literal target, and
+            // the operands stay sources (no last-arg fallback).
+            ("cp -t $DIR /usr/share/src", &[]),
+            ("install -t $DIR /usr/share/a", &[]),
             // C1: redirects, incl. fd-prefixed and command-free forms.
             ("echo seed > /var/lib/seed", &["/var/lib/seed"]),
             ("cat /usr/share/x >> /srv/data/f", &["/srv/data/f"]),
@@ -1224,11 +1270,27 @@ mod tests {
             ("gen | tee /var/log/pipe", &["/var/log/pipe"]),
             ("x=1 mkdir /var/lib/envassign", &["/var/lib/envassign"]),
             ("echo mkdir /var/lib/notcmd", &[]),
-            // Dynamic targets are not literal paths.
+            // Brace groups are command separators like parens: the
+            // write inside a `{ ...; }` group (or a function body)
+            // is in command position after the `{`.
+            ("{ mkdir /var/lib/brace; }", &["/var/lib/brace"]),
+            (
+                "f() { mkdir /var/lib/funcbody; }; f",
+                &["/var/lib/funcbody"],
+            ),
+            ("echo {a,b}", &[]),
+            // Dynamic targets are not literal paths. The
+            // absolute-path-with-dynamic-suffix forms pin the dynamic
+            // guard itself: without it they would be literal hits.
             ("mkdir $VAR/sub", &[]),
             ("mkdir ${VAR}/sub", &[]),
+            ("mkdir /var/lib/$SUFFIX", &[]),
+            ("mkdir /var/lib/${SUFFIX}", &[]),
             ("mkdir %{_localstatedir}/lib/x", &[]),
             ("mkdir '/var/%{name}'", &[]),
+            // The scan reports the literal target; lexical
+            // normalisation is the verdict layer's business.
+            ("mkdir /usr/../var/lib/evil", &["/usr/../var/lib/evil"]),
             // Quoted operator text, comments and heredoc bodies are
             // not constructs.
             ("echo 'use > /var/lib/x to store'", &[]),
@@ -1286,6 +1348,14 @@ mod tests {
             "/boot/efi/x",
             "/var/adm/messages",
             "/var/adm/update-scripts/saslpwd",
+            // `..` segments are judged after lexical normalisation:
+            // an allowed or transient prefix on the raw literal does
+            // not carry over the `..`.
+            "/usr/../var/lib/evil",
+            "/run/../var/lib/x",
+            "/etc/../var/lib/x",
+            "/usr/local/../../var/lib/x",
+            "/var/tmp/../../var/lib/x",
         ] {
             assert!(
                 check.scriptlet_target_outside(outside),
@@ -1313,6 +1383,15 @@ mod tests {
             // The sanctioned deferred-notification spool.
             "/var/adm/update-messages",
             "/var/adm/update-messages/pkg-1.0-1-notify",
+            // `..` segments that normalise back inside (or onto a
+            // transient prefix) stay quiet: the normalised form is
+            // judged, not the literal.
+            "/var/../usr/share/x",
+            "/usr/lib/../share/x",
+            "/var/lib/../../etc/x",
+            "/run/../run/x",
+            "/var/../var/run/x",
+            "/usr/../usr/local/../share/x",
         ] {
             assert!(
                 !check.scriptlet_target_outside(inside),
