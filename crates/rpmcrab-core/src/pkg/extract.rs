@@ -14,7 +14,7 @@ use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -265,6 +265,19 @@ fn io_error(path: &Path, source: std::io::Error) -> ExtractError {
         source.kind(),
         format!("{}: {source}", path.display()),
     ))
+}
+
+/// Whether two paths name the same file on disk. On a case-insensitive
+/// filesystem, two payload paths differing only in case (`Blender.png` /
+/// `blender.png`) are one directory entry, so bookkeeping that treats them
+/// as distinct files breaks: re-linking a hardlink placeholder removes
+/// the entry its data carrier also lives under.
+fn same_file(a: &Path, b: &Path) -> bool {
+    let id = |p: &Path| fs::symlink_metadata(p).map(|m| (m.dev(), m.ino())).ok();
+    match (id(a), id(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
 }
 
 /// Whether `path` already exists as a directory. A symlink counts only when
@@ -551,7 +564,11 @@ impl<'a> Extractor<'a> {
             skip_pad(r, e.size)?;
             // Re-link earlier placeholders (size-0 entries) to the data carrier.
             for other in group.paths.drain(..) {
-                if other != path {
+                // A placeholder that already names the carrier's file
+                // (a case variant of its path on a case-insensitive
+                // filesystem) needs no re-link: removing it would delete
+                // the carrier too, and the link source would be gone.
+                if other != path && !same_file(path, &other) {
                     fs::remove_file(&other).map_err(|e| io_error(&other, e))?;
                     fs::hard_link(path, &other).map_err(|e| io_error(&other, e))?;
                 }
@@ -562,7 +579,12 @@ impl<'a> Extractor<'a> {
             match &group.data_path {
                 Some(data) => {
                     let data = data.clone();
-                    fs::hard_link(&data, path).map_err(|e| io_error(path, e))?;
+                    // A case variant of the carrier's path already names
+                    // the carrier's file; linking it again would fail
+                    // with EEXIST on a case-insensitive filesystem.
+                    if !same_file(&data, path) {
+                        fs::hard_link(&data, path).map_err(|e| io_error(path, e))?;
+                    }
                 }
                 // Data carrier not seen yet: placeholder, re-linked above when
                 // it arrives.
@@ -1485,6 +1507,68 @@ mod tests {
         let mut out = Vec::new();
         reader.read_to_end(&mut out).unwrap();
         assert_eq!(out, b"hello bzip2 world\n".repeat(4));
+    }
+
+    /// Regression (issue #700): hardlink group members whose paths differ
+    /// only in case are one file on a case-insensitive filesystem. When
+    /// the data carrier arrives second, re-linking its placeholder must
+    /// not remove the placeholder first: the removal deletes the shared
+    /// entry, the carrier with it, and the link fails with ENOENT —
+    /// which aborted the whole package read (the icon themes' payloads
+    /// are full of such pairs, e.g. moka's `Blender.png`/`blender.png`).
+    #[test]
+    fn hardlink_case_variant_placeholder_first() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ex = extractor_for(root.path());
+        let mut placeholder = cpio_entry(b"Blender.png", S_IFREG | 0o644, 0);
+        placeholder.nlink = 2;
+        placeholder.ino = 7;
+        let mut data = &[][..];
+        ex.materialize(&mut data, &placeholder).unwrap();
+        let mut carrier = cpio_entry(b"blender.png", S_IFREG | 0o644, 5);
+        carrier.nlink = 2;
+        carrier.ino = 7;
+        let raw = padded(b"hello");
+        let mut data = &raw[..];
+        ex.materialize(&mut data, &carrier).unwrap();
+        ex.check_hardlinks().unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join("Blender.png")).unwrap(),
+            b"hello"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("blender.png")).unwrap(),
+            b"hello"
+        );
+    }
+
+    /// The same pair with the data carrier first: the later placeholder
+    /// already names the carrier's file, so linking it again must not
+    /// fail with EEXIST on a case-insensitive filesystem.
+    #[test]
+    fn hardlink_case_variant_carrier_first() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ex = extractor_for(root.path());
+        let mut carrier = cpio_entry(b"blender.png", S_IFREG | 0o644, 5);
+        carrier.nlink = 2;
+        carrier.ino = 7;
+        let raw = padded(b"hello");
+        let mut data = &raw[..];
+        ex.materialize(&mut data, &carrier).unwrap();
+        let mut placeholder = cpio_entry(b"Blender.png", S_IFREG | 0o644, 0);
+        placeholder.nlink = 2;
+        placeholder.ino = 7;
+        let mut data = &[][..];
+        ex.materialize(&mut data, &placeholder).unwrap();
+        ex.check_hardlinks().unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join("Blender.png")).unwrap(),
+            b"hello"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("blender.png")).unwrap(),
+            b"hello"
+        );
     }
 
     /// Regression: a symlink entry replacing an earlier regular file at the
