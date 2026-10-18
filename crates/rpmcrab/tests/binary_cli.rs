@@ -812,16 +812,11 @@ fn format_json_emits_parseable_report() {
     assert!(summary.get("aborted").is_none(), "no abort flag: {summary}");
 }
 
-/// A spec can print to stdout while librpm parses it in-process:
-/// `%{echo:...}` prints there by definition (and macro lua `print` does
-/// the same). In JSON mode those prints must not corrupt the document --
-/// stdout stays a single parseable JSON document and the prints are
-/// diverted to stderr (#703; the Factory sweep captured the corruption
-/// for the real `bash` and `rspamd` specs).
-#[test]
-fn format_json_is_not_polluted_by_spec_echo() {
-    let dir = tempfile::tempdir().unwrap();
-    let spec = dir.path().join("json-stdout-probe.spec");
+/// The `%{echo:...}` probe spec shared by the JSON-diversion tests: the
+/// echo expands while librpm parses the spec in-process, printing to the
+/// process's stdout.
+fn write_echo_spec(dir: &Path) -> std::path::PathBuf {
+    let spec = dir.join("json-stdout-probe.spec");
     std::fs::write(
         &spec,
         "%global json_stdout_probe %{echo:RPMCRAB-JSON-STDOUT-PROBE}\n\
@@ -840,6 +835,37 @@ fn format_json_is_not_polluted_by_spec_echo() {
          %files\n",
     )
     .unwrap();
+    spec
+}
+
+/// `rpmcrab` with extra environment variables, for tests that must prove
+/// the binary ignores (or honours) a specific ambient variable.
+fn rpmcrab_env(args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rpmcrab"));
+    cmd.args(args)
+        .env("CONFIG_DISABLE_AUTOLOADING", "1")
+        .env_remove("COLUMNS")
+        .env_remove("NO_COLOR")
+        .env_remove("CLICOLOR");
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    cmd.output().expect("spawn rpmcrab")
+}
+
+/// A spec can print to stdout while librpm parses it in-process:
+/// `%{echo:...}` prints there by definition (and macro lua `print` does
+/// the same). In JSON mode those prints must not corrupt the document --
+/// stdout stays a single parseable JSON document (#703; the Factory
+/// sweep captured the corruption for the real `bash` and `rspamd`
+/// specs). Whether the platform's librpm expands the echo during this
+/// parse at all is platform-dependent, so nothing here asserts where
+/// the prints land -- only that they never reach stdout, and that the
+/// run's exit code and the document's summary agree.
+#[test]
+fn format_json_is_not_polluted_by_spec_echo() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = write_echo_spec(dir.path());
     let out = rpmcrab(&["--format", "json", spec.to_str().unwrap()]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let doc: serde_json::Value =
@@ -849,12 +875,85 @@ fn format_json_is_not_polluted_by_spec_echo() {
         !stdout.contains("RPMCRAB-JSON-STDOUT-PROBE"),
         "spec prints leaked into the JSON stream: {stdout}"
     );
-    // Where the platform's librpm expands the echo at all, the diverted
-    // prints land on stderr, still visible as diagnostics.
+    assert_eq!(
+        doc["summary"]["exit_code"].as_i64(),
+        out.status.code().map(i64::from),
+        "summary exit code matches the process"
+    );
+}
+
+/// The diversion is keyed off the hidden `--__diverted-json` flag, never
+/// the environment: a preset `RPMCRAB_JSON_REPORT_FILE` must neither
+/// skip the diversion nor redirect the report -- the document still
+/// lands on stdout and the named file is left untouched.
+#[test]
+fn format_json_ignores_ambient_report_file_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = write_echo_spec(dir.path());
+    let sentinel = dir.path().join("sentinel.json");
+    std::fs::write(&sentinel, "do not touch").unwrap();
+    let out = rpmcrab_env(
+        &["--format", "json", spec.to_str().unwrap()],
+        &[("RPMCRAB_JSON_REPORT_FILE", sentinel.to_str().unwrap())],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let doc: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout must be a single JSON document");
+    assert_eq!(doc["program"], "rpmcrab");
+    assert!(
+        !stdout.contains("RPMCRAB-JSON-STDOUT-PROBE"),
+        "spec prints leaked into the JSON stream: {stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&sentinel).unwrap(),
+        "do not touch",
+        "the ambient path must not be written"
+    );
+}
+
+/// JSON selected by the config file (no `--format` flag) diverts too:
+/// the echo-bearing spec's prints stay out of stdout.
+#[test]
+fn format_json_from_config_is_diverted() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = write_echo_spec(dir.path());
+    let cfg = dir.path().join("format.toml");
+    std::fs::write(&cfg, "OutputFormat = \"json\"\n").unwrap();
+    let out = rpmcrab(&["-c", cfg.to_str().unwrap(), spec.to_str().unwrap()]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let doc: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout must be a single JSON document");
+    assert_eq!(doc["program"], "rpmcrab");
+    assert!(
+        !stdout.contains("RPMCRAB-JSON-STDOUT-PROBE"),
+        "spec prints leaked into the JSON stream: {stdout}"
+    );
+}
+
+/// The child half of a diversion whose hand-back write fails is loud:
+/// a failure code, an error on stderr, and no document on stdout --
+/// never a silent empty success.
+#[test]
+fn diverted_json_write_failure_is_loud() {
+    let dir = tempfile::tempdir().unwrap();
+    let bad_path = dir.path().join("missing").join("report.json");
+    let out = rpmcrab(&[
+        "--format",
+        "json",
+        "--__diverted-json",
+        bad_path.to_str().unwrap(),
+        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        out.stdout.is_empty(),
+        "no document may be delivered when the hand-back write fails, got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("RPMCRAB-JSON-STDOUT-PROBE"),
-        "diverted spec prints expected on stderr, got: {stderr}"
+        stderr.contains("writing the JSON report failed"),
+        "the failure must be reported on stderr, got: {stderr}"
     );
 }
 

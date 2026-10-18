@@ -500,7 +500,8 @@ plus, where one exists, a linked upstream issue.
   in-process and a spec can print there while it is parsed (`%{echo:...}`,
   macro lua `print`), so a JSON run is diverted through a child process whose
   stdout is forwarded to stderr and which hands the rendered document back
-  through a file (#703).
+  through an exclusively created, unpredictably named temporary file whose
+  path the parent passes by a hidden flag (#703).
 - **A real man page.** rpmlint has none (upstream #1077, open since 2023);
   rpmcrab ships one, generated from the CLI definition by `rpmcrab-gen`
   and drift-checked in CI.

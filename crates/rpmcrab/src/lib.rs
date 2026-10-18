@@ -131,6 +131,11 @@ struct Cli {
     /// `OutputFormat` config key.
     #[arg(long = "format", value_name = "format", value_parser = ["text", "json"])]
     format: Option<String>,
+
+    /// Hand-back file of a diverted JSON run; set only by the parent's
+    /// re-exec (see `divert_json_run`). Hidden: not a user interface.
+    #[arg(long = "__diverted-json", value_name = "path", hide = true)]
+    diverted_json: Option<PathBuf>,
 }
 
 /// `-j/--jobs` default: the reference uses `os.cpu_count() or 1`
@@ -179,15 +184,6 @@ pub fn cli_command() -> clap::Command {
     Cli::command()
 }
 
-/// Parse arguments and run the linter, returning the process exit code.
-///
-/// Exit-code semantics are part of the frozen compatibility contract (see
-/// `docs/DESIGN.md` §4.6); do not change the mapping without a ledger entry.
-/// Environment variable carrying the report path of a diverted JSON
-/// run; its presence marks the child half of the diversion (see
-/// [`divert_json_run`]).
-const JSON_REPORT_FILE_ENV: &str = "RPMCRAB_JSON_REPORT_FILE";
-
 /// Run a `--format json` report through a child process so the document
 /// is the only thing that reaches this process's stdout (#703).
 ///
@@ -197,39 +193,121 @@ const JSON_REPORT_FILE_ENV: &str = "RPMCRAB_JSON_REPORT_FILE";
 /// corrupting it for any JSON consumer (the Factory sweep captured
 /// exactly that for the `bash` and `rspamd` specs). The crate forbids
 /// unsafe code, so the fd cannot be redirected in-process; instead the
-/// run re-executes itself with [`JSON_REPORT_FILE_ENV`] set, the child's
-/// stdout is forwarded to stderr (the prints stay visible as
-/// diagnostics), and the child writes the rendered report to the named
-/// file, which this parent copies to its own stdout once the child
-/// finishes. The child's exit code becomes the run's.
+/// run re-executes itself with the hidden `--__diverted-json` flag, the
+/// child's stdout is forwarded to stderr (the prints stay visible as
+/// diagnostics), and the child writes the rendered report to the file
+/// named by the flag, which this parent copies to its own stdout once
+/// the child finishes. The child's exit code becomes the run's.
 ///
-/// Returns `None` when the diversion could not be set up; the caller
-/// then runs in-process, as it did before the diversion existed.
+/// The hand-back file is a [`tempfile::NamedTempFile`]: created
+/// exclusively under an unpredictable name with owner-only permissions,
+/// so nothing can pre-create, redirect or pre-read it, and dropping it
+/// removes it. The child half is keyed off the hidden flag alone -- no
+/// environment variable steers the diversion, so an ambient variable
+/// can neither skip the diversion nor redirect the report.
+///
+/// Returns `None` only when the diversion could not be set up at all
+/// (no child exists; the caller then runs in-process with a warning, as
+/// it did before the diversion existed). Every failure after the child
+/// has spawned is loud instead: a message on stderr and a failure code,
+/// never a silent empty stdout.
 fn divert_json_run() -> Option<ExitCode> {
+    let report = tempfile::NamedTempFile::new().ok()?;
     let exe = std::env::current_exe().ok()?;
-    let report = std::env::temp_dir().join(format!("rpmcrab-report-{}.json", std::process::id()));
-    let mut child = std::process::Command::new(exe)
-        .args(std::env::args_os().skip(1))
-        .env(JSON_REPORT_FILE_ENV, &report)
+    // Forward the user's arguments verbatim, with the hidden flag
+    // inserted before any `--` separator (after it, clap would treat
+    // the flag as a positional file).
+    let mut args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let insert_at = args
+        .iter()
+        .position(|a| a.as_os_str() == "--")
+        .unwrap_or(args.len());
+    args.insert(insert_at, std::ffi::OsString::from("--__diverted-json"));
+    args.insert(insert_at + 1, report.path().as_os_str().to_os_string());
+    let mut child = match std::process::Command::new(exe)
+        .args(&args)
         .stdout(std::process::Stdio::piped())
         .spawn()
-        .ok()?;
-    let mut pipe = child.stdout.take()?;
+    {
+        Ok(child) => child,
+        Err(_) => return None,
+    };
+    // No path past this point may leave the child behind: every failure
+    // path kills and reaps it before reporting.
+    let Some(mut pipe) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        eprintln!("(none): E: the diverted JSON run lost its output pipe");
+        return Some(ExitCode::from(1));
+    };
     let forwarder = std::thread::spawn(move || {
         let _ = std::io::copy(&mut pipe, &mut std::io::stderr());
     });
-    let status = child.wait().ok()?;
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = forwarder.join();
+            eprintln!("(none): E: waiting for the diverted JSON run failed: {e}");
+            return Some(ExitCode::from(1));
+        }
+    };
     let _ = forwarder.join();
-    if let Ok(bytes) = std::fs::read(&report) {
-        use std::io::Write;
-        let _ = std::io::stdout().write_all(&bytes);
+    let code = exit_code_of(&status);
+    match std::fs::read(report.path()) {
+        Ok(bytes) if !bytes.is_empty() => {
+            use std::io::Write;
+            match std::io::stdout().write_all(&bytes) {
+                Ok(()) => Some(code),
+                Err(e) => {
+                    eprintln!("(none): E: writing the JSON report to stdout failed: {e}");
+                    Some(ExitCode::from(1))
+                }
+            }
+        }
+        Ok(_) => {
+            eprintln!("(none): E: the diverted JSON run left an empty report");
+            Some(if status.success() {
+                ExitCode::from(1)
+            } else {
+                code
+            })
+        }
+        Err(e) => {
+            eprintln!("(none): E: the diverted JSON run left no readable report: {e}");
+            // A child that failed keeps its code; a child that claimed
+            // success but delivered nothing failed here, loudly.
+            Some(if status.success() {
+                ExitCode::from(1)
+            } else {
+                code
+            })
+        }
     }
-    let _ = std::fs::remove_file(&report);
-    Some(ExitCode::from(
-        u8::try_from(status.code().unwrap_or(1)).unwrap_or(1),
-    ))
 }
 
+/// The exit code a diverted run's parent reports for its child: the
+/// child's own code where it has one; for a signal death, the shell
+/// convention `128 + signal` on Unix, so the two stay distinguishable.
+fn exit_code_of(status: &std::process::ExitStatus) -> ExitCode {
+    if let Some(code) = status.code() {
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return ExitCode::from(128u8.saturating_add(u8::try_from(signal).unwrap_or(0)));
+        }
+    }
+    ExitCode::from(1)
+}
+
+/// Parse arguments and run the linter, returning the process exit code.
+///
+/// Exit-code semantics are part of the frozen compatibility contract (see
+/// `docs/DESIGN.md` §4.6); do not change the mapping without a ledger entry.
 pub fn run() -> ExitCode {
     // Progress reporting (upstream rpmlint#255): `tracing` events render on
     // stderr, so finding output on stdout is never perturbed. `RUST_LOG`
@@ -250,7 +328,36 @@ pub fn run() -> ExitCode {
 
     // The reference picks its colour table from stdout's tty-ness and uses it
     // for stderr diagnostics too, so it is needed before the first warning.
-    let color = Color::for_tty(std::io::stdout().is_terminal());
+    // The child half of a diverted JSON run (#703) has the diversion pipe
+    // for stdout, never a terminal, so its table comes from stderr -- the
+    // inherited terminal its diagnostics land on -- which reproduces the
+    // parent's own decision exactly.
+    let color = if cli.diverted_json.is_some() {
+        Color::for_tty(std::io::stderr().is_terminal())
+    } else {
+        Color::for_tty(std::io::stdout().is_terminal())
+    };
+
+    // A `--format json` run whose format is settled by the command line
+    // alone diverts into its child here, before anything else can print:
+    // the parent stays silent, so no diagnostic is emitted twice (#703;
+    // see `divert_json_run`). The meta modes (`--print-config`,
+    // `--explain`) print to stdout themselves and never divert. A run
+    // whose format comes from the config file diverts at the second
+    // point in `run`, once the configuration has been loaded.
+    if cli.diverted_json.is_none()
+        && cli.format.as_deref() == Some("json")
+        && !cli.print_config
+        && cli.explain.is_empty()
+    {
+        match divert_json_run() {
+            Some(code) => return code,
+            None => warn!(
+                color,
+                "warning: the JSON run could not be diverted; spec output may corrupt the report"
+            ),
+        }
+    }
 
     // Load configuration. A nonexistent -c path is a usage error (exit 2) with
     // the reference's exact message (`cli.py:_validate_conf_location`).
@@ -309,6 +416,22 @@ pub fn run() -> ExitCode {
             println!("{}", filter.explanation(id, &cfg));
         }
         return ExitCode::SUCCESS;
+    }
+
+    // Second diversion point (#703): the format came from the config
+    // file, so it is only known now. Diverting here still precedes the
+    // rpmlintrc loading and every per-run diagnostic below, so those are
+    // emitted once, by the child. (A command-line `--format json` run
+    // diverted earlier, before the configuration was even loaded.)
+    let format = resolve_output_format(cli.format.as_deref(), &cfg.output_format);
+    if cli.diverted_json.is_none() && cli.format.is_none() && format == "json" {
+        match divert_json_run() {
+            Some(code) => return code,
+            None => warn!(
+                color,
+                "warning: the JSON run could not be diverted; spec output may corrupt the report"
+            ),
+        }
     }
 
     // Validate positional paths (missing -> exit 2). This is `cli.py`'s job and
@@ -382,23 +505,6 @@ pub fn run() -> ExitCode {
     if skip_hit {
         println!("Skipping rpmlint for rpmlint package!");
         return ExitCode::SUCCESS;
-    }
-
-    // `--format json` promises a single JSON document on stdout, but
-    // librpm parses specs in-process and a spec can print to stdout while
-    // it is parsed (#703): the report goes through a diverted child so
-    // the document stays the only thing on this process's stdout. Text
-    // mode is untouched -- there the prints interleave exactly as the
-    // reference's do.
-    let format = resolve_output_format(cli.format.as_deref(), &cfg.output_format);
-    if format == "json" && std::env::var_os(JSON_REPORT_FILE_ENV).is_none() {
-        match divert_json_run() {
-            Some(code) => return code,
-            None => warn!(
-                color,
-                "warning: the JSON run could not be diverted; spec output may corrupt the report"
-            ),
-        }
     }
 
     let start = Instant::now();
@@ -538,18 +644,24 @@ pub fn run() -> ExitCode {
         show_time_report,
         duration,
     );
-    // The child half of a diverted JSON run (#703) writes the document to
-    // the report file instead of stdout; the parent copies the file to
-    // the real stdout once the run is over. A failed write falls back to
-    // stdout -- a possibly-corrupted document beats none.
-    match std::env::var_os(JSON_REPORT_FILE_ENV) {
-        Some(path) if format == "json" => {
-            if std::fs::write(&path, &out).is_err() {
-                print!("{out}");
+    // The child half of a diverted JSON run (#703) writes the document
+    // to the hand-back file named by `--__diverted-json` instead of
+    // stdout; the parent copies it to the real stdout once the run is
+    // over. A failed write is loud -- an error on stderr and a failure
+    // code -- never a fallback print into the diverted stream, which
+    // would silently deliver no document at all.
+    if let Some(path) = &cli.diverted_json
+        && format == "json"
+    {
+        return match std::fs::write(path, &out) {
+            Ok(()) => ExitCode::from(u8::try_from(lint.exit_code()).unwrap_or(1)),
+            Err(e) => {
+                eprintln!("(none): E: writing the JSON report failed: {e}");
+                ExitCode::from(1)
             }
-        }
-        _ => print!("{out}"),
+        };
     }
+    print!("{out}");
     ExitCode::from(u8::try_from(lint.exit_code()).unwrap_or(1))
 }
 

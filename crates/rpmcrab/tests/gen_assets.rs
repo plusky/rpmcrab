@@ -15,6 +15,10 @@ fn long_flags() -> Vec<String> {
         // `ArgAction::Version` args render in the man page's VERSION section,
         // not OPTIONS, so they are covered separately.
         .filter(|a| !matches!(a.get_action(), clap::ArgAction::Version))
+        // Hidden args are internal (the `--__diverted-json` hand-back of
+        // a diverted JSON run); the generator excludes them from the man
+        // page by design, so they are not part of the covered flag set.
+        .filter(|a| !a.is_hide_set())
         .filter_map(|a| a.get_long().map(|long| format!("--{long}")))
         .collect()
 }
