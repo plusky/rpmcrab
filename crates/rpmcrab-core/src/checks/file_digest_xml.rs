@@ -553,12 +553,19 @@ impl Canonicalizer {
         let mut i = 0;
         while i < bytes.len() {
             if bytes[i..].starts_with(b"<!--") {
-                match inner[i..].find("-->") {
+                // The terminator search starts after the opening
+                // `<!--`: searching from `i` lets the opener's own
+                // `--` form a spurious `-->` with a following `>`
+                // (as in `<!-->`), which both miscounts the comment
+                // body and slices with start > end on that input.
+                match inner[i + 4..].find("-->") {
                     Some(end) => {
-                        validate_comment(&inner[i + 4..i + end])?;
-                        i += end + 3;
+                        validate_comment(&inner[i + 4..i + 4 + end])?;
+                        i += 4 + end + 3;
                     }
-                    None => break,
+                    None => {
+                        return Err("XML parse error: unterminated comment".to_string());
+                    }
                 }
                 continue;
             }
@@ -873,7 +880,7 @@ fn skip_attlist(s: &str, mut i: usize) -> Result<usize, String> {
         }
         i += 1;
     }
-    Ok(i)
+    Err("XML parse error: unterminated ATTLIST declaration".to_string())
 }
 
 /// Skip one `<!...>` declaration, respecting quoted sections.
@@ -1300,6 +1307,70 @@ mod tests {
         ] {
             assert!(canon(xml).is_ok(), "{xml} must be accepted");
         }
+    }
+
+    #[test]
+    fn subset_comment_terminator_is_searched_after_the_opener() {
+        // The reference reports an unclosed token for each of these:
+        // `<!-->` and `<!--->` have no terminator after the opener
+        // (the opener's own `--` must not count toward one), and a
+        // comment with no terminator at all is unterminated, however
+        // the subset happens to end after it.
+        for xml in [
+            "<!DOCTYPE r [<!-->]><r/>",
+            "<!DOCTYPE r [<!--->]><r/>",
+            "<!DOCTYPE r [<!--]><r/>",
+            "<!DOCTYPE r [<!-- x ]><r/>",
+        ] {
+            assert!(canon(xml).is_err(), "{xml} must be rejected");
+        }
+        // Forms where the subset scan itself is what runs: a later
+        // well-formed comment lets the reader deliver the subset with
+        // the overlapping opener inside it -- the first two panicked
+        // the old scan (start > end slice) -- and an unbracketed
+        // DOCTYPE delivers a comment with no terminator at all, which
+        // the old scan silently ended at.
+        for xml in [
+            "<!DOCTYPE r [<!--> <!-- c -->]><r/>",
+            "<!DOCTYPE r [<!---><!-- c -->]><r/>",
+            "<!DOCTYPE r <!-- x><r/>",
+            "<!DOCTYPE r <!--> <r/>",
+        ] {
+            assert!(canon(xml).is_err(), "{xml} must be rejected");
+        }
+        // A genuinely empty comment, and one holding a single space,
+        // are well-formed.
+        for xml in ["<!DOCTYPE r [<!---->]><r/>", "<!DOCTYPE r [<!-- -->]><r/>"] {
+            assert!(canon(xml).is_ok(), "{xml} must be accepted");
+        }
+        // The document-level comment path (quick-xml events, audited
+        // alongside the subset scan) rejects the same overlapping
+        // forms and accepts the genuinely empty comment.
+        for xml in ["<!--><r/>", "<!---><r/>", "<r><!--></r>"] {
+            assert!(canon(xml).is_err(), "{xml} must be rejected");
+        }
+        assert!(canon("<!----><r/>").is_ok());
+    }
+
+    #[test]
+    fn unterminated_attlist_is_rejected() {
+        // A subset ATTLIST with no closing `>` -- the open-quote form
+        // runs to the end of the subset -- is a parse error in the
+        // reference, not a declaration to skip silently.
+        for xml in [
+            "<!DOCTYPE r [<!ATTLIST r a CDATA \"x>]><r/>",
+            "<!DOCTYPE r [<!ATTLIST r a CDATA \"x\"]><r/>",
+            "<!DOCTYPE r [<!ATTLIST r a CDATA \"x\" ]><r/>",
+        ] {
+            assert!(canon(xml).is_err(), "{xml} must be rejected");
+        }
+        // The form that reaches the skip itself: an unbracketed
+        // DOCTYPE delivers an ATTLIST whose text runs to the end of
+        // the declaration with no closing `>` of its own -- the old
+        // skip fell through to accepting it at that end.
+        assert!(canon("<!DOCTYPE r <!ATTLIST r a CDATA \"x\"><r/>").is_err());
+        // A terminated ATTLIST in the same position stays accepted.
+        assert!(canon("<!DOCTYPE r [<!ATTLIST r a CDATA \"def\">]><r/>").is_ok());
     }
 
     #[test]
