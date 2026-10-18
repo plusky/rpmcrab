@@ -3,6 +3,13 @@
 //! Ported from `rpmlint/checks/AtomicUpdateCheck.py`. Two findings:
 //! `dir-or-file-outside-snapshot` (E) and `ghost-outside-snapshot` (W).
 //!
+//! Directory entries are exempt from the error: a shipped directory
+//! carries no payload that a snapshot switch could lose or leave
+//! inconsistent, and the transactional-update guide allows directories
+//! anywhere. The reference makes no dir/file distinction, so the
+//! exemption is a ledgered fix-and-diverge (issue #711). Symlinks are
+//! not directories and still fire.
+//!
 //! This file hosts the transactional-update family's predicates. It also
 //! carries `usr_etc_conffile`, the predicate behind the crab-only
 //! `usr-etc-file-marked-as-conffile` warning emitted by
@@ -101,6 +108,12 @@ impl Check for AtomicUpdateCheck {
             if pkgfile.is_ghost() {
                 continue;
             }
+            // Directories carry no payload; the transactional-update
+            // guide exempts them wherever they are shipped (issue #711).
+            // A symlink is not a directory and still fires below.
+            if is_dir(pkgfile.mode) {
+                continue;
+            }
             if !self.path_allowed(name) {
                 add_info(
                     out,
@@ -161,6 +174,23 @@ mod tests {
             name: name.to_string(),
             mode: 0o100644,
             flags: RPMFILE_GHOST,
+            ..Default::default()
+        }
+    }
+
+    fn dir_entry(name: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            mode: 0o040755,
+            ..Default::default()
+        }
+    }
+
+    fn symlink(name: &str, target: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            mode: 0o120777,
+            linkto: target.to_string(),
             ..Default::default()
         }
     }
@@ -250,6 +280,96 @@ mod tests {
             "{}",
             results[1].1
         );
+    }
+
+    #[test]
+    fn directories_outside_snapshot_are_exempt() {
+        // A shipped directory carries no payload, so it never fires --
+        // wherever it sits, and whatever its name looks like. The
+        // exemption keys on the entry type alone (issue #711).
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![
+            dir_entry("/var/lib/daemon"),
+            dir_entry("/var/log/daemon"),
+            dir_entry("/srv/www/htdocs"),
+            // A directory whose name looks like a payload file.
+            dir_entry("/var/lib/libpayload.so"),
+            // Inside a disallowed subdir: still just a directory.
+            dir_entry("/usr/local/share/tool"),
+        ];
+        let mut check = check_with(&["/usr", "/etc"], &["/usr/local"], false);
+        assert!(run(&mut check, &pkg).is_empty());
+    }
+
+    #[test]
+    fn directory_exemption_keeps_file_findings() {
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![
+            dir_entry("/var/lib/daemon"),
+            regular("/var/lib/daemon/state.db"),
+        ];
+        let mut check = check_with(&["/usr", "/etc"], &[], false);
+        let results = run(&mut check, &pkg);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "dir-or-file-outside-snapshot");
+        assert!(
+            results[0].1.contains("/var/lib/daemon/state.db"),
+            "{}",
+            results[0].1
+        );
+    }
+
+    #[test]
+    fn symlink_to_directory_outside_snapshot_still_fires() {
+        // A symlink is not a directory (S_IFLNK, not S_IFDIR): it still
+        // fires, even when its target is a directory. The /usr/lib link
+        // is the near-miss: inside the snapshot, so quiet either way.
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![
+            symlink("/var/lib/current", "/var/lib/daemon"),
+            symlink("/usr/lib/inside", "/usr/lib/real"),
+        ];
+        let mut check = check_with(&["/usr", "/etc"], &[], false);
+        let results = run(&mut check, &pkg);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "dir-or-file-outside-snapshot");
+        assert!(results[0].1.contains(": E: "), "level: {}", results[0].1);
+        assert!(
+            results[0].1.contains("/var/lib/current"),
+            "{}",
+            results[0].1
+        );
+    }
+
+    #[test]
+    fn ghost_directory_stays_on_the_ghost_path() {
+        // A %ghost directory leaves the error loop as a ghost and is
+        // reported, if at all, by the ghost loop: the directory
+        // exemption neither promotes nor demotes it.
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![PkgFile {
+            name: "/var/cache/state".to_string(),
+            mode: 0o040755,
+            flags: RPMFILE_GHOST,
+            ..Default::default()
+        }];
+        pkg.ghost_files = vec!["/var/cache/state".to_string()];
+        let mut check = check_with(&["/usr", "/etc"], &[], true);
+        let results = run(&mut check, &pkg);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "ghost-outside-snapshot");
+        assert!(results[0].1.contains(": W: "), "level: {}", results[0].1);
+
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![PkgFile {
+            name: "/var/cache/state".to_string(),
+            mode: 0o040755,
+            flags: RPMFILE_GHOST,
+            ..Default::default()
+        }];
+        pkg.ghost_files = vec!["/var/cache/state".to_string()];
+        let mut check = check_with(&["/usr", "/etc"], &[], false);
+        assert!(run(&mut check, &pkg).is_empty());
     }
 
     #[test]
