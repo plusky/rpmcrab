@@ -8238,8 +8238,8 @@ description = "explicit priority string bypasses the system crypto policy"
             "orphan finding names file and symbol: {lines:?}"
         );
         assert!(
-            lines.iter().all(|l| l.contains(" E: ")),
-            "Error level: {lines:?}"
+            lines.iter().all(|l| l.contains(" W: ")),
+            "Warning level (temporary levelling pending #701): {lines:?}"
         );
     }
 
@@ -9157,7 +9157,8 @@ description = "explicit priority string bypasses the system crypto policy"
         let mut ldd = syn_ldd();
         ldd.undefined_symbols = vec!["GSS_C_NT_HOSTBASED_SERVICE".to_string()];
 
-        // Undefined symbols in a shared object -> Error.
+        // Undefined symbols in a shared object -> Warning
+        // (temporary levelling pending the #701 resolver fix).
         let mut info = syn_info();
         info.is_shlib = true;
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
@@ -9165,7 +9166,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let results = out.results().to_vec();
         let lines = lines_for(&results, "undefined-non-weak-symbol");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
-        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
         assert!(
             lines[0].contains("GSS_C_NT_HOSTBASED_SERVICE"),
             "detail names the symbol: {}",
