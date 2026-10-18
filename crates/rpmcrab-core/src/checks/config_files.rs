@@ -151,7 +151,7 @@ mod tests {
         // Kills the neutered-wiring mutant: the loop over `pkg.files`
         // must run the family predicate for the finding to reach the
         // `Filter`, exactly once per marked /usr/etc entry.
-        use crate::pkg::pkgfile::{PkgFile, RPMFILE_CONFIG, RPMFILE_NOREPLACE};
+        use crate::pkg::pkgfile::{PkgFile, RPMFILE_CONFIG, RPMFILE_GHOST, RPMFILE_NOREPLACE};
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
         let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
@@ -172,6 +172,20 @@ mod tests {
             PkgFile {
                 name: "/etc/foo.conf".to_string(),
                 mode: 0o100644,
+                flags: RPMFILE_CONFIG,
+                ..Default::default()
+            },
+            // A %ghost ships no vendor default: excluded.
+            PkgFile {
+                name: "/usr/etc/ghost.conf".to_string(),
+                mode: 0o100644,
+                flags: RPMFILE_CONFIG | RPMFILE_GHOST,
+                ..Default::default()
+            },
+            // A directory never gets .rpmnew/.rpmsave treatment: excluded.
+            PkgFile {
+                name: "/usr/etc/subdir".to_string(),
+                mode: 0o040755,
                 flags: RPMFILE_CONFIG,
                 ..Default::default()
             },
