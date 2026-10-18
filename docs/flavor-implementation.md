@@ -104,10 +104,11 @@ ledger remains the record of intentional departures from the reference.
   are identical in both branches; 1.2 is simply older. One `"slfo"` value
   covers both.
 - **No code gating for `AtomicUpdateCheck`.** It exists in opensuse too;
-  the port runs it whenever a config enables it. It is absent from the
-  bundled default config and from the opensuse flavor config's `Checks`
-  list (snapshot layout is an slfo requirement, issue #478); the slfo
-  flavor config enables it.
+  the port runs it whenever a config enables it. It is listed in the
+  bundled default config and in both flavor configs' `Checks` lists:
+  transactional updates are mandatory everywhere (issue #698,
+  superseding the slfo-only scoping of issue #478), and both flavors
+  keep the `filesystem` exemption for the finding.
 - **No gating for the three REJECTED candidates** (§4.11): they are
   staleness or removed checks, not flavor behavior.
 - **No auto-detection** (no `/etc/os-release` sniffing). Flavor is a
