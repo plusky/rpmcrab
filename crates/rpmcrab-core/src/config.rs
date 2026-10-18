@@ -87,7 +87,7 @@ pub struct Config {
     /// Distribution flavor for flavor-gated check behavior (`docs/DESIGN.md`
     /// §4.11, `docs/flavor-implementation.md`): `"opensuse"` (default) or
     /// `"slfo"`. Derived from the `Flavor` TOML key by [`Config::finalize`];
-    /// unknown values warn on stderr and fall back to `"opensuse"`.
+    /// unknown values record a load warning and fall back to `"opensuse"`.
     pub flavor: String,
     /// `SkipPackagePatterns` (rpmlint#1592).
     pub skip_package_patterns: Vec<String>,
@@ -100,6 +100,14 @@ pub struct Config {
     /// `OutputFormat` (`"text"` default, `"json"` for machine-readable
     /// output; upstream rpmlint#1156). The CLI `--format` overrides this.
     pub output_format: String,
+    /// Warnings collected while loading, in emission order. `finalize`
+    /// and the vendored-config flavor pre-pass record them here instead
+    /// of printing, so the caller decides when they are shown: [`load`]
+    /// prints them itself, while a caller that hands the run to a child
+    /// process (the diverted JSON run, #703) can drop its own copies and
+    /// let the child print its. Drain with
+    /// [`Config::take_load_warnings`].
+    pub load_warnings: Vec<String>,
 }
 
 /// Human-readable TOML value kind for configuration diagnostics.
@@ -116,6 +124,12 @@ fn value_kind(v: &toml::Value) -> &'static str {
 }
 
 impl Config {
+    /// Drain the warnings collected while loading (see
+    /// [`Config::load_warnings`]), returning them in emission order.
+    pub fn take_load_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.load_warnings)
+    }
+
     /// Derive the typed hot-path fields from `configuration`. Called after
     /// every load step (initial merge, rpmlintrc).
     pub fn finalize(&mut self) -> Result<(), String> {
@@ -124,26 +138,28 @@ impl Config {
         self.filter_titles = self.get_strings("FilterErrorTitles")?;
         self.blocked_filters = self.get_strings("BlockedFilters")?;
         // Keys #699 removed (`BadnessThreshold`, `PermissiveByDefault`)
-        // are read by nothing, but a config that still carries one warns
-        // on stderr instead of going silently inert — the same
-        // warn-and-ignore treatment as `setBadness` and a non-table
+        // are read by nothing, but a config that still carries one
+        // records a load warning instead of going silently inert — the
+        // same warn-and-ignore treatment as `setBadness` and a non-table
         // `Scoring` below.
         for key in ["BadnessThreshold", "PermissiveByDefault"] {
             if self.configuration.contains_key(key) {
-                eprintln!("warning: '{key}' has no effect since #699; ignoring it");
+                self.load_warnings.push(format!(
+                    "warning: '{key}' has no effect since #699; ignoring it"
+                ));
             }
         }
-        // A present-but-non-table `Scoring`: the whole
-        // map is ignored, with a warning. (A table's individual values are
+        // A present-but-non-table `Scoring`: the whole map is ignored,
+        // with a warning recorded. (A table's individual values are
         // coerced per finding at emit time; see the field docs.)
         self.scoring = match self.configuration.get("Scoring") {
             None => HashMap::new(),
             Some(toml::Value::Table(t)) => t.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             Some(other) => {
-                eprintln!(
+                self.load_warnings.push(format!(
                     "warning: 'Scoring' must be a table, found {}; ignoring it",
                     value_kind(other)
-                );
+                ));
                 HashMap::new()
             }
         };
@@ -191,7 +207,9 @@ impl Config {
         self.flavor = match flavor.as_str() {
             "opensuse" | "slfo" => flavor,
             other => {
-                eprintln!("warning: unknown Flavor {other:?}, falling back to \"opensuse\"");
+                self.load_warnings.push(format!(
+                    "warning: unknown Flavor {other:?}, falling back to \"opensuse\""
+                ));
                 "opensuse".to_string()
             }
         };
@@ -209,7 +227,9 @@ impl Config {
         self.output_format = match output_format.as_str() {
             "text" | "json" => output_format,
             other => {
-                eprintln!("warning: unknown OutputFormat {other:?}, falling back to \"text\"");
+                self.load_warnings.push(format!(
+                    "warning: unknown OutputFormat {other:?}, falling back to \"text\""
+                ));
                 "text".to_string()
             }
         };
@@ -456,9 +476,27 @@ pub fn load_bundled() -> Config {
 /// error. An unreadable file exits 1 and an unparsable TOML file exits 4 at
 /// the read site instead, as rpmlint does.
 pub fn load(extra: &[PathBuf]) -> Result<Config, String> {
+    let (cfg, warnings) = load_with_warnings(extra)?;
+    for warning in &warnings {
+        eprintln!("{warning}");
+    }
+    Ok(cfg)
+}
+
+/// Like [`load`], but returns the load warnings instead of printing
+/// them, so the caller decides when (or whether) they are shown. The
+/// diverted JSON run (#703) uses this: a parent that hands the run to
+/// its child drops its own copies, because the child loads the same
+/// configuration and prints its.
+///
+/// # Errors
+/// Same as [`load`].
+pub fn load_with_warnings(extra: &[PathBuf]) -> Result<(Config, Vec<String>), String> {
     let autoload = std::env::var("PYTEST_XDIST_TESTRUNUID").is_err()
         && std::env::var("CONFIG_DISABLE_AUTOLOADING").is_err();
-    load_inner(extra, &xdg_config_dirs(), autoload)
+    let mut cfg = load_inner(extra, &xdg_config_dirs(), autoload)?;
+    let warnings = cfg.take_load_warnings();
+    Ok((cfg, warnings))
 }
 
 /// What a config file's top-level `Flavor` key says.
@@ -527,6 +565,11 @@ fn load_inner(extra: &[PathBuf], xdg_dirs: &[PathBuf], autoload: bool) -> Result
         }
     }
 
+    // Warnings raised before the `Config` exists (the flavor pre-pass
+    // below); they become the head of `cfg.load_warnings`, ahead of the
+    // ones `finalize` records, preserving emission order.
+    let mut early_warnings: Vec<String> = Vec::new();
+
     // The vendored distro config is part of autoloading: it is the distro
     // package's XDG config shipped in the binary. `load_bundled` and
     // CONFIG_DISABLE_AUTOLOADING=1 skip it, keeping the bare builtin baseline.
@@ -561,7 +604,9 @@ fn load_inner(extra: &[PathBuf], xdg_dirs: &[PathBuf], autoload: bool) -> Result
         let flavor = match flavor.as_str() {
             "opensuse" | "slfo" => flavor,
             other => {
-                eprintln!("warning: unknown Flavor {other:?}, falling back to \"opensuse\"");
+                early_warnings.push(format!(
+                    "warning: unknown Flavor {other:?}, falling back to \"opensuse\""
+                ));
                 "opensuse".to_string()
             }
         };
@@ -625,6 +670,7 @@ fn load_inner(extra: &[PathBuf], xdg_dirs: &[PathBuf], autoload: bool) -> Result
         cfg.conf_files.push(display.clone());
     }
 
+    cfg.load_warnings = early_warnings;
     cfg.finalize()?;
     Ok(cfg)
 }

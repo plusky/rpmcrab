@@ -44,12 +44,44 @@ An error was found (and \fB\-P\fR/\fB\-\-permissive\fR was not passed).
 Interrupted (SIGINT).
 "#;
 
+/// The command the shell completions are generated from: the shipped
+/// CLI minus its hidden args. `clap_complete` renders every argument
+/// it is given (it filters hidden *values*, not hidden args), so the
+/// internal `--__diverted-json` hand-back would otherwise be
+/// advertised in every shell. The man page keeps the full command:
+/// `clap_mangen` omits hidden args itself.
+fn completions_command(cmd: &clap::Command) -> clap::Command {
+    // The generator only ever serves this one binary (the man title and
+    // the `generate` bin name below are likewise fixed), and clap's
+    // `Str` accepts only static strings, so the name and version are
+    // restated rather than copied: the version is this crate's own,
+    // the same one the derive `version` on the shipped CLI resolves
+    // to. (The version must be present at all: the shipped CLI carries
+    // an `ArgAction::Version` arg, which clap refuses to build
+    // without one.)
+    assert_eq!(cmd.get_name(), "rpmcrab");
+    assert_eq!(cmd.get_version(), Some(env!("CARGO_PKG_VERSION")));
+    let mut filtered = clap::Command::new("rpmcrab").version(env!("CARGO_PKG_VERSION"));
+    if let Some(about) = cmd.get_about() {
+        filtered = filtered.about(about.to_string());
+    }
+    if cmd.is_disable_version_flag_set() {
+        filtered = filtered.disable_version_flag(true);
+    }
+    for arg in cmd.get_arguments() {
+        if !arg.is_hide_set() {
+            filtered = filtered.arg(arg.clone());
+        }
+    }
+    filtered
+}
+
 fn main() {
     let root = std::env::args()
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("crates/rpmcrab"));
-    let mut cmd = rpmcrab::cli_command();
+    let cmd = rpmcrab::cli_command();
 
     let man_dir = root.join("man");
     fs::create_dir_all(&man_dir).expect("create man dir");
@@ -73,6 +105,7 @@ fn main() {
 
     let completions_dir = root.join("completions");
     fs::create_dir_all(&completions_dir).expect("create completions dir");
+    let mut comp_cmd = completions_command(&cmd);
     for (shell, ext) in [
         (Shell::Bash, "bash"),
         (Shell::Zsh, "zsh"),
@@ -80,7 +113,7 @@ fn main() {
     ] {
         let path = completions_dir.join(format!("rpmcrab.{ext}"));
         let mut file = fs::File::create(&path).expect("create completion file");
-        clap_complete::generate(shell, &mut cmd, "rpmcrab", &mut file);
+        clap_complete::generate(shell, &mut comp_cmd, "rpmcrab", &mut file);
     }
 
     println!(

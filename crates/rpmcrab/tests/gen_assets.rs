@@ -49,6 +49,33 @@ fn completions_are_present_and_name_the_binary() {
 }
 
 #[test]
+fn completions_hide_internal_args() {
+    // Hidden args are internal plumbing (the `--__diverted-json`
+    // hand-back of a diverted JSON run); the generator filters them
+    // out of the completions command, so they must never be
+    // advertised to a shell user.
+    let hidden: Vec<String> = rpmcrab::cli_command()
+        .get_arguments()
+        .filter(|a| a.is_hide_set())
+        .filter_map(|a| a.get_long().map(|long| format!("--{long}")))
+        .collect();
+    assert!(
+        !hidden.is_empty(),
+        "the CLI has a hidden arg to keep hidden"
+    );
+    for name in ["rpmcrab.bash", "rpmcrab.zsh", "rpmcrab.fish"] {
+        let content = std::fs::read_to_string(crate_dir().join("completions").join(name))
+            .unwrap_or_else(|_| panic!("{name} is checked in"));
+        for flag in &hidden {
+            assert!(
+                !content.contains(flag.as_str()),
+                "{name} advertises the hidden {flag}"
+            );
+        }
+    }
+}
+
+#[test]
 fn man_page_documents_exit_status() {
     let man =
         std::fs::read_to_string(crate_dir().join("man/rpmcrab.1")).expect("man page is checked in");

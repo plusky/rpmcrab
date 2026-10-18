@@ -838,6 +838,29 @@ fn write_echo_spec(dir: &Path) -> std::path::PathBuf {
     spec
 }
 
+/// A spec whose parse prints far more than a pipe buffer holds: one
+/// `%global` per line, each expanding an `%{echo:...}` while librpm
+/// parses it in-process. Proves the diverted run's stdout forwarder
+/// keeps draining even when its own writes to stderr fail.
+fn write_loud_echo_spec(dir: &Path) -> std::path::PathBuf {
+    let mut text = String::from(
+        "Name: json-stdout-loud-probe\n\
+         Version: 1.0\n\
+         Release: 1\n\
+         Summary: probe\n\
+         License: MIT\n",
+    );
+    for i in 0..2000 {
+        text.push_str(&format!(
+            "%global loud_probe_{i} %{{echo:RPMCRAB-LOUD-{i}-aaaaaaaaaaaaaaaaaaaaaaaa}}\n"
+        ));
+    }
+    text.push_str("\n%description\nprobe\n\n%files\n");
+    let spec = dir.join("json-stdout-loud-probe.spec");
+    std::fs::write(&spec, text).unwrap();
+    spec
+}
+
 /// `rpmcrab` with extra environment variables, for tests that must prove
 /// the binary ignores (or honours) a specific ambient variable.
 fn rpmcrab_env(args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
@@ -954,6 +977,275 @@ fn diverted_json_write_failure_is_loud() {
     assert!(
         stderr.contains("writing the JSON report failed"),
         "the failure must be reported on stderr, got: {stderr}"
+    );
+}
+
+/// A forged `--__diverted-json` naming a populated file (the
+/// `~/.bashrc` case) must not write to it: the hand-back target has to
+/// be the parent's fresh hand-back file -- existing, empty, a regular
+/// file, not a symlink -- so the run refuses loudly and the named file
+/// stays byte-identical.
+#[test]
+fn diverted_json_refuses_a_populated_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let precious = dir.path().join("precious.txt");
+    std::fs::write(&precious, "do not overwrite\n").unwrap();
+    let out = rpmcrab(&[
+        "--format",
+        "json",
+        "--__diverted-json",
+        precious.to_str().unwrap(),
+        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        out.stdout.is_empty(),
+        "no document may be delivered when the hand-back is refused, got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("writing the JSON report failed")
+            && stderr.contains("refusing the diverted report target"),
+        "the refusal must be reported on stderr, got: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&precious).unwrap(),
+        "do not overwrite\n",
+        "the forged target must stay byte-identical"
+    );
+}
+
+/// A forged flag naming a symlink is refused the same way: the write
+/// must never follow the link into a real file.
+#[test]
+#[cfg(unix)]
+fn diverted_json_refuses_a_symlink_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let precious = dir.path().join("precious.txt");
+    std::fs::write(&precious, "do not overwrite\n").unwrap();
+    let link = dir.path().join("link.json");
+    std::os::unix::fs::symlink(&precious, &link).unwrap();
+    let out = rpmcrab(&[
+        "--format",
+        "json",
+        "--__diverted-json",
+        link.to_str().unwrap(),
+        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("refusing the diverted report target") && stderr.contains("symlink"),
+        "the refusal must be reported on stderr, got: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&precious).unwrap(),
+        "do not overwrite\n",
+        "the link target must stay byte-identical"
+    );
+}
+
+/// A forged flag naming a path that does not exist must not create
+/// it: the hand-back file is always created by the parent, so there
+/// is no implicit creation on the write side.
+#[test]
+fn diverted_json_does_not_create_the_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("report.json");
+    let out = rpmcrab(&[
+        "--format",
+        "json",
+        "--__diverted-json",
+        missing.to_str().unwrap(),
+        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("writing the JSON report failed"),
+        "the refusal must be reported on stderr, got: {stderr}"
+    );
+    assert!(
+        !missing.exists(),
+        "a forged flag must not create its target file"
+    );
+}
+
+/// Even an empty regular file is refused when it is not owner-only:
+/// the parent's hand-back file is, so anything looser is not it.
+#[test]
+#[cfg(unix)]
+fn diverted_json_refuses_a_shared_empty_target() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let shared = dir.path().join("shared.json");
+    std::fs::write(&shared, "").unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let out = rpmcrab(&[
+        "--format",
+        "json",
+        "--__diverted-json",
+        shared.to_str().unwrap(),
+        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("refusing the diverted report target") && stderr.contains("owner-only"),
+        "the refusal must be reported on stderr, got: {stderr}"
+    );
+}
+
+/// The genuine hand-back shape -- an empty, owner-only regular file,
+/// exactly what the parent creates -- is accepted: the document lands
+/// in the file and stdout stays empty.
+#[test]
+#[cfg(unix)]
+fn diverted_json_accepts_a_fresh_handoff_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let handoff = dir.path().join("handoff.json");
+    std::fs::write(&handoff, "").unwrap();
+    std::fs::set_permissions(&handoff, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let out = rpmcrab(&[
+        "--format",
+        "json",
+        "--__diverted-json",
+        handoff.to_str().unwrap(),
+        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+    ]);
+    assert!(
+        out.stdout.is_empty(),
+        "the document goes to the hand-back file, not stdout, got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let written = std::fs::read_to_string(&handoff).unwrap();
+    let doc: serde_json::Value =
+        serde_json::from_str(&written).expect("the hand-back file holds the JSON document");
+    assert_eq!(doc["program"], "rpmcrab");
+}
+
+/// A config-selected JSON run emits each load warning exactly once:
+/// the parent holds its copies back when it hands the run to the
+/// child, and the child prints its own.
+#[test]
+fn format_json_from_config_prints_load_warnings_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = write_echo_spec(dir.path());
+    let cfg = dir.path().join("warn.toml");
+    std::fs::write(&cfg, "OutputFormat = \"json\"\nFlavor = \"bogus\"\n").unwrap();
+    let out = rpmcrab(&["-c", cfg.to_str().unwrap(), spec.to_str().unwrap()]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let doc: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout must be a single JSON document");
+    assert_eq!(doc["program"], "rpmcrab");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        stderr.matches("unknown Flavor").count(),
+        1,
+        "each load warning must be emitted once, got: {stderr}"
+    );
+}
+
+/// The invalid-`RUST_LOG` warning likewise comes from the child
+/// alone: a command-line-diverted run's parent never initialises its
+/// tracing subscriber, so it cannot print a first copy.
+#[test]
+fn format_json_prints_the_rust_log_warning_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = write_echo_spec(dir.path());
+    let out = rpmcrab_env(
+        &["--format", "json", spec.to_str().unwrap()],
+        &[("RUST_LOG", "!!")],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let doc: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout must be a single JSON document");
+    assert_eq!(doc["program"], "rpmcrab");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        stderr.matches("ignoring invalid RUST_LOG").count(),
+        1,
+        "the warning must be emitted once, got: {stderr}"
+    );
+}
+
+/// A diverted run delivers its document whatever the child's
+/// verdict: a non-zero exit is the ordinary lint outcome (here,
+/// `--strict` promotions), not a failed child, so the parent copies
+/// the report out and forwards the code unchanged.
+#[test]
+fn diverted_run_delivers_the_document_on_a_nonzero_verdict() {
+    let rpm = binaries_fixture_rpm();
+    let out = rpmcrab(&["--format", "json", "-s", rpm.to_str().unwrap()]);
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "the strict run must report a non-zero verdict"
+    );
+    let doc: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout))
+        .expect("the document is delivered on a non-zero verdict");
+    assert_eq!(doc["program"], "rpmcrab");
+    assert_eq!(
+        doc["summary"]["exit_code"].as_i64(),
+        out.status.code().map(i64::from),
+        "summary exit code matches the process"
+    );
+}
+
+/// A diverted child that fails has already explained itself on the
+/// forwarded stderr (here: a positional path that does not exist);
+/// the parent forwards its exit code without adding an "empty
+/// report" complaint of its own.
+#[test]
+fn diverted_child_failure_adds_no_parent_noise() {
+    let out = rpmcrab(&["--format", "json", "/no/such/package.rpm"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("does not exist"),
+        "the child's own explanation is forwarded, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("empty report"),
+        "the parent must not add noise to a child-explained failure, got: {stderr}"
+    );
+}
+
+/// If the diverted run's stderr fails mid-forward (`/dev/full`
+/// rejects every write at once), the parent keeps draining the
+/// child's stdout instead of abandoning the pipe: otherwise the
+/// pipe fills, the child wedges mid-print and the run hangs. The
+/// document must still land on stdout.
+#[test]
+#[cfg(unix)]
+fn diverted_run_survives_a_broken_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = write_loud_echo_spec(dir.path());
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rpmcrab"));
+    cmd.args(["--format", "json", spec.to_str().unwrap()])
+        .env("CONFIG_DISABLE_AUTOLOADING", "1")
+        .env_remove("COLUMNS")
+        .env_remove("NO_COLOR")
+        .env_remove("CLICOLOR")
+        .stderr(std::process::Stdio::from(
+            std::fs::File::create("/dev/full").expect("/dev/full is writable"),
+        ))
+        .stdout(std::process::Stdio::piped());
+    let out = cmd.output().expect("spawn rpmcrab");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let doc: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout must be a single JSON document");
+    assert_eq!(doc["program"], "rpmcrab");
+    assert_eq!(
+        doc["summary"]["exit_code"].as_i64(),
+        out.status.code().map(i64::from),
+        "summary exit code matches the process"
     );
 }
 
