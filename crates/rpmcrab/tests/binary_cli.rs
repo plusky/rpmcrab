@@ -812,6 +812,52 @@ fn format_json_emits_parseable_report() {
     assert!(summary.get("aborted").is_none(), "no abort flag: {summary}");
 }
 
+/// A spec can print to stdout while librpm parses it in-process:
+/// `%{echo:...}` prints there by definition (and macro lua `print` does
+/// the same). In JSON mode those prints must not corrupt the document --
+/// stdout stays a single parseable JSON document and the prints are
+/// diverted to stderr (#703; the Factory sweep captured the corruption
+/// for the real `bash` and `rspamd` specs).
+#[test]
+fn format_json_is_not_polluted_by_spec_echo() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = dir.path().join("json-stdout-probe.spec");
+    std::fs::write(
+        &spec,
+        "%global json_stdout_probe %{echo:RPMCRAB-JSON-STDOUT-PROBE}\n\
+         Name: json-stdout-probe\n\
+         Version: 1.0\n\
+         Release: 1\n\
+         Summary: probe\n\
+         License: MIT\n\
+         \n\
+         %description\n\
+         probe\n\
+         \n\
+         %prep\n\
+         %{echo:RPMCRAB-JSON-STDOUT-PROBE-PREP}\n\
+         \n\
+         %files\n",
+    )
+    .unwrap();
+    let out = rpmcrab(&["--format", "json", spec.to_str().unwrap()]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let doc: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout must be a single JSON document");
+    assert_eq!(doc["program"], "rpmcrab");
+    assert!(
+        !stdout.contains("RPMCRAB-JSON-STDOUT-PROBE"),
+        "spec prints leaked into the JSON stream: {stdout}"
+    );
+    // Where the platform's librpm expands the echo at all, the diverted
+    // prints land on stderr, still visible as diagnostics.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("RPMCRAB-JSON-STDOUT-PROBE"),
+        "diverted spec prints expected on stderr, got: {stderr}"
+    );
+}
+
 /// The findings in JSON mode are the same multiset as in text mode.
 #[test]
 fn format_json_matches_text_findings() {

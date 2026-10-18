@@ -496,6 +496,11 @@ plus, where one exists, a linked upstream issue.
   machine-readable output (upstream rpmlint#1156), so every consumer greps human text.
   A stable JSON stream is new surface, added without touching the text format
   (the `OutputFormat` config key selects it when the flag is absent).
+  The document is the only thing on stdout in this mode: librpm parses specs
+  in-process and a spec can print there while it is parsed (`%{echo:...}`,
+  macro lua `print`), so a JSON run is diverted through a child process whose
+  stdout is forwarded to stderr and which hands the rendered document back
+  through a file (#703).
 - **A real man page.** rpmlint has none (upstream #1077, open since 2023);
   rpmcrab ships one, generated from the CLI definition by `rpmcrab-gen`
   and drift-checked in CI.

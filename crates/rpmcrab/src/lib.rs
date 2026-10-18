@@ -183,6 +183,53 @@ pub fn cli_command() -> clap::Command {
 ///
 /// Exit-code semantics are part of the frozen compatibility contract (see
 /// `docs/DESIGN.md` §4.6); do not change the mapping without a ledger entry.
+/// Environment variable carrying the report path of a diverted JSON
+/// run; its presence marks the child half of the diversion (see
+/// [`divert_json_run`]).
+const JSON_REPORT_FILE_ENV: &str = "RPMCRAB_JSON_REPORT_FILE";
+
+/// Run a `--format json` report through a child process so the document
+/// is the only thing that reaches this process's stdout (#703).
+///
+/// librpm parses specs in-process, and a spec can print to the process's
+/// stdout while it is parsed -- `%{echo:...}` prints there by definition
+/// and macro lua `print` does the same -- ahead of the rendered document,
+/// corrupting it for any JSON consumer (the Factory sweep captured
+/// exactly that for the `bash` and `rspamd` specs). The crate forbids
+/// unsafe code, so the fd cannot be redirected in-process; instead the
+/// run re-executes itself with [`JSON_REPORT_FILE_ENV`] set, the child's
+/// stdout is forwarded to stderr (the prints stay visible as
+/// diagnostics), and the child writes the rendered report to the named
+/// file, which this parent copies to its own stdout once the child
+/// finishes. The child's exit code becomes the run's.
+///
+/// Returns `None` when the diversion could not be set up; the caller
+/// then runs in-process, as it did before the diversion existed.
+fn divert_json_run() -> Option<ExitCode> {
+    let exe = std::env::current_exe().ok()?;
+    let report = std::env::temp_dir().join(format!("rpmcrab-report-{}.json", std::process::id()));
+    let mut child = std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .env(JSON_REPORT_FILE_ENV, &report)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    let mut pipe = child.stdout.take()?;
+    let forwarder = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut pipe, &mut std::io::stderr());
+    });
+    let status = child.wait().ok()?;
+    let _ = forwarder.join();
+    if let Ok(bytes) = std::fs::read(&report) {
+        use std::io::Write;
+        let _ = std::io::stdout().write_all(&bytes);
+    }
+    let _ = std::fs::remove_file(&report);
+    Some(ExitCode::from(
+        u8::try_from(status.code().unwrap_or(1)).unwrap_or(1),
+    ))
+}
+
 pub fn run() -> ExitCode {
     // Progress reporting (upstream rpmlint#255): `tracing` events render on
     // stderr, so finding output on stdout is never perturbed. `RUST_LOG`
@@ -337,6 +384,23 @@ pub fn run() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // `--format json` promises a single JSON document on stdout, but
+    // librpm parses specs in-process and a spec can print to stdout while
+    // it is parsed (#703): the report goes through a diverted child so
+    // the document stays the only thing on this process's stdout. Text
+    // mode is untouched -- there the prints interleave exactly as the
+    // reference's do.
+    let format = resolve_output_format(cli.format.as_deref(), &cfg.output_format);
+    if format == "json" && std::env::var_os(JSON_REPORT_FILE_ENV).is_none() {
+        match divert_json_run() {
+            Some(code) => return code,
+            None => warn!(
+                color,
+                "warning: the JSON run could not be diverted; spec output may corrupt the report"
+            ),
+        }
+    }
+
     let start = Instant::now();
     let width = term::terminal_width();
     let checks = rpmcrab_core::check::load(&cfg, cli.checks.as_deref());
@@ -460,7 +524,6 @@ pub fn run() -> ExitCode {
     // The session banner identifies rpmcrab itself, not the emulated
     // reference (docs/DESIGN.md §4.5).
     let prog = "rpmcrab";
-    let format = resolve_output_format(cli.format.as_deref(), &lint.config().output_format);
     // `--format` dispatches through the pluggable renderers (text/json);
     // the text wire format is untouched, and the time report stays a
     // text-mode section. It is on by default (`-t`/`--time-report` remain
@@ -475,7 +538,18 @@ pub fn run() -> ExitCode {
         show_time_report,
         duration,
     );
-    print!("{out}");
+    // The child half of a diverted JSON run (#703) writes the document to
+    // the report file instead of stdout; the parent copies the file to
+    // the real stdout once the run is over. A failed write falls back to
+    // stdout -- a possibly-corrupted document beats none.
+    match std::env::var_os(JSON_REPORT_FILE_ENV) {
+        Some(path) if format == "json" => {
+            if std::fs::write(&path, &out).is_err() {
+                print!("{out}");
+            }
+        }
+        _ => print!("{out}"),
+    }
     ExitCode::from(u8::try_from(lint.exit_code()).unwrap_or(1))
 }
 
