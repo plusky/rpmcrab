@@ -131,8 +131,8 @@ missing-cf-protection="""
 The binary or shared library was built without x86 control-flow
 protection: its `.note.gnu.property` does not record both the IBT
 (indirect branch tracking) and SHSTK (shadow stack) features, and
-its code contains no `ENDBR64` instructions, so the CPU cannot
-enforce either feature at runtime. Rebuild with `%{optflags}`
+its `.text` contains no `ENDBR64` instructions, so at least one
+of the two features cannot be enforced at runtime. Rebuild with `%{optflags}`
 unmodified, which carries `-fcf-protection` on x86_64. This check
 only verifies absence: the property is merged over all link inputs,
 so code compiled with the flag whose property was cleared by an
