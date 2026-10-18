@@ -23,8 +23,8 @@ feature on.
 
 The build needs the RPM development headers, because `librpm-sys` runs bindgen
 (`pkg-config` must find `rpm.pc`): install `rpm-devel` (openSUSE) or
-`librpm-dev` (Debian/Ubuntu) first, and note that `librpm` is **Linux-only** —
-there is no macOS build. The enabled librpm `build` feature (for `Spec::parse`;
+`librpm-dev` (Debian/Ubuntu) first, and note that `librpm` is **Linux-only**.
+The enabled librpm `build` feature (for `Spec::parse`;
 see `crates/rpmcrab-core/Cargo.toml`) additionally pulls in `librpmbuild-sys`,
 whose bindgen step needs `popt.h`: install `popt-devel` (openSUSE) or
 `libpopt-dev` (Debian/Ubuntu) too. On Debian/Ubuntu `librpm-dev` already drags
