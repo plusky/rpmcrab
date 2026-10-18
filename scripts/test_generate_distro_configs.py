@@ -1644,5 +1644,62 @@ def test_strict_layer_is_not_vendored():
         assert "scoring.toml" in files, (flavor, files)
 
 
+def test_append_systemd_preset_packages_before_first_table_after_blank_line():
+    """The key lands at the end of the preamble, before the first table.
+
+    At the end of the document it would fall inside the trailing
+    [Descriptions] table and never reach the check. A blank line already
+    before the header separates the inserted block, so the block's own
+    leading blank line is dropped: exactly one blank line remains.
+    """
+    text = 'Version = 3\n\n[Descriptions]\nfoo = "x"\n'
+    out = gen.append_systemd_preset_packages(text, ["a", "b"])
+    assert out == (
+        'Version = 3\n'
+        '\n'
+        '# Packages allowed to ship systemd preset files (not from upstream;\n'
+        '# see SYSTEMD_PRESET_PACKAGES in scripts/generate-distro-configs.py).\n'
+        'SystemdPresetPackages = [\n'
+        '    "a",\n'
+        '    "b",\n'
+        ']\n'
+        '[Descriptions]\n'
+        'foo = "x"\n'
+    ), out
+
+
+def test_append_systemd_preset_packages_before_first_table_without_blank_line():
+    """No blank line before the header: the block brings its own, so the
+    key still starts a fresh paragraph instead of gluing onto the last
+    preamble line."""
+    text = 'Version = 3\n[Descriptions]\n'
+    out = gen.append_systemd_preset_packages(text, ["a"])
+    assert out == (
+        'Version = 3\n'
+        '\n'
+        '# Packages allowed to ship systemd preset files (not from upstream;\n'
+        '# see SYSTEMD_PRESET_PACKAGES in scripts/generate-distro-configs.py).\n'
+        'SystemdPresetPackages = [\n'
+        '    "a",\n'
+        ']\n'
+        '[Descriptions]\n'
+    ), out
+
+
+def test_append_systemd_preset_packages_appends_at_eof_without_table():
+    """A document with no table header gets the block at the end, and a
+    missing trailing newline at EOF is supplied first."""
+    block = (
+        '\n'
+        '# Packages allowed to ship systemd preset files (not from upstream;\n'
+        '# see SYSTEMD_PRESET_PACKAGES in scripts/generate-distro-configs.py).\n'
+        'SystemdPresetPackages = [\n'
+        '    "a",\n'
+        ']\n'
+    )
+    assert gen.append_systemd_preset_packages('Version = 3\n', ["a"]) == 'Version = 3\n' + block
+    assert gen.append_systemd_preset_packages('Version = 3', ["a"]) == 'Version = 3\n' + block
+
+
 if __name__ == "__main__":
     sys.exit(main())

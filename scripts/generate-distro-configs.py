@@ -2079,6 +2079,14 @@ def generate(ref_dir=None, pins=None):
                 # (openSUSE:Factory / openSUSE:Leap:16.0, both publicly
                 # queryable), so both flavors prune their stale paths.
                 text = prune_pie_paths(text, pie_pruned_log, flavor)
+            # The preset-package exemption (see
+            # SYSTEMD_PRESET_PACKAGES) lands in both flavors'
+            # opensuse.toml: unlike the extra filters below it is
+            # not gated on the flavor.
+            if filename == "opensuse.toml":
+                text = append_systemd_preset_packages(
+                    text, SYSTEMD_PRESET_PACKAGES
+                )
             # SLFO is currently excluded from the extra filters: the gate
             # below appends only for flavor=="opensuse", and the vendored
             # slfo/opensuse.toml has zero mingw hits. That exclusion is a
@@ -2090,10 +2098,6 @@ def generate(ref_dir=None, pins=None):
             # the reference effective SLFO config includes it for mingw
             # packages too. Extending this gate to the slfo flavor is the
             # natural fix; kept separate for review (follow-up to #412).
-            if filename == "opensuse.toml":
-                text = append_systemd_preset_packages(
-                    text, SYSTEMD_PRESET_PACKAGES
-                )
             if flavor == "opensuse" and filename == "opensuse.toml":
                 text = append_extra_filters(text, EXTRA_OPENSUSE_FILTERS)
                 # Same gate as the extra filters: SLFO's vendored config
