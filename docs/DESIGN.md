@@ -356,7 +356,7 @@ stored on findings, not rendered, not totalled, and no threshold exists.
 What survives of the `[Scoring]` machinery in the reference is a
 level-promotion override only: a check whose `[Scoring]` value is a
 **positive** number is promoted to `E`. A value of 0 or negative is
-inert — **configured badness never lowers a level** (the reference
+inert — **configured badness only ever promotes** (the reference
 downgrades an `E` to `W` at `Scoring` 0; that direction is removed
 outright). Findings not in `[Scoring]` keep their emitted level.
 `--strict` likewise only promotes (W/I print as `E`). Shipped
@@ -366,7 +366,7 @@ vendored scoring tables were dropped by #699.
 **`[SeverityOverrides]`** (finding name → `E`/`W`/`I` or long form, case-insensitive; upstream rpmlint#1335, no 2.10.0 counterpart) is the final word on a finding's level, applied **after** scoring and strict promotion:
 - The override rewrites the level only, in either direction.
 - `Filters` regexes and `--format json` see the overridden level: suppression matches on the post-override `level.letter()`, and JSON `level` is rendered from the rewritten finding.
-- There is no static registry of finding tags (checks emit them ad hoc), so a name that never matches an emitted finding is warned on stderr after the run — the typo signal — rather than rejected at load. A non-table `SeverityOverrides` value is a fatal configuration error, like every other table key.
+- Checks emit finding tags ad hoc, so a name that never matches an emitted finding is accepted at load and warned on stderr after the run — the typo signal. A non-table `SeverityOverrides` value is a fatal configuration error, like every other table key.
 
 ### 4.10 CLI flags
 
@@ -389,8 +389,8 @@ for `-v/--verbose`: the reference's long name survives in build
 infrastructure (OBS invokes `rpmlint --info`), so drop-in replacement
 requires it.
 **`--errors-only`** (upstream rpmlint#134) skips warning-only checks entirely,
-for post-build runs that only care about errors. CLI-only: there is no config-file
-key (the filter lives in check loading, `check::load_with`). The filter is a
+for post-build runs that only care about errors. CLI-only
+(the filter lives in check loading, `check::load_with`). The filter is a
 **static pre-scoring bound** on each check's declared `max_severity`
 (`BashismsCheck`, `ConfigFilesCheck`, `FHSCheck`, `SystemdInstallCheck`,
 `TmpFilesCheck` — every
@@ -419,8 +419,8 @@ flag breaks `rpmlint-mini` outright.
 ### 4.11 Flavors
 
 The reference maintains separate git branches for distribution flavors
-(`opensuse`, `opensuse-slfo-1.2`, `opensuse-slfo-main`). rpmcrab does not
-branch; flavor-specific behavior is controlled by a single config key.
+(`opensuse`, `opensuse-slfo-1.2`, `opensuse-slfo-main`). rpmcrab controls
+flavor-specific behavior with a single config key.
 
 - **Key:** `Flavor` (top-level TOML key, case-insensitive value).
 - **Values:** `"opensuse"` (default), `"slfo"`.
@@ -506,10 +506,10 @@ plus, where one exists, a linked upstream issue.
 Direction agreed in the RFC (#2), refined 2026-09-28: **divergence is not
 version-gated.** rpmcrab may diverge from rpmlint's findings whenever it makes
 sense — from the first check port — provided every departure is recorded in the
-ledger (§6) with justification. What does not move is the frozen output
-contract (§4): the wire format, exit codes, sort order and config semantics
-that consumers depend on. A change to *that* is a deliberate major-version
-decision, not a routine divergence.
+ledger (§6) with justification. The frozen output
+contract (§4) stays fixed: the wire format, exit codes, sort order and config
+semantics that consumers depend on. A change to *that* is a deliberate
+major-version decision.
 
 **Why the corpus still matters.** Relaxing the parity requirement does not make
 the corpus optional — it is what lets us *measure* per-check false-positive
@@ -520,7 +520,8 @@ ledger entry records the measured or argued reason.
 **Error-fast, but run to completion.** The goal is cold hard facts, not fuzzy
 warnings. Every check carries a **measured precision bar** (its FP rate on the
 corpus): what measures clean is promoted to error and fails the build; what
-does not is demoted or deleted. There is no permanent warning purgatory. But
+does not is demoted or deleted. Every warning is a transit state on the way
+to promotion or deletion. But
 the linter always **runs to completion** — the whole-report contract and the
 footer summary are frozen precisely so batch fixing works; aborting at the
 first error breaks that for no gain.
@@ -635,15 +636,15 @@ checks appears, revisit as an additive feature.
 
 ### 7.4 External tools
 
-Header, file-list and rpmdb reads go through **`librpm`** (§3.1), not a
-subprocess. **Payload extraction** is native pure-Rust code (`pkg/extract.rs`): container
+Header, file-list and rpmdb reads go through **`librpm`** (§3.1).
+**Payload extraction** is native pure-Rust code (`pkg/extract.rs`): container
 parse via the `rpm` crate, in-stream decompression (gzip/xz/zstd), direct newc
-cpio materialization — no `rpm2archive`/`tar` subprocess. The binding's
+cpio materialization. The binding's
 `archive::PackageReader` is unusable for compressed payloads (§3.1).
 ELF binary analysis uses the pure-Rust `goblin` crate (section/program
-headers, dynamic section, symbols) and `gimli` for DWARF, not `readelf`/`ldd`/
-`objdump` subprocesses — faster, no binutils dependency, and more reliable
-than text parsing. `checkbashisms`, `desktop-file-validate`, `appstreamcli`
+headers, dynamic section, symbols) and `gimli` for DWARF — in-process,
+faster, and more reliable than parsing subprocess text. `checkbashisms`,
+`desktop-file-validate`, `appstreamcli`
 and `file` are invoked as subprocesses on extracted files, matching rpmlint's
 own dependencies (they are already `Requires:` of the openSUSE package). All
 invocations go through shared quoting/path helpers with golden tests.
