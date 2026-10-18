@@ -155,6 +155,13 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "specfile-error"
+kind = "behaviour"
+reason = "A spec parse failure is reported once: when the rpm child query in _check_specfile_error has already reported the failure, the parse failure in _check_invalid_url does not add its fallback finding, whose detail is only the bare spec path. The reference reports both. In the #702 census of the 20261018 Factory sweep, 13,839 findings were this one failure reported twice (6,920 bare-path fallbacks against 6,919 child summaries over 6,815 packages)."
+since = "0.3.0"
+
+[[divergence]]
+case = "global"
 check = "obsolete-suse-version-check"
 kind = "behaviour"
 reason = "Fixed behaviour: the suse_version regex also matches the braced %{suse_version} form, which the frozen 2.10.0 reference's `%({\\?)?suse_version}?` misses (it only matches %suse_version and %{?suse_version})."

@@ -1053,8 +1053,8 @@ impl Check for SpecCheck {
             return;
         }
         if !self.mini_mode {
-            self.check_specfile_error(pkg, out);
-            self.check_invalid_url(pkg, out);
+            let specfile_error_reported = self.check_specfile_error(pkg, out);
+            self.check_invalid_url(pkg, out, specfile_error_reported);
         }
     }
 
@@ -1083,8 +1083,10 @@ impl Check for SpecCheck {
 
 impl SpecCheck {
     /// Parse the spec with the `rpm` tool and forward its diagnostics
-    /// (`SpecCheck.py:300-322`).
-    fn check_specfile_error(&self, pkg: &SpecPkg, out: &mut Filter) {
+    /// (`SpecCheck.py:300-322`). Returns whether any diagnostic was
+    /// forwarded as a `specfile-error`, so the caller can tell a parse
+    /// failure reported here from one only the spec parser saw.
+    fn check_specfile_error(&self, pkg: &SpecPkg, out: &mut Filter) -> bool {
         let spec_file = self.spec_file.as_deref().unwrap_or("");
         let define = format!("_sourcedir {}", self.spec_file_dir());
         // The reference lets a missing `rpm` raise here (no try/except around
@@ -1093,7 +1095,7 @@ impl SpecCheck {
         // checkbashisms entries -- and keeps a missing rpm from aborting the
         // whole run instead of one check.
         let Some(mut cmd) = self.rpm.command() else {
-            return;
+            return false;
         };
         let output = cmd
             .args(["-q", "--qf=", "-D", &define, "--specfile", spec_file])
@@ -1115,9 +1117,10 @@ impl SpecCheck {
                     "specfile-error",
                     &[&e.to_string()],
                 );
-                return;
+                return true;
             }
         };
+        let mut reported_error = false;
         for line in stderr.lines() {
             let line = line.trim();
             if line.is_empty() {
@@ -1135,16 +1138,18 @@ impl SpecCheck {
                 // (unknown tags for macros the parse environment lacks),
                 // not broken specs; at E they would fail about 40% of
                 // Factory under the #699 exit doctrine.
+                reported_error = true;
                 self.info(out, pkg, Level::Warning, "specfile-error", &[line]);
             }
         }
+        reported_error
     }
 
     /// Check `Source`/`Patch` URLs via the spec parser (`_check_invalid_url`).
     /// Uses librpm's `Spec::parse` — the same C parser the reference reaches
     /// through `TransactionSet().parseSpec` — so the expanded source URLs
     /// match.
-    fn check_invalid_url(&self, pkg: &SpecPkg, out: &mut Filter) {
+    fn check_invalid_url(&self, pkg: &SpecPkg, out: &mut Filter, specfile_error_reported: bool) {
         use librpm::build::SpecFlags;
         let spec_file = self.spec_file.as_deref().unwrap_or("");
         let _ = pkg_init();
@@ -1161,9 +1166,15 @@ impl SpecCheck {
         let _ = macros.pop("_sourcedir");
         let Some(parsed) = parsed else {
             // The reference also reports librpm's error text here, which
-            // `Spec::parse` does not surface (ledgered). The level is
-            // specfile-error's temporary W (issue #699, pending #702).
-            self.info(out, pkg, Level::Warning, "specfile-error", &[spec_file]);
+            // `Spec::parse` does not surface (ledgered). When the `rpm`
+            // child already reported this parse failure, that report is
+            // the only one: the fallback detail is the bare spec path,
+            // so emitting it too would state the same failure twice
+            // (ledgered). The level is specfile-error's temporary W
+            // (issue #699, pending #702).
+            if !specfile_error_reported {
+                self.info(out, pkg, Level::Warning, "specfile-error", &[spec_file]);
+            }
             return;
         };
         for src in parsed.sources() {
@@ -2661,6 +2672,58 @@ make install
         assert!(comment.is_empty(), "unexpected: {comment:?}");
     }
 
+    /// #702: one parse failure, one report. The `rpm` child's stderr
+    /// carries the parse diagnostics and the `can't parse` summary, so
+    /// the in-process parse failing on the same spec must not repeat
+    /// the failure with its bare-path fallback finding.
+    #[test]
+    fn specfile_error_not_duplicated_when_rpm_child_reports() {
+        let spec = "Name:           unterm\nVersion:        1.0\nRelease:        1\n\
+                    Summary:        unterm\nLicense:        MIT\n%if 0\n\n\
+                    %description\nunterm\n";
+        let results = run_with(spec, &Config::default());
+        let errors = lines_for(&results, "specfile-error");
+        assert!(
+            errors.iter().any(|l| l.contains("can't parse")),
+            "child summary missing: {errors:?}"
+        );
+        assert!(
+            errors.iter().all(|l| l.contains("error:")),
+            "bare-path fallback repeated the failure: {errors:?}"
+        );
+        assert_eq!(errors.len(), 2, "child lines only: {errors:?}");
+    }
+
+    /// #702: with no `rpm` tool the child reports nothing, so the
+    /// in-process parse failure keeps its fallback finding -- the dedup
+    /// must not silence the only report of the failure.
+    #[test]
+    fn specfile_error_fallback_fires_without_rpm() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unterm.spec");
+        std::fs::write(
+            &path,
+            "Name:           unterm\nVersion:        1.0\nRelease:        1\n\
+             Summary:        unterm\nLicense:        MIT\n%if 0\n\n\
+             %description\nunterm\n",
+        )
+        .unwrap();
+        let empty = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let pkg = SpecPkg::open(&path).unwrap();
+        let mut check = SpecCheck::with_tool_dir(&config, Some(empty.path()));
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_spec(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        let errors = lines_for(&results, "specfile-error");
+        assert_eq!(errors.len(), 1, "the lone fallback expected: {results:?}");
+        assert!(
+            errors[0].contains(&path.to_string_lossy().to_string()),
+            "fallback detail is the spec path: {}",
+            errors[0]
+        );
+    }
+
     /// `check_invalid_url` defines `_sourcedir`, parses the spec and
     /// pops the define, all against the process-global macro context.
     /// Run distinct specs through the check concurrently and require
@@ -2668,6 +2731,7 @@ make install
     /// `Source` URLs embed `%{_sourcedir}`, so a sibling worker's define
     /// leaking into a parse changes that parse's `invalid-url` lines and
     /// breaks the equality.
+
     #[test]
     fn parallel_spec_checks_match_serial_results() {
         const WORKERS: usize = 8;
