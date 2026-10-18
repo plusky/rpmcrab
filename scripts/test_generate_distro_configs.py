@@ -1492,14 +1492,16 @@ def test_drop_live_filters_drops_usr_local_line():
     """The dir-or-file-in-usr-local filter is dropped via
     DROP_LIVE_FILTERS (ruling in issue #583).
 
-    The check is a verbatim port of FilesCheck with a measured
-    misfire rate of 0/45 on the Factory corpus; the suppressed set
-    is two deliberate carriers (filesystem's %ghost /usr/local
+    The check is a port of FilesCheck with a measured misfire
+    rate of 0/45 on the Factory corpus; the suppressed set is
+    two deliberate carriers (filesystem's %ghost /usr/local
     skeleton tree, reproducible-faketools' /usr/local/bin
     PATH-shadowing wrappers) whose exceptions belong in per-package
-    rpmlintrc. The drop is unconditional -- the 45 findings
-    becoming visible is the point of this table. The line under
-    test is upstream's verbatim shape, padding and fossil comment
+    rpmlintrc. The drop is unconditional -- the findings becoming
+    visible is the point of this table; since the %ghost exemption
+    (issue #643) only reproducible-faketools' 25 real-payload
+    lines still fire (issue #654). The line under test is
+    upstream's verbatim shape, padding and fossil comment
     included.
     """
     text = (
