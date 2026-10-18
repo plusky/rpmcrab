@@ -6,6 +6,7 @@ complete -c rpmcrab -s j -l jobs -d 'Number of parallel worker threads for check
 complete -c rpmcrab -l checks -d 'Run only these checks (debug)' -r
 complete -c rpmcrab -l format -d 'Report output format: human-readable text (default) or machine-readable JSON (upstream rpmlint#1156). Overrides the `OutputFormat` config key' -r -f -a "text\t''
 json\t''"
+complete -c rpmcrab -l __diverted-json -d 'Hand-back file of a diverted JSON run; set only by the parent\'s re-exec (see `divert_json_run`). Hidden: not a user interface' -r -F
 complete -c rpmcrab -s V -l version -d 'Print version and exit'
 complete -c rpmcrab -s v -l verbose -l info -d 'Inline explanations (and re-raise internal errors)'
 complete -c rpmcrab -s p -l print-config -d 'Dump the merged configuration as TOML and exit'
