@@ -34,6 +34,7 @@
 
 use super::shared::scriptlets_for;
 use crate::check::{Check, add_info};
+use crate::checks::post::PostCheck;
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
@@ -141,8 +142,12 @@ const RESTART_VERBS: &[&str] = &[
     "start",
 ];
 
-/// Verbs of the legacy `service`/`rc*` command forms that (re)start a daemon.
-const LEGACY_RESTART_VERBS: &[&str] = &["restart", "start"];
+/// Verbs of the legacy `service`/`rc*` command forms that (re)start a
+/// daemon. `try-restart` and `condrestart` are the legacy spellings of
+/// the conditional restart (the `systemctl` list carries `try-restart`
+/// natively); both forms accept both spellings in the wild, so both
+/// lists carry both.
+const LEGACY_RESTART_VERBS: &[&str] = &["restart", "start", "try-restart", "condrestart"];
 
 /// `systemctl` options that consume the following token as their value;
 /// the verb scan steps over both tokens.
@@ -162,6 +167,8 @@ const SYSTEMCTL_VALUE_OPTIONS: &[&str] = &[
     "--kill-whom",
     "--lines",
     "-n",
+    "--output",
+    "-o",
 ];
 
 /// True for scriptlet tags whose bodies run during the install
@@ -173,11 +180,19 @@ fn scanned_scriptlet(tag: librpm::Tag) -> bool {
 
 /// The (re)start invocations in one scriptlet body, as trimmed lines.
 ///
-/// The scan is lexical and line-based: each line is split into command
-/// segments on `;`, `|` and `&`, and only a `systemctl`/`service`/`rc*`
-/// word in command position (after leading braces, shell keywords and
-/// environment assignments) counts, so comments, `echo` text and
-/// status/preset plumbing stay quiet. A body that mentions
+/// The scan is lexical and line-based, over the heredoc-blanked,
+/// quote-blanked form of the body (`PostCheck::without_heredoc_bodies`
+/// and `PostCheck::code_only`, the same pair `PostCheck` matches on):
+/// heredoc bodies are text the scriptlet writes out, not commands, and
+/// a `;`/`|`/`&` inside a quoted string or a comment does not split a
+/// command, so `cat <<EOF` payloads and `echo "a; systemctl restart
+/// foo"` stay quiet. Both transforms preserve the line count, so the
+/// scan zips 1:1 with the original lines and reports the original
+/// text. Each resulting line is split into command segments on `;`,
+/// `|` and `&`, and only a `systemctl`/`service`/`rc*` word in command
+/// position (after leading braces, shell keywords, a `case`-arm
+/// pattern and environment assignments) counts, so comments, `echo`
+/// text and status/preset plumbing stay quiet. A body that mentions
 /// `TRANSACTIONAL_UPDATE` is exempt as a whole: the packager gates the
 /// scriptlet on the update mechanism explicitly, and which lines the
 /// gate covers is not decidable lexically.
@@ -185,18 +200,15 @@ fn service_restarts_in_body(body: &str) -> Vec<String> {
     if body.contains("TRANSACTIONAL_UPDATE") {
         return Vec::new();
     }
+    let blanked = PostCheck::without_heredoc_bodies(body);
+    let coded = PostCheck::code_only(&blanked);
     let mut hits = Vec::new();
-    for raw_line in body.lines() {
+    for (raw_line, code_line) in body.lines().zip(coded.lines()) {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        // Strip a trailing comment (` #...` at a word boundary).
-        let code = match line.find(" #") {
-            Some(i) => &line[..i],
-            None => line,
-        };
-        for segment in code.split([';', '|', '&']) {
+        for segment in code_line.split([';', '|', '&']) {
             if segment_restarts(segment) {
                 hits.push(line.to_string());
                 break;
@@ -208,6 +220,7 @@ fn service_restarts_in_body(body: &str) -> Vec<String> {
 
 /// True when one command segment invokes a service (re)start.
 fn segment_restarts(segment: &str) -> bool {
+    let segment = skip_case_pattern(segment);
     let words: Vec<&str> = segment
         .split_whitespace()
         .map(|w| w.trim_matches(['{', '}', '(', ')', '"', '\'']))
@@ -239,11 +252,39 @@ fn segment_restarts(segment: &str) -> bool {
     // The legacy rc form is `rc<name> VERB`, invoked bare or by path.
     let base = command.rsplit('/').next().unwrap_or(command);
     if base.len() > 2 && base.starts_with("rc") {
+        // A path-qualified rc command only counts from a sbin
+        // directory, where the rc<service> links live; a same-shaped
+        // binary elsewhere (e.g. /usr/bin/rclone) is not an rc script.
+        // A bare rc<name> carries no path to judge and counts.
+        if command.contains('/') && !command.rsplit('/').nth(1).is_some_and(|dir| dir == "sbin") {
+            return false;
+        }
         return args
             .first()
             .is_some_and(|v| LEGACY_RESTART_VERBS.contains(v));
     }
     false
+}
+
+/// Skip a leading `case`-arm pattern (`*)`, `restart)`, `(start)`) in
+/// a command segment, returning the segment past it. The pattern is a
+/// single word ending in `)`; without the skip the pattern reads as
+/// the command word (`*`) and the arm's command is missed. A word
+/// containing a substitution, a backtick or an assignment is not a
+/// pattern (a `$(...)` command word keeps its old reading).
+fn skip_case_pattern(segment: &str) -> &str {
+    let trimmed = segment.trim_start();
+    let Some(first) = trimmed.split_whitespace().next() else {
+        return segment;
+    };
+    let core = first.strip_prefix('(').unwrap_or(first);
+    let Some(pattern) = core.strip_suffix(')') else {
+        return segment;
+    };
+    if pattern.is_empty() || pattern.contains(['(', ')', '$', '`', '=']) {
+        return segment;
+    }
+    trimmed[first.len()..].trim_start()
 }
 
 /// The verb of a `systemctl` invocation: the first non-option token,
@@ -990,6 +1031,36 @@ mod tests {
     }
 
     #[test]
+    fn verifyscript_restart_body_is_quiet_through_check() {
+        // Wiring pin for the %verifyscript exclusion: the scan loop in
+        // `check` must skip the tag, not just the predicate above.
+        // Deleting the guard makes this fixture fire once.
+        let pkg = fixture_pkg_named("atomic-verify-restart-1.0-1.noarch.rpm");
+        let mut check = check_with(&["/usr", "/etc"], &[], false);
+        let results = run(&mut check, &pkg);
+        assert!(
+            results
+                .iter()
+                .all(|(name, _)| name != "scriptlet-service-restart"),
+            "{results:?}"
+        );
+    }
+
+    #[test]
+    fn post_restart_body_fires_through_check() {
+        let pkg = fixture_pkg_named("atomic-post-restart-1.0-1.noarch.rpm");
+        let mut check = check_with(&["/usr", "/etc"], &[], false);
+        let results = run(&mut check, &pkg);
+        let hits: Vec<_> = results
+            .iter()
+            .filter(|(name, _)| name == "scriptlet-service-restart")
+            .collect();
+        assert_eq!(hits.len(), 1, "{results:?}");
+        assert!(hits[0].1.contains("%post"), "{}", hits[0].1);
+        assert!(hits[0].1.contains("restart"), "{}", hits[0].1);
+    }
+
+    #[test]
     fn bare_systemctl_restart_fires() {
         let hits = service_restarts(&[("%post", "/usr/bin/systemctl restart apache2.service\n")]);
         assert_eq!(hits.len(), 1);
@@ -1016,6 +1087,8 @@ mod tests {
             "systemctl --machine=host1 restart foo.service",
             "systemctl --machine host1 try-restart foo.service",
             "systemctl --root /srv/target restart foo.service",
+            "systemctl --output json restart foo.service",
+            "systemctl -o json restart foo.service",
         ] {
             assert_eq!(service_restarts_in_body(body).len(), 1, "{body}");
         }
@@ -1057,9 +1130,59 @@ fi
             "/sbin/service httpd start",
             "rchapache2 restart",
             "/usr/sbin/rchapache2 restart",
+            "rchapache2 try-restart",
+            "rchapache2 condrestart",
+            "service httpd condrestart",
+            "service httpd try-restart",
         ] {
             assert_eq!(service_restarts_in_body(body).len(), 1, "{body}");
         }
+    }
+
+    #[test]
+    fn non_sbin_rc_lookalike_is_quiet() {
+        // `rclone` is a file-sync tool, not an rc<service> link; the
+        // rc links live in sbin directories.
+        for body in ["/usr/bin/rclone restart", "/usr/bin/rclone start"] {
+            assert!(service_restarts_in_body(body).is_empty(), "{body}");
+        }
+    }
+
+    #[test]
+    fn heredoc_body_is_quiet() {
+        let body = "cat <<EOF\nsystemctl restart foo.service\nEOF\n";
+        assert!(service_restarts_in_body(body).is_empty());
+        let body = "cat <<'EOF'\nservice foo restart\nEOF\n";
+        assert!(service_restarts_in_body(body).is_empty());
+    }
+
+    #[test]
+    fn restart_after_heredoc_terminator_fires() {
+        let body = "cat <<EOF\nsome text\nEOF\nsystemctl restart foo.service\n";
+        assert_eq!(service_restarts_in_body(body).len(), 1);
+    }
+
+    #[test]
+    fn quoted_separator_text_is_quiet() {
+        for body in [
+            "echo \"a; systemctl restart foo.service\"",
+            "echo 'a; systemctl restart foo.service'",
+            "echo \"a | systemctl restart foo.service\"",
+        ] {
+            assert!(service_restarts_in_body(body).is_empty(), "{body}");
+        }
+    }
+
+    #[test]
+    fn case_arm_restart_fires() {
+        assert_eq!(
+            service_restarts_in_body("*) systemctl restart foo.service;;").len(),
+            1
+        );
+        let body = "case \"$1\" in\n*) systemctl restart foo.service;;\nesac\n";
+        assert_eq!(service_restarts_in_body(body).len(), 1, "{body}");
+        let body = "case \"$1\" in\nrestart) systemctl restart foo.service;;\nesac\n";
+        assert_eq!(service_restarts_in_body(body).len(), 1, "{body}");
     }
 
     #[test]

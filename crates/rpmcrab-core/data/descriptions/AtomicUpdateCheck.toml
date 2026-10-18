@@ -8,9 +8,10 @@ or inside /usr/local. This might become an issue upon removal of this
 package, but not during installation.
 """
 scriptlet-service-restart="""
-A scriptlet invokes a service (re)start directly (systemctl restart or
-start, service, or a legacy rc script) instead of using the
-distribution's service macros. During a transactional update the
+A scriptlet invokes a service (re)start directly (systemctl restart,
+try-restart, reload-or-restart or start, service with restart,
+try-restart or condrestart, or a legacy rc script) instead of using
+the distribution's service macros. During a transactional update the
 scriptlet runs inside the new snapshot with systemd offline, so the
 (re)start silently does nothing and the daemon keeps running its old
 code until the next reboot. Use the service macros, which defer the
