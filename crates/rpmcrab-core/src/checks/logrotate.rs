@@ -367,9 +367,7 @@ mod tests {
                 assert_eq!(hits.len(), 1, "case {log_path}: {rendered:?}");
                 assert_eq!(
                     hits[0],
-                    &format!(
-                        "logrotate-test.noarch: E: logrotate-log-dir-not-packaged {dir}"
-                    ),
+                    &format!("logrotate-test.noarch: E: logrotate-log-dir-not-packaged {dir}"),
                     "case {log_path}"
                 );
             } else {

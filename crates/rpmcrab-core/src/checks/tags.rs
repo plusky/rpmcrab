@@ -2638,10 +2638,7 @@ mod tests {
         let results = run_check(&pkg);
         let hits = tag_hits(&results, "invalid-version");
         assert_eq!(hits.len(), 1, "all: {results:?}");
-        assert_eq!(
-            hits[0].1,
-            "tags-badversion.noarch: E: invalid-version 0pre"
-        );
+        assert_eq!(hits[0].1, "tags-badversion.noarch: E: invalid-version 0pre");
     }
 
     #[test]
