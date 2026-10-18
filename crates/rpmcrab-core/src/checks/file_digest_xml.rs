@@ -780,9 +780,12 @@ fn validate_comment(content: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether `name` is a legal entity name. The reference builds its
-/// entity table with namespace processing on, so the name must be an
-/// `NCName`: the XML `Name` production without the colon.
+/// Whether `name` is a legal entity name. The reference parser for
+/// this check is raw expat, so the name follows expat's `Name`
+/// production, colon included: `ns:e` is a legal entity name.
+/// `xml.etree` enforces `NCName` at its own layer above expat and
+/// rejects such names; that divergence is deliberate and recorded in
+/// the parity ledger (`tests/parity/divergences.toml`).
 fn is_valid_entity_name(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
@@ -794,7 +797,7 @@ fn is_valid_entity_name(name: &str) -> bool {
 fn is_name_start_char(c: char) -> bool {
     matches!(
         c as u32,
-        0x5F | 0x41..=0x5A
+        0x3A | 0x5F | 0x41..=0x5A
             | 0x61..=0x7A
             | 0xC0..=0xD6
             | 0xD8..=0xF6
@@ -1232,12 +1235,21 @@ mod tests {
     fn entity_reference_names_are_validated_at_declaration() {
         // The reference rejects a reference whose name is not a legal
         // entity name while building its table, even when the holding
-        // entity is never used; termination alone is not enough.
-        for value in ["&;", "& b;", "&a b;", "&1a;", "&-a;", "&\u{b7}x;", "&ns:e;"] {
+        // entity is never used; termination alone is not enough. A
+        // colon in the name is legal: the governing production is
+        // expat's `Name`, not `NCName`.
+        for value in ["&;", "& b;", "&a b;", "&1a;", "&-a;", "&\u{b7}x;"] {
             let xml = format!("<!DOCTYPE r [<!ENTITY e \"{value}\">]><r/>");
             assert!(canon(&xml).is_err(), "{xml} must be rejected");
         }
-        for value in ["&ab;", "&a-b_c.d;", "&a\u{b7}b;", "&\u{e9}x;", "&#65;"] {
+        for value in [
+            "&ab;",
+            "&a-b_c.d;",
+            "&a\u{b7}b;",
+            "&\u{e9}x;",
+            "&#65;",
+            "&ns:e;",
+        ] {
             let xml = format!("<!DOCTYPE r [<!ENTITY e \"{value}\">]><r/>");
             assert!(canon(&xml).is_ok(), "{xml} must be accepted");
         }
@@ -1245,14 +1257,42 @@ mod tests {
 
     #[test]
     fn entity_declaration_names_are_validated() {
-        for name in ["1e", "ns:e"] {
+        for name in ["1e", "-e", ".e"] {
             let xml = format!("<!DOCTYPE r [<!ENTITY {name} \"v\">]><r/>");
             assert!(canon(&xml).is_err(), "{xml} must be rejected");
         }
-        for name in ["_e", "a-e", "e.x"] {
+        for name in ["_e", "a-e", "e.x", "ns:e"] {
             let xml = format!("<!DOCTYPE r [<!ENTITY {name} \"v\">]><r>&{name};</r>");
             assert!(canon(&xml).is_ok(), "{xml} must be accepted");
         }
+    }
+
+    #[test]
+    fn colon_entity_names_expand_like_raw_expat() {
+        // Raw expat accepts `<!ENTITY ns:e>` under its `Name`
+        // production, colons included, so the entity expands in text,
+        // in an attribute value and through another entity's value;
+        // the canonical bytes below are what the digest is computed
+        // over. `xml.etree` rejects the same document at its own
+        // layer (it enforces `NCName` above expat); that divergence
+        // is deliberate and recorded in the parity ledger.
+        assert_eq!(
+            canon("<!DOCTYPE r [<!ENTITY ns:e \"v\">]><r>&ns:e;</r>").unwrap(),
+            "<r>v</r>"
+        );
+        assert_eq!(
+            canon("<!DOCTYPE r [<!ENTITY ns:e \"v\">]><r x=\"&ns:e;\"/>").unwrap(),
+            "<r x=\"v\"></r>"
+        );
+        assert_eq!(
+            canon("<!DOCTYPE r [<!ENTITY ns:e \"v\"><!ENTITY e \"&ns:e;\">]><r>&e;</r>").unwrap(),
+            "<r>v</r>"
+        );
+        // A leading colon is a `NameStartChar` for expat too.
+        assert_eq!(
+            canon("<!DOCTYPE r [<!ENTITY :e \"v\">]><r>&:e;</r>").unwrap(),
+            "<r>v</r>"
+        );
     }
 
     #[test]

@@ -2036,6 +2036,17 @@ last</e></root>"#,
                 r#"<?xml version="1.1"?><r><e>x</e></r>"#,
                 "ad926dabb729569ba83458b620101122db2a154ebc4a8f1a217e81d95246a9bf",
             ),
+            // Deliberate divergence from `xml.etree`, recorded in
+            // tests/parity/divergences.toml: ET enforces `NCName` at
+            // its own layer and rejects `<!ENTITY ns:e>`, but raw
+            // expat -- the reference parser for this check -- accepts
+            // it under the `Name` production. The digest is the sha256
+            // of the canonical form `<r>v</r>`.
+            (
+                "entity-colon-name.xml",
+                r#"<!DOCTYPE r [<!ENTITY ns:e "v">]><r>&ns:e;</r>"#,
+                "df43b08df48d2b5b23e7b0e806d7e8d5ebeebd60192ccd0433964bd4dc48e7be",
+            ),
         ];
         for (name, xml, expected) in cases {
             let dir = std::env::temp_dir().join("rpmcrab-fd-xmlparity");
