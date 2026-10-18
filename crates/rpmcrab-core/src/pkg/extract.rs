@@ -3,13 +3,11 @@
 //!
 //! The container is parsed with the pure-Rust `rpm` crate (lead + signature and
 //! main headers; the reader is left positioned at the payload), the payload
-//! decompressed in-stream (gzip via flate2, xz via liblzma, zstd), and the SVR4
-//! newc cpio entries materialized directly. This replaces the old
-//! `rpm2archive - | tar -xz` (fallback `rpm2cpio | cpio -id`) subprocess, which
-//! dominated wall-clock time on large packages.
-//!
-//! bzip2 payloads are rejected with a clear error: no pure-Rust decoder is
-//! available and the last RPMs using bzip2 payloads predate 2010.
+//! decompressed in-stream (gzip via flate2, xz via liblzma, zstd, bzip2 via
+//! the bzip2 crate), and the SVR4 newc cpio entries materialized directly. This
+//! replaces the old `rpm2archive - | tar -xz` (fallback
+//! `rpm2cpio | cpio -id`) subprocess, which dominated wall-clock time on
+//! large packages.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
@@ -232,7 +230,7 @@ fn decoder<'a>(
         CompressionType::Gzip => Ok(Box::new(flate2::bufread::GzDecoder::new(stream))),
         CompressionType::Zstd => Ok(Box::new(zstd::stream::Decoder::new(stream)?)),
         CompressionType::Xz => Ok(Box::new(liblzma::bufread::XzDecoder::new(stream))),
-        other => Err(ExtractError::UnsupportedCompressor(*other)),
+        CompressionType::Bzip2 => Ok(Box::new(bzip2::bufread::BzDecoder::new(stream))),
     }
 }
 
@@ -1468,19 +1466,25 @@ mod tests {
         );
     }
 
-    /// bzip2 payloads have no pure-Rust decoder: the failure names the
-    /// compressor instead of failing obscurely mid-stream.
+    /// bzip2 payloads decode in-stream: current Factory packages (the
+    /// kernel family, deltarpm, rpm itself) still ship bzip2 payloads, so
+    /// rejecting the compressor made those packages unreadable. The stream
+    /// below is `b"hello bzip2 world\n" * 4` at level 9.
     #[test]
-    fn bzip2_payload_is_rejected_cleanly() {
-        let stream = std::io::BufReader::new(&b"BZh9fake"[..]);
-        let err = match decoder(stream, *b"BZh91a", &CompressionType::Bzip2) {
-            Ok(_) => panic!("bzip2 payload must be rejected"),
-            Err(e) => e,
-        };
-        assert!(matches!(
-            err,
-            ExtractError::UnsupportedCompressor(CompressionType::Bzip2)
-        ));
+    fn bzip2_payload_decodes() {
+        const STREAM: &[u8] = &[
+            66, 90, 104, 57, 49, 65, 89, 38, 83, 89, 142, 152, 140, 93, 0, 0, 15, 217, 128, 0, 16,
+            64, 0, 16, 0, 22, 100, 208, 144, 32, 0, 80, 128, 0, 1, 85, 9, 145, 178, 53, 50, 65,
+            146, 77, 18, 65, 241, 71, 78, 26, 20, 81, 194, 10, 63, 23, 114, 69, 56, 80, 144, 142,
+            152, 140, 93,
+        ];
+        let mut magic = [0u8; 6];
+        magic.copy_from_slice(&STREAM[..6]);
+        let stream = std::io::BufReader::new(&STREAM[6..]);
+        let mut reader = decoder(stream, magic, &CompressionType::Bzip2).unwrap();
+        let mut out = Vec::new();
+        reader.read_to_end(&mut out).unwrap();
+        assert_eq!(out, b"hello bzip2 world\n".repeat(4));
     }
 
     /// Regression: a symlink entry replacing an earlier regular file at the
