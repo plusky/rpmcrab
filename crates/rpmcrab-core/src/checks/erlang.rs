@@ -151,7 +151,12 @@ impl<'a> TermParser<'a> {
                 for _ in 0..len {
                     elems.push(self.parse_term()?);
                 }
-                // Tail; NIL is the common case.
+                // Tail; NIL is the common case. The tail is discarded,
+                // so an improper list decodes as its proper prefix and a
+                // 2-element improper list counts as a pair below.
+                // Impropriety is deliberately not modelled: OTP emits
+                // proper lists, so the difference is reachable only by
+                // crafted files.
                 let _tail = self.parse_term()?;
                 Some(Term::List(elems))
             }
@@ -201,6 +206,18 @@ impl<'a> TermParser<'a> {
     }
 }
 
+/// Whether the Python value pybeam decodes this term to could be a
+/// `dict()` key: atoms, binaries and the scalar `Other` terms are
+/// hashable, lists and maps are not, and a tuple is hashable only if
+/// every element is.
+fn is_hashable(term: &Term) -> bool {
+    match term {
+        Term::List(_) | Term::Map(_) => false,
+        Term::Tuple(elems) => elems.iter().all(is_hashable),
+        _ => true,
+    }
+}
+
 /// The compile info from a BEAM file: `(options, source)`.
 struct CompileInfo {
     options: Option<Vec<String>>,
@@ -247,29 +264,52 @@ fn read_compile_info(path: &str) -> Result<Option<CompileInfo>, String> {
         Term::List(items) => {
             let mut pairs = Vec::with_capacity(items.len());
             for item in items {
-                match item {
+                let (k, v) = match item {
                     Term::Tuple(mut elems) | Term::List(mut elems) if elems.len() == 2 => {
                         let v = elems.pop().unwrap();
                         let k = elems.pop().unwrap();
-                        pairs.push((k, v));
+                        (k, v)
                     }
                     // pybeam builds `dict(cinf)` from the list, and
                     // `dict()` accepts any 2-element sequence as a pair:
-                    // a 2-byte binary is a sequence of two integers,
-                    // which can never match an atom key, so it is kept
+                    // a 2-byte binary is a sequence of two integers and
+                    // a 2-character atom a sequence of two characters;
+                    // neither can match an atom key, so both are kept
                     // as a pair of opaque terms.
-                    Term::Binary(b) if b.len() == 2 => {
-                        pairs.push((Term::Other, Term::Other));
+                    Term::Binary(b) if b.len() == 2 => (Term::Other, Term::Other),
+                    Term::Atom(s) if s.chars().count() == 2 => (Term::Other, Term::Other),
+                    // A map is a sequence of its keys for `dict()`: a
+                    // 2-entry map element is the pair of its two keys,
+                    // and its values play no part.
+                    Term::Map(mut entries) if entries.len() == 2 => {
+                        let v = entries.pop().unwrap().0;
+                        let k = entries.pop().unwrap().0;
+                        (k, v)
                     }
                     // An element that is not a 2-element sequence
                     // raises in `dict(cinf)` there; the reference
                     // reports `pybeam-failed` for the file.
                     _ => return Err("compile info entry is not a pair".to_string()),
+                };
+                // `dict()` raises TypeError on an unhashable key (a
+                // list, a map, or a tuple holding one), so such a key
+                // is a parse failure here too.
+                if !is_hashable(&k) {
+                    return Err("compile info key is not hashable".to_string());
                 }
+                pairs.push((k, v));
             }
             pairs
         }
-        Term::Map(pairs) => pairs,
+        Term::Map(pairs) => {
+            // The top-level map form is held to the same key rule:
+            // pybeam builds a Python dict from the chunk, which raises
+            // on an unhashable key before the reference reads anything.
+            if pairs.iter().any(|(k, _)| !is_hashable(k)) {
+                return Err("compile info key is not hashable".to_string());
+            }
+            pairs
+        }
         // The chunk is present but holds no compile info structure:
         // pybeam raises when it builds a dict from such a term, so
         // this is a parse failure, not missed compile info.
@@ -749,7 +789,158 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let path = tmp.path().join("binpair.beam");
         std::fs::write(&path, beam_with_cinf(&t)).unwrap();
-        assert!(read_compile_info(path.to_str().unwrap()).is_ok());
+        let info = read_compile_info(path.to_str().unwrap())
+            .expect("2-byte binary entry is a pair")
+            .expect("compile info present");
+        // The opaque pair leaks nothing: its integer key matches no
+        // atom key, so neither options nor source is set.
+        assert!(info.options.is_none());
+        assert!(info.source.is_none());
+    }
+
+    /// The 3-byte binary is the negative boundary of the 2-byte case:
+    /// a 3-element sequence raises in `dict(cinf)`, so the chunk fails.
+    #[test]
+    fn three_byte_binary_compile_info_entry_fails() {
+        let mut t = vec![131];
+        // LIST_EXT, len 1
+        t.extend_from_slice(&[108, 0, 0, 0, 1]);
+        // BINARY_EXT, len 3
+        t.extend_from_slice(&[109, 0, 0, 0, 3, 1, 2, 3]);
+        t.push(106); // NIL tail
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("bin3.beam");
+        std::fs::write(&path, beam_with_cinf(&t)).unwrap();
+        assert_eq!(
+            read_compile_info(path.to_str().unwrap()).err().as_deref(),
+            Some("compile info entry is not a pair")
+        );
+    }
+
+    /// A 2-character atom element is a 2-element sequence for
+    /// `dict(cinf)` (`dict(['ab']) == {'a': 'b'}`), so it is accepted
+    /// as an opaque pair whose one-character halves match no atom key.
+    #[test]
+    fn two_char_atom_compile_info_entry_is_accepted() {
+        let mut t = vec![131];
+        // LIST_EXT, len 1
+        t.extend_from_slice(&[108, 0, 0, 0, 1]);
+        t.extend_from_slice(&[119, 2]); // SMALL_ATOM_UTF8_EXT "ab"
+        t.extend_from_slice(b"ab");
+        t.push(106); // NIL tail
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("atompair.beam");
+        std::fs::write(&path, beam_with_cinf(&t)).unwrap();
+        let info = read_compile_info(path.to_str().unwrap())
+            .expect("2-char atom entry is a pair")
+            .expect("compile info present");
+        assert!(info.options.is_none());
+        assert!(info.source.is_none());
+    }
+
+    /// A 2-entry map element is a pair of its two keys for `dict()`
+    /// (which iterates the map's keys); its values play no part, and
+    /// neither key here matches an atom key of interest.
+    #[test]
+    fn two_entry_map_compile_info_entry_is_accepted() {
+        let mut t = vec![131];
+        // LIST_EXT, len 1
+        t.extend_from_slice(&[108, 0, 0, 0, 1]);
+        // MAP_EXT, arity 2: {"ab" => 1, "cd" => 2}
+        t.extend_from_slice(&[116, 0, 0, 0, 2]);
+        t.extend_from_slice(&[119, 2]);
+        t.extend_from_slice(b"ab");
+        t.extend_from_slice(&[97, 1]); // SMALL_INTEGER_EXT
+        t.extend_from_slice(&[119, 2]);
+        t.extend_from_slice(b"cd");
+        t.extend_from_slice(&[97, 2]);
+        t.push(106); // NIL tail
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("mappair.beam");
+        std::fs::write(&path, beam_with_cinf(&t)).unwrap();
+        let info = read_compile_info(path.to_str().unwrap())
+            .expect("2-entry map entry is a pair")
+            .expect("compile info present");
+        assert!(info.options.is_none());
+        assert!(info.source.is_none());
+    }
+
+    /// A pair whose key `dict()` cannot hash (a list, or a list inside
+    /// the top-level map form) raises TypeError there, so the chunk
+    /// fails instead of the key being silently dropped by the
+    /// atom-key match.
+    #[test]
+    fn unhashable_compile_info_key_fails() {
+        // [{[1, 2], 3}]: a tuple pair with a list key.
+        let list_key_pair = {
+            let mut t = vec![131];
+            t.extend_from_slice(&[108, 0, 0, 0, 1]); // LIST_EXT, len 1
+            t.extend_from_slice(&[104, 2]); // SMALL_TUPLE_EXT arity 2
+            t.extend_from_slice(&[108, 0, 0, 0, 2]); // LIST_EXT, len 2
+            t.extend_from_slice(&[97, 1]);
+            t.extend_from_slice(&[97, 2]);
+            t.push(106); // NIL tail (key list)
+            t.extend_from_slice(&[97, 3]);
+            t.push(106); // NIL tail (outer list)
+            t
+        };
+        // {[1] => 2}: the map form with a list key.
+        let list_key_map = {
+            let mut t = vec![131];
+            t.extend_from_slice(&[116, 0, 0, 0, 1]); // MAP_EXT, arity 1
+            t.extend_from_slice(&[108, 0, 0, 0, 1]); // LIST_EXT, len 1
+            t.extend_from_slice(&[97, 1]);
+            t.push(106); // NIL tail (key list)
+            t.extend_from_slice(&[97, 2]);
+            t
+        };
+        for payload in [list_key_pair, list_key_map] {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let path = tmp.path().join("unhashable.beam");
+            std::fs::write(&path, beam_with_cinf(&payload)).unwrap();
+            assert_eq!(
+                read_compile_info(path.to_str().unwrap()).err().as_deref(),
+                Some("compile info key is not hashable"),
+                "payload {payload:?} must fail"
+            );
+        }
+    }
+
+    /// End to end: a BEAM file whose CInf chunk is not a pair list
+    /// surfaces from `check_binary` as exactly one `pybeam-failed` at
+    /// Error, not as missed compile info or silence.
+    #[test]
+    fn check_binary_reports_pybeam_failed_at_error() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let beam_path = tmp.path().join("bad.beam");
+        std::fs::write(
+            &beam_path,
+            beam_with_cinf(&compile_info_with_non_pair_term()),
+        )
+        .unwrap();
+        let rpm = format!(
+            "{}/../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut pkg =
+            Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture header");
+        pkg.files = vec![crate::pkg::pkgfile::PkgFile {
+            name: "/usr/lib/erlang/lib/foo/ebin/bad.beam".to_string(),
+            path: beam_path.to_string_lossy().into_owned(),
+            ..Default::default()
+        }];
+        let config = Config::default();
+        let mut check = ErlangCheck::new(&config);
+        let mut out = Filter::new(&config, crate::color::Color::for_tty(false)).unwrap();
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results();
+        assert_eq!(results.len(), 1, "exactly one finding: {results:?}");
+        assert_eq!(results[0].0, "pybeam-failed");
+        assert!(
+            results[0].1.contains(": E: pybeam-failed"),
+            "the finding renders at Error: {}",
+            results[0].1
+        );
     }
 
     /// A crafted CInf of nothing but nested SMALL_TUPLE wrappers used
