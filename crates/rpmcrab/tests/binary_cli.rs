@@ -10,6 +10,12 @@ fn rpmcrab(args: &[&str]) -> std::process::Output {
     cmd.args(args)
         // Hermetic: no XDG auto-load, no colour, no ambient COLUMNS.
         .env("CONFIG_DISABLE_AUTOLOADING", "1")
+        // Spelling suggestions must be reproducible across spawned
+        // processes: spellbook's ngram candidate set is not (issue
+        // #688), so the harness disables the ngram suggester in the
+        // spawned checker. Production runs leave the variable unset
+        // and keep the full suggestions.
+        .env("RPMCRAB_DISABLE_NGRAM_SUGGESTIONS", "1")
         .env_remove("COLUMNS")
         .env_remove("NO_COLOR")
         .env_remove("CLICOLOR");
