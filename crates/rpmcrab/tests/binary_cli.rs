@@ -142,16 +142,23 @@ fn unreadable_package_exits_three() {
 }
 
 /// A `.spec` input is linted through `check_spec` and counted in the
-/// footer as a specfile. A bare `Name:`-only spec draws error findings,
-/// so the run exits 64 (issue #699).
+/// footer as a specfile. A bare `Name:`-only spec fails to parse, which
+/// draws the specfile-error finding; that finding is temporarily W
+/// (issue #699 levelling, pending #702), so the run exits 0 while the
+/// levelling stands.
 #[test]
 fn spec_input_is_linted_and_counted() {
     let dir = tempfile::tempdir().unwrap();
     let spec = dir.path().join("thing.spec");
     std::fs::write(&spec, b"Name: thing\n").unwrap();
     let out = rpmcrab(&[spec.to_str().unwrap()]);
-    assert_eq!(out.status.code(), Some(64));
+    assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("specfile-error") || stderr.contains("specfile-error"),
+        "spec was not linted: stdout: {stdout} stderr: {stderr}"
+    );
     assert!(
         stdout.contains("0 packages and 1 specfiles checked"),
         "stdout: {stdout}"
