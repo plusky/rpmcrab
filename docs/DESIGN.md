@@ -291,6 +291,8 @@ promotion-sourced errors, which mattered only while genuine errors could
 pass). `-P/--permissive` remains as an explicit opt-in only: errors print
 but the run exits 0. `-s/--strict` remains as pure level promotion: W/I
 findings print as E and therefore fail with 64 like any other error.
+A config that still carries `BadnessThreshold` or `PermissiveByDefault`
+draws a warning on stderr and the key is ignored.
 
 | Situation | Code |
 |-----------|-----:|

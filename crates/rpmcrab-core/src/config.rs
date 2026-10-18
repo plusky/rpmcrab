@@ -124,6 +124,16 @@ impl Config {
         self.filters = self.get_strings("Filters")?;
         self.filter_titles = self.get_strings("FilterErrorTitles")?;
         self.blocked_filters = self.get_strings("BlockedFilters")?;
+        // Keys #699 removed (`BadnessThreshold`, `PermissiveByDefault`)
+        // are read by nothing, but a config that still carries one warns
+        // on stderr instead of going silently inert — the same
+        // warn-and-ignore treatment as `setBadness` and a non-table
+        // `Scoring` below.
+        for key in ["BadnessThreshold", "PermissiveByDefault"] {
+            if self.configuration.contains_key(key) {
+                eprintln!("warning: '{key}' has no effect since #699; ignoring it");
+            }
+        }
         // A present-but-non-table `Scoring`: the whole
         // map is ignored, with a warning. (A table's individual values are
         // coerced per finding at emit time; see the field docs.)
@@ -934,7 +944,8 @@ mod tests {
     fn permissive_by_default_key_is_inert_in_finalize() {
         // #699 removed PermissiveByDefault: the key is not read at all,
         // so even a string value (previously a fatal type error) passes
-        // finalize untouched and cannot enable a permissive default.
+        // finalize and cannot enable a permissive default. Its presence
+        // is warned about on stderr (pinned in binary_cli).
         for value in ["true", "false"] {
             let mut cfg = Config::default();
             cfg.configuration.insert(
@@ -1031,7 +1042,8 @@ mod tests {
     fn badness_threshold_key_is_inert() {
         // Issue #699: the threshold is gone. The key may still appear in a
         // user config; it is carried in the merged table but read by
-        // nothing, and a wrongly-typed value is not even warned about.
+        // nothing. Its presence is warned about on stderr, whatever the
+        // value's type (pinned in binary_cli).
         let cfg = config_with_toml("BadnessThreshold = \"abc\"\n[Scoring]\na = 7\n");
         assert_eq!(cfg.scoring.get("a"), Some(&toml::Value::Integer(7)));
     }
