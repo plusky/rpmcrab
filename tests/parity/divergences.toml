@@ -1044,7 +1044,7 @@ upstream = "https://github.com/plusky/rpmcrab/issues/479"
 case = "global"
 check = "XinetdDepCheck"
 kind = "behaviour"
-reason = "Deliberate config divergence: rpmcrab enables XinetdDepCheck in its bundled default config (crates/rpmcrab-core/data/configdefaults.toml) and in the vendored openSUSE flavour config (crates/rpmcrab-core/data/distro/opensuse/opensuse.toml, appended by EXTRA_OPENSUSE_CHECKS in scripts/generate-distro-configs.py). The reference lists the check in no shipped config -- neither its configdefaults.toml nor the openSUSE branch's opensuse.toml -- so it never runs there. The port implements the check and its message is the point (xinetd is obsolete; the replacement is a systemd socket unit), so it runs by default: packages requiring xinetd or shipping /etc/xinetd.d/ files now error, and the run header reports checks: 44 where the reference reports 43. The Fedora flavour config is untouched."
+reason = "Deliberate config divergence: rpmcrab enables XinetdDepCheck in its bundled default config (crates/rpmcrab-core/data/configdefaults.toml) and in the vendored openSUSE flavour config (crates/rpmcrab-core/data/distro/opensuse/opensuse.toml, appended by EXTRA_OPENSUSE_CHECKS in scripts/generate-distro-configs.py). The reference lists the check in no shipped config -- neither its configdefaults.toml nor the openSUSE branch's opensuse.toml -- so it never runs there. The port implements the check and its message is the point (xinetd is obsolete; the replacement is a systemd socket unit), so it runs by default: packages requiring xinetd or shipping /etc/xinetd.d/ files now error, and the run header reports checks: 45 where the reference reports 43. The Fedora flavour config is untouched."
 since = "0.3.0"
 
 [[divergence]]
