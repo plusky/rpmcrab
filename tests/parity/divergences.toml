@@ -1086,6 +1086,14 @@ upstream = "https://github.com/plusky/rpmcrab/issues/712"
 
 [[divergence]]
 case = "global"
+check = "AtomicUpdateCheck"
+kind = "behaviour"
+reason = "New `scriptlet-service-restart` warning with no reference counterpart: a scriptlet body (every kind except %verifyscript) that carries no TRANSACTIONAL_UPDATE guard and invokes systemctl with a restart, try-restart, reload-or-restart, try-reload-or-restart or start verb at command position — or the legacy service/rc* forms with restart or start — fires, with the scriptlet label and the offending line as detail. The reference's AtomicUpdateCheck docstring states that (re)starting daemons is not possible during a transactional update, but the reference implements no such rule (its AtomicUpdateCheck.py covers file placement only). On a transactional-update system scriptlets run inside the new snapshot with systemd offline, so a direct (re)start silently does nothing; the distribution macros stay silent because systemd-update-helper defers their service actions to the booted system. The scan is lexical and decidable: command position only (segment start, after shell keywords or assignments), comment lines and trailing comments ignored, and systemctl options plus their values are stepped over to reach the verb. Warning, not Error: on a classic system the restart works — only the transactional case no-ops. Where PostCheck's `daemon-activation` Error also applies (sh/bash/perl scriptlets under the general install-time activation policy), this warning adds the transactional-specific explanation rather than restating the policy error, and it is interpreter-agnostic, so macro-free bodies outside that scope are covered too. Pinned by unit tests in atomic_update.rs. Its staged `--explain` description lives in `crates/rpmcrab-core/data/descriptions/AtomicUpdateCheck.toml`."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/709"
+
+[[divergence]]
+case = "global"
 check = "SpecCheck"
 kind = "behaviour"
 reason = "Upstream rpmlint#554: a non-breaking space in %description bodies, Summary: tag lines and %changelog entries is harmless prose typesetting, not a syntax hazard, so the port no longer emits `non-break-space` there; the frozen 2.10.0 reference flags every spec line containing U+00A0 (SpecCheck.py:428-432). Code and scriptlet sections keep the warning."

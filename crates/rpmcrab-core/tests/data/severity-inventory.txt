@@ -302,6 +302,7 @@ requires-on-release = W
 rpath-in-buildconfig = E
 rpm-buildroot-usage = E
 script-without-shebang = E
+scriptlet-service-restart = W
 scriptlet-writes-outside-snapshot = W
 self-obsoletion = W
 selinux-incorrect-if-file-location = E
