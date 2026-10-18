@@ -7,3 +7,12 @@ The package contains ghosts outside the snapshot, e.g. outside /etc and /usr
 or inside /usr/local. This might become an issue upon removal of this
 package, but not during installation.
 """
+
+scriptlet-writes-outside-snapshot="""
+The package's install scriptlets write to a path outside the snapshot,
+e.g. under /var or /srv. On a transactional-update system that write is
+not part of the snapshot being installed: it takes effect immediately,
+outside the update, and is lost or inconsistent if the update is rolled
+back. Defer the change to the first boot of the new snapshot instead,
+e.g. with a tmpfiles.d entry or a first-boot service.
+"""

@@ -2,6 +2,14 @@
 //!
 //! Ported from `rpmlint/checks/AtomicUpdateCheck.py`. Two findings:
 //! `dir-or-file-outside-snapshot` (E) and `ghost-outside-snapshot` (W).
+//! A third finding, `scriptlet-writes-outside-snapshot` (W), has no
+//! reference counterpart (issue #708, ledgered in
+//! `tests/parity/divergences.toml`): the payload findings cannot see the
+//! writes an install scriptlet performs, and on a transactional-update
+//! system those writes land outside the snapshot being installed, so
+//! they take effect immediately and vanish or turn inconsistent on a
+//! rollback; the packaging guidelines require them deferred to the
+//! first boot of the new snapshot instead.
 //!
 //! Directory entries are exempt from the error: a shipped directory
 //! carries no payload that a snapshot switch could lose or leave
@@ -16,6 +24,7 @@
 //! `ConfigFilesCheck`: under the UsrEtc layout `/usr/etc` holds vendor
 //! defaults, so no file there may be marked `%config`.
 
+use super::shared::scriptlets_for;
 use crate::check::{Check, add_info};
 use crate::config::Config;
 use crate::filter::Filter;
@@ -75,6 +84,23 @@ impl AtomicUpdateCheck {
         let allowed = self.allowed_dirs.iter().any(|d| path.starts_with(d));
         let disallowed = self.disallowed_subdirs.iter().any(|d| path.starts_with(d));
         allowed && !disallowed
+    }
+
+    /// True when a scriptlet write target lies outside the snapshot.
+    /// A bare prefix names the directory itself (`mkdir /var`,
+    /// `touch /run`), which a payload path never does, so the prefix
+    /// test treats the bare form as under itself; runtime filesystems
+    /// (TRANSIENT_PREFIXES) are never outside.
+    fn scriptlet_target_outside(&self, path: &str) -> bool {
+        let under = |prefix: &str| path == prefix.trim_end_matches('/') || path.starts_with(prefix);
+        if TRANSIENT_PREFIXES.iter().any(|p| under(p))
+            || SANCTIONED_PREFIXES.iter().any(|p| under(p))
+        {
+            return false;
+        }
+        let allowed = self.allowed_dirs.iter().any(|d| under(d));
+        let disallowed = self.disallowed_subdirs.iter().any(|d| under(d));
+        !(allowed && !disallowed)
     }
 }
 
@@ -137,7 +163,534 @@ impl Check for AtomicUpdateCheck {
                 }
             }
         }
+        for slot in scriptlets_for(pkg, &SCRIPTLET_LABELS) {
+            if !is_shell_prog(&slot.prog) {
+                continue;
+            }
+            for target in scan_scriptlet(&slot.body) {
+                if self.scriptlet_target_outside(&target) {
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "scriptlet-writes-outside-snapshot",
+                        &[slot.label, &target],
+                    );
+                }
+            }
+        }
     }
+}
+
+/// The scriptlet slots this check scans: the install scriptlets that run
+/// inside the update transaction. Trigger and verify scriptlets are out of
+/// scope: triggers also run for other packages' changes, and verify
+/// scriptlets do not install anything.
+const SCRIPTLET_LABELS: [&str; 6] = [
+    "%pre",
+    "%post",
+    "%preun",
+    "%postun",
+    "%pretrans",
+    "%posttrans",
+];
+
+/// Runtime filesystems and their legacy spellings (`/var/run` and
+/// `/var/tmp` are the pre-systemd names of `/run` and the tmpfiles-managed
+/// part of `/var`). Paths here are not snapshot subvolumes at all, so a
+/// write to them is runtime state by definition, not a snapshot escape.
+/// Corpus evidence (issue #708 measurement): the apache2 family touches
+/// `/var/run/httpd.restart.flag` from %postun/%posttrans as its restart
+/// hand-off; flagging that spelling of `/run` would be a false positive.
+const TRANSIENT_PREFIXES: &[&str] = &[
+    "/dev/",
+    "/proc/",
+    "/sys/",
+    "/run/",
+    "/tmp/",
+    "/var/run/",
+    "/var/tmp/",
+];
+
+/// The distro's deferred-notification spool: files dropped in
+/// `/var/adm/update-messages/` are displayed to the user by the updater
+/// after the transaction. Dropping a notice there is the sanctioned way
+/// to communicate across an update, not a state change escaping the
+/// snapshot. Corpus evidence (issue #708 measurement): every firer under
+/// `/var/adm/` outside this spool is a genuine state write, and every
+/// spool write sampled is a notice file. The sibling
+/// `/var/adm/update-scripts/` is NOT carved out: the corpus shows it
+/// used as scriptlet scratch state within one transaction (cyrus-sasl
+/// generates, executes and deletes a migration script there), which is
+/// exactly the pattern this finding exists to catch.
+const SANCTIONED_PREFIXES: &[&str] = &["/var/adm/update-messages/"];
+
+/// Write commands whose every path argument is a target.
+const WRITE_EVERY_ARG: &[&str] = &["mkdir", "touch", "rm", "rmdir", "tee"];
+/// Write commands whose target is the last path argument (the rest are
+/// sources).
+const WRITE_LAST_ARG: &[&str] = &["cp", "mv", "ln"];
+/// Shell keywords that leave the next word in command position.
+const SHELL_KEYWORDS: &[&str] = &[
+    "if", "then", "else", "elif", "while", "until", "do", "!", "time",
+];
+
+/// True when the interpreter string names a POSIX shell. An empty string
+/// (the header carries no `-p`) means rpm's default, `/bin/sh`.
+/// Non-shell scriptlets (lua, perl, python, prog-only `/sbin/ldconfig`,
+/// ...) are not scanned: the tokeniser below speaks shell, and judging
+/// another language's text by shell rules would invent findings.
+fn is_shell_prog(prog: &str) -> bool {
+    let prog = prog.trim();
+    if prog.is_empty() || prog == "(none)" {
+        return true;
+    }
+    let first = prog.split_whitespace().next().unwrap_or("");
+    let base = first.rsplit('/').next().unwrap_or(first);
+    base == "sh" || base == "bash"
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokKind {
+    Word,
+    Op,
+    Sep,
+}
+
+#[derive(Debug, Clone)]
+struct Tok {
+    kind: TokKind,
+    text: String,
+    /// The word contains an unquoted `$`, backtick or `%{`/`%(`: its value
+    /// is computed at install time, so it is not a literal path.
+    dynamic: bool,
+}
+
+/// Blank heredoc bodies: their lines are data for the command reading
+/// them, not commands. The `<<DELIM` line itself is kept.
+fn blank_heredocs(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut delim: Option<String> = None;
+    for line in text.split('\n') {
+        if let Some(d) = &delim {
+            if line.trim() == d || line.trim_start_matches('\t') == d.as_str() {
+                delim = None;
+            }
+            out.push('\n');
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+        // Find a heredoc opener: `<<` (not `<<<`), optional `-`, optional
+        // quote, then the delimiter word.
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i + 1 < chars.len() {
+            if chars[i] == '<' && chars[i + 1] == '<' {
+                if i + 2 < chars.len() && chars[i + 2] == '<' {
+                    break; // herestring, no body follows
+                }
+                let mut j = i + 2;
+                if j < chars.len() && chars[j] == '-' {
+                    j += 1;
+                }
+                while j < chars.len() && (chars[j] == ' ' || chars[j] == '\t') {
+                    j += 1;
+                }
+                if j < chars.len() && (chars[j] == '\'' || chars[j] == '"') {
+                    j += 1;
+                }
+                let start = j;
+                while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+                    j += 1;
+                }
+                if j > start {
+                    delim = Some(chars[start..j].iter().collect());
+                }
+                break;
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+/// A small shell tokeniser: words (quotes removed, contents kept, as the
+/// shell builds them), redirection operators and command separators.
+/// This is deliberately not a shell parser: it recognises exactly the
+/// constructs the scan below matches on, nothing more.
+fn tokenize(text: &str) -> Vec<Tok> {
+    let text = blank_heredocs(text);
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut toks = Vec::new();
+    let mut word: Vec<char> = Vec::new();
+    let mut dynamic = false;
+    let mut in_word = false;
+    let mut i = 0;
+
+    macro_rules! flush {
+        () => {
+            if in_word {
+                toks.push(Tok {
+                    kind: TokKind::Word,
+                    text: word.iter().collect(),
+                    dynamic,
+                });
+                word = Vec::new();
+                dynamic = false;
+                in_word = false;
+            }
+        };
+    }
+
+    #[derive(PartialEq, Clone, Copy)]
+    enum Quote {
+        None,
+        Single,
+        Double,
+    }
+    let mut quote = Quote::None;
+
+    while i < n {
+        let c = chars[i];
+        match quote {
+            Quote::Single => {
+                if c == '\'' {
+                    quote = Quote::None;
+                } else {
+                    word.push(c);
+                }
+                i += 1;
+                continue;
+            }
+            Quote::Double => {
+                if c == '"' {
+                    quote = Quote::None;
+                    i += 1;
+                    continue;
+                }
+                if c == '\\' && i + 1 < n && matches!(chars[i + 1], '"' | '$' | '`' | '\\') {
+                    word.push(chars[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if c == '$' || c == '`' {
+                    dynamic = true;
+                }
+                word.push(c);
+                i += 1;
+                continue;
+            }
+            Quote::None => {}
+        }
+        match c {
+            '\'' => {
+                quote = Quote::Single;
+                in_word = true;
+                i += 1;
+            }
+            '"' => {
+                quote = Quote::Double;
+                in_word = true;
+                i += 1;
+            }
+            '\\' if i + 1 < n => {
+                word.push(chars[i + 1]);
+                in_word = true;
+                i += 2;
+            }
+            '#' if !in_word => {
+                while i < n && chars[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '$' | '`' => {
+                dynamic = true;
+                word.push(c);
+                in_word = true;
+                i += 1;
+            }
+            '%' if i + 1 < n && (chars[i + 1] == '{' || chars[i + 1] == '(') => {
+                dynamic = true;
+                word.push(c);
+                in_word = true;
+                i += 1;
+            }
+            ' ' | '\t' | '\r' => {
+                flush!();
+                i += 1;
+            }
+            '\n' | ';' => {
+                flush!();
+                toks.push(Tok {
+                    kind: TokKind::Sep,
+                    text: ";".to_string(),
+                    dynamic: false,
+                });
+                i += 1;
+            }
+            '|' => {
+                flush!();
+                if i + 1 < n && chars[i + 1] == '|' {
+                    toks.push(Tok {
+                        kind: TokKind::Sep,
+                        text: "||".to_string(),
+                        dynamic: false,
+                    });
+                    i += 2;
+                } else {
+                    toks.push(Tok {
+                        kind: TokKind::Sep,
+                        text: "|".to_string(),
+                        dynamic: false,
+                    });
+                    i += 1;
+                }
+            }
+            '&' => {
+                flush!();
+                if i + 1 < n && chars[i + 1] == '&' {
+                    toks.push(Tok {
+                        kind: TokKind::Sep,
+                        text: "&&".to_string(),
+                        dynamic: false,
+                    });
+                    i += 2;
+                } else if i + 1 < n && chars[i + 1] == '>' {
+                    toks.push(Tok {
+                        kind: TokKind::Op,
+                        text: "&>".to_string(),
+                        dynamic: false,
+                    });
+                    i += 2;
+                } else {
+                    toks.push(Tok {
+                        kind: TokKind::Sep,
+                        text: "&".to_string(),
+                        dynamic: false,
+                    });
+                    i += 1;
+                }
+            }
+            '(' | ')' => {
+                flush!();
+                toks.push(Tok {
+                    kind: TokKind::Sep,
+                    text: c.to_string(),
+                    dynamic: false,
+                });
+                i += 1;
+            }
+            '>' | '<' => {
+                // An all-digits pending word is the fd of the redirect.
+                let mut op = String::new();
+                if in_word && word.iter().all(|d| d.is_ascii_digit()) {
+                    op = word.iter().collect();
+                    word = Vec::new();
+                    dynamic = false;
+                    in_word = false;
+                } else {
+                    flush!();
+                }
+                op.push(c);
+                let mut j = i + 1;
+                if j < n && chars[j] == c {
+                    op.push(c);
+                    j += 1;
+                }
+                if j < n && chars[j] == '&' {
+                    op.push('&');
+                    j += 1;
+                }
+                toks.push(Tok {
+                    kind: TokKind::Op,
+                    text: op,
+                    dynamic: false,
+                });
+                i = j;
+            }
+            _ => {
+                word.push(c);
+                in_word = true;
+                i += 1;
+            }
+        }
+    }
+    if in_word {
+        toks.push(Tok {
+            kind: TokKind::Word,
+            text: word.iter().collect(),
+            dynamic,
+        });
+    }
+    toks
+}
+
+fn is_literal(tok: &Tok) -> bool {
+    !tok.dynamic && !tok.text.contains("%{") && !tok.text.contains("%(")
+}
+
+/// An assignment word (`NAME=value`) in command position leaves the next
+/// word in command position.
+fn is_assignment(word: &str) -> bool {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    for c in chars {
+        if c == '=' {
+            return true;
+        }
+        if !(c.is_ascii_alphanumeric() || c == '_') {
+            return false;
+        }
+    }
+    false
+}
+
+/// The literal absolute-path targets of the write constructs in one
+/// scriptlet body, in first-seen order, de-duplicated. Two decidable
+/// classes (issue #708):
+///
+/// - C1: a redirection operator whose target word is a literal absolute
+///   path (`> /var/log/x`, `cat >> /srv/data/f`, `2> /var/log/err`).
+/// - C2: a write command in command position with literal absolute path
+///   arguments: `mkdir`/`touch`/`rm`/`rmdir`/`tee` (every path argument),
+///   `cp`/`mv`/`ln` (the last path argument -- the rest are sources),
+///   `install` (every path argument with `-d`, the last one without, the
+///   `-t`/`--target-directory` directory in both modes), `dd` (its `of=`
+///   argument).
+///
+/// Everything else is out of scope by construction: dynamic targets
+/// (`$var`, `%{...}`), relative paths, read-only references, metadata
+/// commands (`chmod`, `chown`), in-place editors (`sed -i`) and
+/// tool-implied writes name no decidable literal target here.
+fn scan_scriptlet(body: &str) -> Vec<String> {
+    let toks = tokenize(body);
+    let mut targets: Vec<String> = Vec::new();
+    let mut push = |t: &str| {
+        if !targets.iter().any(|x| x == t) {
+            targets.push(t.to_string());
+        }
+    };
+    let mut cmd_pos = true;
+    let mut i = 0;
+    while i < toks.len() {
+        let tok = &toks[i];
+        match tok.kind {
+            TokKind::Sep => {
+                cmd_pos = true;
+                i += 1;
+            }
+            TokKind::Op => {
+                // Only output redirects name a written file; an input
+                // redirect (`< /var/lib/data`) reads its target.
+                let core = tok.text.trim_start_matches(|c: char| c.is_ascii_digit());
+                let output = core.starts_with('>') || core.starts_with("&>");
+                if output && i + 1 < toks.len() && toks[i + 1].kind == TokKind::Word {
+                    let w = &toks[i + 1];
+                    if is_literal(w) && w.text.starts_with('/') {
+                        push(&w.text);
+                    }
+                    i += 2;
+                    cmd_pos = false;
+                } else {
+                    i += 1;
+                }
+            }
+            TokKind::Word => {
+                if !cmd_pos {
+                    i += 1;
+                    continue;
+                }
+                let base = tok.text.rsplit('/').next().unwrap_or(&tok.text);
+                if SHELL_KEYWORDS.contains(&tok.text.as_str()) || is_assignment(&tok.text) {
+                    i += 1;
+                    continue;
+                }
+                let known = WRITE_EVERY_ARG.contains(&base)
+                    || WRITE_LAST_ARG.contains(&base)
+                    || base == "install"
+                    || base == "dd";
+                if !known {
+                    cmd_pos = false;
+                    i += 1;
+                    continue;
+                }
+                // Gather argv (the consecutive words).
+                let mut args: Vec<&Tok> = Vec::new();
+                let mut j = i + 1;
+                while j < toks.len() && toks[j].kind == TokKind::Word {
+                    args.push(&toks[j]);
+                    j += 1;
+                }
+                let plain: Vec<&&Tok> = args.iter().filter(|a| !a.text.starts_with('-')).collect();
+                let mut cands: Vec<&Tok> = Vec::new();
+                // `--target-directory=DIR` (install/cp/mv long form).
+                for a in &args {
+                    if let Some(dir) = a.text.strip_prefix("--target-directory=") {
+                        let owned = Tok {
+                            kind: TokKind::Word,
+                            text: dir.to_string(),
+                            dynamic: a.dynamic,
+                        };
+                        if is_literal(&owned) && owned.text.starts_with('/') {
+                            push(&owned.text);
+                        }
+                    }
+                }
+                if WRITE_EVERY_ARG.contains(&base) {
+                    cands.extend(plain.iter().copied());
+                } else if WRITE_LAST_ARG.contains(&base) {
+                    if let Some(last) = plain.last() {
+                        cands.push(last);
+                    }
+                } else if base == "install" {
+                    let dir_mode = args
+                        .iter()
+                        .any(|a| a.text == "-d" || a.text == "--directory");
+                    // With `-t DIR` every operand is a source; the `-t`
+                    // loop below names the directory itself.
+                    let has_t = args.iter().any(|a| {
+                        a.text == "-t"
+                            || a.text == "--target-directory"
+                            || a.text.starts_with("--target-directory=")
+                    });
+                    if dir_mode {
+                        cands.extend(plain.iter().copied());
+                    } else if !has_t && let Some(last) = plain.last() {
+                        cands.push(last);
+                    }
+                    for (k, a) in args.iter().enumerate() {
+                        if a.text == "-t"
+                            && let Some(t) = args.get(k + 1)
+                        {
+                            cands.push(t);
+                        }
+                    }
+                } else if base == "dd" {
+                    for a in &args {
+                        if let Some(of) = a.text.strip_prefix("of=")
+                            && !a.dynamic
+                            && of.starts_with('/')
+                        {
+                            push(of);
+                        }
+                    }
+                }
+                for tg in cands {
+                    if is_literal(tg) && tg.text.starts_with('/') {
+                        push(&tg.text);
+                    }
+                }
+                i = j;
+                cmd_pos = false;
+            }
+        }
+    }
+    targets
 }
 
 #[cfg(test)]
@@ -606,5 +1159,223 @@ mod tests {
             ..Default::default()
         };
         let _ = AtomicUpdateCheck::new(&config);
+    }
+
+    /// The scan layer is verdict-free: it returns literal targets in
+    /// first-seen order; `scriptlet_target_outside` decides which of
+    /// them are findings. Cases pin one construct each: the firing
+    /// classes (C1 redirects, C2 write commands) and the near-miss
+    /// negatives (dynamic targets, quoted/comment/heredoc text,
+    /// non-command positions, out-of-scope commands).
+    #[test]
+    fn scan_scriptlet_cases() {
+        let cases: &[(&str, &[&str])] = &[
+            // C2: every-arg commands.
+            ("mkdir /var/lib/foo", &["/var/lib/foo"]),
+            (
+                "mkdir -p /var/lib/foo /srv/bar",
+                &["/var/lib/foo", "/srv/bar"],
+            ),
+            ("rm -rf /var/lib/foo", &["/var/lib/foo"]),
+            ("rmdir /var/lib/foodir", &["/var/lib/foodir"]),
+            ("touch /var/lib/flag", &["/var/lib/flag"]),
+            (
+                "tee /var/log/x /var/log/y < /dev/null",
+                &["/var/log/x", "/var/log/y"],
+            ),
+            ("/usr/bin/mkdir /var/lib/abs", &["/var/lib/abs"]),
+            ("mkdir '/var/lib/single'", &["/var/lib/single"]),
+            ("mkdir \"/var/lib/quoted\"", &["/var/lib/quoted"]),
+            ("mkdir /var/lib/with\\ space", &["/var/lib/with space"]),
+            // C2: last-arg commands. The scan names the destination
+            // even when the source is the outside path; the verdict
+            // layer is what keeps an inside destination quiet.
+            ("cp /usr/share/a /var/lib/b", &["/var/lib/b"]),
+            ("cp /var/lib/a /usr/share/b", &["/usr/share/b"]),
+            ("mv /tmp/a /opt/b", &["/opt/b"]),
+            ("ln -s /usr/share/a /var/lib/link", &["/var/lib/link"]),
+            ("ln -s /var/lib/a /usr/share/link", &["/usr/share/link"]),
+            // C2: install modes and dd.
+            ("install -d /var/lib/foo", &["/var/lib/foo"]),
+            ("install -m644 /usr/share/a /var/lib/b", &["/var/lib/b"]),
+            ("install -t /var/lib/dir /usr/share/a", &["/var/lib/dir"]),
+            (
+                "install --target-directory=/srv/dir /usr/share/a",
+                &["/srv/dir"],
+            ),
+            ("dd if=/dev/zero of=/var/lib/img bs=1M", &["/var/lib/img"]),
+            ("dd if=/var/lib/src of=/dev/null", &["/dev/null"]),
+            // C1: redirects, incl. fd-prefixed and command-free forms.
+            ("echo seed > /var/lib/seed", &["/var/lib/seed"]),
+            ("cat /usr/share/x >> /srv/data/f", &["/srv/data/f"]),
+            ("somecmd 2>/var/log/err", &["/var/log/err"]),
+            ("> /var/lib/trunc", &["/var/lib/trunc"]),
+            ("echo x > /dev/null; echo y 2>/dev/null", &["/dev/null"]),
+            ("echo z 2>&1", &[]),
+            // Command position: separators, keywords, assignments,
+            // pipelines; a write word as an argument is not a command.
+            (
+                "if [ $1 -eq 1 ]; then mkdir /var/lib/cond; fi",
+                &["/var/lib/cond"],
+            ),
+            ("false || mkdir /var/lib/orcase", &["/var/lib/orcase"]),
+            ("gen | tee /var/log/pipe", &["/var/log/pipe"]),
+            ("x=1 mkdir /var/lib/envassign", &["/var/lib/envassign"]),
+            ("echo mkdir /var/lib/notcmd", &[]),
+            // Dynamic targets are not literal paths.
+            ("mkdir $VAR/sub", &[]),
+            ("mkdir ${VAR}/sub", &[]),
+            ("mkdir %{_localstatedir}/lib/x", &[]),
+            ("mkdir '/var/%{name}'", &[]),
+            // Quoted operator text, comments and heredoc bodies are
+            // not constructs.
+            ("echo 'use > /var/lib/x to store'", &[]),
+            (
+                "# mkdir /var/lib/commented\nmkdir /usr/share/ok",
+                &["/usr/share/ok"],
+            ),
+            (
+                "mkdir /usr/share/ok # mkdir /var/lib/commented",
+                &["/usr/share/ok"],
+            ),
+            (
+                "cat <<EOF\nmkdir /var/lib/heredoc\nEOF\nmkdir /var/lib/after",
+                &["/var/lib/after"],
+            ),
+            // De-duplication across constructs in one body.
+            ("mkdir /var/lib/a; rm /var/lib/a", &["/var/lib/a"]),
+            // Out-of-scope commands name no target here.
+            ("sed -i s/a/b/ /var/lib/file", &[]),
+            (
+                "chmod 755 /var/lib/file; chown root:root /var/lib/file",
+                &[],
+            ),
+            // Scan keeps transient and allowed targets; the verdict
+            // layer filters them.
+            (
+                "mkdir /etc/foo /usr/share/bar",
+                &["/etc/foo", "/usr/share/bar"],
+            ),
+            ("touch /run/foo /var/run/bar", &["/run/foo", "/var/run/bar"]),
+        ];
+        for (body, expected) in cases {
+            assert_eq!(&scan_scriptlet(body), expected, "body: {body}");
+        }
+    }
+
+    #[test]
+    fn scriptlet_target_outside_verdicts() {
+        let check = check_with(
+            &[
+                "/etc/", "/usr/", "/bin/", "/lib/", "/lib64/", "/sbin/", "/boot/",
+            ],
+            &["/usr/local/", "/boot/efi/"],
+            false,
+        );
+        for outside in [
+            "/var/lib/x",
+            "/var",
+            "/srv/www",
+            "/opt/x",
+            "/home/user",
+            "/root/x",
+            "/usr/local/bin/x",
+            "/usr/local",
+            "/boot/efi/x",
+            "/var/adm/messages",
+            "/var/adm/update-scripts/saslpwd",
+        ] {
+            assert!(
+                check.scriptlet_target_outside(outside),
+                "expected outside: {outside}"
+            );
+        }
+        for inside in [
+            "/etc/x",
+            "/etc",
+            "/usr/share/x",
+            "/usr",
+            "/bin/x",
+            "/boot/grub2/x",
+            // Runtime filesystems and their legacy spellings.
+            "/run/x",
+            "/run",
+            "/var/run/x",
+            "/tmp/x",
+            "/var/tmp/x",
+            "/dev/null",
+            "/proc/self/x",
+            "/sys/kernel/x",
+            // The sanctioned deferred-notification spool.
+            "/var/adm/update-messages",
+            "/var/adm/update-messages/pkg-1.0-1-notify",
+        ] {
+            assert!(
+                !check.scriptlet_target_outside(inside),
+                "expected inside/transient: {inside}"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_prog_recognition() {
+        for shell in ["", "  ", "/bin/sh", "/bin/bash", " /bin/sh "] {
+            assert!(is_shell_prog(shell), "expected shell: {shell:?}");
+        }
+        for other in ["/sbin/ldconfig", "/usr/bin/lua", "<lua>", "/usr/bin/perl"] {
+            assert!(!is_shell_prog(other), "expected non-shell: {other:?}");
+        }
+    }
+
+    fn fixture_pkg_named(name: &str) -> Pkg {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../tests/parity/pkg/inputs/{name}"));
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
+        pkg.name = "atomic-scriptlet-test".to_string();
+        pkg.arch = "noarch".to_string();
+        pkg
+    }
+
+    /// The shipped configuration lists (configdefaults and both
+    /// flavours carry the same Atomic* keys).
+    fn shipped_check() -> AtomicUpdateCheck {
+        check_with(
+            &[
+                "/etc/", "/usr/", "/bin/", "/lib/", "/lib64/", "/sbin/", "/boot/",
+            ],
+            &["/usr/local/", "/boot/efi/"],
+            false,
+        )
+    }
+
+    #[test]
+    fn scriptlet_fires_fixture_reports_each_write() {
+        let pkg = fixture_pkg_named("atomic-scriptlet-fires-1.0-1.noarch.rpm");
+        let mut check = shipped_check();
+        let results = run(&mut check, &pkg);
+        let expected: &[(&str, &str)] = &[
+            ("%pre", "/var/lib/atomic-fixture"),
+            ("%post", "/srv/atomic-fixture/seed.conf"),
+            ("%post", "/var/cache/atomic-fixture"),
+            ("%post", "/var/lib/atomic-fixture/quoted"),
+            ("%postun", "/var/lib/atomic-fixture/state"),
+            ("%posttrans", "/opt/atomic-fixture.conf"),
+        ];
+        assert_eq!(results.len(), expected.len(), "results: {results:?}");
+        for ((name, line), (label, target)) in results.iter().zip(expected) {
+            assert_eq!(name, "scriptlet-writes-outside-snapshot");
+            assert!(line.contains(": W: "), "level: {line}");
+            assert!(
+                line.contains(&format!("{label} {target}")),
+                "detail: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn scriptlet_clean_fixture_is_quiet() {
+        let pkg = fixture_pkg_named("atomic-scriptlet-clean-1.0-1.noarch.rpm");
+        let mut check = shipped_check();
+        assert!(run(&mut check, &pkg).is_empty());
     }
 }
