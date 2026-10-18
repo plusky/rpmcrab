@@ -2,7 +2,6 @@
 Checks = [
     "AlternativesCheck",
     "AppDataCheck",
-    "AtomicUpdateCheck",
     "BinariesCheck",
     'BuildRootAndDateCheck',
     "ConfigFilesCheck",
@@ -45,6 +44,7 @@ Checks = [
     "SystemdTmpfilesCheck",
     "SUIDPermissionsCheck",
     "WorldWritableCheck",
+    "AtomicUpdateCheck",
     # Deliberate rpmcrab addition (ledgered in tests/parity/divergences.toml):
     # the reference lists XinetdDepCheck in no shipped config, so it never
     # runs there; the check is implemented and its deprecation message is
