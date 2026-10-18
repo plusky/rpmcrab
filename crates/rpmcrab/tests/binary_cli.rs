@@ -1217,25 +1217,29 @@ fn diverted_child_failure_adds_no_parent_noise() {
     );
 }
 
-/// If the diverted run's stderr fails mid-forward (`/dev/full`
-/// rejects every write at once), the parent keeps draining the
-/// child's stdout instead of abandoning the pipe: otherwise the
-/// pipe fills, the child wedges mid-print and the run hangs. The
-/// document must still land on stdout.
+/// If the diverted run's stderr fails mid-forward (the pipe
+/// below has no reader, so every write to it fails at once), the
+/// parent keeps draining the child's stdout instead of abandoning
+/// the pipe: otherwise the pipe fills, the child wedges mid-print
+/// and the run hangs. The document must still land on stdout.
 #[test]
 #[cfg(unix)]
 fn diverted_run_survives_a_broken_stderr() {
     let dir = tempfile::tempdir().unwrap();
     let spec = write_loud_echo_spec(dir.path());
+    // A stderr that rejects every write: a pipe whose read end is
+    // dropped before the spawn, so the first forwarded write fails
+    // with EPIPE (the runtime ignores SIGPIPE) -- the broken
+    // downstream the forwarder must survive, on any Unix.
+    let (reader, writer) = std::io::pipe().expect("pipe for the broken stderr");
+    drop(reader);
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rpmcrab"));
     cmd.args(["--format", "json", spec.to_str().unwrap()])
         .env("CONFIG_DISABLE_AUTOLOADING", "1")
         .env_remove("COLUMNS")
         .env_remove("NO_COLOR")
         .env_remove("CLICOLOR")
-        .stderr(std::process::Stdio::from(
-            std::fs::File::create("/dev/full").expect("/dev/full is writable"),
-        ))
+        .stderr(std::process::Stdio::from(writer))
         .stdout(std::process::Stdio::piped());
     let out = cmd.output().expect("spawn rpmcrab");
     let stdout = String::from_utf8_lossy(&out.stdout);
