@@ -16,8 +16,7 @@ The sensitive surface of rpmcrab is:
   parsing), payload probing and validation (`file`, `strings`, `ar`,
   `desktop-file-validate`, `appstream-util`, `checkbashisms`), the
   decompressors (`gzip`, `bzip2`, `xz`, `zstd`), and the scriptlet syntax
-  interpreters (`sh -n`, `perl -wc`). ELF analysis is performed in-process;
-  payload code is never executed (there is no `ldd`).
+  interpreters (`sh -n`, `perl -wc`).
 - `unsafe_code = "forbid"` everywhere in the workspace; the CI gates
   (`cargo-deny` advisories + licence + source policy, CodeQL) enforce the
   dependency and code-quality floor.
