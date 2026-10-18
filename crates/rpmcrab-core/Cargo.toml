@@ -18,9 +18,11 @@ workspace = true
 # librpm FFI (the `rpm-software-management` binding). Covers the header, the
 # file list (rpmfiles), the rpmdb (Db), and EVR comparison (version). Needs
 # `rpm-devel` at build time (bindgen) and `librpm`/`librpmio` at runtime;
-# `sign` feature off; `build` on for `Spec::parse` (`SpecCheck`
-# `_check_invalid_url`, the same C parser the reference uses via
-# `TransactionSet().parseSpec`). Safe API only — `unsafe` stays inside
+# `build` on for `Spec::parse` (`SpecCheck` `_check_invalid_url`, the same
+# C parser the reference uses via `TransactionSet().parseSpec`). The `sign`
+# feature stays off: it adds package *signing* via librpmsign, while
+# signature *verification* (`SignatureCheck`) uses the base keyring and
+# verified-read API and needs no feature. Safe API only — `unsafe` stays inside
 # librpm/librpm-sys, so this crate keeps `unsafe_code = "forbid"`. Payload
 # extraction does NOT use the binding (its PackageReader returns no entries for
 # compressed payloads); the payload is extracted natively (see pkg/extract.rs).

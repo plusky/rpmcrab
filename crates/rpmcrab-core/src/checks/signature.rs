@@ -1,82 +1,388 @@
-//! `SignatureCheck` — PGP signature presence and validity.
+//! `SignatureCheck` — PGP signature validity.
 //!
-//! Ported from `rpmlint/checks/SignatureCheck.py`. Three findings:
+//! Ported from `rpmlint/checks/SignatureCheck.py`. Two findings:
 //! `unknown-key`, `invalid-signature`.
 //!
-//! Like the reference, this shells out to `rpm -Kv` and parses its output.
+//! Verification runs in-process through librpm: the package file is
+//! re-read with signature verification enabled against the rpmdb keyring
+//! (the header read in `Pkg` skips verification, as rpmlint's does).
+//! Only the signature verdict is consumed — digest checks are masked
+//! out, so a package is judged by its signature alone even when its
+//! stored digests are damaged. The key ID reported for `unknown-key` is
+//! read from the signature packet's issuer field and formatted as the
+//! low 32 bits in lowercase hex, the way `rpm -Kv` prints it.
 
-use std::process::Command;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
+use std::sync::Mutex;
 
-use fancy_regex::Regex;
+use librpm::keyring::Keyring;
+use librpm::verify::{VerificationFlags, VerifyOptions};
+use librpm::{PackageHeader, RpmErrorKind};
 
 use crate::check::{Check, add_info};
-use crate::checks::is_match;
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
-use std::sync::OnceLock;
 
 pub struct SignatureCheck {
-    rpm_bin: String,
+    /// Keyring to verify against; `None` verifies against the rpmdb
+    /// keyring.
+    keyring: Option<Keyring>,
+}
+
+/// The structured outcome of one verified header read.
+enum Verdict {
+    /// Every signature verified.
+    Verified,
+    /// A signature's key is not in the keyring.
+    NoKey,
+    /// Signature verification failed.
+    Failed,
+    /// The file could not be read as a package at all.
+    Unreadable,
 }
 
 impl SignatureCheck {
     pub fn new(_config: &Config) -> Self {
-        Self {
-            rpm_bin: "rpm".to_string(),
-        }
+        Self { keyring: None }
     }
 
-    /// Test hook: point the check at a fake `rpm` executable.
+    /// Test hook: verify against `keyring` instead of the rpmdb keyring.
     #[cfg(test)]
-    fn with_rpm_bin(rpm_bin: &str) -> Self {
+    fn with_keyring(keyring: Keyring) -> Self {
         Self {
-            rpm_bin: rpm_bin.to_string(),
+            keyring: Some(keyring),
         }
     }
 
-    /// Run `rpm -Kv` on the package file, returning `(returncode, output)`.
-    /// The reference lets the `FileNotFoundError` propagate when `rpm`
-    /// cannot be run; panic here for the same fail-loud behaviour.
-    fn check_signature(&self, pkg: &Pkg) -> (i32, String) {
-        let output = Command::new(&self.rpm_bin)
-            .args(["-Kv", &pkg.filename])
-            .env("LC_ALL", "C")
-            .output()
-            .unwrap_or_else(|e| {
-                panic!(
-                    "SignatureCheck: failed to run `{}` -Kv on {}: {e}",
-                    self.rpm_bin, pkg.filename
-                )
-            });
-        // The reference merges stderr into stdout (`stderr=subprocess.STDOUT`)
-        // and runs under `en_US.UTF-8`; see the parity ledger.
-        // Appending whole stderr after whole stdout (rather than true
-        // interleaving) is safe because all three SignatureCheck matchers
-        // are unanchored searches, so relative stream order cannot change
-        // what matches. A future anchored matcher would need real
-        // interleaving instead.
-        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
-        if text.ends_with('\n') {
-            text.pop();
+    /// Re-read the package header with signature verification enabled
+    /// and digest checks masked out, and classify the result.
+    fn verify(&self, path: &Path) -> Verdict {
+        // The keyring autoload in the verified read needs librpm
+        // configured; opening the package normally did this already.
+        let _ = crate::pkg::init();
+        // rpmlog reports every non-clean signature verdict while the
+        // read runs (NOKEY at warning, BAD at error); the structured
+        // result carries the same information, so the read runs with
+        // rpmlog masked down to critical. The mask is process-global,
+        // hence the serialisation across worker threads.
+        static VERIFY_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = VERIFY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _mask = RpmlogMask::hush();
+        self.verify_read(path)
+    }
+
+    fn verify_read(&self, path: &Path) -> Verdict {
+        let mut options = VerifyOptions::new().flags(VerificationFlags::mask_nodigests());
+        if let Some(keyring) = &self.keyring {
+            options = options.keyring(keyring.clone());
         }
-        (output.status.code().unwrap_or(-1), text)
+        match PackageHeader::from_file(path, Some(&options)) {
+            Ok(_) => Verdict::Verified,
+            Err(RpmErrorKind::NoKey) => Verdict::NoKey,
+            // `NotTrusted` is not produced for OpenPGP signatures under
+            // the rpmdb keyring model (an absent key reports `NoKey`);
+            // classify it with the other verification failures.
+            Err(RpmErrorKind::Fail) | Err(RpmErrorKind::NotTrusted) => Verdict::Failed,
+            Err(_) => Verdict::Unreadable,
+        }
+    }
+}
+
+/// RAII guard for the rpmlog mask: `hush` narrows it to critical-only
+/// and dropping restores librpm's default (messages up to notice).
+struct RpmlogMask;
+
+impl RpmlogMask {
+    fn hush() -> Self {
+        librpm::logging::set_verbosity(librpm::logging::LogLevel::Critical);
+        Self
+    }
+}
+
+impl Drop for RpmlogMask {
+    fn drop(&mut self) {
+        librpm::logging::set_verbosity(librpm::logging::LogLevel::Notice);
+    }
+}
+
+/// Signature-header tags carrying OpenPGP signatures: `RPMSIGTAG_DSA`
+/// (267), `RPMSIGTAG_RSA` (268), `RPMSIGTAG_PGP` (1002), `RPMSIGTAG_GPG`
+/// (1005) and `RPMSIGTAG_PGP5` (1006).
+const SIG_TAGS: [u32; 5] = [267, 268, 1002, 1005, 1006];
+
+/// The RPM lead magic (`0xEDABEEDB`).
+const LEAD_MAGIC: [u8; 4] = [0xed, 0xab, 0xee, 0xdb];
+
+/// The header structure magic (`0x8EADE8`).
+const HEADER_MAGIC: [u8; 3] = [0x8e, 0xad, 0xe8];
+
+fn be_u32(bytes: &[u8]) -> u32 {
+    u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+/// Read the OpenPGP signature blobs out of the package's signature
+/// header, in header index order. Empty when the file is not an RPM or
+/// carries no OpenPGP signatures. Only the lead and the signature
+/// header are read; the payload is never touched.
+fn signature_blobs(path: &Path) -> Vec<Vec<u8>> {
+    let mut blobs = Vec::new();
+    let Ok(mut file) = File::open(path) else {
+        return blobs;
+    };
+    let mut lead = [0u8; 96];
+    if file.read_exact(&mut lead).is_err() || lead[0..4] != LEAD_MAGIC {
+        return blobs;
+    }
+    let mut preamble = [0u8; 16];
+    if file.read_exact(&mut preamble).is_err() || preamble[0..3] != HEADER_MAGIC {
+        return blobs;
+    }
+    let nindex = be_u32(&preamble[8..12]) as usize;
+    let store_size = be_u32(&preamble[12..16]) as usize;
+    // Real signature headers hold a handful of entries; the bound keeps
+    // a garbage preamble from sizing a huge allocation.
+    if nindex > 1024 {
+        return blobs;
+    }
+    let mut index = vec![0u8; nindex * 16];
+    if file.read_exact(&mut index).is_err() {
+        return blobs;
+    }
+    let store_start = 96 + 16 + nindex as u64 * 16;
+    for entry in index.as_chunks::<16>().0 {
+        let tag = be_u32(&entry[0..4]);
+        let entry_type = be_u32(&entry[4..8]);
+        let offset = be_u32(&entry[8..12]) as usize;
+        let count = be_u32(&entry[12..16]) as usize;
+        // Type 7 is BIN; for BIN entries the count is a byte count.
+        if !SIG_TAGS.contains(&tag) || entry_type != 7 {
+            continue;
+        }
+        let Some(end) = offset.checked_add(count) else {
+            continue;
+        };
+        if end > store_size {
+            continue;
+        }
+        let mut blob = vec![0u8; count];
+        if file
+            .seek(SeekFrom::Start(store_start + offset as u64))
+            .is_err()
+        {
+            continue;
+        }
+        if file.read_exact(&mut blob).is_ok() {
+            blobs.push(blob);
+        }
+    }
+    blobs
+}
+
+/// A parsed OpenPGP signature packet.
+struct SigPacket {
+    /// The issuer key ID from the packet, when it carries one.
+    issuer: Option<[u8; 8]>,
+}
+
+/// A byte cursor with bounds-checked reads.
+struct Cursor<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(buf: &'a [u8]) -> Self {
+        Self { buf, pos: 0 }
     }
 
-    fn nokey_sig_regex() -> &'static Regex {
-        static NOKEY_SIG_REGEX: OnceLock<Regex> = OnceLock::new();
-        NOKEY_SIG_REGEX.get_or_init(|| {
-            Regex::new(r"[Ss]ignature, key ID ([\w\d]*): NOKEY").expect("nokey regex")
-        })
+    fn remaining(&self) -> usize {
+        self.buf.len() - self.pos
     }
 
-    fn invalid_sig_regex() -> &'static Regex {
-        static INVALID_SIG_REGEX: OnceLock<Regex> = OnceLock::new();
-        INVALID_SIG_REGEX
-            .get_or_init(|| Regex::new(r"invalid OpenPGP signature").expect("invalid sig regex"))
+    fn take(&mut self, count: usize) -> Option<&'a [u8]> {
+        let end = self.pos.checked_add(count)?;
+        let slice = self.buf.get(self.pos..end)?;
+        self.pos = end;
+        Some(slice)
     }
+
+    fn u8(&mut self) -> Option<u8> {
+        Some(self.take(1)?[0])
+    }
+
+    fn u16(&mut self) -> Option<u16> {
+        let bytes = self.take(2)?;
+        Some(u16::from_be_bytes([bytes[0], bytes[1]]))
+    }
+
+    fn u32(&mut self) -> Option<u32> {
+        Some(be_u32(self.take(4)?))
+    }
+}
+
+/// Read an OpenPGP length (the one/two/five-octet form used by packet
+/// headers and subpackets). Partial body lengths are rejected: stored
+/// signature packets do not use them.
+fn pgp_length(cur: &mut Cursor<'_>) -> Option<usize> {
+    match cur.u8()? {
+        first @ 0..=191 => Some(first as usize),
+        first @ 192..=223 => {
+            let second = cur.u8()?;
+            Some(((first as usize - 192) << 8) + second as usize + 192)
+        }
+        255 => Some(cur.u32()? as usize),
+        _ => None,
+    }
+}
+
+/// Parse one OpenPGP signature packet. `None` when the packet is
+/// structurally invalid (bad framing, truncation, an unsupported
+/// version, malformed MPIs) — the case librpm reports as an invalid
+/// OpenPGP signature, as opposed to a well-formed signature that merely
+/// fails verification.
+fn parse_sig_packet(blob: &[u8]) -> Option<SigPacket> {
+    let mut cur = Cursor::new(blob);
+    let first = cur.u8()?;
+    if first & 0x80 == 0 {
+        return None;
+    }
+    let body = if first & 0x40 != 0 {
+        // New format: the low six bits are the packet tag (2 = signature).
+        if first & 0x3f != 2 {
+            return None;
+        }
+        let len = pgp_length(&mut cur)?;
+        cur.take(len)?
+    } else {
+        // Old format: bits 5-2 are the packet tag, bits 1-0 the length form.
+        if (first >> 2) & 0x0f != 2 {
+            return None;
+        }
+        match first & 0x03 {
+            0 => {
+                let len = cur.u8()? as usize;
+                cur.take(len)?
+            }
+            1 => {
+                let len = cur.u16()? as usize;
+                cur.take(len)?
+            }
+            2 => {
+                let len = cur.u32()? as usize;
+                cur.take(len)?
+            }
+            _ => {
+                // Indeterminate length: the packet runs to the end of
+                // the blob.
+                &cur.buf[cur.pos..]
+            }
+        }
+    };
+    parse_sig_body(body)
+}
+
+fn parse_sig_body(body: &[u8]) -> Option<SigPacket> {
+    let mut cur = Cursor::new(body);
+    match cur.u8()? {
+        3 => {
+            // The hashed-material length is fixed at 5 for version 3.
+            if cur.u8()? != 5 {
+                return None;
+            }
+            cur.take(1)?; // signature type
+            cur.take(4)?; // creation time
+            let issuer: [u8; 8] = cur.take(8)?.try_into().expect("8 bytes");
+            cur.take(1)?; // public-key algorithm
+            cur.take(1)?; // hash algorithm
+            cur.take(2)?; // left 16 bits of the hash
+            parse_mpis(&mut cur)?;
+            Some(SigPacket {
+                issuer: Some(issuer),
+            })
+        }
+        version @ 4..=6 => {
+            cur.take(1)?; // signature type
+            cur.take(1)?; // public-key algorithm
+            cur.take(1)?; // hash algorithm
+            // Version 6 sizes its subpacket areas with u32 lengths.
+            let wide = version == 6;
+            let hashed_len = if wide {
+                cur.u32()? as usize
+            } else {
+                cur.u16()? as usize
+            };
+            let hashed = cur.take(hashed_len)?;
+            let unhashed_len = if wide {
+                cur.u32()? as usize
+            } else {
+                cur.u16()? as usize
+            };
+            let unhashed = cur.take(unhashed_len)?;
+            cur.take(2)?; // left 16 bits of the hash
+            parse_mpis(&mut cur)?;
+            let issuer =
+                issuer_from_subpackets(unhashed).or_else(|| issuer_from_subpackets(hashed));
+            Some(SigPacket { issuer })
+        }
+        _ => None,
+    }
+}
+
+/// Consume the packet's MPIs: at least one must be present and every
+/// one must fit inside the packet.
+fn parse_mpis(cur: &mut Cursor<'_>) -> Option<()> {
+    let mut count = 0;
+    while cur.remaining() > 0 {
+        let bits = cur.u16()? as usize;
+        cur.take(bits.div_ceil(8))?;
+        count += 1;
+    }
+    if count == 0 { None } else { Some(()) }
+}
+
+/// Find the issuer key ID in a subpacket area: the issuer subpacket
+/// (type 16) directly, or the low 64 bits of the issuer fingerprint
+/// subpacket (type 33). A malformed area yields `None`.
+fn issuer_from_subpackets(area: &[u8]) -> Option<[u8; 8]> {
+    let mut cur = Cursor::new(area);
+    let mut from_fingerprint = None;
+    while cur.remaining() > 0 {
+        let len = pgp_length(&mut cur)?;
+        if len == 0 {
+            return None;
+        }
+        let subpacket = cur.take(len)?;
+        let (kind, body) = subpacket.split_first()?;
+        match kind {
+            16 if body.len() == 8 => return Some(body.try_into().expect("8 bytes")),
+            33 if body.len() > 1 => {
+                // Body: one version byte, then the fingerprint.
+                let fingerprint = &body[1..];
+                if fingerprint.len() >= 8 {
+                    from_fingerprint = Some(
+                        fingerprint[fingerprint.len() - 8..]
+                            .try_into()
+                            .expect("8 bytes"),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    from_fingerprint
+}
+
+/// Format an issuer key ID the way `rpm -Kv` prints it: the low 32
+/// bits, lowercase hex.
+fn key_id_string(issuer: &[u8; 8]) -> String {
+    issuer[4..]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 impl Check for SignatureCheck {
@@ -85,21 +391,45 @@ impl Check for SignatureCheck {
     }
 
     fn check(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
-        let (retcode, output) = self.check_signature(pkg);
-
-        // The reference runs all three sub-checks unconditionally
-        // (SignatureCheck.py:36-40); each decides for itself whether to fire.
-        // Unknown key (NOKEY) without an invalid signature.
-        if retcode == 1 {
-            if let Some(caps) = Self::nokey_sig_regex().captures(&output).ok().flatten() {
-                let key_id = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-                if !is_match(Self::invalid_sig_regex(), &output) {
-                    add_info(out, Level::Error, pkg, "unknown-key", &[key_id]);
+        let path = Path::new(&pkg.filename);
+        let blobs = signature_blobs(path);
+        if blobs.is_empty() {
+            return;
+        }
+        let parsed: Vec<Option<SigPacket>> =
+            blobs.iter().map(|blob| parse_sig_packet(blob)).collect();
+        let any_corrupt = parsed.iter().any(|packet| packet.is_none());
+        match self.verify(path) {
+            Verdict::Verified | Verdict::Unreadable => {}
+            Verdict::NoKey => {
+                // `rpm -Kv` prints the NOKEY line and the invalid
+                // signature text together for a package holding both a
+                // keyless signature and a corrupt one, and the
+                // reference reports only the corrupt one — an
+                // unparsable packet therefore takes precedence here
+                // too.
+                if any_corrupt {
+                    add_info(out, Level::Error, pkg, "invalid-signature", &[]);
+                } else if let Some(issuer) =
+                    parsed.iter().flatten().find_map(|packet| packet.issuer)
+                {
+                    add_info(
+                        out,
+                        Level::Error,
+                        pkg,
+                        "unknown-key",
+                        &[&key_id_string(&issuer)],
+                    );
                 }
             }
-            // Invalid signature.
-            if is_match(Self::invalid_sig_regex(), &output) {
-                add_info(out, Level::Error, pkg, "invalid-signature", &[]);
+            Verdict::Failed => {
+                // A well-formed signature that fails verification (bad
+                // digest of the signed data, wrong key) is silent, as
+                // are digest failures; only an unparsable signature
+                // packet is reported.
+                if any_corrupt {
+                    add_info(out, Level::Error, pkg, "invalid-signature", &[]);
+                }
             }
         }
     }
@@ -109,174 +439,283 @@ impl Check for SignatureCheck {
 mod tests {
     use super::*;
     use crate::color::Color;
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
+    use librpm::keyring::PubKey;
 
-    fn fixture_pkg() -> Pkg {
-        let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
-        let mut pkg = Pkg::installed_from_file(&rpm);
-        pkg.name = "testpkg".to_string();
+    /// The low-32-bit key ID of the fixture signing key, as printed by
+    /// `rpm -Kv`. Regenerating the fixtures with
+    /// `build-signature-fixtures.sh` creates a new key; the script
+    /// prints the new value to put here.
+    const EXPECTED_KEY_ID: &str = "fc85304d";
+
+    fn inputs() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/parity/pkg/inputs")
+    }
+
+    fn fixture_pkg(rpm_name: &str) -> Pkg {
+        let path = inputs().join(rpm_name);
+        let mut pkg = Pkg::installed_from_file(&path);
+        // `installed_from_file` models an rpmdb-installed package, whose
+        // filename is not the fixture path; the check re-reads the file,
+        // so point it at the fixture.
+        pkg.filename = path.to_string_lossy().into_owned();
         pkg
     }
 
-    /// A fake `rpm` executable printing `output` and exiting with `code`.
-    fn fake_rpm(dir: &std::path::Path, name: &str, output: &str, code: i32) -> String {
-        let path = dir.join(name);
-        let mut f = std::fs::File::create(&path).expect("create fake rpm");
-        writeln!(f, "#!/bin/sh").unwrap();
-        // No single quotes in the test outputs, so plain quoting is safe.
-        writeln!(f, "printf '%s' '{output}'").unwrap();
-        writeln!(f, "exit {code}").unwrap();
-        let mut perms = f.metadata().unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).unwrap();
-        path.to_string_lossy().into_owned()
+    /// A keyring holding only the fixture signing key.
+    fn test_keyring() -> Keyring {
+        let raw = std::fs::read(inputs().join("signature-testkey.gpg")).expect("read test key");
+        let mut keyring = Keyring::new();
+        keyring
+            .add_key(&PubKey::new(&raw).expect("test key parses"))
+            .expect("test key added");
+        keyring
     }
 
-    fn run_check(pkg: &Pkg, rpm_bin: &str) -> Vec<(String, String)> {
+    /// Which keyring a test run verifies against.
+    enum KeyringChoice {
+        /// A keyring holding only the fixture signing key.
+        TestKey,
+        /// An empty keyring: every signature reports as keyless.
+        Empty,
+        /// The production path: the rpmdb keyring.
+        System,
+    }
+
+    fn run_check(pkg: &Pkg, choice: KeyringChoice) -> Vec<(String, String)> {
+        // librpm's OpenPGP backend keeps process-global state, and
+        // concurrent first use from several test threads can corrupt a
+        // verdict, so keyring construction and the verified read run
+        // serially within this module.
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let config = Config::default();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let mut check = SignatureCheck::with_rpm_bin(rpm_bin);
+        let mut check = match choice {
+            KeyringChoice::TestKey => SignatureCheck::with_keyring(test_keyring()),
+            KeyringChoice::Empty => SignatureCheck::with_keyring(Keyring::new()),
+            KeyringChoice::System => SignatureCheck::new(&config),
+        };
         check.check(pkg, &config, &mut out);
         out.results().to_vec()
     }
 
-    fn tmpdir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(name);
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tmpdir");
-        dir
+    fn finding_names(results: &[(String, String)]) -> Vec<&str> {
+        results.iter().map(|(name, _)| name.as_str()).collect()
     }
 
     #[test]
-    fn unknown_key_reported() {
-        let dir = tmpdir("rpmcrab-sig-nokey");
-        let rpm = fake_rpm(
-            &dir,
-            "rpm",
-            "test.rpm: RSA/SHA256 Signature, key ID abc123: NOKEY",
-            1,
-        );
-        let pkg = fixture_pkg();
-        let results = run_check(&pkg, &rpm);
-        assert_eq!(results.len(), 1, "{results:?}");
-        assert_eq!(results[0].0, "unknown-key");
+    fn signed_with_key_verifies_quiet() {
+        let pkg = fixture_pkg("signature-signed-1.0-1.noarch.rpm");
+        let results = run_check(&pkg, KeyringChoice::TestKey);
+        assert!(results.is_empty(), "{results:?}");
+    }
+
+    #[test]
+    fn signed_without_key_reports_unknown_key() {
+        let pkg = fixture_pkg("signature-signed-1.0-1.noarch.rpm");
+        let results = run_check(&pkg, KeyringChoice::Empty);
+        assert_eq!(finding_names(&results), ["unknown-key"], "{results:?}");
         assert!(
-            results[0].1.contains("abc123"),
+            results[0].1.contains(EXPECTED_KEY_ID),
             "key id detail: {}",
             results[0].1
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn invalid_signature_reported() {
-        let dir = tmpdir("rpmcrab-sig-invalid");
-        let rpm = fake_rpm(&dir, "rpm", "test.rpm: invalid OpenPGP signature", 1);
-        let pkg = fixture_pkg();
-        let results = run_check(&pkg, &rpm);
-        assert_eq!(results.len(), 1, "{results:?}");
-        assert_eq!(results[0].0, "invalid-signature");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn valid_signature_no_findings() {
-        let dir = tmpdir("rpmcrab-sig-ok");
-        let rpm = fake_rpm(
-            &dir,
-            "rpm",
-            "test.rpm: RSA/SHA256 Signature, key ID abc123: OK",
-            0,
-        );
-        let pkg = fixture_pkg();
-        let results = run_check(&pkg, &rpm);
-        assert!(results.is_empty(), "{results:?}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    #[should_panic(expected = "failed to run")]
-    fn missing_rpm_binary_panics() {
-        let pkg = fixture_pkg();
-        let config = Config::default();
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let mut check = SignatureCheck::with_rpm_bin("/nonexistent/rpm-binary-xyz");
-        check.check(&pkg, &config, &mut out);
-    }
-
-    #[test]
-    fn nokey_extracts_key_id() {
-        let re = SignatureCheck::nokey_sig_regex();
-        let caps = re
-            .captures("foo.rpm: RSA/SHA256 Signature, key ID abc123: NOKEY")
-            .ok()
-            .flatten()
-            .expect("match");
-        assert_eq!(caps.get(1).map(|m| m.as_str()), Some("abc123"));
-    }
-
-    #[test]
-    fn invalid_sig_matches() {
-        let re = SignatureCheck::invalid_sig_regex();
-        assert!(is_match(re, "foo.rpm: invalid OpenPGP signature"));
-        assert!(!is_match(
-            re,
-            "foo.rpm: RSA/SHA256 Signature, key ID abc: OK"
-        ));
-    }
-
-    /// A fake `rpm` that writes to stderr only, so the finding can only come
-    /// from stderr reaching the output the matchers read.
-    fn fake_rpm_stderr(dir: &std::path::Path, name: &str, stderr: &str, code: i32) -> String {
-        let path = dir.join(name);
-        let mut f = std::fs::File::create(&path).expect("create fake rpm");
-        writeln!(f, "#!/bin/sh").unwrap();
-        writeln!(f, "printf '%s' '{stderr}' >&2").unwrap();
-        writeln!(f, "exit {code}").unwrap();
-        let mut perms = f.metadata().unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).unwrap();
-        path.to_string_lossy().into_owned()
-    }
-
-    #[test]
-    fn stderr_reaches_the_matchers() {
-        // The reference runs rpm -Kv with stderr=subprocess.STDOUT
-        // (pkg.py:637-644), so a key id reported on stderr still produces
-        // unknown-key. With stdout-only capture this finding disappears, so
-        // this fails if the merge is reverted.
-        let dir = tmpdir("rpmcrab-signature-stderr");
-        let rpm = fake_rpm_stderr(
-            &dir,
-            "rpm-stderr",
-            "V6-RSA-CBC, signature, key ID 1234abcd: NOKEY\n",
-            // _check_unknown_key requires retcode == 1 (SignatureCheck.py:50).
-            1,
-        );
-        let results = run_check(&fixture_pkg(), &rpm);
+    fn signed_default_keyring_reports_unknown_key() {
+        // The production path: the rpmdb keyring. The fixture key is a
+        // throwaway test key that no rpmdb contains, so the signature
+        // reports as keyless.
+        let pkg = fixture_pkg("signature-signed-1.0-1.noarch.rpm");
+        let results = run_check(&pkg, KeyringChoice::System);
+        assert_eq!(finding_names(&results), ["unknown-key"], "{results:?}");
         assert!(
-            results
-                .iter()
-                .any(|(name, line)| name == "unknown-key" && line.contains("1234abcd")),
-            "stderr did not reach the matchers: {results:?}"
+            results[0].1.contains(EXPECTED_KEY_ID),
+            "key id detail: {}",
+            results[0].1
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
-    /// Negative pin for the deleted `no-signature` finding: an unsigned RPM
-    /// must stay silent, and `cargo test` (not just the reference-coverage
-    /// auditor) must catch a re-add.
+
+    #[test]
+    fn unsigned_stays_silent() {
+        let pkg = fixture_pkg("signature-unsigned-1.0-1.noarch.rpm");
+        for choice in [
+            KeyringChoice::TestKey,
+            KeyringChoice::Empty,
+            KeyringChoice::System,
+        ] {
+            let results = run_check(&pkg, choice);
+            assert!(results.is_empty(), "{results:?}");
+        }
+    }
+
+    /// Negative pin for the deleted `no-signature` finding: an unsigned
+    /// RPM must stay silent, and `cargo test` (not just the
+    /// reference-coverage auditor) must catch a re-add.
     #[test]
     fn killed_no_signature_stays_absent() {
-        let dir = tmpdir("rpmcrab-sig-nosig-absent");
-        let rpm = fake_rpm(&dir, "rpm", "test.rpm: digests OK", 0);
-        let pkg = fixture_pkg();
-        let results = run_check(&pkg, &rpm);
+        let pkg = fixture_pkg("signature-unsigned-1.0-1.noarch.rpm");
+        let results = run_check(&pkg, KeyringChoice::Empty);
         assert!(
-            !results.iter().any(|(n, _)| n == "no-signature"),
+            !results.iter().any(|(name, _)| name == "no-signature"),
             "must stay silent: {results:?}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(results.is_empty(), "{results:?}");
+    }
+
+    #[test]
+    fn corrupt_packet_reports_invalid_signature() {
+        // The framing byte of the signature packet is flipped, so the
+        // packet no longer parses. `rpm -Kv` reports such a package
+        // with the invalid-signature text whether or not the signing
+        // key is at hand.
+        let pkg = fixture_pkg("signature-corrupt-1.0-1.noarch.rpm");
+        for choice in [KeyringChoice::TestKey, KeyringChoice::Empty] {
+            let results = run_check(&pkg, choice);
+            assert_eq!(
+                finding_names(&results),
+                ["invalid-signature"],
+                "{results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bad_math_signature_stays_silent_with_key() {
+        // One byte inside the RSA MPI is flipped: the packet parses,
+        // verification fails. `rpm -Kv` prints a BAD line, which the
+        // reference's patterns do not match, so this stays silent.
+        let pkg = fixture_pkg("signature-badsig-1.0-1.noarch.rpm");
+        let results = run_check(&pkg, KeyringChoice::TestKey);
+        assert!(results.is_empty(), "{results:?}");
+    }
+
+    #[test]
+    fn bad_math_signature_without_key_reports_unknown_key() {
+        // Key lookup precedes the signature math: without the key the
+        // tampered signature still reports as keyless.
+        let pkg = fixture_pkg("signature-badsig-1.0-1.noarch.rpm");
+        let results = run_check(&pkg, KeyringChoice::Empty);
+        assert_eq!(finding_names(&results), ["unknown-key"], "{results:?}");
+    }
+
+    #[test]
+    fn broken_payload_keeps_signature_verdicts() {
+        // A flipped payload byte breaks the payload digests only; the
+        // header signature still verifies (or reports keyless) exactly
+        // like the intact package.
+        let pkg = fixture_pkg("signature-brokenpayload-1.0-1.noarch.rpm");
+        let results = run_check(&pkg, KeyringChoice::TestKey);
+        assert!(results.is_empty(), "{results:?}");
+        let results = run_check(&pkg, KeyringChoice::Empty);
+        assert_eq!(finding_names(&results), ["unknown-key"], "{results:?}");
+    }
+
+    #[test]
+    fn bad_digest_keeps_signature_verdicts() {
+        // One hex digit of the stored header SHA256 is flipped. The
+        // digest check fails, but the signature itself is intact, so
+        // the signature verdicts are unchanged. This pins digest checks
+        // being masked out of the verified read: with them enabled the
+        // read fails wholesale and the keyless case below goes silent.
+        let pkg = fixture_pkg("signature-baddigest-1.0-1.noarch.rpm");
+        let results = run_check(&pkg, KeyringChoice::TestKey);
+        assert!(results.is_empty(), "{results:?}");
+        let results = run_check(&pkg, KeyringChoice::Empty);
+        assert_eq!(finding_names(&results), ["unknown-key"], "{results:?}");
+        assert!(
+            results[0].1.contains(EXPECTED_KEY_ID),
+            "key id detail: {}",
+            results[0].1
+        );
+    }
+
+    #[test]
+    fn blobs_come_from_the_signature_header() {
+        let signed = signature_blobs(&inputs().join("signature-signed-1.0-1.noarch.rpm"));
+        assert_eq!(signed.len(), 1);
+        let packet = parse_sig_packet(&signed[0]).expect("fixture packet parses");
+        let issuer = packet.issuer.expect("fixture packet has an issuer");
+        assert_eq!(key_id_string(&issuer), EXPECTED_KEY_ID);
+
+        let unsigned = signature_blobs(&inputs().join("signature-unsigned-1.0-1.noarch.rpm"));
+        assert!(unsigned.is_empty());
+
+        let corrupt = signature_blobs(&inputs().join("signature-corrupt-1.0-1.noarch.rpm"));
+        assert_eq!(corrupt.len(), 1);
+        assert!(parse_sig_packet(&corrupt[0]).is_none());
+    }
+
+    /// Build a new-format version 4 signature packet around the given
+    /// hashed/unhashed areas and one MPI.
+    fn v4_packet(unhashed: &[u8]) -> Vec<u8> {
+        let mut body = vec![4u8, 0, 1, 8]; // version, type, RSA, SHA256
+        body.extend_from_slice(&0u16.to_be_bytes()); // no hashed area
+        body.extend_from_slice(&(unhashed.len() as u16).to_be_bytes());
+        body.extend_from_slice(unhashed);
+        body.extend_from_slice(&[0xab, 0xcd]); // left 16 bits of the hash
+        body.extend_from_slice(&16u16.to_be_bytes()); // MPI: 16 bits
+        body.extend_from_slice(&[0x12, 0x34]);
+        let mut packet = vec![0xc2u8, body.len() as u8];
+        packet.extend_from_slice(&body);
+        packet
+    }
+
+    #[test]
+    fn v4_issuer_subpacket_is_read() {
+        let mut issuer_subpacket = vec![9u8, 16];
+        issuer_subpacket.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let packet = v4_packet(&issuer_subpacket);
+        let parsed = parse_sig_packet(&packet).expect("packet parses");
+        assert_eq!(parsed.issuer, Some([1, 2, 3, 4, 5, 6, 7, 8]));
+        assert_eq!(key_id_string(&[1, 2, 3, 4, 5, 6, 7, 8]), "05060708");
+    }
+
+    #[test]
+    fn v4_issuer_fingerprint_fallback() {
+        // Type 33: version byte + 20-byte v4 fingerprint; the key ID is
+        // its low 64 bits.
+        let mut subpacket = vec![22u8, 33, 4];
+        subpacket.extend_from_slice(&[0xaa; 12]);
+        subpacket.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let packet = v4_packet(&subpacket);
+        let parsed = parse_sig_packet(&packet).expect("packet parses");
+        assert_eq!(parsed.issuer, Some([1, 2, 3, 4, 5, 6, 7, 8]));
+    }
+
+    #[test]
+    fn v3_packet_issuer_is_read() {
+        let mut body = vec![3u8, 5, 2];
+        body.extend_from_slice(&[0; 4]); // creation time
+        body.extend_from_slice(&[0xaa; 8]); // key ID
+        body.extend_from_slice(&[1, 8]); // RSA, SHA256
+        body.extend_from_slice(&[0xab, 0xcd]);
+        body.extend_from_slice(&16u16.to_be_bytes());
+        body.extend_from_slice(&[0x12, 0x34]);
+        // Old format, tag 2, two-byte length: 0x80 | (2 << 2) | 1.
+        let mut packet = vec![0x89u8];
+        packet.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        packet.extend_from_slice(&body);
+        let parsed = parse_sig_packet(&packet).expect("packet parses");
+        assert_eq!(parsed.issuer, Some([0xaa; 8]));
+    }
+
+    #[test]
+    fn malformed_packets_do_not_parse() {
+        // The corrupt-fixture case: tag byte with the high bit clear.
+        assert!(parse_sig_packet(&[0x76, 0x00, 0x00]).is_none());
+        // Not a signature tag.
+        assert!(parse_sig_packet(&[0xc9, 0x00]).is_none());
+        // Truncated inside the MPI.
+        let mut packet = v4_packet(&[]);
+        packet.truncate(packet.len() - 1);
+        assert!(parse_sig_packet(&packet).is_none());
+        // Unsupported version.
+        let mut packet = v4_packet(&[]);
+        packet[2] = 9;
+        assert!(parse_sig_packet(&packet).is_none());
+        // Version 3 with a hashed-material length other than 5.
+        assert!(parse_sig_packet(&[0x89, 0, 4, 3, 4, 2, 0]).is_none());
     }
 }
