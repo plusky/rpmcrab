@@ -9,8 +9,9 @@ package, but not during installation.
 """
 scriptlet-service-restart="""
 A scriptlet invokes a service (re)start directly (systemctl restart,
-try-restart, reload-or-restart or start, service with restart,
-try-restart or condrestart, or a legacy rc script) instead of using
+try-restart, reload-or-restart, try-reload-or-restart or start,
+service with restart, start, try-restart or condrestart, or a
+legacy rc script) instead of using
 the distribution's service macros. During a transactional update the
 scriptlet runs inside the new snapshot with systemd offline, so the
 (re)start silently does nothing and the daemon keeps running its old
