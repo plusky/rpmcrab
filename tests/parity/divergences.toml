@@ -629,6 +629,14 @@ upstream = "https://github.com/plusky/rpmcrab/issues/75"
 case = "global"
 check = "FileDigestCheck"
 kind = "behaviour"
+reason = "The `xml` digester accepts colon-bearing general entity names (`<!ENTITY ns:e \"v\">`, referenced as `&ns:e;`) and digests the document, where `xml.etree` rejects it: ET enforces `NCName` at its own layer above the parser. Raw-expat parity governs this check -- expat is its reference parser and expat's `Name` production includes the colon -- so the port follows expat. Names raw expat rejects (a leading digit, an empty or space-bearing reference) are still rejected."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/642"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "behaviour"
 reason = "Malformed configuration aborts via Rust panic (exit 101, panic text on stderr) where the reference raises out of `__init__` (exit 1, traceback on stderr). Both kill the run before any package is linted; the abort itself is the parity point, not the exit code."
 since = "0.1.0"
 
