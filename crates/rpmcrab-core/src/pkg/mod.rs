@@ -565,6 +565,15 @@ impl Pkg {
         self.source.extracted()
     }
 
+    /// Whether the package's files are read from the live filesystem
+    /// rather than from an extracted payload: an rpmdb-installed
+    /// package, or a header-only view of `/` (`ExtractDir = "/"`).
+    /// Checks whose model is the installed system (the reference's
+    /// `ldd -r` shape) key on this.
+    pub fn is_installed(&self) -> bool {
+        matches!(self.source, PkgSource::Installed | PkgSource::LiveRoot)
+    }
+
     /// True for a NoSource package (source whose files are all ghosts).
     pub fn is_no_source(&self) -> bool {
         self.is_source && !self.ghost_files.is_empty()
