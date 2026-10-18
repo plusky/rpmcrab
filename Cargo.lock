@@ -1238,7 +1238,6 @@ dependencies = [
  "criterion",
  "fancy-regex",
  "flate2",
- "foldhash",
  "gimli",
  "goblin",
  "indexmap",

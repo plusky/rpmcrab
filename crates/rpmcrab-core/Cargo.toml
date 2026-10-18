@@ -72,10 +72,9 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 # the `spelling-error` check in TagsCheck; degrades gracefully when the
 # dictionary is absent.
 spellbook = "0.4.2"
-# Fixed-seed hasher for the spellbook dictionary (see spellcheck.rs):
-# spellbook's own foldhash version, pinned to the same release line so
-# the dictionary's hash order stays a function of the dictionary bytes.
-foldhash = "0.2"
+# The spellbook dictionary's hasher is the FNV-1a implementation in
+# spellcheck.rs: its hash values must be identical on 32- and 64-bit
+# targets, which foldhash::fast's folded multiply does not guarantee.
 # ELF parsing for BinariesCheck (replaces readelf/ldd). Pure Rust, MIT.
 goblin = "0.10"
 # Per-file parallelism for BinariesCheck ELF metadata parsing (rayon
