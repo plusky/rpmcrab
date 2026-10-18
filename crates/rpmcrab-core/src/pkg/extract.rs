@@ -325,6 +325,14 @@ impl<'a> Extractor<'a> {
                 Ok(m) if m.is_dir() => break,
                 Ok(m) if m.is_symlink() && cur.is_dir() => break,
                 Ok(_) => return Ok(false),
+                // An ancestor component is a non-directory (the payload
+                // carries both a file and entries beneath it, e.g.
+                // grpc-source's `build`): the path collides just like
+                // the `Ok(_)` case above, so skip the entry instead of
+                // aborting the whole extraction.
+                Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => {
+                    return Ok(false);
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     missing.push(cur.to_path_buf());
                     match cur.parent() {
@@ -1568,6 +1576,38 @@ mod tests {
         assert_eq!(
             std::fs::read(root.path().join("blender.png")).unwrap(),
             b"hello"
+        );
+    }
+
+    /// Regression (issue #700): an entry beneath a non-directory
+    /// ancestor collides, like the other path collisions: it is
+    /// skipped, not fatal. grpc-source carries a `build` file and a
+    /// `build/` tree; probing the tree's directories reports ENOTDIR,
+    /// which aborted the whole package read.
+    #[test]
+    fn entry_below_regular_file_is_skipped() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ex = extractor_for(root.path());
+        let file = cpio_entry(b"build", S_IFREG | 0o644, 5);
+        let raw = padded(b"hello");
+        let mut data = &raw[..];
+        ex.materialize(&mut data, &file).unwrap();
+
+        let nested = cpio_entry(b"build/CMakeFiles/x.txt", S_IFREG | 0o644, 5);
+        let raw = padded(b"hello");
+        let mut data = &raw[..];
+        ex.materialize(&mut data, &nested).unwrap();
+        assert!(!root.path().join("build/CMakeFiles/x.txt").exists());
+        assert_eq!(std::fs::read(root.path().join("build")).unwrap(), b"hello");
+
+        // Extraction continues for unrelated entries.
+        let other = cpio_entry(b"other.txt", S_IFREG | 0o644, 5);
+        let raw = padded(b"world");
+        let mut data = &raw[..];
+        ex.materialize(&mut data, &other).unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join("other.txt")).unwrap(),
+            b"world"
         );
     }
 
