@@ -130,10 +130,17 @@ normally already in `%{optflags}`) for full RELRO.
 missing-cf-protection="""
 The binary or shared library was built without x86 control-flow
 protection: its `.note.gnu.property` does not record both the IBT
-(indirect branch tracking) and SHSTK (shadow stack) features, so the
-CPU cannot enforce them at runtime. Rebuild with `%{optflags}`
-unmodified, which carries `-fcf-protection` on x86_64. Verify with
-`readelf -n` that the GNU property list includes `IBT` and `SHSTK`.
+(indirect branch tracking) and SHSTK (shadow stack) features, and
+its code contains no `ENDBR64` instructions, so the CPU cannot
+enforce either feature at runtime. Rebuild with `%{optflags}`
+unmodified, which carries `-fcf-protection` on x86_64. This check
+only verifies absence: the property is merged over all link inputs,
+so code compiled with the flag whose property was cleared by an
+input carrying none (hand-written assembly, a prebuilt object) does
+not fire — rebuilding cannot restore the property there, the input
+itself must carry one (`ld -z cet-report` names such inputs).
+Verify with `readelf -n` that the GNU property list includes `IBT`
+and `SHSTK`.
 """
 missing-call-to-setgroups-before-setuid="""
 This executable is calling setuid and setgid without setgroups or initgroups.

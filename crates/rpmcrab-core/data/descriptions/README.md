@@ -17,9 +17,10 @@ Provenance, verified against the pinned reference (`84848c0`):
   `missing-mandatory-optflags` entry dropped with the finding in #645, plus
   the restored `shared-library-without-dependency-information` entry (copied
   verbatim from the pre-deletion upstream file; upstream removed entry and
-  check in `cf619f717bc3`), plus the four port-only rpmcrab#17 hardening
-  entries (`missing-fortify`, `missing-stack-protector`, `missing-relro`,
-  `partial-relro`). The reference has no such findings, so `--explain`
+  check in `cf619f717bc3`), plus five port-only hardening entries: the
+  four rpmcrab#17 ones (`missing-fortify`, `missing-stack-protector`,
+  `missing-relro`, `partial-relro`) and `missing-cf-protection`
+  (rpmcrab#667). The reference has no such findings, so `--explain`
   would print `Unknown message` for them; ledgered in
   `tests/parity/divergences.toml`.
 - `IconSizesCheck.toml`, `MixedOwnershipCheck.toml`, `PAMModulesCheck.toml`,

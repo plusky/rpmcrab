@@ -170,12 +170,33 @@ const X86_FEATURE_1_IBT: u32 = 1 << 0;
 /// `GNU_PROPERTY_X86_FEATURE_1_AND` bit: shadow stack.
 const X86_FEATURE_1_SHSTK: u32 = 1 << 1;
 
-/// Extract `GNU_PROPERTY_X86_FEATURE_1_AND` from one `.note.gnu.property`
-/// section's bytes, or `None` when the section carries no such property.
-/// Note entries are 4-byte aligned; property entries inside a
-/// `GNU` property note are 8-byte aligned in ELF64 and 4-byte aligned
-/// in ELF32.
-fn parse_x86_feature_1_and(section: &[u8], is_64: bool) -> Option<u32> {
+/// Both control-flow features a `-fcf-protection` build records in
+/// `GNU_PROPERTY_X86_FEATURE_1_AND` (IBT and SHSTK together).
+const X86_FEATURE_1_IBT_SHSTK: u32 = X86_FEATURE_1_IBT | X86_FEATURE_1_SHSTK;
+/// `ENDBR64`: the instruction `-fcf-protection` emits at every
+/// indirect-branch target — the code-level record that the flag
+/// reached the compiler, independent of the merged property note.
+const ENDBR64: [u8; 4] = [0xf3, 0x0f, 0x1e, 0xfa];
+
+/// State of `GNU_PROPERTY_X86_FEATURE_1_AND` in an ELF's
+/// `.note.gnu.property`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum X86Feature1And {
+    /// No such property entry in any GNU property note.
+    #[default]
+    Absent,
+    /// The property's value (see `X86_FEATURE_1_IBT`/`X86_FEATURE_1_SHSTK`).
+    Present(u32),
+    /// A property entry exists but is truncated or undersized, so its
+    /// value cannot be read and absence of the features is not proven.
+    Unreadable,
+}
+
+/// Extract the `GNU_PROPERTY_X86_FEATURE_1_AND` state from one
+/// `.note.gnu.property` section's bytes. Note entries are 4-byte
+/// aligned; property entries inside a `GNU` property note are 8-byte
+/// aligned in ELF64 and 4-byte aligned in ELF32.
+fn parse_x86_feature_1_and(section: &[u8], is_64: bool) -> X86Feature1And {
     let u32_at = |b: &[u8], off: usize| -> Option<u32> {
         b.get(off..off + 4)
             .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
@@ -183,32 +204,59 @@ fn parse_x86_feature_1_and(section: &[u8], is_64: bool) -> Option<u32> {
     let align = |v: usize, a: usize| v.div_ceil(a) * a;
     let mut off = 0;
     while off + 12 <= section.len() {
-        let namesz = u32_at(section, off)? as usize;
-        let descsz = u32_at(section, off + 4)? as usize;
-        let n_type = u32_at(section, off + 8)?;
+        let Some(namesz) = u32_at(section, off) else {
+            break;
+        };
+        let Some(descsz) = u32_at(section, off + 4) else {
+            break;
+        };
+        let Some(n_type) = u32_at(section, off + 8) else {
+            break;
+        };
+        let namesz = namesz as usize;
+        let descsz = descsz as usize;
         let name_at = off + 12;
         let desc_at = name_at + align(namesz, 4);
+        let is_gnu_property = n_type == NT_GNU_PROPERTY_TYPE_0
+            && section.get(name_at..name_at + namesz) == Some(b"GNU\0".as_slice());
         if desc_at + descsz > section.len() {
-            return None;
+            // A truncated GNU property note may have carried the
+            // property in its lost tail; its absence is not proven.
+            if is_gnu_property {
+                return X86Feature1And::Unreadable;
+            }
+            break;
         }
-        if n_type == NT_GNU_PROPERTY_TYPE_0
-            && section.get(name_at..name_at + namesz) == Some(b"GNU\0".as_slice())
-        {
+        if is_gnu_property {
             let desc = &section[desc_at..desc_at + descsz];
             let prop_align = if is_64 { 8 } else { 4 };
             let mut poff = 0;
             while poff + 8 <= desc.len() {
-                let pr_type = u32_at(desc, poff)?;
-                let pr_datasz = u32_at(desc, poff + 4)? as usize;
-                if pr_type == GNU_PROPERTY_X86_FEATURE_1_AND && pr_datasz >= 4 {
-                    return u32_at(desc, poff + 8);
+                let Some(pr_type) = u32_at(desc, poff) else {
+                    break;
+                };
+                let Some(pr_datasz) = u32_at(desc, poff + 4) else {
+                    break;
+                };
+                let pr_datasz = pr_datasz as usize;
+                if pr_type == GNU_PROPERTY_X86_FEATURE_1_AND {
+                    // The entry exists; a value that is cut off or too
+                    // small to hold the feature word is unreadable,
+                    // not absent.
+                    if pr_datasz < 4 {
+                        return X86Feature1And::Unreadable;
+                    }
+                    return match u32_at(desc, poff + 8) {
+                        Some(v) => X86Feature1And::Present(v),
+                        None => X86Feature1And::Unreadable,
+                    };
                 }
                 poff += align(8 + pr_datasz, prop_align);
             }
         }
         off = desc_at + align(descsz, 4);
     }
-    None
+    X86Feature1And::Absent
 }
 
 struct ReadelfInfo {
@@ -261,10 +309,13 @@ struct ReadelfInfo {
     /// The dynamic symbol table defines `main`: an executable-entry shim
     /// linked into binaries, not a regular shared library.
     defines_main: bool,
-    /// `GNU_PROPERTY_X86_FEATURE_1_AND` from `.note.gnu.property`
-    /// (x86_64 only): bit 0 is IBT, bit 1 is SHSTK. `None` when the ELF
-    /// carries no such property.
-    x86_feature_1_and: Option<u32>,
+    /// `GNU_PROPERTY_X86_FEATURE_1_AND` state from
+    /// `.note.gnu.property` (x86_64 only).
+    x86_feature_1_and: X86Feature1And,
+    /// The binary's `.text` contains an `ENDBR64` instruction: code
+    /// compiled with `-fcf-protection` is present, whatever the merged
+    /// property note records.
+    has_endbr64: bool,
     failed: Option<String>,
 }
 
@@ -295,7 +346,8 @@ impl ReadelfInfo {
             elf_machine: goblin::elf::header::EM_NONE,
             bind_now: false,
             has_dynamic: false,
-            x86_feature_1_and: None,
+            x86_feature_1_and: X86Feature1And::Absent,
+            has_endbr64: false,
             failed: None,
         }
     }
@@ -381,19 +433,30 @@ impl ReadelfInfo {
             }]);
         }
 
-        // x86 control-flow protection property (consumed by
-        // check_hardening's missing-cf-protection). Properties are an
-        // x86 concept here; other architectures' notes are not read.
+        // x86 control-flow protection data (consumed by
+        // check_hardening's missing-cf-protection): the merged
+        // FEATURE_1_AND property state and the code-level ENDBR64
+        // record. Properties are an x86 concept here; other
+        // architectures' notes are not read.
         if elf.header.e_machine == goblin::elf::header::EM_X86_64 {
             for sh in &elf.section_headers {
-                if elf.shdr_strtab.get_at(sh.sh_name) == Some(".note.gnu.property") {
-                    let start = sh.sh_offset as usize;
-                    let end = start.saturating_add(sh.sh_size as usize).min(data.len());
-                    if let Some(bytes) = data.get(start..end) {
-                        if let Some(v) = parse_x86_feature_1_and(bytes, elf.is_64) {
-                            self.x86_feature_1_and = Some(v);
+                let start = sh.sh_offset as usize;
+                let end = start.saturating_add(sh.sh_size as usize).min(data.len());
+                let Some(bytes) = data.get(start..end) else {
+                    continue;
+                };
+                match elf.shdr_strtab.get_at(sh.sh_name) {
+                    Some(".note.gnu.property") => {
+                        let state = parse_x86_feature_1_and(bytes, elf.is_64);
+                        if self.x86_feature_1_and == X86Feature1And::Absent {
+                            self.x86_feature_1_and = state;
                         }
                     }
+                    Some(".text") => {
+                        self.has_endbr64 =
+                            self.has_endbr64 || bytes.windows(4).any(|w| w == ENDBR64);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2630,23 +2693,42 @@ impl BinariesCheck {
                 add_info(out, Level::Warning, pkg, "partial-relro", &[&pkgfile.name]);
             }
         }
-        // Control-flow protection: openSUSE's `%{optflags}` carry
-        // `-fcf-protection` on x86_64, which makes the compiler record
-        // the IBT and SHSTK features in `.note.gnu.property`; a binary
-        // whose property lacks either bit was built without the flags.
-        // Rust, Haskell and OCaml do not emit the property for their
-        // own code, so — like the fortify and stack-protector findings
-        // above — it applies to C binaries only. Measured over the
-        // Factory corpus (51,589 RPMs; 69,894 x86_64 ET_EXEC/ET_DYN
-        // ELFs): 84.4% carry both bits, 15.5% carry no
-        // FEATURE_1_AND at all and 27 carry exactly one bit.
+        // Control-flow protection (rpmcrab#667): openSUSE's
+        // `%{optflags}` carry `-fcf-protection` on x86_64, which makes
+        // the compiler record the IBT and SHSTK features in
+        // `.note.gnu.property` and emit ENDBR64 at indirect-branch
+        // targets. The finding requires both records to fall short.
+        // The property alone does not prove a flagless build: it is
+        // the bitwise AND over all link inputs, so one input carrying no
+        // property (a hand-written assembly or prebuilt object) clears
+        // it for the whole binary, and rebuilding changes nothing
+        // there — the merged note is what `-z cet-report` reports on.
+        // Measured over the Factory corpus (51,589 RPMs; 69,894 x86_64
+        // ET_EXEC/ET_DYN ELFs): 59,022 (84.4%) carry both bits, 10,845
+        // (15.5%) carry no FEATURE_1_AND at all and 27 carry exactly
+        // one bit — but of the 9,664 no-property ELFs outside the Go
+        // and debuginfo gates, 9,551 (98.8%) contain ENDBR64 in
+        // `.text`, i.e. they were compiled with the flag and lost the
+        // note at link time, as do all 27 one-bit ELFs (the
+        // asm-heavy FFmpeg family). The ENDBR64 absence is this
+        // finding's applicability evidence, in the sense of
+        // rpmcrab#447: only a binary whose code also shows no trace of
+        // the flag is reported. Like the fortify and stack-protector
+        // findings above it applies to C binaries only — Rust, Haskell
+        // and OCaml emit neither the property nor ENDBR64 for their
+        // own code. A truncated property entry is Unreadable, not
+        // absent: damage proves nothing either way.
+        let cf_unprotected = match info.x86_feature_1_and {
+            X86Feature1And::Present(f) => f & X86_FEATURE_1_IBT_SHSTK != X86_FEATURE_1_IBT_SHSTK,
+            X86Feature1And::Absent => true,
+            X86Feature1And::Unreadable => false,
+        };
         if info.elf_machine == goblin::elf::header::EM_X86_64
             && !is_rust
             && !is_haskell
             && !is_ocaml
-            && info
-                .x86_feature_1_and
-                .is_none_or(|f| f & (X86_FEATURE_1_IBT | X86_FEATURE_1_SHSTK) != 0b11)
+            && !info.has_endbr64
+            && cf_unprotected
         {
             add_info(
                 out,
@@ -4170,7 +4252,8 @@ mod tests {
 
         let run = |name: &str, runpaths: Vec<String>| {
             let info = ReadelfInfo {
-                x86_feature_1_and: None,
+                x86_feature_1_and: X86Feature1And::Absent,
+                has_endbr64: false,
                 sections: Vec::new(),
                 program_headers: Vec::new(),
                 functions: Vec::new(),
@@ -4241,10 +4324,11 @@ mod tests {
         let has =
             |finding: &str, bin: &str| lines_for(&results, finding).iter().any(|l| l.contains(bin));
 
-        // Fully hardened: silent on all four.
+        // Fully hardened: silent on all five.
         for finding in [
             "missing-fortify",
             "missing-stack-protector",
+            "missing-cf-protection",
             "missing-relro",
             "partial-relro",
         ] {
@@ -4306,6 +4390,7 @@ mod tests {
         for finding in [
             "missing-fortify",
             "missing-stack-protector",
+            "missing-cf-protection",
             "missing-relro",
             "partial-relro",
         ] {
@@ -4569,6 +4654,7 @@ mod tests {
             for finding in [
                 "missing-fortify",
                 "missing-stack-protector",
+                "missing-cf-protection",
                 "missing-relro",
                 "partial-relro",
             ] {
@@ -4590,6 +4676,10 @@ mod tests {
         assert!(
             lines_for(&results, "missing-stack-protector").is_empty(),
             "missing-stack-protector must not fire for Rust: {results:?}"
+        );
+        assert!(
+            lines_for(&results, "missing-cf-protection").is_empty(),
+            "missing-cf-protection must not fire for Rust: {results:?}"
         );
         // Linker-level RELRO checks still apply to Rust binaries.
         assert_eq!(
@@ -4642,6 +4732,10 @@ mod tests {
             lines_for(&results, "missing-stack-protector").is_empty(),
             "missing-stack-protector must not fire for Haskell: {results:?}"
         );
+        assert!(
+            lines_for(&results, "missing-cf-protection").is_empty(),
+            "missing-cf-protection must not fire for Haskell: {results:?}"
+        );
         // Linker-level RELRO checks still apply to Haskell binaries.
         assert_eq!(
             lines_for(&results, "missing-relro").len(),
@@ -4668,6 +4762,10 @@ mod tests {
             lines_for(&results, "missing-stack-protector").is_empty(),
             "missing-stack-protector must not fire for libHSrts: {results:?}"
         );
+        assert!(
+            lines_for(&results, "missing-cf-protection").is_empty(),
+            "missing-cf-protection must not fire for libHSrts: {results:?}"
+        );
     }
 
     #[test]
@@ -4688,6 +4786,10 @@ mod tests {
         assert!(
             lines_for(&results, "missing-stack-protector").is_empty(),
             "missing-stack-protector must not fire for OCaml: {results:?}"
+        );
+        assert!(
+            lines_for(&results, "missing-cf-protection").is_empty(),
+            "missing-cf-protection must not fire for OCaml: {results:?}"
         );
         // Linker-level RELRO checks still apply to OCaml binaries.
         assert_eq!(
@@ -4714,6 +4816,10 @@ mod tests {
         assert!(
             lines_for(&results, "missing-stack-protector").is_empty(),
             "missing-stack-protector must not fire for an OCaml plugin: {results:?}"
+        );
+        assert!(
+            lines_for(&results, "missing-cf-protection").is_empty(),
+            "missing-cf-protection must not fire for an OCaml plugin: {results:?}"
         );
     }
 
@@ -4857,6 +4963,7 @@ mod tests {
         for finding in [
             "missing-fortify",
             "missing-stack-protector",
+            "missing-cf-protection",
             "missing-relro",
             "partial-relro",
         ] {
@@ -4963,6 +5070,7 @@ mod tests {
         for finding in [
             "missing-fortify",
             "missing-stack-protector",
+            "missing-cf-protection",
             "missing-relro",
             "partial-relro",
         ] {
@@ -4994,6 +5102,11 @@ mod tests {
             lines_for(&results, "missing-stack-protector").len(),
             1,
             "missing-stack-protector must fire for C: {results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-cf-protection").len(),
+            1,
+            "missing-cf-protection must fire for C: {results:?}"
         );
         // Linker-level RELRO checks apply to plain C binaries too; the
         // Zig skip must not swallow them for non-Zig input.
@@ -5477,22 +5590,97 @@ mod tests {
         note
     }
 
+    /// Wrap a raw property-note desc in a `GNU` note header, with an
+    /// optional descsz override for truncation cases.
+    fn gnu_note_with_desc(desc: &[u8], descsz: Option<u32>) -> Vec<u8> {
+        let mut note = Vec::new();
+        note.extend_from_slice(&4u32.to_le_bytes()); // namesz, "GNU\0"
+        note.extend_from_slice(&descsz.unwrap_or(desc.len() as u32).to_le_bytes());
+        note.extend_from_slice(&5u32.to_le_bytes()); // NT_GNU_PROPERTY_TYPE_0
+        note.extend_from_slice(b"GNU\0");
+        note.extend_from_slice(desc);
+        note
+    }
+
     #[test]
     fn gnu_property_feature_1_and_is_parsed() {
         let both = gnu_property_note(&[(GNU_PROPERTY_X86_FEATURE_1_AND, 0b11)]);
         let info = parse_crafted_sections("cfboth", &[(".note.gnu.property", &both)]);
-        assert_eq!(info.x86_feature_1_and, Some(0b11));
+        assert_eq!(
+            info.x86_feature_1_and,
+            X86Feature1And::Present(X86_FEATURE_1_IBT_SHSTK)
+        );
         let shstk_only = gnu_property_note(&[(GNU_PROPERTY_X86_FEATURE_1_AND, 0b10)]);
         let info = parse_crafted_sections("cfshstk", &[(".note.gnu.property", &shstk_only)]);
-        assert_eq!(info.x86_feature_1_and, Some(0b10));
+        assert_eq!(
+            info.x86_feature_1_and,
+            X86Feature1And::Present(X86_FEATURE_1_SHSTK)
+        );
+        // A present-but-zero value is a real value, not an absence.
+        let zero = gnu_property_note(&[(GNU_PROPERTY_X86_FEATURE_1_AND, 0)]);
+        let info = parse_crafted_sections("cfzero", &[(".note.gnu.property", &zero)]);
+        assert_eq!(info.x86_feature_1_and, X86Feature1And::Present(0));
         // A property note without FEATURE_1_AND (here the x86
-        // FEATURE_2_USED property) leaves the field unset, as does a
+        // FEATURE_2_USED property) leaves the state Absent, as does a
         // binary with no property section at all.
         let other = gnu_property_note(&[(0xc000_0001, 0b11)]);
         let info = parse_crafted_sections("cfother", &[(".note.gnu.property", &other)]);
-        assert_eq!(info.x86_feature_1_and, None);
+        assert_eq!(info.x86_feature_1_and, X86Feature1And::Absent);
         let info = parse_crafted_sections("cfnone", &[(".text", b"code")]);
-        assert_eq!(info.x86_feature_1_and, None);
+        assert_eq!(info.x86_feature_1_and, X86Feature1And::Absent);
+    }
+
+    #[test]
+    fn gnu_property_feature_1_and_elf32_layout() {
+        // ELF32 property entries are 4-byte aligned, ELF64 ones 8-byte:
+        // a 12-byte first entry places FEATURE_1_AND at offset 12,
+        // where the ELF64 walk (16-byte stride) misses it.
+        let mut desc = Vec::new();
+        desc.extend_from_slice(&0xc000_0001u32.to_le_bytes()); // FEATURE_2_USED
+        desc.extend_from_slice(&4u32.to_le_bytes());
+        desc.extend_from_slice(&0xaaaa_aaaau32.to_le_bytes());
+        desc.extend_from_slice(&GNU_PROPERTY_X86_FEATURE_1_AND.to_le_bytes());
+        desc.extend_from_slice(&4u32.to_le_bytes());
+        desc.extend_from_slice(&X86_FEATURE_1_IBT_SHSTK.to_le_bytes());
+        let note = gnu_note_with_desc(&desc, None);
+        assert_eq!(
+            parse_x86_feature_1_and(&note, false),
+            X86Feature1And::Present(X86_FEATURE_1_IBT_SHSTK)
+        );
+        assert_eq!(parse_x86_feature_1_and(&note, true), X86Feature1And::Absent);
+    }
+
+    #[test]
+    fn gnu_property_feature_1_and_truncated_is_unreadable() {
+        // The entry declares 8 data bytes but the desc ends after 2:
+        // the value is cut off, which is damage, not absence.
+        let mut desc = Vec::new();
+        desc.extend_from_slice(&GNU_PROPERTY_X86_FEATURE_1_AND.to_le_bytes());
+        desc.extend_from_slice(&8u32.to_le_bytes());
+        desc.extend_from_slice(&[0x03, 0x00]);
+        let note = gnu_note_with_desc(&desc, None);
+        assert_eq!(
+            parse_x86_feature_1_and(&note, true),
+            X86Feature1And::Unreadable
+        );
+        // An entry too small to hold the feature word at all.
+        let mut desc = Vec::new();
+        desc.extend_from_slice(&GNU_PROPERTY_X86_FEATURE_1_AND.to_le_bytes());
+        desc.extend_from_slice(&2u32.to_le_bytes());
+        desc.extend_from_slice(&[0x03, 0x00]);
+        let note = gnu_note_with_desc(&desc, None);
+        assert_eq!(
+            parse_x86_feature_1_and(&note, true),
+            X86Feature1And::Unreadable
+        );
+        // A note header claiming a desc longer than the section: the
+        // property may have sat in the lost tail.
+        let desc = vec![0u8; 8];
+        let note = gnu_note_with_desc(&desc, Some(1024));
+        assert_eq!(
+            parse_x86_feature_1_and(&note, true),
+            X86Feature1And::Unreadable
+        );
     }
 
     #[test]
@@ -5506,20 +5694,39 @@ mod tests {
             check.check_hardening(&pkg, &pkgfile, info, &mut out);
             out.results().to_vec()
         };
-        // syn_info is ET_EXEC / EM_X86_64 with no property recorded:
-        // fires exactly once, at Warning.
+        // syn_info is ET_EXEC / EM_X86_64 with no property recorded and
+        // no ENDBR64: fires exactly once, at Warning.
         let results = run(&syn_info());
         let lines = lines_for(&results, "missing-cf-protection");
         assert_eq!(lines.len(), 1, "must fire once: {results:?}");
         assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
         // Both features recorded: quiet.
         let mut info = syn_info();
-        info.x86_feature_1_and = Some(0b11);
+        info.x86_feature_1_and = X86Feature1And::Present(X86_FEATURE_1_IBT_SHSTK);
         assert!(lines_for(&run(&info), "missing-cf-protection").is_empty());
         // One feature only (SHSTK): the missing IBT still fires.
         let mut info = syn_info();
-        info.x86_feature_1_and = Some(0b10);
+        info.x86_feature_1_and = X86Feature1And::Present(X86_FEATURE_1_SHSTK);
         assert_eq!(lines_for(&run(&info), "missing-cf-protection").len(), 1);
+        // A present-but-zero value records neither feature: fires.
+        let mut info = syn_info();
+        info.x86_feature_1_and = X86Feature1And::Present(0);
+        assert_eq!(lines_for(&run(&info), "missing-cf-protection").len(), 1);
+        // A truncated property entry proves nothing either way: quiet.
+        let mut info = syn_info();
+        info.x86_feature_1_and = X86Feature1And::Unreadable;
+        assert!(lines_for(&run(&info), "missing-cf-protection").is_empty());
+        // ENDBR64 in .text: the code was compiled with the flag and
+        // the property was cleared at link time by an input carrying
+        // none — rebuilding cannot restore it, so the finding stays
+        // quiet with no property and with a partial property alike.
+        let mut info = syn_info();
+        info.has_endbr64 = true;
+        assert!(lines_for(&run(&info), "missing-cf-protection").is_empty());
+        let mut info = syn_info();
+        info.has_endbr64 = true;
+        info.x86_feature_1_and = X86Feature1And::Present(X86_FEATURE_1_SHSTK);
+        assert!(lines_for(&run(&info), "missing-cf-protection").is_empty());
         // Other architectures have no x86 property semantics.
         let mut info = syn_info();
         info.elf_machine = goblin::elf::header::EM_AARCH64;
@@ -6211,7 +6418,8 @@ description = "explicit priority string bypasses the system crypto policy"
 
         let run = |sections: Vec<Vec<ElfSection>>| {
             let info = ReadelfInfo {
-                x86_feature_1_and: None,
+                x86_feature_1_and: X86Feature1And::Absent,
+                has_endbr64: false,
                 sections,
                 program_headers: Vec::new(),
                 functions: Vec::new(),
@@ -6348,7 +6556,8 @@ description = "explicit priority string bypasses the system crypto policy"
 
     fn syn_info() -> ReadelfInfo {
         ReadelfInfo {
-            x86_feature_1_and: None,
+            x86_feature_1_and: X86Feature1And::Absent,
+            has_endbr64: false,
             sections: Vec::new(),
             program_headers: Vec::new(),
             functions: Vec::new(),
