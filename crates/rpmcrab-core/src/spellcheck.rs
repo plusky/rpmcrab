@@ -24,7 +24,22 @@ const DICT_PATHS: &[&str] = &[
 
 /// A spellchecker, or `None` if no dictionary was found.
 pub struct Spellchecker {
-    dict: spellbook::Dictionary,
+    dict: spellbook::Dictionary<foldhash::fast::FixedState>,
+}
+
+/// Build the dictionary with a fixed-seed hasher.
+///
+/// spellbook's suggester scans the word list in hash order and cuts
+/// tied ngram candidates off in that order, so with the default
+/// randomly seeded hasher the kept suggestions depend on the process
+/// seed: two processes given identical dictionary bytes can keep
+/// different suggestions for the same word. A fixed seed makes the
+/// scan order a pure function of the dictionary bytes.
+fn build_dictionary(
+    aff: &str,
+    dic: &str,
+) -> Result<spellbook::Dictionary<foldhash::fast::FixedState>, spellbook::ParseDictionaryError> {
+    spellbook::Dictionary::new_with_hasher(aff, dic, foldhash::fast::FixedState::default())
 }
 
 impl Spellchecker {
@@ -39,7 +54,7 @@ impl Spellchecker {
             else {
                 continue;
             };
-            if let Ok(dict) = spellbook::Dictionary::new(&aff_s, &dic_s) {
+            if let Ok(dict) = build_dictionary(&aff_s, &dic_s) {
                 return Some(Self { dict });
             }
         }
@@ -49,9 +64,7 @@ impl Spellchecker {
     /// Build from inline dictionary strings (for tests).
     #[cfg(test)]
     pub(crate) fn from_strings(aff: &str, dic: &str) -> Option<Self> {
-        spellbook::Dictionary::new(aff, dic)
-            .ok()
-            .map(|dict| Self { dict })
+        build_dictionary(aff, dic).ok().map(|dict| Self { dict })
     }
 
     /// Check text for misspellings, returning (word, suggestions) pairs.
@@ -120,9 +133,8 @@ impl Spellchecker {
 
             let mut suggestions = Vec::new();
             self.dict.suggest(word, &mut suggestions);
-            // The dictionary returns candidates in per-process order; sort
-            // before truncating so the kept suggestions are deterministic
-            // for any dictionary bytes.
+            // Sort before truncating so the kept suggestions are in a
+            // canonical order.
             suggestions.sort();
             suggestions.truncate(3);
             result.push((word.to_string(), suggestions));
@@ -248,6 +260,91 @@ mod tests {
         let checker = test_checker();
         let result = checker.check("wrld wrld wrld", "testpkg", &[]);
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn suggestions_are_identical_across_checker_instances() {
+        // The word list below concentrates stems in the probes' letter
+        // neighbourhood (every distinct permutation of "preun" and of
+        // "preun" with one doubled letter), so spellbook's ngram
+        // suggester faces large sets of tied candidates at its internal
+        // cut-offs. Checker instances built from identical dictionary
+        // bytes must still keep identical suggestions: with a randomly
+        // seeded dictionary hasher they do not, because the suggester
+        // scans the word list in per-process hash order.
+        fn next_permutation(v: &mut [char]) -> bool {
+            let n = v.len();
+            if n < 2 {
+                return false;
+            }
+            let mut i = n - 2;
+            loop {
+                if v[i] < v[i + 1] {
+                    break;
+                }
+                if i == 0 {
+                    return false;
+                }
+                i -= 1;
+            }
+            let mut j = n - 1;
+            while v[j] <= v[i] {
+                j -= 1;
+            }
+            v.swap(i, j);
+            v[i + 1..].reverse();
+            true
+        }
+
+        let mut stems: Vec<String> = vec!["preen".to_string()];
+        let base: Vec<char> = "preun".chars().collect();
+        let mut v = base.clone();
+        v.sort_unstable();
+        loop {
+            stems.push(v.iter().collect());
+            if !next_permutation(&mut v) {
+                break;
+            }
+        }
+        for d in base {
+            let mut v: Vec<char> = "preun".chars().collect();
+            v.push(d);
+            v.sort_unstable();
+            loop {
+                stems.push(v.iter().collect());
+                if !next_permutation(&mut v) {
+                    break;
+                }
+            }
+        }
+        stems.sort();
+        stems.dedup();
+        let mut dic = format!("{}\n", stems.len());
+        for stem in &stems {
+            dic.push_str(stem);
+            dic.push('\n');
+        }
+
+        let probes = ["preum", "prenux", "preunx", "prenuq", "preuq", "preunm"];
+        let first = Spellchecker::from_strings(TEST_AFF, &dic).expect("synthetic dictionary");
+        let expected: Vec<Vec<(String, Vec<String>)>> = probes
+            .iter()
+            .map(|probe| first.check(probe, "testpkg", &[]))
+            .collect();
+        assert!(
+            expected.iter().any(|result| !result.is_empty()),
+            "probes must yield suggestions for the comparison to mean anything"
+        );
+        for _ in 0..16 {
+            let checker = Spellchecker::from_strings(TEST_AFF, &dic).expect("synthetic dictionary");
+            for (probe, want) in probes.iter().zip(&expected) {
+                assert_eq!(
+                    &checker.check(probe, "testpkg", &[]),
+                    want,
+                    "suggestions for {probe} differ between checker instances"
+                );
+            }
+        }
     }
 
     #[test]
