@@ -17,8 +17,8 @@
 //! (`.so.<number>`). The `-devel` package paired with it is
 //! `lib<name><number>-devel` or `lib<name>-devel`. The finding fires on the
 //! `-devel` package when none of its requires names the sibling — under the
-//! sibling's own name or one of its non-SONAME provides names — with a
-//! version relation. SONAME provides (`libfoo.so.1()(64bit)`) never count:
+//! sibling's own name or one of its `lib`-prefixed non-SONAME provides
+//! names — with a version relation. SONAME provides (`libfoo.so.1()(64bit)`) never count:
 //! they are the automatic file dependencies, not the package pairing.
 //! Sibling candidates are grouped by their normalised base: the base
 //! package and its `-32bit`/`-64bit` flavours (`libfoo1`,
@@ -56,6 +56,9 @@ pub struct SharedLibraryPolicyCheck {
     re_so_files: Regex,
     re_versioned_so_file: Regex,
     seen: Vec<SeenPkg>,
+    /// Index of `seen` by (name, arch, source), for the dedup in
+    /// `record_seen`.
+    seen_index: HashMap<(String, String, Option<String>), usize>,
 }
 
 /// One binary package of the run, recorded for the cross-package `-devel`
@@ -83,36 +86,55 @@ impl SharedLibraryPolicyCheck {
             re_so_files: Regex::new(r"\S+.so((\.(\d+))*)$").expect("static regex"),
             re_versioned_so_file: Regex::new(r"\.so\.\d").expect("static regex"),
             seen: Vec::new(),
+            seen_index: HashMap::new(),
         }
     }
 
     fn record(&mut self, pkg: &Pkg) {
+        // The pairing reads the dependency lists of only two record
+        // shapes: a `-devel` package's requires (it is the package the
+        // finding judges) and a scheme-named sibling's provides (the
+        // names a require may satisfy the pairing through). No other
+        // package's lists are ever read, so they are not cloned.
+        let is_devel = pkg.name.ends_with("-devel");
+        let is_scheme_named = self.sibling_group(&pkg.name).is_some();
         self.record_seen(SeenPkg {
             name: pkg.name.clone(),
             arch: pkg.arch.clone(),
             source_rpm: pkg.source_rpm.clone(),
-            requires: pkg
-                .requires
-                .iter()
-                .chain(pkg.prereq.iter())
-                .cloned()
-                .collect(),
-            provides: pkg.provides.iter().map(|d| d.name.clone()).collect(),
+            requires: if is_devel {
+                pkg.requires
+                    .iter()
+                    .chain(pkg.prereq.iter())
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            provides: if is_scheme_named {
+                pkg.provides.iter().map(|d| d.name.clone()).collect()
+            } else {
+                Vec::new()
+            },
             has_versioned_so: pkg
                 .files
                 .iter()
-                .any(|f| is_match(&self.re_versioned_so_file, &f.name)),
+                .any(|f| f.name.contains(".so.") && is_match(&self.re_versioned_so_file, &f.name)),
         });
     }
 
     fn record_seen(&mut self, entry: SeenPkg) {
         // One entry per (name, arch, source): a repeated package replaces
         // its earlier record instead of pairing with itself twice.
-        if let Some(old) = self.seen.iter_mut().find(|e| {
-            e.name == entry.name && e.arch == entry.arch && e.source_rpm == entry.source_rpm
-        }) {
-            *old = entry;
+        let key = (
+            entry.name.clone(),
+            entry.arch.clone(),
+            entry.source_rpm.clone(),
+        );
+        if let Some(&idx) = self.seen_index.get(&key) {
+            self.seen[idx] = entry;
         } else {
+            self.seen_index.insert(key, self.seen.len());
             self.seen.push(entry);
         }
     }
@@ -135,27 +157,17 @@ impl SharedLibraryPolicyCheck {
     /// whose canonical name is `libfoo1`. `None` when the name does not
     /// match the naming scheme.
     fn sibling_group(&self, shlib: &str) -> Option<(String, String)> {
-        if !is_match(&self.re_soname_pkg, shlib) {
-            return None;
-        }
-        // The scheme number is the trailing digit run (plus a normalised
-        // `-32bit`/`-64bit` suffix); the regex capture alone does not pin
-        // it, since the name part is greedy (`libfoo23` captures `3`).
-        let base = shlib
-            .strip_suffix("-32bit")
-            .or_else(|| shlib.strip_suffix("-64bit"))
-            .unwrap_or(shlib);
-        let num_len = base.len() - base.trim_end_matches(|c: char| c.is_ascii_digit()).len();
-        if num_len == 0 {
-            return None;
-        }
-        let stem = &base[..base.len() - num_len];
-        Some((stem.to_string(), base[base.len() - num_len..].to_string()))
+        // The one scheme parser, shared with the obsoletes path: both
+        // normalise identically, the number being the trailing digit
+        // run with leading zeroes dropped (`libfoo01` groups as
+        // `libfoo1`).
+        soname_package_parts(&self.re_soname_pkg, shlib)
     }
 
     /// Whether the `-devel` package requires the sibling with a version
-    /// relation, under the sibling's name or one of its non-SONAME provides
-    /// names. A bare name or a SONAME require does not satisfy the pairing.
+    /// relation, under the sibling's name or one of its `lib`-prefixed
+    /// non-SONAME provides names. A bare name or a SONAME require does
+    /// not satisfy the pairing.
     fn versioned_sibling_require(devel: &SeenPkg, sibling: &SeenPkg) -> bool {
         let mut names: Vec<&str> = vec![sibling.name.as_str()];
         for provide in &sibling.provides {
@@ -464,6 +476,7 @@ impl Check for SharedLibraryPolicyCheck {
 
     fn reset(&mut self) {
         self.seen.clear();
+        self.seen_index.clear();
     }
 
     fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
@@ -481,6 +494,15 @@ impl Check for SharedLibraryPolicyCheck {
     }
 
     fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
+        // Index the records by source once: the pairing never crosses
+        // sources, so each `-devel` package scans only its own set
+        // instead of the whole run with a string compare per pair.
+        let mut by_source: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (i, entry) in self.seen.iter().enumerate() {
+            if let Some(sr) = entry.source_rpm.as_deref() {
+                by_source.entry(sr).or_default().push(i);
+            }
+        }
         // Lint order of the `-devel` packages drives the finding order.
         for d in 0..self.seen.len() {
             if !self.seen[d].name.ends_with("-devel") {
@@ -493,13 +515,12 @@ impl Check for SharedLibraryPolicyCheck {
             // first-seen order: the base package and its flavours are
             // one pairing, not one pairing per sibling.
             let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
-            for s in 0..self.seen.len() {
+            for &s in &by_source[source_rpm.as_str()] {
                 if s == d {
                     continue;
                 }
                 let sibling = &self.seen[s];
-                if sibling.source_rpm.as_deref() != Some(source_rpm.as_str())
-                    || !sibling.has_versioned_so
+                if !sibling.has_versioned_so
                     || !self
                         .devel_names_for(&sibling.name)
                         .contains(&self.seen[d].name)
@@ -518,8 +539,8 @@ impl Check for SharedLibraryPolicyCheck {
             }
             for (base, members) in groups {
                 // A versioned require naming any member of the group (or
-                // one of its non-SONAME provides names) satisfies the
-                // whole group.
+                // one of its `lib`-prefixed non-SONAME provides names)
+                // satisfies the whole group.
                 if members
                     .iter()
                     .any(|&s| Self::versioned_sibling_require(&self.seen[d], &self.seen[s]))
@@ -1620,6 +1641,48 @@ mod tests {
                 version: None,
                 release: None,
             }],
+        );
+        let results = run_set(&[&lib, &devel]);
+        assert_eq!(results.len(), 1, "exactly one finding: {results:?}");
+    }
+
+    #[test]
+    fn devel_repeated_input_warns_once() {
+        // The same package recorded twice (a repeated input, or two
+        // workers reporting it) replaces its first record: the pairing
+        // still emits exactly one finding, not one per record.
+        let lib = shlib("libfoo1", "foo-1-1.src.rpm");
+        let devel = devel("libfoo-devel", "foo-1-1.src.rpm", vec![dep("libfoo1")]);
+        let results = run_set(&[&lib, &devel, &devel]);
+        assert_eq!(results.len(), 1, "exactly one finding: {results:?}");
+    }
+
+    #[test]
+    fn devel_zero_padded_sibling_groups_under_unpadded_name() {
+        // The scheme number drops leading zeroes, as on the obsoletes
+        // path: libfoo01 is the libfoo1 group, and the finding names
+        // the canonical (unpadded) base.
+        let lib = shlib("libfoo01", "foo-1-1.src.rpm");
+        let devel = devel("libfoo-devel", "foo-1-1.src.rpm", vec![dep("libfoo01")]);
+        let results = run_set(&[&lib, &devel]);
+        assert_eq!(results.len(), 1, "exactly one finding: {results:?}");
+        assert_eq!(
+            results[0].1,
+            "libfoo-devel.x86_64: W: shlib-devel-unversioned-requires libfoo1"
+        );
+    }
+
+    #[test]
+    fn devel_require_on_non_lib_provides_name_warns() {
+        // Only `lib`-prefixed provides names count as pairing names: a
+        // versioned require on an unrelated provides name of the
+        // sibling does not satisfy the pairing.
+        let mut lib = shlib("libfoo1", "foo-1-1.src.rpm");
+        lib.provides = vec![dep_versioned("foo", RPMSENSE_EQUAL)];
+        let devel = devel(
+            "libfoo-devel",
+            "foo-1-1.src.rpm",
+            vec![dep_versioned("foo", RPMSENSE_EQUAL)],
         );
         let results = run_set(&[&lib, &devel]);
         assert_eq!(results.len(), 1, "exactly one finding: {results:?}");

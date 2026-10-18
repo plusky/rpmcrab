@@ -448,7 +448,7 @@ impl Pkg {
     ) -> Self {
         let is_source = is_source.unwrap_or_else(|| header.get_owned(Tag::SOURCERPM).is_none());
         let name = tags::str_tag(&header, Tag::NAME).unwrap_or_default();
-        let source_rpm = tags::str_tag(&header, Tag::SOURCERPM);
+        let source_rpm = tags::str_tag(&header, Tag::SOURCERPM).filter(|s| !s.is_empty());
 
         let (requires, prereq) = gather_requires(&header);
         let provides = gather_deps(
