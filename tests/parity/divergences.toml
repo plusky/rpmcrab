@@ -2290,7 +2290,7 @@ upstream = "https://github.com/plusky/rpmcrab/issues/594"
 case = "global"
 check = "dir-or-file-outside-snapshot"
 kind = "severity"
-reason = "Config-only (issue #698): the vendored configs drop upstream's [Scoring] entry dir-or-file-outside-snapshot = 0 (DROP_SCORING in scripts/generate-distro-configs.py), so the port prints the emitted E with the default badness 1 where the reference under its opensuse config prints W with badness 0 (the b == 0 rule demotes E to W). Transactional updates are mandatory in every flavor, and under the badness doctrine (issue #699) no shipped badness is set for the finding: its significance is its Error level. The demote made the check advisory in the flavors that ran it: all 58,713 lines over 347 srcpkgs in the 20261018 Factory corpus measurement printed W with badness 0 under the pre-change flavor configs."
+reason = "Config-only (issue #698): the vendored configs drop upstream's [Scoring] entry dir-or-file-outside-snapshot = 0 (DROP_SCORING in scripts/generate-distro-configs.py), so the port prints the emitted E with the default badness 1 where the reference under its opensuse config prints W with badness 0 (the b == 0 rule demotes E to W). Transactional updates are mandatory in every flavor, and under the badness doctrine (issue #699) no shipped badness is set for the finding: its significance is its Error level. The demote made the check advisory in the flavor that ran it: all 58,713 lines over 347 srcpkgs in the 20261018 Factory corpus measurement printed W with badness 0 under the pre-change slfo flavor config."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/698"
 
