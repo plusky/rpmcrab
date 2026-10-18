@@ -2949,11 +2949,19 @@ impl BinariesCheck {
         // in an executable the undefined symbols resolve at load time, so the
         // reference's `ldd -r` stays silent there while a raw UND scan fires
         // hundreds of bogus hits.
+        // The level is Warning TEMPORARILY (issue #699, pending #701): the
+        // resolver's provider universe is the same package plus ambient
+        // system libraries, so a symbol provided by another package in the
+        // dependency closure reads as undefined; the #701 investigation
+        // sampled the Factory corpus and found 97.6% of findings resolve
+        // within the closure. #701 tightens the resolver (provider
+        // universe = the whole invocation's package set); the residue
+        // returns to Error there.
         if info.is_shlib {
             for symbol in &ldd.undefined_symbols {
                 add_info(
                     out,
-                    Level::Error,
+                    Level::Warning,
                     pkg,
                     "undefined-non-weak-symbol",
                     &[&pkgfile.name, symbol],

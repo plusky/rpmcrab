@@ -2491,3 +2491,10 @@ check = "non-ghost-in-run"
 kind = "severity"
 reason = "Emission severity E since issue #699 (the reference emits W): payload files or directories under /run or /var/run are never legitimate package content -- both are tmpfs mounts whose runtime directories belong in tmpfiles.d snippets -- so the finding always implies the defect it names. Under the pre-#699 regime the openSUSE flavours reached E only via their vendored scoring (non-ghost-in-run = 10000); #699 removed config badness and made E the emission level. The #639 entry records the widened /var/run coverage."
 since = "0.3.0"
+
+[[divergence]]
+case = "global"
+check = "undefined-non-weak-symbol"
+kind = "severity"
+reason = "TEMPORARY levelling pending plusky/rpmcrab#701 (issue #699 Factory-corpus fallout pass): the port emits undefined-non-weak-symbol at W, the reference at E. In the 20261018 Factory sweep the check produced 1,694,484 E findings across 3,625 srcpkgs (about 90% of all findings in the corpus; median 160 per package), which under the #699 exit doctrine would fail a fifth of Factory on this check alone. The mass is a provider-universe defect, not package damage: the resolver considers only the same binary RPM plus ambient system libraries (empty on the sweep host), and the #701 investigation found 97.6% of sampled findings (excluding the genuinely broken paraview) resolve within the package set's dependency closure. The settled fix is #701's resolver tightening (provider universe = the whole invocation's package set) with the residue staying E -- explicitly not a permanent downgrade. This entry and the W level are removed when #701 lands; until then the E-share figures for this check in the #699 fallout table are pre-fix."
+since = "0.3.0"
