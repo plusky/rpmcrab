@@ -168,6 +168,13 @@ fn signature_blobs(path: &Path) -> Vec<Vec<u8>> {
         if end > store_size {
             continue;
         }
+        // Signature blobs are hundreds of bytes; the bound keeps a
+        // garbage count from sizing a huge allocation, since the
+        // store size it was checked against comes from the same
+        // untrusted preamble.
+        if count > 65_536 {
+            continue;
+        }
         let mut blob = vec![0u8; count];
         if file
             .seek(SeekFrom::Start(store_start + offset as u64))
@@ -699,6 +706,41 @@ mod tests {
         packet.extend_from_slice(&body);
         let parsed = parse_sig_packet(&packet).expect("packet parses");
         assert_eq!(parsed.issuer, Some([0xaa; 8]));
+    }
+
+    #[test]
+    fn oversized_signature_blob_is_skipped() {
+        // A BIN signature entry whose count exceeds the blob cap is
+        // skipped without allocating for it, and a following
+        // in-bounds entry is still read.
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("oversized.rpm");
+        let oversized = 65_537u32;
+        let small: [u8; 4] = [1, 2, 3, 4];
+        let store_size = oversized + small.len() as u32;
+        let mut data = Vec::new();
+        let mut lead = [0u8; 96];
+        lead[0..4].copy_from_slice(&LEAD_MAGIC);
+        data.extend_from_slice(&lead);
+        let mut preamble = [0u8; 16];
+        preamble[0..3].copy_from_slice(&HEADER_MAGIC);
+        preamble[8..12].copy_from_slice(&2u32.to_be_bytes());
+        preamble[12..16].copy_from_slice(&store_size.to_be_bytes());
+        data.extend_from_slice(&preamble);
+        for (offset, count) in [(0u32, oversized), (oversized, small.len() as u32)] {
+            data.extend_from_slice(&1002u32.to_be_bytes());
+            data.extend_from_slice(&7u32.to_be_bytes());
+            data.extend_from_slice(&offset.to_be_bytes());
+            data.extend_from_slice(&count.to_be_bytes());
+        }
+        data.resize(data.len() + oversized as usize, 0);
+        data.extend_from_slice(&small);
+        std::fs::File::create(&path)
+            .expect("create fixture")
+            .write_all(&data)
+            .expect("write fixture");
+        assert_eq!(signature_blobs(&path), vec![small.to_vec()]);
     }
 
     #[test]
