@@ -1632,6 +1632,81 @@ def test_adjust_scoring_drops_promotions_and_keeps_the_rest():
     assert len(added) == 1 and "invalid-license" in added[0], added
 
 
+def test_adjust_scoring_drops_the_comment_block_of_a_dropped_entry():
+    """A dropped entry takes its own comment block with it.
+
+    In the vendored files an entry's comment sits in the entry's own
+    blank-line-separated block -- the shape of the
+    dir-or-file-outside-snapshot = 0 demote in both flavors (issue
+    #698) -- so dropping only the key line left the comment
+    documenting an entry that no longer exists. The whole block
+    goes, with one adjacent blank, and the transform stays
+    idempotent on its own output.
+    """
+    text = (
+        "[Scoring]\n"
+        "summary-too-long = 200\n"
+        "\n"
+        "# Set to 10000 once affected packages have been updated\n"
+        "# for atomic update compatibility\n"
+        "dir-or-file-outside-snapshot = 0\n"
+        "\n"
+        "kmp-missing-supplements = 10000\n"
+    )
+    dropped, added = [], []
+    out = gen.adjust_scoring(text, dropped, added)
+    assert out == (
+        "[Scoring]\n"
+        "summary-too-long = 200\n"
+        "\n"
+        "kmp-missing-supplements = 10000\n"
+        "\n"
+        "# Added by rpmcrab (deliberate, ledgered divergence; see\n"
+        "# SCORING_ADDITIONS in scripts/generate-distro-configs.py):\n"
+        "invalid-license = 100000\n"
+    ), out
+    assert len(dropped) == 1, dropped
+    assert "dir-or-file-outside-snapshot" in dropped[0], dropped
+    assert gen.adjust_scoring(out, [], []) == out
+
+
+def test_adjust_scoring_keeps_a_shared_comment_header():
+    """A comment heading a block with a surviving entry is shared and
+    stays, even when another entry under it is dropped: the block is
+    the only distinction the file offers between an entry's comment
+    and a group header, so a block that holds a surviving entry
+    never loses its comments."""
+    text = (
+        "[Scoring]\n"
+        "# Calibration for the findings below\n"
+        "summary-too-long = 200\n"
+        "makefile-junk = 109\n"
+    )
+    dropped, added = [], []
+    out = gen.adjust_scoring(text, dropped, added)
+    assert "# Calibration for the findings below\n" in out, out
+    assert "summary-too-long = 200\n" in out, out
+    assert "makefile-junk = " not in out, out
+    assert len(dropped) == 1 and "makefile-junk" in dropped[0], dropped
+
+
+def test_adjust_scoring_keeps_a_comment_block_without_entries():
+    """A comment block holding no entry is never removed: standing
+    alone it cannot be told apart from a section footer, so the
+    conservative rule keeps it even next to a dropped entry."""
+    text = (
+        "[Scoring]\n"
+        "makefile-junk = 109\n"
+        "\n"
+        "# The entries above are calibrated for the default bundle.\n"
+    )
+    dropped, added = [], []
+    out = gen.adjust_scoring(text, dropped, added)
+    assert "# The entries above are calibrated for the default bundle.\n" in out, out
+    assert "makefile-junk = " not in out, out
+    assert len(dropped) == 1 and "makefile-junk" in dropped[0], dropped
+
+
 def test_adjust_scoring_is_idempotent():
     """Re-running on adjusted text changes nothing: the monthly sync
     regenerates from upstream, but a no-op second pass proves the
