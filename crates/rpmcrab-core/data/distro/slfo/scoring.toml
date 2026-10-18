@@ -93,9 +93,6 @@ zypperplugin-file-digest-mismatch = 10
 zypperplugin-file-ghost = 10
 zypperplugin-file-unauthorized = 10
 
-# Set to 10000 once affected packages have been updated
-# for atomic update compatibility
-
 # Added by rpmcrab (deliberate, ledgered divergence; see
 # SCORING_ADDITIONS in scripts/generate-distro-configs.py):
 invalid-license = 100000

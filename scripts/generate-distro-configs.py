@@ -1967,32 +1967,97 @@ def remove_excluded_checks(text, checks):
     return "".join(out)
 
 
-def adjust_scoring(text, dropped_log, added_log):
-    """Apply DROP_SCORING / SCORING_ADDITIONS to a vendored scoring.toml.
+def _scoring_blocks(lines):
+    """Split a table's lines into blank-line-separated blocks.
 
-    Only the ``[Scoring]`` table is touched. A dropped key loses its
-    line; an addition upstream already carries is rewritten in place
-    (so a future upstream adoption cannot produce a duplicate key),
-    and a missing addition is appended at the end of the file -- the
-    table runs to EOF in the pinned files -- under an explanatory
-    comment, the same self-documenting shape append_extra_checks uses.
-    Idempotent: re-running on adjusted text changes nothing.
+    Returns ("blank", line) elements for blank lines and
+    ("block", [line, ...]) elements for maximal runs of non-blank
+    lines, in order.
     """
-    lines = text.splitlines(keepends=True)
-    out = []
-    in_scoring = False
-    present = set()
+    elements = []
+    block = []
     for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("["):
-            in_scoring = stripped == "[Scoring]"
-            out.append(line)
+        if line.strip():
+            block.append(line)
+        else:
+            if block:
+                elements.append(("block", block))
+                block = []
+            elements.append(("blank", line))
+    if block:
+        elements.append(("block", block))
+    return elements
+
+
+def _emit_scoring(lines, dropped_log, added_log, present):
+    """Emit one [Scoring] table's lines with DROP_SCORING applied.
+
+    A dropped key loses its line, and takes its comment block with it
+    when the block holds nothing else: in the vendored files an
+    entry's comment sits in the entry's own blank-line-separated
+    block, so a block made only of comments and dropped entries
+    documents entries that no longer exist. One blank line adjacent
+    to such a removed block goes with it (the following one, else
+    the preceding), so the removal strands no doubled blank. Every
+    other comment survives: a comment whose block also holds a
+    surviving entry is a shared header, and a comment block with no
+    entries at all cannot be told apart from a section footer, so
+    both stay. SCORING_ADDITIONS rewrites apply per line, exactly as
+    a plain line filter would apply them.
+    """
+    key_re = re.compile(r"^([A-Za-z0-9_.%*-]+)\s*=")
+    elements = _scoring_blocks(lines)
+    removed_blocks = set()
+    for idx, (kind, block) in enumerate(elements):
+        if kind != "block":
             continue
-        if in_scoring:
-            m = re.match(r"^([A-Za-z0-9_.%*-]+)\s*=", stripped)
+        keys = []
+        removable = True
+        has_comment = False
+        for line in block:
+            stripped = line.strip()
+            m = key_re.match(stripped)
+            if m:
+                keys.append(m.group(1))
+                present.add(m.group(1))
+                if m.group(1) not in DROP_SCORING:
+                    removable = False
+            elif stripped.startswith("#"):
+                has_comment = True
+            else:
+                removable = False
+        if keys and has_comment and removable:
+            removed_blocks.add(idx)
+    removed_blanks = set()
+    for idx in sorted(removed_blocks):
+        for neighbour in (idx + 1, idx - 1):
+            if (
+                0 <= neighbour < len(elements)
+                and elements[neighbour][0] == "blank"
+                and neighbour not in removed_blanks
+            ):
+                removed_blanks.add(neighbour)
+                break
+    out = []
+    for idx, (kind, block) in enumerate(elements):
+        if idx in removed_blocks:
+            for line in block:
+                m = key_re.match(line.strip())
+                if m:
+                    key = m.group(1)
+                    dropped_log.append(
+                        f"Scoring: dropped {key!r} ({DROP_SCORING[key]})"
+                    )
+            continue
+        if kind == "blank":
+            if idx not in removed_blanks:
+                out.append(block)
+            continue
+        for line in block:
+            stripped = line.strip()
+            m = key_re.match(stripped)
             if m:
                 key = m.group(1)
-                present.add(key)
                 if key in DROP_SCORING:
                     dropped_log.append(
                         f"Scoring: dropped {key!r} ({DROP_SCORING[key]})"
@@ -2007,7 +2072,47 @@ def adjust_scoring(text, dropped_log, added_log):
                         )
                         out.append(new_line)
                         continue
+            out.append(line)
+    return out
+
+
+def adjust_scoring(text, dropped_log, added_log):
+    """Apply DROP_SCORING / SCORING_ADDITIONS to a vendored scoring.toml.
+
+    Only the ``[Scoring]`` table is touched. See _emit_scoring for how
+    dropped keys and their comment blocks are handled; an addition
+    upstream already carries is rewritten in place (so a future
+    upstream adoption cannot produce a duplicate key), and a missing
+    addition is appended at the end of the file -- the table runs to
+    EOF in the pinned files -- under an explanatory comment, the same
+    self-documenting shape append_extra_checks uses. Idempotent:
+    re-running on adjusted text changes nothing.
+    """
+    lines = text.splitlines(keepends=True)
+    out = []
+    present = set()
+    in_scoring = False
+    scoring_lines = []
+
+    def flush_scoring():
+        if scoring_lines:
+            out.extend(
+                _emit_scoring(scoring_lines, dropped_log, added_log, present)
+            )
+            del scoring_lines[:]
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("["):
+            flush_scoring()
+            in_scoring = stripped == "[Scoring]"
+            out.append(line)
+            continue
+        if in_scoring:
+            scoring_lines.append(line)
+            continue
         out.append(line)
+    flush_scoring()
     missing = [k for k in SCORING_ADDITIONS if k not in present]
     if missing:
         if out and not out[-1].endswith("\n"):
