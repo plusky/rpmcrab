@@ -251,6 +251,12 @@ fn parse_x86_feature_1_and(section: &[u8], is_64: bool) -> X86Feature1And {
                         None => X86Feature1And::Unreadable,
                     };
                 }
+                if poff + 8 + pr_datasz > desc.len() {
+                    // A non-feature entry overrunning the desc ends
+                    // the walk here; the feature entry could have sat
+                    // in the lost tail, so absence is not proven.
+                    return X86Feature1And::Unreadable;
+                }
                 poff += align(8 + pr_datasz, prop_align);
             }
         }
@@ -2707,10 +2713,12 @@ impl BinariesCheck {
         // ET_EXEC/ET_DYN ELFs): 59,022 (84.4%) carry both bits, 10,845
         // (15.5%) carry no FEATURE_1_AND at all and 27 carry exactly
         // one bit — but of the 9,664 no-property ELFs outside the Go
-        // and debuginfo gates, 9,551 (98.8%) contain ENDBR64 in
-        // `.text`, i.e. they were compiled with the flag and lost the
-        // note at link time, as do all 27 one-bit ELFs (the
-        // asm-heavy FFmpeg family). The ENDBR64 absence is this
+        // and debuginfo gates, 9,551 (98.8%) carry an ENDBR64 record
+        // in `.text`, as do all 27 one-bit ELFs (the asm-heavy FFmpeg
+        // family). The record is applicability evidence, not
+        // attribution: it shows the flag reached some of the code,
+        // not which link input contributed it — flag-built CRT glue
+        // lands in `.text` too. The ENDBR64 absence is this
         // finding's applicability evidence, in the sense of
         // rpmcrab#447: only a binary whose code also shows no trace of
         // the flag is reported. Like the fortify and stack-protector
@@ -5631,6 +5639,22 @@ mod tests {
     }
 
     #[test]
+    fn endbr64_is_detected_from_text_section_bytes() {
+        // The gate sensor end to end: `has_endbr64` must come from
+        // the parsed `.text` bytes, not from a hand-set field — a
+        // wrong ENDBR64 constant or section-name drift would
+        // silently disable the gate and fire on every hardened
+        // binary.
+        let with = parse_crafted_sections("cfendbr", &[(".text", b"\x90\xf3\x0f\x1e\xfa\xc3")]);
+        assert!(with.has_endbr64, "ENDBR64 in .text must be detected");
+        let without = parse_crafted_sections("cfnoendbr", &[(".text", b"\x90\x90\xc3")]);
+        assert!(!without.has_endbr64);
+        // The same bytes outside `.text` are not a code record.
+        let rodata = parse_crafted_sections("cfendbrro", &[(".rodata", b"\xf3\x0f\x1e\xfa")]);
+        assert!(!rodata.has_endbr64);
+    }
+
+    #[test]
     fn gnu_property_feature_1_and_elf32_layout() {
         // ELF32 property entries are 4-byte aligned, ELF64 ones 8-byte:
         // a 12-byte first entry places FEATURE_1_AND at offset 12,
@@ -5647,7 +5671,13 @@ mod tests {
             parse_x86_feature_1_and(&note, false),
             X86Feature1And::Present(X86_FEATURE_1_IBT_SHSTK)
         );
-        assert_eq!(parse_x86_feature_1_and(&note, true), X86Feature1And::Absent);
+        // Read with the ELF64 stride, the walk lands mid-entry and
+        // the misread entry's declared size overruns the desc: the
+        // state is unreadable (damage proves nothing), not absent.
+        assert_eq!(
+            parse_x86_feature_1_and(&note, true),
+            X86Feature1And::Unreadable
+        );
     }
 
     #[test]
@@ -5677,6 +5707,18 @@ mod tests {
         // property may have sat in the lost tail.
         let desc = vec![0u8; 8];
         let note = gnu_note_with_desc(&desc, Some(1024));
+        assert_eq!(
+            parse_x86_feature_1_and(&note, true),
+            X86Feature1And::Unreadable
+        );
+        // A non-feature entry whose declared size overruns the desc
+        // ends the walk the same way: the feature entry could have
+        // sat in the lost tail.
+        let mut desc = Vec::new();
+        desc.extend_from_slice(&0xc000_0001u32.to_le_bytes());
+        desc.extend_from_slice(&64u32.to_le_bytes());
+        desc.extend_from_slice(&[0x03, 0x00, 0x00, 0x00]);
+        let note = gnu_note_with_desc(&desc, None);
         assert_eq!(
             parse_x86_feature_1_and(&note, true),
             X86Feature1And::Unreadable
