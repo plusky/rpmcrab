@@ -258,12 +258,12 @@ fn every_built_check_reports_its_registry_name() {
 
 /// Issue #698: transactional updates are mandatory, not an slfo-only
 /// requirement, so `AtomicUpdateCheck` is listed in the bundled defaults
-/// and in both flavour configs. The openSUSE flavour keeps the
-/// `filesystem` exemption for the finding (the check now runs there, so
-/// the exemption is live), and no flavour ships a scoring entry for
-/// `dir-or-file-outside-snapshot`: a vendored `= 0` would demote the
-/// emitted Error to a warning, and the finding's significance is its
-/// Error level (issue #699).
+/// and in both flavour configs. Both flavours keep the
+/// `filesystem` exemption for the finding (in the openSUSE flavour the
+/// check now runs there, so the exemption is live), and no flavour
+/// ships a scoring entry for `dir-or-file-outside-snapshot`: a
+/// vendored `= 0` would demote the emitted Error to a warning, and
+/// the finding's significance is its Error level (issue #699).
 #[test]
 fn atomic_update_check_is_enabled_everywhere() {
     let root = core_root();
@@ -287,14 +287,15 @@ fn atomic_update_check_is_enabled_everywhere() {
             "the {flavor} flavour must not ship a scoring entry for \
              dir-or-file-outside-snapshot (it would demote the Error)"
         );
+        let flavor_config =
+            std::fs::read_to_string(root.join(format!("data/distro/{flavor}/opensuse.toml")))
+                .expect("read opensuse.toml");
+        assert!(
+            flavor_config.contains("'^filesystem\\..*: dir-or-file-outside-snapshot'"),
+            "the {flavor} flavour must keep the filesystem exemption for \
+             dir-or-file-outside-snapshot"
+        );
     }
-    let opensuse = std::fs::read_to_string(root.join("data/distro/opensuse/opensuse.toml"))
-        .expect("read opensuse.toml");
-    assert!(
-        opensuse.contains("'^filesystem\\..*: dir-or-file-outside-snapshot'"),
-        "the openSUSE flavour must keep the filesystem exemption for \
-         dir-or-file-outside-snapshot"
-    );
 }
 
 /// The reverse direction (issue #85): a name in a shipped config's
