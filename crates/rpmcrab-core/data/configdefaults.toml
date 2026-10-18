@@ -1,10 +1,8 @@
 # Enabled checks for the rpmlint to be run
-# AtomicUpdateCheck is deliberately absent here and in the openSUSE flavour
-# config: the snapshot layout is a transactional-update (SLFO) requirement,
-# so the check is enabled only by the slfo flavour config (issue #478).
 Checks = [
     "AlternativesCheck",
     "AppDataCheck",
+    "AtomicUpdateCheck",
     "BinariesCheck",
     'BuildRootAndDateCheck',
     "ConfigFilesCheck",
