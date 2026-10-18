@@ -22,6 +22,18 @@ pub struct PostCheck {
     empty_shells: Vec<String>,
 }
 
+/// Scanner state `PostCheck::heredoc_delimiters` threads across the
+/// lines of a scriptlet: shell quotes and arithmetic expansions span
+/// lines, so a `<<` on the continuation line of a quoted string is
+/// string content, not a heredoc operator.
+#[derive(Default)]
+struct HeredocScan {
+    in_single: bool,
+    in_double: bool,
+    arith_depth: usize,
+    bracket_depth: usize,
+}
+
 static POST_MENU_RE: OnceLock<Regex> = OnceLock::new();
 
 impl PostCheck {
@@ -96,12 +108,28 @@ impl PostCheck {
     /// tests/parity/divergences.toml.
     fn uses_tmp_literal(script: &str) -> bool {
         // Pending heredocs in the order their bodies appear:
-        // (delimiter, body is fed to `systemd-tmpfiles`).
-        let mut pending: Vec<(String, bool)> = Vec::new();
-        for line in script.lines() {
+        // (delimiter, body is fed to `systemd-tmpfiles`, `<<-` form).
+        let mut pending: Vec<(String, bool, bool)> = Vec::new();
+        // Quote/arithmetic state spans lines; the heredoc scanner
+        // threads it so a phantom opener inside a multi-line string
+        // cannot swallow the blocks after it.
+        let mut scan = HeredocScan::default();
+        let physical: Vec<&str> = script.lines().collect();
+        let mut idx = 0;
+        while idx < physical.len() {
             if !pending.is_empty() {
-                let (delim, exempt) = pending[0].clone();
-                if line.trim() == delim {
+                let line = physical[idx];
+                idx += 1;
+                // Compare through a borrow; only the terminator line
+                // mutates the queue.
+                let (terminated, exempt) = {
+                    let (delim, exempt, strip_tabs) = &pending[0];
+                    (
+                        Self::tmp_heredoc_terminator(line, delim, *strip_tabs),
+                        *exempt,
+                    )
+                };
+                if terminated {
                     pending.remove(0);
                     continue;
                 }
@@ -113,14 +141,45 @@ impl PostCheck {
                 }
                 continue;
             }
-            if Self::line_has_tmp_literal(line) {
+            // A backslash-continued command is one logical line to the
+            // shell: join continuations before scanning, so a wrapped
+            // invocation is attributed whole.
+            let mut logical = physical[idx].to_string();
+            idx += 1;
+            while Self::ends_with_continuation(&logical) && idx < physical.len() {
+                logical.pop();
+                logical.push_str(physical[idx]);
+                idx += 1;
+            }
+            if Self::line_has_tmp_literal(&logical) {
                 return true;
             }
             // The reference's `^[^#]*` prefix cannot cross a `#`.
-            let code = line.split('#').next().unwrap_or("");
-            pending.extend(Self::heredoc_delimiters(code));
+            let code = logical.split('#').next().unwrap_or("");
+            pending.extend(Self::heredoc_delimiters(code, &mut scan));
         }
         false
+    }
+
+    /// Whether `line` terminates a tmpfiles-scan heredoc: an exact
+    /// match for the plain form, leading tabs stripped for the `<<-`
+    /// form — the shell's own rule, so a delimiter-like body line
+    /// that is indented or carries trailing blanks does not end the
+    /// body early.
+    fn tmp_heredoc_terminator(line: &str, delim: &str, strip_tabs: bool) -> bool {
+        if strip_tabs {
+            line.trim_start_matches('\t') == delim
+        } else {
+            line == delim
+        }
+    }
+
+    /// Whether the line's code portion (before any `#` comment) ends
+    /// in an unescaped backslash, i.e. the shell joins the next
+    /// physical line onto this one.
+    fn ends_with_continuation(line: &str) -> bool {
+        let code = line.split('#').next().unwrap_or("");
+        code.chars().rev().take_while(|c| *c == '\\').count() % 2 == 1
     }
 
     fn line_has_tmp_literal(line: &str) -> bool {
@@ -160,50 +219,65 @@ impl PostCheck {
     }
 
     /// Heredocs opened on a line, in order, each paired with whether
-    /// its body is fed to `systemd-tmpfiles`. Handles the plain, `<<-`,
-    /// and quoted-delimiter forms; a herestring is not a heredoc. A
-    /// `<<` inside single/double quotes or inside a `$((...))`
-    /// arithmetic expansion (where it is the left-shift operator) is
-    /// not a heredoc operator. The exemption is per heredoc, not per
-    /// line: only the first heredoc of a command segment that feeds
-    /// `systemd-tmpfiles` its `-` stdin is exempt, so a second heredoc
-    /// opened by another command on the same line is still scanned.
-    fn heredoc_delimiters(code: &str) -> Vec<(String, bool)> {
+    /// its body is fed to `systemd-tmpfiles` and whether the operator
+    /// is the `<<-` form. Handles the plain, `<<-`, and
+    /// quoted-delimiter forms; a herestring is not a heredoc. A `<<`
+    /// inside single/double quotes or inside an arithmetic context
+    /// (a `$((...))` expansion, the `((...))` command, a `$[...]`
+    /// expansion, a `let` expression), where it is the left-shift
+    /// operator, is not a heredoc operator. Quote and arithmetic
+    /// state lives in `scan` and threads across the scriptlet's
+    /// lines, because both span lines. The exemption is per heredoc,
+    /// not per line: only the last heredoc of a command segment that
+    /// feeds `systemd-tmpfiles` its `-` stdin is exempt — the shell
+    /// reads and discards the earlier stdin redirections — so a
+    /// heredoc opened by another command on the same line is still
+    /// scanned.
+    fn heredoc_delimiters(code: &str, scan: &mut HeredocScan) -> Vec<(String, bool, bool)> {
         let bytes = code.as_bytes();
-        // (byte offset of the `<<`, delimiter), plus the byte offsets
-        // of the command separators (`;`, `|`, `&`) seen in code
-        // position — each heredoc belongs to the segment around it.
-        let mut found: Vec<(usize, String)> = Vec::new();
+        // (byte offset of the `<<`, delimiter, `<<-` form), plus the
+        // byte offsets of the command separators (`;`, `|`, `&`) seen
+        // in code position — each heredoc belongs to the segment
+        // around it.
+        let mut found: Vec<(usize, String, bool)> = Vec::new();
         let mut separators: Vec<usize> = Vec::new();
-        let mut in_single = false;
-        let mut in_double = false;
-        let mut arith_depth = 0usize;
+        // A `let` command makes the rest of its segment arithmetic.
+        let mut arith_segment = false;
         let mut i = 0;
         while i < bytes.len() {
             let c = bytes[i];
-            if in_single {
+            if scan.in_single {
                 if c == b'\'' {
-                    in_single = false;
+                    scan.in_single = false;
                 }
                 i += 1;
                 continue;
             }
-            if in_double {
+            if scan.in_double {
                 if c == b'\\' {
                     i += 2;
                     continue;
                 }
                 if c == b'"' {
-                    in_double = false;
+                    scan.in_double = false;
                 }
                 i += 1;
                 continue;
             }
-            if arith_depth > 0 {
+            if scan.arith_depth > 0 {
                 if c == b'(' {
-                    arith_depth += 1;
+                    scan.arith_depth += 1;
                 } else if c == b')' {
-                    arith_depth -= 1;
+                    scan.arith_depth -= 1;
+                }
+                i += 1;
+                continue;
+            }
+            if scan.bracket_depth > 0 {
+                if c == b'[' {
+                    scan.bracket_depth += 1;
+                } else if c == b']' {
+                    scan.bracket_depth -= 1;
                 }
                 i += 1;
                 continue;
@@ -213,24 +287,66 @@ impl PostCheck {
                     i += 2;
                     continue;
                 }
-                b'\'' => in_single = true,
-                b'"' => in_double = true,
+                b'\'' => scan.in_single = true,
+                b'"' => scan.in_double = true,
                 b'$' => {
                     if code[i..].starts_with("$((") {
-                        arith_depth = 2;
+                        scan.arith_depth = 2;
+                        i += 3;
+                        continue;
+                    }
+                    if code[i..].starts_with("$[") {
+                        scan.bracket_depth = 1;
+                        i += 2;
+                        continue;
+                    }
+                }
+                b'(' => {
+                    // The `((...))` arithmetic command at command
+                    // position: its `<<` is the left-shift operator.
+                    if code[i..].starts_with("((")
+                        && (i == 0
+                            || matches!(bytes[i - 1], b' ' | b'\t' | b';' | b'|' | b'&' | b'('))
+                    {
+                        scan.arith_depth = 2;
+                        i += 2;
+                        continue;
+                    }
+                }
+                b'l' => {
+                    // A leading `let` makes the rest of the segment
+                    // an arithmetic expression.
+                    let seg_start = separators
+                        .iter()
+                        .copied()
+                        .filter(|s| *s < i)
+                        .max()
+                        .map_or(0, |s| s + 1);
+                    if code[seg_start..i].trim().is_empty()
+                        && code[i..].starts_with("let")
+                        && matches!(bytes.get(i + 3).copied(), None | Some(b' ') | Some(b'\t'))
+                    {
+                        arith_segment = true;
                         i += 3;
                         continue;
                     }
                 }
-                b';' | b'|' | b'&' => separators.push(i),
+                b';' | b'|' | b'&' => {
+                    separators.push(i);
+                    arith_segment = false;
+                }
                 b'<' => {
+                    if arith_segment {
+                        i += 1;
+                        continue;
+                    }
                     if code[i..].starts_with("<<<") {
                         i += 3;
                         continue;
                     }
                     if code[i..].starts_with("<<") {
-                        if let Some((delim, next)) = Self::delimiter_after(code, i) {
-                            found.push((i, delim));
+                        if let Some((delim, strip_tabs, next)) = Self::delimiter_after(code, i) {
+                            found.push((i, delim, strip_tabs));
                             i = next;
                             continue;
                         }
@@ -242,42 +358,51 @@ impl PostCheck {
             }
             i += 1;
         }
-        let mut exempted_segments: Vec<usize> = Vec::new();
+        let seg_start = |at: usize| {
+            separators
+                .iter()
+                .copied()
+                .filter(|s| *s < at)
+                .max()
+                .map_or(0, |s| s + 1)
+        };
+        // The shell feeds a segment's stdin from its LAST heredoc:
+        // earlier stdin redirections are read and discarded.
+        let mut last_in_segment: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::new();
+        for (idx, (at, _, _)) in found.iter().enumerate() {
+            last_in_segment.insert(seg_start(*at), idx);
+        }
         found
             .into_iter()
-            .map(|(at, delim)| {
-                let start = separators
-                    .iter()
-                    .copied()
-                    .filter(|s| *s < at)
-                    .max()
-                    .map_or(0, |s| s + 1);
+            .enumerate()
+            .map(|(idx, (at, delim, strip_tabs))| {
+                let start = seg_start(at);
                 let end = separators
                     .iter()
                     .copied()
                     .filter(|s| *s > at)
                     .min()
                     .unwrap_or(code.len());
-                let exempt = !exempted_segments.contains(&start)
+                let exempt = last_in_segment[&start] == idx
                     && Self::segment_feeds_tmpfiles_stdin(&code[start..end]);
-                if exempt {
-                    exempted_segments.push(start);
-                }
-                (delim, exempt)
+                (delim, exempt, strip_tabs)
             })
             .collect()
     }
 
     /// Parse the delimiter following a `<<` at byte offset `at` in
-    /// `code`; returns the delimiter and the offset just past it. The
-    /// delimiter is the full shell word, so a hyphen or dot inside it
-    /// (`<<MY-DELIM`, `<<MY.DELIM`) is part of the delimiter, not its
-    /// end. A leading `-` is the `<<-` strip-tabs marker, not part of
-    /// the word.
-    fn delimiter_after(code: &str, at: usize) -> Option<(String, usize)> {
+    /// `code`; returns the delimiter, whether the operator is the
+    /// `<<-` strip-tabs form, and the offset just past the delimiter.
+    /// The delimiter is the full shell word, so a hyphen or dot
+    /// inside it (`<<MY-DELIM`, `<<MY.DELIM`) is part of the
+    /// delimiter, not its end. A leading `-` is the `<<-` strip-tabs
+    /// marker, not part of the word.
+    fn delimiter_after(code: &str, at: usize) -> Option<(String, bool, usize)> {
         let bytes = code.as_bytes();
         let mut j = at + 2;
-        if j < bytes.len() && bytes[j] == b'-' {
+        let strip_tabs = j < bytes.len() && bytes[j] == b'-';
+        if strip_tabs {
             j += 1;
         }
         while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
@@ -297,7 +422,7 @@ impl PostCheck {
             if j < bytes.len() {
                 j += 1;
             }
-            return Some((delim, j));
+            return Some((delim, strip_tabs, j));
         }
         if j < bytes.len() && bytes[j] == b'\\' {
             j += 1;
@@ -311,7 +436,7 @@ impl PostCheck {
         if j == start || !(bytes[start].is_ascii_alphabetic() || bytes[start] == b'_') {
             return None;
         }
-        Some((code[start..j].to_string(), j))
+        Some((code[start..j].to_string(), strip_tabs, j))
     }
     fn bogus_var_regex() -> &'static Regex {
         static BOGUS_VAR_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -1628,6 +1753,65 @@ mod tests {
             let after = format!("{quiet}\necho hi > /tmp/after");
             assert!(tmp_finding(&after), "phantom: {phantom}");
         }
+    }
+
+    #[test]
+    fn wrapped_tmpfiles_invocation_is_attributed() {
+        // A backslash-continued invocation is one logical line: the
+        // `-` argument lands on the continuation line, and the
+        // heredoc it opens is still the tmpfiles one.
+        let quiet = "systemd-tmpfiles --create \\
+ - <<SYSTEMD_INLINE_EOF\nd /tmp/myapp 0755 root root -\nSYSTEMD_INLINE_EOF";
+        assert!(!tmp_finding(quiet));
+        let after = format!("{quiet}\necho hi > /tmp/after");
+        assert!(tmp_finding(&after));
+    }
+
+    #[test]
+    fn multiline_quote_does_not_phantom_swallow_tmpfiles_block() {
+        // The `<<` sits inside a quoted string spanning lines: it
+        // opens nothing, so the genuine tmpfiles block after it is
+        // still recognised (quote state threads across lines).
+        let quiet = "echo \"start\nmiddle <<EOF still string\"\nsystemd-tmpfiles --create - <<SYSTEMD_INLINE_EOF\nd /tmp/myapp 0755 root root -\nSYSTEMD_INLINE_EOF";
+        assert!(!tmp_finding(quiet));
+    }
+
+    #[test]
+    fn arithmetic_shift_is_not_a_heredoc_opener() {
+        // `<<` is the left-shift operator in every arithmetic
+        // context: the `((...))` command, `$[...]`, and `let`.
+        for arith in ["(( x << y ))", "echo $[x << y]", "let a = x << y"] {
+            let quiet = format!(
+                "{arith}\nsystemd-tmpfiles --create - <<SYSTEMD_INLINE_EOF\nd /tmp/myapp 0755 root root -\nSYSTEMD_INLINE_EOF"
+            );
+            assert!(!tmp_finding(&quiet), "arith: {arith}");
+            let after = format!("{quiet}\necho hi > /tmp/after");
+            assert!(tmp_finding(&after), "arith: {arith}");
+        }
+    }
+
+    #[test]
+    fn last_heredoc_of_tmpfiles_segment_is_the_exempt_one() {
+        // Two stdin heredocs on one segment: the shell feeds the
+        // LAST one, so the tmpfiles entries live there, while the
+        // first body is discarded text the scan still reads.
+        let quiet =
+            "systemd-tmpfiles --create - <<A <<B\nhello\nA\nd /tmp/myapp 0755 root root -\nB";
+        assert!(!tmp_finding(quiet));
+        let loud =
+            "systemd-tmpfiles --create - <<A <<B\nd /tmp/myapp 0755 root root -\nA\nhello\nB";
+        assert!(tmp_finding(loud));
+    }
+
+    #[test]
+    fn plain_heredoc_terminator_must_match_exactly() {
+        // An indented delimiter-like body line does not end a plain
+        // heredoc (only `<<-` strips leading tabs): the block runs
+        // to the exact terminator, so both entries stay exempt.
+        let quiet = "systemd-tmpfiles --create - <<EOF\nd /tmp/one 0755 root root -\n EOF\nd /tmp/two 0755 root root -\nEOF";
+        assert!(!tmp_finding(quiet));
+        let after = format!("{quiet}\necho hi > /tmp/after");
+        assert!(tmp_finding(&after));
     }
 
     #[test]
