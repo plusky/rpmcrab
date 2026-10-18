@@ -305,7 +305,9 @@ mod prebuilt {
             if let Some(d) = decompress_zstd(data) {
                 scan_decompressed(&d, ctx, depth, hits);
             }
-        } else if data.starts_with(b"BZh") {
+        } else if data.len() >= 4 && data.starts_with(b"BZh") && (b'1'..=b'9').contains(&data[3]) {
+            // The 4th magic byte is the bzip2 block-size digit
+            // ('1'..='9'); anything else is not a bzip2 stream.
             if let Some(d) = decompress_bzip2(data) {
                 scan_decompressed(&d, ctx, depth, hits);
             }
@@ -1297,10 +1299,49 @@ mod prebuilt_tests {
         assert!(prebuilt_lines(&findings).is_empty(), "all: {findings:?}");
     }
 
+    fn bzip2_bytes(data: &[u8]) -> Vec<u8> {
+        let mut enc = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+        enc.write_all(data).unwrap();
+        enc.finish().unwrap()
+    }
+
     #[test]
-    fn prebuilt_bzip2_archive_skipped_silently() {
-        // No pure-Rust bzip2 decoder exists: the archive is skipped, not
-        // misread and not a panic.
+    fn prebuilt_bzip2_tarball_is_walked() {
+        let tar = tarball(&[("src/prebuilt.o", ELF)]);
+        let bz2 = bzip2_bytes(&tar);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("prebuilt-test-1.0.tar.bz2", bz2),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            ["prebuilt-test.src: W: prebuilt-binary-in-sources \
+              prebuilt-test-1.0.tar.bz2: src/prebuilt.o ELF binary"]
+        );
+    }
+
+    #[test]
+    fn prebuilt_unit_bzip2_tar_is_walked() {
+        // Decoder-level pin, without the source-package plumbing:
+        // a bzip2 tarball fed straight to the walker is decompressed
+        // and its prebuilt entries are reported.
+        use super::prebuilt::{BinaryKind, inspect_entry};
+        let tar = tarball(&[("src/prebuilt.o", ELF)]);
+        let bz2 = bzip2_bytes(&tar);
+        let mut hits = Vec::new();
+        inspect_entry("t.tar.bz2", &bz2, "t.tar.bz2", 0, &mut hits);
+        assert_eq!(
+            hits,
+            [(BinaryKind::Elf, "t.tar.bz2: src/prebuilt.o".to_string())]
+        );
+    }
+
+    #[test]
+    fn prebuilt_corrupt_bzip2_archive_skipped_silently() {
+        // A valid bzip2 header over a corrupt body: the decoder
+        // fails, so the archive is skipped, not misread and not
+        // a panic.
         let tar = tarball(&[("src/prebuilt.o", ELF)]);
         let mut bz2 = b"BZh91".to_vec();
         bz2.extend_from_slice(&tar);
@@ -1310,6 +1351,19 @@ mod prebuilt_tests {
         ]);
         let findings = run_source(&pkg);
         assert!(prebuilt_lines(&findings).is_empty(), "all: {findings:?}");
+    }
+
+    #[test]
+    fn prebuilt_invalid_bzip2_magic_is_skipped() {
+        // The 4th magic byte must be the block-size digit: a stream
+        // starting BZhx is not bzip2, whatever follows it.
+        use super::prebuilt::inspect_entry;
+        let tar = tarball(&[("src/prebuilt.o", ELF)]);
+        let mut fake = b"BZhx".to_vec();
+        fake.extend_from_slice(&tar);
+        let mut hits = Vec::new();
+        inspect_entry("t.tar.bz2", &fake, "t.tar.bz2", 0, &mut hits);
+        assert!(hits.is_empty(), "{hits:?}");
     }
 
     #[test]

@@ -218,6 +218,7 @@ fn sanitize(name: &[u8]) -> Result<PathBuf, ExtractError> {
 
 /// Wrap the payload stream in the matching decompressor. The 6 magic bytes are
 /// chained back in front: the decoders expect the stream from its start.
+#[allow(unreachable_patterns)]
 fn decoder<'a>(
     stream: impl std::io::BufRead + 'a,
     magic: [u8; 6],
@@ -231,6 +232,10 @@ fn decoder<'a>(
         CompressionType::Zstd => Ok(Box::new(zstd::stream::Decoder::new(stream)?)),
         CompressionType::Xz => Ok(Box::new(liblzma::bufread::XzDecoder::new(stream))),
         CompressionType::Bzip2 => Ok(Box::new(bzip2::bufread::BzDecoder::new(stream))),
+        // Keep the unsupported-compressor fallback: the rpm crate may
+        // grow new CompressionType variants, and those must surface as
+        // a clean error rather than fall through to a decoder.
+        other => Err(ExtractError::UnsupportedCompressor(*other)),
     }
 }
 
@@ -463,6 +468,16 @@ impl<'a> Extractor<'a> {
             S_IFREG => {
                 if !self.ensure_parent(&path)? || is_existing_dir(&path) {
                     self.warn_skip_collision(e);
+                    if e.nlink > 1 && e.size > 0 {
+                        // The skipped entry is a hardlink group's data
+                        // carrier: record the skip so the group check
+                        // does not fail the whole package, mirroring
+                        // the symlink-collision skip above.
+                        self.hardlinks
+                            .entry((e.dev_major, e.dev_minor, e.ino))
+                            .or_default()
+                            .carrier_skipped = true;
+                    }
                     return skip_data(r, e.size);
                 }
                 if e.nlink > 1 {
@@ -578,7 +593,16 @@ impl<'a> Extractor<'a> {
                 // the carrier too, and the link source would be gone.
                 if other != path && !same_file(path, &other) {
                     fs::remove_file(&other).map_err(|e| io_error(&other, e))?;
-                    fs::hard_link(path, &other).map_err(|e| io_error(&other, e))?;
+                    match fs::hard_link(path, &other) {
+                        Ok(()) => {}
+                        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                            tracing::warn!(
+                                "extract: skipping entry {:?}: path collides with an incompatible existing object",
+                                String::from_utf8_lossy(&e.name)
+                            );
+                        }
+                        Err(err) => return Err(io_error(&other, err)),
+                    }
                 }
             }
             group.data_path = Some(path.to_path_buf());
@@ -591,7 +615,21 @@ impl<'a> Extractor<'a> {
                     // the carrier's file; linking it again would fail
                     // with EEXIST on a case-insensitive filesystem.
                     if !same_file(&data, path) {
-                        fs::hard_link(&data, path).map_err(|e| io_error(path, e))?;
+                        match fs::hard_link(&data, path) {
+                            Ok(()) => {}
+                            // The placeholder path is already occupied by
+                            // an unrelated file (not a case variant of the
+                            // carrier, which same_file covers): skip with
+                            // a warning like every other collision instead
+                            // of aborting the whole extraction on EEXIST.
+                            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                                tracing::warn!(
+                                    "extract: skipping entry {:?}: path collides with an incompatible existing object",
+                                    String::from_utf8_lossy(&e.name)
+                                );
+                            }
+                            Err(err) => return Err(io_error(path, err)),
+                        }
                     }
                 }
                 // Data carrier not seen yet: placeholder, re-linked above when
@@ -1517,6 +1555,25 @@ mod tests {
         assert_eq!(out, b"hello bzip2 world\n".repeat(4));
     }
 
+    /// Decoder-level round-trip with an encoder-generated bzip2
+    /// stream, so the test does not depend on one captured byte
+    /// sequence: anything BzEncoder produces must decode here.
+    #[test]
+    fn bzip2_payload_roundtrips_generated_stream() {
+        use std::io::Write as _;
+        let plain = b"generated bzip2 payload\n".repeat(3);
+        let mut enc = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+        enc.write_all(&plain).unwrap();
+        let compressed = enc.finish().unwrap();
+        let mut magic = [0u8; 6];
+        magic.copy_from_slice(&compressed[..6]);
+        let stream = std::io::BufReader::new(&compressed[6..]);
+        let mut reader = decoder(stream, magic, &CompressionType::Bzip2).unwrap();
+        let mut out = Vec::new();
+        reader.read_to_end(&mut out).unwrap();
+        assert_eq!(out, plain);
+    }
+
     /// Regression (issue #700): hardlink group members whose paths differ
     /// only in case are one file on a case-insensitive filesystem. When
     /// the data carrier arrives second, re-linking its placeholder must
@@ -1579,36 +1636,153 @@ mod tests {
         );
     }
 
+    /// Serialize one newc entry (header + name + data, each padded to
+    /// the 4-byte alignment) for concatenated-stream tests driven
+    /// through read_entry, exactly as extract consumes a payload.
+    fn newc_bytes(name: &[u8], mode: u32, nlink: u32, ino: u32, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"070701");
+        for f in [
+            ino,
+            mode,
+            0,
+            0,
+            nlink,
+            0,
+            data.len() as u32,
+            0,
+            0,
+            0,
+            0,
+            (name.len() + 1) as u32,
+            0,
+        ] {
+            out.extend_from_slice(format!("{f:08X}").as_bytes());
+        }
+        out.extend_from_slice(name);
+        out.push(0);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+        out.extend_from_slice(data);
+        let dpad = (4 - data.len() % 4) % 4;
+        out.extend(std::iter::repeat_n(0, dpad));
+        out
+    }
+
     /// Regression (issue #700): an entry beneath a non-directory
     /// ancestor collides, like the other path collisions: it is
-    /// skipped, not fatal. grpc-source carries a `build` file and a
-    /// `build/` tree; probing the tree's directories reports ENOTDIR,
+    /// skipped, not fatal. grpc-source carries a build file and a
+    /// build/ tree; probing the tree's directories reports ENOTDIR,
     /// which aborted the whole package read.
+    ///
+    /// Driven as one concatenated stream through read_entry (the way
+    /// extract consumes a payload), so a missing skip_data or pad on
+    /// a skipped entry desyncs the stream and fails the test on the
+    /// next entry's header. The skipped entries include a hardlink
+    /// data carrier (nlink=2, size>0): its group must be recorded as
+    /// carrier-skipped, or the group check aborts the extraction
+    /// even though the skip itself succeeded.
     #[test]
     fn entry_below_regular_file_is_skipped() {
         let root = tempfile::tempdir().unwrap();
         let mut ex = extractor_for(root.path());
-        let file = cpio_entry(b"build", S_IFREG | 0o644, 5);
-        let raw = padded(b"hello");
-        let mut data = &raw[..];
-        ex.materialize(&mut data, &file).unwrap();
-
-        let nested = cpio_entry(b"build/CMakeFiles/x.txt", S_IFREG | 0o644, 5);
-        let raw = padded(b"hello");
-        let mut data = &raw[..];
-        ex.materialize(&mut data, &nested).unwrap();
+        let mut stream = Vec::new();
+        stream.extend(newc_bytes(b"build", S_IFREG | 0o644, 1, 1, b"hello"));
+        stream.extend(newc_bytes(
+            b"build/CMakeFiles/x.txt",
+            S_IFREG | 0o644,
+            1,
+            2,
+            b"hello",
+        ));
+        // Hardlink data carrier below the non-directory ancestor: skipped.
+        stream.extend(newc_bytes(
+            b"build/sub/carrier",
+            S_IFREG | 0o644,
+            2,
+            7,
+            b"HELLO",
+        ));
+        // The carrier's group member: a plain placeholder elsewhere.
+        stream.extend(newc_bytes(b"member", S_IFREG | 0o644, 2, 7, b""));
+        // Extraction continues for unrelated entries after the skips.
+        stream.extend(newc_bytes(b"other.txt", S_IFREG | 0o644, 1, 3, b"world"));
+        stream.extend(newc_bytes(b"TRAILER!!!", 0, 1, 0, b""));
+        let mut data = &stream[..];
+        while let Some(entry) = read_entry(&mut data, &[]).unwrap() {
+            ex.materialize(&mut data, &entry).unwrap();
+        }
+        ex.check_hardlinks().unwrap();
         assert!(!root.path().join("build/CMakeFiles/x.txt").exists());
+        assert!(!root.path().join("build/sub/carrier").exists());
         assert_eq!(std::fs::read(root.path().join("build")).unwrap(), b"hello");
-
-        // Extraction continues for unrelated entries.
-        let other = cpio_entry(b"other.txt", S_IFREG | 0o644, 5);
-        let raw = padded(b"world");
-        let mut data = &raw[..];
-        ex.materialize(&mut data, &other).unwrap();
+        assert_eq!(std::fs::read(root.path().join("member")).unwrap(), b"");
         assert_eq!(
             std::fs::read(root.path().join("other.txt")).unwrap(),
             b"world"
         );
+    }
+
+    /// same_file is the guard that keeps case-variant hardlink
+    /// handling from unlinking or re-linking the carrier itself. On
+    /// Linux both existing tests for that handling take the
+    /// same_file == false arm (the paths are distinct files), so pin
+    /// the predicate itself: a hardlinked pair is the same file,
+    /// distinct files and missing paths are not.
+    #[test]
+    fn same_file_detects_hardlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        let c = dir.path().join("c");
+        std::fs::write(&a, b"x").unwrap();
+        std::fs::hard_link(&a, &b).unwrap();
+        std::fs::write(&c, b"y").unwrap();
+        assert!(same_file(&a, &b), "hardlinked pair must be the same file");
+        assert!(same_file(&a, &a));
+        assert!(!same_file(&a, &c), "distinct files must differ");
+        let missing = dir.path().join("missing");
+        assert!(!same_file(&a, &missing), "missing path must differ");
+        assert!(!same_file(&missing, &missing));
+    }
+
+    /// A hardlink placeholder whose path is already occupied by an
+    /// unrelated file (not a case variant of the carrier, so
+    /// same_file is false) collided with EEXIST out of the whole
+    /// extraction. Like every other collision it is skipped with a
+    /// warning: the unrelated file keeps its bytes and the rest of
+    /// the package extracts.
+    #[test]
+    fn hardlink_placeholder_colliding_with_unrelated_file_is_skipped() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ex = extractor_for(root.path());
+        // The group's data carrier.
+        let mut carrier = cpio_entry(b"data", S_IFREG | 0o644, 5);
+        carrier.nlink = 2;
+        carrier.ino = 9;
+        let raw = padded(b"hello");
+        let mut data = &raw[..];
+        ex.materialize(&mut data, &carrier).unwrap();
+        // An unrelated regular file at the placeholder's path.
+        let victim = cpio_entry(b"victim", S_IFREG | 0o644, 7);
+        let raw = padded(b"victim!");
+        let mut data = &raw[..];
+        ex.materialize(&mut data, &victim).unwrap();
+        // The placeholder entry for the same path: linking the carrier
+        // over the unrelated file fails with EEXIST and must be skipped.
+        let mut placeholder = cpio_entry(b"victim", S_IFREG | 0o644, 0);
+        placeholder.nlink = 2;
+        placeholder.ino = 9;
+        let mut data = &[][..];
+        ex.materialize(&mut data, &placeholder).unwrap();
+        ex.check_hardlinks().unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join("victim")).unwrap(),
+            b"victim!",
+            "the unrelated file must keep its bytes"
+        );
+        assert_eq!(std::fs::read(root.path().join("data")).unwrap(), b"hello");
     }
 
     /// Regression: a symlink entry replacing an earlier regular file at the
