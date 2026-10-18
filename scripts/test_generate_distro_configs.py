@@ -1597,163 +1597,33 @@ def test_drop_live_filters_drops_non_standard_dir_in_usr_line():
 
 
 # ---------------------------------------------------------------------------
-# adjust_scoring: [Scoring] recalibration (issue #594)
+# strip_badness_threshold / no vendored scoring (issue #699)
 # ---------------------------------------------------------------------------
 
-def test_adjust_scoring_drops_promotions_and_keeps_the_rest():
-    """DROP_SCORING lines go; every other line survives byte-exact.
-
-    The kept lines matter as much as the dropped ones: summary-too-long
-    keeps its reference calibration (its E is an emission decision, not
-    a promotion). The dir-or-file-outside-snapshot = 0 demote switch is
-    dropped too (issue #698): the finding prints at its emitted Error.
-    """
-    text = (
-        "[Scoring]\n"
-        "devel-file-in-non-devel-package = 50\n"
-        "files-duplicated-waste = 100\n"
-        "makefile-junk = 109\n"
-        "spurious-executable-perm = 50\n"
-        "summary-ended-with-dot = 20\n"
-        "summary-not-capitalized = 20\n"
-        "summary-too-long = 200\n"
-        "dir-or-file-outside-snapshot = 0\n"
-    )
-    dropped, added = [], []
-    out = gen.adjust_scoring(text, dropped, added)
-    for key in gen.DROP_SCORING:
-        assert "%s =" % key not in out, out
-    assert "summary-too-long = 200\n" in out, out
-    assert len(dropped) == len(gen.DROP_SCORING), dropped
-    # invalid-license is absent from the fixture, so it is appended
-    # under its explanatory comment, inside the [Scoring] table.
-    assert out.endswith("invalid-license = 100000\n"), out
-    assert "# SCORING_ADDITIONS in scripts/generate-distro-configs.py" in out, out
-    assert len(added) == 1 and "invalid-license" in added[0], added
+def test_strip_badness_threshold_drops_only_the_key_line():
+    """The BadnessThreshold line goes; every other line survives
+    byte-exact, and the removal is logged for the provenance."""
+    text = "Version = 3\nBadnessThreshold = 999\nFlavor = \"opensuse\"\n"
+    log = []
+    out = gen.strip_badness_threshold(text, "opensuse", log)
+    assert out == "Version = 3\nFlavor = \"opensuse\"\n", out
+    assert len(log) == 1 and "999" in log[0] and "opensuse" in log[0], log
 
 
-def test_adjust_scoring_drops_the_comment_block_of_a_dropped_entry():
-    """A dropped entry takes its own comment block with it.
-
-    In the vendored files an entry's comment sits in the entry's own
-    blank-line-separated block -- the shape of the
-    dir-or-file-outside-snapshot = 0 demote in both flavors (issue
-    #698) -- so dropping only the key line left the comment
-    documenting an entry that no longer exists. The whole block
-    goes, with one adjacent blank, and the transform stays
-    idempotent on its own output.
-    """
-    text = (
-        "[Scoring]\n"
-        "summary-too-long = 200\n"
-        "\n"
-        "# Set to 10000 once affected packages have been updated\n"
-        "# for atomic update compatibility\n"
-        "dir-or-file-outside-snapshot = 0\n"
-        "\n"
-        "kmp-missing-supplements = 10000\n"
-    )
-    dropped, added = [], []
-    out = gen.adjust_scoring(text, dropped, added)
-    assert out == (
-        "[Scoring]\n"
-        "summary-too-long = 200\n"
-        "\n"
-        "kmp-missing-supplements = 10000\n"
-        "\n"
-        "# Added by rpmcrab (deliberate, ledgered divergence; see\n"
-        "# SCORING_ADDITIONS in scripts/generate-distro-configs.py):\n"
-        "invalid-license = 100000\n"
-    ), out
-    assert len(dropped) == 1, dropped
-    assert "dir-or-file-outside-snapshot" in dropped[0], dropped
-    assert gen.adjust_scoring(out, [], []) == out
+def test_strip_badness_threshold_is_idempotent():
+    text = "BadnessThreshold = 999\nVersion = 3\n"
+    once = gen.strip_badness_threshold(text, "opensuse", [])
+    twice = gen.strip_badness_threshold(once, "opensuse", [])
+    assert once == twice == "Version = 3\n", (once, twice)
 
 
-def test_adjust_scoring_keeps_a_shared_comment_header():
-    """A comment heading a block with a surviving entry is shared and
-    stays, even when another entry under it is dropped: the block is
-    the only distinction the file offers between an entry's comment
-    and a group header, so a block that holds a surviving entry
-    never loses its comments."""
-    text = (
-        "[Scoring]\n"
-        "# Calibration for the findings below\n"
-        "summary-too-long = 200\n"
-        "makefile-junk = 109\n"
-    )
-    dropped, added = [], []
-    out = gen.adjust_scoring(text, dropped, added)
-    assert "# Calibration for the findings below\n" in out, out
-    assert "summary-too-long = 200\n" in out, out
-    assert "makefile-junk = " not in out, out
-    assert len(dropped) == 1 and "makefile-junk" in dropped[0], dropped
-
-
-def test_adjust_scoring_keeps_a_comment_block_without_entries():
-    """A comment block holding no entry is never removed: standing
-    alone it cannot be told apart from a section footer, so the
-    conservative rule keeps it even next to a dropped entry."""
-    text = (
-        "[Scoring]\n"
-        "makefile-junk = 109\n"
-        "\n"
-        "# The entries above are calibrated for the default bundle.\n"
-    )
-    dropped, added = [], []
-    out = gen.adjust_scoring(text, dropped, added)
-    assert "# The entries above are calibrated for the default bundle.\n" in out, out
-    assert "makefile-junk = " not in out, out
-    assert len(dropped) == 1 and "makefile-junk" in dropped[0], dropped
-
-
-def test_adjust_scoring_is_idempotent():
-    """Re-running on adjusted text changes nothing: the monthly sync
-    regenerates from upstream, but a no-op second pass proves the
-    transform cannot compound (no duplicated additions, no re-drops)."""
-    text = "[Scoring]\nmakefile-junk = 109\nsummary-too-long = 200\n"
-    once = gen.adjust_scoring(text, [], [])
-    twice = gen.adjust_scoring(once, [], [])
-    assert once == twice, (once, twice)
-    assert once.count("invalid-license") == 1, once
-
-
-def test_adjust_scoring_replaces_an_upstream_adopted_addition():
-    """If upstream adopts an addition at another value, the line is
-    rewritten in place -- never duplicated (a duplicate key would make
-    the vendored table fail to parse)."""
-    text = "[Scoring]\ninvalid-license = 5\nsummary-too-long = 200\n"
-    dropped, added = [], []
-    out = gen.adjust_scoring(text, dropped, added)
-    assert out.count("invalid-license") == 1, out
-    assert "invalid-license = 100000\n" in out, out
-    assert "summary-too-long = 200\n" in out, out
-    assert dropped == [], dropped
-    assert len(added) == 1, added
-
-
-def test_adjust_scoring_leaves_other_tables_alone():
-    """A key named like a dropped entry outside [Scoring] is not a
-    scoring decision and must survive."""
-    text = (
-        "[Scoring]\n"
-        "summary-too-long = 200\n"
-        "[SeverityOverrides]\n"
-        "makefile-junk = \"W\"\n"
-    )
-    dropped, added = [], []
-    out = gen.adjust_scoring(text, dropped, added)
-    assert 'makefile-junk = "W"\n' in out, out
-    assert dropped == [], dropped
-
-
-def test_strict_layer_is_not_vendored():
-    """scoring-strict.override.toml stays out of the bundle (issue
-    #594): it is the rpmlint-strict subpackage's layer; the default
-    bundle carries one calibrated [Scoring] set per flavor."""
+def test_scoring_is_not_vendored():
+    """No [Scoring] table ships (issue #699): neither upstream's
+    scoring.toml nor the rpmlint-strict layer is in the bundle, so no
+    shipped config can promote or demote a finding's level."""
     for flavor, files in gen.FILES.items():
+        assert "scoring.toml" not in files, (flavor, files)
         assert "scoring-strict.override.toml" not in files, (flavor, files)
-        assert "scoring.toml" in files, (flavor, files)
 
 
 def test_append_systemd_preset_packages_before_first_table_after_blank_line():

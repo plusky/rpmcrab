@@ -1,7 +1,7 @@
 //! The suppression engine — `Filter` mirrors rpmlint's `filter.py`.
 //!
 //! The single most important behaviour: **suppression is applied at emit time**
-//! (`add_info`), before the badness total and the per-level counters are
+//! (`add_info`), before the per-level counters are
 //! incremented, so a suppressed finding is invisible to the footer and the exit
 //! code, not merely hidden from stdout.
 
@@ -16,8 +16,8 @@ use crate::describe;
 use crate::finding::Finding;
 use crate::level::Level;
 
-/// Accumulates findings, applies scoring/strict/suppression, and renders the
-/// sorted result block.
+/// Accumulates findings, applies scoring promotion/strict/suppression, and
+/// renders the sorted result block.
 pub struct Filter {
     strict: bool,
     scoring: HashMap<String, i64>,
@@ -42,9 +42,7 @@ pub struct Filter {
     /// `check` -> long explanation, for `-v`.
     error_details: HashMap<String, String>,
 
-    pub score: i64,
     pub filtered_out: u64,
-    pub promoted_to_error: u64,
     printed_errors: u64,
     printed_warnings: u64,
     printed_infos: u64,
@@ -91,7 +89,7 @@ impl From<fancy_regex::Error> for FilterError {
 /// booleans become 1/0. A value `int()` would reject (a garbage string, a
 /// non-finite float, an array, a table) is a configuration error instead of
 /// a crash, as is a finite float whose truncated value does not fit in an
-/// `i64` (Python ints are unbounded, the badness score is not).
+/// `i64` (Python ints are unbounded, an `i64` is not).
 fn coerce_scoring(check: &str, v: &toml::Value) -> Result<i64, FilterError> {
     let invalid = || FilterError::Scoring {
         check: check.to_string(),
@@ -158,9 +156,7 @@ impl Filter {
             // The staged `data/descriptions/*.toml` corpus, exactly as
             // `filter.py` loads `descriptions/*.toml` in `Filter.__init__`.
             error_details: describe::staged_descriptions(),
-            score: 0,
             filtered_out: 0,
-            promoted_to_error: 0,
             printed_errors: 0,
             printed_warnings: 0,
             printed_infos: 0,
@@ -176,8 +172,8 @@ impl Filter {
         }
     }
 
-    /// Record a finding, applying scoring, strict promotion, and suppression —
-    /// the exact order of `filter.py` `add_info`.
+    /// Record a finding, applying scoring promotion, strict promotion, and
+    /// suppression — in the order of `filter.py` `add_info`.
     pub fn add_info(&mut self, mut finding: Finding) {
         assert!(
             !finding.check.contains(' '),
@@ -185,45 +181,27 @@ impl Filter {
             finding.check
         );
 
-        // Scoring remaps the level in both directions: to E when badness > 0,
-        // and E -> W when the configured badness is 0. The value was coerced
-        // with Python `int()` semantics at construction; `filter.py:124-131`
-        // applies the configured badness per emitted finding.
-        let mut badness = None;
-        if let Some(&b) = self.scoring.get(&finding.check) {
-            badness = Some(b);
-            if b > 0 {
-                finding.level = Level::Error;
-            } else if finding.level == Level::Error {
-                finding.level = Level::Warning;
-            }
+        // Scoring is a promotion-only override (issue #699): a positive
+        // configured value raises the finding to E. A configured value never
+        // lowers a level — in particular a badness of 0 does not downgrade
+        // an error to a warning. The value was coerced with Python `int()`
+        // semantics at construction.
+        if let Some(&b) = self.scoring.get(&finding.check)
+            && b > 0
+        {
+            finding.level = Level::Error;
         }
-        // Strict promotes everything to error (and counts the promotions);
-        // default badness is computed after promotion, so promoted
-        // findings get the E default of 1.
-        //
-        // An overridden finding is not counted as strict-promoted: the
-        // override below is the final word on its level, and counting it
-        // would break the DESIGN §4.6 `printed(E) == promoted` split (a
-        // finding overridden back to W is not a strict error, so the run
-        // exits 65, not 64).
-        let overridden = self.severity_overrides.contains_key(&finding.check);
+        // Strict promotes everything to error.
         if self.strict {
-            if finding.level != Level::Error && !overridden {
-                self.promoted_to_error += 1;
-            }
             finding.level = Level::Error;
         }
         // Per-finding severity overrides (upstream rpmlint#1335): explicit
         // user policy, applied after scoring and strict promotion — the
-        // override is the final word on the finding's level. Badness still
-        // follows the scoring table when set, else the level default below.
+        // override is the final word on the finding's level.
         if let Some(level) = self.severity_overrides.get(&finding.check) {
             self.used_overrides.insert(finding.check.clone());
             finding.level = *level;
         }
-        let badness = badness.unwrap_or(if finding.level == Level::Error { 1 } else { 0 });
-        finding.badness = badness;
 
         // Suppression at emit time, on the de-coloured match string.
         if finding.check != "unused-rpmlintrc-filter"
@@ -253,7 +231,6 @@ impl Filter {
             }
         }
 
-        self.score += badness;
         match finding.level {
             Level::Error => self.printed_errors += 1,
             Level::Warning => self.printed_warnings += 1,
@@ -370,16 +347,14 @@ impl Filter {
     }
 
     /// Merge a per-package worker filter into the run's filter, in package
-    /// input order (`_replay_result`). Suppression, scoring and strict
-    /// promotion are deterministic per finding, so concatenating the results
-    /// and summing the counters equals the sequential run exactly.
+    /// input order (`_replay_result`). Suppression, scoring promotion and
+    /// strict promotion are deterministic per finding, so concatenating the
+    /// results and summing the counters equals the sequential run exactly.
     pub fn merge_from(&mut self, other: Filter) {
         self.results.extend(other.results);
         self.levels.extend(other.levels);
         self.findings.extend(other.findings);
-        self.score += other.score;
         self.filtered_out += other.filtered_out;
-        self.promoted_to_error += other.promoted_to_error;
         self.printed_errors += other.printed_errors;
         self.printed_warnings += other.printed_warnings;
         self.printed_infos += other.printed_infos;
@@ -428,12 +403,11 @@ pub fn sort_results(results: &mut [(String, String)]) {
 mod tests {
     use super::*;
 
-    fn finding(check: &str, level: Level, badness: i64) -> Finding {
+    fn finding(check: &str, level: Level) -> Finding {
         Finding {
             level,
             check: check.to_string(),
             details: vec![],
-            badness,
             pkg_name: "pkg".to_string(),
             arch: Some("src".to_string()),
             line: None,
@@ -450,24 +424,29 @@ mod tests {
         let mut c = cfg();
         c.filters = vec!["no-soname".to_string()];
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
-        f.add_info(finding("no-soname", Level::Warning, 0));
+        f.add_info(finding("no-soname", Level::Warning));
         assert_eq!(f.printed(Level::Warning), 0);
         assert_eq!(f.filtered_out, 1);
-        assert_eq!(f.score, 0);
         assert!(f.results().is_empty());
     }
 
     #[test]
-    fn scoring_downgrades_error_to_warning_at_zero_badness() {
-        let mut c = cfg();
-        c.scoring
-            .insert("some-check".to_string(), toml::Value::Integer(0));
-        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
-        f.add_info(finding("some-check", Level::Error, 99));
-        // level remapped E -> W, badness 0, counts as a warning, no score.
-        assert_eq!(f.printed(Level::Warning), 1);
-        assert_eq!(f.printed(Level::Error), 0);
-        assert_eq!(f.score, 0);
+    fn scoring_zero_badness_never_downgrades_an_error() {
+        // Issue #699: the reference remaps E -> W at a configured badness
+        // of 0; rpmcrab removes that escape hatch outright. Zero and
+        // negative values are inert, in both directions.
+        for value in [0, -5] {
+            let mut c = cfg();
+            c.scoring
+                .insert("some-check".to_string(), toml::Value::Integer(value));
+            let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
+            f.add_info(finding("some-check", Level::Error));
+            assert_eq!(f.printed(Level::Error), 1, "value {value}");
+            assert_eq!(f.printed(Level::Warning), 0, "value {value}");
+            f.add_info(finding("some-check", Level::Warning));
+            assert_eq!(f.printed(Level::Warning), 1, "value {value}");
+            assert_eq!(f.printed(Level::Error), 1, "value {value}");
+        }
     }
 
     #[test]
@@ -476,9 +455,8 @@ mod tests {
         c.scoring
             .insert("some-check".to_string(), toml::Value::Integer(50));
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
-        f.add_info(finding("some-check", Level::Warning, 0));
+        f.add_info(finding("some-check", Level::Warning));
         assert_eq!(f.printed(Level::Error), 1);
-        assert_eq!(f.score, 50);
     }
 
     #[test]
@@ -516,17 +494,17 @@ mod tests {
     }
 
     #[test]
-    fn scoring_numeric_string_from_rpmlintrc_still_applies() {
-        // rpmlintrc `setBadness` lands in Scoring as a string.
+    fn scoring_numeric_string_still_applies() {
+        // A `[Scoring]` value written as a TOML string is coerced with
+        // Python `int()` semantics, like every other value shape.
         let mut c = cfg();
         c.scoring.insert(
             "some-check".to_string(),
             toml::Value::String("50".to_string()),
         );
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
-        f.add_info(finding("some-check", Level::Warning, 0));
+        f.add_info(finding("some-check", Level::Warning));
         assert_eq!(f.printed(Level::Error), 1);
-        assert_eq!(f.score, 50);
     }
 
     #[test]
@@ -597,35 +575,33 @@ mod tests {
         c.scoring
             .insert("bool-check".to_string(), toml::Value::Boolean(true));
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
-        f.add_info(finding("float-check", Level::Warning, 0));
-        f.add_info(finding("bool-check", Level::Warning, 0));
-        assert_eq!(f.score, 2 + 1);
+        f.add_info(finding("float-check", Level::Warning));
+        f.add_info(finding("bool-check", Level::Warning));
+        // 2.9 truncates to 2 and `true` coerces to 1: both positive, so
+        // both findings are promoted to error.
+        assert_eq!(f.printed(Level::Error), 2);
     }
 
     #[test]
-    fn strict_promotes_with_default_badness() {
+    fn strict_promotes_warning_to_error() {
         let mut c = cfg();
         c.strict = true;
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
-        f.add_info(finding("a-warning", Level::Warning, 0));
+        f.add_info(finding("a-warning", Level::Warning));
         assert_eq!(f.printed(Level::Error), 1);
-        assert_eq!(f.promoted_to_error, 1);
-        assert_eq!(f.score, 1); // E default badness 1 after promotion
+        assert_eq!(f.printed(Level::Warning), 0);
     }
 
     #[test]
     fn strict_promotes_info_findings() {
         // --strict promotion applies to every level, Info included
-        // (filter.py:134-140): the finding prints as an error, counts as
-        // promoted, and scores the post-promotion default badness of 1.
+        // (filter.py:134-140): the finding prints as an error.
         let mut c = cfg();
         c.strict = true;
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
-        f.add_info(finding("no-%check-section", Level::Info, 0));
+        f.add_info(finding("no-%check-section", Level::Info));
         assert_eq!(f.printed(Level::Error), 1);
         assert_eq!(f.printed(Level::Info), 0);
-        assert_eq!(f.promoted_to_error, 1);
-        assert_eq!(f.score, 1);
     }
 
     #[test]
@@ -634,10 +610,9 @@ mod tests {
         c.severity_overrides
             .insert("spelling-error".to_string(), Level::Warning);
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
-        f.add_info(finding("spelling-error", Level::Error, 0));
+        f.add_info(finding("spelling-error", Level::Error));
         assert_eq!(f.printed(Level::Warning), 1);
         assert_eq!(f.printed(Level::Error), 0);
-        assert_eq!(f.score, 0); // W default badness 0
         assert!(f.results()[0].1.starts_with("pkg.src: W: spelling-error"));
     }
 
@@ -647,9 +622,8 @@ mod tests {
         c.severity_overrides
             .insert("no-soname".to_string(), Level::Error);
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
-        f.add_info(finding("no-soname", Level::Warning, 0));
+        f.add_info(finding("no-soname", Level::Warning));
         assert_eq!(f.printed(Level::Error), 1);
-        assert_eq!(f.score, 1); // E default badness 1
         assert!(f.results()[0].1.starts_with("pkg.src: E: no-soname"));
     }
 
@@ -660,66 +634,56 @@ mod tests {
         c.severity_overrides
             .insert("spelling-error".to_string(), Level::Warning);
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
-        f.add_info(finding("spelling-error", Level::Warning, 0));
+        f.add_info(finding("spelling-error", Level::Warning));
         // Strict promotes, then the override downgrades back: the table is
-        // the final word on the finding's level, and the finding is not
-        // counted as strict-promoted (DESIGN §4.6 exit-code split).
-        assert_eq!(f.promoted_to_error, 0);
+        // the final word on the finding's level.
         assert_eq!(f.printed(Level::Warning), 1);
         assert_eq!(f.printed(Level::Error), 0);
     }
 
     #[test]
-    fn strict_promotion_count_skips_overridden_findings() {
-        // The exit-code bug: 2 strict-promoted warnings with one overridden
-        // back must keep printed(E) == promoted_to_error (1 == 1); counting
-        // the overridden finding gave 1 != 2 and the wrong exit code.
+    fn strict_with_override_back_prints_one_error_one_warning() {
         let mut c = cfg();
         c.strict = true;
         c.severity_overrides
             .insert("second-warning".to_string(), Level::Warning);
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
-        f.add_info(finding("first-warning", Level::Warning, 0));
-        f.add_info(finding("second-warning", Level::Warning, 0));
+        f.add_info(finding("first-warning", Level::Warning));
+        f.add_info(finding("second-warning", Level::Warning));
         assert_eq!(f.printed(Level::Error), 1);
         assert_eq!(f.printed(Level::Warning), 1);
-        assert_eq!(f.promoted_to_error, 1);
         assert_eq!(f.used_overrides().len(), 1);
         assert!(f.used_overrides().contains("second-warning"));
     }
 
     #[test]
-    fn severity_override_keeps_explicit_scoring_badness() {
+    fn severity_override_beats_scoring_promotion() {
         let mut c = cfg();
         c.scoring
             .insert("some-check".to_string(), toml::Value::Integer(50));
         c.severity_overrides
             .insert("some-check".to_string(), Level::Warning);
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
-        f.add_info(finding("some-check", Level::Warning, 0));
-        // scoring forces E, the override returns it to W, explicit badness
-        // 50 stays (scoring still drives the score).
+        f.add_info(finding("some-check", Level::Warning));
+        // Scoring promotes to E, the override returns it to W: the
+        // override is the final word on the level.
         assert_eq!(f.printed(Level::Warning), 1);
-        assert_eq!(f.score, 50);
+        assert_eq!(f.printed(Level::Error), 0);
     }
 
     #[test]
-    fn severity_override_to_error_keeps_zero_scoring_badness() {
-        // `Scoring(0)` + override to E (DESIGN §4.9): the finding prints as a
-        // genuine error for the §4.6 split, but scoring still drives the
-        // badness, so it scores nothing.
+    fn severity_override_to_error_with_zero_scoring() {
+        // `Scoring(0)` is inert (issue #699); the override alone raises
+        // the finding to a genuine error.
         let mut c = cfg();
         c.scoring
-            .insert("zero-badness".to_string(), toml::Value::Integer(0));
+            .insert("zero-scored".to_string(), toml::Value::Integer(0));
         c.severity_overrides
-            .insert("zero-badness".to_string(), Level::Error);
+            .insert("zero-scored".to_string(), Level::Error);
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
-        f.add_info(finding("zero-badness", Level::Warning, 0));
+        f.add_info(finding("zero-scored", Level::Warning));
         assert_eq!(f.printed(Level::Error), 1);
         assert_eq!(f.printed(Level::Warning), 0);
-        assert_eq!(f.score, 0);
-        // An override is not a strict promotion, even when it raises the level.
-        assert_eq!(f.promoted_to_error, 0);
     }
 
     #[test]
@@ -732,7 +696,7 @@ mod tests {
             .insert("downgraded".to_string(), Level::Warning);
         c.filters = vec!["W: downgraded".to_string()];
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
-        f.add_info(finding("downgraded", Level::Error, 0));
+        f.add_info(finding("downgraded", Level::Error));
         assert_eq!(f.filtered_out, 1);
         assert_eq!(f.printed(Level::Warning), 0);
 
@@ -741,7 +705,7 @@ mod tests {
             .insert("downgraded".to_string(), Level::Warning);
         c.filters = vec!["E: downgraded".to_string()];
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
-        f.add_info(finding("downgraded", Level::Error, 0));
+        f.add_info(finding("downgraded", Level::Error));
         assert_eq!(f.filtered_out, 0);
         assert_eq!(f.printed(Level::Warning), 1);
     }
@@ -755,7 +719,7 @@ mod tests {
         let mut c = cfg();
         c.filters = vec!["script-without-shebang".to_string()];
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
-        let mut aliased = finding("spurious-executable-perm", Level::Warning, 0);
+        let mut aliased = finding("spurious-executable-perm", Level::Warning);
         aliased.filter_alias = Some("script-without-shebang");
         f.add_info(aliased);
         assert_eq!(f.filtered_out, 1);
@@ -763,7 +727,7 @@ mod tests {
         assert!(f.unused_filters(&c.filters).is_empty());
 
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
-        f.add_info(finding("spurious-executable-perm", Level::Warning, 0));
+        f.add_info(finding("spurious-executable-perm", Level::Warning));
         assert_eq!(f.filtered_out, 0);
         assert_eq!(f.printed(Level::Warning), 1);
         assert_eq!(f.unused_filters(&c.filters), vec!["script-without-shebang"]);
@@ -775,7 +739,7 @@ mod tests {
         c.filters = vec!["no-soname".to_string()];
         c.blocked_filters = vec!["no-soname".to_string()];
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
-        f.add_info(finding("no-soname", Level::Warning, 0));
+        f.add_info(finding("no-soname", Level::Warning));
         assert_eq!(f.printed(Level::Warning), 1);
         assert_eq!(f.filtered_out, 0);
     }
@@ -793,21 +757,21 @@ mod tests {
             "The 'packageand(package1:package2)' syntax is obsolete, please use boolean\ndependencies like:\n'Supplements: (package1 and package2)'\n".to_string(),
         );
         f.add_info({
-            let mut d = finding("suse-zypp-packageand", Level::Error, 0);
+            let mut d = finding("suse-zypp-packageand", Level::Error);
             d.pkg_name = "llvm21-gold".to_string();
             d.arch = Some("aarch64".to_string());
             d.details = vec!["packageand(clang21:binutils)".to_string()];
             d
         });
         f.add_info({
-            let mut d = finding("no-soname", Level::Warning, 0);
+            let mut d = finding("no-soname", Level::Warning);
             d.pkg_name = "llvm21-gold".to_string();
             d.arch = Some("aarch64".to_string());
             d.details = vec!["/usr/lib64/LLVMgold.so".to_string()];
             d
         });
         let out = f.render_results(&c);
-        let expected = "llvm21-gold.aarch64: E: suse-zypp-packageand (Badness: 1) packageand(clang21:binutils)\nThe 'packageand(package1:package2)' syntax is obsolete, please use boolean\ndependencies like: 'Supplements: (package1 and package2)'\n\nllvm21-gold.aarch64: W: no-soname /usr/lib64/LLVMgold.so\nThe library has no soname.\n\n";
+        let expected = "llvm21-gold.aarch64: E: suse-zypp-packageand packageand(clang21:binutils)\nThe 'packageand(package1:package2)' syntax is obsolete, please use boolean\ndependencies like: 'Supplements: (package1 and package2)'\n\nllvm21-gold.aarch64: W: no-soname /usr/lib64/LLVMgold.so\nThe library has no soname.\n\n";
         assert_eq!(out, expected);
     }
 
@@ -861,7 +825,6 @@ mod tests {
                 level,
                 check: check.to_string(),
                 details: vec![],
-                badness: 0,
                 pkg_name: "pkg".to_string(),
                 arch: Some("src".to_string()),
                 line: None,
@@ -935,8 +898,8 @@ mod tests {
             .insert("Descriptions".to_string(), toml::Value::Table(descriptions));
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
         crate::checks::fhs::FHSCheck::register_error_details(&mut f);
-        f.add_info(finding("non-standard-dir-in-usr", Level::Warning, 0));
-        f.add_info(finding("non-standard-dir-in-var", Level::Warning, 0));
+        f.add_info(finding("non-standard-dir-in-usr", Level::Warning));
+        f.add_info(finding("non-standard-dir-in-var", Level::Warning));
         let out = f.render_results(&c);
         assert!(
             out.contains("A new text for non-standard-dir-in-usr error."),

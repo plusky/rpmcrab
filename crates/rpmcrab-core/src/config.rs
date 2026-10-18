@@ -57,7 +57,8 @@ pub struct Config {
     pub errors_only: bool,
     /// `-v/--verbose`/`--info`.
     pub info: bool,
-    /// `-P/--permissive`. On openSUSE forced on unless `--strict`.
+    /// `-P/--permissive`: findings print, but errors do not fail the run.
+    /// An explicit opt-in only — never on by default (issue #699).
     pub permissive: bool,
     /// `-m/--mini-mode` (SUSE-only). Disables `TagsCheck` spellchecking and
     /// makes `SpecCheck` skip `_check_specfile_error`/`_check_invalid_url`
@@ -67,7 +68,9 @@ pub struct Config {
     // Derived from `configuration` by `finalize` (do not set by hand after load).
     /// `Checks`.
     pub checks: Vec<String>,
-    /// `[Scoring]` — check name → raw badness value. Kept raw (not coerced to
+    /// `[Scoring]` — check name → raw badness value. Only the sign is used:
+    /// a positive value promotes the finding to `E` at emit time, and no
+    /// value ever lowers a level (issue #699). Kept raw (not coerced to
     /// an integer) because Python coerces per finding at emit time
     /// (`filter.py` `int()`), so negatives/floats/bools/garbage behave
     /// per-finding. Coerced in `filter.rs`.
@@ -82,15 +85,11 @@ pub struct Config {
     pub filter_titles: Vec<String>,
     /// `BlockedFilters`.
     pub blocked_filters: Vec<String>,
-    /// `BadnessThreshold` (default -1).
-    pub badness_threshold: i64,
     /// Distribution flavor for flavor-gated check behavior (`docs/DESIGN.md`
     /// §4.11, `docs/flavor-implementation.md`): `"opensuse"` (default) or
     /// `"slfo"`. Derived from the `Flavor` TOML key by [`Config::finalize`];
     /// unknown values warn on stderr and fall back to `"opensuse"`.
     pub flavor: String,
-    /// `PermissiveByDefault` (rpmlint#1592).
-    pub permissive_by_default: bool,
     /// `SkipPackagePatterns` (rpmlint#1592).
     pub skip_package_patterns: Vec<String>,
     /// `RpmlintrcSearchPaths` (rpmlint#1592).
@@ -125,21 +124,7 @@ impl Config {
         self.filters = self.get_strings("Filters")?;
         self.filter_titles = self.get_strings("FilterErrorTitles")?;
         self.blocked_filters = self.get_strings("BlockedFilters")?;
-        // A present-but-non-integer `BadnessThreshold` is ignored (the -1
-        // "no threshold" default applies), but not silently: like the
-        // Flavor and OutputFormat fallbacks below, the wrongly-typed value
-        // leaves a warning on stderr so it stays discoverable.
-        self.badness_threshold = match self.configuration.get("BadnessThreshold") {
-            None => -1,
-            Some(v) => v.as_integer().unwrap_or_else(|| {
-                eprintln!(
-                    "warning: 'BadnessThreshold' must be an integer, found {}; ignoring it",
-                    value_kind(v)
-                );
-                -1
-            }),
-        };
-        // Same treatment for a present-but-non-table `Scoring`: the whole
+        // A present-but-non-table `Scoring`: the whole
         // map is ignored, with a warning. (A table's individual values are
         // coerced per finding at emit time; see the field docs.)
         self.scoring = match self.configuration.get("Scoring") {
@@ -201,7 +186,6 @@ impl Config {
                 "opensuse".to_string()
             }
         };
-        self.permissive_by_default = self.get_bool("PermissiveByDefault")?;
         self.skip_package_patterns = self.get_strings("SkipPackagePatterns")?;
         self.rpmlintrc_search_paths = self.get_strings("RpmlintrcSearchPaths")?;
         self.suppress_extraction_stderr = self.get_bool("SuppressExtractionStderr")?;
@@ -661,8 +645,9 @@ fn splitlines(text: &str) -> Vec<&str> {
 }
 
 /// The two `rpmlintrc` directives rpmlint recognises (`config.py`).
-/// `setBadness` values land in `Scoring` as strings (int()'d at read time);
-/// `addFilter` appends to `Filters` and is recorded for the unused-filter audit.
+/// `addFilter` appends to `Filters` and is recorded for the unused-filter
+/// audit. `setBadness` is parsed and ignored with a warning: badness no
+/// longer adjusts finding levels (issue #699).
 pub fn load_rpmlintrc(config: &mut Config, path: &Path) -> std::io::Result<()> {
     let re_filter =
         Regex::new(r#"^\s*addFilter\s*\(\s*r?["\'](.*)["\']\s*\)"#).expect("static regex");
@@ -676,20 +661,11 @@ pub fn load_rpmlintrc(config: &mut Config, path: &Path) -> std::io::Result<()> {
             filters.push(m.get(1).expect("capture group").as_str().to_string());
         }
         if let Ok(Some(m)) = re_badness.captures(line) {
-            let name = m.get(1).expect("capture group").as_str().to_string();
-            let val = m.get(2).expect("capture group").as_str().to_string();
-            let scoring = config
-                .configuration
-                .entry("Scoring")
-                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-            let kind = value_kind(scoring);
-            let table = scoring.as_table_mut().ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("'Scoring' must be a table, found {kind}"),
-                )
-            })?;
-            table.insert(name, toml::Value::String(val));
+            let name = m.get(1).expect("capture group").as_str();
+            eprintln!(
+                "warning: ignoring setBadness({name:?}) in {}: badness no longer adjusts finding levels",
+                path.display()
+            );
         }
     }
 
@@ -1063,22 +1039,17 @@ mod tests {
     }
 
     #[test]
-    fn non_integer_badness_threshold_is_ignored() {
-        // Same shape as `Scoring`: a value of the wrong type is ignored (the -1
-        // "no threshold" default) with a stderr warning, not an error.
-        let mut cfg = Config::default();
-        cfg.configuration.insert(
-            "BadnessThreshold".to_string(),
-            toml::Value::String("abc".to_string()),
-        );
-        cfg.finalize().unwrap();
-        assert_eq!(cfg.badness_threshold, -1);
+    fn badness_threshold_key_is_inert() {
+        // Issue #699: the threshold is gone. The key may still appear in a
+        // user config; it is carried in the merged table but read by
+        // nothing, and a wrongly-typed value is not even warned about.
+        let cfg = config_with_toml("BadnessThreshold = \"abc\"\n[Scoring]\na = 7\n");
+        assert_eq!(cfg.scoring.get("a"), Some(&toml::Value::Integer(7)));
     }
 
     #[test]
-    fn scoring_table_and_integer_threshold_load() {
-        let cfg = config_with_toml("BadnessThreshold = 3\n[Scoring]\na = 7\n");
-        assert_eq!(cfg.badness_threshold, 3);
+    fn scoring_table_loads() {
+        let cfg = config_with_toml("[Scoring]\na = 7\n");
         assert_eq!(cfg.scoring.get("a"), Some(&toml::Value::Integer(7)));
     }
 
@@ -1113,7 +1084,6 @@ mod tests {
     #[test]
     fn bundled_defaults_carry_the_suse_ism_keys() {
         let cfg = load_inner(&[], &[], false).unwrap();
-        assert!(cfg.permissive_by_default);
         assert_eq!(
             cfg.skip_package_patterns,
             vec![r"/home/abuild/rpmbuild/RPMS/noarch/rpmlint-\d".to_string()]
@@ -1134,7 +1104,7 @@ mod tests {
         // out and the bare builtin baseline applies.
         let cfg = load_inner(&[], &[], false).unwrap();
         assert!(!cfg.checks.is_empty());
-        assert_eq!(cfg.badness_threshold, -1);
+        assert!(cfg.scoring.is_empty(), "defaults ship no [Scoring] entries");
         assert_eq!(cfg.conf_files, vec!["<builtin>".to_string()]);
     }
 
@@ -1215,7 +1185,10 @@ mod tests {
     }
 
     #[test]
-    fn rpmlintrc_scraper_handles_addfilter_and_setbadness() {
+    fn rpmlintrc_scraper_handles_addfilter_and_ignores_setbadness() {
+        // Issue #699: `setBadness` is parse-and-warn-ignore — it must not
+        // land in `Scoring` (where the reference's 0 would downgrade the
+        // finding from E to W), while `addFilter` works as before.
         let tmp = tempfile::tempdir().unwrap();
         let rc = tmp.path().join("pkg-rpmlintrc");
         std::fs::write(
@@ -1225,9 +1198,10 @@ mod tests {
         .unwrap();
         let mut cfg = load_inner(&[], &[], false).unwrap();
         load_rpmlintrc(&mut cfg, &rc).unwrap();
-        assert_eq!(
-            cfg.scoring.get("no-return-in-nonvoid-function"),
-            Some(&toml::Value::String("0".to_string()))
+        assert!(
+            cfg.scoring.is_empty(),
+            "setBadness must not reach Scoring: {:?}",
+            cfg.scoring
         );
         assert!(
             cfg.filters
@@ -1240,25 +1214,18 @@ mod tests {
     }
 
     #[test]
-    fn rpmlintrc_setbadness_on_a_non_table_scoring_errors() {
-        // A config layer that sets `Scoring` to a scalar replaces the
-        // table wholesale at merge time; an rpmlintrc `setBadness` then
-        // used to panic at the insertion. It is a load error now, in the
-        // InvalidData channel `load_rpmlintrc` already uses for finalize
-        // errors.
+    fn rpmlintrc_setbadness_never_touches_scoring() {
+        // Even with a non-table `Scoring` in the merged config (which
+        // finalize ignores with a warning), a `setBadness` line is simply
+        // skipped — it performs no insertion and cannot fail the load.
         let mut cfg = Config::default();
         cfg.configuration
             .insert("Scoring".to_string(), toml::Value::Integer(5));
         let tmp = tempfile::tempdir().unwrap();
         let rc = tmp.path().join("x.rc");
         std::fs::write(&rc, "setBadness('no-%check-section', 10)\n").unwrap();
-        let err = load_rpmlintrc(&mut cfg, &rc).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-        assert!(
-            err.to_string()
-                .contains("'Scoring' must be a table, found an integer"),
-            "error: {err}"
-        );
+        load_rpmlintrc(&mut cfg, &rc).unwrap();
+        assert!(cfg.scoring.is_empty());
     }
 
     fn config_with_toml(toml_text: &str) -> Config {
@@ -1388,15 +1355,18 @@ mod tests {
 
     #[test]
     fn xdg_config_overrides_vendored_distro_value() {
-        // Vendored opensuse.toml sets BadnessThreshold = 999; an
-        // XDG-discovered config must override it, mirroring upstream layering
-        // where local config sits above the distro package's files.
+        // An XDG-discovered config overrides a vendored distro value,
+        // mirroring upstream layering where local config sits above the
+        // distro package's files.
         let tmp = tempfile::tempdir().unwrap();
         let rpmlint_dir = tmp.path().join("xdg").join("rpmlint");
         std::fs::create_dir_all(&rpmlint_dir).unwrap();
-        std::fs::write(rpmlint_dir.join("local.toml"), "BadnessThreshold = 42\n").unwrap();
+        std::fs::write(rpmlint_dir.join("local.toml"), "MaxLineLength = 100\n").unwrap();
         let cfg = load_inner(&[], &[tmp.path().join("xdg")], true).unwrap();
-        assert_eq!(cfg.badness_threshold, 42);
+        assert_eq!(
+            cfg.configuration.get("MaxLineLength"),
+            Some(&toml::Value::Integer(100))
+        );
     }
 
     #[test]

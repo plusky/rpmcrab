@@ -63,16 +63,9 @@ FilterErrorTitles = []
 Filters = []
 # List of errors that can't be filtered
 BlockedFilters = []
-# Threshold where we should error out, by default single error is enough
-BadnessThreshold = -1
 # Report output format: "text" (the frozen human-readable wire format) or
 # "json" (machine-readable, upstream rpmlint#1156). Overridden by --format.
 OutputFormat = "text"
-# Treat individual errors as non-fatal unless --strict is passed on the
-# command line. rpmcrab's defaults are the openSUSE flavour, which runs
-# permissive by default (rpmlint#1592); this moves to the openSUSE flavour
-# layer once the Flavor key lands.
-PermissiveByDefault = true
 # List of regexp patterns for package paths that rpmcrab should refuse to
 # check and exit cleanly instead (e.g. the rpmlint package itself when the
 # checking wrapper uses a modified configuration).
@@ -423,10 +416,6 @@ SystemdUnitDir = "/usr/lib/systemd/system"
 #f_name = ""
 #good_param = ""
 #description = ""
-# Set badness tweaking for various options
-[Scoring]
-#function=0
-
 # Paths in which non-XDG legacy icons should be installed
 [IconPath]
 [IconPath."/usr/share/icons/"]

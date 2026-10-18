@@ -141,18 +141,6 @@ fn default_jobs() -> i32 {
         .unwrap_or(1)
 }
 
-/// Resolve effective permissive mode from CLI flags and the
-/// `PermissiveByDefault` config key (rpmlint#1592).
-///
-/// `--permissive` wins outright; otherwise permissive applies unless
-/// `--strict` was passed and the config default is off. This is the
-/// production expression previously inline in `run()`; the
-/// `render_llvm21_gold` test re-derived it by hand, so it gets its own
-/// unit tests here.
-fn resolve_permissive(cli_permissive: bool, cli_strict: bool, permissive_by_default: bool) -> bool {
-    cli_permissive || (!cli_strict && permissive_by_default)
-}
-
 /// Resolve the effective output format: the CLI `--format` wins outright,
 /// otherwise the `OutputFormat` config key decides (`"text"` default).
 fn resolve_output_format(cli_format: Option<&str>, config_format: &str) -> String {
@@ -241,9 +229,9 @@ pub fn run() -> ExitCode {
     cfg.strict = cli.strict;
     cfg.info = cli.verbose;
     cfg.errors_only = cli.errors_only;
-    // rpmlint#1592: `--permissive` only when asked; otherwise the
-    // `PermissiveByDefault` config key decides (openSUSE runs permissive).
-    cfg.permissive = resolve_permissive(cli.permissive, cli.strict, cfg.permissive_by_default);
+    // Issue #699: permissive is an explicit opt-in only — no config
+    // default forces it, so errors fail the run unless `-P` was passed.
+    cfg.permissive = cli.permissive;
     cfg.mini_mode = cli.mini_mode;
 
     if cli.print_config {
@@ -636,30 +624,6 @@ mod tests {
         assert_eq!(resolve_output_format(Some("text"), "json"), "text");
         assert_eq!(resolve_output_format(None, "json"), "json");
         assert_eq!(resolve_output_format(None, "text"), "text");
-    }
-
-    #[test]
-    fn resolve_permissive_matrix() {
-        // (cli_permissive, cli_strict, permissive_by_default) -> effective.
-        // `--permissive` always wins; `--strict` beats the config default;
-        // otherwise the default decides.
-        let cases = [
-            (false, false, false, false),
-            (false, false, true, true),
-            (false, true, false, false),
-            (false, true, true, false),
-            (true, false, false, true),
-            (true, false, true, true),
-            (true, true, false, true),
-            (true, true, true, true),
-        ];
-        for (cli_p, cli_s, def, expected) in cases {
-            assert_eq!(
-                resolve_permissive(cli_p, cli_s, def),
-                expected,
-                "cli_permissive={cli_p} cli_strict={cli_s} default={def}"
-            );
-        }
     }
 
     /// `Lint._expand_filelist` keeps only the three package suffixes and

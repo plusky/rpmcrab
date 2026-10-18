@@ -217,7 +217,7 @@ mod tests {
         let (name, line) = &results[0];
         assert_eq!(name, "deprecated-init-script");
         assert!(
-            line.contains(": E: deprecated-init-script (Badness: 1) mydaemon"),
+            line.contains(": E: deprecated-init-script mydaemon"),
             "unexpected line: {line}"
         );
     }

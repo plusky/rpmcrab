@@ -417,7 +417,7 @@ mod tests {
         assert_eq!(results[0].0, "no-library-dependency-on");
         assert_eq!(
             results[0].1,
-            "foo-devel.x86_64: E: no-library-dependency-on (Badness: 1) libfoo /usr/lib64/libfoo.so.1"
+            "foo-devel.x86_64: E: no-library-dependency-on libfoo /usr/lib64/libfoo.so.1"
         );
     }
 
@@ -431,7 +431,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0].1,
-            "foo-devel: E: no-library-dependency-on (Badness: 1) libfoo /usr/lib64/libfoo.so.1"
+            "foo-devel: E: no-library-dependency-on libfoo /usr/lib64/libfoo.so.1"
         );
     }
 
@@ -482,7 +482,7 @@ mod tests {
         assert_eq!(results[0].0, "no-library-dependency-on");
         assert_eq!(
             results[0].1,
-            "foo-devel.x86_64: E: no-library-dependency-on (Badness: 1) libfoo /usr/lib64/libfoo.so.1"
+            "foo-devel.x86_64: E: no-library-dependency-on libfoo /usr/lib64/libfoo.so.1"
         );
     }
 
@@ -556,12 +556,12 @@ mod tests {
         assert_eq!(results[0].0, "no-library-dependency-on");
         assert_eq!(
             results[0].1,
-            "foo-devel.x86_64: E: no-library-dependency-on (Badness: 1) libfoo /usr/lib64/libfoo.so.1"
+            "foo-devel.x86_64: E: no-library-dependency-on libfoo /usr/lib64/libfoo.so.1"
         );
         assert_eq!(results[1].0, "no-library-dependency-on");
         assert_eq!(
             results[1].1,
-            "foo-devel.aarch64: E: no-library-dependency-on (Badness: 1) libfoo /usr/lib64/libfoo.so.1"
+            "foo-devel.aarch64: E: no-library-dependency-on libfoo /usr/lib64/libfoo.so.1"
         );
     }
 
