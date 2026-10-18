@@ -448,7 +448,7 @@ impl PostCheck {
         static INSSERV_REGEX: OnceLock<Regex> = OnceLock::new();
         INSSERV_REGEX.get_or_init(|| {
             Regex::new(
-                r"(?m)(^|[;`|]|&&|\$\()\s*(?:then\s+|do\s+|else\s+)?(?:\S*/)?insserv\b([^\n;|&]*)",
+                r"(?m)((?:^|[;`|]|&&|&|\$\()\s*(?:then\s+|do\s+|else\s+)?|^\s*[^\s()]+\s*\)\s*)(?:\S*/)?insserv\b([^\n;|&]*)",
             )
             .expect("static regex")
         })
@@ -462,7 +462,7 @@ impl PostCheck {
             // (`try-restart`, `condrestart`, `reload-or-try-restart`)
             // genuinely no-op when the unit is inactive and stay quiet.
             Regex::new(
-                r"(?m)(^|[;`|]|&&|\$\()\s*(?:then\s+|do\s+|else\s+)?(?:\S*/)?systemctl\s+(?:--?\S+\s+)*(reload-or-restart|reenable|enable|start|restart)\b",
+                r"(?m)((?:^|[;`|]|&&|&|\$\()\s*(?:then\s+|do\s+|else\s+)?|^\s*[^\s()]+\s*\)\s*)(?:\S*/)?systemctl\s+(?:--?\S+\s+)*(reload-or-restart|reenable|enable|start|restart)\b",
             )
             .expect("static regex")
         })
@@ -471,7 +471,7 @@ impl PostCheck {
         static CHKCONFIG_REGEX: OnceLock<Regex> = OnceLock::new();
         CHKCONFIG_REGEX.get_or_init(|| {
             Regex::new(
-                r"(?m)(^|[;`|]|&&|\$\()\s*(?:then\s+|do\s+|else\s+)?(?:\S*/)?chkconfig\b([^\n;|&]*)",
+                r"(?m)((?:^|[;`|]|&&|&|\$\()\s*(?:then\s+|do\s+|else\s+)?|^\s*[^\s()]+\s*\)\s*)(?:\S*/)?chkconfig\b([^\n;|&]*)",
             )
             .expect("static regex")
         })
@@ -763,7 +763,9 @@ impl PostCheck {
     /// stay live. The quote characters are kept; only the contents go.
     /// The result is length-preserving (comment text is blanked, not
     /// cut), so a match span in the result is the same span in the
-    /// input. Scanned per line, like `delimiters_in_line`.
+    /// input. The frame stack threads across lines, like the heredoc
+    /// scan: a quoted string spanning lines keeps its continuation
+    /// lines blanked instead of letting them read as code.
     fn code_only(script: &str) -> String {
         #[derive(Clone, Copy)]
         enum Frame {
@@ -774,10 +776,9 @@ impl PostCheck {
             Single,
             Double,
         }
-        fn code_line(line: &str) -> String {
+        fn code_line(line: &str, stack: &mut Vec<Frame>) -> String {
             let bytes = line.as_bytes();
             let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-            let mut stack: Vec<Frame> = Vec::new();
             let mut i = 0;
             while i < bytes.len() {
                 let c = bytes[i] as char;
@@ -824,7 +825,30 @@ impl PostCheck {
                         '\\' => {
                             out.push(bytes[i]);
                             if i + 1 < bytes.len() {
-                                out.push(bytes[i + 1]);
+                                // An escaped separator or quote is a
+                                // literal argument character, not
+                                // syntax: blank the escaped byte so
+                                // matchers cannot read the separator
+                                // (the double-quote frame blanks
+                                // escaped bytes the same way).
+                                if matches!(
+                                    bytes[i + 1] as char,
+                                    ';' | '|'
+                                        | '&'
+                                        | '`'
+                                        | '\''
+                                        | '"'
+                                        | '('
+                                        | ')'
+                                        | '<'
+                                        | '>'
+                                        | '#'
+                                        | '$'
+                                ) {
+                                    out.push(b' ');
+                                } else {
+                                    out.push(bytes[i + 1]);
+                                }
                                 i += 1;
                             }
                             i += 1;
@@ -900,7 +924,12 @@ impl PostCheck {
             }
             String::from_utf8(out).expect("blanking preserves UTF-8")
         }
-        script.lines().map(code_line).collect::<Vec<_>>().join("\n")
+        let mut stack: Vec<Frame> = Vec::new();
+        script
+            .lines()
+            .map(|line| code_line(line, &mut stack))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Cache and database updaters invoked at command position in a
@@ -1017,7 +1046,8 @@ impl PostCheck {
     /// deactivate or remove and stay quiet, like the insserv removal
     /// form. Matching runs on the heredoc-blanked, comment-stripped,
     /// quote-blanked text (`code_only`) and is command-position only
-    /// (start of line or after a command separator), so comments,
+    /// (start of line, after a command separator — a bare `&`
+    /// backgrounding included — or as a `case` arm), so comments,
     /// echoed or otherwise quoted text and the preset-based
     /// `systemd-update-helper` expansions of the `%service_*` macros
     /// do not fire.
@@ -2840,6 +2870,114 @@ mod tests {
             !found
                 .iter()
                 .any(|(_, f, _)| f == "daemon-activation-in-%postun"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn daemon_activation_after_background_ampersand_is_flagged() {
+        // A bare `&` backgrounds the previous command; what follows
+        // is at command position just as after `&&`.
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "sleep 1 & systemctl enable foo.service",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post")
+        );
+    }
+
+    #[test]
+    fn daemon_activation_in_case_arm_is_flagged() {
+        let script =
+            "case $1 in\nstart) systemctl enable foo.service;;\nstop) chkconfig foo off;;\nesac";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "{found:?}"
+        );
+        let script = "case $1 in\n1) chkconfig foo on;;\nesac";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn fd_redirect_does_not_open_command_position() {
+        // `2>&1` is a redirection, not a separator: the words after
+        // it are arguments to the first command, not an invocation.
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "foo 2>&1 systemctl enable foo.service",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn daemon_activation_in_multiline_quote_is_quiet() {
+        // A quoted string spanning lines: the continuation line is
+        // string content, not code — the quote state threads across
+        // lines in `code_only`.
+        let script = "echo \"the service is managed with\nsystemctl enable foo.service\"";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn escaped_separator_does_not_open_command_position() {
+        // `\;` is a literal argument character: what follows it is
+        // still an argument, not a command at command position.
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "echo \\; systemctl enable foo.service",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
+    fn heredoc_delimiter_lookalike_line_does_not_end_body() {
+        // Only the exact terminator ends a plain heredoc body (the
+        // `<<-` tab-stripping form aside): the indented lookalike
+        // line is body text, so the mention after it is still
+        // heredoc text, not code.
+        let script = "cat <<EOF\n  EOF\nsystemctl enable foo.service\nEOF";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
             "must stay silent: {found:?}"
         );
     }
