@@ -27,4 +27,7 @@ jobs:
           # guards the PR-time graph.
           deny-licenses: GPL-3.0-only, AGPL-3.0-only, AGPL-3.0-or-later, LGPL-3.0-only, SSPL-1.0, CC-BY-NC-4.0, CC-BY-NC-SA-4.0
           # Path dep shares this repo's license; its bump trips the or-later match on the GPL-3.0-only entry.
-          allow-dependencies-licenses: 'pkg:cargo/rpmcrab-core'
+          # sequoia-openpgp and buffered-reader are LGPL-2.0-or-later, which links
+          # into this GPL-2.0-or-later project (deny.toml allows it); their
+          # or-later expression trips the matcher on the LGPL-3.0-only entry.
+          allow-dependencies-licenses: 'pkg:cargo/rpmcrab-core, pkg:cargo/sequoia-openpgp, pkg:cargo/buffered-reader'
