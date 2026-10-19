@@ -1901,6 +1901,14 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "hidden-file-or-dir"
+kind = "behaviour"
+reason = "Deliberate config fix (plusky/rpmcrab#739): the vendored openSUSE/SLFO configs add a Filters line upstream does not ship, '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.cache' (see ADD_FILTERS in scripts/generate-distro-configs.py). Upstream's config filters the sibling skeleton dotdirs .config/.local/.fonts (the vendored copies retarget them to /usr/etc/skel, #538) but carries no .cache line, so the one member of filesystem's deliberate 0700 XDG skeleton set that upstream's list predates fired while its siblings stayed quiet. Measured on the Factory filesystem package: the vendored flavours emitted exactly one hidden-file-or-dir line before this fix — the .cache warning — and none after."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/739"
+
+[[divergence]]
+case = "global"
 check = "explicit-lib-dependency"
 kind = "behaviour"
 reason = "The reference lib-package regex's unanchored `libs?[\\d-]*` alternative matches any dependency name ending in \"lib\" (e.g. `appstream-glib`), which is not a library at all. Per openSUSE naming policy library packages are named `lib*`, which is what this check targets here; rpmcrab anchors both alternatives to the start of the name, so genuine `libfoo` findings still fire while suffix false positives stay silent. This knowingly silences non-`lib*` true positives like `Requires: zlib`, where the reference is right. Concrete case: rpmcrab's own package requires `appstream-glib` for its `appstream-util` binary (a runtime subprocess invocation rpm's autodeps can never see); the reference flags it, rpmcrab does not."

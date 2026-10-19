@@ -93,6 +93,10 @@
 #   Filters: retargeted '^filesystem\\..*: missing-dependency-to-cron' to '^filesystem\\..*: missing-dependency-to-crontabs' (the emitted tag is missing-dependency-to-crontabs (plural); the singular matched only as a substring prefix of the tag (issue #538))
 #   Filters: retargeted '.* statically-linked-binary /sbin/ldconfig' to '.* statically-linked-binary /usr/sbin/ldconfig' (usr-merge: ldconfig ships as /usr/sbin/ldconfig, so the /sbin/ anchor could never match (issue #538))
 #
+# Added Filters entries (exemption upstream does not
+# ship; see ADD_FILTERS):
+#   Filters: added '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.cache' after '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.local' (filesystem ships /usr/etc/skel/.cache in the same deliberate 0700 XDG skeleton set as .config/.local; upstream filters the siblings but carries no .cache line (issue #739))
+#
 # Dropped Filters entries (live findings rpmcrab deliberately
 # surfaces; see DROP_LIVE_FILTERS):
 #   Filters: dropped 'dir-or-file-in-usr-local' (blanket filter dropped by ruling (issue #583): FilesCheck port with a %ghost exemption (issue #643), 0/45 measured misfires; the suppressed set is 45 E lines in 2 srcpkgs, both deliberate carriers (filesystem's %ghost /usr/local skeleton, reproducible-faketools' PATH-shadowing wrappers) whose exceptions belong in per-package rpmlintrc; since the exemption only reproducible-faketools' 25 real-payload lines still fire (re-measured 2026-10-18, issue #654); Fedora ships the line commented out)
