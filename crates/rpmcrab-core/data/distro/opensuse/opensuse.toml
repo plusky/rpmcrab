@@ -96,6 +96,7 @@ Filters = [
     '^filesystem\..*: hidden-file-or-dir /root/.gnupg',
     '^filesystem\..*: hidden-file-or-dir /usr/etc/skel/.config',
     '^filesystem\..*: hidden-file-or-dir /usr/etc/skel/.local',
+    '^filesystem\..*: hidden-file-or-dir /usr/etc/skel/.cache',
     '^filesystem\..*: hidden-file-or-dir /tmp/.X11-unix',
     '^filesystem\..*: hidden-file-or-dir /tmp/.ICE-unix',
     '^filesystem\..*: hidden-file-or-dir /usr/etc/skel/.fonts',
