@@ -2544,13 +2544,6 @@ since = "0.3.0"
 
 [[divergence]]
 case = "global"
-check = "undefined-non-weak-symbol"
-kind = "severity"
-reason = "TEMPORARY levelling pending plusky/rpmcrab#701 (issue #699 Factory-corpus fallout pass): the port emits undefined-non-weak-symbol at W, the reference at E. In the 20261018 Factory sweep the check produced 1,694,484 E findings across 3,625 srcpkgs (about 90% of all findings in the corpus; median 160 per package), which under the #699 exit doctrine would fail a fifth of Factory on this check alone. The mass is a provider-universe defect, not package damage: the resolver considers only the same binary RPM plus ambient system libraries (empty on the sweep host), and the #701 investigation found 97.6% of sampled findings (excluding the genuinely broken paraview) resolve within the package set's dependency closure. The settled fix is #701's resolver tightening (provider universe = the whole invocation's package set) with the residue staying E -- explicitly not a permanent downgrade. This entry and the W level are removed when #701 lands; until then the E-share figures for this check in the #699 fallout table are pre-fix."
-since = "0.3.0"
-
-[[divergence]]
-case = "global"
 check = "specfile-error"
 kind = "severity"
 reason = "TEMPORARY levelling pending plusky/rpmcrab#702 (issue #699 Factory-corpus fallout pass): the port emits specfile-error at W, the reference at E. In the 20261018 Factory sweep the check produced 22,528 E findings carried by 6,876 of 17,241 srcpkgs; at E, under the #699 exit doctrine, that population alone fails about 40% of Factory. The mass is a parse-environment defect, not broken specs: the sweep parses specs without the distro macro context an OBS build root carries (Factory prjconf and the macro-providing packages), and the #702 census classified the population as overwhelmingly missing-context artefacts -- 13,839 findings are the double-report population (the rpm -q child summary and the Spec::parse fallback in check_invalid_url; the specfile-error behaviour entry gives the exact split), 4,756 are unknown-tag errors led by %python_subpackages (3,667); sampled firers are uniformly of this class, none a genuinely broken spec. #702 installs the stolen prjconf and the macro packages into the parse environment and re-measures the residue; genuinely unparsable specs return to E there. This entry and the W level are removed when #702 lands."
