@@ -80,13 +80,31 @@ impl SignatureCheck {
         if let Some(keyring) = &self.keyring {
             options = options.keyring(keyring.clone());
         }
-        match PackageHeader::from_file(path, Some(&options)) {
+        // The read runs under `guarded`, like `Pkg::open`'s read:
+        // librpm's decoders can panic on a malformed header, and the
+        // contained panic becomes `Unreadable` here instead of
+        // unwinding through the verification lock in `verify`.
+        let read = crate::pkg::guarded(|| {
+            PackageHeader::from_file(path, Some(&options)).map_err(|source| {
+                crate::pkg::PkgError::Open {
+                    path: path.to_path_buf(),
+                    source,
+                }
+            })
+        });
+        match read {
             Ok(_) => Verdict::Verified,
-            Err(RpmErrorKind::NoKey) => Verdict::NoKey,
+            Err(crate::pkg::PkgError::Open {
+                source: RpmErrorKind::NoKey,
+                ..
+            }) => Verdict::NoKey,
             // `NotTrusted` is not produced for OpenPGP signatures under
             // the rpmdb keyring model (an absent key reports `NoKey`);
             // classify it with the other verification failures.
-            Err(RpmErrorKind::Fail) | Err(RpmErrorKind::NotTrusted) => Verdict::Failed,
+            Err(crate::pkg::PkgError::Open {
+                source: RpmErrorKind::Fail | RpmErrorKind::NotTrusted,
+                ..
+            }) => Verdict::Failed,
             Err(_) => Verdict::Unreadable,
         }
     }
@@ -413,21 +431,29 @@ fn issuer_from_subpackets(area: &[u8]) -> Option<Option<[u8; 8]>> {
         let subpacket = cur.take(len)?;
         let (kind, body) = subpacket.split_first()?;
         match kind {
-            16 if body.len() == 8 => {
+            16 => {
+                // An issuer subpacket body is exactly the 8-byte key
+                // ID; any other length makes the area malformed.
+                if body.len() != 8 {
+                    return None;
+                }
                 if issuer.is_none() {
                     issuer = Some(body.try_into().expect("8 bytes"));
                 }
             }
-            33 if body.len() > 1 => {
-                // Body: one version byte, then the fingerprint.
-                let fingerprint = &body[1..];
-                if fingerprint.len() >= 8 {
-                    from_fingerprint = Some(
-                        fingerprint[fingerprint.len() - 8..]
-                            .try_into()
-                            .expect("8 bytes"),
-                    );
+            33 => {
+                // Body: one version byte, then the fingerprint, whose
+                // low 64 bits the key ID needs; a shorter body makes
+                // the area malformed.
+                let fingerprint = body.get(1..)?;
+                if fingerprint.len() < 8 {
+                    return None;
                 }
+                from_fingerprint = Some(
+                    fingerprint[fingerprint.len() - 8..]
+                        .try_into()
+                        .expect("8 bytes"),
+                );
             }
             _ => {}
         }
@@ -442,6 +468,20 @@ fn key_id_string(issuer: &[u8; 8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// The details an `unknown-key` report carries: the first issuer's
+/// key ID when a packet provides one, and no detail when none does
+/// — the reference's NOKEY pattern fires with an empty key ID for
+/// an issuer-less signature too, so the report in `check` is
+/// unconditional and only its detail varies.
+fn unknown_key_details(parsed: &[Option<SigPacket>]) -> Vec<String> {
+    parsed
+        .iter()
+        .flatten()
+        .find_map(|packet| packet.issuer)
+        .map(|issuer| vec![key_id_string(&issuer)])
+        .unwrap_or_default()
 }
 
 impl Check for SignatureCheck {
@@ -476,16 +516,10 @@ impl Check for SignatureCheck {
                 // too.
                 if any_corrupt {
                     add_info(out, Level::Error, pkg, "invalid-signature", &[]);
-                } else if let Some(issuer) =
-                    parsed.iter().flatten().find_map(|packet| packet.issuer)
-                {
-                    add_info(
-                        out,
-                        Level::Error,
-                        pkg,
-                        "unknown-key",
-                        &[&key_id_string(&issuer)],
-                    );
+                } else {
+                    let detail_strings = unknown_key_details(&parsed);
+                    let details: Vec<&str> = detail_strings.iter().map(String::as_str).collect();
+                    add_info(out, Level::Error, pkg, "unknown-key", &details);
                 }
             }
             Verdict::Failed => {
@@ -959,6 +993,74 @@ mod tests {
         area.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
         area.extend_from_slice(&[5, 1]);
         assert!(parse_sig_packet(&v4_packet(&area)).is_none());
+    }
+
+    #[test]
+    fn wrong_length_issuer_subpackets_are_malformed() {
+        // Type 16 with a 7-byte body: the issuer subpacket carries
+        // exactly the 8-byte key ID, so a shorter body is malformed,
+        // not issuer-less.
+        let mut area = vec![8u8, 16];
+        area.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(issuer_from_subpackets(&area), None);
+        assert!(parse_sig_packet(&v4_packet(&area)).is_none());
+        // Type 16 with a 9-byte body: over-long is malformed too.
+        let mut area = vec![10u8, 16];
+        area.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(issuer_from_subpackets(&area), None);
+        assert!(parse_sig_packet(&v4_packet(&area)).is_none());
+        // Type 33 carrying only the version byte: the fingerprint is
+        // absent, so the low 64 bits the key ID needs are missing.
+        assert_eq!(issuer_from_subpackets(&[2, 33, 4]), None);
+        assert!(parse_sig_packet(&v4_packet(&[2, 33, 4])).is_none());
+        // Type 33 with a 4-byte fingerprint: truncated below the low
+        // 64 bits.
+        let area = [6u8, 33, 4, 0xaa, 0xbb, 0xcc, 0xdd];
+        assert_eq!(issuer_from_subpackets(&area), None);
+        assert!(parse_sig_packet(&v4_packet(&area)).is_none());
+        // A truncated type 33 after a valid issuer subpacket still
+        // makes the whole area malformed.
+        let mut area = vec![9u8, 16];
+        area.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        area.extend_from_slice(&[2, 33, 4]);
+        assert_eq!(issuer_from_subpackets(&area), None);
+        // Near miss: a type 33 whose fingerprint is exactly 8 bytes
+        // carries the key ID in full and parses.
+        let mut area = vec![10u8, 33, 4];
+        area.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            issuer_from_subpackets(&area),
+            Some(Some([1, 2, 3, 4, 5, 6, 7, 8]))
+        );
+        let parsed = parse_sig_packet(&v4_packet(&area)).expect("packet parses");
+        assert_eq!(parsed.issuer, Some([1, 2, 3, 4, 5, 6, 7, 8]));
+    }
+
+    #[test]
+    fn missing_file_verified_read_is_unreadable() {
+        let config = Config::default();
+        let check = SignatureCheck::new(&config);
+        let missing = inputs().join("signature-no-such-file.rpm");
+        assert!(matches!(check.verify(&missing), Verdict::Unreadable));
+    }
+
+    #[test]
+    fn unknown_key_details_without_an_issuer_are_empty() {
+        // Issuer-less packets (empty or unrelated subpacket areas)
+        // carry no detail; the `unknown-key` report itself is
+        // unconditional in `check`, so an empty detail list is the
+        // issuer-less outcome, not silence.
+        let issuerless = [Some(SigPacket { issuer: None })];
+        assert_eq!(unknown_key_details(&issuerless), Vec::<String>::new());
+        assert_eq!(unknown_key_details(&[]), Vec::<String>::new());
+        // An issuer later in the list still names the key.
+        let mixed = [
+            Some(SigPacket { issuer: None }),
+            Some(SigPacket {
+                issuer: Some([1, 2, 3, 4, 5, 6, 7, 8]),
+            }),
+        ];
+        assert_eq!(unknown_key_details(&mixed), ["05060708".to_string()]);
     }
 
     #[test]
