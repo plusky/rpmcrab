@@ -145,8 +145,8 @@ existing checks:
 case or an explicit ledger entry):
 
 - `BinariesCheck`: `missing-call-to-setgroups-before-setuid` severity
-  matches upstream (`E if is_uid else W`); rpmcrab's unconditional `E`
-  is the #593 severity recalibration, not a flavour patch.
+  is a uniform `W` in rpmcrab (fix-and-diverge #743); upstream splits
+  (`E if is_uid else W`). Not a flavour patch.
 - `BinariesCheck`: `binary-in-etc` also fires under `/usr/etc/`.
 - `DBusPolicyCheck`: new `E: dbus-policy-allow-wildcard` (bsc#1220215) and
   `W: dbus-policy-allow-receive`.
@@ -446,9 +446,10 @@ not real flavor divergences:
 | 3 | `file-contains-date-and-time` / `file-contains-current-date` W→E | **APPROVED** | Decided 2026-10-19 (D11 of #714) and implemented in #759 as an unconditional severity recalibration: both findings report E. An embedded build date stamps image content with the build moment and makes the image non-reproducible byte-for-byte. Measured over the Factory corpus by build-time emulation (51,589 RPMs, each payload scanned for its own build date under the check's exact rule): 578 firings in 259 srcpkgs; 25 hand-read firings carried 23 genuine embedded build dates, and the 2 remaining firings are upstream release-history files whose release date equals a release-day build date. Ledgered as a severity divergence (§6.2). |
 | 4 | LogrotateCheck drops `/usr/etc/logrotate.d/` | **REJECTED** | Same staleness as #2: `/usr/etc/` support added to opensuse after the SLFO fork. Do not gate. |
 
-`missing-call-to-setgroups-before-setuid` carries upstream's own level
-split (`E if is_uid else W`); rpmcrab's unconditional `E` is the #593
-severity recalibration with a ledger entry, not a flavor gate.
+`missing-call-to-setgroups-before-setuid` carries a uniform `W` in
+rpmcrab (fix-and-diverge #743 with a ledger entry); upstream's own
+level split (`E if is_uid else W`) is not carried, and it is not a
+flavor gate.
 
 Row 3 is approved and implemented as an unconditional recalibration, so
 the divergence matrix carries no flavor gating:
@@ -827,8 +828,9 @@ finding is an error only when it always implies the damage, so style
 and judgement findings moved down: `description-line-too-long` and
 `files-duplicated-waste` print as warnings, `no-%check-section` as
 info, the `systemd-service-without-service_*` family as warnings.
-`missing-call-to-setgroups-before-setuid` moved the other way and is
-now always an error. The vendored distro configs no longer bundle the
+`missing-call-to-setgroups-before-setuid` prints as a warning at
+every file mode: its symbol pattern cannot tell an identity switch
+from an effective-id drop, so it does not always imply the damage. The vendored distro configs no longer bundle the
 strict scoring layer by default; `invalid-license` keeps its badness
 of 100000 in the base scoring, and six `[Scoring]` promotions that
 printed warnings as errors are gone. Text output renders
