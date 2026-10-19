@@ -52,17 +52,19 @@ No trait changes: `Config` (or `&Config`) is already passed to every check's
 
 ## Gating pattern
 
-At the decision point, branch on `config.is_slfo()`. For severity flips,
-make the level a variable rather than duplicating the emit call:
+At the decision point, branch on `config.is_slfo()`; for severity flips,
+make the level a variable rather than duplicating the emit call. The
+§4.11 date recalibration is not gated: both date findings report
+`Level::Error` under every flavor, so their emit sites carry the level
+directly:
 
 ```rust
-// checks/buildroot.rs (when ported)
-let level = if config.is_slfo() { Level::Error } else { Level::Warning };
+// checks/buildroot_and_date.rs
 if self.istoday.is_match(data) {
     if self.looksliketime.is_match(data) {
-        out.add_info(level, pkg, "file-contains-date-and-time", filename);
+        out.add_info(Level::Error, pkg, "file-contains-date-and-time", filename);
     } else {
-        out.add_info(level, pkg, "file-contains-current-date", filename);
+        out.add_info(Level::Error, pkg, "file-contains-current-date", filename);
     }
 }
 ```
@@ -84,15 +86,17 @@ let etc_prefixes: &[&str] = if config.is_slfo() {
 
 Each gated divergence gets a `[[divergence]]` entry in
 `tests/parity/divergences.toml`, with the flavor recorded so corpus diffs
-stay legible:
+stay legible. The date recalibration is unconditional, so its entries
+record the severity departure with no flavor field:
 
 ```toml
 [[divergence]]
-case = "buildroot"
-finding = "file-contains-date-and-time"
-flavor = "slfo"
-kind = "behaviour"
-reason = "Severity is Error under Flavor=\"slfo\" (immutable images require reproducible builds); Warning otherwise, matching the frozen 2.10.0 opensuse reference."
+case = "global"
+check = "file-contains-date-and-time"
+kind = "severity"
+reason = "Deliberate severity recalibration (issue #759, decision D11 of #714): the port reports E where the reference reports W. An embedded build date stamps image content with the build moment and makes the image non-reproducible byte-for-byte, a significant defect on an image-based OS."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/759"
 ```
 
 The corpus runner (§6) runs in the default `"opensuse"` flavor, so the
