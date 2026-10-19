@@ -4702,6 +4702,29 @@ mod tests {
     }
 
     #[test]
+    fn world_writable_silent_for_sticky_dir_on_an_ordinary_path() {
+        // Same path as the firing case above, only the sticky bit
+        // differs: /var/lib/foo at 1777 stays quiet, proving the silence
+        // comes from the mode predicate alone and not from the path
+        // being an FHS tmp directory (issue #772).
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = vec![PkgFile {
+            name: "/var/lib/foo".to_string(),
+            path: "/var/lib/foo".to_string(),
+            mode: 0o041777,
+            ..Default::default()
+        }];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_lacks(&names, "world-writable");
+    }
+
+    #[test]
     fn spurious_executable_perm_fires_for_text_data_file() {
         // Text data file with the executable bit but no shebang: not a
         // script, not an ELF binary, not in a script path ->
