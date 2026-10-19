@@ -531,6 +531,17 @@ pub struct FilesCheck {
     /// been seen.
     session_files: HashSet<String>,
     dangling_candidates: Vec<DanglingCandidate>,
+    /// Session state for `non-standard-uid` / `non-standard-gid` (issue
+    /// #756): the files whose owner sits outside the standard registry,
+    /// held as candidates, and the user/group names the run's packages
+    /// declare through the source-wide routes (a shipped sysusers.d
+    /// snippet, a `user()` / `group()` Provides), per source key.
+    /// Requires crediting is per file-owning package instead and rides
+    /// on each candidate itself. The finding is decided in
+    /// `after_checks`, once every package of the run has been seen.
+    owner_candidates: Vec<OwnerCandidate>,
+    declared_users: HashMap<String, HashSet<String>>,
+    declared_groups: HashMap<String, HashSet<String>>,
     /// Decompressed bytes per file path, shared between `is_utf8_file`
     /// and `manpage_text` (see `decompressed_bytes`); `None` entries
     /// record outputs that could not be obtained or exceeded the text
@@ -647,6 +658,9 @@ impl FilesCheck {
             documented_sources: HashSet::new(),
             session_files: HashSet::new(),
             dangling_candidates: Vec::new(),
+            owner_candidates: Vec::new(),
+            declared_users: HashMap::new(),
+            declared_groups: HashMap::new(),
             decompressed_cache: std::cell::RefCell::new(HashMap::new()),
         }
     }
@@ -664,6 +678,9 @@ impl FilesCheck {
 #[derive(Default)]
 #[allow(dead_code)]
 struct PkgState {
+    /// The package's source key (`source_key`), for the session-aware
+    /// decisions that group sibling packages.
+    source: String,
     devel_pkg: bool,
     is_kernel_package: bool,
     debuginfo_package: bool,
@@ -705,7 +722,10 @@ impl Check for FilesCheck {
         // `-v`/`--explain` descriptions, mirroring the reference's
         // `__init__` dict which installs them unconditionally.
         Self::register_error_details(config, out);
-        let mut st = PkgState::default();
+        let mut st = PkgState {
+            source: source_key(pkg),
+            ..Default::default()
+        };
         self.check_utf8(pkg, out);
         self.check_bidi_controls(pkg, out);
         st.devel_pkg = is_match(&self.devel_re, &pkg.name);
@@ -747,6 +767,7 @@ impl Check for FilesCheck {
 
         self.session_files
             .extend(pkg.files.iter().map(|f| f.name.clone()));
+        self.note_declared_owners(pkg);
         self.check_nodoc(pkg, &st);
         self.check_meta_package(pkg, &st, out);
         self.check_empty_debuginfo(pkg, &st, out);
@@ -806,6 +827,41 @@ impl Check for FilesCheck {
                 DanglingDisposition::Silent => {}
             }
         }
+        // The session-aware `non-standard-uid` / `non-standard-gid`
+        // decision (issue #756): a candidate fires only when the owner
+        // is declared through a source-wide route -- a sysusers.d
+        // snippet or a `user()` / `group()` Provides from a package
+        // built from the same source (see `note_declared_owners`) --
+        // or the file-owning package itself Requires the capability
+        // (`cand.own_requires`). A sibling's Requires credits nothing:
+        // the owning package installed standalone has no creator for
+        // the account. Candidates are in lint order, which the stable
+        // output sort preserves for equal keys.
+        for cand in &self.owner_candidates {
+            if cand.own_requires {
+                continue;
+            }
+            let declared = if cand.group {
+                self.declared_groups.get(&cand.source)
+            } else {
+                self.declared_users.get(&cand.source)
+            };
+            if declared.is_some_and(|names| names.contains(&cand.owner)) {
+                continue;
+            }
+            out.add_info(make_finding(
+                &cand.name,
+                &cand.arch,
+                Level::Error,
+                if cand.group {
+                    "non-standard-gid"
+                } else {
+                    "non-standard-uid"
+                },
+                vec![cand.fname.clone(), cand.owner.clone()],
+                None,
+            ));
+        }
     }
 
     fn reset(&mut self) {
@@ -813,6 +869,9 @@ impl Check for FilesCheck {
         self.documented_sources.clear();
         self.session_files.clear();
         self.dangling_candidates.clear();
+        self.owner_candidates.clear();
+        self.declared_users.clear();
+        self.declared_groups.clear();
         self.decompressed_cache.borrow_mut().clear();
     }
 
@@ -821,6 +880,9 @@ impl Check for FilesCheck {
             && self.documented_sources.is_empty()
             && self.session_files.is_empty()
             && self.dangling_candidates.is_empty()
+            && self.owner_candidates.is_empty()
+            && self.declared_users.is_empty()
+            && self.declared_groups.is_empty()
         {
             return None;
         }
@@ -829,6 +891,9 @@ impl Check for FilesCheck {
             documented_sources: std::mem::take(&mut self.documented_sources),
             session_files: std::mem::take(&mut self.session_files),
             dangling_candidates: std::mem::take(&mut self.dangling_candidates),
+            owner_candidates: std::mem::take(&mut self.owner_candidates),
+            declared_users: std::mem::take(&mut self.declared_users),
+            declared_groups: std::mem::take(&mut self.declared_groups),
         }))
     }
 
@@ -838,19 +903,33 @@ impl Check for FilesCheck {
             self.documented_sources.extend(state.documented_sources);
             self.session_files.extend(state.session_files);
             self.dangling_candidates.extend(state.dangling_candidates);
+            self.owner_candidates.extend(state.owner_candidates);
+            for (source, names) in state.declared_users {
+                self.declared_users.entry(source).or_default().extend(names);
+            }
+            for (source, names) in state.declared_groups {
+                self.declared_groups
+                    .entry(source)
+                    .or_default()
+                    .extend(names);
+            }
         }
     }
 }
 
 /// Cross-package `FilesCheck` state, exported per package and merged
 /// before `after_checks` (`rpmlint#1595`): the session-aware
-/// `no-documentation` (issue #539) and `dangling-relative-symlink`
-/// (issue #547) decisions.
+/// `no-documentation` (issue #539), `dangling-relative-symlink`
+/// (issue #547) and `non-standard-uid` / `non-standard-gid`
+/// (issue #756) decisions.
 struct FilesSessionState {
     nodoc_candidates: Vec<(String, String, String)>,
     documented_sources: HashSet<String>,
     session_files: HashSet<String>,
     dangling_candidates: Vec<DanglingCandidate>,
+    owner_candidates: Vec<OwnerCandidate>,
+    declared_users: HashMap<String, HashSet<String>>,
+    declared_groups: HashMap<String, HashSet<String>>,
 }
 
 /// The key grouping binary packages built from one source: the
@@ -862,6 +941,87 @@ fn source_key(pkg: &Pkg) -> String {
         Some(srpm) if !srpm.is_empty() => srpm,
         _ => pkg.name.clone(),
     }
+}
+
+/// Whether `path` is a sysusers.d snippet: a `.conf` file whose parent
+/// directory is named `sysusers.d` (`/usr/lib/sysusers.d/*.conf`,
+/// `/etc/sysusers.d/*.conf`).
+fn is_sysusers_snippet(path: &str) -> bool {
+    path.ends_with(".conf")
+        && path
+            .rsplit('/')
+            .nth(1)
+            .is_some_and(|parent| parent == "sysusers.d")
+}
+
+/// The `(users, groups)` a sysusers.d snippet declares. A `u` line
+/// declares its user and the like-named primary group (the group rpm's
+/// sysusers generator provides for a `u` line); a `g` line declares its
+/// group. `m` lines record membership and `r` lines id ranges: they
+/// declare no account name. A `-` or purely numeric name field declares
+/// by id, so it credits no name either.
+fn sysusers_declared(text: &str) -> (HashSet<String>, HashSet<String>) {
+    let mut users = HashSet::new();
+    let mut groups = HashSet::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        let (kind, name) = match (fields.next(), fields.next()) {
+            (Some(kind), Some(name)) => (kind, name),
+            _ => continue,
+        };
+        if name == "-" || name.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        match kind {
+            "u" => {
+                users.insert(name.to_string());
+                groups.insert(name.to_string());
+            }
+            "g" => {
+                groups.insert(name.to_string());
+            }
+            _ => {}
+        }
+    }
+    (users, groups)
+}
+
+/// The account a `user(<name>)` / `group(<name>)` dependency capability
+/// declares, as `(is_group, name)`. Any other dependency name declares
+/// no account.
+fn account_capability(dep_name: &str) -> Option<(bool, &str)> {
+    if let Some(name) = dep_name
+        .strip_prefix("user(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        (!name.is_empty()).then_some((false, name))
+    } else if let Some(name) = dep_name
+        .strip_prefix("group(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        (!name.is_empty()).then_some((true, name))
+    } else {
+        None
+    }
+}
+
+/// Whether `pkg`'s own Requires -- plain, or the scriptlet-context
+/// split into `prereq` (`Requires(pre): user(<name>)`, the form account
+/// Requires take in real headers) -- name the `user(<name>)` /
+/// `group(<name>)` capability for `name`. This is the per-package
+/// Requires route of the `non-standard-uid` / `non-standard-gid`
+/// crediting (issue #756): only the file-owning package's own Requires
+/// count, never a sibling's.
+fn own_requires_account(pkg: &Pkg, group: bool, name: &str) -> bool {
+    pkg.requires.iter().chain(pkg.prereq.iter()).any(|dep| {
+        dep.leaves()
+            .iter()
+            .any(|leaf| account_capability(&leaf.name) == Some((group, name)))
+    })
 }
 
 /// The source package name a `SOURCERPM` value names: the value is
@@ -983,6 +1143,28 @@ struct DanglingCandidate {
     /// The normalised absolute target path.
     target: String,
     disposition: DanglingDisposition,
+}
+
+/// One file whose owner sits outside the standard registry, held until
+/// `after_checks` knows every name the run's packages declare through
+/// the source-wide routes (issue #756).
+struct OwnerCandidate {
+    name: String,
+    arch: String,
+    source: String,
+    fname: String,
+    owner: String,
+    /// `true` for the group decision (`non-standard-gid`), `false` for
+    /// the user decision (`non-standard-uid`).
+    group: bool,
+    /// `true` when the file-owning package itself Requires the
+    /// `user(<owner>)` / `group(<owner>)` capability, in plain or
+    /// scriptlet-context (`prereq`) form. Requires crediting is
+    /// per-package, unlike the sysusers-snippet and Provides routes,
+    /// which credit the whole source set: a sibling's Requires does
+    /// not create the account for a standalone install of the owning
+    /// package, so it credits nothing here.
+    own_requires: bool,
 }
 
 /// What an unresolved candidate emits, precomputed at record time from
@@ -1289,6 +1471,55 @@ impl FilesCheck {
         }
     }
 
+    /// Credit the user and group names this package declares through
+    /// the source-wide routes, under the package's source key, for the
+    /// `after_checks` `non-standard-uid` / `non-standard-gid` decision
+    /// (issue #756): the sysusers.d snippets a package ships and its
+    /// `user()` / `group()` Provides. The Requires route is credited
+    /// separately and per file-owning package (see
+    /// `own_requires_account`): a sibling's Requires does not create
+    /// the account for a standalone install of the owning package, so
+    /// Requires capabilities are not merged in here.
+    fn note_declared_owners(&mut self, pkg: &Pkg) {
+        let source = source_key(pkg);
+        let mut users = HashSet::new();
+        let mut groups = HashSet::new();
+        for f in &pkg.files {
+            if is_sysusers_snippet(&f.name) {
+                let (snippet_users, snippet_groups) = sysusers_declared(&pkg.read_file(&f.name));
+                users.extend(snippet_users);
+                groups.extend(snippet_groups);
+            }
+        }
+        // Provides only: Requires and the scriptlet-context `prereq`
+        // split credit the file-owning package alone, never the whole
+        // source set, so they are recorded per candidate instead (see
+        // `own_requires_account`).
+        for dep in &pkg.provides {
+            for leaf in dep.leaves() {
+                if let Some((group, name)) = account_capability(&leaf.name) {
+                    if group {
+                        groups.insert(name.to_string());
+                    } else {
+                        users.insert(name.to_string());
+                    }
+                }
+            }
+        }
+        if !users.is_empty() {
+            self.declared_users
+                .entry(source.clone())
+                .or_default()
+                .extend(users);
+        }
+        if !groups.is_empty() {
+            self.declared_groups
+                .entry(source)
+                .or_default()
+                .extend(groups);
+        }
+    }
+
     fn check_file(
         &mut self,
         pkg: &Pkg,
@@ -1308,8 +1539,8 @@ impl FilesCheck {
         self.check_file_manpage(pkg, fname, pkgfile, st, out);
         self.check_file_infopage_compressed(pkg, fname, out);
         self.check_file_unexpanded_macro(pkg, fname, out);
-        self.check_file_non_standard_uid(pkg, fname, pkgfile, out);
-        self.check_file_non_standard_gid(pkg, fname, pkgfile, out);
+        self.check_file_non_standard_uid(pkg, fname, pkgfile, st);
+        self.check_file_non_standard_gid(pkg, fname, pkgfile, st);
         self.check_file_kernel_modules(pkg, fname, &st.is_kernel_package, out);
         self.check_file_dir_or_file(pkg, fname, pkgfile, out);
         self.check_file_non_ghost_in_run(pkg, fname, pkg, out);
@@ -2118,38 +2349,42 @@ impl FilesCheck {
     }
 
     fn check_file_non_standard_uid(
-        &self,
+        &mut self,
         pkg: &Pkg,
         fname: &str,
         pkgfile: &PkgFile,
-        out: &mut Filter,
+        st: &PkgState,
     ) {
         if !self.standard_users.contains(&pkgfile.user) {
-            add_info(
-                out,
-                Level::Warning,
-                pkg,
-                "non-standard-uid",
-                &[fname, &pkgfile.user],
-            );
+            self.owner_candidates.push(OwnerCandidate {
+                name: pkg.name.clone(),
+                arch: pkg.arch.clone(),
+                source: st.source.clone(),
+                fname: fname.to_string(),
+                owner: pkgfile.user.clone(),
+                group: false,
+                own_requires: own_requires_account(pkg, false, &pkgfile.user),
+            });
         }
     }
 
     fn check_file_non_standard_gid(
-        &self,
+        &mut self,
         pkg: &Pkg,
         fname: &str,
         pkgfile: &PkgFile,
-        out: &mut Filter,
+        st: &PkgState,
     ) {
         if !self.standard_groups.contains(&pkgfile.group) {
-            add_info(
-                out,
-                Level::Warning,
-                pkg,
-                "non-standard-gid",
-                &[fname, &pkgfile.group],
-            );
+            self.owner_candidates.push(OwnerCandidate {
+                name: pkg.name.clone(),
+                arch: pkg.arch.clone(),
+                source: st.source.clone(),
+                fname: fname.to_string(),
+                owner: pkgfile.group.clone(),
+                group: true,
+                own_requires: own_requires_account(pkg, true, &pkgfile.group),
+            });
         }
     }
 
@@ -3957,6 +4192,7 @@ impl FilesCheck {
 mod tests {
     use super::*;
     use crate::color::Color;
+    use crate::pkg::dep::DepInfo;
     use crate::pkg::pkgfile::RPMFILE_GHOST;
 
     fn test_config() -> Config {
@@ -4031,6 +4267,37 @@ mod tests {
         let (results, mut dirs) = run_files_check_session(&[rpm], config);
         let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
         (names, dirs.pop().expect("one extraction dir"))
+    }
+
+    /// Drive `FilesCheck` over already-opened packages the way the lint
+    /// loop drives a batch: one worker instance checks each package in
+    /// order and exports its cross-package state after each one, the
+    /// main instance merges the exports and runs `after_checks` once at
+    /// the end. Returns the `(finding, rendered line)` pairs and their
+    /// levels.
+    fn run_files_check_pkgs(pkgs: &[Pkg], config: &Config) -> (Vec<(String, String)>, Vec<Level>) {
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        let mut worker = FilesCheck::new(config);
+        let mut main = FilesCheck::new(config);
+        for pkg in pkgs {
+            worker.check(pkg, config, &mut out);
+            if let Some(state) = worker.export_state() {
+                main.import_state(state);
+            }
+            worker.reset();
+        }
+        main.after_checks(config, &mut out);
+        (out.results().to_vec(), out.result_levels().to_vec())
+    }
+
+    /// The level one finding was emitted at, from `run_files_check_pkgs`
+    /// output.
+    fn level_of(results: &[(String, String)], levels: &[Level], finding: &str) -> Option<Level> {
+        results
+            .iter()
+            .zip(levels)
+            .find(|((name, _), _)| name == finding)
+            .map(|(_, level)| *level)
     }
 
     fn assert_has(names: &[String], finding: &str) {
@@ -5683,28 +5950,48 @@ mod tests {
 
     #[test]
     fn files_check_non_standard_uid() {
-        // Owner outside StandardUsers must warn via the per-file dispatch.
+        // Owner outside StandardUsers and declared nowhere must error
+        // via the session decision (issue #756). A root-owned sibling
+        // file in the same package stays quiet, so the tag fires once.
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
         let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
-        pkg.files = vec![PkgFile {
-            name: "/usr/share/fcprobe/data.dat".to_string(),
-            path: "/usr/share/fcprobe/data.dat".to_string(),
-            user: "nosuchuser".to_string(),
-            group: "root".to_string(),
-            ..Default::default()
-        }];
+        pkg.files = vec![
+            PkgFile {
+                name: "/usr/share/fcprobe/data.dat".to_string(),
+                path: "/usr/share/fcprobe/data.dat".to_string(),
+                user: "nosuchuser".to_string(),
+                group: "root".to_string(),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/share/fcprobe/other.dat".to_string(),
+                path: "/usr/share/fcprobe/other.dat".to_string(),
+                user: "root".to_string(),
+                group: "root".to_string(),
+                ..Default::default()
+            },
+        ];
         let config = test_config();
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let mut check = FilesCheck::new(&config);
-        check.check(&pkg, &config, &mut out);
-        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
-        assert_has(&names, "non-standard-uid");
+        let (results, levels) = run_files_check_pkgs(&[pkg], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        assert_eq!(
+            names
+                .iter()
+                .filter(|n| n.as_str() == "non-standard-uid")
+                .count(),
+            1
+        );
+        assert_eq!(
+            level_of(&results, &levels, "non-standard-uid"),
+            Some(Level::Error)
+        );
     }
 
     #[test]
     fn files_check_non_standard_gid() {
-        // Group outside StandardGroups must warn via the per-file dispatch.
+        // Group outside StandardGroups and declared nowhere must error
+        // via the session decision (issue #756).
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
         let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
@@ -5716,11 +6003,365 @@ mod tests {
             ..Default::default()
         }];
         let config = test_config();
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let mut check = FilesCheck::new(&config);
-        check.check(&pkg, &config, &mut out);
-        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        let (results, levels) = run_files_check_pkgs(&[pkg], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
         assert_has(&names, "non-standard-gid");
+        assert_eq!(
+            level_of(&results, &levels, "non-standard-gid"),
+            Some(Level::Error)
+        );
+    }
+
+    /// Open one uidgid-session fixture RPM with extraction, keeping the
+    /// extraction dir alive in the returned TempDir.
+    fn uidgid_fixture(name: &str) -> (Pkg, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let rpm = fixture_path(name);
+        let pkg = Pkg::open(Path::new(&rpm), dir.path(), true).expect("open fixture");
+        (pkg, dir)
+    }
+
+    #[test]
+    fn non_standard_uid_quiet_when_sibling_ships_sysusers_snippet() {
+        // The uidgid-session-sysusers subpackage ships the snippet
+        // declaring svcfoo; a file in the main subpackage owned by
+        // svcfoo stays quiet when both are linted in one run (issue
+        // #756, declaration route (a)). The candidate is recorded
+        // before the declaring package is seen: the decision is
+        // order-independent.
+        let (mut main_pkg, _d1) = uidgid_fixture("uidgid-session-main-1.0-1.noarch.rpm");
+        main_pkg.files.push(PkgFile {
+            name: "/var/lib/svcfoo/state".to_string(),
+            path: "/var/lib/svcfoo/state".to_string(),
+            user: "svcfoo".to_string(),
+            group: "root".to_string(),
+            ..Default::default()
+        });
+        let (sysusers_pkg, _d2) = uidgid_fixture("uidgid-session-sysusers-1.0-1.noarch.rpm");
+        let config = test_config();
+        let (results, _levels) = run_files_check_pkgs(&[main_pkg, sysusers_pkg], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        assert_lacks(&names, "non-standard-uid");
+    }
+
+    #[test]
+    fn non_standard_gid_quiet_for_u_line_primary_group() {
+        // The snippet's `u svcfoo` line declares svcfoo's like-named
+        // primary group too, so a file owned by group svcfoo stays
+        // quiet (issue #756; the 389-ds shape).
+        let (mut main_pkg, _d1) = uidgid_fixture("uidgid-session-main-1.0-1.noarch.rpm");
+        main_pkg.files.push(PkgFile {
+            name: "/var/lib/svcfoo/state".to_string(),
+            path: "/var/lib/svcfoo/state".to_string(),
+            user: "root".to_string(),
+            group: "svcfoo".to_string(),
+            ..Default::default()
+        });
+        let (sysusers_pkg, _d2) = uidgid_fixture("uidgid-session-sysusers-1.0-1.noarch.rpm");
+        let config = test_config();
+        let (results, _levels) = run_files_check_pkgs(&[main_pkg, sysusers_pkg], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        assert_lacks(&names, "non-standard-gid");
+    }
+
+    #[test]
+    fn non_standard_uid_fires_for_group_only_name() {
+        // Near-miss: the snippet declares svcbar with a `g` line only,
+        // so svcbar is a declared group but not a declared user; a file
+        // owned by user svcbar still fires (issue #756).
+        let (mut main_pkg, _d1) = uidgid_fixture("uidgid-session-main-1.0-1.noarch.rpm");
+        main_pkg.files.push(PkgFile {
+            name: "/var/lib/svcbar/state".to_string(),
+            path: "/var/lib/svcbar/state".to_string(),
+            user: "svcbar".to_string(),
+            group: "root".to_string(),
+            ..Default::default()
+        });
+        let (sysusers_pkg, _d2) = uidgid_fixture("uidgid-session-sysusers-1.0-1.noarch.rpm");
+        let config = test_config();
+        let (results, _levels) = run_files_check_pkgs(&[main_pkg, sysusers_pkg], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "non-standard-uid");
+    }
+
+    #[test]
+    fn non_standard_uid_fires_when_snippet_declares_another_name() {
+        // Near-miss: the sibling snippet declares svcfoo/svcbar, not
+        // the file's owner svcother (issue #756).
+        let (mut main_pkg, _d1) = uidgid_fixture("uidgid-session-main-1.0-1.noarch.rpm");
+        main_pkg.files.push(PkgFile {
+            name: "/var/lib/svcother/state".to_string(),
+            path: "/var/lib/svcother/state".to_string(),
+            user: "svcother".to_string(),
+            group: "root".to_string(),
+            ..Default::default()
+        });
+        let (sysusers_pkg, _d2) = uidgid_fixture("uidgid-session-sysusers-1.0-1.noarch.rpm");
+        let config = test_config();
+        let (results, _levels) = run_files_check_pkgs(&[main_pkg, sysusers_pkg], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "non-standard-uid");
+    }
+
+    #[test]
+    fn non_standard_quiet_with_provides_only_package() {
+        // Declaration route (b): explicit user()/group() Provides on a
+        // package that ships no snippet (the legacy class).
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.provides = vec![
+            DepInfo {
+                name: "user(svcfoo)".to_string(),
+                flags: 0,
+                epoch: None,
+                version: None,
+                release: None,
+            },
+            DepInfo {
+                name: "group(svcbar)".to_string(),
+                flags: 0,
+                epoch: None,
+                version: None,
+                release: None,
+            },
+        ];
+        pkg.requires = vec![];
+        pkg.files = vec![PkgFile {
+            name: "/var/lib/svcfoo/state".to_string(),
+            path: "/var/lib/svcfoo/state".to_string(),
+            user: "svcfoo".to_string(),
+            group: "svcbar".to_string(),
+            ..Default::default()
+        }];
+        let config = test_config();
+        let (results, _levels) = run_files_check_pkgs(&[pkg], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        assert_lacks(&names, "non-standard-uid");
+        assert_lacks(&names, "non-standard-gid");
+    }
+
+    #[test]
+    fn non_standard_quiet_with_requires_capability() {
+        // Declaration route (c): the file-owning package Requires the
+        // user()/group() capabilities a provider package declares.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.provides = vec![];
+        pkg.requires = vec![
+            DepInfo {
+                name: "user(svcfoo)".to_string(),
+                flags: 0,
+                epoch: None,
+                version: None,
+                release: None,
+            },
+            DepInfo {
+                name: "group(svcbar)".to_string(),
+                flags: 0,
+                epoch: None,
+                version: None,
+                release: None,
+            },
+        ];
+        pkg.files = vec![PkgFile {
+            name: "/var/lib/svcfoo/state".to_string(),
+            path: "/var/lib/svcfoo/state".to_string(),
+            user: "svcfoo".to_string(),
+            group: "svcbar".to_string(),
+            ..Default::default()
+        }];
+        let config = test_config();
+        let (results, _levels) = run_files_check_pkgs(&[pkg], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        assert_lacks(&names, "non-standard-uid");
+        assert_lacks(&names, "non-standard-gid");
+    }
+
+    #[test]
+    fn non_standard_fires_when_provides_name_another_account() {
+        // Near-miss for route (b): the Provides name a different
+        // account than the file's owner.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.provides = vec![DepInfo {
+            name: "user(svcfoo)".to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        }];
+        pkg.requires = vec![];
+        pkg.files = vec![PkgFile {
+            name: "/var/lib/svcother/state".to_string(),
+            path: "/var/lib/svcother/state".to_string(),
+            user: "svcother".to_string(),
+            group: "root".to_string(),
+            ..Default::default()
+        }];
+        let config = test_config();
+        let (results, _levels) = run_files_check_pkgs(&[pkg], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "non-standard-uid");
+    }
+
+    #[test]
+    fn non_standard_declaration_does_not_leak_across_sources() {
+        // The uidgid-session declaration credits only packages built
+        // from that source: an unrelated package's svcfoo-owned file
+        // in the same run still fires (issue #756).
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut lone = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        lone.files = vec![PkgFile {
+            name: "/var/lib/svcfoo/state".to_string(),
+            path: "/var/lib/svcfoo/state".to_string(),
+            user: "svcfoo".to_string(),
+            group: "root".to_string(),
+            ..Default::default()
+        }];
+        let (sysusers_pkg, _d2) = uidgid_fixture("uidgid-session-sysusers-1.0-1.noarch.rpm");
+        let config = test_config();
+        let (results, _levels) = run_files_check_pkgs(&[lone, sysusers_pkg], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "non-standard-uid");
+    }
+
+    #[test]
+    fn non_standard_quiet_with_prereq_capability() {
+        // Declaration route (c) in its real-world form: the account
+        // capabilities sit in the scriptlet-context Requires split
+        // (`Requires(pre): user(<name>)`), which the header loader
+        // stores in `prereq` (the grommunio-web / gromox corpus shape).
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.provides = vec![];
+        pkg.requires = vec![];
+        pkg.prereq = vec![
+            DepInfo {
+                name: "user(svcfoo)".to_string(),
+                flags: 0,
+                epoch: None,
+                version: None,
+                release: None,
+            },
+            DepInfo {
+                name: "group(svcbar)".to_string(),
+                flags: 0,
+                epoch: None,
+                version: None,
+                release: None,
+            },
+        ];
+        pkg.files = vec![PkgFile {
+            name: "/var/lib/svcfoo/state".to_string(),
+            path: "/var/lib/svcfoo/state".to_string(),
+            user: "svcfoo".to_string(),
+            group: "svcbar".to_string(),
+            ..Default::default()
+        }];
+        let config = test_config();
+        let (results, _levels) = run_files_check_pkgs(&[pkg], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        assert_lacks(&names, "non-standard-uid");
+        assert_lacks(&names, "non-standard-gid");
+    }
+
+    #[test]
+    fn non_standard_fires_when_only_sibling_requires_capability() {
+        // Negative for the Requires route's scope: crediting is
+        // per-package, not set-wide. The sibling subpackage (same
+        // SOURCERPM) Requires user(svcfoo) in plain form and
+        // group(svcbar) in prereq form, but the file-owning package
+        // Requires nothing, so a standalone install of the owning
+        // package has no creator for either account and both findings
+        // fire at E (issue #756).
+        let (mut owner, _d1) = uidgid_fixture("uidgid-session-main-1.0-1.noarch.rpm");
+        owner.provides = vec![];
+        owner.requires = vec![];
+        owner.prereq = vec![];
+        owner.files.push(PkgFile {
+            name: "/var/lib/svcfoo/state".to_string(),
+            path: "/var/lib/svcfoo/state".to_string(),
+            user: "svcfoo".to_string(),
+            group: "svcbar".to_string(),
+            ..Default::default()
+        });
+        let (mut sibling, _d2) = uidgid_fixture("uidgid-session-sysusers-1.0-1.noarch.rpm");
+        // Strip the sibling's shipped files so its sysusers snippet
+        // cannot credit the accounts, and clear its Provides: the only
+        // declarations left in the run are the sibling's Requires.
+        sibling.files = vec![];
+        sibling.provides = vec![];
+        sibling.requires = vec![DepInfo {
+            name: "user(svcfoo)".to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        }];
+        sibling.prereq = vec![DepInfo {
+            name: "group(svcbar)".to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        }];
+        let config = test_config();
+        let (results, levels) = run_files_check_pkgs(&[owner, sibling], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "non-standard-uid");
+        assert_has(&names, "non-standard-gid");
+        assert_eq!(
+            level_of(&results, &levels, "non-standard-uid"),
+            Some(Level::Error)
+        );
+        assert_eq!(
+            level_of(&results, &levels, "non-standard-gid"),
+            Some(Level::Error)
+        );
+    }
+
+    #[test]
+    fn sysusers_declared_credits_u_and_g_lines() {
+        let (users, groups) = sysusers_declared(
+            "u svcfoo - \"svcfoo service user\" /var/lib/svcfoo -\ng svcbar - -\n",
+        );
+        assert!(users.contains("svcfoo"));
+        // A `u` line declares its like-named primary group too.
+        assert!(groups.contains("svcfoo"));
+        assert!(groups.contains("svcbar"));
+        assert!(!users.contains("svcbar"));
+    }
+
+    #[test]
+    fn sysusers_declared_ignores_membership_ranges_and_ids() {
+        // `m` lines are membership, `r` lines id ranges, `-` and
+        // numeric name fields declare by id: none credits a name.
+        let (users, groups) =
+            sysusers_declared("# comment\n\nm svcfoo svcbar\nr 200..299\nu - 500:500\ng 123 - -\n");
+        assert!(users.is_empty());
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn account_capability_reads_user_and_group_caps() {
+        assert_eq!(account_capability("user(svcfoo)"), Some((false, "svcfoo")));
+        assert_eq!(account_capability("group(svcbar)"), Some((true, "svcbar")));
+        assert_eq!(account_capability("user()"), None);
+        assert_eq!(account_capability("/bin/sh"), None);
+    }
+
+    #[test]
+    fn sysusers_snippet_paths_match_conf_under_sysusers_d() {
+        assert!(is_sysusers_snippet("/usr/lib/sysusers.d/foo.conf"));
+        assert!(is_sysusers_snippet("/etc/sysusers.d/foo.conf"));
+        assert!(!is_sysusers_snippet("/usr/lib/sysusers.d/foo.txt"));
+        assert!(!is_sysusers_snippet("/usr/lib/tmpfiles.d/foo.conf"));
+        assert!(!is_sysusers_snippet("/foo.conf"));
     }
 
     #[test]
