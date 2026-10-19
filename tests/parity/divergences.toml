@@ -150,14 +150,14 @@ since = "0.1.0"
 case = "global"
 check = "specfile-error"
 kind = "detail"
-reason = "When the spec parser fails in _check_invalid_url, rpmcrab reports 'specfile-error' with only the spec path as detail. The reference also includes librpm's error text, which librpm 0.6's Spec::parse does not surface (it returns Option)."
+reason = "When the spec parser fails in _check_invalid_url and the rpm child query has not already reported that fatal failure with a surviving finding, rpmcrab reports 'specfile-error' with only the spec path as detail. The reference also includes librpm's error text, which librpm 0.6's Spec::parse does not surface (it returns Option)."
 since = "0.1.0"
 
 [[divergence]]
 case = "global"
 check = "specfile-error"
 kind = "behaviour"
-reason = "A spec parse failure is reported once: when the rpm child query in _check_specfile_error has already reported the failure, the parse failure in _check_invalid_url does not add its fallback finding, whose detail is only the bare spec path. The reference reports both. In the #702 census of the 20261018 Factory sweep, 13,839 findings were this one failure reported twice (6,920 bare-path fallbacks against 6,919 child summaries over 6,815 packages)."
+reason = "A spec parse failure is reported once: when the rpm child query in _check_specfile_error has already reported that fatal failure (a non-zero child exit or its 'can't parse' summary) with a specfile-error finding that survived the filter, the parse failure in _check_invalid_url does not add its fallback finding, whose detail is only the bare spec path. The reference reports both. In the #702 census of the 20261018 Factory sweep, 13,839 findings were this one failure reported twice (6,920 bare-path fallbacks against 6,919 child summaries over 6,815 packages)."
 since = "0.3.0"
 
 [[divergence]]
