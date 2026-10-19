@@ -64,10 +64,11 @@ impl SpecPkg {
     /// python-libmount) — so the declarations expand to a set of
     /// patterns: literal text anchors a pattern, and a macro the
     /// preamble does not define contributes an unconstrained segment.
-    /// The patterns are the ground truth for the spec's own identity —
-    /// a source RPM's header name names the container (OBS names
-    /// multibuild flavour source RPMs after the build job), not the
-    /// spec. `None` when the preamble declares no `Name:` at all.
+    /// Macro definitions take effect from their own line on — a
+    /// `%undefine` removes a macro's earlier definitions — and the
+    /// definitions of every conditional branch count, since branch
+    /// conditions are not evaluated. `None` when the preamble
+    /// declares no `Name:` at all.
     pub fn declared_name_patterns(&self) -> Option<Vec<NamePattern>> {
         declared_name_patterns(&self.lines)
     }
@@ -127,6 +128,12 @@ impl NamePattern {
         self.matches_at(0, candidate.as_bytes(), 0, &mut failed)
     }
 
+    /// Whether this pattern constrains nothing: every segment is
+    /// [`NameSegment::Any`], so the pattern produces any name at all.
+    pub fn is_unconstrained(&self) -> bool {
+        !self.0.is_empty() && self.0.iter().all(|s| matches!(s, NameSegment::Any))
+    }
+
     fn matches_at(
         &self,
         seg: usize,
@@ -156,20 +163,35 @@ impl NamePattern {
     }
 }
 
+/// The preamble scan's yield: the `Name:` values and the
+/// macro-environment events, each with its logical-line position.
+type PreambleScan = (Vec<(usize, String)>, Vec<(usize, MacroEvent)>);
+
+/// One macro-environment event of the preamble scan: a `%define` /
+/// `%global` definition or a `%undefine`, in declaration order.
+enum MacroEvent {
+    /// `%define name body` / `%global name body`.
+    Define(String, String),
+    /// `%undefine name`.
+    Undefine(String),
+}
+
 /// The preamble scan behind [`SpecPkg::declared_name_patterns`]: the
-/// `Name:` values and the `%define` / `%global` macro definitions of
-/// the main preamble, in declaration order. The scan stops at the
-/// first section header; conditionals, build-conditionals and bare
-/// macro invocations are preamble content and the scan reads past
-/// them.
-fn scan_preamble(lines: &[String]) -> (Vec<String>, Vec<(String, String)>) {
-    // Join backslash-continued definition lines first: a definition's
-    // body runs to the end of its logical line.
+/// `Name:` values and the macro-environment events of the main
+/// preamble, each with its logical-line position, in declaration
+/// order. The scan stops at the first section header; conditionals,
+/// build-conditionals and bare macro invocations are preamble
+/// content and the scan reads past them.
+fn scan_preamble(lines: &[String]) -> PreambleScan {
+    // Join backslash-continued lines first: a definition's or a
+    // `Name:` tag's value runs to the end of its logical line.
     let mut logical: Vec<String> = Vec::with_capacity(lines.len());
     for line in lines {
         let line = line.trim();
         match logical.last_mut() {
-            Some(prev) if prev.ends_with('\\') && is_definition_line(prev) => {
+            Some(prev)
+                if prev.ends_with('\\') && (is_definition_line(prev) || is_name_line(prev)) =>
+            {
                 prev.pop();
                 prev.push_str(line);
             }
@@ -178,8 +200,8 @@ fn scan_preamble(lines: &[String]) -> (Vec<String>, Vec<(String, String)>) {
     }
 
     let mut names = Vec::new();
-    let mut macros: Vec<(String, String)> = Vec::new();
-    for line in &logical {
+    let mut events = Vec::new();
+    for (pos, line) in logical.iter().enumerate() {
         if line.starts_with('#') {
             continue;
         }
@@ -196,7 +218,14 @@ fn scan_preamble(lines: &[String]) -> (Vec<String>, Vec<(String, String)>) {
                 .collect();
             match directive.as_str() {
                 "define" | "global" => {
-                    record_macro(&rest[directive.len()..], &mut macros);
+                    if let Some((name, body)) = parse_macro(&rest[directive.len()..]) {
+                        events.push((pos, MacroEvent::Define(name, body)));
+                    }
+                }
+                "undefine" => {
+                    if let Some(name) = parse_undefine(&rest[directive.len()..]) {
+                        events.push((pos, MacroEvent::Undefine(name)));
+                    }
                 }
                 d if SECTION_HEADERS.contains(&d) => break,
                 _ => {}
@@ -211,10 +240,10 @@ fn scan_preamble(lines: &[String]) -> (Vec<String>, Vec<(String, String)>) {
         }
         let value = value.trim();
         if !value.is_empty() {
-            names.push(value.to_string());
+            names.push((pos, value.to_string()));
         }
     }
-    (names, macros)
+    (names, events)
 }
 
 /// Whether `line` opens a `%define` / `%global` definition.
@@ -228,20 +257,37 @@ fn is_definition_line(line: &str) -> bool {
     })
 }
 
-/// Record one `%define` / `%global` definition from the text after the
-/// directive word. Parametric definitions (`%define name(args) body`)
-/// define functions, not values, and are not recorded.
-fn record_macro(rest: &str, macros: &mut Vec<(String, String)>) {
+/// Whether `line` is a `Name:` tag line.
+fn is_name_line(line: &str) -> bool {
+    line.split_once(':')
+        .is_some_and(|(tag, _)| tag.trim().eq_ignore_ascii_case("name"))
+}
+
+/// Parse one `%define` / `%global` definition from the text after
+/// the directive word. Parametric definitions (`%define name(args)
+/// body`) define functions, not values, and do not parse.
+fn parse_macro(rest: &str) -> Option<(String, String)> {
     let mut parts = rest.trim_start().splitn(2, char::is_whitespace);
     let name = parts.next().unwrap_or_default();
     if name.is_empty() || name.contains('(') {
-        return;
+        return None;
     }
     let body = parts.next().unwrap_or_default().trim();
     if body.starts_with('(') {
-        return;
+        return None;
     }
-    macros.push((name.to_string(), body.to_string()));
+    Some((name.to_string(), body.to_string()))
+}
+
+/// Parse the macro name of a `%undefine` from the text after the
+/// directive word.
+fn parse_undefine(rest: &str) -> Option<String> {
+    let name = rest.split_whitespace().next().unwrap_or_default();
+    if name.is_empty() || name.contains('(') {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 /// An item of a macro-bearing value: a literal run or a macro
@@ -324,6 +370,60 @@ fn tokenise_value(value: &str) -> Vec<ValueItem> {
                     i = j + 1;
                 }
             }
+            '?' | '!' => {
+                // `%?name` / `%!name`: the short conditional reference —
+                // the macro's expansion, or nothing. The identifier is
+                // the macro's name, not literal text.
+                match chars.get(i + 2) {
+                    Some(&c) if c.is_ascii_alphanumeric() || c == '_' => {
+                        let mut j = i + 2;
+                        while j < chars.len()
+                            && (chars[j].is_ascii_alphanumeric() || chars[j] == '_')
+                        {
+                            j += 1;
+                        }
+                        if !lit.is_empty() {
+                            items.push(ValueItem::Lit(std::mem::take(&mut lit)));
+                        }
+                        let name: String = chars[i + 2..j].iter().collect();
+                        items.push(ValueItem::Query(name));
+                        i = j;
+                    }
+                    Some(&'{') => {
+                        let mut depth = 0usize;
+                        let mut j = i + 2;
+                        while j < chars.len() {
+                            if chars[j] == '{' {
+                                depth += 1;
+                            } else if chars[j] == '}' {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            j += 1;
+                        }
+                        if !lit.is_empty() {
+                            items.push(ValueItem::Lit(std::mem::take(&mut lit)));
+                        }
+                        if j >= chars.len() {
+                            items.push(ValueItem::Opaque);
+                            i = chars.len();
+                        } else {
+                            let inner: String = chars[i + 3..j].iter().collect();
+                            items.push(brace_item(&format!("{next}{inner}")));
+                            i = j + 1;
+                        }
+                    }
+                    _ => {
+                        if !lit.is_empty() {
+                            items.push(ValueItem::Lit(std::mem::take(&mut lit)));
+                        }
+                        items.push(ValueItem::Opaque);
+                        i += 2;
+                    }
+                }
+            }
             c if c.is_ascii_alphanumeric() || c == '_' => {
                 let mut j = i + 1;
                 while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
@@ -399,6 +499,18 @@ fn expand_value(
     expand_items(&tokenise_value(value), macros, depth, visiting)
 }
 
+/// Collapse a completed pattern set that contains an unconstrained
+/// pattern: the unconstrained alternative produces every name the
+/// other alternatives produce, so the set is the single unconstrained
+/// pattern. Keeps widened expansions from being enumerated further.
+fn collapse_unconstrained(patterns: Vec<NamePattern>) -> Vec<NamePattern> {
+    if patterns.iter().any(|p| p.is_unconstrained()) {
+        vec![NamePattern(vec![NameSegment::Any])]
+    } else {
+        patterns
+    }
+}
+
 /// Expand tokenised items into patterns by composing the items'
 /// alternatives in order.
 fn expand_items(
@@ -432,7 +544,7 @@ fn expand_items(
             return vec![NamePattern(vec![NameSegment::Any])];
         }
     }
-    patterns
+    collapse_unconstrained(patterns)
 }
 
 /// The patterns for one macro reference: each of the macro's preamble
@@ -470,7 +582,7 @@ fn macro_patterns(
     if out.len() > MAX_NAME_PATTERNS {
         return vec![NamePattern(vec![NameSegment::Any])];
     }
-    out.into_iter().collect()
+    collapse_unconstrained(out.into_iter().collect())
 }
 
 /// Concatenate two pattern sets pairwise, merging adjacent literal
@@ -499,14 +611,31 @@ fn compose_patterns(left: &[NamePattern], right: &[NamePattern]) -> Vec<NamePatt
 
 /// The declared-name patterns behind [`SpecPkg::declared_name_patterns`].
 fn declared_name_patterns(lines: &[String]) -> Option<Vec<NamePattern>> {
-    let (names, macros) = scan_preamble(lines);
+    let (names, events) = scan_preamble(lines);
     if names.is_empty() {
         return None;
     }
     let mut out = std::collections::BTreeSet::new();
-    for value in &names {
+    for (pos, value) in &names {
+        // The macro environment in effect at the `Name:` line: the
+        // preamble's events before it, replayed in order — a
+        // definition takes effect from its own line on, a `%undefine`
+        // removes the definitions before it, and a definition below
+        // the tag is not in effect yet. Branch conditions are not
+        // evaluated, so the definitions of every branch before the
+        // tag accumulate as alternatives.
+        let mut env: Vec<(String, String)> = Vec::new();
+        for (at, event) in &events {
+            if at >= pos {
+                break;
+            }
+            match event {
+                MacroEvent::Define(name, body) => env.push((name.clone(), body.clone())),
+                MacroEvent::Undefine(name) => env.retain(|(n, _)| n != name),
+            }
+        }
         let mut visiting = Vec::new();
-        for pattern in expand_value(value, &macros, 0, &mut visiting) {
+        for pattern in expand_value(value, &env, 0, &mut visiting) {
             out.insert(pattern);
         }
     }
@@ -750,13 +879,14 @@ mod name_patterns_tests {
     }
 
     #[test]
-    fn definition_after_the_name_tag_still_counts() {
-        // rpm resolves the preamble lazily: a definition below the
-        // `Name:` line is part of the declaration.
+    fn definition_after_the_name_tag_is_not_in_effect() {
+        // Definitions take effect from their own line on: at the
+        // `Name:` tag the macro is not defined yet, so it contributes
+        // an unconstrained segment instead of the later value.
         assert_matches(
             "Name: foo%{sfx}\n%define sfx -bar\n",
-            &["foo-bar"],
-            &["foo"],
+            &["foo", "foo-bar", "foo-zzz"],
+            &["bar", "xfoo"],
         );
     }
 
@@ -775,8 +905,8 @@ mod name_patterns_tests {
         // The conditional-expansion form contributes its text as one
         // alternative, emptiness as the other.
         let text = "%define mpi_flavor openmpi4\n\
-                    Name: %{pname}%{?mpi_flavor:-%{mpi_flavor}}\n\
-                    %define pname hdf5\n";
+                    %define pname hdf5\n\
+                    Name: %{pname}%{?mpi_flavor:-%{mpi_flavor}}\n";
         assert_matches(text, &["hdf5", "hdf5-openmpi4"], &["hdf5-openmpi"]);
     }
 
@@ -822,5 +952,78 @@ mod name_patterns_tests {
         );
         assert_eq!(patterns("%ifndef foo\n%description\nName: bar\n"), None);
     }
-}
 
+    #[test]
+    fn unbraced_query_reference_expands_conditionally() {
+        // `%?bar` is the short conditional reference: the expansion of
+        // `bar`, or nothing — the identifier is not literal text, so
+        // `foo` itself is a producible name.
+        assert_matches(
+            "%define bar baz\nName: foo%?bar\n",
+            &["foo", "foobaz"],
+            &["foox", "bar"],
+        );
+        assert_matches("Name: foo%?bar\n", &["foo", "fooXYZ"], &["foe", "xfoo"]);
+    }
+
+    #[test]
+    fn undefine_removes_the_definitions_before_it() {
+        // After `%undefine` the macro is undefined: its segment is
+        // unconstrained and the earlier value no longer applies.
+        assert_matches(
+            "%define sfx -x\n%undefine sfx\nName: foo%{sfx}\n",
+            &["foo", "foo-zzz"],
+            &["xfoo"],
+        );
+        // A fresh definition after the `%undefine` is the value again.
+        assert_matches(
+            "%define sfx -x\n%undefine sfx\n%define sfx -y\nName: foo%{sfx}\n",
+            &["foo-y"],
+            &["foo-x", "foo"],
+        );
+        // A `%undefine` below the `Name:` tag is not in effect yet.
+        assert_matches(
+            "%define sfx -x\nName: foo%{sfx}\n%undefine sfx\n",
+            &["foo-x"],
+            &["foo"],
+        );
+    }
+
+    #[test]
+    fn forward_reference_inside_a_definition_stays_undefined() {
+        // A definition's own forward reference resolves against the
+        // environment at the `Name:` tag: `b` is defined only below
+        // it, so the segment is unconstrained.
+        assert_matches(
+            "%define a %{b}\nName: foo%{a}\n%define b -x\n",
+            &["foo-x", "foo-zzz"],
+            &["bar"],
+        );
+    }
+
+    #[test]
+    fn continued_name_value_is_joined() {
+        assert_matches("Name: foo\\\n-bar\n", &["foo-bar"], &["foo"]);
+    }
+
+    #[test]
+    fn widened_expansions_collapse_to_one_unconstrained_pattern() {
+        // One undeterminable definition among concrete ones collapses
+        // the macro's set: the unconstrained alternative already
+        // produces every name the concrete ones do.
+        let pats =
+            patterns("%define v one\n%define v %(shell)\nName: %{v}\n").expect("patterns declared");
+        assert_eq!(pats.len(), 1);
+        assert!(pats[0].is_unconstrained());
+
+        // A chain deeper than the recursion budget widens the same way.
+        let mut text = String::from("%define m0 x\n");
+        for n in 1..=12 {
+            text.push_str(&format!("%define m{n} %{{m{}}}\n", n - 1));
+        }
+        text.push_str("Name: %{m12}\n");
+        let pats = patterns(&text).expect("patterns declared");
+        assert_eq!(pats.len(), 1);
+        assert!(pats[0].is_unconstrained());
+    }
+}
