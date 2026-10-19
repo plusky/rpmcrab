@@ -1003,11 +1003,17 @@ mod tests {
             .get("Filters")
             .and_then(|v| v.as_array())
             .expect("Filters list");
-        let pattern = filters
+        let matches: Vec<&str> = filters
             .iter()
             .filter_map(|v| v.as_str())
-            .find(|p| p.contains("spelling-error"))
-            .expect("spelling-error jargon filter in vendored opensuse.toml");
+            .filter(|p| p.contains("spelling-error"))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "exactly one spelling-error jargon filter: {matches:?}"
+        );
+        let pattern = matches[0];
 
         let re = fancy_regex::Regex::new(pattern).expect("compile spelling filter");
         let is_match = |s: &str| re.find(s).unwrap().is_some();
@@ -1023,6 +1029,17 @@ mod tests {
             "rpm-plugin-prioreset.x86_64: E: spelling-error %description -l C init -> i nit, in it, in-it",
             "rpm-plugin-unshare.x86_64: E: spelling-error Summary(C) namespace -> name space, name-space, names pace",
             "rpm-plugin-unshare.x86_64: E: spelling-error %description -l C namespace -> name space, name-space, names pace",
+            // librpm in the %description shape.
+            "rpm-devel.x86_64: E: spelling-error %description -l C librpm -> Librium, lib rpm, lib-rpm",
+            // Locales with digits and a hyphen: C.UTF-8 and de_DE.UTF-8.
+            "rpm-plugin-unshare.x86_64: E: spelling-error Summary(C.UTF-8) namespace -> name space, name-space, names pace",
+            "rpm-plugin-prioreset.x86_64: E: spelling-error %description -l de_DE.UTF-8 scriptlet -> prescript, script, script let",
+            // Sentence-initial capitals: the checker reports words as written.
+            "rpm-plugin-prioreset.x86_64: E: spelling-error Summary(C) Init -> i nit, in it, in-it",
+            "rpm-plugin-unshare.x86_64: E: spelling-error %description -l C Namespace -> name space, name-space, names pace",
+            // Plurals of the same terms are the same jargon.
+            "rpm-plugin-unshare.x86_64: E: spelling-error Summary(C) namespaces -> name spaces, name-spaces, names paces",
+            "rpm-plugin-prioreset.x86_64: E: spelling-error %description -l C scriptlets -> prescript, scripts, script lets",
         ] {
             assert!(is_match(line), "not suppressed: {line}");
         }
@@ -1034,6 +1051,11 @@ mod tests {
         ));
         assert!(!is_match(
             "foo.x86_64: E: spelling-error Summary(C) initialisation -> initialization"
+        ));
+        // A jargon word carrying a suffix other than the plural s is a
+        // different word and still surfaces.
+        assert!(!is_match(
+            "foo.x86_64: E: spelling-error Summary(C) namespaced -> name spaced"
         ));
         assert!(!is_match("rpm.x86_64: E: scriptlet-failed /usr/bin/foo"));
     }

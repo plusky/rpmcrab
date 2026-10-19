@@ -1784,11 +1784,12 @@ def test_spelling_jargon_shipped_words_build_the_shipped_filter():
         "scriptlet",
     ], gen.SPELLING_JARGON_WORDS
     expected = (
-        r"^.*spelling-error (Summary\([A-Za-z_@.]+\)|%description -l [A-Za-z_@.]+) "
-        r"(init|librpm|namespace|scriptlet)\b"
+        r"^.*spelling-error (Summary\([A-Za-z0-9_@.-]+\)|%description -l [A-Za-z0-9_@.-]+) "
+        r"([Ii]nits?|[Ll]ibrpms?|[Nn]amespaces?|[Ss]criptlets?)\b"
     )
     assert gen.spelling_jargon_filter(gen.SPELLING_JARGON_WORDS) == expected
-    assert expected in gen.EXTRA_OPENSUSE_FILTERS, gen.EXTRA_OPENSUSE_FILTERS
+    patterns = [pattern for pattern, _reason in gen.EXTRA_OPENSUSE_FILTERS]
+    assert expected in patterns, patterns
 
 
 def test_spelling_jargon_added_word_appears_in_filter():
@@ -1809,8 +1810,8 @@ def test_spelling_jargon_added_word_appears_in_filter():
         words = gen.load_spelling_jargon(path)
     assert words == ["frobnicate", "lib.rpm", "scriptlet"], words
     pattern = gen.spelling_jargon_filter(words)
-    assert "frobnicate" in pattern, pattern
-    assert r"lib\.rpm" in pattern, pattern
+    assert "[Ff]robnicates?" in pattern, pattern
+    assert r"[Ll]ib\.rpms?" in pattern, pattern
     rx = re.compile(pattern)
     assert rx.search("foo.x86_64: E: spelling-error Summary(C) frobnicate -> frob nicate")
     assert rx.search("foo.x86_64: E: spelling-error %description -l C lib.rpm -> lib rpm")
@@ -1835,6 +1836,49 @@ def test_spelling_jargon_duplicate_words_raise():
         except ValueError:
             return
     raise AssertionError("load_spelling_jargon accepted duplicate words")
+
+
+def test_spelling_jargon_filter_covers_capitals_plurals_and_utf8_locales():
+    """The built filter matches the shapes the spelling check actually
+    emits for a jargon word: capitalised at the start of a sentence,
+    pluralised, and under locales carrying digits and a hyphen
+    (C.UTF-8, de_DE.UTF-8). A longer word that merely starts with a
+    jargon word still surfaces."""
+    import re
+
+    rx = re.compile(gen.spelling_jargon_filter(gen.SPELLING_JARGON_WORDS))
+    for line in [
+        "foo.x86_64: E: spelling-error Summary(C.UTF-8) namespace -> name space",
+        "foo.x86_64: E: spelling-error %description -l de_DE.UTF-8 scriptlet -> script let",
+        "foo.x86_64: E: spelling-error Summary(C) Init -> i nit",
+        "foo.x86_64: E: spelling-error %description -l C Namespace -> name space",
+        "foo.x86_64: E: spelling-error Summary(C) namespaces -> name spaces",
+        "foo.x86_64: E: spelling-error %description -l C scriptlets -> script lets",
+    ]:
+        assert rx.search(line), line
+    assert not rx.search(
+        "foo.x86_64: E: spelling-error Summary(C) initialisation -> initialization"
+    )
+
+
+def test_extra_opensuse_filters_carry_their_provenance_reasons():
+    """Each EXTRA_OPENSUSE_FILTERS entry pairs its pattern with the
+    reason the generator logs for it in PROVENANCE: the mingw entries
+    keep their rpmlintrc attribution and the spelling-jargon entry
+    cites issue #778 instead of inheriting the mingw label."""
+    reasons = dict(gen.EXTRA_OPENSUSE_FILTERS)
+    assert len(reasons) == len(gen.EXTRA_OPENSUSE_FILTERS)
+    for pattern, reason in gen.EXTRA_OPENSUSE_FILTERS:
+        assert pattern and reason, (pattern, reason)
+    mingw_reasons = [
+        reason
+        for pattern, reason in gen.EXTRA_OPENSUSE_FILTERS
+        if pattern.startswith("^mingw")
+    ]
+    assert mingw_reasons == ["mingw -filesystem packages' rpmlintrc"] * 2, mingw_reasons
+    jargon_pattern = gen.spelling_jargon_filter(gen.SPELLING_JARGON_WORDS)
+    assert "#778" in reasons[jargon_pattern], reasons[jargon_pattern]
+
 
 if __name__ == "__main__":
     sys.exit(main())
