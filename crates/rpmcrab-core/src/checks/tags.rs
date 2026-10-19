@@ -427,8 +427,21 @@ impl TagsCheck {
                     // Requires: zlib, where the reference is right.
                     // Biarch/flavored devel requirers are devel packages, so
                     // their lib requirements must not trip this either.
+                    // Capability names are not library package names either
+                    // (#753): symbol capabilities in the SUSE
+                    // lib<name>__<symbol> namespace (libuuid1 provides
+                    // libuuid__uuid_generate_time_cont, which uuidd
+                    // requires to restart against the new libuuid after an
+                    // update — a deliberate ABI pin, not a package rpm
+                    // should be left to find), and qualified capabilities
+                    // such as libzypp(econf) or libclc(llvm23). The
+                    // separators are decidable: plain library package
+                    // names contain neither "__" nor "(". The reference
+                    // fires on both forms.
                     if !requirer_is_biarch_devel
                         && leaf.flags == 0
+                        && !leaf.name.contains("__")
+                        && !leaf.name.contains('(')
                         && let Ok(Some(caps)) = self.lib_package_re.captures(&leaf.name)
                         && caps.get(1).is_none()
                     {
@@ -3150,6 +3163,48 @@ mod rich_dep_emission_tests {
             named(&results, "explicit-lib-dependency").is_empty(),
             "all: {results:?}"
         );
+    }
+
+    #[test]
+    fn explicit_lib_dependency_symbol_capability_is_silent() {
+        // #753: lib<name>__<symbol> is a symbol capability provided by a
+        // library package, not a library package name. uuidd requires
+        // libuuid__uuid_generate_time_cont in exactly this shape to pin
+        // the libuuid ABI across updates (a seamless-restart requirement,
+        // documented in the spec); the reference fires on it, we
+        // deliberately do not.
+        let config = rich_test_config(&[], false);
+        for cap in [
+            "libuuid__uuid_generate_time_cont",
+            "libfoo__some_exported_symbol",
+        ] {
+            let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+            pkg.requires = vec![plain_dep(cap)];
+            let results = run(&pkg, &config);
+            assert!(
+                named(&results, "explicit-lib-dependency").is_empty(),
+                "capability {cap}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_lib_dependency_qualified_capability_is_silent() {
+        // #753: qualified capabilities are capability names, not package
+        // names — a package name cannot contain "(". libzypp(econf)
+        // selects the econf flavour of libzypp; libclc(llvm23) the
+        // llvm23 build of libclc. The reference fires on both, we
+        // deliberately do not.
+        let config = rich_test_config(&[], false);
+        for cap in ["libzypp(econf)", "libclc(llvm23)"] {
+            let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+            pkg.requires = vec![plain_dep(cap)];
+            let results = run(&pkg, &config);
+            assert!(
+                named(&results, "explicit-lib-dependency").is_empty(),
+                "capability {cap}: {results:?}"
+            );
+        }
     }
 
     #[test]

@@ -1916,6 +1916,14 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "explicit-lib-dependency"
+kind = "behaviour"
+reason = "Capability names are not library package names (#753): symbol capabilities in the SUSE lib<name>__<symbol> namespace — provided by a library package so individual symbol ABIs can be pinned; libuuid1 provides libuuid__uuid_generate_time_cont, which uuidd requires to restart against the new libuuid after an update — and qualified capabilities such as libzypp(econf) or libclc(llvm23) stay silent. The separators are decidable: plain library package names contain neither \"__\" nor \"(\". The reference's lib-package regex matches the lib prefix and fires E on both forms. Measured over the full Factory corpus (17,242 source packages, 2026-10-19): 625 findings before — 1 symbol capability, 5 qualified capabilities, 619 plain unversioned lib package names; after the fix the 6 capability findings are gone and the 619 plain-name findings are unchanged."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/753"
+
+[[divergence]]
+case = "global"
 check = "pkg-layer"
 kind = "behaviour"
 reason = "Extraction skips payload entries colliding with an incompatible existing path (a file where a directory entry lands or vice versa, e.g. case-colliding names on case-insensitive filesystems) and logs a warning, instead of aborting the whole package on the resulting ENOTDIR/EISDIR as before."
