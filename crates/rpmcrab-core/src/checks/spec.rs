@@ -2723,6 +2723,14 @@ make install
                 Err(e) => panic!("fake rpm {} failed: {e}", path.display()),
             }
         }
+        // Exhaustion must not fall through silently: with the tool
+        // never exec-ready, the probe in `SpecCheck::with_tool_dir`
+        // treats `rpm` as absent, and the filtered/silent tests
+        // below could pass without the child ever running.
+        panic!(
+            "fake rpm {} never became exec-ready (ETXTBSY) in 100 attempts",
+            path.display()
+        );
     }
 
     /// Run `SpecCheck` over the unclosed-`%if` spec with `rpm`
