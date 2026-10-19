@@ -145,8 +145,8 @@ existing checks:
 case or an explicit ledger entry):
 
 - `BinariesCheck`: `missing-call-to-setgroups-before-setuid` severity
-  matches upstream (`E if is_uid else W`); rpmcrab's unconditional `E`
-  is the #593 severity recalibration, not a flavour patch.
+  is a uniform `W` in rpmcrab (fix-and-diverge #743); upstream splits
+  (`E if is_uid else W`). Not a flavour patch.
 - `BinariesCheck`: `binary-in-etc` also fires under `/usr/etc/`.
 - `DBusPolicyCheck`: new `E: dbus-policy-allow-wildcard` (bsc#1220215) and
   `W: dbus-policy-allow-receive`.
@@ -445,9 +445,10 @@ not real flavor divergences:
 | 3 | `file-contains-date-and-time` / `file-contains-current-date` W→E | **QUESTIONABLE** | Plausible (immutable images need reproducibility) but undocumented: no upstream issue, no commit message justifying the severity flip. Held for Tom's decision. |
 | 4 | LogrotateCheck drops `/usr/etc/logrotate.d/` | **REJECTED** | Same staleness as #2: `/usr/etc/` support added to opensuse after the SLFO fork. Do not gate. |
 
-`missing-call-to-setgroups-before-setuid` carries upstream's own level
-split (`E if is_uid else W`); rpmcrab's unconditional `E` is the #593
-severity recalibration with a ledger entry, not a flavor gate.
+`missing-call-to-setgroups-before-setuid` carries a uniform `W` in
+rpmcrab (fix-and-diverge #743 with a ledger entry); upstream's own
+level split (`E if is_uid else W`) is not carried, and it is not a
+flavor gate.
 
 If #3 is approved, the divergence matrix is:
 
@@ -825,8 +826,9 @@ finding is an error only when it always implies the damage, so style
 and judgement findings moved down: `description-line-too-long` and
 `files-duplicated-waste` print as warnings, `no-%check-section` as
 info, the `systemd-service-without-service_*` family as warnings.
-`missing-call-to-setgroups-before-setuid` moved the other way and is
-now always an error. The vendored distro configs no longer bundle the
+`missing-call-to-setgroups-before-setuid` prints as a warning at
+every file mode: its symbol pattern cannot tell an identity switch
+from an effective-id drop, so it does not always imply the damage. The vendored distro configs no longer bundle the
 strict scoring layer by default; `invalid-license` keeps its badness
 of 100000 in the base scoring, and six `[Scoring]` promotions that
 printed warnings as errors are gone. Text output renders

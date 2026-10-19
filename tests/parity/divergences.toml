@@ -277,7 +277,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/issues/439"
 case = "global"
 check = "missing-call-to-setgroups-before-setuid"
 kind = "behaviour"
-reason = "The reference reports this at Error when the binary is installed setuid and Warning otherwise (BinariesCheck.py: 'E' if is_uid else 'W'); rpmcrab reports Error unconditionally — the level does not split on the setuid bit (the severity recalibration is ledgered separately under plusky/rpmcrab#593)."
+reason = "The reference reports this at Error when the binary is installed setuid and Warning otherwise (BinariesCheck.py: 'E' if is_uid else 'W'); rpmcrab reports Warning unconditionally — the level does not split on the setuid bit. The symbol pattern cannot distinguish an identity switch that neglects setgroups from the safe idiom that drops the effective ids to the real ids, so the split would still leave an Error on proven-bogus findings (fix-and-diverge, plusky/rpmcrab#743)."
 since = "0.1.0"
 
 [[divergence]]
@@ -2362,9 +2362,9 @@ upstream = "https://github.com/plusky/rpmcrab/issues/593"
 case = "global"
 check = "missing-call-to-setgroups-before-setuid"
 kind = "severity"
-reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports E unconditionally; the reference splits the level on the setuid bit (E when the binary is installed setuid, W otherwise). Privilege-drop correctness is security-critical when real and the check is high-precision, so the level does not split (pcp audit: the 2 W lines there are genuine)."
+reason = "Deliberate false-positive fix (plusky/rpmcrab#743): the port reports W unconditionally; the reference splits the level on the setuid bit (E when the binary is installed setuid, W otherwise) and #593 previously recalibrated the port to E unconditionally. The util-linux adjudication showed every finding there traces to the drop_permissions() idiom — the effective ids dropped to the real ids, the invoking user's own groups throughout — and the symbol pattern cannot separate that idiom from an identity switch that neglects setgroups, so an Error at either split breaks builds on bogus findings. The check keeps firing at W as a human-review signal."
 since = "0.3.0"
-upstream = "https://github.com/plusky/rpmcrab/issues/593"
+upstream = "https://github.com/plusky/rpmcrab/issues/743"
 
 [[divergence]]
 case = "global"
