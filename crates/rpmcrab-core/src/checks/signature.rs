@@ -11,6 +11,11 @@
 //! stored digests are damaged. The key ID reported for `unknown-key` is
 //! read from the signature packet's issuer field and formatted as the
 //! low 32 bits in lowercase hex, the way `rpm -Kv` prints it.
+//!
+//! Signature packets are parsed with sequoia-openpgp's low-level
+//! packet parser: the parse classifies each signature blob — a
+//! structurally invalid packet is the `invalid-signature` case —
+//! and yields the issuer the key ID is read from.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -20,6 +25,12 @@ use std::sync::Mutex;
 use librpm::keyring::Keyring;
 use librpm::verify::{VerificationFlags, VerifyOptions};
 use librpm::{PackageHeader, RpmErrorKind};
+
+use openpgp::packet::Signature;
+use openpgp::packet::signature::subpacket::{SubpacketArea, SubpacketValue};
+use openpgp::parse::Parse as _;
+use openpgp::{Packet, PacketPile};
+use sequoia_openpgp as openpgp;
 
 use crate::check::{Check, add_info};
 use crate::config::Config;
@@ -247,218 +258,68 @@ struct SigPacket {
     issuer: Option<[u8; 8]>,
 }
 
-/// A byte cursor with bounds-checked reads.
-struct Cursor<'a> {
-    buf: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Cursor<'a> {
-    fn new(buf: &'a [u8]) -> Self {
-        Self { buf, pos: 0 }
-    }
-
-    fn remaining(&self) -> usize {
-        self.buf.len() - self.pos
-    }
-
-    fn take(&mut self, count: usize) -> Option<&'a [u8]> {
-        let end = self.pos.checked_add(count)?;
-        let slice = self.buf.get(self.pos..end)?;
-        self.pos = end;
-        Some(slice)
-    }
-
-    fn u8(&mut self) -> Option<u8> {
-        Some(self.take(1)?[0])
-    }
-
-    fn u16(&mut self) -> Option<u16> {
-        let bytes = self.take(2)?;
-        Some(u16::from_be_bytes([bytes[0], bytes[1]]))
-    }
-
-    fn u32(&mut self) -> Option<u32> {
-        Some(be_u32(self.take(4)?))
-    }
-}
-
-/// Read an OpenPGP length (the one/two/five-octet form used by packet
-/// headers and subpackets). Partial body lengths are rejected: stored
-/// signature packets do not use them.
-fn pgp_length(cur: &mut Cursor<'_>) -> Option<usize> {
-    match cur.u8()? {
-        first @ 0..=191 => Some(first as usize),
-        first @ 192..=223 => {
-            let second = cur.u8()?;
-            Some(((first as usize - 192) << 8) + second as usize + 192)
-        }
-        255 => Some(cur.u32()? as usize),
-        _ => None,
-    }
-}
-
-/// Parse one OpenPGP signature packet. `None` when the packet is
-/// structurally invalid (bad framing, truncation, an unsupported
-/// version, malformed MPIs) — the case librpm reports as an invalid
-/// OpenPGP signature, as opposed to a well-formed signature that merely
-/// fails verification.
+/// Parse one OpenPGP signature packet with sequoia-openpgp's packet
+/// parser. `None` when the packet is structurally invalid (bad
+/// framing, truncation, an unsupported version, malformed MPIs or
+/// subpacket areas) — the case librpm reports as an invalid OpenPGP
+/// signature, as opposed to a well-formed signature that merely
+/// fails verification. The blob holds exactly one packet: each RPM
+/// signature entry carries a single signature.
 fn parse_sig_packet(blob: &[u8]) -> Option<SigPacket> {
-    let mut cur = Cursor::new(blob);
-    let first = cur.u8()?;
-    if first & 0x80 == 0 {
-        return None;
-    }
-    // A length-delimited packet consumes the whole blob exactly; the
-    // indeterminate-length form runs to the end of the blob by
-    // definition and satisfies full consumption directly.
-    let mut length_delimited = true;
-    let body = if first & 0x40 != 0 {
-        // New format: the low six bits are the packet tag (2 = signature).
-        if first & 0x3f != 2 {
-            return None;
-        }
-        let len = pgp_length(&mut cur)?;
-        cur.take(len)?
-    } else {
-        // Old format: bits 5-2 are the packet tag, bits 1-0 the length form.
-        if (first >> 2) & 0x0f != 2 {
-            return None;
-        }
-        match first & 0x03 {
-            0 => {
-                let len = cur.u8()? as usize;
-                cur.take(len)?
-            }
-            1 => {
-                let len = cur.u16()? as usize;
-                cur.take(len)?
-            }
-            2 => {
-                let len = cur.u32()? as usize;
-                cur.take(len)?
-            }
-            _ => {
-                length_delimited = false;
-                &cur.buf[cur.pos..]
-            }
-        }
+    let pile = PacketPile::from_bytes(blob).ok()?;
+    let mut children = pile.into_children();
+    let sig = match (children.next(), children.next()) {
+        (Some(Packet::Signature(sig)), None) => sig,
+        _ => return None,
     };
-    if length_delimited && cur.pos != blob.len() {
-        return None;
-    }
-    parse_sig_body(body)
+    Some(SigPacket {
+        issuer: issuer_of(&sig),
+    })
 }
 
-fn parse_sig_body(body: &[u8]) -> Option<SigPacket> {
-    let mut cur = Cursor::new(body);
-    match cur.u8()? {
-        3 => {
-            // The hashed-material length is fixed at 5 for version 3.
-            if cur.u8()? != 5 {
-                return None;
+/// The issuer key ID of a parsed signature packet. The unhashed
+/// subpacket area provides it first — within one area an issuer
+/// subpacket wins over the issuer-fingerprint subpacket, whose low
+/// 64 bits the key ID is — then the hashed area. Version 3 packets
+/// carry the key ID in the packet body, where the parser surfaces
+/// it with the packet's issuers.
+fn issuer_of(sig: &Signature) -> Option<[u8; 8]> {
+    fn area_issuer(area: &SubpacketArea) -> Option<[u8; 8]> {
+        let mut issuer = None;
+        let mut from_fingerprint = None;
+        for subpacket in area.iter() {
+            match subpacket.value() {
+                SubpacketValue::Issuer(key_id) => {
+                    if issuer.is_none() {
+                        issuer = Some(key_id.as_bytes().try_into().ok()?);
+                    }
+                }
+                SubpacketValue::IssuerFingerprint(fingerprint) => {
+                    let bytes = fingerprint.as_bytes();
+                    if bytes.len() >= 8 {
+                        from_fingerprint =
+                            Some(bytes[bytes.len() - 8..].try_into().expect("8 bytes"));
+                    }
+                }
+                _ => {}
             }
-            cur.take(1)?; // signature type
-            cur.take(4)?; // creation time
-            let issuer: [u8; 8] = cur.take(8)?.try_into().expect("8 bytes");
-            cur.take(1)?; // public-key algorithm
-            cur.take(1)?; // hash algorithm
-            cur.take(2)?; // left 16 bits of the hash
-            parse_mpis(&mut cur)?;
-            Some(SigPacket {
-                issuer: Some(issuer),
-            })
         }
-        version @ 4..=6 => {
-            cur.take(1)?; // signature type
-            cur.take(1)?; // public-key algorithm
-            cur.take(1)?; // hash algorithm
-            // Version 6 sizes its subpacket areas with u32 lengths.
-            let wide = version == 6;
-            let hashed_len = if wide {
-                cur.u32()? as usize
-            } else {
-                cur.u16()? as usize
-            };
-            let hashed = cur.take(hashed_len)?;
-            let unhashed_len = if wide {
-                cur.u32()? as usize
-            } else {
-                cur.u16()? as usize
-            };
-            let unhashed = cur.take(unhashed_len)?;
-            cur.take(2)?; // left 16 bits of the hash
-            parse_mpis(&mut cur)?;
-            // A malformed subpacket area makes the whole packet
-            // malformed; a well-formed area yields its issuer, which
-            // the unhashed area takes precedence in providing.
-            let issuer = issuer_from_subpackets(unhashed)?.or(issuer_from_subpackets(hashed)?);
-            Some(SigPacket { issuer })
-        }
-        _ => None,
+        issuer.or(from_fingerprint)
     }
-}
 
-/// Consume the packet's MPIs: at least one must be present and every
-/// one must fit inside the packet.
-fn parse_mpis(cur: &mut Cursor<'_>) -> Option<()> {
-    let mut count = 0;
-    while cur.remaining() > 0 {
-        let bits = cur.u16()? as usize;
-        cur.take(bits.div_ceil(8))?;
-        count += 1;
+    if sig.version() == 3 {
+        return sig
+            .issuers()
+            .next()
+            .and_then(|key_id| key_id.as_bytes().try_into().ok());
     }
-    if count == 0 { None } else { Some(()) }
-}
-
-/// Find the issuer key ID in a subpacket area: the issuer subpacket
-/// (type 16) directly, or the low 64 bits of the issuer fingerprint
-/// subpacket (type 33). The outer `Option` reports the area's
-/// well-formedness — `None` for a malformed area (a bad length, a
-/// truncated subpacket) — and the inner `Option` carries the issuer
-/// a well-formed area provides. Every subpacket in the area is
-/// validated, so malformed trailing subpackets report as malformed
-/// even when an earlier subpacket already provided an issuer.
-fn issuer_from_subpackets(area: &[u8]) -> Option<Option<[u8; 8]>> {
-    let mut cur = Cursor::new(area);
-    let mut issuer = None;
-    let mut from_fingerprint = None;
-    while cur.remaining() > 0 {
-        let len = pgp_length(&mut cur)?;
-        if len == 0 {
-            return None;
-        }
-        let subpacket = cur.take(len)?;
-        let (kind, body) = subpacket.split_first()?;
-        match kind {
-            16 => {
-                // An issuer subpacket body is exactly the 8-byte key
-                // ID; any other length makes the area malformed.
-                if body.len() != 8 {
-                    return None;
-                }
-                if issuer.is_none() {
-                    issuer = Some(body.try_into().expect("8 bytes"));
-                }
-            }
-            33 => {
-                // Body: one version byte, then the fingerprint, whose
-                // low 64 bits the key ID needs; a shorter body makes
-                // the area malformed.
-                let fingerprint = body.get(1..)?;
-                if fingerprint.len() < 8 {
-                    return None;
-                }
-                from_fingerprint = Some(
-                    fingerprint[fingerprint.len() - 8..]
-                        .try_into()
-                        .expect("8 bytes"),
-                );
-            }
-            _ => {}
-        }
-    }
-    Some(issuer.or(from_fingerprint))
+    area_issuer(sig.unhashed_area())
+        .or_else(|| area_issuer(sig.hashed_area()))
+        .or_else(|| {
+            sig.issuers()
+                .next()
+                .and_then(|key_id| key_id.as_bytes().try_into().ok())
+        })
 }
 
 /// Format an issuer key ID the way `rpm -Kv` prints it: the low 32
@@ -795,7 +656,8 @@ mod tests {
         body.extend_from_slice(unhashed);
         body.extend_from_slice(&[0xab, 0xcd]); // left 16 bits of the hash
         body.extend_from_slice(&16u16.to_be_bytes()); // MPI: 16 bits
-        body.extend_from_slice(&[0x12, 0x34]);
+        body.extend_from_slice(&[0x92, 0x34]);
+        assert!(body.len() < 192, "helpers emit the one-octet length form");
         let mut packet = vec![0xc2u8, body.len() as u8];
         packet.extend_from_slice(&body);
         packet
@@ -811,7 +673,8 @@ mod tests {
         body.extend_from_slice(unhashed);
         body.extend_from_slice(&[0xab, 0xcd]); // left 16 bits of the hash
         body.extend_from_slice(&16u16.to_be_bytes()); // MPI: 16 bits
-        body.extend_from_slice(&[0x12, 0x34]);
+        body.extend_from_slice(&[0x92, 0x34]);
+        assert!(body.len() < 192, "helpers emit the one-octet length form");
         let mut packet = vec![0xc2u8, body.len() as u8];
         packet.extend_from_slice(&body);
         packet
@@ -847,7 +710,7 @@ mod tests {
         body.extend_from_slice(&[1, 8]); // RSA, SHA256
         body.extend_from_slice(&[0xab, 0xcd]);
         body.extend_from_slice(&16u16.to_be_bytes());
-        body.extend_from_slice(&[0x12, 0x34]);
+        body.extend_from_slice(&[0x92, 0x34]);
         // Old format, tag 2, two-byte length: 0x80 | (2 << 2) | 1.
         let mut packet = vec![0x89u8];
         packet.extend_from_slice(&(body.len() as u16).to_be_bytes());
@@ -964,7 +827,7 @@ mod tests {
         body.extend_from_slice(&[1, 8]);
         body.extend_from_slice(&[0xab, 0xcd]);
         body.extend_from_slice(&16u16.to_be_bytes());
-        body.extend_from_slice(&[0x12, 0x34]);
+        body.extend_from_slice(&[0x92, 0x34]);
         let mut old_packet = vec![0x89u8];
         old_packet.extend_from_slice(&(body.len() as u16).to_be_bytes());
         old_packet.extend_from_slice(&body);
@@ -1002,38 +865,133 @@ mod tests {
         // not issuer-less.
         let mut area = vec![8u8, 16];
         area.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7]);
-        assert_eq!(issuer_from_subpackets(&area), None);
         assert!(parse_sig_packet(&v4_packet(&area)).is_none());
         // Type 16 with a 9-byte body: over-long is malformed too.
         let mut area = vec![10u8, 16];
         area.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9]);
-        assert_eq!(issuer_from_subpackets(&area), None);
         assert!(parse_sig_packet(&v4_packet(&area)).is_none());
         // Type 33 carrying only the version byte: the fingerprint is
         // absent, so the low 64 bits the key ID needs are missing.
-        assert_eq!(issuer_from_subpackets(&[2, 33, 4]), None);
         assert!(parse_sig_packet(&v4_packet(&[2, 33, 4])).is_none());
         // Type 33 with a 4-byte fingerprint: truncated below the low
         // 64 bits.
         let area = [6u8, 33, 4, 0xaa, 0xbb, 0xcc, 0xdd];
-        assert_eq!(issuer_from_subpackets(&area), None);
         assert!(parse_sig_packet(&v4_packet(&area)).is_none());
         // A truncated type 33 after a valid issuer subpacket still
         // makes the whole area malformed.
         let mut area = vec![9u8, 16];
         area.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
         area.extend_from_slice(&[2, 33, 4]);
-        assert_eq!(issuer_from_subpackets(&area), None);
-        // Near miss: a type 33 whose fingerprint is exactly 8 bytes
-        // carries the key ID in full and parses.
+        assert!(parse_sig_packet(&v4_packet(&area)).is_none());
+        // Type 33 whose fingerprint is exactly 8 bytes: the subpacket
+        // carries the full fingerprint (20 bytes for version 4), so a
+        // fingerprint cut down to the key ID alone is malformed too.
         let mut area = vec![10u8, 33, 4];
         area.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
-        assert_eq!(
-            issuer_from_subpackets(&area),
-            Some(Some([1, 2, 3, 4, 5, 6, 7, 8]))
-        );
+        assert!(parse_sig_packet(&v4_packet(&area)).is_none());
+        // Near miss: a type 33 with the full fingerprint parses, and
+        // the key ID is its low 64 bits.
+        let mut area = vec![22u8, 33, 4];
+        area.extend_from_slice(&[0xaa; 12]);
+        area.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
         let parsed = parse_sig_packet(&v4_packet(&area)).expect("packet parses");
         assert_eq!(parsed.issuer, Some([1, 2, 3, 4, 5, 6, 7, 8]));
+    }
+
+    #[test]
+    fn v5_relabeled_packet_does_not_parse() {
+        // A signature packet relabeled to the nonexistent version 5
+        // is structurally invalid (ledgered tightening, #779 D5).
+        let mut packet = v4_packet(&[]);
+        packet[2] = 5;
+        assert!(parse_sig_packet(&packet).is_none());
+    }
+
+    #[test]
+    fn indeterminate_length_packet_does_not_parse() {
+        // Old-format header with the indeterminate length form
+        // (ledgered tightening, #779 D5): stored signature packets
+        // are length-delimited.
+        let mut body = vec![3u8, 5, 2];
+        body.extend_from_slice(&[0; 4]); // creation time
+        body.extend_from_slice(&[0xaa; 8]); // key ID
+        body.extend_from_slice(&[1, 8]); // RSA, SHA256
+        body.extend_from_slice(&[0xab, 0xcd]);
+        body.extend_from_slice(&16u16.to_be_bytes());
+        body.extend_from_slice(&[0x92, 0x34]);
+        // Old format, tag 2, indeterminate length: 0x80 | (2 << 2) | 3.
+        let mut packet = vec![0x8bu8];
+        packet.extend_from_slice(&body);
+        assert!(parse_sig_packet(&packet).is_none());
+    }
+
+    #[test]
+    fn noncanonical_mpi_packet_does_not_parse() {
+        // An MPI whose declared bit length exceeds the value's actual
+        // bit length (0x1234 is a 13-bit value) is not the canonical
+        // MPI encoding (ledgered tightening, #779 D5 family).
+        let mut packet = v4_packet(&[]);
+        let len = packet.len();
+        packet[len - 2] = 0x12;
+        packet[len - 1] = 0x34;
+        assert!(parse_sig_packet(&packet).is_none());
+    }
+
+    #[test]
+    fn critical_bit_issuer_subpackets_are_read() {
+        // Subpacket types carry the critical flag in the type octet's
+        // top bit (0x90 = issuer, 0xA1 = issuer fingerprint); the
+        // issuer is read through it (#737 item 1).
+        let mut area = vec![9u8, 0x90];
+        area.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let parsed = parse_sig_packet(&v4_packet(&area)).expect("packet parses");
+        assert_eq!(parsed.issuer, Some([1, 2, 3, 4, 5, 6, 7, 8]));
+        let mut area = vec![22u8, 0xa1, 4];
+        area.extend_from_slice(&[0xaa; 12]);
+        area.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let parsed = parse_sig_packet(&v4_packet(&area)).expect("packet parses");
+        assert_eq!(parsed.issuer, Some([1, 2, 3, 4, 5, 6, 7, 8]));
+    }
+
+    #[test]
+    fn zero_bit_mpi_packet_parses() {
+        // A zero-bit MPI is the canonical encoding of the value zero
+        // and parses (#737 item 4); the packet's issuer still reads.
+        let mut area = vec![9u8, 16];
+        area.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let mut body = vec![4u8, 0, 1, 8]; // version, type, RSA, SHA256
+        body.extend_from_slice(&0u16.to_be_bytes()); // no hashed area
+        body.extend_from_slice(&(area.len() as u16).to_be_bytes());
+        body.extend_from_slice(&area);
+        body.extend_from_slice(&[0xab, 0xcd]); // left 16 bits of the hash
+        body.extend_from_slice(&0u16.to_be_bytes()); // MPI: 0 bits, no bytes
+        assert!(body.len() < 192, "helpers emit the one-octet length form");
+        let mut packet = vec![0xc2u8, body.len() as u8];
+        packet.extend_from_slice(&body);
+        let parsed = parse_sig_packet(&packet).expect("packet parses");
+        assert_eq!(parsed.issuer, Some([1, 2, 3, 4, 5, 6, 7, 8]));
+    }
+
+    #[test]
+    fn chunked_length_packet_does_not_parse() {
+        // New-format partial (chunked) body lengths are a streaming
+        // encoding; a stored signature packet is length-delimited, so
+        // the chunked form (two chunks of 16 and 8 bytes plus the
+        // final zero-length chunk, carrying the 24-byte helper body)
+        // classifies with the malformed packets.
+        let packet = v4_packet(&{
+            let mut area = vec![9u8, 16];
+            area.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+            area
+        });
+        let body = &packet[2..];
+        assert_eq!(body.len(), 24);
+        let mut chunked = vec![0xc2u8, 228]; // partial chunk: 2^(228-224) = 16 bytes
+        chunked.extend_from_slice(&body[..16]);
+        chunked.push(227); // partial chunk: 2^(227-224) = 8 bytes
+        chunked.extend_from_slice(&body[16..]);
+        chunked.push(0); // final chunk: 0 bytes
+        assert!(parse_sig_packet(&chunked).is_none());
     }
 
     #[test]
@@ -1072,13 +1030,11 @@ mod tests {
         // well-formed and issuer-less.
         let parsed = parse_sig_packet(&v4_packet(&[1, 0])).expect("unknown subpacket parses");
         assert_eq!(parsed.issuer, None);
-        // Direct split pin: a well-formed issuer-less area and a
-        // malformed area report distinctly.
-        assert_eq!(issuer_from_subpackets(&[]), Some(None));
-        assert_eq!(issuer_from_subpackets(&[9, 16]), None);
-        assert_eq!(
-            issuer_from_subpackets(&[9, 16, 1, 2, 3, 4, 5, 6, 7, 8]),
-            Some(Some([1, 2, 3, 4, 5, 6, 7, 8]))
-        );
+        // A malformed area and a well-formed one report distinctly
+        // at the packet level too.
+        assert!(parse_sig_packet(&v4_packet(&[9, 16])).is_none());
+        let parsed =
+            parse_sig_packet(&v4_packet(&[9, 16, 1, 2, 3, 4, 5, 6, 7, 8])).expect("packet parses");
+        assert_eq!(parsed.issuer, Some([1, 2, 3, 4, 5, 6, 7, 8]));
     }
 }
