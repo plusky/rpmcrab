@@ -73,22 +73,35 @@ impl SpecPkg {
     }
 }
 
-/// Directives that may appear in the main preamble ahead of the `Name:`
-/// tag: macro definitions and conditionals. Any other `%`-led line opens
-/// a section or a scriptlet and ends the preamble.
-const PREAMBLE_DIRECTIVES: &[&str] = &[
-    "bcond",
-    "bcond_with",
-    "bcond_without",
-    "define",
-    "elif",
-    "elifarch",
-    "elifnarch",
-    "else",
-    "expand",
-    "global",
-    "include",
-    "undefine",
+/// The section headers that end the main preamble: the scan runs
+/// until the first of these. Every other `%`-led line — macro
+/// definitions, conditionals (`%if`, `%ifdef`, `%else`, …),
+/// build-conditionals and bare macro invocations — is preamble
+/// content the scan reads past.
+const SECTION_HEADERS: &[&str] = &[
+    "build",
+    "changelog",
+    "check",
+    "clean",
+    "conf",
+    "configure",
+    "description",
+    "files",
+    "generate_buildrequires",
+    "install",
+    "package",
+    "post",
+    "posttrans",
+    "postun",
+    "pre",
+    "prep",
+    "pretrans",
+    "preun",
+    "trigger",
+    "triggerin",
+    "triggerpostun",
+    "triggerun",
+    "verify",
 ];
 
 /// One segment of a [`NamePattern`].
@@ -146,7 +159,9 @@ impl NamePattern {
 /// The preamble scan behind [`SpecPkg::declared_name_patterns`]: the
 /// `Name:` values and the `%define` / `%global` macro definitions of
 /// the main preamble, in declaration order. The scan stops at the
-/// first section directive.
+/// first section header; conditionals, build-conditionals and bare
+/// macro invocations are preamble content and the scan reads past
+/// them.
 fn scan_preamble(lines: &[String]) -> (Vec<String>, Vec<(String, String)>) {
     // Join backslash-continued definition lines first: a definition's
     // body runs to the end of its logical line.
@@ -180,13 +195,11 @@ fn scan_preamble(lines: &[String]) -> (Vec<String>, Vec<(String, String)>) {
                 .take_while(|c| c.is_ascii_alphabetic() || *c == '_')
                 .collect();
             match directive.as_str() {
-                "if" | "ifarch" | "ifnarch" | "endif" => {}
-                d if PREAMBLE_DIRECTIVES.contains(&d) => {
-                    if d == "define" || d == "global" {
-                        record_macro(&rest[directive.len()..], &mut macros);
-                    }
+                "define" | "global" => {
+                    record_macro(&rest[directive.len()..], &mut macros);
                 }
-                _ => break,
+                d if SECTION_HEADERS.contains(&d) => break,
+                _ => {}
             }
             continue;
         }
@@ -795,4 +808,19 @@ mod name_patterns_tests {
             &["foo-a"],
         );
     }
+
+    #[test]
+    fn conditionals_and_invocations_do_not_end_the_scan() {
+        // `%ifdef` / `%ifndef` / `%ifos`, `%with` / `%without` and bare
+        // macro invocations are preamble content: the `Name:` below
+        // them still counts, and a section header still ends the scan.
+        assert_matches("%ifdef foo\nName: bar\n", &["bar"], &["foo"]);
+        assert_matches(
+            "%ifos linux\n%with x\n%without y\n%some_macro arg\nName: bar\n",
+            &["bar"],
+            &["foo"],
+        );
+        assert_eq!(patterns("%ifndef foo\n%description\nName: bar\n"), None);
+    }
 }
+
