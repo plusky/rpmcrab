@@ -1046,8 +1046,8 @@ impl Check for SpecCheck {
             return;
         }
         if !self.mini_mode {
-            let specfile_error_reported = self.check_specfile_error(pkg, out);
-            self.check_invalid_url(pkg, out, specfile_error_reported);
+            let parse_failure_reported = self.check_specfile_error(pkg, out);
+            self.check_invalid_url(pkg, out, parse_failure_reported);
         }
     }
 
@@ -1076,9 +1076,14 @@ impl Check for SpecCheck {
 
 impl SpecCheck {
     /// Parse the spec with the `rpm` tool and forward its diagnostics
-    /// (`SpecCheck.py:300-322`). Returns whether any diagnostic was
-    /// forwarded as a `specfile-error`, so the caller can tell a parse
-    /// failure reported here from one only the spec parser saw.
+    /// (`SpecCheck.py:300-322`). Returns whether a fatal parse failure
+    /// is reported by a `specfile-error` finding that survives the
+    /// filter: the child signals a fatal failure with a non-zero exit
+    /// or its `can't parse` summary line, and the surviving count is
+    /// the `results()` delta around the forwarding below, so a finding
+    /// the filter suppresses counts as unreported. The caller uses
+    /// this to tell a parse failure reported here from one only the
+    /// spec parser saw.
     fn check_specfile_error(&self, pkg: &SpecPkg, out: &mut Filter) -> bool {
         let spec_file = self.spec_file.as_deref().unwrap_or("");
         let define = format!("_sourcedir {}", self.spec_file_dir());
@@ -1098,6 +1103,7 @@ impl SpecCheck {
             .stdout(Stdio::null())
             .output()
             .expect("the rpm binary is required for the specfile-error check");
+        let fatal_exit = !output.status.success();
         let stderr = match String::from_utf8(output.stderr) {
             Ok(stderr) => stderr,
             Err(e) => {
@@ -1110,10 +1116,20 @@ impl SpecCheck {
                     "specfile-error",
                     &[&e.to_string()],
                 );
-                return true;
+                // An undecodable stderr reports an encoding failure of
+                // the child's output, a distinct finding from a parse
+                // failure: the parse-failure fallback stays armed.
+                return false;
             }
         };
-        let mut reported_error = false;
+        let fatal = fatal_exit || stderr.lines().any(|line| line.contains("can't parse"));
+        let count_errors = |out: &Filter| {
+            out.results()
+                .iter()
+                .filter(|(check, _)| check == "specfile-error")
+                .count()
+        };
+        let errors_before = count_errors(out);
         for line in stderr.lines() {
             let line = line.trim();
             if line.is_empty() {
@@ -1131,18 +1147,17 @@ impl SpecCheck {
                 // (unknown tags for macros the parse environment lacks),
                 // not broken specs; at E they would fail about 40% of
                 // Factory under the #699 exit doctrine.
-                reported_error = true;
                 self.info(out, pkg, Level::Warning, "specfile-error", &[line]);
             }
         }
-        reported_error
+        fatal && count_errors(out) > errors_before
     }
 
     /// Check `Source`/`Patch` URLs via the spec parser (`_check_invalid_url`).
     /// Uses librpm's `Spec::parse` — the same C parser the reference reaches
     /// through `TransactionSet().parseSpec` — so the expanded source URLs
     /// match.
-    fn check_invalid_url(&self, pkg: &SpecPkg, out: &mut Filter, specfile_error_reported: bool) {
+    fn check_invalid_url(&self, pkg: &SpecPkg, out: &mut Filter, parse_failure_reported: bool) {
         use librpm::build::SpecFlags;
         let spec_file = self.spec_file.as_deref().unwrap_or("");
         let _ = pkg_init();
@@ -1160,12 +1175,13 @@ impl SpecCheck {
         let Some(parsed) = parsed else {
             // The reference also reports librpm's error text here, which
             // `Spec::parse` does not surface (ledgered). When the `rpm`
-            // child already reported this parse failure, that report is
-            // the only one: the fallback detail is the bare spec path,
+            // child already reported this fatal parse failure with a
+            // finding that survived the filter, that report is the
+            // only one: the fallback detail is the bare spec path,
             // so emitting it too would state the same failure twice
             // (ledgered). The level is specfile-error's temporary W
             // (issue #699, pending #702).
-            if !specfile_error_reported {
+            if !parse_failure_reported {
                 self.info(out, pkg, Level::Warning, "specfile-error", &[spec_file]);
             }
             return;
@@ -2664,16 +2680,74 @@ make install
         assert!(comment.is_empty(), "unexpected: {comment:?}");
     }
 
-    /// #702: one parse failure, one report. The `rpm` child's stderr
-    /// carries the parse diagnostics and the `can't parse` summary, so
-    /// the in-process parse failing on the same spec must not repeat
-    /// the failure with its bare-path fallback finding.
+    /// The unclosed-`%if` spec the dedup tests below parse: the
+    /// in-process `Spec::parse` fails on it, so the bare-path fallback
+    /// is armed unless the child already reported the failure.
+    const UNTERM_SPEC: &str = "Name:           unterm\nVersion:        1.0\nRelease:        1\n\
+         Summary:        unterm\nLicense:        MIT\n%if 0\n\n\
+         %description\nunterm\n";
+
+    /// Write a fake `rpm` tool running `body` (a shell script body
+    /// after the shebang) into `dir`, so a test controls the child's
+    /// stderr and exit status exactly instead of depending on the
+    /// live `rpm` on `PATH`.
+    #[cfg(unix)]
+    fn fake_rpm(dir: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("rpm");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        // A just-written script can still be "text file busy" (ETXTBSY)
+        // on first spawn under parallel load; settle it so the probe in
+        // `SpecCheck::with_tool_dir` sees an exec-ready tool.
+        for _ in 0..100 {
+            match std::process::Command::new(&path).arg("--version").output() {
+                Ok(_) => return,
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(e) => panic!("fake rpm {} failed: {e}", path.display()),
+            }
+        }
+    }
+
+    /// Run `SpecCheck` over the unclosed-`%if` spec with `rpm`
+    /// resolved under `tool_dir`, returning the results and the spec
+    /// path (the fallback finding's detail).
+    fn run_unterm_with_tool_dir(
+        tool_dir: &Path,
+        config: &Config,
+    ) -> (Vec<(String, String)>, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unterm.spec");
+        std::fs::write(&path, UNTERM_SPEC).unwrap();
+        let pkg = SpecPkg::open(&path).unwrap();
+        let mut check = SpecCheck::with_tool_dir(config, Some(tool_dir));
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        check.check_spec(&pkg, config, &mut out);
+        (out.results().to_vec(), path.to_string_lossy().into_owned())
+    }
+
+    /// #702: one parse failure, one report. The fake `rpm` child's
+    /// stderr carries the parse diagnostics and the `can't parse`
+    /// summary and it exits non-zero, so the in-process parse failing
+    /// on the same spec must not repeat the failure with its bare-path
+    /// fallback finding. Hermetic: the child is the fake above, so the
+    /// pin holds whatever `rpm` the host carries.
     #[test]
+    #[cfg(unix)]
     fn specfile_error_not_duplicated_when_rpm_child_reports() {
-        let spec = "Name:           unterm\nVersion:        1.0\nRelease:        1\n\
-                    Summary:        unterm\nLicense:        MIT\n%if 0\n\n\
-                    %description\nunterm\n";
-        let results = run_with(spec, &Config::default());
+        let tools = tempfile::tempdir().unwrap();
+        fake_rpm(
+            tools.path(),
+            r#"for a in "$@"; do if [ "$a" = "--version" ]; then exit 0; fi; done
+printf '%s\n' 'error: line 7: unclosed %if' >&2
+printf '%s\n' "error: query of specfile failed, can't parse" >&2
+exit 1"#,
+        );
+        let (results, path) = run_unterm_with_tool_dir(tools.path(), &Config::default());
         let errors = lines_for(&results, "specfile-error");
         assert!(
             errors.iter().any(|l| l.contains("can't parse")),
@@ -2683,7 +2757,112 @@ make install
             errors.iter().all(|l| l.contains("error:")),
             "bare-path fallback repeated the failure: {errors:?}"
         );
-        assert_eq!(errors.len(), 2, "child lines only: {errors:?}");
+        assert!(
+            errors.iter().all(|l| !l.contains(&path)),
+            "bare-path fallback repeated the failure: {errors:?}"
+        );
+    }
+
+    /// #702: a child emitting only non-fatal artefacts (an unknown-tag
+    /// line, with a successful exit and no `can't parse` summary) has
+    /// not reported the fatal failure the in-process parse hits, so
+    /// the fallback still fires alongside the artefact.
+    #[test]
+    #[cfg(unix)]
+    fn specfile_error_fallback_fires_when_child_reports_only_artefacts() {
+        let tools = tempfile::tempdir().unwrap();
+        fake_rpm(
+            tools.path(),
+            r#"for a in "$@"; do if [ "$a" = "--version" ]; then exit 0; fi; done
+printf '%s\n' 'error: line 3: Unknown tag: Frobnicate' >&2
+exit 0"#,
+        );
+        let (results, path) = run_unterm_with_tool_dir(tools.path(), &Config::default());
+        let errors = lines_for(&results, "specfile-error");
+        assert!(
+            errors.iter().any(|l| l.contains("Unknown tag")),
+            "child artefact missing: {errors:?}"
+        );
+        assert!(
+            errors.iter().any(|l| l.contains(&path)),
+            "fallback silenced by a non-fatal artefact: {errors:?}"
+        );
+    }
+
+    /// #702: filter-suppressed child diagnostics are not a report.
+    /// The filter pattern suppresses both child lines, while the
+    /// bare-path fallback (a different match string) survives it, so
+    /// the fallback fires and carries the failure alone.
+    #[test]
+    #[cfg(unix)]
+    fn specfile_error_fallback_fires_when_child_lines_are_filtered() {
+        let tools = tempfile::tempdir().unwrap();
+        fake_rpm(
+            tools.path(),
+            r#"for a in "$@"; do if [ "$a" = "--version" ]; then exit 0; fi; done
+printf '%s\n' 'error: childparse line 7: unclosed %if' >&2
+printf '%s\n' "error: childparse query of specfile failed, can't parse" >&2
+exit 1"#,
+        );
+        let config = Config {
+            filters: vec!["childparse".to_string()],
+            ..Config::default()
+        };
+        let (results, path) = run_unterm_with_tool_dir(tools.path(), &config);
+        let errors = lines_for(&results, "specfile-error");
+        assert!(
+            errors.iter().all(|l| !l.contains("childparse")),
+            "suppressed child lines leaked: {errors:?}"
+        );
+        assert_eq!(errors.len(), 1, "the lone fallback expected: {results:?}");
+        assert!(
+            errors[0].contains(&path),
+            "fallback detail is the spec path: {}",
+            errors[0]
+        );
+    }
+
+    /// #702: a silent `rpm` child (successful exit, no output) reports
+    /// nothing, so the in-process parse failure keeps its fallback
+    /// finding.
+    #[test]
+    #[cfg(unix)]
+    fn specfile_error_fallback_fires_when_rpm_child_is_silent() {
+        let tools = tempfile::tempdir().unwrap();
+        fake_rpm(tools.path(), "exit 0");
+        let (results, path) = run_unterm_with_tool_dir(tools.path(), &Config::default());
+        let errors = lines_for(&results, "specfile-error");
+        assert_eq!(errors.len(), 1, "the lone fallback expected: {results:?}");
+        assert!(
+            errors[0].contains(&path),
+            "fallback detail is the spec path: {}",
+            errors[0]
+        );
+    }
+
+    /// #702: undecodable child stderr reports an encoding failure,
+    /// a distinct finding from a parse failure, so the in-process
+    /// parse failure still gets its fallback finding alongside it.
+    #[test]
+    #[cfg(unix)]
+    fn specfile_error_fallback_fires_when_child_stderr_is_not_utf8() {
+        let tools = tempfile::tempdir().unwrap();
+        fake_rpm(
+            tools.path(),
+            r#"for a in "$@"; do if [ "$a" = "--version" ]; then exit 0; fi; done
+printf '\377\n' >&2
+exit 1"#,
+        );
+        let (results, path) = run_unterm_with_tool_dir(tools.path(), &Config::default());
+        let errors = lines_for(&results, "specfile-error");
+        assert!(
+            errors.iter().any(|l| l.contains("invalid utf-8")),
+            "encoding failure missing: {errors:?}"
+        );
+        assert!(
+            errors.iter().any(|l| l.contains(&path)),
+            "fallback silenced by an encoding failure: {errors:?}"
+        );
     }
 
     /// #702: with no `rpm` tool the child reports nothing, so the
@@ -2691,26 +2870,13 @@ make install
     /// must not silence the only report of the failure.
     #[test]
     fn specfile_error_fallback_fires_without_rpm() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("unterm.spec");
-        std::fs::write(
-            &path,
-            "Name:           unterm\nVersion:        1.0\nRelease:        1\n\
-             Summary:        unterm\nLicense:        MIT\n%if 0\n\n\
-             %description\nunterm\n",
-        )
-        .unwrap();
         let empty = tempfile::tempdir().unwrap();
         let config = Config::default();
-        let pkg = SpecPkg::open(&path).unwrap();
-        let mut check = SpecCheck::with_tool_dir(&config, Some(empty.path()));
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_spec(&pkg, &config, &mut out);
-        let results = out.results().to_vec();
+        let (results, path) = run_unterm_with_tool_dir(empty.path(), &config);
         let errors = lines_for(&results, "specfile-error");
         assert_eq!(errors.len(), 1, "the lone fallback expected: {results:?}");
         assert!(
-            errors[0].contains(&path.to_string_lossy().to_string()),
+            errors[0].contains(&path),
             "fallback detail is the spec path: {}",
             errors[0]
         );
