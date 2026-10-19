@@ -1364,7 +1364,7 @@ const SCRIPTLET_USERADD_DETAIL: &str = "The scriptlet creates a user by invoking
 /// `scriptlet-groupadd-in-<scriptlet>`:
 const SCRIPTLET_GROUPADD_DETAIL: &str = "The scriptlet creates a group by invoking groupadd directly. Users and groups are created declaratively: the package ships a sysusers.d configuration and the sysusers macros create the group during installation (openSUSE packaging guidelines, Users and Groups). A direct groupadd invocation cannot create the group on image-based installations, where scriptlets run on the build host without access to the target /etc/group, and groupadd is not part of container images.";
 /// `scriptlet-rc-link-invocation-in-<scriptlet>`:
-const RC_LINK_INVOCATION_DETAIL: &str = "The scriptlet invokes an rc<service> link (rc<name>, invoked bare or by path from a sbin directory). The rc<service> symlinks to the service command are the pre-systemd service-control form, removed from the distribution in the SLE 16 legacy cleanup; drive the service through systemctl or the systemd service macros instead.";
+const RC_LINK_INVOCATION_DETAIL: &str = "The scriptlet invokes an rc<service> link (rc<name>, invoked bare or by path from a sbin directory; the same-shaped real binaries rclone, rcs and rcp are not rc links). The rc<service> symlinks to the service command are the pre-systemd service-control form, removed from the distribution in the SLE 16 legacy cleanup; drive the service through systemctl or the systemd service macros instead.";
 /// `non-empty-<scriptlet>`:
 const NON_EMPTY_DETAIL: &str = "Scriptlets for the interpreter mentioned in the message should be empty.\n        One common case where they are unintentionally not is when the specfile\n        contains comments after the scriptlet and before the next section. Review\n        and clean up the scriptlet contents if appropriate.";
 pub fn register_error_details(out: &mut Filter) {
@@ -3514,9 +3514,16 @@ mod tests {
         // rc<service> link invocations — a real binary in a bin
         // directory, a name whose rc is not a prefix, the bare word
         // rc, an rc name under a non-sbin parent directory, and an
-        // rc name in argument position.
+        // rc name in argument position. The bare-name collisions
+        // (`rclone`, `rcs`, `rcp`) are real binaries that resolve
+        // through PATH, so the bare forms stay quiet for any
+        // arguments, exactly like the path-qualified forms.
         for body in [
             "/usr/bin/rclone sync a b",
+            "rclone sync a b",
+            "rclone restart",
+            "rcs -i somefile",
+            "rcp a b",
             "/usr/sbin/myrc restart",
             "rc start",
             "/opt/rcfoo/bin/rcbar start",
@@ -3530,6 +3537,40 @@ mod tests {
                 "must stay silent: {body}"
             );
         }
+    }
+
+    #[test]
+    fn rc_link_function_definition_is_quiet() {
+        // A shell function definition names a command, it does not
+        // invoke one: `rcfoo() { ...; }` stays quiet even though
+        // the bare name in command position would fire.
+        for body in [
+            "rcfoo() { echo hi; }",
+            "rcfoo () { echo hi; }",
+            "rcfoo()\n{\n echo hi\n}",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", body, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "scriptlet-rc-link-invocation-in-%post"),
+                "must stay silent for a function definition: {body}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rc_link_repeated_line_is_flagged_per_line() {
+        // Per-line reporting, matching the sibling
+        // scriptlet-service-restart scan: the same offending line
+        // twice in one body is two findings, not one.
+        let body = "rcfoo status\nrcfoo status";
+        let found = check().check_scriptlet("/bin/sh", body, "%post", &[], &[]);
+        let hits: Vec<_> = found
+            .iter()
+            .filter(|(_, f, _)| f == "scriptlet-rc-link-invocation-in-%post")
+            .collect();
+        assert_eq!(hits.len(), 2, "{found:?}");
     }
 
     #[test]

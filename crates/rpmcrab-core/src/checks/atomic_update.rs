@@ -192,7 +192,9 @@ fn scanned_scriptlet(tag: librpm::Tag) -> bool {
 /// `|` and `&`, and only a `systemctl`/`service`/`rc*` word in command
 /// position (after leading braces, shell keywords, a `case`-arm
 /// pattern and environment assignments) counts, so comments, `echo`
-/// text and status/preset plumbing stay quiet. A body that mentions
+/// text and status/preset plumbing stay quiet. A shell function
+/// definition (`rcfoo() { ...; }`) names a command rather than
+/// invoking one and stays quiet. A body that mentions
 /// `TRANSACTIONAL_UPDATE` is exempt as a whole: the packager gates the
 /// scriptlet on the update mechanism explicitly, and which lines the
 /// gate covers is not decidable lexically.
@@ -200,22 +202,38 @@ fn service_restarts_in_body(body: &str) -> Vec<String> {
     if body.contains("TRANSACTIONAL_UPDATE") {
         return Vec::new();
     }
+    invocation_lines(body, segment_restarts)
+}
+
+/// The lines of one scriptlet body in which a command segment
+/// satisfies `segment_matches`, in body order, one entry per line
+/// occurrence (a line repeated in the body reports per occurrence,
+/// as the sibling scans sharing this walker do). The walk is over
+/// the heredoc-blanked, quote-blanked form of the body
+/// (`PostCheck::without_heredoc_bodies` and `PostCheck::code_only`):
+/// both transforms preserve the line count, so the walk zips 1:1
+/// with the original lines and reports the original text. Each
+/// resulting line is split into command segments on `;`, `|` and
+/// `&`; a command inside a command substitution (`$(...)` or
+/// backticks) starts no segment in this tokenisation, so the
+/// predicates built on this walker judge segment-start command
+/// positions only.
+fn invocation_lines(body: &str, segment_matches: impl Fn(&str) -> bool) -> Vec<String> {
     let blanked = PostCheck::without_heredoc_bodies(body);
     let coded = PostCheck::code_only(&blanked);
-    let mut hits = Vec::new();
-    for (raw_line, code_line) in body.lines().zip(coded.lines()) {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        for segment in code_line.split([';', '|', '&']) {
-            if segment_restarts(segment) {
-                hits.push(line.to_string());
-                break;
+    body.lines()
+        .zip(coded.lines())
+        .filter_map(|(raw_line, code_line)| {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
             }
-        }
-    }
-    hits
+            code_line
+                .split([';', '|', '&'])
+                .any(&segment_matches)
+                .then(|| line.to_string())
+        })
+        .collect()
 }
 
 /// The words of one command segment: split on whitespace, with the
@@ -246,15 +264,74 @@ fn segment_command_index(words: &[&str]) -> Option<usize> {
     if i >= words.len() { None } else { Some(i) }
 }
 
+/// True when a segment's command word is a shell function
+/// definition (`rcfoo() { ...; }`, `rcfoo () { ...; }`): a
+/// definition names a command, it does not invoke one.
+/// `segment_words` trims `()` off each word, which would reduce
+/// the definition's name to a bare command word, so the test
+/// inspects the raw segment: the word at command position (the
+/// raw word the trimmed `words[i]` came from) carries a `(`
+/// directly after the command name, or the following raw word is
+/// the `()` of the spaced form. A `(` before the command name
+/// (a subshell invocation, `( rcfoo restart )`) is an invocation
+/// and stays visible to the scans.
+fn segment_is_function_definition(segment: &str) -> bool {
+    let segment = skip_case_pattern(segment);
+    let words = segment_words(segment);
+    let Some(i) = segment_command_index(&words) else {
+        return false;
+    };
+    let command = words[i];
+    // Raw words and trimmed words line up 1:1 once the raw words
+    // that trim to nothing (pure decoration) are skipped.
+    let raw_words: Vec<&str> = segment.split_whitespace().collect();
+    let mut trimmed_index = 0;
+    for (pos, raw) in raw_words.iter().enumerate() {
+        let trimmed = raw.trim_matches(['{', '}', '(', ')', '"', '\'']);
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed_index == i {
+            let core = raw.trim_start_matches(['{', '"', '\'']);
+            let Some(rest) = core.strip_prefix(command) else {
+                return false;
+            };
+            if rest.starts_with('(') {
+                return true;
+            }
+            // The spaced form: the command word stands alone and
+            // the next raw word is exactly `()`.
+            return rest.is_empty()
+                && raw_words
+                    .get(pos + 1)
+                    .is_some_and(|next| next.trim_matches(['{', '}', '"', '\'']) == "()");
+        }
+        trimmed_index += 1;
+    }
+    false
+}
+
+/// Basenames that are shaped like an rc<service> link but name a
+/// real, widely used binary instead: `rclone` (the file-sync
+/// tool), `rcs` (the RCS version-control command) and `rcp` (the
+/// remote-copy command). None of them is an rc link, in any
+/// directory and invoked bare — a bare `rclone` resolves through
+/// PATH exactly like the path-qualified form the sbin gate
+/// already excludes, so the gate alone cannot separate them.
+const RC_NAME_COLLISIONS: &[&str] = &["rclone", "rcs", "rcp"];
+
 /// True when `command` — the word in command position — names an
 /// rc<service> link: basename `rc<name>`, invoked bare or by path.
-/// A path-qualified form only counts from a sbin directory, where
-/// the rc<service> links live; a same-shaped binary elsewhere
-/// (e.g. `/usr/bin/rclone`) is not an rc link. A bare `rc<name>`
-/// carries no path to judge and counts.
-pub(crate) fn rc_link_command(command: &str) -> bool {
+/// A path-qualified form only counts when its immediate parent
+/// directory is a sbin directory, where the rc<service> links
+/// live; a same-shaped binary elsewhere (e.g. `/usr/bin/rclone`)
+/// is not an rc link. A bare `rc<name>` carries no path to judge
+/// and counts, with the known bare-name collisions in
+/// `RC_NAME_COLLISIONS` excluded: those basenames name real
+/// binaries, not rc links.
+fn rc_link_command(command: &str) -> bool {
     let base = command.rsplit('/').next().unwrap_or(command);
-    if base.len() <= 2 || !base.starts_with("rc") {
+    if base.len() <= 2 || !base.starts_with("rc") || RC_NAME_COLLISIONS.contains(&base) {
         return false;
     }
     !(command.contains('/') && !command.rsplit('/').nth(1).is_some_and(|dir| dir == "sbin"))
@@ -262,6 +339,9 @@ pub(crate) fn rc_link_command(command: &str) -> bool {
 
 /// True when one command segment invokes a service (re)start.
 fn segment_restarts(segment: &str) -> bool {
+    if segment_is_function_definition(segment) {
+        return false;
+    }
     let words = segment_words(skip_case_pattern(segment));
     let Some(i) = segment_command_index(&words) else {
         return false;
@@ -479,42 +559,30 @@ fn segment_user_creation(segment: &str) -> Option<&'static str> {
 }
 
 /// The lines of one scriptlet body that invoke an rc<service>
-/// link, in first-seen order, each line once. The scan shares the
-/// tokenisation of `service_restarts_in_body` — the heredoc-blanked,
-/// quote-blanked lines (`PostCheck::without_heredoc_bodies` and
-/// `PostCheck::code_only`) split into command segments on `;`, `|`
-/// and `&`, command position only — but is verb-independent: the
+/// link, in body order, one entry per line occurrence. The scan
+/// shares the tokenisation of `service_restarts_in_body` — the
+/// same `invocation_lines` walk over the heredoc-blanked,
+/// quote-blanked lines, command segments split on `;`, `|` and
+/// `&`, command position only — but is verb-independent: the
 /// rc<name> invocation itself is the obsolete part, whatever verb
 /// follows it, so `rcfoo status` fires here while staying silent
-/// for `scriptlet-service-restart`. There is no
+/// for `scriptlet-service-restart`. A shell function definition
+/// (`rcfoo() { ...; }`) names a command and does not invoke one,
+/// so it stays silent in both scans. There is no
 /// `TRANSACTIONAL_UPDATE` exemption: the links are removed from
 /// the distribution outright, on classic and transactional systems
 /// alike. `PostCheck` reports the lines as
 /// `scriptlet-rc-link-invocation-in-<scriptlet>` (issue #731).
 pub(crate) fn rc_link_invocations_in_body(body: &str) -> Vec<String> {
-    let blanked = PostCheck::without_heredoc_bodies(body);
-    let coded = PostCheck::code_only(&blanked);
-    let mut hits: Vec<String> = Vec::new();
-    for (raw_line, code_line) in body.lines().zip(coded.lines()) {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        for segment in code_line.split([';', '|', '&']) {
-            if segment_rc_link(segment) {
-                if !hits.iter().any(|h| h == line) {
-                    hits.push(line.to_string());
-                }
-                break;
-            }
-        }
-    }
-    hits
+    invocation_lines(body, segment_rc_link)
 }
 
 /// True when one command segment's command word is an rc<service>
 /// link invocation.
 fn segment_rc_link(segment: &str) -> bool {
+    if segment_is_function_definition(segment) {
+        return false;
+    }
     let words = segment_words(skip_case_pattern(segment));
     let Some(i) = segment_command_index(&words) else {
         return false;
@@ -1348,6 +1416,75 @@ fi
         // `rclone` is a file-sync tool, not an rc<service> link; the
         // rc links live in sbin directories.
         for body in ["/usr/bin/rclone restart", "/usr/bin/rclone start"] {
+            assert!(service_restarts_in_body(body).is_empty(), "{body}");
+        }
+    }
+
+    #[test]
+    fn bare_rc_name_collisions_are_quiet() {
+        // The known bare-name collisions (review on #732): a bare
+        // `rclone` resolves through PATH exactly like the excluded
+        // `/usr/bin/rclone`, and `rcs`/`rcp` are real binaries too —
+        // none of them is an rc<service> link, for either scan and
+        // for any arguments.
+        for body in [
+            "rclone sync a b",
+            "rclone restart",
+            "rcs -i somefile",
+            "rcp a b",
+            "rcp restart",
+        ] {
+            assert!(service_restarts_in_body(body).is_empty(), "{body}");
+            assert!(rc_link_invocations_in_body(body).is_empty(), "{body}");
+        }
+    }
+
+    #[test]
+    fn function_definition_is_quiet() {
+        // A definition names a command, it does not invoke one
+        // (review on #732): `segment_words` trims `()`, so the
+        // definition must be recognised on the raw segment. The
+        // invocation inside the definition's body is a segment of
+        // its own and still fires.
+        for body in [
+            "rcfoo() { echo hi; }",
+            "rcfoo () { echo hi; }",
+            "rcfoo()\n{\n echo hi\n}",
+        ] {
+            assert!(rc_link_invocations_in_body(body).is_empty(), "{body}");
+            assert!(service_restarts_in_body(body).is_empty(), "{body}");
+        }
+        assert_eq!(
+            rc_link_invocations_in_body("rcfoo() { true; }; rcbar status").len(),
+            1
+        );
+        // A subshell invocation is not a definition.
+        assert_eq!(rc_link_invocations_in_body("( rcfoo restart )").len(), 1);
+        assert_eq!(service_restarts_in_body("( rcfoo restart )").len(), 1);
+    }
+
+    #[test]
+    fn rc_link_invocations_report_per_line_occurrence() {
+        // Per-line reporting, matching `service_restarts_in_body`:
+        // a line repeated in the body reports per occurrence, not
+        // once per distinct line text.
+        let body = "rcfoo status\nrcfoo status";
+        assert_eq!(rc_link_invocations_in_body(body).len(), 2);
+        assert_eq!(
+            service_restarts_in_body("rcfoo restart\nrcfoo restart").len(),
+            2
+        );
+    }
+
+    #[test]
+    fn substitution_interior_is_outside_segment_scope() {
+        // Pinned scope of the shared tokenisation (disclosed in the
+        // #731 ledger entry): a command inside `$(...)` or
+        // backticks starts no segment, so neither scan judges it.
+        // Widening segment splitting to substitution interiors is a
+        // recall change for both checks, not part of this predicate.
+        for body in ["x=$(rcfoo restart)", "echo `rcfoo restart`"] {
+            assert!(rc_link_invocations_in_body(body).is_empty(), "{body}");
             assert!(service_restarts_in_body(body).is_empty(), "{body}");
         }
     }
