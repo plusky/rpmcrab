@@ -239,11 +239,20 @@ fn invocation_lines(body: &str, segment_matches: impl Fn(&str) -> bool) -> Vec<S
 
 /// The words of one command segment: split on whitespace, with the
 /// shell decoration characters (`{}`, `()`, quotes) trimmed off
-/// each word.
+/// each word. A substitution's closing backtick is trimmed off
+/// the word it lands on (an interior's last word) as well: the
+/// closing delimiter is decoration of the same kind as the `)`
+/// closing a `$(...)`, which the trim above already removes, so a
+/// separator-delimited interior is judged by the same words in
+/// both substitution forms. The opening backtick stays glued to
+/// the interior's first word: that word reads as a substitution
+/// opener, not as a bare command word, the same reading the `$(`
+/// opener gets (see `invocation_lines`).
 fn segment_words(segment: &str) -> Vec<&str> {
     segment
         .split_whitespace()
         .map(|w| w.trim_matches(['{', '}', '(', ')', '"', '\'']))
+        .map(|w| w.trim_end_matches('`'))
         .filter(|w| !w.is_empty())
         .collect()
 }
@@ -1497,32 +1506,73 @@ fi
         // Pinned scope of the shared tokenisation (disclosed in the
         // #731 ledger entry): the substitution opener starts no
         // segment, so an interior without a separator stays inside
-        // the outer segment and neither scan judges it. The
-        // splitter tracks no substitution depth, though, so an
-        // interior command after a separator is a segment of its
-        // own and is judged: the `$(...)` form fires in both
-        // scans. Widening the opener case is a recall change for
-        // both checks, not part of this predicate.
-        for body in ["x=$(rcfoo restart)", "echo `rcfoo restart`"] {
+        // the outer segment and neither scan judges it \u2014 and a
+        // substitution standing alone is its opener word, read the
+        // same way. The splitter tracks no substitution depth,
+        // though, so an interior command after a separator is a
+        // segment of its own and is judged: both substitution
+        // forms fire in both scans (issue #783 \u2014 the closing
+        // backtick is trimmed off the interior's last word exactly
+        // as the closing parenthesis is, so the restart scan's
+        // verb matching sees the same words in both forms).
+        // Widening the opener case is a recall change for both
+        // checks, not part of this predicate.
+        for body in [
+            "x=$(rcfoo restart)",
+            "echo `rcfoo restart`",
+            "$(rcfoo restart)",
+            "`rcfoo restart`",
+        ] {
             assert!(rc_link_invocations_in_body(body).is_empty(), "{body}");
             assert!(service_restarts_in_body(body).is_empty(), "{body}");
         }
-        assert_eq!(
-            rc_link_invocations_in_body("echo $(echo hi; rcfoo restart)").len(),
-            1
-        );
-        assert_eq!(
-            service_restarts_in_body("echo $(echo hi; rcfoo restart)").len(),
-            1
-        );
-        // A backtick interior splits the same way for this scan;
-        // the restart scan's verb word keeps the closing backtick,
-        // so it matches no restart verb and that scan stays silent.
-        assert_eq!(
-            rc_link_invocations_in_body("echo `echo hi; rcfoo restart`").len(),
-            1
-        );
-        assert!(service_restarts_in_body("echo `echo hi; rcfoo restart`").is_empty());
+        for body in [
+            "echo $(echo hi; rcfoo restart)",
+            "echo `echo hi; rcfoo restart`",
+        ] {
+            assert_eq!(rc_link_invocations_in_body(body).len(), 1, "{body}");
+            assert_eq!(service_restarts_in_body(body).len(), 1, "{body}");
+        }
+        // The closing delimiter lands on the word that ends the
+        // interior \u2014 here the verb of the service and systemctl
+        // forms, the position the restart scan matches on \u2014 and
+        // is trimmed there in both forms.
+        for body in [
+            "echo $(echo hi; service foo restart)",
+            "echo `echo hi; service foo restart`",
+            "echo $(echo hi; systemctl --no-block restart)",
+            "echo `echo hi; systemctl --no-block restart`",
+        ] {
+            assert_eq!(service_restarts_in_body(body).len(), 1, "{body}");
+        }
+        // A non-restart verb inside a substitution interior is
+        // judged like one outside it: the rc scan fires (the
+        // invocation itself is the finding there), the restart
+        // scan stays silent \u2014 in both forms.
+        for body in [
+            "echo $(echo hi; rcfoo status)",
+            "echo `echo hi; rcfoo status`",
+        ] {
+            assert_eq!(rc_link_invocations_in_body(body).len(), 1, "{body}");
+            assert!(service_restarts_in_body(body).is_empty(), "{body}");
+        }
+        // The denylist reads the same words in both forms too: an
+        // interior `rclone` is the file-sync tool, not an rc link,
+        // exactly like the bare word \u2014 the closing backtick
+        // does not carry it past the denylist.
+        for body in [
+            "echo $(echo hi; rclone) sync a b",
+            "echo `echo hi; rclone` sync a b",
+        ] {
+            assert!(rc_link_invocations_in_body(body).is_empty(), "{body}");
+            assert!(service_restarts_in_body(body).is_empty(), "{body}");
+        }
+        // A plain interior command is no invocation in either
+        // scan, in either form.
+        for body in ["echo $(echo hi; ls -la)", "echo `echo hi; ls -la`"] {
+            assert!(rc_link_invocations_in_body(body).is_empty(), "{body}");
+            assert!(service_restarts_in_body(body).is_empty(), "{body}");
+        }
     }
 
     #[test]
