@@ -31,7 +31,7 @@ Checks = [
 
     # Extra: enabled by rpmcrab; upstream lists these checks in no
     # shipped config (deliberate, ledgered divergence); see
-    # EXTRA_OPENSUSE_CHECKS in scripts/generate-distro-configs.py.
+    # EXTRA_CHECKS in scripts/generate-distro-configs.py.
     "XinetdDepCheck",
     "PAMModulesCheck",
 ]
@@ -200,7 +200,7 @@ Filters = [
 
     # Extra: *.dll.a and *.a files are permitted arch-independent objects.
     # From mingw{32,64}-filesystem's mingw{32,64}-rpmlintrc (shipped as
-    # /opt/testing/share/rpmlint/mingw{32,64}.toml); see EXTRA_OPENSUSE_FILTERS
+    # /opt/testing/share/rpmlint/mingw{32,64}.toml); see EXTRA_FILTERS
     # in scripts/generate-distro-configs.py.
     '^mingw32-.*arch-independent-package-contains-binary-or-object.*\.a$',
     '^mingw64-.*arch-independent-package-contains-binary-or-object.*\.a$',
