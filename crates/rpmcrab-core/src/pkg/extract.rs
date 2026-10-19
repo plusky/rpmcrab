@@ -625,6 +625,18 @@ impl<'a> Extractor<'a> {
                             "extract: skipping entry {:?}: hardlink carrier is not a regular file",
                             String::from_utf8_lossy(&e.name)
                         );
+                        // The caller records this path and fixup()
+                        // restores its mode and mtime, so the path must
+                        // exist: leave an empty placeholder, as for a
+                        // placeholder whose carrier has not arrived yet.
+                        // create_new leaves an existing occupant (a
+                        // swapped-in symlink, an unrelated file) untouched,
+                        // and an occupant already satisfies the invariant.
+                        match OpenOptions::new().write(true).create_new(true).open(path) {
+                            Ok(_) => {}
+                            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                            Err(err) => return Err(io_error(path, err)),
+                        }
                     } else if !same_file(&data, path) {
                         match fs::hard_link(&data, path) {
                             Ok(()) => {}
@@ -1672,29 +1684,47 @@ mod tests {
         stream.extend(newc_bytes(b"carrier", S_IFLNK | 0o777, 1, 43, &target));
         // A sibling placeholder of the same hardlink group arrives
         // after the swap.
-        stream.extend(newc_bytes(b"sibling", S_IFREG | 0o644, 3, 42, b""));
+        stream.extend(newc_bytes(b"sibling", S_IFREG | 0o600, 3, 42, b""));
         stream.extend(newc_bytes(b"TRAILER!!!", 0, 1, 0, b""));
         let mut data = &stream[..];
+
+        // Feed the carrier and the swap entry first, so the swap
+        // precondition is asserted on disk before the placeholder is
+        // processed: the carrier path is a symlink to the victim.
+        let entry = read_entry(&mut data, &[]).unwrap().unwrap();
+        ex.materialize(&mut data, &entry).unwrap();
+        let entry = read_entry(&mut data, &[]).unwrap().unwrap();
+        ex.materialize(&mut data, &entry).unwrap();
+        let carrier = root.path().join("carrier");
+        let carrier_md = std::fs::symlink_metadata(&carrier).unwrap();
+        assert!(
+            carrier_md.file_type().is_symlink(),
+            "carrier must have been replaced by a symlink"
+        );
+        assert_eq!(std::fs::read_link(&carrier).unwrap(), victim);
+
         while let Some(entry) = read_entry(&mut data, &[]).unwrap() {
             ex.materialize(&mut data, &entry).unwrap();
         }
         ex.check_hardlinks().unwrap();
+        // fixup() restores the recorded mode and mtime of every
+        // recorded path; the skipped placeholder must leave a path
+        // behind for it.
+        ex.fixup().unwrap();
 
-        // The placeholder must not alias the host file: it is either
-        // absent (the link was skipped) or a regular file that does
-        // not read the victim's bytes.
+        // The end state on disk, asserted explicitly: the placeholder
+        // is a regular file holding no bytes (in particular not the
+        // victim's), carrying the mode fixup() restored from the
+        // recorded 0o600, and the victim is untouched.
         let sibling = root.path().join("sibling");
-        let read_back = std::fs::read(&sibling).unwrap_or_default();
-        assert_ne!(
-            read_back, b"host-bytes",
-            "placeholder must not read host-file bytes"
+        let sibling_md = std::fs::symlink_metadata(&sibling).unwrap();
+        assert!(sibling_md.is_file(), "placeholder must be a regular file");
+        assert!(
+            !sibling_md.file_type().is_symlink(),
+            "placeholder must not be a symlink to the host file"
         );
-        if let Ok(md) = std::fs::symlink_metadata(&sibling) {
-            assert!(
-                !md.file_type().is_symlink(),
-                "placeholder must not be a symlink to the host file"
-            );
-        }
+        assert_eq!(std::fs::read(&sibling).unwrap(), b"");
+        assert_eq!(sibling_md.permissions().mode() & 0o777, 0o644);
         assert_eq!(std::fs::read(&victim).unwrap(), b"host-bytes");
     }
 
