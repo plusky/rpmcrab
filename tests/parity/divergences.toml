@@ -2391,6 +2391,14 @@ upstream = "https://github.com/plusky/rpmcrab/issues/743"
 
 [[divergence]]
 case = "global"
+check = "install-file-in-docs"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#781): the port reports I where the reference reports W. The class is cosmetic by its own detail text: a file whose name suggests it contains installation instructions is shipped in the documentation, and the stated harm is only that such instructions are often not relevant for already installed packages — nothing is broken, misbuilt or non-functional, and the file is one a packager may optionally drop. Comparable tidiness classes already sit at Info (no-manual-page-for-binary, no-%check-section, dangling-relative-symlink), and at W the class only adds to the background warning mass. Measured on the Factory corpus (main 547fa55, both flavours): 108 findings in 42 binary packages out of 51,586 checked, the firing set identical under opensuse and slfo."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/781"
+
+[[divergence]]
+case = "global"
 check = "files-duplicated-waste"
 kind = "severity"
 reason = "Config-only (issue #594): the vendored configs carry no [Scoring] table (#594 dropped this entry via DROP_SCORING in the generator; #699 then removed the vendored scoring tables wholesale), so the port prints W where the reference prints E: files-duplicated-waste (Badness: 100) (the emission demotion to W is ledgered under issue #593; without the drop the surviving Scoring entry would silently re-promote it to E via the b > 0 rule)."
