@@ -1116,7 +1116,7 @@ mod tests {
         std::fs::create_dir_all(&rpmlint_dir).unwrap();
         std::fs::write(
             rpmlint_dir.join("opensuse.toml"),
-            "Checks = [\"BrandingPolicyCheck\"]\n[Scoring]\ninvalid-license = 100000",
+            "CompressExtension = \"xz\"\nChecks = [\"BrandingPolicyCheck\"]\n[Scoring]\ninvalid-license = 100000",
         )
         .unwrap();
         let cfg = load_inner(&[], &[tmp.path().join("xdg")], true).unwrap();
@@ -1125,6 +1125,13 @@ mod tests {
         assert_eq!(
             cfg.scoring.get("invalid-license"),
             Some(&toml::Value::Integer(100000))
+        );
+        // Layering on a genuinely vendored scalar key: the bundled
+        // defaults ship CompressExtension = "bz2", the vendored
+        // openSUSE layer sets "gz", and the XDG layer's "xz" wins.
+        assert_eq!(
+            cfg.configuration.get("CompressExtension"),
+            Some(&toml::Value::String("xz".to_string()))
         );
         // conf_files: builtin first, then the vendored distro files, then
         // the XDG-discovered openSUSE file. The vendored set carries no
