@@ -2870,7 +2870,10 @@ impl FilesCheck {
             return;
         }
         let perm = pkgfile.mode & 0o7777;
-        if perm & 0o002 != 0 {
+        // world-writable: other-write with no sticky bit - the
+        // reference predicate is `mode & 0o1002 == 2`, so sticky-bit
+        // directories (1777, e.g. /tmp and /var/tmp) stay quiet.
+        if perm & 0o1002 == 0o002 {
             add_info(
                 out,
                 Level::Error,
@@ -4636,6 +4639,66 @@ mod tests {
         check.check(&pkg, &config, &mut out);
         let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
         assert_has(&names, "world-writable");
+    }
+
+    #[test]
+    fn world_writable_fires_for_world_writable_dir_without_sticky_bit() {
+        // Directory with o+w and no sticky bit must emit world-writable
+        // at Error (issue #738); the dispatch gates on S_IFDIR, so the
+        // mode carries the file-type bits.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = vec![PkgFile {
+            name: "/var/lib/foo".to_string(),
+            path: "/var/lib/foo".to_string(),
+            mode: 0o040777,
+            ..Default::default()
+        }];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let hits: Vec<Level> = out
+            .results()
+            .iter()
+            .zip(out.result_levels().iter())
+            .filter(|((n, _), _)| n.as_str() == "world-writable")
+            .map(|(_, l)| *l)
+            .collect();
+        assert_eq!(hits, [Level::Error], "world-writable must fire at Error");
+    }
+
+    #[test]
+    fn world_writable_silent_for_sticky_world_writable_dir() {
+        // Sticky-bit world-writable directories stay quiet: the
+        // reference fires only when the sticky bit is absent
+        // (`mode & 0o1002 == 2`), so the FHS public tmp directories at
+        // 1777 emit no world-writable (issue #738).
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.name = "filesystem".to_string();
+        pkg.files = vec![
+            PkgFile {
+                name: "/tmp".to_string(),
+                path: "/tmp".to_string(),
+                mode: 0o041777,
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/var/tmp".to_string(),
+                path: "/var/tmp".to_string(),
+                mode: 0o041777,
+                ..Default::default()
+            },
+        ];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_lacks(&names, "world-writable");
     }
 
     #[test]

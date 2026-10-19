@@ -192,7 +192,9 @@ fn scanned_scriptlet(tag: librpm::Tag) -> bool {
 /// `|` and `&`, and only a `systemctl`/`service`/`rc*` word in command
 /// position (after leading braces, shell keywords, a `case`-arm
 /// pattern and environment assignments) counts, so comments, `echo`
-/// text and status/preset plumbing stay quiet. A body that mentions
+/// text and status/preset plumbing stay quiet. A shell function
+/// definition (`rcfoo() { ...; }`) names a command rather than
+/// invoking one and stays quiet. A body that mentions
 /// `TRANSACTIONAL_UPDATE` is exempt as a whole: the packager gates the
 /// scriptlet on the update mechanism explicitly, and which lines the
 /// gate covers is not decidable lexically.
@@ -200,35 +202,57 @@ fn service_restarts_in_body(body: &str) -> Vec<String> {
     if body.contains("TRANSACTIONAL_UPDATE") {
         return Vec::new();
     }
-    let blanked = PostCheck::without_heredoc_bodies(body);
-    let coded = PostCheck::code_only(&blanked);
-    let mut hits = Vec::new();
-    for (raw_line, code_line) in body.lines().zip(coded.lines()) {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        for segment in code_line.split([';', '|', '&']) {
-            if segment_restarts(segment) {
-                hits.push(line.to_string());
-                break;
-            }
-        }
-    }
-    hits
+    invocation_lines(body, segment_restarts)
 }
 
-/// True when one command segment invokes a service (re)start.
-fn segment_restarts(segment: &str) -> bool {
-    let segment = skip_case_pattern(segment);
-    let words: Vec<&str> = segment
+/// The lines of one scriptlet body in which a command segment
+/// satisfies `segment_matches`, in body order, one entry per line
+/// occurrence (a line repeated in the body reports per occurrence,
+/// as the sibling scans sharing this walker do). The walk is over
+/// the heredoc-blanked, quote-blanked form of the body
+/// (`PostCheck::without_heredoc_bodies` and `PostCheck::code_only`):
+/// both transforms preserve the line count, so the walk zips 1:1
+/// with the original lines and reports the original text. Each
+/// resulting line is split into command segments on `;`, `|` and
+/// `&`; a command inside a command substitution (`$(...)` or
+/// backticks) starts no segment in this tokenisation, so the
+/// predicates built on this walker judge segment-start command
+/// positions only.
+fn invocation_lines(body: &str, segment_matches: impl Fn(&str) -> bool) -> Vec<String> {
+    let blanked = PostCheck::without_heredoc_bodies(body);
+    let coded = PostCheck::code_only(&blanked);
+    body.lines()
+        .zip(coded.lines())
+        .filter_map(|(raw_line, code_line)| {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            code_line
+                .split([';', '|', '&'])
+                .any(&segment_matches)
+                .then(|| line.to_string())
+        })
+        .collect()
+}
+
+/// The words of one command segment: split on whitespace, with the
+/// shell decoration characters (`{}`, `()`, quotes) trimmed off
+/// each word.
+fn segment_words(segment: &str) -> Vec<&str> {
+    segment
         .split_whitespace()
         .map(|w| w.trim_matches(['{', '}', '(', ')', '"', '\'']))
         .filter(|w| !w.is_empty())
-        .collect();
+        .collect()
+}
+
+/// The index of the command word in a segment's words: the first
+/// word past the command-position decoration — shell keywords and
+/// VAR=value environment assignments leave the next word in
+/// command position.
+fn segment_command_index(words: &[&str]) -> Option<usize> {
     let mut i = 0;
-    // Skip command-position decoration: shell keywords and VAR=value
-    // environment assignments.
     while i < words.len()
         && (matches!(
             words[i],
@@ -237,9 +261,91 @@ fn segment_restarts(segment: &str) -> bool {
     {
         i += 1;
     }
-    if i >= words.len() {
+    if i >= words.len() { None } else { Some(i) }
+}
+
+/// True when a segment's command word is a shell function
+/// definition (`rcfoo() { ...; }`, `rcfoo () { ...; }`): a
+/// definition names a command, it does not invoke one.
+/// `segment_words` trims `()` off each word, which would reduce
+/// the definition's name to a bare command word, so the test
+/// inspects the raw segment: the word at command position (the
+/// raw word the trimmed `words[i]` came from) carries a `(`
+/// directly after the command name, or the following raw word is
+/// the `()` of the spaced form. A `(` before the command name
+/// (a subshell invocation, `( rcfoo restart )`) is an invocation
+/// and stays visible to the scans.
+fn segment_is_function_definition(segment: &str) -> bool {
+    let segment = skip_case_pattern(segment);
+    let words = segment_words(segment);
+    let Some(i) = segment_command_index(&words) else {
+        return false;
+    };
+    let command = words[i];
+    // Raw words and trimmed words line up 1:1 once the raw words
+    // that trim to nothing (pure decoration) are skipped.
+    let raw_words: Vec<&str> = segment.split_whitespace().collect();
+    let mut trimmed_index = 0;
+    for (pos, raw) in raw_words.iter().enumerate() {
+        let trimmed = raw.trim_matches(['{', '}', '(', ')', '"', '\'']);
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed_index == i {
+            let core = raw.trim_start_matches(['{', '"', '\'']);
+            let Some(rest) = core.strip_prefix(command) else {
+                return false;
+            };
+            if rest.starts_with('(') {
+                return true;
+            }
+            // The spaced form: the command word stands alone and
+            // the next raw word is exactly `()`.
+            return rest.is_empty()
+                && raw_words
+                    .get(pos + 1)
+                    .is_some_and(|next| next.trim_matches(['{', '}', '"', '\'']) == "()");
+        }
+        trimmed_index += 1;
+    }
+    false
+}
+
+/// Basenames that are shaped like an rc<service> link but name a
+/// real, widely used binary instead: `rclone` (the file-sync
+/// tool), `rcs` (the RCS version-control command) and `rcp` (the
+/// remote-copy command). None of them is an rc link, in any
+/// directory and invoked bare — a bare `rclone` resolves through
+/// PATH exactly like the path-qualified form the sbin gate
+/// already excludes, so the gate alone cannot separate them.
+const RC_NAME_COLLISIONS: &[&str] = &["rclone", "rcs", "rcp"];
+
+/// True when `command` — the word in command position — names an
+/// rc<service> link: basename `rc<name>`, invoked bare or by path.
+/// A path-qualified form only counts when its immediate parent
+/// directory is a sbin directory, where the rc<service> links
+/// live; a same-shaped binary elsewhere (e.g. `/usr/bin/rclone`)
+/// is not an rc link. A bare `rc<name>` carries no path to judge
+/// and counts, with the known bare-name collisions in
+/// `RC_NAME_COLLISIONS` excluded: those basenames name real
+/// binaries, not rc links.
+fn rc_link_command(command: &str) -> bool {
+    let base = command.rsplit('/').next().unwrap_or(command);
+    if base.len() <= 2 || !base.starts_with("rc") || RC_NAME_COLLISIONS.contains(&base) {
         return false;
     }
+    !(command.contains('/') && !command.rsplit('/').nth(1).is_some_and(|dir| dir == "sbin"))
+}
+
+/// True when one command segment invokes a service (re)start.
+fn segment_restarts(segment: &str) -> bool {
+    if segment_is_function_definition(segment) {
+        return false;
+    }
+    let words = segment_words(skip_case_pattern(segment));
+    let Some(i) = segment_command_index(&words) else {
+        return false;
+    };
     let command = words[i];
     let args = &words[i + 1..];
     if command == "systemctl" || command.ends_with("/systemctl") {
@@ -250,15 +356,7 @@ fn segment_restarts(segment: &str) -> bool {
         return args.len() >= 2 && LEGACY_RESTART_VERBS.contains(&args[1]);
     }
     // The legacy rc form is `rc<name> VERB`, invoked bare or by path.
-    let base = command.rsplit('/').next().unwrap_or(command);
-    if base.len() > 2 && base.starts_with("rc") {
-        // A path-qualified rc command only counts from a sbin
-        // directory, where the rc<service> links live; a same-shaped
-        // binary elsewhere (e.g. /usr/bin/rclone) is not an rc script.
-        // A bare rc<name> carries no path to judge and counts.
-        if command.contains('/') && !command.rsplit('/').nth(1).is_some_and(|dir| dir == "sbin") {
-            return false;
-        }
+    if rc_link_command(command) {
         return args
             .first()
             .is_some_and(|v| LEGACY_RESTART_VERBS.contains(v));
@@ -316,6 +414,180 @@ fn service_restarts<'a>(scriptlets: &[(&'a str, &'a str)]) -> Vec<(&'a str, Stri
         }
     }
     hits
+}
+
+/// The direct user/group creation invocations in one scriptlet
+/// body: (tool, line) pairs in body order, one entry per line
+/// occurrence and tool. The scan shares the lexical walk of
+/// `service_restarts_in_body` — the heredoc-blanked, quote-blanked
+/// form of the body (`PostCheck::without_heredoc_bodies` and
+/// `PostCheck::code_only`), zipped 1:1 with the original lines and
+/// reported in the original text. Each line is split into command
+/// segments on `;`, `|` and `&`, and only a `useradd`/`groupadd`
+/// word in command position (after leading braces, shell keywords,
+/// a `case`-arm pattern and environment assignments) counts, so
+/// mentions in comments, quoted text, heredoc bodies and operand
+/// position stay silent, as do shell function definitions
+/// (`useradd() { ...; }`), which name the tool without invoking
+/// it. `PostCheck` reports the pairs as
+/// `scriptlet-useradd-in-<scriptlet>` and
+/// `scriptlet-groupadd-in-<scriptlet>` (issue #640).
+pub(crate) fn direct_user_creation_in_body(body: &str) -> Vec<(&'static str, String)> {
+    let blanked = PostCheck::without_heredoc_bodies(body);
+    let coded = PostCheck::code_only(&blanked);
+    let mut hits = Vec::new();
+    for (raw_line, code_line) in body.lines().zip(coded.lines()) {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut tools: Vec<&'static str> = Vec::new();
+        for segment in code_line.split([';', '|', '&']) {
+            if let Some(tool) = segment_user_creation(segment)
+                && !tools.contains(&tool)
+            {
+                tools.push(tool);
+            }
+        }
+        for tool in tools {
+            hits.push((tool, line.to_string()));
+        }
+    }
+    hits
+}
+
+/// True when a segment's command word is a shell function
+/// definition (`useradd() { ...; }`, `useradd () { ...; }`): a
+/// definition names a command, it does not invoke one. The word
+/// tokenisation trims `()` off each word, which would reduce
+/// the definition's name to a bare command word, so the test
+/// inspects the raw segment: the raw word at command position
+/// (the raw word the trimmed command word came from) carries a
+/// `(` directly after the command name, or the following raw
+/// word is the `()` of the spaced form. A `(` before the command
+/// name (a subshell invocation, `( useradd -r foo )`) is an
+/// invocation and stays visible to the scan.
+fn segment_defines_function(segment: &str) -> bool {
+    let segment = skip_case_pattern(segment);
+    let raw_words: Vec<&str> = segment.split_whitespace().collect();
+    let words: Vec<&str> = raw_words
+        .iter()
+        .map(|w| w.trim_matches(['{', '}', '(', ')', '\"', '\\']))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let mut i = 0;
+    // Skip command-position decoration: shell keywords and
+    // VAR=value environment assignments.
+    while i < words.len()
+        && (matches!(
+            words[i],
+            "if" | "elif" | "while" | "until" | "then" | "do" | "else" | "!"
+        ) || is_assignment(words[i]))
+    {
+        i += 1;
+    }
+    if i >= words.len() {
+        return false;
+    }
+    let command = words[i];
+    // Raw words and trimmed words line up 1:1 once the raw words
+    // that trim to nothing (pure decoration) are skipped.
+    let mut trimmed_index = 0;
+    for (pos, raw) in raw_words.iter().enumerate() {
+        let trimmed = raw.trim_matches(['{', '}', '(', ')', '\"', '\\']);
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed_index == i {
+            let core = raw.trim_start_matches(['{', '\"', '\\']);
+            let Some(rest) = core.strip_prefix(command) else {
+                return false;
+            };
+            if rest.starts_with('(') {
+                return true;
+            }
+            // The spaced form: the command word stands alone and
+            // the next raw word is exactly `()`.
+            return rest.is_empty()
+                && raw_words
+                    .get(pos + 1)
+                    .is_some_and(|next| next.trim_matches(['{', '}', '\"', '\\']) == "()");
+        }
+        trimmed_index += 1;
+    }
+    false
+}
+
+/// The creation tool one command segment invokes, if any:
+/// `useradd` or `groupadd` as the command word, bare or by path
+/// from any directory (the canonical full form is
+/// `/usr/sbin/useradd`). The lifecycle tools (`usermod`,
+/// `userdel`, `groupmod`, `groupdel`) manage existing accounts
+/// and stay silent, as does `systemd-sysusers`: a sysusers
+/// invocation is the declarative mechanism itself. A shell
+/// function definition names the tool without invoking it and
+/// stays silent (`segment_defines_function`).
+fn segment_user_creation(segment: &str) -> Option<&'static str> {
+    if segment_defines_function(segment) {
+        return None;
+    }
+    let segment = skip_case_pattern(segment);
+    let words: Vec<&str> = segment
+        .split_whitespace()
+        .map(|w| w.trim_matches(['{', '}', '(', ')', '"', '\\']))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let mut i = 0;
+    // Skip command-position decoration: shell keywords and
+    // VAR=value environment assignments.
+    while i < words.len()
+        && (matches!(
+            words[i],
+            "if" | "elif" | "while" | "until" | "then" | "do" | "else" | "!"
+        ) || is_assignment(words[i]))
+    {
+        i += 1;
+    }
+    if i >= words.len() {
+        return None;
+    }
+    match words[i].rsplit('/').next().unwrap_or(words[i]) {
+        "useradd" => Some("useradd"),
+        "groupadd" => Some("groupadd"),
+        _ => None,
+    }
+}
+
+/// The lines of one scriptlet body that invoke an rc<service>
+/// link, in body order, one entry per line occurrence. The scan
+/// shares the tokenisation of `service_restarts_in_body` — the
+/// same `invocation_lines` walk over the heredoc-blanked,
+/// quote-blanked lines, command segments split on `;`, `|` and
+/// `&`, command position only — but is verb-independent: the
+/// rc<name> invocation itself is the obsolete part, whatever verb
+/// follows it, so `rcfoo status` fires here while staying silent
+/// for `scriptlet-service-restart`. A shell function definition
+/// (`rcfoo() { ...; }`) names a command and does not invoke one,
+/// so it stays silent in both scans. There is no
+/// `TRANSACTIONAL_UPDATE` exemption: the links are removed from
+/// the distribution outright, on classic and transactional systems
+/// alike. `PostCheck` reports the lines as
+/// `scriptlet-rc-link-invocation-in-<scriptlet>` (issue #731).
+pub(crate) fn rc_link_invocations_in_body(body: &str) -> Vec<String> {
+    invocation_lines(body, segment_rc_link)
+}
+
+/// True when one command segment's command word is an rc<service>
+/// link invocation.
+fn segment_rc_link(segment: &str) -> bool {
+    if segment_is_function_definition(segment) {
+        return false;
+    }
+    let words = segment_words(skip_case_pattern(segment));
+    let Some(i) = segment_command_index(&words) else {
+        return false;
+    };
+    rc_link_command(words[i])
 }
 
 impl Check for AtomicUpdateCheck {
@@ -1149,6 +1421,75 @@ fi
     }
 
     #[test]
+    fn bare_rc_name_collisions_are_quiet() {
+        // The known bare-name collisions (review on #732): a bare
+        // `rclone` resolves through PATH exactly like the excluded
+        // `/usr/bin/rclone`, and `rcs`/`rcp` are real binaries too —
+        // none of them is an rc<service> link, for either scan and
+        // for any arguments.
+        for body in [
+            "rclone sync a b",
+            "rclone restart",
+            "rcs -i somefile",
+            "rcp a b",
+            "rcp restart",
+        ] {
+            assert!(service_restarts_in_body(body).is_empty(), "{body}");
+            assert!(rc_link_invocations_in_body(body).is_empty(), "{body}");
+        }
+    }
+
+    #[test]
+    fn function_definition_is_quiet() {
+        // A definition names a command, it does not invoke one
+        // (review on #732): `segment_words` trims `()`, so the
+        // definition must be recognised on the raw segment. The
+        // invocation inside the definition's body is a segment of
+        // its own and still fires.
+        for body in [
+            "rcfoo() { echo hi; }",
+            "rcfoo () { echo hi; }",
+            "rcfoo()\n{\n echo hi\n}",
+        ] {
+            assert!(rc_link_invocations_in_body(body).is_empty(), "{body}");
+            assert!(service_restarts_in_body(body).is_empty(), "{body}");
+        }
+        assert_eq!(
+            rc_link_invocations_in_body("rcfoo() { true; }; rcbar status").len(),
+            1
+        );
+        // A subshell invocation is not a definition.
+        assert_eq!(rc_link_invocations_in_body("( rcfoo restart )").len(), 1);
+        assert_eq!(service_restarts_in_body("( rcfoo restart )").len(), 1);
+    }
+
+    #[test]
+    fn rc_link_invocations_report_per_line_occurrence() {
+        // Per-line reporting, matching `service_restarts_in_body`:
+        // a line repeated in the body reports per occurrence, not
+        // once per distinct line text.
+        let body = "rcfoo status\nrcfoo status";
+        assert_eq!(rc_link_invocations_in_body(body).len(), 2);
+        assert_eq!(
+            service_restarts_in_body("rcfoo restart\nrcfoo restart").len(),
+            2
+        );
+    }
+
+    #[test]
+    fn substitution_interior_is_outside_segment_scope() {
+        // Pinned scope of the shared tokenisation (disclosed in the
+        // #731 ledger entry): a command inside `$(...)` or
+        // backticks starts no segment, so neither scan judges it.
+        // Widening segment splitting to substitution interiors is a
+        // recall change for both checks, not part of this predicate.
+        for body in ["x=$(rcfoo restart)", "echo `rcfoo restart`"] {
+            assert!(rc_link_invocations_in_body(body).is_empty(), "{body}");
+            assert!(service_restarts_in_body(body).is_empty(), "{body}");
+        }
+    }
+
+    #[test]
     fn heredoc_body_is_quiet() {
         let body = "cat <<EOF\nsystemctl restart foo.service\nEOF\n";
         assert!(service_restarts_in_body(body).is_empty());
@@ -1899,5 +2240,141 @@ fi
         let pkg = fixture_pkg_named("atomic-scriptlet-clean-1.0-1.noarch.rpm");
         let mut check = shipped_check();
         assert!(run(&mut check, &pkg).is_empty());
+    }
+
+    #[test]
+    fn direct_user_creation_fires() {
+        for (body, tool) in [
+            ("useradd -r -s /sbin/nologin foo", "useradd"),
+            ("/usr/sbin/useradd -r foo", "useradd"),
+            ("/usr/bin/useradd foo", "useradd"),
+            ("groupadd -r foo", "groupadd"),
+            ("/usr/sbin/groupadd foo", "groupadd"),
+            ("FOO=bar useradd foo", "useradd"),
+            ("if useradd foo; then true; fi", "useradd"),
+        ] {
+            let hits = direct_user_creation_in_body(body);
+            assert_eq!(hits, vec![(tool, body.to_string())], "must fire: {body}");
+        }
+    }
+
+    #[test]
+    fn direct_user_creation_after_separator_fires_once() {
+        // The `test -x` operand on the same line is not an
+        // invocation; the command after `&&` is, and the line
+        // is reported once.
+        let body = "test -x /usr/sbin/useradd && /usr/sbin/useradd -r foo";
+        let hits = direct_user_creation_in_body(body);
+        assert_eq!(hits, vec![("useradd", body.to_string())]);
+    }
+
+    #[test]
+    fn direct_user_creation_case_arm_fires() {
+        let body = "case $1 in\n  1) groupadd -r foo ;;\nesac";
+        let hits = direct_user_creation_in_body(body);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, "groupadd");
+    }
+
+    #[test]
+    fn direct_user_creation_reports_each_tool_on_a_line() {
+        let body = "groupadd -r foo; useradd -r -g foo foo";
+        let hits = direct_user_creation_in_body(body);
+        assert_eq!(
+            hits,
+            vec![
+                ("groupadd", body.to_string()),
+                ("useradd", body.to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn direct_user_creation_repeated_line_reports_per_line() {
+        let body = "useradd -r foo\nuseradd -r foo";
+        assert_eq!(direct_user_creation_in_body(body).len(), 2);
+    }
+
+    #[test]
+    fn direct_user_creation_near_misses_are_quiet() {
+        for body in [
+            // The declarative mechanism itself: systemd-sysusers
+            // invocations, including the shape the sysusers RPM
+            // macros expand to.
+            "systemd-sysusers",
+            "/usr/bin/systemd-sysusers --replace=/usr/lib/sysusers.d/foo.conf -",
+            // The lifecycle tools manage existing accounts; they
+            // are not creation.
+            "usermod -a -G video foo",
+            "userdel foo",
+            "groupmod -g 42 foo",
+            "groupdel foo",
+            // The Debian creation tool is outside the ruling,
+            // which names useradd/groupadd.
+            "adduser --system foo",
+            // Mentions: comments, quoted text, operand position.
+            "# create the account with useradd -r foo\ntrue",
+            "true # useradd -r foo",
+            "echo \"create the account with useradd -r foo\"",
+            "echo useradd",
+            "test -x /usr/sbin/useradd",
+            // Shipping a sysusers.d file is the desired end state.
+            "install -m 0644 foo.conf /usr/lib/sysusers.d/foo.conf",
+        ] {
+            assert!(
+                direct_user_creation_in_body(body).is_empty(),
+                "must stay silent: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_user_creation_in_heredoc_is_quiet() {
+        let body = "cat >> /var/adm/update-messages/foo << EOF\nCreate the account first:\n useradd -r foo\nEOF";
+        assert!(direct_user_creation_in_body(body).is_empty());
+    }
+
+    #[test]
+    fn direct_user_creation_function_definitions_are_quiet() {
+        // A definition names a command, it does not invoke one
+        // (review on #754): the word tokenisation trims `()`, so
+        // the definition is recognised on the raw segment, in
+        // the attached and the spaced form alike.
+        for body in [
+            "useradd() { echo hi; }",
+            "groupadd() { echo hi; }",
+            "useradd () { echo hi; }",
+            "groupadd () { echo hi; }",
+            "useradd(){ echo hi; }",
+            "useradd()\n{\n echo hi\n}",
+            // The invocation inside the definition's own segment
+            // is part of the definition, not an invocation.
+            "useradd() { useradd -r foo; }",
+            "groupadd() { groupadd -r foo; }",
+        ] {
+            assert!(
+                direct_user_creation_in_body(body).is_empty(),
+                "must stay silent: {body}"
+            );
+        }
+        // An invocation in the definition's body on its own line
+        // is a segment of its own and still fires.
+        let body = "useradd() {\n useradd -r foo\n}";
+        let hits = direct_user_creation_in_body(body);
+        assert_eq!(hits, vec![("useradd", "useradd -r foo".to_string())]);
+    }
+
+    #[test]
+    fn direct_user_creation_subshell_invocations_fire() {
+        // A subshell invocation is not a definition: the `(`
+        // sits before the command name.
+        for (body, tool) in [
+            ("(useradd -r foo)", "useradd"),
+            ("( useradd -r foo )", "useradd"),
+            ("(groupadd -r foo)", "groupadd"),
+        ] {
+            let hits = direct_user_creation_in_body(body);
+            assert_eq!(hits, vec![(tool, body.to_string())], "must fire: {body}");
+        }
     }
 }

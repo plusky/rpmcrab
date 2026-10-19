@@ -59,7 +59,7 @@ impl Tool {
         probe_args: &[&str],
     ) -> (Self, Option<Output>) {
         let path = source.resolve(name);
-        let output = spawn_with_retry(|| Command::new(&path).args(probe_args).output());
+        let output = spawn_with_retry(|| Command::new(&path).args(probe_args).output()).ok();
         let tool = Self {
             name,
             path: output.as_ref().map(|_| path),
@@ -84,7 +84,7 @@ impl Tool {
     }
 }
 
-/// Attempts for one probe spawn before the tool is declared absent.
+/// Attempts for one tool spawn before the spawn is given up on.
 ///
 /// A single spawn can fail transiently under load (fork/exec pressure
 /// on a busy runner), and one failure would otherwise read as "the
@@ -92,40 +92,48 @@ impl Tool {
 /// on it. Only transient failures (`WouldBlock`, `Interrupted`) are
 /// retried; a permanent failure -- a missing or non-executable
 /// binary -- fails fast on the first attempt.
-const PROBE_ATTEMPTS: usize = 3;
+const SPAWN_ATTEMPTS: usize = 3;
 
-/// Pause between probe attempts; see [`PROBE_ATTEMPTS`].
-const PROBE_RETRY_DELAY: Duration = Duration::from_millis(25);
+/// Pause between spawn attempts; see [`SPAWN_ATTEMPTS`].
+const SPAWN_RETRY_DELAY: Duration = Duration::from_millis(25);
 
-/// Run `spawn` until it succeeds and return the output; `None` when
-/// the spawn failed permanently or every attempt failed transiently.
+/// Run `spawn` until it succeeds and return the output; the final
+/// attempt's error when the spawn failed permanently or every attempt
+/// failed transiently.
 ///
 /// Retries apply only to transient spawn errors -- `WouldBlock`
 /// (resource pressure) and `Interrupted` (a signal interrupted the
-/// spawn) -- up to [`PROBE_ATTEMPTS`] attempts. Any other error, such
+/// spawn) -- up to [`SPAWN_ATTEMPTS`] attempts. Any other error, such
 /// as `NotFound` for a missing binary or `PermissionDenied` for a
-/// non-executable one, fails identically on every attempt, so it
-/// returns `None` on the first attempt.
+/// non-executable one, fails identically on every attempt, so it is
+/// returned on the first attempt. Probes discard the error (`.ok()`);
+/// tool runs surface it as their failure diagnostic.
 ///
 /// Split out of [`Tool::probe`] so the retry policy is testable with a
 /// scripted spawner instead of a real binary.
-fn spawn_with_retry<F>(mut spawn: F) -> Option<Output>
+pub(crate) fn spawn_with_retry<F>(mut spawn: F) -> std::io::Result<Output>
 where
     F: FnMut() -> std::io::Result<Output>,
 {
-    for attempt in 0..PROBE_ATTEMPTS {
+    let mut attempt = 0;
+    loop {
         if attempt > 0 {
-            std::thread::sleep(PROBE_RETRY_DELAY);
+            std::thread::sleep(SPAWN_RETRY_DELAY);
         }
         match spawn() {
-            Ok(output) => return Some(output),
-            Err(err) => match err.kind() {
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted => {}
-                _ => return None,
-            },
+            Ok(output) => return Ok(output),
+            Err(err) => {
+                attempt += 1;
+                let transient = matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                );
+                if !transient || attempt >= SPAWN_ATTEMPTS {
+                    return Err(err);
+                }
+            }
         }
     }
-    None
 }
 
 /// Build a [`ToolSource`] for tests: `None` probes the live `PATH`,
@@ -168,7 +176,7 @@ mod tests {
                 Ok(fake_output())
             }
         });
-        assert!(output.is_some());
+        assert!(output.is_ok());
         assert_eq!(attempts.get(), 3);
     }
 
@@ -186,7 +194,7 @@ mod tests {
                 Ok(fake_output())
             }
         });
-        assert!(output.is_some());
+        assert!(output.is_ok());
         assert_eq!(attempts.get(), 2);
     }
 
@@ -195,11 +203,11 @@ mod tests {
         // NotFound is permanent -- a missing binary stays missing --
         // so the probe must not retry it.
         let attempts = Cell::new(0);
-        let output: Option<Output> = spawn_with_retry(|| {
+        let output: io::Result<Output> = spawn_with_retry(|| {
             attempts.set(attempts.get() + 1);
             Err(io::Error::from(io::ErrorKind::NotFound))
         });
-        assert!(output.is_none());
+        assert!(output.is_err());
         assert_eq!(attempts.get(), 1);
     }
 
@@ -207,11 +215,11 @@ mod tests {
     fn spawn_retry_fails_fast_on_a_non_executable_binary() {
         // PermissionDenied is permanent too: exactly one attempt.
         let attempts = Cell::new(0);
-        let output: Option<Output> = spawn_with_retry(|| {
+        let output: io::Result<Output> = spawn_with_retry(|| {
             attempts.set(attempts.get() + 1);
             Err(io::Error::from(io::ErrorKind::PermissionDenied))
         });
-        assert!(output.is_none());
+        assert!(output.is_err());
         assert_eq!(attempts.get(), 1);
     }
 
@@ -220,12 +228,17 @@ mod tests {
         // A spawn that keeps failing transiently must still end up
         // absent after exactly PROBE_ATTEMPTS tries.
         let attempts = Cell::new(0);
-        let output: Option<Output> = spawn_with_retry(|| {
+        let output: io::Result<Output> = spawn_with_retry(|| {
             attempts.set(attempts.get() + 1);
             Err(io::Error::from(io::ErrorKind::WouldBlock))
         });
-        assert!(output.is_none());
-        assert_eq!(attempts.get(), PROBE_ATTEMPTS);
+        assert!(output.is_err());
+        assert_eq!(attempts.get(), SPAWN_ATTEMPTS);
+        // The caller sees the final attempt's error, not a bare failure.
+        assert_eq!(
+            output.expect_err("every attempt failed").kind(),
+            io::ErrorKind::WouldBlock
+        );
     }
 
     #[cfg(unix)]
@@ -236,7 +249,7 @@ mod tests {
             attempts.set(attempts.get() + 1);
             Ok(fake_output())
         });
-        assert!(output.is_some());
+        assert!(output.is_ok());
         assert_eq!(attempts.get(), 1);
     }
 
