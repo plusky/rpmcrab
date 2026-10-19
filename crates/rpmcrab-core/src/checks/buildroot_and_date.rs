@@ -1,7 +1,7 @@
 //! `BuildRootAndDateCheck` — build-root and current-date traces in files.
 //!
 //! Ported from `rpmlint/checks/BuildRootAndDateCheck.py`. Three findings:
-//! `file-contains-date-and-time` (W), `file-contains-current-date` (W),
+//! `file-contains-date-and-time` (E), `file-contains-current-date` (E),
 //! `file-contains-buildroot` (E).
 
 use fancy_regex::Regex;
@@ -105,7 +105,7 @@ impl Check for BuildRootAndDateCheck {
                 if is_match(&self.looksliketime, &data) {
                     add_info(
                         out,
-                        Level::Warning,
+                        Level::Error,
                         pkg,
                         "file-contains-date-and-time",
                         &[filename],
@@ -113,7 +113,7 @@ impl Check for BuildRootAndDateCheck {
                 } else {
                     add_info(
                         out,
-                        Level::Warning,
+                        Level::Error,
                         pkg,
                         "file-contains-current-date",
                         &[filename],
@@ -324,14 +324,14 @@ mod tests {
         out.results().to_vec()
     }
 
-    /// Today's date plus a time triggers `file-contains-date-and-time` (W).
+    /// Today's date plus a time triggers `file-contains-date-and-time` (E).
     #[test]
     fn today_with_time_is_flagged() {
         let content = format!("built {} at 14:30:00", today_string());
         let results = findings_for_content("/usr/bin/with-time", &content);
         assert_eq!(results.len(), 1, "unexpected: {results:?}");
         assert_eq!(results[0].0, "file-contains-date-and-time");
-        assert!(results[0].1.contains(": W: "), "level: {}", results[0].1);
+        assert!(results[0].1.contains(": E: "), "level: {}", results[0].1);
         assert!(
             results[0].1.contains("/usr/bin/with-time"),
             "detail: {}",
@@ -339,14 +339,14 @@ mod tests {
         );
     }
 
-    /// Today's date without a time triggers `file-contains-current-date` (W).
+    /// Today's date without a time triggers `file-contains-current-date` (E).
     #[test]
     fn today_without_time_is_flagged() {
         let content = format!("built {}", today_string());
         let results = findings_for_content("/usr/bin/with-date", &content);
         assert_eq!(results.len(), 1, "unexpected: {results:?}");
         assert_eq!(results[0].0, "file-contains-current-date");
-        assert!(results[0].1.contains(": W: "), "level: {}", results[0].1);
+        assert!(results[0].1.contains(": E: "), "level: {}", results[0].1);
     }
 
     /// A buildroot path triggers `file-contains-buildroot` (E).
