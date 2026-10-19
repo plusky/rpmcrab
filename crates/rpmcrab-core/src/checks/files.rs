@@ -9110,43 +9110,6 @@ mod tests {
         }
     }
 
-    /// The vendored SLFO config's `SystemdPresetPackages` list is the
-    /// exemption source for the SLFO branding-preset packages: a package
-    /// named e.g. `systemd-presets-branding-SLE` shipping a regular preset
-    /// file stays quiet under it.
-    #[test]
-    fn slfo_preset_packages_are_quiet_under_vendored_slfo_config() {
-        let slfo_toml =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("data/distro/slfo/opensuse.toml");
-        let parsed: toml::Table =
-            toml::from_str(&std::fs::read_to_string(slfo_toml).expect("vendored slfo config"))
-                .expect("vendored slfo config parses");
-        let mut cfg = test_config();
-        cfg.configuration.insert(
-            "SystemdPresetPackages".to_string(),
-            parsed["SystemdPresetPackages"].clone(),
-        );
-        for name in [
-            "systemd-presets-branding-SLE",
-            "systemd-presets-branding-SLE_immutable",
-            "systemd-presets-branding-Elemental",
-            "systemd-presets-branding-SLE-SAP",
-            "systemd-presets-branding-SLE-SAP_immutable",
-        ] {
-            let (mut pkg, _dir) = pkg_with_files(vec![mkfile(
-                "/usr/lib/systemd/system-preset/90-default.preset",
-                0o100644,
-                42,
-            )]);
-            pkg.name = name.to_string();
-            let results = run_check_binary_with_config(&pkg, &cfg);
-            assert!(
-                preset_findings(&results).is_empty(),
-                "SLFO preset package {name} must stay quiet: {results:?}"
-            );
-        }
-    }
-
     /// The vendored openSUSE config's `SystemdPresetPackages` list is the
     /// exemption source default runs actually use: every package it names
     /// stays quiet under it, so generator or typo drift in the list

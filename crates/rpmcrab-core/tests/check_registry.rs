@@ -168,17 +168,13 @@ fn checks_in_config_file(path: &std::path::Path) -> Vec<String> {
 }
 
 /// The union of the `Checks = [...]` lists of every shipped config layer:
-/// the bundled defaults and both vendored flavour configs. A check listed
-/// in any layer runs under that layer's flavour.
+/// the bundled defaults and the vendored flavour config. A check listed
+/// in any layer runs under that layer.
 fn checks_in_shipped_configs() -> Vec<String> {
     let mut names = checks_in_config_file(&core_root().join("data/configdefaults.toml"));
-    for flavor in ["opensuse", "slfo"] {
-        for name in
-            checks_in_config_file(&core_root().join(format!("data/distro/{flavor}/opensuse.toml")))
-        {
-            if !names.contains(&name) {
-                names.push(name);
-            }
+    for name in checks_in_config_file(&core_root().join("data/distro/opensuse/opensuse.toml")) {
+        if !names.contains(&name) {
+            names.push(name);
         }
     }
     names
@@ -189,7 +185,7 @@ fn checks_in_shipped_configs() -> Vec<String> {
 /// `XinetdDepCheck` and `PAMModulesCheck` are both deliberately enabled
 /// (ledgered in tests/parity/divergences.toml), and `LSBCheck` is deleted,
 /// so it is not constructible. `AtomicUpdateCheck` is listed in the
-/// bundled defaults and in both flavour configs (issue #698). Every
+/// bundled defaults and in the flavour config (issue #698). Every
 /// constructible check must appear in the `Checks = [...]` list of at
 /// least one shipped config (issue #66 closed).
 #[test]
@@ -256,12 +252,11 @@ fn every_built_check_reports_its_registry_name() {
     }
 }
 
-/// Issue #698: transactional updates are mandatory, not an slfo-only
-/// requirement, so `AtomicUpdateCheck` is listed in the bundled defaults
-/// and in both flavour configs. Both flavours keep the
-/// `filesystem` exemption for the finding (in the openSUSE flavour the
-/// check now runs there, so the exemption is live), and no flavour
-/// ships a scoring entry for `dir-or-file-outside-snapshot`: a
+/// Issue #698: transactional updates are mandatory, so
+/// `AtomicUpdateCheck` is listed in the bundled defaults
+/// and in the flavour config. The flavour keeps the
+/// `filesystem` exemption for the finding, and it
+/// ships no scoring entry for `dir-or-file-outside-snapshot`: a
 /// vendored `= 0` would demote the emitted Error to a warning, and
 /// the finding's significance is its Error level (issue #699).
 #[test]
@@ -272,36 +267,30 @@ fn atomic_update_check_is_enabled_everywhere() {
         defaults.iter().any(|n| n == "AtomicUpdateCheck"),
         "AtomicUpdateCheck must be listed in the bundled defaults"
     );
-    for flavor in ["opensuse", "slfo"] {
-        let listed =
-            checks_in_config_file(&root.join(format!("data/distro/{flavor}/opensuse.toml")));
-        assert!(
-            listed.iter().any(|n| n == "AtomicUpdateCheck"),
-            "AtomicUpdateCheck must be listed in the {flavor} flavour config"
-        );
-        // Since #699 no flavour vendors scoring.toml at all: a
-        // missing file is the strongest form of "no scoring entry".
-        let scoring = match std::fs::read_to_string(
-            root.join(format!("data/distro/{flavor}/scoring.toml")),
-        ) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => panic!("read scoring.toml: {e}"),
-        };
-        assert!(
-            !scoring.contains("dir-or-file-outside-snapshot"),
-            "the {flavor} flavour must not ship a scoring entry for \
-             dir-or-file-outside-snapshot (it would demote the Error)"
-        );
-        let flavor_config =
-            std::fs::read_to_string(root.join(format!("data/distro/{flavor}/opensuse.toml")))
-                .expect("read opensuse.toml");
-        assert!(
-            flavor_config.contains("'^filesystem\\..*: dir-or-file-outside-snapshot'"),
-            "the {flavor} flavour must keep the filesystem exemption for \
-             dir-or-file-outside-snapshot"
-        );
-    }
+    let listed = checks_in_config_file(&root.join("data/distro/opensuse/opensuse.toml"));
+    assert!(
+        listed.iter().any(|n| n == "AtomicUpdateCheck"),
+        "AtomicUpdateCheck must be listed in the flavour config"
+    );
+    // Since #699 the flavour vendors no scoring.toml at all: a
+    // missing file is the strongest form of "no scoring entry".
+    let scoring = match std::fs::read_to_string(root.join("data/distro/opensuse/scoring.toml")) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => panic!("read scoring.toml: {e}"),
+    };
+    assert!(
+        !scoring.contains("dir-or-file-outside-snapshot"),
+        "the flavour must not ship a scoring entry for \
+         dir-or-file-outside-snapshot (it would demote the Error)"
+    );
+    let flavor_config = std::fs::read_to_string(root.join("data/distro/opensuse/opensuse.toml"))
+        .expect("read opensuse.toml");
+    assert!(
+        flavor_config.contains("'^filesystem\\..*: dir-or-file-outside-snapshot'"),
+        "the flavour must keep the filesystem exemption for \
+         dir-or-file-outside-snapshot"
+    );
 }
 
 /// The reverse direction (issue #85): a name in a shipped config's
@@ -313,7 +302,6 @@ fn every_listed_check_is_constructible() {
     let files = [
         core_root().join("data/configdefaults.toml"),
         core_root().join("data/distro/opensuse/opensuse.toml"),
-        core_root().join("data/distro/slfo/opensuse.toml"),
     ];
     for path in files {
         for name in checks_in_config_file(&path) {
