@@ -418,9 +418,8 @@ flag breaks `rpmlint-mini` outright.
 
 ### 4.11 Flavors
 
-The reference maintains separate git branches for distribution flavors
-(`opensuse`, `opensuse-slfo-1.2`, `opensuse-slfo-main`). rpmcrab controls
-flavor-specific behavior with a single config key.
+rpmcrab controls flavor-specific behavior with a single config key, and
+ships one vendored data set: the SUSE flavour's.
 
 - **Key:** `Flavor` (top-level TOML key, case-insensitive value).
 - **Values:** `"opensuse"` (default), `"slfo"`.
@@ -429,21 +428,27 @@ flavor-specific behavior with a single config key.
 - **No auto-detection.** rpmcrab lints arbitrary packages, often cross-distro
   (a Tumbleweed host linting SLFO packages). Flavor is a property of the
   *target*, not the host, so it is explicit config.
+- **Vendored data.** The shipped tree carries one vendored data set — the
+  openSUSE data (`crates/rpmcrab-core/data/distro/opensuse/`, vendored
+  from upstream's `opensuse` branch) — and every recognised `Flavor`
+  value selects it. The key, the pre-pass that reads it,
+  `Config::is_slfo()` and the divergence ledger's `flavor` gating form
+  the mechanism a future flavour plugs into with its own vendored set.
 
 Flavor selects the vendored data set and the configured check list.
 Severity recalibrations are unconditional: a finding reports the same
 level under every flavor, and its ledger entry carries no flavor field.
 
-**Verified SLFO divergences.** Each candidate divergence from the SLFO
-branches was verified against upstream history before being accepted. Three
-of the four candidates turned out to be branch staleness or removed checks,
-not real flavor divergences:
+**The SLFO audit.** The reference maintains separate git branches for
+distribution flavors (`opensuse`, `opensuse-slfo-1.2`,
+`opensuse-slfo-main`). Each candidate divergence from the SLFO branches
+was verified against upstream history and Factory content (issue #714):
 
 | # | Candidate | Verdict | Reason |
 |---|-----------|---------|--------|
 | 1 | `post-without-tmpfile-creation` (new W finding) | **REJECTED** | Removed upstream in 2025-12-09 (issue #1374): the `%tmpfiles` macro is now a noop via systemd triggers; the check fires false positives on correct packages. SLFO branches are stale. Do not implement. |
 | 2 | `binary-in-etc` flags `/usr/etc/` | **REJECTED** | The `/usr/etc/` coverage was added to opensuse on 2025-06-06 (mgerstner PR #1357), after the SLFO branches forked (2025-02-04). SLFO is stale; the opensuse behavior is correct. Do not gate. |
-| 3 | `file-contains-date-and-time` / `file-contains-current-date` W→E | **APPROVED** | Decided 2026-10-19 (D11 of #714) and implemented in #759 as an unconditional severity recalibration: both findings report E. An embedded build date stamps image content with the build moment and makes the image non-reproducible byte-for-byte. Measured over the Factory corpus by build-time emulation (51,589 RPMs, each payload scanned for its own build date under the check's exact rule): 578 firings in 259 srcpkgs; 25 hand-read firings carried 23 genuine embedded build dates, and the 2 remaining firings are upstream release-history files whose release date equals a release-day build date. Ledgered as a severity divergence (§6.2). |
+| 3 | `file-contains-date-and-time` / `file-contains-current-date` W→E | **APPROVED** | Build dates embedded in shipped files break the reproducibility image-based installs rely on. Measured over the Factory corpus (issue #759): 578 firings in 259 srcpkgs; a 25-firing hand audit found 23 genuine build-date stamps and 2 bounded release-day cases (0.35% of firings). Both findings are Error under every flavour: the promotion is unconditional. |
 | 4 | LogrotateCheck drops `/usr/etc/logrotate.d/` | **REJECTED** | Same staleness as #2: `/usr/etc/` support added to opensuse after the SLFO fork. Do not gate. |
 
 `missing-call-to-setgroups-before-setuid` carries a uniform `W` in
@@ -451,24 +456,22 @@ rpmcrab (fix-and-diverge #743 with a ledger entry); upstream's own
 level split (`E if is_uid else W`) is not carried, and it is not a
 flavor gate.
 
-Row 3 is approved and implemented as an unconditional recalibration, so
-the divergence matrix carries no flavor gating:
-
-| Check | Finding | opensuse | slfo |
-|-------|---------|----------|------|
-| `checks::buildroot_and_date` | `file-contains-date-and-time` | E | E |
-| `checks::buildroot_and_date` | `file-contains-current-date` | E | E |
-
-Each severity divergence gets a `[[divergence]]` ledger entry (§6.2) with
-`kind = "severity"` and no flavor field.
+**The unified data set (issue #760).** The one vendored set is the
+openSUSE branch's data with the generator's extras applied
+(`XinetdDepCheck` and `PAMModulesCheck` in `Checks`, the MinGW
+`Filters`, the 59 `BlockedFilters`): the security data covers the
+varlink locations and `/usr/etc/sudoers.d`, and the digest records
+carry the hash sets Factory ships, adjudicated from corpus content
+wherever the branches disagreed (decision D7 of issue #714).
 
 ### 4.12 Supported flavors
 
 rpmcrab supports distributions in priority order. The order decides which
 consumers a finding must serve to survive:
 
-1. **SUSE (P1).** openSUSE and SLFO/SLE — the primary family. Distro configs
-   are vendored in-tree and flavor-specific behavior is `Flavor`-gated (§4.11).
+1. **SUSE (P1).** The primary family: openSUSE, SLFO and SLE consume the
+   one vendored data set. Distro configs are vendored in-tree and
+   flavor-specific behavior is `Flavor`-gated (§4.11).
 2. **Fedora (P2).** Supported, nice to have. No vendored config yet; findings
    are kept when Fedora's own rpmlint config lets them fire.
 3. **Everything else — not considered.** No other flavor is currently
