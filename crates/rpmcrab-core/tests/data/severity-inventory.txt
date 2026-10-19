@@ -415,7 +415,7 @@ dbus_policy.rs: add_info(out, level, pkg, finding, &[fname])
 device_files.rs: add_info(out, level, pkg, check, &refs)
 fhs.rs: add_info(out, Level::Warning, pkg, &check, &[&subdir])
 file_digest.rs: add_info( out, Level::Error, pkg,
-file_digest.rs: add_info( out, Level::Warning, pkg, &format!("
+file_digest.rs: add_info( out, Level::Error, pkg, &format!("{c
 filelist.rs: add_info(out, Level::Error, pkg, &rule.message, &[f])
 files.rs: add_info(finding)
 files.rs: add_info(out, Level::Error, pkg, &tag, &[fname])
