@@ -2451,6 +2451,30 @@ fi
     }
 
     #[test]
+    fn direct_user_creation_substitution_scope_is_opener_only() {
+        // The scope the #640 ledger entry states (narrowed with
+        // the #776 wording): the substitution opener starts no
+        // segment, so an interior without a separator stays
+        // inside the outer segment; an interior command after a
+        // separator is a segment of its own and fires, in both
+        // substitution forms.
+        for body in ["x=$(useradd -r foo)", "echo `useradd -r foo`"] {
+            assert!(
+                direct_user_creation_in_body(body).is_empty(),
+                "must stay silent: {body}"
+            );
+        }
+        for body in [
+            "echo $(echo hi; useradd -r foo)",
+            "echo `echo hi; useradd -r foo`",
+        ] {
+            let hits = direct_user_creation_in_body(body);
+            assert_eq!(hits.len(), 1, "must fire: {body}");
+            assert_eq!(hits[0].0, "useradd", "must fire: {body}");
+        }
+    }
+
+    #[test]
     fn direct_user_creation_subshell_invocations_fire() {
         // A subshell invocation is not a definition: the `(`
         // sits before the command name.
