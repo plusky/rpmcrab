@@ -10,6 +10,7 @@
 # Extra Filters appended (not from upstream; see EXTRA_OPENSUSE_FILTERS):
 #   Filters: added '^mingw32-.*arch-independent-package-contains-binary-or-object.*\\.a$' (mingw -filesystem packages' rpmlintrc)
 #   Filters: added '^mingw64-.*arch-independent-package-contains-binary-or-object.*\\.a$' (mingw -filesystem packages' rpmlintrc)
+#   Filters: added '^.*spelling-error (Summary\\([A-Za-z_@.]+\\)|%description -l [A-Za-z_@.]+) (init|librpm|namespace|scriptlet)\\b' (mingw -filesystem packages' rpmlintrc)
 #
 # Extra Checks appended (not from upstream; see EXTRA_OPENSUSE_CHECKS):
 #   Checks: added 'XinetdDepCheck' (deliberate rpmcrab divergence, ledgered in tests/parity/divergences.toml)

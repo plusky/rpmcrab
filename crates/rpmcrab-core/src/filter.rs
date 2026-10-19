@@ -983,4 +983,58 @@ mod tests {
             "foo-devel.noarch: E: arch-independent-package-contains-binary-or-object /usr/lib/libfoo.a"
         ));
     }
+
+    /// rpmcrab#778: the vendored openSUSE config must carry the
+    /// spelling-error jargon filter. librpm, scriptlet, init and namespace
+    /// are RPM-ecosystem technical terms the hunspell en_US dictionary
+    /// lacks (in both the system dictionary and the LibreOffice build
+    /// pinned by scripts/install-hunspell-dicts.sh), so a provisioned
+    /// reference flags them too; the distro-config Filters list is the
+    /// channel the ecosystem uses for this class (Fedora's rpmlint config
+    /// carries the same kind of jargon list). See EXTRA_OPENSUSE_FILTERS
+    /// in scripts/generate-distro-configs.py.
+    #[test]
+    fn vendored_opensuse_config_suppresses_spelling_error_jargon() {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let toml_path = manifest_dir.join("data/distro/opensuse/opensuse.toml");
+        let content = std::fs::read_to_string(&toml_path).expect("read opensuse.toml");
+        let value: toml::Value = toml::from_str(&content).expect("parse opensuse.toml");
+        let filters = value
+            .get("Filters")
+            .and_then(|v| v.as_array())
+            .expect("Filters list");
+        let pattern = filters
+            .iter()
+            .filter_map(|v| v.as_str())
+            .find(|p| p.contains("spelling-error"))
+            .expect("spelling-error jargon filter in vendored opensuse.toml");
+
+        let re = fancy_regex::Regex::new(pattern).expect("compile spelling filter");
+        let is_match = |s: &str| re.find(s).unwrap().is_some();
+
+        // Suppressed: the four jargon words, in the rendered shapes the
+        // rpm 6.1.0 package set produces (Summary(C) and %description -l C
+        // details, each with its suggestion list).
+        for line in [
+            "rpm-devel.x86_64: E: spelling-error Summary(C) librpm -> Librium, lib rpm, lib-rpm",
+            "rpm-plugin-prioreset.x86_64: E: spelling-error Summary(C) scriptlet -> prescript, script, script let",
+            "rpm-plugin-prioreset.x86_64: E: spelling-error %description -l C scriptlet -> prescript, script, script let",
+            "rpm-plugin-prioreset.x86_64: E: spelling-error Summary(C) init -> i nit, in it, in-it",
+            "rpm-plugin-prioreset.x86_64: E: spelling-error %description -l C init -> i nit, in it, in-it",
+            "rpm-plugin-unshare.x86_64: E: spelling-error Summary(C) namespace -> name space, name-space, names pace",
+            "rpm-plugin-unshare.x86_64: E: spelling-error %description -l C namespace -> name space, name-space, names pace",
+        ] {
+            assert!(is_match(line), "not suppressed: {line}");
+        }
+
+        // Not suppressed: a genuine typo, a word merely starting with a
+        // jargon word, and a different finding mentioning a jargon word.
+        assert!(!is_match(
+            "foo.x86_64: E: spelling-error Summary(C) recieve -> receive"
+        ));
+        assert!(!is_match(
+            "foo.x86_64: E: spelling-error Summary(C) initialisation -> initialization"
+        ));
+        assert!(!is_match("rpm.x86_64: E: scriptlet-failed /usr/bin/foo"));
+    }
 }
