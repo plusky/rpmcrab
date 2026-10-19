@@ -1768,5 +1768,73 @@ def test_append_systemd_preset_packages_appends_at_eof_without_table():
     assert gen.append_systemd_preset_packages('Version = 3', ["a"]) == 'Version = 3\n' + block
 
 
+
+def test_spelling_jargon_shipped_words_build_the_shipped_filter():
+    """The shipped jargon TOML carries the four words issue #778
+    evidenced, sorted, and the filter built from them is the one
+    EXTRA_OPENSUSE_FILTERS appends to the openSUSE config.
+
+    Pins both ends of the generator: a word silently dropping out of
+    the TOML (or out of the built alternation) re-opens #778.
+    """
+    assert gen.SPELLING_JARGON_WORDS == [
+        "init",
+        "librpm",
+        "namespace",
+        "scriptlet",
+    ], gen.SPELLING_JARGON_WORDS
+    expected = (
+        r"^.*spelling-error (Summary\([A-Za-z_@.]+\)|%description -l [A-Za-z_@.]+) "
+        r"(init|librpm|namespace|scriptlet)\b"
+    )
+    assert gen.spelling_jargon_filter(gen.SPELLING_JARGON_WORDS) == expected
+    assert expected in gen.EXTRA_OPENSUSE_FILTERS, gen.EXTRA_OPENSUSE_FILTERS
+
+
+def test_spelling_jargon_added_word_appears_in_filter():
+    """A word added to the TOML appears in the built filter, regex-
+    escaped, and the loader returns the words sorted regardless of
+    file order.
+
+    The list is meant to grow one line at a time; this proves the
+    growth path end to end without touching the shipped file.
+    """
+    import re
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "jargon.toml")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('words = [\n    "scriptlet",\n    "frobnicate",\n    "lib.rpm",\n]\n')
+        words = gen.load_spelling_jargon(path)
+    assert words == ["frobnicate", "lib.rpm", "scriptlet"], words
+    pattern = gen.spelling_jargon_filter(words)
+    assert "frobnicate" in pattern, pattern
+    assert r"lib\.rpm" in pattern, pattern
+    rx = re.compile(pattern)
+    assert rx.search("foo.x86_64: E: spelling-error Summary(C) frobnicate -> frob nicate")
+    assert rx.search("foo.x86_64: E: spelling-error %description -l C lib.rpm -> lib rpm")
+    # The closing word boundary keeps a longer word that merely starts
+    # with a jargon word visible, and unlisted words are untouched.
+    assert not rx.search("foo.x86_64: E: spelling-error Summary(C) frobnicated -> frob nicate")
+    assert not rx.search("foo.x86_64: E: spelling-error Summary(C) blorple -> blurple")
+
+
+def test_spelling_jargon_duplicate_words_raise():
+    """Duplicates in the TOML fail loudly: a duplicated alternative
+    would ride along as dead weight in every vendored copy of the
+    filter."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "jargon.toml")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('words = ["init", "init"]\n')
+        try:
+            gen.load_spelling_jargon(path)
+        except ValueError:
+            return
+    raise AssertionError("load_spelling_jargon accepted duplicate words")
+
 if __name__ == "__main__":
     sys.exit(main())
