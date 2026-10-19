@@ -3,15 +3,16 @@
 
 Fetches the TOML whitelist files from the given upstream rpmlint branch
 (default: opensuse) and merges genuinely new stanzas into rpmcrab's copies
-under crates/rpmcrab-core/data/distro/<flavor>/.
+under crates/rpmcrab-core/data/distro/opensuse/.
 
 This is a SMART merge, not a blind copy:
 - New stanzas not present locally are added in their upstream position.
 - Stanzas naming blocklisted packages (.github/whitelist-blocklist.txt)
   are never (re)introduced.
-- Flavor-specific prunes (e.g. packages absent from Leap 16.0) are respected,
-  except entries the generator deliberately keeps for that flavor (lxd for
-  slfo: still shipped in SLE 16, see PRUNE_PACKAGES).
+- Digest records adjudicated from Factory content (the generator's
+  DIGEST_ADJUDICATIONS) are applied to both sides before merging, so a
+  stale upstream record never re-enters and a corrected local record
+  never reads as an update.
 - Existing stanzas are updated in place when upstream changes them
   (matched by full normalized stanza text).
 - Stanzas upstream deleted are removed and reported (never silently).
@@ -19,7 +20,7 @@ This is a SMART merge, not a blind copy:
 Ownership split with scripts/generate-distro-configs.py: the generator owns
 every vendored file's content at the monthly PINS, except the SYNC_MANAGED
 whitelist files below, which this tool advances day-to-day at branch TIPs.
-The generator's --check skips those files (and the per-flavor whitelist pins
+The generator's --check skips those files (and the whitelist pin
 in PROVENANCE this tool maintains), so a successful daily sync can never fail
 the drift gate.
 
@@ -46,10 +47,9 @@ PROVENANCE_FILE = DISTRO_DIR / "PROVENANCE"
 UPSTREAM_REPO = "rpm-software-management/rpmlint"
 UPSTREAM_CONFIG_DIR = "configs/openSUSE"
 
-# flavor -> upstream branch to sync from
+# flavor -> upstream branch to sync from (the single vendored flavor)
 BRANCHES = {
     "opensuse": "opensuse",
-    "slfo": "opensuse-slfo-main",
 }
 
 
@@ -64,14 +64,13 @@ def _load_generator_module():
 
 
 def _load_generator_sets():
-    """Import the generator's prune set, managed-file set and file sets.
+    """Import the generator's managed-file set and file sets.
 
-    The generator is the source of truth for all three; duplicating them
+    The generator is the source of truth for both; duplicating them
     here caused the #417 data loss (a hand-copied prune list drifting).
     """
     mod = _load_generator_module()
     return (
-        set(mod.PRUNE_PACKAGES_LEAP_ONLY),
         list(mod.SYNC_MANAGED_FILES),
         {flavor: set(files) for flavor, files in mod.FILES.items()},
     )
@@ -89,12 +88,6 @@ STANZA_RE = re.compile(r"^\[\[([A-Za-z0-9_]+)\]\]\s*$", re.M)
 # arrays, silently reintroducing blocklisted packages).
 PACKAGE_RE = re.compile(r'^package\s*=\s*"([^"]+)"', re.M)
 PACKAGES_RE = re.compile(r"^packages\s*=\s*\[(.*?)\]", re.M | re.S)
-
-# Blocklist entries the generator deliberately keeps for the slfo flavor
-# (removed from Factory, still shipped in SLE 16 / Leap 16.0). The daily
-# sync must not strip them or the two tools flap forever.
-BLOCKLIST_SLFO_KEEP = {"lxd"}
-
 
 def load_blocklist():
     """Return the set of blocklisted package names.
@@ -230,7 +223,8 @@ def normalize_stanza(text):
     return "\n".join(sorted(lines))
 
 
-def plan_merge(local_text, upstream_text, blocklist, flavor, leap_only_prunes):
+def plan_merge(local_text, upstream_text, blocklist, filename=None,
+               gen_mod=None):
     """Pure stanza merge.
 
     Returns (changed, new_text, added, updated, removed, skipped):
@@ -241,11 +235,23 @@ def plan_merge(local_text, upstream_text, blocklist, flavor, leap_only_prunes):
     new_text is None when nothing changed.
     Raises RuntimeError on an empty upstream response: zero stanzas must
     never read as "delete everything".
+
+    When filename and gen_mod are given, the generator's
+    DIGEST_ADJUDICATIONS are applied to both texts first: upstream's
+    stale record and the local adjudicated record then compare equal,
+    and the merged output carries the adjudicated hashes.
     """
     if not upstream_text.strip():
         raise RuntimeError(
             "empty upstream response -- refusing to delete every stanza"
         )
+    local_adjudicated = False
+    if gen_mod is not None and filename is not None:
+        local_text, adj_log = gen_mod.apply_digest_adjudications(
+            local_text, filename)
+        local_adjudicated = bool(adj_log)
+        upstream_text, _ = gen_mod.apply_digest_adjudications(
+            upstream_text, filename)
     m = STANZA_RE.search(local_text)
     local_header = local_text[: m.start()] if m else local_text
     local_stanzas = split_stanzas(local_text)
@@ -255,12 +261,7 @@ def plan_merge(local_text, upstream_text, blocklist, flavor, leap_only_prunes):
             "no stanzas in upstream response -- refusing to delete everything"
         )
 
-    # Flavor-specific prunes apply on top of the global blocklist, except
-    # entries the generator deliberately keeps for this flavor.
     effective_blocklist = set(blocklist)
-    if flavor == "slfo":
-        effective_blocklist |= leap_only_prunes
-        effective_blocklist -= BLOCKLIST_SLFO_KEEP
 
     local_by_norm = {}
     for _, _, text in local_stanzas:
@@ -327,6 +328,11 @@ def plan_merge(local_text, upstream_text, blocklist, flavor, leap_only_prunes):
         else:
             removed.append(desc)
     if set(old_by_norm) == new_norms:
+        if local_adjudicated:
+            # The merge itself is a no-op, but the local file still
+            # carries a pre-adjudication record: writing the
+            # adjudicated text is the change.
+            return True, local_text, 0, [], removed, skipped_blocklisted
         return False, None, 0, [], removed, skipped_blocklisted
 
     # Rewrite the file in place with upstream ordering
@@ -342,15 +348,15 @@ def plan_merge(local_text, upstream_text, blocklist, flavor, leap_only_prunes):
     return True, new_text, added, updated, removed, skipped_blocklisted
 
 
-def sync_file(local_path, upstream_text, blocklist, flavor, dry_run,
-              leap_only_prunes):
+def sync_file(local_path, upstream_text, blocklist, dry_run,
+              filename=None, gen_mod=None):
     """Merge upstream stanzas into the file at local_path, rewriting in place.
 
     Returns (changed, added_count, updated, removed, skipped_blocklisted).
     """
     changed, new_text, added, updated, removed, skipped = plan_merge(
-        local_path.read_text(), upstream_text, blocklist, flavor,
-        leap_only_prunes,
+        local_path.read_text(), upstream_text, blocklist,
+        filename=filename, gen_mod=gen_mod,
     )
     if changed and not dry_run:
         local_path.write_text(new_text)
@@ -387,42 +393,19 @@ def update_provenance_pins(flavor_pins):
     PROVENANCE_FILE.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
-def regenerate_rs(gen_mod, distro_dir):
-    """Regenerate the Rust manifest when the sync toggled slfo dedup.
-
-    Materializing a diverged slfo file (or deleting a reconverged one) flips
-    which include_str! path DISTRO_SLFO_FILES must reference. The deduped set
-    is recomputed from on-disk bytes: missing-or-identical means fallback to
-    the opensuse copy, exactly the generator's rule. Returns True when the
-    manifest changed.
-    """
-    deduped = [
-        filename
-        for filename in gen_mod.FILES["slfo"]
-        if not (distro_dir / "slfo" / filename).exists()
-        or (distro_dir / "slfo" / filename).read_bytes()
-        == (distro_dir / "opensuse" / filename).read_bytes()
-    ]
-    want_rs = gen_mod.emit_rs(deduped)
-    if gen_mod.GENERATED_RS.read_text(encoding="utf-8") != want_rs:
-        gen_mod.GENERATED_RS.write_text(want_rs, encoding="utf-8")
-        return True
-    return False
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--branch", default=None,
-                        help="Branch override. Format: 'branch' (applies to opensuse only) "
-                             "or 'opensuse=branch1,slfo=branch2' for per-flavor.")
+                        help="Branch override. Format: 'branch' "
+                             "or 'opensuse=branch'.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    # Parse per-flavor branch overrides
+    # Parse branch overrides
     branch_overrides = {}
     if args.branch:
         if "=" in args.branch:
-            # Per-flavor: "opensuse=foo,slfo=bar"
+            # Per-flavor form: "opensuse=foo" (one vendored flavor).
             for part in args.branch.split(","):
                 if "=" not in part:
                     parser.error(
@@ -438,20 +421,17 @@ def main():
                     )
                 branch_overrides[flavor] = branch
         else:
-            # Single branch applies to opensuse only (not slfo)
-            # to avoid syncing Tumbleweed stanzas into slfo/
             branch_overrides["opensuse"] = args.branch
 
     blocklist = load_blocklist()
     gen_mod = _load_generator_module()
-    leap_only_prunes = set(gen_mod.PRUNE_PACKAGES_LEAP_ONLY)
     whitelist_files = list(gen_mod.SYNC_MANAGED_FILES)
     files_by_flavor = {
         flavor: set(files) for flavor, files in gen_mod.FILES.items()
     }
     global WHITELIST_FILES
     WHITELIST_FILES = whitelist_files
-    print(f"blocklist: {len(blocklist)} entries (+ {len(leap_only_prunes)} leap-only)")
+    print(f"blocklist: {len(blocklist)} entries")
 
     total_added = 0
     total_updated = []
@@ -477,56 +457,22 @@ def main():
             )
         for filename in WHITELIST_FILES:
             if filename not in files_by_flavor.get(flavor, set()):
-                # E.g. varlink-whitelist.toml, which SLFO deleted upstream:
-                # not vendored for this flavor, nothing to sync.
+                # Not vendored for this flavor, nothing to sync.
                 print(f"skip {flavor}/{filename} (not vendored for flavor)")
                 continue
             local_path = flavor_dir / filename
             # Raises on failure — fail fast
             upstream_text = fetch_upstream(sha, filename)
             if not local_path.exists():
-                # Deduped files are absent while byte-identical to the
-                # opensuse copy (the generated Rust consts fall back to it).
-                # Merge against that copy and materialize only on divergence.
-                if flavor == "opensuse":
-                    raise RuntimeError(
-                        f"missing managed file: {local_path} -- "
-                        "opensuse files must always exist"
-                    )
-                base_path = DISTRO_DIR / "opensuse" / filename
-                if not base_path.exists():
-                    raise RuntimeError(
-                        f"missing managed file: {local_path} (and no "
-                        f"{base_path} fallback) -- refusing silent skip"
-                    )
-                changed, new_text, added, updated, removed, skipped = plan_merge(
-                    base_path.read_text(), upstream_text, blocklist, flavor,
-                    leap_only_prunes,
+                raise RuntimeError(
+                    f"missing managed file: {local_path} -- "
+                    "refusing silent skip"
                 )
-                if changed and new_text != base_path.read_text():
-                    if not args.dry_run:
-                        local_path.write_text(new_text)
-                    changed_files.append(str(local_path.relative_to(REPO)))
-                    changed_flavors.add(flavor)
-                    total_added += added
-                    total_updated.extend(
-                        f"{local_path.relative_to(REPO)}: {u}" for u in updated
-                    )
-                    total_removed.extend(
-                        f"{local_path.relative_to(REPO)}: {r}" for r in removed
-                    )
-                total_skipped.extend(f"{flavor}/{filename}: {p}" for p in skipped)
-                continue
             changed, added, updated, removed, skipped = sync_file(
-                local_path, upstream_text, blocklist, flavor,
-                args.dry_run, leap_only_prunes,
+                local_path, upstream_text, blocklist,
+                args.dry_run, filename=filename, gen_mod=gen_mod,
             )
             if changed:
-                # A reconverged slfo file is left in place (byte-identical to
-                # the opensuse copy); the monthly generator's write_all drops
-                # it again via stale-file removal. Deleting here would flip
-                # the generated manifest's include_str! path outside the
-                # regeneration below.
                 changed_files.append(str(local_path.relative_to(REPO)))
                 changed_flavors.add(flavor)
                 total_added += added
@@ -537,12 +483,6 @@ def main():
                     f"{local_path.relative_to(REPO)}: {r}" for r in removed
                 )
             total_skipped.extend(f"{flavor}/{filename}: {p}" for p in skipped)
-
-    if changed_files and not args.dry_run:
-        # Materializing a diverged slfo file flips its manifest entry from
-        # the opensuse fallback to the slfo copy; regenerate atomically.
-        if regenerate_rs(gen_mod, DISTRO_DIR):
-            changed_files.append(str(gen_mod.GENERATED_RS.relative_to(REPO)))
 
     if changed_flavors and not args.dry_run:
         update_provenance_pins(
