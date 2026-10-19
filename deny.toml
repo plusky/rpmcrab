@@ -7,6 +7,17 @@ all-features = false
 version = 2
 yanked = "deny"
 unmaintained = "workspace"
+# RUSTSEC-2023-0071 (Marvin attack) is a timing leak in RSA private-key
+# operations in the rsa crate. rpmcrab performs public-key signature
+# verification only, in a local CLI: it never performs RSA private-key
+# operations and exposes no remote timing oracle, and the advisory
+# itself deems local use on a non-compromised computer fine. No fixed
+# rsa release exists (0.9.10 and 0.10.0-rc are both affected, with
+# patched = [] upstream). This is the first advisory ignore in this
+# file: a deliberate exception, to be dropped once a fixed rsa ships.
+ignore = [
+  "RUSTSEC-2023-0071",
+]
 
 [licenses]
 version = 2
