@@ -26,5 +26,8 @@ cp "$here/nosrc-fixture.spec" "$work/rpmbuild/SPECS/nosrc-fixture.spec"
     "$image" \
     bash -c 'zypper -n in -y rpm-build >/dev/null && rpmbuild -bs --define "_topdir /rpmbuild" /rpmbuild/SPECS/nosrc-fixture.spec'
 
-find "$work/rpmbuild/SRPMS" -name '*.nosrc.rpm' -exec cp {} "$here/" \;
-echo "built: $(ls "$here"/nosrc-fixture-*.nosrc.rpm)"
+built="$(find "$work/rpmbuild/SRPMS" -name '*.nosrc.rpm' -print -quit)"
+[ -n "$built" ] || { echo "rpmbuild produced no package" >&2; exit 1; }
+
+cp "$built" "$here/"
+echo "built: $here/$(basename "$built")"
