@@ -2553,3 +2553,19 @@ kind = "behaviour"
 reason = "Fix-and-diverge (issue #751): `deprecated-grep` fires only where `egrep`/`fgrep` stands in command position — at line start, or behind whitespace, a path slash, a quote, `(`, a backtick, or one of `;`, `|`, `&`, `=`. The reference (`SpecCheck.py::_checkline_deprecated_grep`) matches the bare token `\\b[ef]grep\\b`, so it also fires on name fragments that invoke no grep command at all: the findutils regex dialect name in `find -regextype posix-egrep` (util-linux %install, the case that surfaced this), a dotted data file like `foo.egrep`, a hyphenated helper like `my-egrep-helper`. The check's description targets direct use of grep as egrep or fgrep; genuine invocations fire at the same W level with the identical detail rendering."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/751"
+
+[[divergence]]
+case = "global"
+check = "file-contains-date-and-time"
+kind = "severity"
+reason = "Deliberate severity recalibration (issue #759, decision D11 of #714): the port reports E where the reference reports W. An embedded build date stamps image content with the build moment and makes the image non-reproducible byte-for-byte, a significant defect on an image-based OS. Solidity was measured before the flip by build-time emulation over the Factory corpus (51,589 RPMs; every payload scanned for its own BUILDTIME date under the check's exact rule, the check itself matching the linter's run date): file-contains-date-and-time fires 443 times in 240 binary packages (208 srcpkgs). The matching rule is unchanged; only the level moves."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/759"
+
+[[divergence]]
+case = "global"
+check = "file-contains-current-date"
+kind = "severity"
+reason = "Deliberate severity recalibration (issue #759, decision D11 of #714): the port reports E where the reference reports W, on the file-contains-date-and-time reasoning. The build-time emulation over the Factory corpus (51,589 RPMs) fires it 135 times in 71 binary packages (59 srcpkgs); 25 hand-read firings across both date findings carried 23 genuine embedded build dates (ELF __DATE__/__TIME__ stamps, doxygen generation stamps, firmware build stamps, configure-stamped configuration). The 2 remaining firings of the 578 are upstream release-history files whose newest entry's date equals the build date on a release-day build (liberation-fonts ChangeLog, perl-Unicode-LineBreak Changes): the file genuinely contains the build date, the class is bounded and self-limiting, and the matching rule stays unchanged."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/759"
