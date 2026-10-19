@@ -30,8 +30,3 @@ passim
 scmon
 pam_csync
 pcfclock
-
-# PRUNE_PACKAGES (slfo flavor only): not shipped in Leap 16.0.
-# The sync script applies these to the slfo flavor; they are kept for opensuse.
-# (Handled via flavor-specific logic; listed here for documentation.)
-# pulseaudio, pommed, neard, xpra, iwd, udev-mini

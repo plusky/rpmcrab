@@ -1,8 +1,8 @@
 ---
-# Daily sync of whitelist/config stanzas from upstream rpmlint branches.
+# Daily sync of whitelist/config stanzas from upstream rpmlint.
 #
 # The SUSE security team commits whitelist updates to the `opensuse` branch
-# of rpm-software-management/rpmlint (and related branches). This job merges
+# of rpm-software-management/rpmlint. This job merges
 # genuinely new stanzas into rpmcrab's vendored TOML copies.
 #
 # This is a SMART merge, not a blind copy (see scripts/sync-upstream-whitelists.py):
@@ -11,7 +11,6 @@
 # - Stanzas upstream deleted are removed.
 # - Stanzas naming blocklisted packages (.github/whitelist-blocklist.txt)
 #   are never (re)introduced.
-# - Flavor-specific prunes (e.g. packages absent from Leap 16.0) are respected.
 #
 # No-op days produce no PR.
 
@@ -52,7 +51,7 @@ jobs:
           python3 scripts/sync-upstream-whitelists.py 2>&1 | tee /tmp/sync.log
           # Capture the summary and sections for the PR body
           grep "^sync-summary: " /tmp/sync.log > /tmp/summary.txt || true
-          grep -E "^(opensuse|slfo): .* @ [0-9a-f]+ " /tmp/sync.log > /tmp/shas.txt || true
+          grep -E "^opensuse: .* @ [0-9a-f]+ " /tmp/sync.log > /tmp/shas.txt || true
           grep "^  + " /tmp/sync.log > /tmp/added.txt || true
           grep "^  ~ " /tmp/sync.log > /tmp/updated.txt || true
           grep "^  x " /tmp/sync.log > /tmp/removed.txt || true
@@ -82,7 +81,6 @@ jobs:
           branch="upstream-whitelist-sync-${date}-${{ github.run_id }}-${{ github.run_attempt }}"
           git -c user.name=github-actions -c user.email=github-actions@github.com \
             checkout -b "$branch"
-          # The sync regenerates the Rust manifest when it flips slfo dedup.
           git add crates/rpmcrab-core/data/distro crates/rpmcrab-core/src/distro_files_generated.rs
           # Guard against committing an empty tree if the script ever signals
           # change without staging anything.
@@ -118,7 +116,7 @@ jobs:
           ${skipped:-none}
 
           Sources:
-          ${shas:-opensuse branch (security team updates), opensuse-slfo-main}
+          ${shas:-opensuse branch (security team updates)}
           Blocklist: .github/whitelist-blocklist.txt
 
           Produced by the daily upstream-whitelist-sync job. This is a smart
