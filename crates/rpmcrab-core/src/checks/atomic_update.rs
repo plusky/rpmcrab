@@ -214,10 +214,11 @@ fn service_restarts_in_body(body: &str) -> Vec<String> {
 /// both transforms preserve the line count, so the walk zips 1:1
 /// with the original lines and reports the original text. Each
 /// resulting line is split into command segments on `;`, `|` and
-/// `&`; a command inside a command substitution (`$(...)` or
-/// backticks) starts no segment in this tokenisation, so the
-/// predicates built on this walker judge segment-start command
-/// positions only.
+/// `&`; only a command substitution's opener (`$(...)` or
+/// backticks) starts no segment in this tokenisation (no
+/// substitution depth is tracked, so an interior command after a
+/// separator is a segment of its own), and the predicates built
+/// on this walker judge segment-start command positions only.
 fn invocation_lines(body: &str, segment_matches: impl Fn(&str) -> bool) -> Vec<String> {
     let blanked = PostCheck::without_heredoc_bodies(body);
     let coded = PostCheck::code_only(&blanked);
@@ -1444,8 +1445,10 @@ fi
         // A definition names a command, it does not invoke one
         // (review on #732): `segment_words` trims `()`, so the
         // definition must be recognised on the raw segment. The
-        // invocation inside the definition's body is a segment of
-        // its own and still fires.
+        // definition's header segment is suppressed as a whole, so
+        // an invocation inside a one-line body stays silent with
+        // it; an invocation after a separator or on a later body
+        // line is a segment of its own and still fires.
         for body in [
             "rcfoo() { echo hi; }",
             "rcfoo () { echo hi; }",
@@ -1456,6 +1459,19 @@ fi
         }
         assert_eq!(
             rc_link_invocations_in_body("rcfoo() { true; }; rcbar status").len(),
+            1
+        );
+        // The one-line body shares the header segment: silent in
+        // both scans even with a restart verb inside it.
+        assert!(rc_link_invocations_in_body("rcfoo() { rcbar restart; }").is_empty());
+        assert!(service_restarts_in_body("rcfoo() { rcbar restart; }").is_empty());
+        // A body invocation on its own line is its own segment.
+        assert_eq!(
+            rc_link_invocations_in_body("rcfoo() {\n rcbar restart\n}").len(),
+            1
+        );
+        assert_eq!(
+            service_restarts_in_body("rcfoo() {\n rcbar restart\n}").len(),
             1
         );
         // A subshell invocation is not a definition.
@@ -1477,16 +1493,36 @@ fi
     }
 
     #[test]
-    fn substitution_interior_is_outside_segment_scope() {
+    fn substitution_opener_starts_no_segment_but_separator_interior_fires() {
         // Pinned scope of the shared tokenisation (disclosed in the
-        // #731 ledger entry): a command inside `$(...)` or
-        // backticks starts no segment, so neither scan judges it.
-        // Widening segment splitting to substitution interiors is a
-        // recall change for both checks, not part of this predicate.
+        // #731 ledger entry): the substitution opener starts no
+        // segment, so an interior without a separator stays inside
+        // the outer segment and neither scan judges it. The
+        // splitter tracks no substitution depth, though, so an
+        // interior command after a separator is a segment of its
+        // own and is judged: the `$(...)` form fires in both
+        // scans. Widening the opener case is a recall change for
+        // both checks, not part of this predicate.
         for body in ["x=$(rcfoo restart)", "echo `rcfoo restart`"] {
             assert!(rc_link_invocations_in_body(body).is_empty(), "{body}");
             assert!(service_restarts_in_body(body).is_empty(), "{body}");
         }
+        assert_eq!(
+            rc_link_invocations_in_body("echo $(echo hi; rcfoo restart)").len(),
+            1
+        );
+        assert_eq!(
+            service_restarts_in_body("echo $(echo hi; rcfoo restart)").len(),
+            1
+        );
+        // A backtick interior splits the same way for this scan;
+        // the restart scan's verb word keeps the closing backtick,
+        // so it matches no restart verb and that scan stays silent.
+        assert_eq!(
+            rc_link_invocations_in_body("echo `echo hi; rcfoo restart`").len(),
+            1
+        );
+        assert!(service_restarts_in_body("echo `echo hi; rcfoo restart`").is_empty());
     }
 
     #[test]
