@@ -181,8 +181,88 @@ def check_rs_deduped(regen_deduped, distro_dir):
         disk_managed
     )
 
+# The openSUSE config's spelling-error jargon filter. The words are
+# RPM-ecosystem technical terms the hunspell en_US dictionary lacks, in
+# both the system dictionary and the LibreOffice dictionaries pinned by
+# scripts/install-hunspell-dicts.sh, so a provisioned reference flags
+# them too; issue #778 has the evidence (the rpm 6.1.0 package set flags
+# all four in the Summary(C) and %description -l C detail shapes).
+# Fedora's rpmlint config carries the same kind of spelling-error
+# jargon list, citing
+# https://bugzilla.redhat.com/show_bug.cgi?id=1424684#c9, and its list
+# includes namespace. The word list itself lives in a line-itemized
+# TOML next to this script so it stays reviewable as it grows; the
+# filter pattern is built from it here.
+SPELLING_JARGON_TOML = (
+    Path(__file__).resolve().parent / "opensuse-spelling-jargon.toml"
+)
+
+
+def load_spelling_jargon(path=SPELLING_JARGON_TOML):
+    """Load the spelling-error jargon words from their TOML file.
+
+    Returns the words sorted. The TOML is the reviewable source of the
+    list, so duplicates and non-string entries fail loudly instead of
+    silently warping the built filter.
+    """
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        sys.stderr.write(
+            "error: generate-distro-configs.py needs Python 3.11+ (tomllib)\n"
+        )
+        raise
+    with open(path, "rb") as f:
+        data = tomllib.load(f)
+    words = data["words"]
+    if not all(isinstance(word, str) for word in words):
+        raise ValueError(f"{path}: 'words' must be a list of strings")
+    if len(set(words)) != len(words):
+        raise ValueError(f"{path}: 'words' contains duplicates")
+    return sorted(words)
+
+
+def _spelling_jargon_word_pattern(word):
+    """One jargon word as a regex alternative.
+
+    The spelling check reports words as written, so the first letter
+    is case-flexible (a jargon word at the start of a sentence arrives
+    capitalised) and a trailing plural s is optional (the plural of a
+    jargon term is the same jargon). The rest of the word is
+    regex-escaped.
+    """
+    first = word[0]
+    if first.isascii() and first.isalpha():
+        head = f"[{first.upper()}{first.lower()}]"
+    else:
+        head = re.escape(first)
+    return head + re.escape(word[1:]) + "s?"
+
+
+def spelling_jargon_filter(words):
+    """Build the spelling-error Filters pattern for the jargon words.
+
+    One alternative per word (see _spelling_jargon_word_pattern),
+    closed by a word boundary so a word merely starting with a jargon
+    word still surfaces; the two detail shapes are the ones the
+    spelling check renders (Summary(<lang>) and %description
+    -l <lang>), and the locale class also carries the digits and
+    hyphen of real locales such as C.UTF-8 and de_DE.UTF-8.
+    """
+    alternation = "|".join(_spelling_jargon_word_pattern(word) for word in words)
+    return (
+        r"^.*spelling-error (Summary\([A-Za-z0-9_@.-]+\)|%description -l [A-Za-z0-9_@.-]+) ("
+        + alternation
+        + r")\b"
+    )
+
+
+SPELLING_JARGON_WORDS = load_spelling_jargon()
+
 # Extra Filters appended to the openSUSE config that do not come from upstream
-# rpmlint's configs/openSUSE/*.toml. The reference loads these from
+# rpmlint's configs/openSUSE/*.toml. Each entry pairs the filter pattern
+# with the reason the generator logs for it in data/distro/PROVENANCE.
+# The reference loads the mingw entries from
 # /opt/testing/share/rpmlint/mingw32.toml and mingw64.toml, which are shipped
 # by the mingw32-filesystem and mingw64-filesystem packages (converted from
 # their mingw{32,64}-rpmlintrc sources at package build time). They are part
@@ -193,9 +273,24 @@ def check_rs_deduped(regen_deduped, distro_dir):
 EXTRA_OPENSUSE_FILTERS = [
     # *.dll.a and *.a files are permitted arch-independent objects
     # (mingw32-filesystem's mingw32-rpmlintrc).
-    r"^mingw32-.*arch-independent-package-contains-binary-or-object.*\.a$",
+    (
+        r"^mingw32-.*arch-independent-package-contains-binary-or-object.*\.a$",
+        "mingw -filesystem packages' rpmlintrc",
+    ),
     # Same for mingw64 (mingw64-filesystem's mingw64-rpmlintrc).
-    r"^mingw64-.*arch-independent-package-contains-binary-or-object.*\.a$",
+    (
+        r"^mingw64-.*arch-independent-package-contains-binary-or-object.*\.a$",
+        "mingw -filesystem packages' rpmlintrc",
+    ),
+    # Spelling-error filter for the jargon word list in
+    # scripts/opensuse-spelling-jargon.toml, built by
+    # spelling_jargon_filter (see SPELLING_JARGON_TOML above).
+    (
+        spelling_jargon_filter(SPELLING_JARGON_WORDS),
+        "RPM-ecosystem jargon the hunspell en_US dictionary lacks"
+        " (issue #778); the words are itemised in"
+        " scripts/opensuse-spelling-jargon.toml",
+    ),
 ]
 
 # Extra Checks enabled in the openSUSE config that upstream rpmlint lists in
@@ -2114,7 +2209,9 @@ def generate(ref_dir=None, pins=None):
             # packages too. Extending this gate to the slfo flavor is the
             # natural fix; kept separate for review (follow-up to #412).
             if flavor == "opensuse" and filename == "opensuse.toml":
-                text = append_extra_filters(text, EXTRA_OPENSUSE_FILTERS)
+                text = append_extra_filters(
+                    text, [pattern for pattern, _reason in EXTRA_OPENSUSE_FILTERS]
+                )
                 # Same gate as the extra filters: SLFO's vendored config
                 # stays a pure mirror of the opensuse-slfo-main branch.
                 text = append_extra_checks(text, EXTRA_OPENSUSE_CHECKS)
@@ -2149,8 +2246,8 @@ def generate(ref_dir=None, pins=None):
         )
     provenance.append("#")
     provenance.append("# Extra Filters appended (not from upstream; see EXTRA_OPENSUSE_FILTERS):")
-    for f in EXTRA_OPENSUSE_FILTERS:
-        provenance.append(f"#   Filters: added {f!r} (mingw -filesystem packages' rpmlintrc)")
+    for filter_pattern, reason in EXTRA_OPENSUSE_FILTERS:
+        provenance.append(f"#   Filters: added {filter_pattern!r} ({reason})")
     provenance.append("#")
     provenance.append("# Extra Checks appended (not from upstream; see EXTRA_OPENSUSE_CHECKS):")
     for c in EXTRA_OPENSUSE_CHECKS:
