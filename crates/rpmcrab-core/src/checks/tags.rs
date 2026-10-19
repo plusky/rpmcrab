@@ -436,10 +436,15 @@ impl TagsCheck {
                     // should be left to find), and qualified capabilities
                     // such as libzypp(econf) or libclc(llvm23). The
                     // separators are decidable: plain library package
-                    // names contain neither "__" nor "(". The reference
-                    // fires on both forms.
+                    // names contain neither "__" nor "(", and carry no
+                    // qualifier — the qualifier reaches the check
+                    // structured on the leaf, so a capability embedded
+                    // in a rich expression is recognised the same way
+                    // as a top-level one. The reference fires on both
+                    // forms.
                     if !requirer_is_biarch_devel
                         && leaf.flags == 0
+                        && leaf.qualifier.is_none()
                         && !leaf.name.contains("__")
                         && !leaf.name.contains('(')
                         && let Ok(Some(caps)) = self.lib_package_re.captures(&leaf.name)
@@ -3205,6 +3210,48 @@ mod rich_dep_emission_tests {
                 "capability {cap}: {results:?}"
             );
         }
+    }
+
+    #[test]
+    fn explicit_lib_dependency_rich_qualified_capability_is_silent() {
+        // #753: inside a rich expression the qualifier is structured on
+        // the leaf and the leaf name is the bare "libzypp", which the
+        // "(" name test cannot see; the qualifier test keeps the
+        // rich-embedded spelling as silent as the top-level one. The
+        // reference fires on it.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![rich_dep("(libzypp(econf) or foo)")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "explicit-lib-dependency").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_lib_dependency_rich_symbol_capability_is_silent() {
+        // #753: a symbol capability inside a rich expression is the
+        // same capability as the top-level spelling pinned above.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![rich_dep("(libuuid__uuid_generate_time_cont or foo)")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "explicit-lib-dependency").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_lib_dependency_rich_plain_lib_still_fires() {
+        // A plain unversioned library package name inside a rich
+        // expression is still an explicit lib dependency: the leaves
+        // are analysed individually, exactly like top-level names.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![rich_dep("(libexplicit or foo)")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "explicit-lib-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(hits[0].1.ends_with(" libexplicit"), "line: {}", hits[0].1);
     }
 
     #[test]
