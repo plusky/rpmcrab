@@ -9,6 +9,7 @@ use std::process::Command;
 use fancy_regex::Regex;
 
 use crate::check::{Check, add_info};
+use crate::checks::atomic_update::direct_user_creation_in_body;
 use crate::checks::is_match;
 use crate::config::Config;
 use crate::filter::Filter;
@@ -1267,6 +1268,22 @@ impl PostCheck {
             }
         }
 
+        // The direct user/group creation scan runs under the same
+        // interpreter gate as the other lexical scans. Users and
+        // groups are created declaratively through sysusers.d, so
+        // a useradd/groupadd invocation is the finding in every
+        // scriptlet kind this check scans (issue #640,
+        // boo#1285892).
+        if prog.is_empty() || prog == "/bin/sh" || prog == "/bin/bash" || prog == "/usr/bin/perl" {
+            for (tool, line) in direct_user_creation_in_body(script) {
+                out.push((
+                    Level::Warning,
+                    finding(&format!("scriptlet-{tool}-in")),
+                    vec![line],
+                ));
+            }
+        }
+
         if prog == "/bin/sh" || prog == "/bin/bash" {
             if let Some(ok) = Self::syntax_ok(prog, &["-n"], script)
                 && !ok
@@ -1327,6 +1344,10 @@ const FORBIDDEN_SELINUX_DETAIL: &str = "A command which requires intimate knowle
 const DAEMON_ACTIVATION_DETAIL: &str = "The scriptlet activates a daemon at installation time. Packages must not enable or start services on installation; enablement is governed by systemd presets, not by insserv, chkconfig or systemctl calls in scriptlets.";
 /// `deprecated-cache-updater-in-<scriptlet>`:
 const DEPRECATED_CACHE_UPDATER_DETAIL: &str = "The scriptlet runs a cache or database updater (update-desktop-database, gtk-update-icon-cache, update-mime-database, glib-compile-schemas or install-info) by hand, pointed at a directory the RPM file triggers own. The triggers already run the updater when the files it indexes change, so the manual call is redundant; remove it and rely on the file trigger.";
+/// `scriptlet-useradd-in-<scriptlet>`:
+const SCRIPTLET_USERADD_DETAIL: &str = "The scriptlet creates a user by invoking useradd directly. Users and groups are created declaratively: the package ships a sysusers.d configuration and the sysusers macros create the account during installation (openSUSE packaging guidelines, Users and Groups). A direct useradd invocation cannot create the account on image-based installations, where scriptlets run on the build host without access to the target /etc/passwd, and useradd is not part of container images.";
+/// `scriptlet-groupadd-in-<scriptlet>`:
+const SCRIPTLET_GROUPADD_DETAIL: &str = "The scriptlet creates a group by invoking groupadd directly. Users and groups are created declaratively: the package ships a sysusers.d configuration and the sysusers macros create the group during installation (openSUSE packaging guidelines, Users and Groups). A direct groupadd invocation cannot create the group on image-based installations, where scriptlets run on the build host without access to the target /etc/group, and groupadd is not part of container images.";
 /// `non-empty-<scriptlet>`:
 const NON_EMPTY_DETAIL: &str = "Scriptlets for the interpreter mentioned in the message should be empty.\n        One common case where they are unintentionally not is when the specfile\n        contains comments after the scriptlet and before the next section. Review\n        and clean up the scriptlet contents if appropriate.";
 pub fn register_error_details(out: &mut Filter) {
@@ -1389,6 +1410,16 @@ pub fn register_error_details(out: &mut Filter) {
         out.set_error_detail(
             &format!("deprecated-cache-updater-in-{tag}"),
             DEPRECATED_CACHE_UPDATER_DETAIL.to_string(),
+        );
+        // `scriptlet-useradd-in-<scriptlet>`:
+        out.set_error_detail(
+            &format!("scriptlet-useradd-in-{tag}"),
+            SCRIPTLET_USERADD_DETAIL.to_string(),
+        );
+        // `scriptlet-groupadd-in-<scriptlet>`:
+        out.set_error_detail(
+            &format!("scriptlet-groupadd-in-{tag}"),
+            SCRIPTLET_GROUPADD_DETAIL.to_string(),
         );
         // `non-empty-<scriptlet>`:
         out.set_error_detail(
@@ -3315,6 +3346,85 @@ mod tests {
                 .iter()
                 .any(|(_, f, _)| f == "daemon-activation-in-%post"),
             "must stay silent for unquoted substitution: {found2:?}"
+        );
+    }
+
+    #[test]
+    fn useradd_invocation_is_flagged() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "/usr/sbin/useradd -r -s /sbin/nologin foo",
+            "%pre",
+            &[],
+            &[],
+        );
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
+            && f == "scriptlet-useradd-in-%pre"
+            && d == &vec!["/usr/sbin/useradd -r -s /sbin/nologin foo".to_string()]));
+    }
+
+    #[test]
+    fn groupadd_invocation_is_flagged() {
+        let found = check().check_scriptlet("/bin/sh", "groupadd -r foo", "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
+            && f == "scriptlet-groupadd-in-%post"
+            && d == &vec!["groupadd -r foo".to_string()]));
+    }
+
+    #[test]
+    fn useradd_bare_and_full_path_are_flagged() {
+        for body in ["useradd foo", "/usr/sbin/useradd foo"] {
+            let found = check().check_scriptlet("/bin/sh", body, "%preun", &[], &[]);
+            assert!(
+                found
+                    .iter()
+                    .any(|(_, f, _)| f == "scriptlet-useradd-in-%preun"),
+                "must fire: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn useradd_near_misses_are_quiet() {
+        for body in [
+            "systemd-sysusers",
+            "/usr/bin/systemd-sysusers --replace=/usr/lib/sysusers.d/foo.conf -",
+            "usermod -a -G video foo",
+            "userdel foo",
+            "# useradd -r foo\ntrue",
+            "echo \"create the account with useradd -r foo\"",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", body, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f.starts_with("scriptlet-useradd-in")
+                        || f.starts_with("scriptlet-groupadd-in")),
+                "must stay silent: {body}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn useradd_in_heredoc_is_quiet() {
+        let body = "cat >> /var/adm/update-messages/foo << EOF\nCreate the account first:\n useradd -r foo\nEOF";
+        let found = check().check_scriptlet("/bin/sh", body, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "scriptlet-useradd-in-%post"),
+            "must stay silent for heredoc text: {found:?}"
+        );
+    }
+
+    #[test]
+    fn useradd_non_shell_prog_is_quiet() {
+        let found = check().check_scriptlet("<lua>", "useradd foo", "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "scriptlet-useradd-in-%post"),
+            "must stay silent for a lua scriptlet: {found:?}"
         );
     }
 }
