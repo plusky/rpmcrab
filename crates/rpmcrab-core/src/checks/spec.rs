@@ -920,6 +920,28 @@ impl SpecCheck {
     }
 }
 
+/// Whether a payload spec's file name is consistent with the names
+/// the spec declares for itself. The declared name patterns are the
+/// ground truth: a source RPM's header name names the container — OBS
+/// names multibuild flavour source RPMs after the build job
+/// (util-linux-systemd, python-libmount) while the payload spec keeps
+/// the base package's file name (util-linux.spec, a name the spec's
+/// declarations produce) — so the header name cannot judge the spec
+/// file. When the spec declares no `Name:` (or the payload spec is
+/// unreadable), the header-name comparison decides.
+fn spec_name_consistent(pkg: &Pkg, f: &crate::pkg::pkgfile::PkgFile) -> bool {
+    let patterns = SpecPkg::open(Path::new(&f.path))
+        .ok()
+        .and_then(|spec| spec.declared_name_patterns());
+    match patterns {
+        Some(patterns) => {
+            let stem = f.name.strip_suffix(".spec").unwrap_or(&f.name);
+            patterns.iter().any(|p| p.matches(stem))
+        }
+        None => f.name == format!("{}.spec", pkg.name),
+    }
+}
+
 impl Check for SpecCheck {
     fn name(&self) -> &'static str {
         "SpecCheck"
@@ -935,7 +957,7 @@ impl Check for SpecCheck {
             if f.name.ends_with(".spec") {
                 spec_file = Some(f.path.clone());
                 spec_name = Some(f.name.clone());
-                if f.name == format!("{}.spec", pkg.name) {
+                if spec_name_consistent(pkg, f) {
                     wrong_spec = false;
                     break;
                 }
@@ -3159,6 +3181,144 @@ exit 1"#,
             lines[0].contains("E: invalid-spec-name"),
             "line: {}",
             lines[0]
+        );
+    }
+
+    /// Write a payload spec file (name + contents) into `dir` and return
+    /// its `PkgFile`, for `check_source` name-consistency tests. The
+    /// synthetic source package's header name is `w6-tmpfiles`.
+    fn source_spec(
+        dir: &tempfile::TempDir,
+        name: &str,
+        text: &str,
+    ) -> crate::pkg::pkgfile::PkgFile {
+        let path = dir.path().join(name);
+        std::fs::write(&path, text).unwrap();
+        crate::pkg::pkgfile::PkgFile {
+            name: name.to_string(),
+            path: path.to_string_lossy().to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn invalid_spec_name_quiet_for_flavour_shaped_source() {
+        // The multibuild artefact (#750): the container (header) name is
+        // the build job's, the payload spec is self-consistent — its file
+        // name matches its own `Name:` — so nothing fires.
+        let dir = tempfile::tempdir().unwrap();
+        let results = run_source(vec![source_spec(
+            &dir,
+            "selfnamed.spec",
+            "Name: selfnamed\nVersion: 1\n",
+        )]);
+        assert!(!has(&results, "invalid-spec-name"), "results: {results:?}");
+    }
+
+    #[test]
+    fn invalid_spec_name_fires_when_spec_renamed_internally() {
+        // The file name matches the container, but the spec declares a
+        // different name for itself: the genuine misnaming still fires.
+        let dir = tempfile::tempdir().unwrap();
+        let results = run_source(vec![source_spec(
+            &dir,
+            "w6-tmpfiles.spec",
+            "Name: renamed\nVersion: 1\n",
+        )]);
+        let lines = lines_for(&results, "invalid-spec-name");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("E: invalid-spec-name"),
+            "line: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn invalid_spec_name_quiet_for_matching_declared_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let results = run_source(vec![source_spec(
+            &dir,
+            "w6-tmpfiles.spec",
+            "Name: w6-tmpfiles\nVersion: 1\n",
+        )]);
+        assert!(!has(&results, "invalid-spec-name"), "results: {results:?}");
+    }
+
+    #[test]
+    fn invalid_spec_name_macro_name_resolves_to_a_pattern() {
+        // A macro-valued `Name:` expands to a pattern: the undefined
+        // macro is unconstrained and the literal tail anchors the
+        // pattern, so a file named after the composed name stays quiet
+        // while an unrelated file name still fires.
+        let dir = tempfile::tempdir().unwrap();
+        let matching = run_source(vec![source_spec(
+            &dir,
+            "w6-tmpfiles.spec",
+            "Name: %{flavour}tmpfiles\nVersion: 1\n",
+        )]);
+        assert!(
+            !has(&matching, "invalid-spec-name"),
+            "results: {matching:?}"
+        );
+        let other = run_source(vec![source_spec(
+            &dir,
+            "other.spec",
+            "Name: %{flavour}tmpfiles\nVersion: 1\n",
+        )]);
+        assert_eq!(
+            lines_for(&other, "invalid-spec-name").len(),
+            1,
+            "results: {other:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_spec_name_conditional_names_are_declared() {
+        // A multibuild spec declares one `Name:` per flavour branch;
+        // the payload file is named after one of them (the base), so
+        // the flavour-shaped source stays quiet, while a file named
+        // after no declared branch still fires.
+        let dir = tempfile::tempdir().unwrap();
+        let text = "%if 1\nName: cond\n%endif\nVersion: 1\n";
+        let quiet = run_source(vec![source_spec(&dir, "cond.spec", text)]);
+        assert!(!has(&quiet, "invalid-spec-name"), "results: {quiet:?}");
+        let firing = run_source(vec![source_spec(&dir, "other.spec", text)]);
+        assert_eq!(
+            lines_for(&firing, "invalid-spec-name").len(),
+            1,
+            "results: {firing:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_spec_name_quiet_for_macro_composed_flavour() {
+        // The dominant multibuild shape (#750): the payload pins
+        // `%global flavor`, the suffix macro branches on it and the
+        // `Name:` composes base + suffix (the ImageMagick shape). The
+        // payload file keeps the base name — a name the declarations
+        // produce — so the flavour-shaped source stays quiet.
+        let dir = tempfile::tempdir().unwrap();
+        let text = "%global flavor config_open%{nil}\n\
+                    %if \"%{flavor}\" == \"\"\n%define nsuffix %nil\n\
+                    %else\n%define nsuffix -%{flavor}\n%endif\n\
+                    Name: base%{?nsuffix}\nVersion: 1\n";
+        let results = run_source(vec![source_spec(&dir, "base.spec", text)]);
+        assert!(!has(&results, "invalid-spec-name"), "results: {results:?}");
+    }
+
+    #[test]
+    fn invalid_spec_name_fires_when_template_produces_no_match() {
+        // A macro-composed `Name:` still judges the file: a payload
+        // file named after nothing the declarations can produce is
+        // the genuine misnaming and fires.
+        let dir = tempfile::tempdir().unwrap();
+        let text = "%define sfx -x\nName: base%{?sfx}\nVersion: 1\n";
+        let results = run_source(vec![source_spec(&dir, "stray.spec", text)]);
+        assert_eq!(
+            lines_for(&results, "invalid-spec-name").len(),
+            1,
+            "results: {results:?}"
         );
     }
 
