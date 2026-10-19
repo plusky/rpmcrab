@@ -65,6 +65,11 @@ pub enum PkgError {
         path: PathBuf,
         source: librpm::RpmErrorKind,
     },
+    /// The file exists but librpm could not read a package header from it
+    /// (RPMRC_NOTFOUND): it holds no readable RPM package — corrupt,
+    /// emptied, or not an RPM at all.
+    #[error("failed to open {path}: not a readable RPM package")]
+    NotReadable { path: PathBuf },
     #[error(transparent)]
     Extract(#[from] extract::ExtractError),
     #[error("creating the extraction tempdir: {0}")]
@@ -307,9 +312,20 @@ const LIBMAGIC: &str = "libmagic";
 /// Read a package header, skipping signature checks as rpmlint does.
 fn read_header(path: &Path) -> Result<PackageHeader, PkgError> {
     PackageHeader::from_file(path, Some(&VerifyOptions::skip_verification())).map_err(|source| {
-        PkgError::Open {
-            path: path.to_path_buf(),
-            source,
+        // RPMRC_NOTFOUND means librpm could not read a package header
+        // from the file at all. For a file that exists, its "package not
+        // found" wording misdescribes the problem: the file was found, it
+        // holds no readable RPM package (an error page saved under an
+        // .rpm name by a corpus fetch is the observed shape).
+        if source == librpm::RpmErrorKind::NotFound && path.exists() {
+            PkgError::NotReadable {
+                path: path.to_path_buf(),
+            }
+        } else {
+            PkgError::Open {
+                path: path.to_path_buf(),
+                source,
+            }
         }
     })
 }
@@ -1140,6 +1156,54 @@ mod tests {
             pkg.tag_i18n_str(Tag::DESCRIPTION, "de")
                 .starts_with("Testpaket fuer Pkg::tag_i18n_str")
         );
+    }
+
+    /// A genuine `.nosrc.rpm` opens and reads its header like any source
+    /// package: the header is complete, and the `NoSource` tarball is
+    /// absent from the payload by construction.
+    #[test]
+    fn open_nosrc_fixture_reads_its_header() {
+        use librpm::Tag;
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/nosrc-fixture-1.0-1.nosrc.rpm");
+        let pkg = Pkg::open_no_extract(&rpm).expect("nosrc fixture must open");
+        assert_eq!(pkg.tag_str(Tag::NAME).as_deref(), Some("nosrc-fixture"));
+        assert!(pkg.is_source, "a nosrc package is a source package");
+    }
+
+    /// A file that exists but holds no RPM package — the corpus-fetch
+    /// shape is a download error page saved under a `.nosrc.rpm` name —
+    /// gets the dedicated diagnostic, not librpm's "package not found":
+    /// the file was found, it is not readable as a package.
+    #[test]
+    fn open_existing_unreadable_file_is_not_a_not_found() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("gone-1.0-1.nosrc.rpm");
+        std::fs::write(&path, b"<html><body>404 Not Found</body></html>").expect("write");
+        let Err(err) = Pkg::open_no_extract(&path) else {
+            panic!("an unreadable file must not open");
+        };
+        assert!(matches!(err, PkgError::NotReadable { .. }), "got: {err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("not a readable RPM package"), "got: {msg}");
+        assert!(!msg.contains("package not found"), "got: {msg}");
+    }
+
+    /// Only the NOTFOUND kind is remapped: a file with a valid lead but a
+    /// corrupt header keeps librpm's own wording via `PkgError::Open`.
+    #[test]
+    fn open_truncated_rpm_keeps_the_generic_open_error() {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/nosrc-fixture-1.0-1.nosrc.rpm");
+        let bytes = std::fs::read(&rpm).expect("read fixture");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("truncated.rpm");
+        std::fs::write(&path, &bytes[..100]).expect("write");
+        let Err(err) = Pkg::open_no_extract(&path) else {
+            panic!("a truncated rpm must not open");
+        };
+        assert!(matches!(err, PkgError::Open { .. }), "got: {err:?}");
+        assert!(err.to_string().contains("operation failed"), "got: {err}");
     }
 }
 
