@@ -108,6 +108,15 @@ sha2 = "0.11"
 # in deranged, powerfmt, num-conv.
 time = { version = "0.3", default-features = false, features = ["local-offset"] }
 
+# OpenPGP signature packet parsing for SignatureCheck (sequoia-openpgp's
+# low-level packet parser). The RustCrypto backend keeps the crate free of
+# new system libraries; upstream gates that backend behind the
+# `allow-experimental-crypto` and `allow-variable-time-crypto` opt-ins,
+# recorded here as a deliberate choice: the crate verifies public
+# signatures over public data, so there is no secret material for
+# variable-time operations to leak.
+sequoia-openpgp = { version = "2.4.2", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto"] }
+
 [dev-dependencies]
 criterion = "0.8"
 # Tests build a header directly (e.g. `Pkg::installed`); the crate already uses
