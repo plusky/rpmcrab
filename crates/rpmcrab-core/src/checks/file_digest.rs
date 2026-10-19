@@ -1078,6 +1078,12 @@ impl FileDigestCheck {
             }
             let mut hashes_seen: HashSet<String> = HashSet::new();
             for info in mismatch_list {
+                // A recorded digest equal to the file's own digest is a
+                // match: the group failed on a sibling file, so this path
+                // is reported only for its genuine mismatches (#755).
+                if info.expected == info.actual {
+                    continue;
+                }
                 // Several groups may list the same path; avoid printing
                 // duplicate errors for the same observed hash.
                 if !hashes_seen.insert(info.actual.clone()) {
@@ -1410,6 +1416,143 @@ hash = "{}"
                 && line.contains(&format!("has:{}", sha256_hex(content))),
             "mismatch detail: {line}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn matching_entry_in_failed_group_not_reported() {
+        // #755: a group fails on one stale entry. The entry whose digest
+        // matches is a verified file, and a digest-mismatch line for it
+        // would claim its content changed when it did not — only the
+        // stale path is reported.
+        let dir = std::env::temp_dir().join("rpmcrab-fd-755-group");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let good_content = b"auth required pam_unix.so\n";
+        let good_disk = write_temp(&dir, "login", good_content);
+        let stale_disk = write_temp(&dir, "other", b"tampered\n");
+
+        let extra = format!(
+            r#"
+[[FileDigestGroup]]
+type = "pam"
+package = "testpkg"
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/login"
+algorithm = "sha256"
+digester = "default"
+hash = "{}"
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/other"
+algorithm = "sha256"
+digester = "default"
+hash = "{}"
+"#,
+            sha256_hex(good_content),
+            sha256_hex(b"original other\n")
+        );
+        let config = test_config(&extra);
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![
+            pkgfile("/etc/pam.d/login", &good_disk, 0o100644),
+            pkgfile("/etc/pam.d/other", &stale_disk, 0o100644),
+        ];
+
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        let mismatches: Vec<&(String, String)> = results
+            .iter()
+            .filter(|(n, _)| *n == "pam-file-digest-mismatch")
+            .collect();
+        assert_eq!(
+            mismatches.len(),
+            1,
+            "exactly the stale path is reported: {results:?}"
+        );
+        assert!(
+            mismatches[0].1.contains("/etc/pam.d/other")
+                && mismatches[0].1.contains(&format!(
+                    "expected sha256:{}",
+                    sha256_hex(b"original other\n")
+                ))
+                && mismatches[0]
+                    .1
+                    .contains(&format!("has:{}", sha256_hex(b"tampered\n"))),
+            "stale path detail: {}",
+            mismatches[0].1
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn all_matching_group_is_silent() {
+        // Near-miss for #755: a group whose entries all verify reports no
+        // digest-mismatch.
+        let dir = std::env::temp_dir().join("rpmcrab-fd-755-ok");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let content_a = b"auth required pam_unix.so\n";
+        let content_b = b"session optional pam_systemd.so\n";
+        let disk_a = write_temp(&dir, "login", content_a);
+        let disk_b = write_temp(&dir, "other", content_b);
+
+        let extra = format!(
+            r#"
+[[FileDigestGroup]]
+type = "pam"
+package = "testpkg"
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/login"
+algorithm = "sha256"
+digester = "default"
+hash = "{}"
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/other"
+algorithm = "sha256"
+digester = "default"
+hash = "{}"
+"#,
+            sha256_hex(content_a),
+            sha256_hex(content_b)
+        );
+        let config = test_config(&extra);
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![
+            pkgfile("/etc/pam.d/login", &disk_a, 0o100644),
+            pkgfile("/etc/pam.d/other", &disk_b, 0o100644),
+        ];
+
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, _)| *n == "pam-file-digest-mismatch"),
+            "all-matching group must be silent: {results:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn single_entry_mismatch_still_reported() {
+        // Near-miss for #755: a one-entry group with a stale hash still
+        // reports its mismatch.
+        let dir = std::env::temp_dir().join("rpmcrab-fd-755-single");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let ondisk = write_temp(&dir, "login", b"changed content\n");
+
+        let config = test_config(&group_toml("/etc/pam.d/login", b"original\n"));
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![pkgfile("/etc/pam.d/login", &ondisk, 0o100644)];
+
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        let count = results
+            .iter()
+            .filter(|(n, _)| *n == "pam-file-digest-mismatch")
+            .count();
+        assert_eq!(count, 1, "single stale entry must fire: {results:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
