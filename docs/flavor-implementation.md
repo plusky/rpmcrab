@@ -114,10 +114,10 @@ ledger remains the record of intentional departures from the reference.
 - **No auto-detection** (no `/etc/os-release` sniffing). Flavor is a
   property of the lint target, not the host.
 
-## Open question for Tom
+## Resolved question
 
 Divergence #3 (`file-contains-date-and-time` / `file-contains-current-date`
-W→E) is marked QUESTIONABLE in §4.11: the immutable-reproducibility
-rationale is plausible but undocumented upstream. If rejected, the `Flavor`
-key still ships (the mechanism is sound and future flavors will need it),
-but the divergence matrix stays empty until a verified divergence lands.
+W→E) is APPROVED in §4.11 (decided 2026-10-19) and implemented per #759 as
+an unconditional severity recalibration: both findings report E under every
+flavor, and their ledger entries carry no flavor field. The `Flavor` key
+ships with the gating mechanism, ready for future verified divergences.
