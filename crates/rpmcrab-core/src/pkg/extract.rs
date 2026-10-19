@@ -611,10 +611,21 @@ impl<'a> Extractor<'a> {
             match &group.data_path {
                 Some(data) => {
                     let data = data.clone();
-                    // A case variant of the carrier's path already names
-                    // the carrier's file; linking it again would fail
-                    // with EEXIST on a case-insensitive filesystem.
-                    if !same_file(&data, path) {
+                    // The carrier was recorded when its entry was
+                    // written; a duplicate-path symlink entry at the
+                    // same path has since replaced the file with a
+                    // link (tar replace semantics), and hard-linking
+                    // from a symlink source makes this placeholder an
+                    // alias for the link's target -- a live host file.
+                    // Re-validate the carrier immediately before
+                    // linking: only a regular file may be a link
+                    // source.
+                    if !fs::symlink_metadata(&data).is_ok_and(|m| m.is_file()) {
+                        tracing::warn!(
+                            "extract: skipping entry {:?}: hardlink carrier is not a regular file",
+                            String::from_utf8_lossy(&e.name)
+                        );
+                    } else if !same_file(&data, path) {
                         match fs::hard_link(&data, path) {
                             Ok(()) => {}
                             // The placeholder path is already occupied by
@@ -1634,6 +1645,87 @@ mod tests {
             std::fs::read(root.path().join("blender.png")).unwrap(),
             b"hello"
         );
+    }
+
+    /// Security regression (issue #770): a duplicate-path symlink
+    /// entry can replace a hardlink group's data carrier after the
+    /// carrier was recorded. A placeholder linked from the recorded
+    /// carrier path afterwards aliases the symlink's target -- a live
+    /// host file -- so later checks reading the placeholder ingest
+    /// host bytes. The carrier is re-validated immediately before
+    /// linking; a carrier that is no longer a regular file is never
+    /// a link source.
+    #[test]
+    fn hardlink_placeholder_after_carrier_symlink_swap_does_not_alias_target() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        std::fs::write(&victim, b"host-bytes").unwrap();
+        let target = victim.as_os_str().as_bytes().to_vec();
+
+        let mut ex = extractor_for(root.path());
+        let mut stream = Vec::new();
+        // The group's data carrier: a regular file with payload bytes.
+        stream.extend(newc_bytes(b"carrier", S_IFREG | 0o644, 3, 42, b"hello"));
+        // A duplicate-path symlink entry replaces the carrier (tar
+        // replace semantics for an exact duplicate path).
+        stream.extend(newc_bytes(b"carrier", S_IFLNK | 0o777, 1, 43, &target));
+        // A sibling placeholder of the same hardlink group arrives
+        // after the swap.
+        stream.extend(newc_bytes(b"sibling", S_IFREG | 0o644, 3, 42, b""));
+        stream.extend(newc_bytes(b"TRAILER!!!", 0, 1, 0, b""));
+        let mut data = &stream[..];
+        while let Some(entry) = read_entry(&mut data, &[]).unwrap() {
+            ex.materialize(&mut data, &entry).unwrap();
+        }
+        ex.check_hardlinks().unwrap();
+
+        // The placeholder must not alias the host file: it is either
+        // absent (the link was skipped) or a regular file that does
+        // not read the victim's bytes.
+        let sibling = root.path().join("sibling");
+        let read_back = std::fs::read(&sibling).unwrap_or_default();
+        assert_ne!(
+            read_back, b"host-bytes",
+            "placeholder must not read host-file bytes"
+        );
+        if let Ok(md) = std::fs::symlink_metadata(&sibling) {
+            assert!(
+                !md.file_type().is_symlink(),
+                "placeholder must not be a symlink to the host file"
+            );
+        }
+        assert_eq!(std::fs::read(&victim).unwrap(), b"host-bytes");
+    }
+
+    /// The ordinary hardlink dedup is untouched by the carrier
+    /// re-validation: a placeholder linked from an intact regular-file
+    /// carrier shares the carrier's inode and reads its bytes.
+    #[test]
+    fn hardlink_placeholder_links_to_intact_carrier() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ex = extractor_for(root.path());
+        let mut carrier = cpio_entry(b"data", S_IFREG | 0o644, 5);
+        carrier.nlink = 2;
+        carrier.ino = 9;
+        let raw = padded(b"hello");
+        let mut data = &raw[..];
+        ex.materialize(&mut data, &carrier).unwrap();
+        let mut placeholder = cpio_entry(b"alias", S_IFREG | 0o644, 0);
+        placeholder.nlink = 2;
+        placeholder.ino = 9;
+        let mut data = &[][..];
+        ex.materialize(&mut data, &placeholder).unwrap();
+        ex.check_hardlinks().unwrap();
+        let carrier_md = std::fs::symlink_metadata(root.path().join("data")).unwrap();
+        let alias_md = std::fs::symlink_metadata(root.path().join("alias")).unwrap();
+        assert!(!alias_md.file_type().is_symlink());
+        assert_eq!(
+            alias_md.ino(),
+            carrier_md.ino(),
+            "alias must be a hard link to the carrier"
+        );
+        assert_eq!(std::fs::read(root.path().join("alias")).unwrap(), b"hello");
     }
 
     /// Serialize one newc entry (header + name + data, each padded to
