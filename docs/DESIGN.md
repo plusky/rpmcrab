@@ -430,8 +430,9 @@ flavor-specific behavior with a single config key.
   (a Tumbleweed host linting SLFO packages). Flavor is a property of the
   *target*, not the host, so it is explicit config.
 
-Checks read `config.is_slfo()` at the decision point. Severity flips are
-expressed as a level variable, not duplicated emit calls.
+Flavor selects the vendored data set and the configured check list.
+Severity recalibrations are unconditional: a finding reports the same
+level under every flavor, and its ledger entry carries no flavor field.
 
 **Verified SLFO divergences.** Each candidate divergence from the SLFO
 branches was verified against upstream history before being accepted. Three
@@ -449,15 +450,16 @@ not real flavor divergences:
 split (`E if is_uid else W`); rpmcrab's unconditional `E` is the #593
 severity recalibration with a ledger entry, not a flavor gate.
 
-If #3 is approved, the divergence matrix is:
+Row 3 is approved and implemented as an unconditional recalibration, so
+the divergence matrix carries no flavor gating:
 
 | Check | Finding | opensuse | slfo |
 |-------|---------|----------|------|
-| `checks::buildroot` (when ported) | `file-contains-date-and-time` | W | E |
-| `checks::buildroot` (when ported) | `file-contains-current-date` | W | E |
+| `checks::buildroot_and_date` | `file-contains-date-and-time` | E | E |
+| `checks::buildroot_and_date` | `file-contains-current-date` | E | E |
 
-Each gated divergence gets a `[[divergence]]` ledger entry (§6.2) recording
-`flavor = "slfo"`.
+Each severity divergence gets a `[[divergence]]` ledger entry (§6.2) with
+`kind = "severity"` and no flavor field.
 
 ### 4.12 Supported flavors
 
