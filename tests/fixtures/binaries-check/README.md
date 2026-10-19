@@ -13,9 +13,10 @@ the `binaries_check_fixture` test in `crates/rpmcrab-core/src/checks/binaries.rs
 | `/usr/bin/rpathbin` | `RUNPATH=/opt/custom/lib` | `binary-or-shlib-defines-rpath` |
 | `/usr/bin/truncated` | 64-byte truncated ELF (header only) | `readelf-failed` |
 
-The `setuidbin` case pins the Error level for a setuid binary: the reference
+The `setuidbin` case pins the Warning level for a setuid binary: the reference
 reports this finding at Error for setuid binaries and Warning otherwise;
-rpmcrab reports Error unconditionally (the level does not split).
+rpmcrab reports Warning unconditionally (fix-and-diverge #743; the level does
+not split).
 
 ## Regeneration
 
