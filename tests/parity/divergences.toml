@@ -150,8 +150,15 @@ since = "0.1.0"
 case = "global"
 check = "specfile-error"
 kind = "detail"
-reason = "When the spec parser fails in _check_invalid_url, rpmcrab reports 'specfile-error' with only the spec path as detail. The reference also includes librpm's error text, which librpm 0.6's Spec::parse does not surface (it returns Option)."
+reason = "When the spec parser fails in _check_invalid_url and the rpm child query has not already reported that fatal failure with a surviving finding, rpmcrab reports 'specfile-error' with only the spec path as detail. The reference also includes librpm's error text, which librpm 0.6's Spec::parse does not surface (it returns Option)."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "specfile-error"
+kind = "behaviour"
+reason = "A spec parse failure is reported once: when the rpm child query in _check_specfile_error has already reported that fatal failure (a non-zero child exit or its 'can't parse' summary) with a specfile-error finding that survived the filter, the parse failure in _check_invalid_url does not add its fallback finding, whose detail is only the bare spec path. The reference reports both. In the #702 census of the 20261018 Factory sweep, 13,839 findings were this one failure reported twice (6,920 bare-path fallbacks against 6,919 child summaries over 6,815 packages)."
+since = "0.3.0"
 
 [[divergence]]
 case = "global"
@@ -277,7 +284,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/issues/439"
 case = "global"
 check = "missing-call-to-setgroups-before-setuid"
 kind = "behaviour"
-reason = "The reference reports this at Error when the binary is installed setuid and Warning otherwise (BinariesCheck.py: 'E' if is_uid else 'W'); rpmcrab reports Error unconditionally — the level does not split on the setuid bit (the severity recalibration is ledgered separately under plusky/rpmcrab#593)."
+reason = "The reference reports this at Error when the binary is installed setuid and Warning otherwise (BinariesCheck.py: 'E' if is_uid else 'W'); rpmcrab reports Warning unconditionally — the level does not split on the setuid bit. The symbol pattern cannot distinguish an identity switch that neglects setgroups from the safe idiom that drops the effective ids to the real ids, so the split would still leave an Error on proven-bogus findings (fix-and-diverge, plusky/rpmcrab#743)."
 since = "0.1.0"
 
 [[divergence]]
@@ -1924,6 +1931,14 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "explicit-lib-dependency"
+kind = "behaviour"
+reason = "Capability names are not library package names (#753): symbol capabilities in the SUSE lib<name>__<symbol> namespace — provided by a library package so individual symbol ABIs can be pinned; libuuid1 provides libuuid__uuid_generate_time_cont, which uuidd requires to restart against the new libuuid after an update — and qualified capabilities such as libzypp(econf) or libclc(llvm23) stay silent. The separators are decidable: plain library package names contain neither \"__\" nor \"(\". The reference's lib-package regex matches the lib prefix and fires E on both forms. Measured over the full Factory corpus (17,242 source packages, 2026-10-19): 625 findings before — 1 symbol capability, 5 qualified capabilities, 619 plain unversioned lib package names; after the fix the 6 capability findings are gone and the 619 plain-name findings are unchanged."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/753"
+
+[[divergence]]
+case = "global"
 check = "pkg-layer"
 kind = "behaviour"
 reason = "Extraction skips payload entries colliding with an incompatible existing path (a file where a directory entry lands or vice versa, e.g. case-colliding names on case-insensitive filesystems) and logs a warning, instead of aborting the whole package on the resulting ENOTDIR/EISDIR as before."
@@ -2370,9 +2385,9 @@ upstream = "https://github.com/plusky/rpmcrab/issues/593"
 case = "global"
 check = "missing-call-to-setgroups-before-setuid"
 kind = "severity"
-reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports E unconditionally; the reference splits the level on the setuid bit (E when the binary is installed setuid, W otherwise). Privilege-drop correctness is security-critical when real and the check is high-precision, so the level does not split (pcp audit: the 2 W lines there are genuine)."
+reason = "Deliberate false-positive fix (plusky/rpmcrab#743): the port reports W unconditionally; the reference splits the level on the setuid bit (E when the binary is installed setuid, W otherwise) and #593 previously recalibrated the port to E unconditionally. The util-linux adjudication showed every finding there traces to the drop_permissions() idiom — the effective ids dropped to the real ids, the invoking user's own groups throughout — and the symbol pattern cannot separate that idiom from an identity switch that neglects setgroups, so an Error at either split breaks builds on bogus findings. The check keeps firing at W as a human-review signal."
 since = "0.3.0"
-upstream = "https://github.com/plusky/rpmcrab/issues/593"
+upstream = "https://github.com/plusky/rpmcrab/issues/743"
 
 [[divergence]]
 case = "global"
@@ -2585,3 +2600,19 @@ kind = "behaviour"
 reason = "New crab-only Warning with no reference counterpart (issue #640): a scriptlet run by sh, bash or perl \u2014 or by the default shell when the scriptlet carries no -p flag \u2014 invoking useradd or groupadd at command position emits W scriptlet-useradd-in-<scriptlet> / scriptlet-groupadd-in-<scriptlet> with the offending line as detail, one finding per line occurrence and tool. PostCheck scans %pre, %post, %preun, %postun, %pretrans, %posttrans and %verifyscript plus the trigger, filetrigger and transfiletrigger scriptlets, and this finding runs in every one of those kinds under the prog gate above. The normative source is the openSUSE packaging guidelines (Users and Groups: users and groups are created declaratively with sysusers.d), confirmed for all packages, old and new, by the assignee and the security team in boo#1285892: useradd is not part of container images and cannot create accounts on image-based installations, where scriptlets run on the build host without access to the target /etc/passwd, and the sanctioned scriptlet form is the sysusers RPM macros, whose expansion invokes systemd-sysusers. The predicate reuses the lexical tokenisation pinned for scriptlet-service-restart (shared helpers in atomic_update.rs): heredoc-blanked, quote-blanked text, command position only (segment start after case-arm patterns, shell keywords and environment assignments), basename useradd/groupadd invoked bare or by path from any directory, so systemd-sysusers invocations (including the sysusers-macro expansion shape), the lifecycle tools (usermod, userdel, groupmod, groupdel), comments, quoted text, heredoc bodies, shell function definitions (useradd() { ...; } names the tool without invoking it) and operand positions (echo useradd, test -x /usr/sbin/useradd) stay silent. Scope disclosures: the tokenisation is shell-shaped, so the perl prog in the gate \u2014 shared with PostCheck's sibling lexical scans \u2014 covers shell-shaped lines in perl bodies, and perl-native invocation forms (system(), qx()) are outside this predicate; an invocation that reaches execution only through an interpreter reading text (eval, sh -c, a heredoc fed to a shell) is outside this predicate, as is a command inside a command substitution ($(...) or backticks), which starts no segment in this tokenisation; the Debian adduser tool is outside the ruling, which names useradd/groupadd. Corpus gate (Factory corpus: 51,589 binary RPMs, all 17,242 source packages, PostCheck-only pass with the shipped code): 187 findings \u2014 94 scriptlet-useradd-in-%pre and 93 scriptlet-groupadd-in-%pre \u2014 in 110 binary RPMs across 99 source packages, every finding in %pre. 26 firers hand-read across the population (3proxy, amanda, ceph, corosync-qdevice, freeradius-server, gitolite, icinga2, openSUSE-release-tools, pcp among them) are all genuine direct creations of daemon or service accounts, in the getent-guarded fallback form or bare, with zero false positives. Warning, not Error: the invocation is the superseded pattern rather than a broken package \u2014 useradd still creates the account on classic installations and cannot work on image-based ones, and the move to sysusers.d is a per-package packaging change, so an Error would fail 99 source packages' Factory builds for a policy migration the distribution rolls out package by package. Pinned by unit tests in atomic_update.rs and post.rs; the -v descriptions are registered in PostCheck's register_error_details."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/640"
+
+[[divergence]]
+case = "global"
+check = "scriptlet-rc-link-invocation-in"
+kind = "behaviour"
+reason = "New crab-only Warning with no reference counterpart (issue #731): a scriptlet run by sh, bash or perl — or by the default shell when the scriptlet carries no -p flag — invoking an rc<service> link at command position emits W scriptlet-rc-link-invocation-in-<scriptlet> with the offending line as detail, one finding per offending line occurrence. PostCheck scans %pre, %post, %preun, %postun, %pretrans, %posttrans and %verifyscript plus the trigger, filetrigger and transfiletrigger scriptlets, and this finding runs in every one of those kinds under the prog gate above. The /usr/sbin/rc<name> symlinks to the service command are the pre-systemd service-control form; SLE 16 removed them in the general legacy cleanup, so a scriptlet still invoking one relies on a mechanism current SLE, Leap 16 and Tumbleweed no longer provide. The finding is verb-independent — the invocation itself is the obsolete part — where AtomicUpdateCheck's scriptlet-service-restart matches the same rc form only with a restart-class verb and only outside %verifyscript and bodies carrying a TRANSACTIONAL_UPDATE guard; an rcfoo restart line in a prog-gated scriptlet other than %verifyscript, in a body without that guard, fires both, deliberately, because the restart and the dead mechanism are separate facts reported by separate checks. The predicate reuses the tokenisation pinned for scriptlet-service-restart (shared helpers in atomic_update.rs, one line walker for both scans): heredoc-blanked, quote-blanked text, command position only (segment start after case-arm patterns, shell keywords and environment assignments), basename rc<name> with a path-qualified form counting only when its immediate parent directory is a sbin directory, so /usr/bin/rclone, /usr/sbin/myrc, the bare word rc and rc names in comments, quoted text, heredoc bodies and non-command positions stay silent. The basenames rclone, rcs and rcp are denylisted in every form, bare included: they name real binaries (the file-sync tool, the RCS command, the remote-copy command) that resolve through PATH, and a bare rclone sync fired under the sbin gate alone because that gate only judges path-qualified forms (review on PR #732). A shell function definition (rcfoo() { ...; }) names a command rather than invoking one and stays silent in both scans; an invocation in the definition's body is a segment of its own and still fires. Scope disclosures: the tokenisation is shell-shaped, so the perl prog in the gate — shared with PostCheck's sibling lexical scans — covers shell-shaped lines in perl bodies, and perl-native invocation forms (system(), qx()) are outside this predicate; quoted and heredoc text is treated as data, so an invocation that reaches execution only through an interpreter reading that text (eval, sh -c, a heredoc fed to a shell) is outside this predicate; and a command inside a command substitution ($(...) or backticks) starts no segment in this tokenisation and is outside both this predicate and scriptlet-service-restart. There is no TRANSACTIONAL_UPDATE exemption for this finding: the removal is distribution-wide, not transactional-specific. Corpus gate (Factory corpus: 51,589 binary RPMs; 361,685 non-empty scriptlets across all scriptlet tags; rc-shaped tokens occur in exactly 3 packages): exactly one package fires — uisp %post runs /usr/sbin/rcresmgr restart at command position — and the only other rc-shaped tokens in scriptlet bodies are near misses that stay silent: mariadb's rcmysql inside a heredoc update message, w3c-markup-validator's rcapache2 inside a quoted echo string and uisp's own test -x operand on the firing line; zero false positives. The PR #732 denylist and function-definition fixes remove classes that occur nowhere in that corpus split, so the corpus result stands. Warning, not Error: the invocation is obsolete rather than unconditionally broken — the same scriptlet still works wherever the links exist. Pinned by unit tests in post.rs and atomic_update.rs; the -v description is registered in PostCheck's register_error_details."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/731"
+
+[[divergence]]
+case = "global"
+check = "ZipCheck"
+kind = "behaviour"
+reason = "Entry inflation is capped at 64 MiB per entry (issue #771): an entry inflating past the cap is reported (bad-crc-in-zip from the CRC pass, unable-to-read-zip from the manifest read) instead of being inflated in full, where the reference reads every entry completely. A package must not be able to exhaust the linter's memory: a highly-compressible entry otherwise forces unbounded heap growth up to OOM. Entries at or under the cap are read and CRC-verified exactly as before."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/771"

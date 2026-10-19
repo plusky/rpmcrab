@@ -5,7 +5,7 @@
 # - libbad.so.1: executable stack, no SONAME (triggers executable-stack, no-soname)
 # - libgood.so.1: non-executable stack, proper SONAME (absence assertions)
 # - setuidbin: setuid-root binary calling setgid() and setuid() without setgroups()
-#   (triggers missing-call-to-setgroups-before-setuid at Error severity)
+#   (triggers missing-call-to-setgroups-before-setuid at Warning severity)
 # - rpathbin: binary with RUNPATH (triggers binary-or-shlib-defines-rpath)
 # - truncated: 64-byte truncated ELF (triggers readelf-failed)
 # - cryptobad: stripped shared lib with undefined SSL_CTX_set_cipher_list
