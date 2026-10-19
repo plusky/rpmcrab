@@ -236,14 +236,18 @@ const RPM_SCRIPTLETS: &[&str] = &[
 
 static DEPRECATED_GREP_RE: OnceLock<Regex> = OnceLock::new();
 /// Matches `egrep`/`fgrep` in command position: at line start, or behind
-/// whitespace, a path slash, a quote, `(`, a backtick, or one of `;`, `|`,
-/// `&`, `=` — the shapes a shell command invocation takes. Group 1 is the
-/// command name. A token behind `-`, `.` or an identifier character is a
-/// name fragment (the findutils `posix-egrep` dialect name, a `foo.egrep`
-/// data file, a `my-egrep-helper` script) and never matches.
+/// whitespace, a path slash, a quote, `(`, a backtick, a backslash, or one
+/// of `;`, `|`, `&` — the shapes a shell command invocation takes. Group 1
+/// is the command name. The name must end the token: a following word
+/// character, `.` or `-` makes it a longer name (an `egrep-helper` script,
+/// an `egrep.foo` file), not the deprecated command. A token behind `-`,
+/// `.`, `=` or an identifier character is a name fragment or an assignment
+/// value (the findutils `posix-egrep` dialect name, a `foo.egrep` data
+/// file, a `my-egrep-helper` script, `FOO=egrep`) and never matches.
 fn deprecated_grep_re() -> &'static Regex {
-    DEPRECATED_GREP_RE
-        .get_or_init(|| Regex::new(r#"(?:^|[\s/'"`(;&|=])([ef]grep)\b"#).expect("static regex"))
+    DEPRECATED_GREP_RE.get_or_init(|| {
+        Regex::new(r#"(?:^|[\s/'"`(;&|\\])([ef]grep)(?![\w.-])"#).expect("static regex")
+    })
 }
 
 static TMPFILES_MACRO_RE: OnceLock<Regex> = OnceLock::new();
@@ -3209,6 +3213,20 @@ exit 1"#,
         // different binary, not the deprecated egrep.
         let results = run_mini("Name: foo\n%build\nmy-egrep-helper --check\n");
         assert!(!has(&results, "deprecated-grep"), "results: {results:?}");
+        // The suffix rule holds at command position too: a longer name
+        // that merely starts with egrep is a different binary or file.
+        let results = run_mini("Name: foo\n%build\negrep-helper --check\n");
+        assert!(!has(&results, "deprecated-grep"), "results: {results:?}");
+        let results = run_mini("Name: foo\n%build\negrep.foo --check\n");
+        assert!(!has(&results, "deprecated-grep"), "results: {results:?}");
+        let results =
+            run_mini("Name: foo\n%install\ninstall -m 644 x %{buildroot}/usr/share/egrep.foo\n");
+        assert!(!has(&results, "deprecated-grep"), "results: {results:?}");
+        // An assignment value names the command but does not run it.
+        let results = run_mini("Name: foo\n%build\nGREPPER=egrep\n");
+        assert!(!has(&results, "deprecated-grep"), "results: {results:?}");
+        let results = run_mini("Name: foo\n%build\n./configure --with-grep=fgrep\n");
+        assert!(!has(&results, "deprecated-grep"), "results: {results:?}");
     }
 
     #[test]
@@ -3255,6 +3273,76 @@ exit 1"#,
         assert_eq!(lines.len(), 1, "results: {results:?}");
         assert!(
             lines[0].contains("W: deprecated-grep ['egrep', 'fgrep']"),
+            "line: {}",
+            lines[0]
+        );
+        // Spaceless pipeline and semicolon separators.
+        let results = run_mini("Name: foo\n%build\ncat file|fgrep bar\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['fgrep']"),
+            "line: {}",
+            lines[0]
+        );
+        let results = run_mini("Name: foo\n%build\negrep a;fgrep b\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['egrep', 'fgrep']"),
+            "line: {}",
+            lines[0]
+        );
+        // Background separator, spaceless and spaced.
+        let results = run_mini("Name: foo\n%build\ncat file&egrep bar\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['egrep']"),
+            "line: {}",
+            lines[0]
+        );
+        let results = run_mini("Name: foo\n%build\ncat file & fgrep bar\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['fgrep']"),
+            "line: {}",
+            lines[0]
+        );
+        // Quoted command names still invoke the command.
+        let results = run_mini("Name: foo\n%build\n'egrep' foo\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['egrep']"),
+            "line: {}",
+            lines[0]
+        );
+        let results = run_mini("Name: foo\n%build\n\"fgrep\" bar\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['fgrep']"),
+            "line: {}",
+            lines[0]
+        );
+        // The backslash-escaped name is the shell alias-bypass idiom: it
+        // runs the command, and the pre-gate pattern matched it.
+        let results = run_mini("Name: foo\n%build\n\\egrep foo\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['egrep']"),
+            "line: {}",
+            lines[0]
+        );
+        // An assignment prefix does not mask a later command word.
+        let results = run_mini("Name: foo\n%build\nFOO=bar egrep foo\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['egrep']"),
             "line: {}",
             lines[0]
         );
