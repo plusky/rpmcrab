@@ -384,7 +384,7 @@ since = "0.1.0"
 case = "global"
 check = "FileDigestCheck"
 kind = "detail"
-reason = "File digest finding details are byte-identical to the reference except `{type}-file-parse-error`, which renders the Rust `std::io::Error` text where the reference interpolates its own OS-error wording, and the `file-digest-mismatch` group-sibling case (issue #755), which has its own behaviour divergence entry; `whitelisted-file-missing` matches the reference exactly."
+reason = "File digest finding details are byte-identical to the reference except `{type}-file-parse-error`, which renders the Rust `std::io::Error` text where the reference interpolates its own OS-error wording, and the `file-digest-mismatch` group-sibling case (issue #755), which has its own behaviour divergence entry; `whitelisted-file-missing` matches in detail (its severity is the FileDigestCheck severity divergence)."
 since = "0.1.0"
 
 [[divergence]]
@@ -394,6 +394,14 @@ kind = "behaviour"
 reason = "Once one entry of a digest group mismatches, the reference reports a `{type}-file-digest-mismatch` line for every group entry with a recorded digest, including entries whose recorded digest equals the file's own digest. The port reports only entries whose recorded digest differs from the file's digest, so every mismatch line names a file whose content differs from its record (issue #755)."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/755"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#760, decision D10 of the single-flavour programme in plusky/rpmcrab#714): the port reports E where the reference reports W for `{type}-whitelisted-file-missing`. The finding prints only when the rest of the package's digest group verifies, so it names a package that ships a whitelisted restricted location's sibling files while omitting a recorded one; measured over the Factory corpus under the unified data set it fires 9 times."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/760"
 
 [[divergence]]
 case = "global"

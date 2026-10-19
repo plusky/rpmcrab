@@ -1011,7 +1011,7 @@ impl FileDigestCheck {
         for missing in &missing_files {
             add_info(
                 out,
-                Level::Warning,
+                Level::Error,
                 pkg,
                 &format!("{check_type}-whitelisted-file-missing"),
                 &[missing, "path present in whitelist but not in package"],
@@ -1557,7 +1557,7 @@ hash = "{}"
     }
 
     #[test]
-    fn whitelisted_file_missing_is_warning() {
+    fn whitelisted_file_missing_is_error() {
         let dir = std::env::temp_dir().join("rpmcrab-fd-missing");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("tmpdir");
@@ -1565,7 +1565,7 @@ hash = "{}"
         let ondisk = write_temp(&dir, "login", content);
 
         // Group lists two files; only one is in the package. Both digests
-        // verify, so the absent one is reported as a warning.
+        // verify, so the absent one is reported as an error.
         let extra = format!(
             r#"
 [[FileDigestGroup]]
@@ -1602,8 +1602,8 @@ hash = "deadbeef"
         assert!(
             missing[0]
                 .1
-                .starts_with("testpkg.noarch: W: pam-whitelisted-file-missing /etc/pam.d/gone"),
-            "warning level/detail: {}",
+                .starts_with("testpkg.noarch: E: pam-whitelisted-file-missing /etc/pam.d/gone"),
+            "error level/detail: {}",
             missing[0].1
         );
         // The present file verified, so no mismatch for it.
