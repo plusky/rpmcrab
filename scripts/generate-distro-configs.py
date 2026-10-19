@@ -508,6 +508,29 @@ RETARGET_FILTERS = {
     ),
 }
 
+# Filters entries whose exemption is wanted but that upstream does not
+# ship at all: anchor pattern -> (added pattern, reason). There is no
+# upstream line to rewrite the way RETARGET_FILTERS does, so the added
+# line is inserted immediately after the byte-exact anchor line inside
+# Filters, keeping the family it belongs to adjacent in the vendored
+# output. When upstream rewords or drops the anchor the insertion
+# raises instead of landing in the wrong place, and when upstream ships
+# the added line itself the insertion is skipped -- a monthly sync can
+# never silently duplicate or misplace an exemption. Each entry is a
+# deliberate divergence from the upstream distro config, ledgered in
+# tests/parity/divergences.toml.
+ADD_FILTERS = {
+    # filesystem ships /usr/etc/skel/.cache as one of the deliberate
+    # 0700 XDG skeleton dotdirs, alongside .config and .local.
+    # Upstream's config filters the siblings (retargeted to
+    # /usr/etc/skel above) but carries no .cache line, so this one
+    # member of the set fired while the rest stayed quiet.
+    r"^filesystem\..*: hidden-file-or-dir /usr/etc/skel/.local": (
+        r"^filesystem\..*: hidden-file-or-dir /usr/etc/skel/.cache",
+        "filesystem ships /usr/etc/skel/.cache in the same deliberate 0700 XDG skeleton set as .config/.local; upstream filters the siblings but carries no .cache line (issue #739)",
+    ),
+}
+
 # Filters entries narrowed to the scope their recorded rationale covers:
 # {bare pattern: (scoped pattern, reason)}. The finding stays live and the
 # filter stays, but only for the shape the rationale justifies; everywhere
@@ -992,6 +1015,74 @@ def scope_filters(text, scoped_log):
                 )
                 continue
         out.append(line)
+    return "".join(out)
+
+
+def add_filters(text, added_log):
+    """Insert Filters entries listed in ADD_FILTERS after their anchors.
+
+    ADD_FILTERS covers exemptions upstream does not ship at all, so there
+    is no upstream line to rewrite the way RETARGET_FILTERS does; each
+    entry names the byte-exact Filters pattern it belongs behind and is
+    inserted immediately after that line, in the anchor line's
+    indentation and quote style. Filters only: BlockedFilters entries
+    are matched by exact string equality, so an inserted line there
+    would be a guard, not an exemption. A missing anchor raises --
+    upstream rewording or dropping the anchor must surface at generation
+    time, never silently strand the exemption. A pattern upstream has
+    started shipping itself is not duplicated.
+    """
+    lines = text.splitlines(keepends=True)
+    present = set()
+    in_list = False
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"^Filters\s*=\s*\[", stripped):
+            in_list = True
+            continue
+        if in_list and stripped.startswith("]"):
+            in_list = False
+            continue
+        if in_list:
+            raw = raw_filter_pattern(line)
+            if raw is not None:
+                present.add(raw)
+    pending = {
+        anchor: entry
+        for anchor, entry in ADD_FILTERS.items()
+        if entry[0] not in present
+    }
+    out = []
+    in_list = False
+    done = set()
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"^Filters\s*=\s*\[", stripped):
+            in_list = True
+            out.append(line)
+            continue
+        if in_list and stripped.startswith("]"):
+            in_list = False
+            out.append(line)
+            continue
+        out.append(line)
+        if in_list:
+            raw = raw_filter_pattern(line)
+            if raw is not None and raw in pending and raw not in done:
+                pattern, reason = pending[raw]
+                indent = line[: len(line) - len(line.lstrip())]
+                quote = stripped[:1] if stripped[:1] in ("'", '"') else "'"
+                eol = "\n" if line.endswith("\n") else ""
+                out.append(f"{indent}{quote}{pattern}{quote},{eol}")
+                added_log.append(
+                    f"Filters: added {pattern!r} after {raw!r} ({reason})"
+                )
+                done.add(raw)
+    missing = [anchor for anchor in pending if anchor not in done]
+    if missing:
+        raise AssertionError(
+            f"ADD_FILTERS anchor(s) not found in Filters: {missing!r}"
+        )
     return "".join(out)
 
 
@@ -1981,6 +2072,7 @@ def generate(ref_dir=None, pins=None):
     deduped_filters_log = []
     threshold_log = []
     flavoured_pruned_log = []
+    added_log = []
     for flavor, data in result.items():
         for filename, text in data["files"].items():
             assert_no_flavor_key(flavor, filename, text)
@@ -2006,6 +2098,10 @@ def generate(ref_dir=None, pins=None):
                 text = append_systemd_preset_packages(
                     text, SYSTEMD_PRESET_PACKAGES
                 )
+                # Exemptions upstream does not ship (see ADD_FILTERS)
+                # land in both flavors' opensuse.toml, like the preset
+                # packages above: not gated on the flavor.
+                text = add_filters(text, added_log)
             # SLFO is currently excluded from the extra filters: the gate
             # below appends only for flavor=="opensuse", and the vendored
             # slfo/opensuse.toml has zero mingw hits. That exclusion is a
@@ -2104,6 +2200,15 @@ def generate(ref_dir=None, pins=None):
             if entry not in seen_retargeted:
                 seen_retargeted.add(entry)
                 provenance.append(f"#   {entry}")
+    if added_log:
+        provenance.append("#")
+        provenance.append("# Added Filters entries (exemption upstream does not")
+        provenance.append("# ship; see ADD_FILTERS):")
+        seen_added = set()
+        for entry in added_log:
+            if entry not in seen_added:
+                seen_added.add(entry)
+                provenance.append(f"#   {entry}")
     if dropped_log:
         provenance.append("#")
         provenance.append(
@@ -2190,6 +2295,7 @@ def generate(ref_dir=None, pins=None):
         deduped_filters_log,
         flavoured_pruned_log,
         threshold_log,
+        added_log,
     )
 
 
@@ -2343,7 +2449,7 @@ def main():
         rewrite_pins(Path(__file__).resolve(), pins)
 
     ref_dir = Path(args.ref_dir) if args.ref_dir else None
-    result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, deduped, dropped_log, retargeted_log, scoped_log, deduped_filters_log, flavoured_pruned_log, threshold_log = generate(
+    result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, deduped, dropped_log, retargeted_log, scoped_log, deduped_filters_log, flavoured_pruned_log, threshold_log, added_log = generate(
         ref_dir=ref_dir, pins=pins
     )
 
@@ -2449,6 +2555,8 @@ def main():
         print(f"pruned: {entry}")
     for entry in retargeted_log:
         print(f"retargeted: {entry}")
+    for entry in added_log:
+        print(f"added: {entry}")
     for entry in deduped_filters_log:
         print(f"deduped: {entry}")
     for entry in threshold_log:

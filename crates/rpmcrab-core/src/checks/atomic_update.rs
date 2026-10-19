@@ -318,6 +318,148 @@ fn service_restarts<'a>(scriptlets: &[(&'a str, &'a str)]) -> Vec<(&'a str, Stri
     hits
 }
 
+/// The direct user/group creation invocations in one scriptlet
+/// body: (tool, line) pairs in body order, one entry per line
+/// occurrence and tool. The scan shares the lexical walk of
+/// `service_restarts_in_body` — the heredoc-blanked, quote-blanked
+/// form of the body (`PostCheck::without_heredoc_bodies` and
+/// `PostCheck::code_only`), zipped 1:1 with the original lines and
+/// reported in the original text. Each line is split into command
+/// segments on `;`, `|` and `&`, and only a `useradd`/`groupadd`
+/// word in command position (after leading braces, shell keywords,
+/// a `case`-arm pattern and environment assignments) counts, so
+/// mentions in comments, quoted text, heredoc bodies and operand
+/// position stay silent, as do shell function definitions
+/// (`useradd() { ...; }`), which name the tool without invoking
+/// it. `PostCheck` reports the pairs as
+/// `scriptlet-useradd-in-<scriptlet>` and
+/// `scriptlet-groupadd-in-<scriptlet>` (issue #640).
+pub(crate) fn direct_user_creation_in_body(body: &str) -> Vec<(&'static str, String)> {
+    let blanked = PostCheck::without_heredoc_bodies(body);
+    let coded = PostCheck::code_only(&blanked);
+    let mut hits = Vec::new();
+    for (raw_line, code_line) in body.lines().zip(coded.lines()) {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut tools: Vec<&'static str> = Vec::new();
+        for segment in code_line.split([';', '|', '&']) {
+            if let Some(tool) = segment_user_creation(segment)
+                && !tools.contains(&tool)
+            {
+                tools.push(tool);
+            }
+        }
+        for tool in tools {
+            hits.push((tool, line.to_string()));
+        }
+    }
+    hits
+}
+
+/// True when a segment's command word is a shell function
+/// definition (`useradd() { ...; }`, `useradd () { ...; }`): a
+/// definition names a command, it does not invoke one. The word
+/// tokenisation trims `()` off each word, which would reduce
+/// the definition's name to a bare command word, so the test
+/// inspects the raw segment: the raw word at command position
+/// (the raw word the trimmed command word came from) carries a
+/// `(` directly after the command name, or the following raw
+/// word is the `()` of the spaced form. A `(` before the command
+/// name (a subshell invocation, `( useradd -r foo )`) is an
+/// invocation and stays visible to the scan.
+fn segment_defines_function(segment: &str) -> bool {
+    let segment = skip_case_pattern(segment);
+    let raw_words: Vec<&str> = segment.split_whitespace().collect();
+    let words: Vec<&str> = raw_words
+        .iter()
+        .map(|w| w.trim_matches(['{', '}', '(', ')', '\"', '\\']))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let mut i = 0;
+    // Skip command-position decoration: shell keywords and
+    // VAR=value environment assignments.
+    while i < words.len()
+        && (matches!(
+            words[i],
+            "if" | "elif" | "while" | "until" | "then" | "do" | "else" | "!"
+        ) || is_assignment(words[i]))
+    {
+        i += 1;
+    }
+    if i >= words.len() {
+        return false;
+    }
+    let command = words[i];
+    // Raw words and trimmed words line up 1:1 once the raw words
+    // that trim to nothing (pure decoration) are skipped.
+    let mut trimmed_index = 0;
+    for (pos, raw) in raw_words.iter().enumerate() {
+        let trimmed = raw.trim_matches(['{', '}', '(', ')', '\"', '\\']);
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed_index == i {
+            let core = raw.trim_start_matches(['{', '\"', '\\']);
+            let Some(rest) = core.strip_prefix(command) else {
+                return false;
+            };
+            if rest.starts_with('(') {
+                return true;
+            }
+            // The spaced form: the command word stands alone and
+            // the next raw word is exactly `()`.
+            return rest.is_empty()
+                && raw_words
+                    .get(pos + 1)
+                    .is_some_and(|next| next.trim_matches(['{', '}', '\"', '\\']) == "()");
+        }
+        trimmed_index += 1;
+    }
+    false
+}
+
+/// The creation tool one command segment invokes, if any:
+/// `useradd` or `groupadd` as the command word, bare or by path
+/// from any directory (the canonical full form is
+/// `/usr/sbin/useradd`). The lifecycle tools (`usermod`,
+/// `userdel`, `groupmod`, `groupdel`) manage existing accounts
+/// and stay silent, as does `systemd-sysusers`: a sysusers
+/// invocation is the declarative mechanism itself. A shell
+/// function definition names the tool without invoking it and
+/// stays silent (`segment_defines_function`).
+fn segment_user_creation(segment: &str) -> Option<&'static str> {
+    if segment_defines_function(segment) {
+        return None;
+    }
+    let segment = skip_case_pattern(segment);
+    let words: Vec<&str> = segment
+        .split_whitespace()
+        .map(|w| w.trim_matches(['{', '}', '(', ')', '"', '\\']))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let mut i = 0;
+    // Skip command-position decoration: shell keywords and
+    // VAR=value environment assignments.
+    while i < words.len()
+        && (matches!(
+            words[i],
+            "if" | "elif" | "while" | "until" | "then" | "do" | "else" | "!"
+        ) || is_assignment(words[i]))
+    {
+        i += 1;
+    }
+    if i >= words.len() {
+        return None;
+    }
+    match words[i].rsplit('/').next().unwrap_or(words[i]) {
+        "useradd" => Some("useradd"),
+        "groupadd" => Some("groupadd"),
+        _ => None,
+    }
+}
+
 impl Check for AtomicUpdateCheck {
     fn name(&self) -> &'static str {
         "AtomicUpdateCheck"
@@ -1899,5 +2041,141 @@ fi
         let pkg = fixture_pkg_named("atomic-scriptlet-clean-1.0-1.noarch.rpm");
         let mut check = shipped_check();
         assert!(run(&mut check, &pkg).is_empty());
+    }
+
+    #[test]
+    fn direct_user_creation_fires() {
+        for (body, tool) in [
+            ("useradd -r -s /sbin/nologin foo", "useradd"),
+            ("/usr/sbin/useradd -r foo", "useradd"),
+            ("/usr/bin/useradd foo", "useradd"),
+            ("groupadd -r foo", "groupadd"),
+            ("/usr/sbin/groupadd foo", "groupadd"),
+            ("FOO=bar useradd foo", "useradd"),
+            ("if useradd foo; then true; fi", "useradd"),
+        ] {
+            let hits = direct_user_creation_in_body(body);
+            assert_eq!(hits, vec![(tool, body.to_string())], "must fire: {body}");
+        }
+    }
+
+    #[test]
+    fn direct_user_creation_after_separator_fires_once() {
+        // The `test -x` operand on the same line is not an
+        // invocation; the command after `&&` is, and the line
+        // is reported once.
+        let body = "test -x /usr/sbin/useradd && /usr/sbin/useradd -r foo";
+        let hits = direct_user_creation_in_body(body);
+        assert_eq!(hits, vec![("useradd", body.to_string())]);
+    }
+
+    #[test]
+    fn direct_user_creation_case_arm_fires() {
+        let body = "case $1 in\n  1) groupadd -r foo ;;\nesac";
+        let hits = direct_user_creation_in_body(body);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, "groupadd");
+    }
+
+    #[test]
+    fn direct_user_creation_reports_each_tool_on_a_line() {
+        let body = "groupadd -r foo; useradd -r -g foo foo";
+        let hits = direct_user_creation_in_body(body);
+        assert_eq!(
+            hits,
+            vec![
+                ("groupadd", body.to_string()),
+                ("useradd", body.to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn direct_user_creation_repeated_line_reports_per_line() {
+        let body = "useradd -r foo\nuseradd -r foo";
+        assert_eq!(direct_user_creation_in_body(body).len(), 2);
+    }
+
+    #[test]
+    fn direct_user_creation_near_misses_are_quiet() {
+        for body in [
+            // The declarative mechanism itself: systemd-sysusers
+            // invocations, including the shape the sysusers RPM
+            // macros expand to.
+            "systemd-sysusers",
+            "/usr/bin/systemd-sysusers --replace=/usr/lib/sysusers.d/foo.conf -",
+            // The lifecycle tools manage existing accounts; they
+            // are not creation.
+            "usermod -a -G video foo",
+            "userdel foo",
+            "groupmod -g 42 foo",
+            "groupdel foo",
+            // The Debian creation tool is outside the ruling,
+            // which names useradd/groupadd.
+            "adduser --system foo",
+            // Mentions: comments, quoted text, operand position.
+            "# create the account with useradd -r foo\ntrue",
+            "true # useradd -r foo",
+            "echo \"create the account with useradd -r foo\"",
+            "echo useradd",
+            "test -x /usr/sbin/useradd",
+            // Shipping a sysusers.d file is the desired end state.
+            "install -m 0644 foo.conf /usr/lib/sysusers.d/foo.conf",
+        ] {
+            assert!(
+                direct_user_creation_in_body(body).is_empty(),
+                "must stay silent: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_user_creation_in_heredoc_is_quiet() {
+        let body = "cat >> /var/adm/update-messages/foo << EOF\nCreate the account first:\n useradd -r foo\nEOF";
+        assert!(direct_user_creation_in_body(body).is_empty());
+    }
+
+    #[test]
+    fn direct_user_creation_function_definitions_are_quiet() {
+        // A definition names a command, it does not invoke one
+        // (review on #754): the word tokenisation trims `()`, so
+        // the definition is recognised on the raw segment, in
+        // the attached and the spaced form alike.
+        for body in [
+            "useradd() { echo hi; }",
+            "groupadd() { echo hi; }",
+            "useradd () { echo hi; }",
+            "groupadd () { echo hi; }",
+            "useradd(){ echo hi; }",
+            "useradd()\n{\n echo hi\n}",
+            // The invocation inside the definition's own segment
+            // is part of the definition, not an invocation.
+            "useradd() { useradd -r foo; }",
+            "groupadd() { groupadd -r foo; }",
+        ] {
+            assert!(
+                direct_user_creation_in_body(body).is_empty(),
+                "must stay silent: {body}"
+            );
+        }
+        // An invocation in the definition's body on its own line
+        // is a segment of its own and still fires.
+        let body = "useradd() {\n useradd -r foo\n}";
+        let hits = direct_user_creation_in_body(body);
+        assert_eq!(hits, vec![("useradd", "useradd -r foo".to_string())]);
+    }
+
+    #[test]
+    fn direct_user_creation_subshell_invocations_fire() {
+        // A subshell invocation is not a definition: the `(`
+        // sits before the command name.
+        for (body, tool) in [
+            ("(useradd -r foo)", "useradd"),
+            ("( useradd -r foo )", "useradd"),
+            ("(groupadd -r foo)", "groupadd"),
+        ] {
+            let hits = direct_user_creation_in_body(body);
+            assert_eq!(hits, vec![(tool, body.to_string())], "must fire: {body}");
+        }
     }
 }

@@ -954,6 +954,91 @@ def test_retarget_filters_byte_exact_only():
     assert retargeted == [], retargeted
 
 
+def test_add_filters_inserts_after_anchor():
+    """ADD_FILTERS entries land immediately after their anchor line.
+
+    The exemption is new (upstream ships no .cache line), so it is
+    inserted behind the sibling it belongs with, in the anchor's own
+    indentation and quote style; unrelated lines survive byte-identical.
+    """
+    text = (
+        'Filters = [\n'
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.config',\n"
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.local',\n"
+        "    '^filesystem\\..*: hidden-file-or-dir /tmp/.X11-unix',\n"
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.fonts',\n"
+        ']\n'
+    )
+    added = []
+    out = gen.add_filters(text, added)
+    assert out == (
+        'Filters = [\n'
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.config',\n"
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.local',\n"
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.cache',\n"
+        "    '^filesystem\\..*: hidden-file-or-dir /tmp/.X11-unix',\n"
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.fonts',\n"
+        ']\n'
+    ), out
+    assert len(added) == 1, added
+    assert '/usr/etc/skel/.cache' in added[0], added
+
+
+def test_add_filters_skips_line_upstream_now_ships():
+    """A pattern already present in Filters is not duplicated: when
+    upstream starts shipping the exemption itself, the insertion steps
+    aside instead of emitting the line twice.
+    """
+    text = (
+        'Filters = [\n'
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.local',\n"
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.cache',\n"
+        ']\n'
+    )
+    added = []
+    out = gen.add_filters(text, added)
+    assert out == text, out
+    assert added == [], added
+
+
+def test_add_filters_missing_anchor_raises():
+    """An anchor upstream reworded or dropped fails generation loudly:
+    the exemption must never be silently stranded or land in the wrong
+    place. Matching is byte-exact, so a trailing-space variant of the
+    anchor does not count.
+    """
+    text = (
+        'Filters = [\n'
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.local ',\n"
+        ']\n'
+    )
+    try:
+        gen.add_filters(text, [])
+    except AssertionError:
+        return
+    raise AssertionError("add_filters accepted a Filters list without the anchor")
+
+
+def test_add_filters_ignores_blocked_filters():
+    """The anchor is only honoured inside Filters: BlockedFilters
+    entries are exact-match guards, so an anchor there does not count
+    and the missing Filters anchor still raises.
+    """
+    text = (
+        'BlockedFilters = [\n'
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.local',\n"
+        ']\n'
+        'Filters = [\n'
+        "    ' dangerous-command.*',\n"
+        ']\n'
+    )
+    try:
+        gen.add_filters(text, [])
+    except AssertionError:
+        return
+    raise AssertionError("add_filters took the anchor from BlockedFilters")
+
+
 def test_prune_flavoured_filters_drops_opensuse_snapshot_line():
     """With a table entry, PRUNE_FLAVOURED drops the line for that flavor only.
 

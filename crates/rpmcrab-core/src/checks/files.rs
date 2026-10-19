@@ -6,10 +6,12 @@
 //!
 //! Deliberate gaps are ledgered in `tests/parity/divergences.toml`.
 //!
-//! Two findings have no reference counterpart: `debug-files-in-non-debug-package`
-//! (upstream feature request rpm-software-management/rpmlint#11) and
+//! Three findings have no reference counterpart: `debug-files-in-non-debug-package`
+//! (upstream feature request rpm-software-management/rpmlint#11),
 //! `systemd-preset-packaged` (preset files are distro policy, shipped only
-//! by the packages named in the `SystemdPresetPackages` config key).
+//! by the packages named in the `SystemdPresetPackages` config key) and
+//! `symlink-loop` (a symlink whose in-package resolution chain cycles;
+//! every open of such a link fails with ELOOP).
 
 #![allow(clippy::collapsible_if)]
 
@@ -2594,6 +2596,7 @@ impl FilesCheck {
         // dangling symlink checks
         self.check_link_absolute(pkg, fname, pkgfile, st, out);
         self.check_link_relative(pkg, fname, pkgfile, st, out);
+        self.check_link_loop(pkg, fname, pkgfile, out);
         self.check_link_bindir_shebang(pkg, fname, pkgfile, out);
     }
 
@@ -2767,6 +2770,48 @@ impl FilesCheck {
         }
     }
 
+    /// `symlink-loop` (issue #723): follow the link's resolution chain
+    /// within this package; a chain that revisits a path can never
+    /// resolve, so every open of the link fails with ELOOP. The
+    /// dangling findings are presence-based and cannot see the shape:
+    /// a loop's target is present in the file list, being the link
+    /// itself or another link in the cycle. A chain reaching a shipped
+    /// non-link entry resolves, and a chain leaving the package is the
+    /// dangling family's business, so only a revisited path fires. The
+    /// walk terminates because every step either returns or visits a
+    /// package path not visited before.
+    fn check_link_loop(&self, pkg: &Pkg, fname: &str, pkgfile: &PkgFile, out: &mut Filter) {
+        let mut visited: HashSet<&str> = HashSet::new();
+        visited.insert(fname);
+        let mut current: &PkgFile = pkgfile;
+        while !current.linkto.is_empty() {
+            let target = &current.linkto;
+            let joined = if target.starts_with('/') {
+                target.clone()
+            } else {
+                match current.name.rfind('/') {
+                    Some(i) => format!("{}/{target}", &current.name[..i]),
+                    None => target.clone(),
+                }
+            };
+            let next_name = crate::pkg::normalize_path(&joined);
+            let Some(next) = pkg.files.iter().find(|f| f.name == next_name) else {
+                return;
+            };
+            if !visited.insert(next.name.as_str()) {
+                add_info(
+                    out,
+                    Level::Error,
+                    pkg,
+                    "symlink-loop",
+                    &[fname, &pkgfile.linkto],
+                );
+                return;
+            }
+            current = next;
+        }
+    }
+
     fn check_link_bindir_shebang(
         &self,
         pkg: &Pkg,
@@ -2825,7 +2870,10 @@ impl FilesCheck {
             return;
         }
         let perm = pkgfile.mode & 0o7777;
-        if perm & 0o002 != 0 {
+        // world-writable: other-write with no sticky bit - the
+        // reference predicate is `mode & 0o1002 == 2`, so sticky-bit
+        // directories (1777, e.g. /tmp and /var/tmp) stay quiet.
+        if perm & 0o1002 == 0o002 {
             add_info(
                 out,
                 Level::Error,
@@ -4594,6 +4642,66 @@ mod tests {
     }
 
     #[test]
+    fn world_writable_fires_for_world_writable_dir_without_sticky_bit() {
+        // Directory with o+w and no sticky bit must emit world-writable
+        // at Error (issue #738); the dispatch gates on S_IFDIR, so the
+        // mode carries the file-type bits.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = vec![PkgFile {
+            name: "/var/lib/foo".to_string(),
+            path: "/var/lib/foo".to_string(),
+            mode: 0o040777,
+            ..Default::default()
+        }];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let hits: Vec<Level> = out
+            .results()
+            .iter()
+            .zip(out.result_levels().iter())
+            .filter(|((n, _), _)| n.as_str() == "world-writable")
+            .map(|(_, l)| *l)
+            .collect();
+        assert_eq!(hits, [Level::Error], "world-writable must fire at Error");
+    }
+
+    #[test]
+    fn world_writable_silent_for_sticky_world_writable_dir() {
+        // Sticky-bit world-writable directories stay quiet: the
+        // reference fires only when the sticky bit is absent
+        // (`mode & 0o1002 == 2`), so the FHS public tmp directories at
+        // 1777 emit no world-writable (issue #738).
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.name = "filesystem".to_string();
+        pkg.files = vec![
+            PkgFile {
+                name: "/tmp".to_string(),
+                path: "/tmp".to_string(),
+                mode: 0o041777,
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/var/tmp".to_string(),
+                path: "/var/tmp".to_string(),
+                mode: 0o041777,
+                ..Default::default()
+            },
+        ];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_lacks(&names, "world-writable");
+    }
+
+    #[test]
     fn spurious_executable_perm_fires_for_text_data_file() {
         // Text data file with the executable bit but no shebang: not a
         // script, not an ELF binary, not in a script path ->
@@ -5866,6 +5974,135 @@ mod tests {
             lines.iter().any(|l| l.contains("lone-root-link")),
             "got: {results:?}"
         );
+    }
+
+    fn symlink(name: &str, target: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            mode: 0o120777,
+            linkto: target.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn loop_findings(results: &[(String, String)]) -> Vec<&(String, String)> {
+        results
+            .iter()
+            .filter(|(n, _)| n == "symlink-loop")
+            .collect()
+    }
+
+    #[test]
+    fn symlink_loop_self_link_relative_fires() {
+        // Issue #723: a link pointing at itself. Its target is present
+        // in the file list (it is the link itself), so neither dangling
+        // finding can fire; the loop finding is the only report.
+        let results = run_files_check_with_files(vec![symlink("/usr/lib/foo/self", "self")]);
+        let names = finding_names(&results);
+        let hits = loop_findings(&results);
+        assert_eq!(hits.len(), 1, "got: {results:?}");
+        assert!(
+            hits[0].1.contains(": E: symlink-loop /usr/lib/foo/self"),
+            "level and detail must render, got: {}",
+            hits[0].1
+        );
+        assert_lacks(&names, "dangling-symlink");
+        assert_lacks(&names, "dangling-relative-symlink");
+    }
+
+    #[test]
+    fn symlink_loop_self_link_absolute_fires() {
+        // Issue #723: the absolute spelling of a self-pointing link.
+        let results =
+            run_files_check_with_files(vec![symlink("/usr/lib/foo/self", "/usr/lib/foo/self")]);
+        assert_eq!(loop_findings(&results).len(), 1, "got: {results:?}");
+        assert_lacks(&finding_names(&results), "dangling-symlink");
+    }
+
+    #[test]
+    fn symlink_loop_two_cycle_fires_for_both_links() {
+        // Issue #723: a 2-cycle; both members' resolutions loop.
+        let results = run_files_check_with_files(vec![
+            symlink("/usr/lib/foo/a", "b"),
+            symlink("/usr/lib/foo/b", "a"),
+        ]);
+        assert_eq!(loop_findings(&results).len(), 2, "got: {results:?}");
+    }
+
+    #[test]
+    fn symlink_loop_longer_cycle_fires_for_every_link() {
+        // Issue #723: a 3-cycle.
+        let results = run_files_check_with_files(vec![
+            symlink("/usr/lib/foo/a", "b"),
+            symlink("/usr/lib/foo/b", "c"),
+            symlink("/usr/lib/foo/c", "a"),
+        ]);
+        assert_eq!(loop_findings(&results).len(), 3, "got: {results:?}");
+    }
+
+    #[test]
+    fn symlink_loop_across_directories_fires() {
+        // Issue #723: the cycle crosses a directory hop and a `..`
+        // segment; the normalised chain still revisits a path.
+        let results = run_files_check_with_files(vec![
+            symlink("/usr/lib/foo/a", "sub/b"),
+            symlink("/usr/lib/foo/sub/b", "../a"),
+        ]);
+        assert_eq!(loop_findings(&results).len(), 2, "got: {results:?}");
+    }
+
+    #[test]
+    fn symlink_loop_feeder_link_fires() {
+        // Issue #723: a link resolving into a cycle never resolves
+        // either; opening it fails with ELOOP like the cycle members.
+        let results = run_files_check_with_files(vec![
+            symlink("/usr/lib/foo/feeder", "a"),
+            symlink("/usr/lib/foo/a", "b"),
+            symlink("/usr/lib/foo/b", "a"),
+        ]);
+        assert_eq!(loop_findings(&results).len(), 3, "got: {results:?}");
+    }
+
+    #[test]
+    fn symlink_chain_ending_at_real_file_is_quiet() {
+        // Near miss (issue #723): a long but acyclic chain of links
+        // ending at a shipped regular file.
+        let results = run_files_check_with_files(vec![
+            symlink("/usr/lib/foo/a", "b"),
+            symlink("/usr/lib/foo/b", "c"),
+            symlink("/usr/lib/foo/c", "real"),
+            plain_file("/usr/lib/foo/real"),
+        ]);
+        assert_lacks(&finding_names(&results), "symlink-loop");
+    }
+
+    #[test]
+    fn symlink_to_directory_is_quiet() {
+        // Near miss (issue #723): a link whose target is a directory
+        // entry the package ships.
+        let dir = PkgFile {
+            name: "/usr/share/foo".to_string(),
+            path: "/usr/share/foo".to_string(),
+            mode: 0o40755,
+            ..Default::default()
+        };
+        let results = run_files_check_with_files(vec![symlink("/usr/share/link", "foo"), dir]);
+        assert_lacks(&finding_names(&results), "symlink-loop");
+    }
+
+    #[test]
+    fn dangling_link_reports_dangling_not_loop() {
+        // Near miss (issue #723): a plain dangling link keeps its
+        // existing finding only; its chain leaves the package at the
+        // first hop.
+        let results = run_files_check_with_files(vec![symlink(
+            "/usr/lib/foo/dangling",
+            "/usr/lib/foo/missing",
+        )]);
+        let names = finding_names(&results);
+        assert_has(&names, "dangling-symlink");
+        assert_lacks(&names, "symlink-loop");
     }
 
     /// The distro-shaped `DanglingSymlinkExceptions` table (the

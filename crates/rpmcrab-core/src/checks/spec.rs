@@ -235,8 +235,15 @@ const RPM_SCRIPTLETS: &[&str] = &[
 ];
 
 static DEPRECATED_GREP_RE: OnceLock<Regex> = OnceLock::new();
+/// Matches `egrep`/`fgrep` in command position: at line start, or behind
+/// whitespace, a path slash, a quote, `(`, a backtick, or one of `;`, `|`,
+/// `&`, `=` — the shapes a shell command invocation takes. Group 1 is the
+/// command name. A token behind `-`, `.` or an identifier character is a
+/// name fragment (the findutils `posix-egrep` dialect name, a `foo.egrep`
+/// data file, a `my-egrep-helper` script) and never matches.
 fn deprecated_grep_re() -> &'static Regex {
-    DEPRECATED_GREP_RE.get_or_init(|| Regex::new(r"\b[ef]grep\b").expect("static regex"))
+    DEPRECATED_GREP_RE
+        .get_or_init(|| Regex::new(r#"(?:^|[\s/'"`(;&|=])([ef]grep)\b"#).expect("static regex"))
 }
 
 static TMPFILES_MACRO_RE: OnceLock<Regex> = OnceLock::new();
@@ -1833,8 +1840,9 @@ impl SpecCheck {
         }
         let greps: Vec<String> = self
             .deprecated_grep_re
-            .find_iter(line)
-            .filter_map(|r| r.ok().map(|m| m.as_str().to_string()))
+            .captures_iter(line)
+            .filter_map(|r| r.ok())
+            .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
             .collect();
         if !greps.is_empty() {
             // The reference passes the list; `add_info` renders it with the
@@ -3181,6 +3189,75 @@ exit 1"#,
         // `grep -E` is the sanctioned spelling.
         let clean = run_mini("Name: foo\n%build\ngrep -E foo\n");
         assert!(!has(&clean, "deprecated-grep"), "results: {clean:?}");
+    }
+
+    #[test]
+    fn deprecated_grep_quiet_on_name_fragments() {
+        // The findutils `-regextype` dialect names select a regex dialect
+        // for `find`; no grep command runs.
+        let results =
+            run_mini("Name: foo\n%install\nfind . -regextype posix-egrep -regex '.*\\.c'\n");
+        assert!(!has(&results, "deprecated-grep"), "results: {results:?}");
+        let results =
+            run_mini("Name: foo\n%install\nfind . -regextype posix-fgrep -regex '.*\\.h'\n");
+        assert!(!has(&results, "deprecated-grep"), "results: {results:?}");
+        // A dotted data file name.
+        let results =
+            run_mini("Name: foo\n%install\ninstall -m 644 foo.egrep %{buildroot}/usr/share/foo/\n");
+        assert!(!has(&results, "deprecated-grep"), "results: {results:?}");
+        // A hyphenated helper script name invoked as a command is a
+        // different binary, not the deprecated egrep.
+        let results = run_mini("Name: foo\n%build\nmy-egrep-helper --check\n");
+        assert!(!has(&results, "deprecated-grep"), "results: {results:?}");
+    }
+
+    #[test]
+    fn deprecated_grep_fires_on_command_invocations() {
+        // Path invocation.
+        let results = run_mini("Name: foo\n%build\n/usr/bin/egrep foo\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['egrep']"),
+            "line: {}",
+            lines[0]
+        );
+        // Command substitution.
+        let results = run_mini("Name: foo\n%build\ncount=$(egrep -c x file)\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['egrep']"),
+            "line: {}",
+            lines[0]
+        );
+        // Pipeline.
+        let results = run_mini("Name: foo\n%build\ncat file | fgrep bar\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['fgrep']"),
+            "line: {}",
+            lines[0]
+        );
+        // Backtick substitution.
+        let results = run_mini("Name: foo\n%build\ncount=`egrep -c x file`\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['egrep']"),
+            "line: {}",
+            lines[0]
+        );
+        // Two invocations on one line render as one list detail.
+        let results = run_mini("Name: foo\n%build\negrep a; fgrep b\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['egrep', 'fgrep']"),
+            "line: {}",
+            lines[0]
+        );
     }
 
     #[test]
