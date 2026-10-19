@@ -39,6 +39,11 @@ fn classpath_regex() -> &'static Regex {
     CLASSPATH_REGEX.get_or_init(|| Regex::new(r"(?im)^\s*Class-Path\s*:").expect("static regex"))
 }
 
+/// Cap on one entry's inflated bytes, the `checks::source` idiom: an
+/// entry inflating past the cap is reported instead of inflated, so a
+/// highly-compressible entry cannot grow the heap without bound.
+const MAX_ENTRY_BYTES: usize = 64 * 1024 * 1024;
+
 /// How entry-data reading failed: a CRC failure names the entry
 /// (`bad-crc-in-zip`); a password-protected entry aborts the file like the
 /// reference's `RuntimeError` handler (`unable-to-read-zip` as a warning).
@@ -55,6 +60,9 @@ enum CrcOutcome {
 /// `UnsupportedArchive(PASSWORD_REQUIRED)` (zip 2.x reports it at open, not
 /// at read); like the reference's `RuntimeError` path it aborts the file
 /// instead of naming an entry.
+///
+/// An entry inflating past `MAX_ENTRY_BYTES` is a bad entry: it is
+/// reported, never inflated in full.
 fn first_bad_crc(archive: &mut ZipArchive<File>) -> CrcOutcome {
     // zip 9 yields entry names as results: a name that fails to
     // decode cannot be addressed by name, so it is skipped here.
@@ -66,14 +74,16 @@ fn first_bad_crc(archive: &mut ZipArchive<File>) -> CrcOutcome {
     for name in &names {
         sink.clear();
         let read = match archive.by_name(name) {
-            Ok(mut entry) => entry.read_to_end(&mut sink),
+            Ok(entry) => entry
+                .take(MAX_ENTRY_BYTES as u64 + 1)
+                .read_to_end(&mut sink),
             Err(ZipError::UnsupportedArchive(msg)) if msg == ZipError::PASSWORD_REQUIRED => {
                 return CrcOutcome::Unreadable;
             }
             Err(ZipError::InvalidPassword) => return CrcOutcome::Unreadable,
             Err(_) => return CrcOutcome::BadEntry(name.clone()),
         };
-        if read.is_err() {
+        if read.is_err() || sink.len() > MAX_ENTRY_BYTES {
             return CrcOutcome::BadEntry(name.clone());
         }
     }
@@ -108,16 +118,26 @@ fn has_end_of_central_dir(path: &Path) -> bool {
 
 /// The jar manifest, decoded lossily like the reference's
 /// `.decode(errors='replace')`. A read failure propagates: the reference's
-/// outer handler turns it into `unable-to-read-zip`.
+/// outer handler turns it into `unable-to-read-zip`. The read is capped
+/// like the CRC pass: a manifest inflating past `MAX_ENTRY_BYTES` is a
+/// read failure.
 fn manifest_text(archive: &mut ZipArchive<File>) -> Result<String, std::io::Error> {
-    let mut entry = archive.by_name("META-INF/MANIFEST.MF").map_err(|e| {
+    let entry = archive.by_name("META-INF/MANIFEST.MF").map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("cannot open META-INF/MANIFEST.MF: {e}"),
         )
     })?;
     let mut buf = Vec::new();
-    entry.read_to_end(&mut buf)?;
+    entry
+        .take(MAX_ENTRY_BYTES as u64 + 1)
+        .read_to_end(&mut buf)?;
+    if buf.len() > MAX_ENTRY_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("META-INF/MANIFEST.MF inflates past the {MAX_ENTRY_BYTES}-byte entry cap"),
+        ));
+    }
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
@@ -491,5 +511,106 @@ mod tests {
             names.contains(&"bad-crc-in-zip"),
             "expected bad-crc-in-zip in {names:?}"
         );
+    }
+
+    #[test]
+    fn over_cap_entry_reports_bad_crc() {
+        // An entry inflating past the entry cap is reported, not inflated:
+        // 65 MiB of zeros deflate to a few KiB in the archive.
+        let dir = tempfile::tempdir().unwrap();
+        let data = vec![0u8; MAX_ENTRY_BYTES + 1024 * 1024];
+        let bytes = build_zip(
+            &[("big.bin", &data, zip::CompressionMethod::Deflated)],
+            None,
+        );
+        let path = write_fixture(dir.path(), "big.zip", &bytes);
+        let findings = ZipCheck::inspect(&path, "big.zip");
+        assert_eq!(fixture_names(&findings), vec!["bad-crc-in-zip"]);
+        assert_eq!(
+            findings[0].2,
+            vec!["big.bin".to_string(), "big.zip".to_string()]
+        );
+    }
+
+    #[test]
+    fn at_cap_entry_is_quiet() {
+        // Exactly at the cap the entry is read in full and CRC-verified.
+        let dir = tempfile::tempdir().unwrap();
+        let data = vec![0u8; MAX_ENTRY_BYTES];
+        let bytes = build_zip(
+            &[("full.bin", &data, zip::CompressionMethod::Deflated)],
+            None,
+        );
+        let path = write_fixture(dir.path(), "full.zip", &bytes);
+        assert!(ZipCheck::inspect(&path, "full.zip").is_empty());
+    }
+
+    #[test]
+    fn at_cap_corrupt_entry_still_reports_bad_crc() {
+        // The cap does not mask CRC failures at the boundary: a stored
+        // entry of exactly the cap with a flipped payload byte still
+        // reads to end-of-entry and fails its CRC.
+        let dir = tempfile::tempdir().unwrap();
+        let mut data = vec![0u8; MAX_ENTRY_BYTES];
+        data[..11].copy_from_slice(b"hello world");
+        let mut bytes = build_zip(&[("full.bin", &data, zip::CompressionMethod::Stored)], None);
+        let pos = bytes
+            .windows(b"hello world".len())
+            .position(|w| w == b"hello world")
+            .unwrap();
+        bytes[pos] ^= 0xff;
+        let path = write_fixture(dir.path(), "full.zip", &bytes);
+        let findings = ZipCheck::inspect(&path, "full.zip");
+        assert_eq!(fixture_names(&findings), vec!["bad-crc-in-zip"]);
+    }
+
+    #[test]
+    fn over_cap_manifest_reports_bad_crc_and_unable_to_read() {
+        // The manifest read is capped like the CRC pass: a MANIFEST.MF
+        // inflating past the cap fails the CRC pass as a bad entry and
+        // the manifest read as unable-to-read-zip.
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = vec![0u8; MAX_ENTRY_BYTES + 1024 * 1024];
+        let bytes = build_zip(
+            &[
+                (
+                    "A.class",
+                    b"fake class data",
+                    zip::CompressionMethod::Deflated,
+                ),
+                (
+                    "META-INF/MANIFEST.MF",
+                    &manifest,
+                    zip::CompressionMethod::Deflated,
+                ),
+            ],
+            None,
+        );
+        let path = write_fixture(dir.path(), "a.jar", &bytes);
+        let findings = ZipCheck::inspect(&path, "a.jar");
+        assert_eq!(
+            fixture_names(&findings),
+            vec!["bad-crc-in-zip", "unable-to-read-zip"]
+        );
+    }
+
+    #[test]
+    fn padded_manifest_still_reports_class_path() {
+        // A manifest well under the cap behaves exactly as before.
+        let dir = tempfile::tempdir().unwrap();
+        let mut text = String::from("Manifest-Version: 1.0\nClass-Path: lib/dep.jar\nX-Pad: ");
+        text.push_str(&"A".repeat(1024 * 1024));
+        text.push('\n');
+        let bytes = build_zip(
+            &[(
+                "A.class",
+                b"fake class data",
+                zip::CompressionMethod::Deflated,
+            )],
+            Some(&text),
+        );
+        let path = write_fixture(dir.path(), "a.jar", &bytes);
+        let findings = ZipCheck::inspect(&path, "a.jar");
+        assert_eq!(fixture_names(&findings), vec!["class-path-in-manifest"]);
     }
 }
