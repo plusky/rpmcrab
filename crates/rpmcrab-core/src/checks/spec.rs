@@ -920,29 +920,53 @@ impl SpecCheck {
     }
 }
 
-/// Whether a payload spec's file name is consistent with the package.
-/// Two names are consistent with the spec: the source RPM's header
-/// name — the container OBS names after the build job, so a payload
-/// file carrying it is the ordinary case — and any name the spec's
-/// own `Name:` declarations can produce, since a multibuild spec
-/// declares one name per flavour branch while the payload file keeps
-/// the base name (util-linux-systemd and python-libmount both carry
-/// util-linux.spec). The file is inconsistent only when it matches
-/// neither. When the declarations cannot determine the name — the
-/// preamble declares no `Name:`, or an expansion is unconstrained —
-/// the header-name comparison decides alone.
-fn spec_name_consistent(pkg: &Pkg, f: &crate::pkg::pkgfile::PkgFile) -> bool {
-    let header_match = f.name == format!("{}.spec", pkg.name);
-    let patterns = SpecPkg::open(Path::new(&f.path))
-        .ok()
-        .and_then(|spec| spec.declared_name_patterns());
-    match patterns {
-        Some(patterns) if !patterns.iter().any(|p| p.is_unconstrained()) => {
-            let stem = f.name.strip_suffix(".spec").unwrap_or(&f.name);
-            header_match || patterns.iter().any(|p| p.matches(stem))
-        }
-        _ => header_match,
+/// The grounds on which a payload spec's file name is consistent
+/// with the package, judged separately because `check_source`'s
+/// selection prefers the header ground over the declared one.
+struct NameVerdict {
+    /// The file is named after the source RPM's header name — the
+    /// container OBS names after the build job, so a payload file
+    /// carrying it is the ordinary case.
+    header: bool,
+    /// The file is named after a name the spec's own `Name:`
+    /// declarations can produce: a multibuild spec declares one
+    /// name per flavour branch while the payload file keeps one of
+    /// the declared names (util-linux-systemd and python-libmount
+    /// both carry util-linux.spec).
+    declared: bool,
+}
+
+impl NameVerdict {
+    /// The file is inconsistent only when it matches neither name.
+    fn consistent(&self) -> bool {
+        self.header || self.declared
     }
+}
+
+/// Judge a payload spec's file name on both grounds. A declaration
+/// whose expansion the preamble cannot determine produces an
+/// unconstrained pattern, which constrains nothing and is set
+/// aside; the remaining declarations judge the declared ground.
+/// The header ground decides alone when no declaration constrains
+/// the name — a preamble declaring no `Name:`, every declaration
+/// unconstrained, or a payload file that cannot be opened.
+fn spec_name_verdict(
+    pkg: &Pkg,
+    f: &crate::pkg::pkgfile::PkgFile,
+    spec: Option<&SpecPkg>,
+) -> NameVerdict {
+    let header = f.name == format!("{}.spec", pkg.name);
+    let declared = spec
+        .and_then(|spec| spec.declared_name_patterns())
+        .map(|patterns| {
+            let stem = f.name.strip_suffix(".spec").unwrap_or(&f.name);
+            patterns
+                .iter()
+                .filter(|p| !p.is_unconstrained())
+                .any(|p| p.matches(stem))
+        })
+        .unwrap_or(false);
+    NameVerdict { header, declared }
 }
 
 impl Check for SpecCheck {
@@ -953,35 +977,42 @@ impl Check for SpecCheck {
     /// `check_source`: find the spec file in the SRPM's file list and run
     /// the spec checks on it.
     fn check_source(&mut self, pkg: &Pkg, config: &Config, out: &mut Filter) {
-        // Selection and verdict are separate computations over the
-        // same consistency table: the verdict judges every `.spec`
+        // Verdict and selection are separate computations over the
+        // same per-file judgements: the verdict judges every `.spec`
         // file in the source (the finding fires when none of them is
-        // consistent), the selection picks the file the spec checks
-        // run on — the first consistent one, else the last.
-        let verdicts: Vec<(&crate::pkg::pkgfile::PkgFile, bool)> = pkg
+        // consistent on either ground), the selection picks the file
+        // the spec checks run on — the first the header names, else
+        // the first a declaration names, else the last. Each payload
+        // spec is opened once, for its verdict; the selection reuses
+        // that opened spec, and a selection whose open failed is
+        // skipped — a payload file can vanish between the SRPM
+        // listing and the read.
+        let scans: Vec<(&crate::pkg::pkgfile::PkgFile, Option<SpecPkg>, NameVerdict)> = pkg
             .files
             .iter()
             .filter(|f| f.name.ends_with(".spec"))
-            .map(|f| (f, spec_name_consistent(pkg, f)))
+            .map(|f| {
+                let spec = SpecPkg::open(Path::new(&f.path)).ok();
+                let verdict = spec_name_verdict(pkg, f, spec.as_ref());
+                (f, spec, verdict)
+            })
             .collect();
-        let spec_file = verdicts
-            .iter()
-            .find(|(_, consistent)| *consistent)
-            .or_else(|| verdicts.last())
-            .map(|(f, _)| *f);
 
-        if verdicts.is_empty() {
+        if scans.is_empty() {
             add_info(out, Level::Error, pkg, "no-spec-file", &[]);
         }
-        if !verdicts.is_empty() && verdicts.iter().all(|(_, consistent)| !consistent) {
+        if !scans.is_empty() && scans.iter().all(|(_, _, verdict)| !verdict.consistent()) {
             add_info(out, Level::Error, pkg, "invalid-spec-name", &[]);
         }
 
-        if let Some(f) = spec_file {
+        let selected = scans
+            .iter()
+            .find(|(_, _, verdict)| verdict.header)
+            .or_else(|| scans.iter().find(|(_, _, verdict)| verdict.declared))
+            .or_else(|| scans.last());
+        if let Some((f, Some(spec_pkg), _)) = selected {
             self.spec_name = Some(f.name.clone());
-            let spec_pkg =
-                SpecPkg::open(Path::new(&f.path)).expect("spec file from the SRPM is readable");
-            self.check_spec(&spec_pkg, config, out);
+            self.check_spec(spec_pkg, config, out);
         }
     }
 
@@ -3374,6 +3405,131 @@ exit 1"#,
             1,
             "results: {firing:?}"
         );
+    }
+
+    #[test]
+    fn invalid_spec_name_quiet_for_pattern_only_match() {
+        // The payload file is named after a name only the declared
+        // pattern produces — the header names a different
+        // package — and the pattern alone keeps it quiet.
+        let dir = tempfile::tempdir().unwrap();
+        let results = run_source(vec![source_spec(
+            &dir,
+            "footmpfiles.spec",
+            "Name: %{flavour}tmpfiles\nVersion: 1\n",
+        )]);
+        assert!(!has(&results, "invalid-spec-name"), "results: {results:?}");
+    }
+
+    #[test]
+    fn invalid_spec_name_two_branch_union() {
+        // A multibuild spec declares one `Name:` per conditional
+        // branch; the accepted set is the union over both branches,
+        // so a payload file named after either branch stays quiet
+        // and a file named after neither fires.
+        let dir = tempfile::tempdir().unwrap();
+        let text = "%if 1\nName: alpha\n%else\nName: beta\n%endif\nVersion: 1\n";
+        for name in ["alpha.spec", "beta.spec"] {
+            let results = run_source(vec![source_spec(&dir, name, text)]);
+            assert!(
+                !has(&results, "invalid-spec-name"),
+                "{name} results: {results:?}"
+            );
+        }
+        let firing = run_source(vec![source_spec(&dir, "stray.spec", text)]);
+        assert_eq!(
+            lines_for(&firing, "invalid-spec-name").len(),
+            1,
+            "results: {firing:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_spec_name_mixed_declarations_judge_by_the_constrained_one() {
+        // One declaration's name is determinable, the other's is
+        // not: the unconstrained declaration constrains nothing and
+        // is set aside, so the determinable one judges — a file
+        // named after it stays quiet even though the header names a
+        // different package, and a file named after neither fires.
+        let dir = tempfile::tempdir().unwrap();
+        let text = "%if 1\nName: cond\n%endif\nName: %{pypi_name}\nVersion: 1\n";
+        let quiet = run_source(vec![source_spec(&dir, "cond.spec", text)]);
+        assert!(!has(&quiet, "invalid-spec-name"), "results: {quiet:?}");
+        let header = run_source(vec![source_spec(&dir, "w6-tmpfiles.spec", text)]);
+        assert!(!has(&header, "invalid-spec-name"), "results: {header:?}");
+        let firing = run_source(vec![source_spec(&dir, "other.spec", text)]);
+        assert_eq!(
+            lines_for(&firing, "invalid-spec-name").len(),
+            1,
+            "results: {firing:?}"
+        );
+    }
+
+    #[test]
+    fn check_source_tolerates_an_unreadable_payload_spec() {
+        // A payload spec listed in the SRPM that cannot be opened
+        // — removed between the listing and the read — is
+        // judged on the header name alone and the spec checks are
+        // skipped for it, without panicking.
+        let missing = |name: &str| crate::pkg::pkgfile::PkgFile {
+            name: name.to_string(),
+            path: format!("/nonexistent/{name}"),
+            ..Default::default()
+        };
+        let quiet = run_source(vec![missing("w6-tmpfiles.spec")]);
+        assert!(quiet.is_empty(), "results: {quiet:?}");
+        let firing = run_source(vec![missing("stray.spec")]);
+        assert_eq!(
+            lines_for(&firing, "invalid-spec-name").len(),
+            1,
+            "results: {firing:?}"
+        );
+    }
+
+    #[test]
+    fn check_source_runs_spec_checks_on_the_header_named_spec() {
+        // With several payload specs, the spec checks run on the
+        // header-named file in preference to an earlier
+        // declaration-named one: the header name is the container's
+        // own name for the source.
+        let dir = tempfile::tempdir().unwrap();
+        let declared = source_spec(
+            &dir,
+            "alpha.spec",
+            "Name: alpha\nVersion: 1\n%clean\nrm -rf %{buildroot}\n",
+        );
+        let header = source_spec(&dir, "w6-tmpfiles.spec", "Name: renamed\nVersion: 1\n");
+        let results = run_source(vec![declared, header]);
+        assert!(
+            !has(&results, "superfluous-%clean-section"),
+            "results: {results:?}"
+        );
+        let lines = lines_for(&results, "no-%prep-section");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(lines[0].contains("w6-tmpfiles.spec"), "line: {}", lines[0]);
+    }
+
+    #[test]
+    fn check_source_runs_spec_checks_on_the_last_spec_when_none_is_consistent() {
+        // No payload spec matches the header name or its own
+        // declarations: the finding fires and the spec checks run
+        // on the last file.
+        let dir = tempfile::tempdir().unwrap();
+        let first = source_spec(&dir, "one.spec", "Name: uno\nVersion: 1\n");
+        let last = source_spec(
+            &dir,
+            "dos.spec",
+            "Name: deux\nVersion: 1\n%clean\nrm -rf %{buildroot}\n",
+        );
+        let results = run_source(vec![first, last]);
+        assert_eq!(
+            lines_for(&results, "invalid-spec-name").len(),
+            1,
+            "results: {results:?}"
+        );
+        let lines = lines_for(&results, "superfluous-%clean-section");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(lines[0].contains("dos.spec"), "line: {}", lines[0]);
     }
 
     #[test]
