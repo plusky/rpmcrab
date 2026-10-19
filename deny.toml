@@ -13,9 +13,10 @@ version = 2
 confidence-threshold = 0.8
 # The project itself is GPL-2.0-or-later, so its own crates and any GPL-2.0+
 # dependency must be allowed; GPL-3.0-only would force the combined work to 3.0
-# and stays denied. Weak-copyleft (MPL, LGPL-2.1) is linkable.
+# and stays denied. Weak-copyleft (MPL, LGPL-2.0, LGPL-2.1) is linkable.
 allow = [
   "GPL-2.0-or-later",
+  "LGPL-2.0-or-later",
   "LGPL-2.1-only",
   "LGPL-2.1-or-later",
   "MIT",
@@ -24,6 +25,7 @@ allow = [
   "Apache-2.0 WITH LLVM-exception",
   "BSD-2-Clause",
   "BSD-3-Clause",
+  "BSL-1.0",
   "bzip2-1.0.6",
   "ISC",
   "Unicode-3.0",
