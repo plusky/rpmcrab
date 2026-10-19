@@ -24,7 +24,7 @@ use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::pkg::pkgfile::PkgFile;
-use crate::tools::{Tool, ToolSource, test_source};
+use crate::tools::{Tool, ToolSource, spawn_with_retry, test_source};
 use std::sync::OnceLock;
 
 static VALIDSO_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -1743,7 +1743,11 @@ impl StringsInfo {
         let Some(mut cmd) = tool.command() else {
             return info;
         };
-        let out = cmd.arg(path).env("LC_ALL", "C").output();
+        cmd.arg(path).env("LC_ALL", "C");
+        // The spawn retries transient fork/exec failures, like the
+        // probe's: one transient failure on a loaded runner must not
+        // read as a strings failure.
+        let out = spawn_with_retry(|| cmd.output());
         match out {
             Ok(o) if o.status.success() => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
@@ -1774,7 +1778,9 @@ impl ArInfo {
         let Some(mut cmd) = tool.command() else {
             return info;
         };
-        let out = cmd.args(["t", path]).env("LC_ALL", "C").output();
+        cmd.args(["t", path]).env("LC_ALL", "C");
+        // Same transient-spawn retry as `StringsInfo::parse`.
+        let out = spawn_with_retry(|| cmd.output());
         match out {
             Ok(o) if o.status.success() => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
