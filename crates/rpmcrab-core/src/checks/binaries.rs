@@ -3093,29 +3093,28 @@ impl BinariesCheck {
                 let state = self
                     .pending_state
                     .get_or_insert_with(BinariesState::default);
-                let record = match state.packages.last_mut() {
-                    Some(record) if record.pkg_name == pkg.name && record.pkg_arch == pkg.arch => {
-                        record
-                    }
-                    _ => {
-                        state.packages.push(PackageConsumers {
-                            pkg_name: pkg.name.clone(),
-                            pkg_arch: pkg.arch.clone(),
-                            files: Vec::new(),
-                        });
-                        state.packages.last_mut().expect("just pushed")
-                    }
-                };
-                record.files.push(ConsumerFile {
-                    file_name: pkgfile.name.clone(),
-                    undefined_symbols: ldd.undefined_symbols.clone(),
-                    defined_symbols: ldd.defined_symbols.clone(),
-                    dependencies: ldd.dependencies.clone(),
-                    is_64: ldd.is_64,
-                    rpath: ldd.rpath.clone(),
-                    runpath: ldd.runpath.clone(),
-                    has_runpath: ldd.has_runpath,
-                });
+                if !matches!(
+                    state.packages.last(),
+                    Some(record) if record.pkg_name == pkg.name && record.pkg_arch == pkg.arch
+                ) {
+                    state.packages.push(PackageConsumers {
+                        pkg_name: pkg.name.clone(),
+                        pkg_arch: pkg.arch.clone(),
+                        files: Vec::new(),
+                    });
+                }
+                if let Some(record) = state.packages.last_mut() {
+                    record.files.push(ConsumerFile {
+                        file_name: pkgfile.name.clone(),
+                        undefined_symbols: ldd.undefined_symbols.clone(),
+                        defined_symbols: ldd.defined_symbols.clone(),
+                        dependencies: ldd.dependencies.clone(),
+                        is_64: ldd.is_64,
+                        rpath: ldd.rpath.clone(),
+                        runpath: ldd.runpath.clone(),
+                        has_runpath: ldd.has_runpath,
+                    });
+                }
             } else {
                 for symbol in &ldd.undefined_symbols {
                     add_info(
@@ -3611,19 +3610,10 @@ impl Check for BinariesCheck {
         // invocation installs side by side.
         self.defer_undefined = !pkg.is_installed();
         if self.defer_undefined {
-            let mut state = BinariesState {
+            let state = BinariesState {
                 providers: package_providers(&analyses, &pkg.files),
                 ..BinariesState::default()
             };
-            if analyses
-                .iter()
-                .flatten()
-                .any(|a| a.ldd.as_ref().is_some_and(|l| l.failed.is_none()))
-            {
-                state
-                    .contributors
-                    .push((pkg.name.clone(), pkg.arch.clone()));
-            }
             match &mut self.pending_state {
                 Some(existing) => existing.merge(state),
                 None => self.pending_state = Some(state),
@@ -3718,6 +3708,46 @@ impl Check for BinariesCheck {
 
             if is_exec {
                 self.check_non_pie(pkg, fname, out);
+            }
+        }
+
+        // Register this package as an invocation contributor only
+        // now, when what it actually contributed is known
+        // (plusky/rpmcrab#735 review): a captured consumer (the
+        // records `check_dependency` left in the pending state) or a
+        // provider library (an `ldd`-clean file that is a shared
+        // library, carries a SONAME, or is named like one). A package
+        // shipping only executables contributes neither --
+        // executables are never captured as consumers and their
+        // basenames are not library providers -- so it must not flip
+        // a batch into invocation-wide resolution in `after_checks`.
+        if self.defer_undefined {
+            let captured = self.pending_state.as_ref().is_some_and(|state| {
+                state
+                    .packages
+                    .iter()
+                    .any(|p| p.pkg_name == pkg.name && p.pkg_arch == pkg.arch)
+            });
+            let provides = analyses
+                .iter()
+                .zip(pkg.files.iter())
+                .any(|(analysis, pkgfile)| {
+                    let Some(analysis) = analysis else {
+                        return false;
+                    };
+                    analysis.ldd.as_ref().is_some_and(|l| l.failed.is_none())
+                        && (analysis.info.is_shlib
+                            || analysis.info.soname.is_some()
+                            || basename(&pkgfile.name).contains(".so"))
+                });
+            if captured || provides {
+                let state = self
+                    .pending_state
+                    .get_or_insert_with(BinariesState::default);
+                let contributor = (pkg.name.clone(), pkg.arch.clone());
+                if !state.contributors.contains(&contributor) {
+                    state.contributors.push(contributor);
+                }
             }
         }
 
@@ -8430,6 +8460,23 @@ description = "explicit priority string bypasses the system crypto policy"
         }
     }
 
+    /// Write a crafted executable into `dir` and return its
+    /// `PkgFile`, named `/usr/bin/<base>` inside the package. The
+    /// bytes are the crafted ET_DYN shape; executability follows
+    /// from the file's name and magic, as in the reference.
+    fn exe_pkgfile(dir: &std::path::Path, base: &str, elf: &[u8]) -> PkgFile {
+        let path = dir.join(base);
+        std::fs::write(&path, elf).expect("write exe");
+        PkgFile {
+            name: format!("/usr/bin/{base}"),
+            path: path.to_string_lossy().into_owned(),
+            magic: "ELF 64-bit LSB executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, not stripped"
+                .to_string(),
+            mode: 0o100755,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn undefined_symbol_provided_by_needed_library_is_quiet() {
         // plusky/rpmcrab#467: the symbol is undefined in the consumer
@@ -8664,6 +8711,97 @@ description = "explicit priority string bypasses the system crypto policy"
             lines.len(),
             1,
             "host-only provider must not rescue: {results:?}"
+        );
+        assert!(lines[0].contains("sys_sym"), "names the symbol: {lines:?}");
+    }
+
+    #[test]
+    fn exe_only_package_does_not_flip_invocation_wide() {
+        // plusky/rpmcrab#735 review: a package shipping only
+        // executables contributes no provider library and no captured
+        // consumer (executables are never captured -- the shlib gate
+        // in `check_dependency`), so it must not count as an
+        // invocation contributor. Otherwise adding it to a batch
+        // disables the system fallback for a sibling package whose
+        // symbols the system provides, and the sibling's verdict
+        // depends on an unrelated package.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let sysroot = dir.path().join("sysroot");
+        std::fs::create_dir(&sysroot).expect("mkdir sysroot");
+        let syslib = craft_shlib_elf(false, None, Some("libsys.so.1"), &[("sys_sym", 1, 0, 1)]);
+        write_system_lib(&sysroot, "libsys.so.1", &syslib);
+        let consumer = craft_shlib_elf(
+            false,
+            Some("libsys.so.1"),
+            Some("libbar.so.1"),
+            &[("sys_sym", 1, 0, 0)],
+        );
+        let exe = craft_shlib_elf(false, Some("libsys.so.1"), None, &[("main", 1, 2, 1)]);
+        let other = craft_shlib_elf(
+            false,
+            None,
+            Some("libother.so.1"),
+            &[("other_sym", 1, 0, 1)],
+        );
+        let consumer_pkg = synthetic_pkg(
+            "consumerpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let exe_pkg = synthetic_pkg(
+            "exepkg",
+            "x86_64",
+            vec![exe_pkgfile(dir.path(), "tool", &exe)],
+        );
+        let other_pkg = synthetic_pkg(
+            "otherpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libother.so.1", &other)],
+        );
+        let config = test_config();
+
+        // Alone, the system provider rescues the consumer.
+        let alone = driver_results_with_system(
+            &consumer_pkg,
+            &config,
+            SystemLibraries::with_roots(vec![sysroot.clone()], None),
+        );
+        assert!(
+            lines_for(&alone, "undefined-non-weak-symbol").is_empty(),
+            "system provider rescues a lone package: {alone:?}"
+        );
+
+        // Batched with the exe-only package, the consumer is still
+        // the only contributor: the system fallback stays in place
+        // and the verdict is the same as alone.
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.system_libraries = SystemLibraries::with_roots(vec![sysroot.clone()], None);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        run_invocation(&mut check, &[&consumer_pkg, &exe_pkg], &config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "exe-only package must not disable the system fallback: {results:?}"
+        );
+
+        // A genuine contributor alongside still flips the batch:
+        // with a second library package in the invocation the system
+        // fallback is off and the host-only symbol fires.
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.system_libraries = SystemLibraries::with_roots(vec![sysroot], None);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        run_invocation(
+            &mut check,
+            &[&consumer_pkg, &exe_pkg, &other_pkg],
+            &config,
+            &mut out,
+        );
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(
+            lines.len(),
+            1,
+            "genuine contributor still flips the batch: {results:?}"
         );
         assert!(lines[0].contains("sys_sym"), "names the symbol: {lines:?}");
     }
