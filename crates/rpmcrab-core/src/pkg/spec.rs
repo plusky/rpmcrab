@@ -1122,7 +1122,10 @@ mod name_patterns_tests {
         // unconstrained pattern of the undefined reading.
         let pats = patterns("%define v one\n%if 0\n%undefine v\n%endif\nName: %{v}\n")
             .expect("patterns declared");
-        assert!(pats.iter().any(|p| p.matches("one")));
+        assert!(
+            pats.iter()
+                .any(|p| !p.is_unconstrained() && p.matches("one"))
+        );
         assert!(pats.iter().any(|p| p.is_unconstrained()));
         // A `%undefine` outside any branch, after the branch, still
         // removes the macro for every reading.
@@ -1130,6 +1133,37 @@ mod name_patterns_tests {
             "%define sfx -x\n%if 0\n%define sfx -y\n%endif\n%undefine sfx\nName: foo%{sfx}\n",
             &["foo", "foo-zzz"],
             &["xfoo", "bar"],
+        );
+    }
+
+    #[test]
+    fn suffixed_branch_names_form_a_union() {
+        // Each conditional branch pins its own suffix macro; the
+        // accepted set is the union over the branches, suffixes
+        // included.
+        assert_matches(
+            "%if 0\n%global sfx -a\n%else\n%global sfx -b\n%endif\nName: pkg%{sfx}\n",
+            &["pkg-a", "pkg-b"],
+            &["pkg", "pkg-c", "pkg-ab"],
+        );
+    }
+
+    #[test]
+    fn continued_conditional_text_is_joined() {
+        // A `%{?name:text}` group split by a continuation still
+        // expands its text, in a `Name:` value and in a definition
+        // body alike.
+        assert_matches(
+            "%define bar 1\nName: foo%{?bar:\
+-baz}\n",
+            &["foo-baz", "foo"],
+            &["foo-bar", "foox"],
+        );
+        assert_matches(
+            "%define a 1\n%define sfx %{?a:\
+-b}\nName: foo%{sfx}\n",
+            &["foo-b", "foo"],
+            &["foo-a", "foox"],
         );
     }
 

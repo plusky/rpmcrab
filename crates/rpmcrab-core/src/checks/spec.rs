@@ -3474,6 +3474,67 @@ exit 1"#,
     }
 
     #[test]
+    fn invalid_spec_name_mixed_macro_definitions_keep_the_concrete_name() {
+        // A macro defined literally in one declaration and
+        // undeterminably in another: the concrete name the preamble
+        // does determine judges \u2014 a file named after it stays quiet
+        // even though the header names a different package, and a
+        // file named after neither fires.
+        let dir = tempfile::tempdir().unwrap();
+        let text = "%define v one\n%define v %(shell)\nName: %{v}\nVersion: 1\n";
+        let quiet = run_source(vec![source_spec(&dir, "one.spec", text)]);
+        assert!(!has(&quiet, "invalid-spec-name"), "results: {quiet:?}");
+        let firing = run_source(vec![source_spec(&dir, "other.spec", text)]);
+        assert_eq!(
+            lines_for(&firing, "invalid-spec-name").len(),
+            1,
+            "results: {firing:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_spec_name_suffixed_branch_union() {
+        // Each conditional branch pins its own suffix; a payload
+        // file named after either branch's suffixed name stays
+        // quiet, and a file named after neither fires.
+        let dir = tempfile::tempdir().unwrap();
+        let text =
+            "%if 0\n%global sfx -a\n%else\n%global sfx -b\n%endif\nName: pkg%{sfx}\nVersion: 1\n";
+        for name in ["pkg-a.spec", "pkg-b.spec"] {
+            let results = run_source(vec![source_spec(&dir, name, text)]);
+            assert!(
+                !has(&results, "invalid-spec-name"),
+                "{name} results: {results:?}"
+            );
+        }
+        let firing = run_source(vec![source_spec(&dir, "pkg-c.spec", text)]);
+        assert_eq!(
+            lines_for(&firing, "invalid-spec-name").len(),
+            1,
+            "results: {firing:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_spec_name_branch_undefine_keeps_the_defined_name() {
+        // A `%undefine` inside a conditional branch removes the
+        // macro for that branch's reading only: the name the other
+        // reading defines still judges, so a file named after it
+        // stays quiet even though the header names a different
+        // package, and a file named after neither fires.
+        let dir = tempfile::tempdir().unwrap();
+        let text = "%define v one\n%if 0\n%undefine v\n%endif\nName: %{v}\nVersion: 1\n";
+        let quiet = run_source(vec![source_spec(&dir, "one.spec", text)]);
+        assert!(!has(&quiet, "invalid-spec-name"), "results: {quiet:?}");
+        let firing = run_source(vec![source_spec(&dir, "other.spec", text)]);
+        assert_eq!(
+            lines_for(&firing, "invalid-spec-name").len(),
+            1,
+            "results: {firing:?}"
+        );
+    }
+
+    #[test]
     fn check_source_tolerates_an_unreadable_payload_spec() {
         // A payload spec listed in the SRPM that cannot be opened
         // — removed between the listing and the read — is
