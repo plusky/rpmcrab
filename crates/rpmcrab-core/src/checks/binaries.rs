@@ -18,7 +18,7 @@ use fancy_regex::Regex;
 use rayon::prelude::*;
 
 use crate::check::{Check, add_info, basename, make_finding};
-use crate::checks::shared::is_64bit_arch;
+use crate::checks::shared::{base_arch, is_64bit_arch};
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
@@ -1412,19 +1412,25 @@ fn package_providers(
 struct PackageProviders {
     pkg_name: String,
     pkg_arch: String,
+    pkg_filename: String,
     providers: HashMap<String, SymbolProvider>,
 }
 
 /// Identity of the package a resolution request originates from:
-/// its name and architecture.
-type PackageId = (String, String);
+/// its name, architecture and package file. Two versions of one
+/// package in one invocation are distinct identities (issue #799):
+/// when both versions ship a SONAME, the consumer's provider is
+/// its own package file's copy, not the sibling version's copy a
+/// name+arch key would reach first in check order.
+type PackageId = (String, String, String);
 
 /// The resolution view over an invocation's per-package provider
 /// sets, in package check order. A lookup for one needing object
 /// considers its own package's set first, then the sets of other
-/// packages with the object's own architecture, in check order,
-/// and returns the first provider found for the SONAME (exact
-/// spelling first, then the entry's basename). Sets of a
+/// packages with the object's own base architecture (a hwcaps
+/// subarch such as `x86_64_v3` counts as its base arch), in check
+/// order, and returns the first provider found for the SONAME
+/// (exact spelling first, then the entry's basename). Sets of a
 /// different architecture are never consulted: the loader does
 /// not bind a consumer to a library built for another
 /// architecture.
@@ -1439,7 +1445,7 @@ impl ProviderIndex {
                 .into_iter()
                 .map(|set| {
                     (
-                        (set.pkg_name, set.pkg_arch),
+                        (set.pkg_name, set.pkg_arch, set.pkg_filename),
                         set.providers
                             .into_iter()
                             .map(|(k, v)| (k, Arc::new(v)))
@@ -1464,7 +1470,7 @@ impl ProviderIndex {
             }
         }
         for (id, map) in &self.sets {
-            if id != owner && id.1 == owner.1 {
+            if id != owner && base_arch(&id.1) == base_arch(&owner.1) {
                 if let Some(provider) = map.get(soname).or_else(|| map.get(base)) {
                     return Some((id.clone(), provider.clone()));
                 }
@@ -1660,6 +1666,7 @@ fn resolve_undefined_symbols(
     let providers = ProviderIndex::new(vec![PackageProviders {
         pkg_name: owner.0.clone(),
         pkg_arch: owner.1.clone(),
+        pkg_filename: owner.2.clone(),
         providers,
     }]);
 
@@ -3192,7 +3199,17 @@ impl BinariesCheck {
                         record.files.push(ConsumerFile {
                             file_name: pkgfile.name.clone(),
                             undefined_symbols: ldd.undefined_symbols.clone(),
-                            defined_symbols: ldd.defined_symbols.iter().cloned().collect(),
+                            // Only the intersection is kept
+                            // (issue #799): `after_checks` tests
+                            // membership for the consumer's own
+                            // undefined symbols, so a defined symbol
+                            // outside that set is never consulted.
+                            defined_symbols: ldd
+                                .defined_symbols
+                                .iter()
+                                .filter(|sym| ldd.undefined_symbols.contains(*sym))
+                                .cloned()
+                                .collect(),
                             dependencies: ldd.dependencies.clone(),
                             is_64: ldd.is_64,
                             rpath: ldd.rpath.clone(),
@@ -3700,6 +3717,7 @@ impl Check for BinariesCheck {
                 provider_sets: vec![PackageProviders {
                     pkg_name: pkg.name.clone(),
                     pkg_arch: pkg.arch.clone(),
+                    pkg_filename: pkg.filename.clone(),
                     providers: package_providers(&analyses, &pkg.files),
                 }],
                 ..BinariesState::default()
@@ -3709,7 +3727,7 @@ impl Check for BinariesCheck {
                 None => self.pending_state = Some(state),
             }
         } else {
-            let owner: PackageId = (pkg.name.clone(), pkg.arch.clone());
+            let owner: PackageId = (pkg.name.clone(), pkg.arch.clone(), pkg.filename.clone());
             resolve_undefined_symbols(&mut analyses, &pkg.files, &self.system_libraries, &owner);
         }
 
@@ -3890,7 +3908,32 @@ impl Check for BinariesCheck {
         }
         let state = std::mem::take(&mut self.deferred_state);
         let invocation_wide = state.contributors.len() > 1;
-        let providers = ProviderIndex::new(state.provider_sets);
+        // Single-contributor mode resolves against the contributing
+        // package's providers plus the system (issue #799): the
+        // index holds that package's set alone. Every other set is
+        // outside the model -- a sibling's basename entries (an
+        // exe-only package's files land in its set under their
+        // basenames) must not satisfy the contributor's DT_NEEDED
+        // spellings.
+        let provider_sets = if invocation_wide {
+            state.provider_sets
+        } else {
+            // A batch can reach here with no contributor at all
+            // (only exe-only or provider-only packages): the filter
+            // then keeps nothing, and the resolution loop below has
+            // no consumers to resolve.
+            let contributor = state.contributors.first();
+            state
+                .provider_sets
+                .into_iter()
+                .filter(|set| {
+                    contributor.is_some_and(|c| {
+                        set.pkg_name == c.0 && set.pkg_arch == c.1 && set.pkg_filename == c.2
+                    })
+                })
+                .collect()
+        };
+        let providers = ProviderIndex::new(provider_sets);
         let empty_system;
         let system = if invocation_wide {
             empty_system = SystemLibraries::empty();
@@ -3900,7 +3943,11 @@ impl Check for BinariesCheck {
         };
         let mut closures: HashMap<ClosureKey, Rc<HashSet<String>>> = HashMap::new();
         for package in &state.packages {
-            let owner: PackageId = (package.pkg_name.clone(), package.pkg_arch.clone());
+            let owner: PackageId = (
+                package.pkg_name.clone(),
+                package.pkg_arch.clone(),
+                package.pkg_filename.clone(),
+            );
             for consumer in &package.files {
                 if consumer.undefined_symbols.is_empty() {
                     continue;
@@ -9141,6 +9188,183 @@ description = "explicit priority string bypasses the system crypto policy"
              invocation-wide resolution: {results:?}"
         );
         assert!(lines[0].contains("sys_sym"), "names the symbol: {lines:?}");
+    }
+
+    #[test]
+    fn same_name_versions_resolve_against_own_package_file() {
+        // Issue #799: the provider index keyed a package by
+        // (name, arch) alone, so two versions of one package in one
+        // invocation shared a lookup identity: a consumer in the
+        // newer version resolved against whichever version's copy
+        // of a SONAME check order reached first. The identity now
+        // includes the package file, so the consumer resolves
+        // against its own version's copy -- which does not define
+        // `versioned_sym`, so the symbol fires.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let v1_dir = dir.path().join("v1");
+        let v2_dir = dir.path().join("v2");
+        std::fs::create_dir(&v1_dir).expect("mkdir v1");
+        std::fs::create_dir(&v2_dir).expect("mkdir v2");
+        let defining = craft_shlib_elf(
+            false,
+            None,
+            Some("libfoo.so.1"),
+            &[("versioned_sym", 1, 0, 1)],
+        );
+        let lacking = craft_shlib_elf(false, None, Some("libfoo.so.1"), &[("other_sym", 1, 0, 1)]);
+        let consumer = craft_shlib_elf(
+            false,
+            Some("libfoo.so.1"),
+            Some("libbar.so.1"),
+            &[("versioned_sym", 1, 0, 0)],
+        );
+        let mut v1_pkg = synthetic_pkg(
+            "libpkg",
+            "x86_64",
+            vec![shlib_pkgfile(&v1_dir, "libfoo.so.1", &defining)],
+        );
+        v1_pkg.filename = "libpkg-1.0-1.x86_64.rpm".to_string();
+        let mut v2_pkg = synthetic_pkg(
+            "libpkg",
+            "x86_64",
+            vec![
+                shlib_pkgfile(&v2_dir, "libfoo.so.1", &lacking),
+                shlib_pkgfile(dir.path(), "libbar.so.1", &consumer),
+            ],
+        );
+        v2_pkg.filename = "libpkg-2.0-1.x86_64.rpm".to_string();
+        let config = test_config();
+        // The defining version is checked first: under a name+arch
+        // identity its copy is the one the lookup reaches.
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        run_invocation(&mut check, &[&v1_pkg, &v2_pkg], &config, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(
+            lines.len(),
+            1,
+            "the consumer resolves against its own version's copy: {results:?}"
+        );
+        assert!(
+            lines[0].contains("versioned_sym"),
+            "names the symbol: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn single_contributor_index_excludes_non_contributor_sets() {
+        // Issue #799: in single-contributor mode the provider index
+        // was built from every package's set, so a non-contributing
+        // sibling's entries could satisfy the contributor's
+        // DT_NEEDED spellings. An exe-only package's files land in
+        // its provider set under their basenames; here the sibling
+        // ships an executable whose basename matches the consumer's
+        // DT_NEEDED spelling and whose defined symbols cover the
+        // undefined one. Single-contributor resolution sees the
+        // contributor's own set plus the system only, so the symbol
+        // must fire.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let sysroot = dir.path().join("sysroot");
+        std::fs::create_dir(&sysroot).expect("mkdir sysroot");
+        let consumer = craft_shlib_elf(
+            false,
+            Some("tool"),
+            Some("libbar.so.1"),
+            &[("tool_sym", 1, 0, 0)],
+        );
+        let exe = craft_shlib_elf(false, None, None, &[("tool_sym", 1, 0, 1)]);
+        let consumer_pkg = synthetic_pkg(
+            "consumerpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let exe_pkg = synthetic_pkg(
+            "exepkg",
+            "x86_64",
+            vec![exe_pkgfile(dir.path(), "tool", &exe)],
+        );
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.system_libraries = SystemLibraries::with_roots(vec![sysroot], None);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        run_invocation(&mut check, &[&consumer_pkg, &exe_pkg], &config, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(
+            lines.len(),
+            1,
+            "a non-contributor's basename entry must not satisfy the spelling: {results:?}"
+        );
+        assert!(lines[0].contains("tool_sym"), "names the symbol: {lines:?}");
+    }
+
+    #[test]
+    fn contributorless_batch_resolves_nothing() {
+        // A deferred batch in which no package contributes -- an
+        // exe-only package's files land in its provider set under
+        // their basenames, yet it captures no consumer and provides
+        // no library -- reaches `after_checks` with an empty
+        // contributor list. The single-contributor filter must keep
+        // no set (and must not index into the missing contributor);
+        // with no consumers there is nothing to resolve.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let exe = craft_shlib_elf(false, None, None, &[("tool_sym", 1, 0, 1)]);
+        let exe_pkg = synthetic_pkg(
+            "exepkg",
+            "x86_64",
+            vec![exe_pkgfile(dir.path(), "tool", &exe)],
+        );
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        run_invocation(&mut check, &[&exe_pkg], &config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "no consumers, no findings: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hwcaps_subarch_provider_resolves_for_base_arch_consumer() {
+        // Issue #799: the cross-package lookup compared raw arch
+        // strings, so a provider package built for a hwcaps subarch
+        // (x86_64_v3) never resolved a base-arch (x86_64) consumer,
+        // even though subarch packages ship files under the base
+        // arch's libdirs. The comparison now runs on base arches.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let provider = craft_shlib_elf(false, None, Some("libfoo.so.1"), &[("foo_sym", 1, 0, 1)]);
+        let consumer = craft_shlib_elf(
+            false,
+            Some("libfoo.so.1"),
+            Some("libbar.so.1"),
+            &[("foo_sym", 1, 0, 0)],
+        );
+        let provider_pkg = synthetic_pkg(
+            "providerpkg",
+            "x86_64_v3",
+            vec![shlib_pkgfile(dir.path(), "libfoo.so.1", &provider)],
+        );
+        let consumer_pkg = synthetic_pkg(
+            "consumerpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        run_invocation(
+            &mut check,
+            &[&consumer_pkg, &provider_pkg],
+            &config,
+            &mut out,
+        );
+        let results = out.results().to_vec();
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "a base-arch-equal provider resolves the consumer: {results:?}"
+        );
     }
 
     #[test]
