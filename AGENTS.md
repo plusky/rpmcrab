@@ -23,8 +23,8 @@ feature on.
 
 The build needs the RPM development headers, because `librpm-sys` runs bindgen
 (`pkg-config` must find `rpm.pc`): install `rpm-devel` (openSUSE) or
-`librpm-dev` (Debian/Ubuntu) first, and note that `librpm` is **Linux-only** —
-there is no macOS build. The enabled librpm `build` feature (for `Spec::parse`;
+`librpm-dev` (Debian/Ubuntu) first, and note that `librpm` is **Linux-only**.
+The enabled librpm `build` feature (for `Spec::parse`;
 see `crates/rpmcrab-core/Cargo.toml`) additionally pulls in `librpmbuild-sys`,
 whose bindgen step needs `popt.h`: install `popt-devel` (openSUSE) or
 `libpopt-dev` (Debian/Ubuntu) too. On Debian/Ubuntu `librpm-dev` already drags
@@ -74,8 +74,8 @@ must be. Do not treat it as an authority on what is *correct*.
   not, and the two must not ride in the same commit.
 - First check whether an odd upstream shape is a **contract in disguise** — a
   byte sequence an external consumer already greps. The `exceeds threshold,
-  aborting.` banner is the canonical example: it is grepped verbatim by build
-  tooling, so it is frozen no matter how it reads.
+  aborting.` banner was the canonical example: it was grepped verbatim by build
+  tooling, so it was frozen no matter how it read, until #699 removed it.
 - A note recording a deliberate departure is a guard-rail and stays. State it
   positively ("rpmcrab does X"), not comparatively ("unlike rpmlint…").
 
@@ -85,13 +85,13 @@ These byte shapes have external consumers. Changing any of them is a breaking
 change, whatever a nearby comment says about where it came from. The normative,
 machine-enforceable list is `docs/DESIGN.md`; the headline items are:
 
-- The finding line `{file}{arch}:{line} {L}: {check}{ (Badness: N)}{details}`.
+- The finding line `{file}{arch}:{line} {L}: {check}{details}` (no badness
+  column since #699).
 - The de-coloured filter-match string (no badness, no colour) that `Filters`
   regexes run against.
-- The footer template and the `exceeds threshold, aborting.` banner (grepped
-  verbatim by build tooling).
-- The exit-code set `0/2/3/4/64/65/66/130`, including the `64`-vs-`65` strict
-  split.
+- The footer template (no badness total since #699; the `exceeds threshold,
+  aborting.` banner is gone).
+- The exit-code set `0/2/3/4/64/130`.
 - The sort order (check name reverse-alphabetical, then severity reverse).
 - The TOML config merge order and the `rpmlintrc` two-directive scraper.
 

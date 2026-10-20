@@ -52,11 +52,18 @@ fn man_page_documents_exit_status() {
         man.contains(".SH EXIT STATUS"),
         "man page has an EXIT STATUS section"
     );
-    // The frozen exit-code contract (docs/DESIGN.md §4.6).
-    for code in ["0", "2", "3", "4", "64", "65", "66", "130"] {
+    // The exit-code contract (docs/DESIGN.md §4.6, revised by #699:
+    // 65 and 66 no longer exist).
+    for code in ["0", "2", "3", "4", "64", "130"] {
         assert!(
             man.contains(&format!("\\fB{code}\\fR")),
             "man page is missing exit code {code}"
+        );
+    }
+    for code in ["65", "66"] {
+        assert!(
+            !man.contains(&format!("\\fB{code}\\fR")),
+            "man page still documents removed exit code {code}"
         );
     }
 }

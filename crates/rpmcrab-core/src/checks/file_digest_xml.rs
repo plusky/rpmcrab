@@ -110,10 +110,15 @@ impl Canonicalizer {
                         return Err("XML parse error: multiple DOCTYPE declarations".to_string());
                     }
                     self.seen_doctype = true;
-                    self.parse_doctype_entities(&e);
+                    self.parse_doctype_entities(&e)?;
                 }
-                // Comments neither emit nor break text coalescing.
-                Event::Comment(_) => {}
+                // Comments neither emit nor break text coalescing, but
+                // their content is still validated: the reference
+                // rejects a comment holding a character outside the XML
+                // `Char` production — or the `--` the `Comment`
+                // production forbids — even though the comment is
+                // dropped.
+                Event::Comment(e) => validate_comment(&e)?,
                 Event::PI(e) => self.emit_pi(&e)?,
                 Event::GeneralRef(e) => self.push_ref(&e)?,
                 Event::Start(e) => {
@@ -156,13 +161,16 @@ impl Canonicalizer {
                         .push_str(&e.xml_content(self.xml_version()));
                 }
                 Event::CData(e) => {
-                    // A CDATA section outside the document element is
-                    // content expat rejects, even holding only
-                    // whitespace: mark it like a reference outside the
-                    // root, so flush_text does not let it slip through
-                    // the whitespace trim.
+                    // A CDATA section is only well-formed inside the
+                    // document element; judged by the event, like a
+                    // reference, it is an error outside the root even
+                    // when its content is whitespace only.
                     if self.depth == 0 {
-                        self.pending_ref_outside_root = true;
+                        return Err(if self.seen_root {
+                            "XML parse error: junk after document element".to_string()
+                        } else {
+                            "XML parse error: content before document element".to_string()
+                        });
                     }
                     self.pending_text
                         .push_str(&e.xml_content(self.xml_version()));
@@ -254,8 +262,12 @@ impl Canonicalizer {
     }
 
     /// Route a PI: prolog buffer, epilog (`\n<?...?>`), or inline.
+    /// The raw content is validated first: the reference rejects a PI
+    /// holding a character outside the XML `Char` production, in the
+    /// data just as in character data.
     fn emit_pi(&mut self, raw: &str) -> Result<(), String> {
         self.flush_text()?;
+        validate_xml_chars(raw)?;
         let (target, data) = split_pi(raw);
         if !self.seen_root {
             self.prolog_pis.push((target, data));
@@ -530,15 +542,35 @@ impl Canonicalizer {
     /// delimiters (UTF-8 continuation bytes never match one) and the
     /// fallthrough steps over a whole character, so no index can land
     /// inside a multi-byte character.
-    fn parse_doctype_entities(&mut self, inner: &str) {
+    fn parse_doctype_entities(&mut self, inner: &str) -> Result<(), String> {
+        // The subset is document text like any other: a character
+        // outside the `Char` production anywhere in it — in a comment,
+        // a processing instruction, an attribute default — is a parse
+        // error in the reference, so the whole span is validated
+        // before the declarations are picked out of it.
+        validate_xml_chars(inner)?;
         let bytes = inner.as_bytes();
         let mut i = 0;
         while i < bytes.len() {
             if bytes[i..].starts_with(b"<!--") {
-                match inner[i..].find("-->") {
-                    Some(end) => i += end + 3,
-                    None => break,
+                // The terminator search starts after the opening
+                // `<!--`: searching from `i` lets the opener's own
+                // `--` form a spurious `-->` with a following `>`
+                // (as in `<!-->`), which both miscounts the comment
+                // body and slices with start > end on that input.
+                match inner[i + 4..].find("-->") {
+                    Some(end) => {
+                        validate_comment(&inner[i + 4..i + 4 + end])?;
+                        i += 4 + end + 3;
+                    }
+                    None => {
+                        return Err("XML parse error: unterminated comment".to_string());
+                    }
                 }
+                continue;
+            }
+            if bytes[i..].starts_with(b"<!ATTLIST") {
+                i = skip_attlist(inner, i)?;
                 continue;
             }
             if bytes[i..].starts_with(b"<!ENTITY") {
@@ -566,6 +598,10 @@ impl Canonicalizer {
                         i += 1;
                     }
                     if !name.is_empty() {
+                        if !is_valid_entity_name(name) {
+                            return Err(format!("invalid entity name {name:?}"));
+                        }
+                        validate_entity_value(value)?;
                         self.entities.insert(name.to_string(), Rc::from(value));
                     }
                 }
@@ -573,6 +609,39 @@ impl Canonicalizer {
             }
             i += inner[i..].chars().next().map_or(1, char::len_utf8);
         }
+        Ok(())
+    }
+}
+
+/// Validate one general-entity value at declaration time, the way the
+/// reference validates it while building its entity table: character
+/// references must decode to XML characters, literal runs must consist
+/// of XML characters, a general reference's name must be a legal entity
+/// name, and a `%` — a parameter-entity reference in the internal
+/// subset — is an error in every position. Whether a named entity
+/// exists is decided when the value is used, so an unreferenced value
+/// may mention an entity that is never declared.
+fn validate_entity_value(value: &str) -> Result<(), String> {
+    if value.contains('%') {
+        return Err("illegal parameter entity reference in entity value".to_string());
+    }
+    let mut rest = value;
+    loop {
+        let Some(amp) = rest.find('&') else {
+            return validate_xml_chars(rest);
+        };
+        validate_xml_chars(&rest[..amp])?;
+        let after = &rest[amp + 1..];
+        let Some(semi) = after.find(';') else {
+            return Err("unterminated entity reference".to_string());
+        };
+        let name = &after[..semi];
+        if let Some(num) = name.strip_prefix('#') {
+            decode_char_ref(num)?;
+        } else if !is_valid_entity_name(name) {
+            return Err(format!("invalid entity reference &{name};"));
+        }
+        rest = &after[semi + 1..];
     }
 }
 
@@ -697,6 +766,62 @@ fn validate_xml_chars(s: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate comment content: the literal characters must be XML
+/// `Char`s, and the `Comment` production additionally forbids `--`
+/// anywhere in the content and a `-` as its last character.
+fn validate_comment(content: &str) -> Result<(), String> {
+    validate_xml_chars(content)?;
+    if content.contains("--") {
+        return Err("XML parse error: comment content contains '--'".to_string());
+    }
+    if content.ends_with('-') {
+        return Err("XML parse error: comment content ends with '-'".to_string());
+    }
+    Ok(())
+}
+
+/// Whether `name` is a legal entity name. The reference parser for
+/// this check is raw expat, so the name follows expat's `Name`
+/// production, colon included: `ns:e` is a legal entity name.
+/// `xml.etree` enforces `NCName` at its own layer above expat and
+/// rejects such names; that divergence is deliberate and recorded in
+/// the parity ledger (`tests/parity/divergences.toml`).
+fn is_valid_entity_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => is_name_start_char(first) && chars.all(is_name_char),
+        None => false,
+    }
+}
+
+fn is_name_start_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x3A | 0x5F | 0x41..=0x5A
+            | 0x61..=0x7A
+            | 0xC0..=0xD6
+            | 0xD8..=0xF6
+            | 0xF8..=0x2FF
+            | 0x370..=0x37D
+            | 0x37F..=0x1FFF
+            | 0x200C..=0x200D
+            | 0x2070..=0x218F
+            | 0x2C00..=0x2FEF
+            | 0x3001..=0xD7FF
+            | 0xF900..=0xFDCF
+            | 0xFDF0..=0xFFFD
+            | 0x10000..=0xEFFFF
+    )
+}
+
+fn is_name_char(c: char) -> bool {
+    is_name_start_char(c)
+        || matches!(
+            c as u32,
+            0x2D | 0x2E | 0x30..=0x39 | 0xB7 | 0x300..=0x36F | 0x203F..=0x2040
+        )
+}
+
 fn escape_text(out: &mut Vec<u8>, s: &str) {
     for c in s.chars() {
         match c {
@@ -735,6 +860,30 @@ fn skip_ws(s: &str, mut i: usize) -> usize {
         i += 1;
     }
     i
+}
+
+/// Skip one `<!ATTLIST ...>` declaration, respecting quoted sections.
+/// A literal `<` inside a quoted default is rejected: a default is an
+/// attribute value, and the `AttValue` production forbids `<` there —
+/// unlike in an entity value or a system literal, where it is legal.
+fn skip_attlist(s: &str, mut i: usize) -> Result<usize, String> {
+    let mut quote = None;
+    while i < s.len() {
+        let b = s.as_bytes()[i];
+        if let Some(q) = quote {
+            if b == q {
+                quote = None;
+            } else if b == b'<' {
+                return Err("XML parse error: '<' in attribute default".to_string());
+            }
+        } else if b == b'"' || b == b'\'' {
+            quote = Some(b);
+        } else if b == b'>' {
+            return Ok(i + 1);
+        }
+        i += 1;
+    }
+    Err("XML parse error: unterminated ATTLIST declaration".to_string())
 }
 
 /// Skip one `<!...>` declaration, respecting quoted sections.
@@ -984,6 +1133,7 @@ mod tests {
         // the only character data allowed.
         assert!(canon("&#32;<a/>").is_err());
         assert!(canon("<a/>&#x20;").is_err());
+        assert!(canon("<a/> &#x20;").is_err());
         let entity = "<!DOCTYPE a [<!ENTITY e \" \">]>";
         assert!(canon(&format!("{entity}&e;<a/>")).is_err());
         assert!(canon(&format!("{entity}<a/>&e;")).is_err());
@@ -991,6 +1141,8 @@ mod tests {
         // whitespace reference inside the root still decodes.
         assert!(canon(" \t\r\n<a/> \n").is_ok());
         assert_eq!(canon("<a>x&#32;y</a>").unwrap(), "<a>x y</a>");
+        // Whitespace-only referenced content inside the root trims away.
+        assert_eq!(canon("<a>&#32;</a>").unwrap(), "<a></a>");
     }
 
     #[test]
@@ -1009,6 +1161,47 @@ mod tests {
     }
 
     #[test]
+    fn pi_and_comment_content_is_validated() {
+        // A literal vertical tab inside a PI or a comment: the
+        // reference rejects both even though comments are dropped from
+        // the canonical form entirely.
+        assert!(canon("<?p \u{b}?><r/>").is_err());
+        assert!(canon("<r><?p a\u{b}b?></r>").is_err());
+        assert!(canon("<!-- \u{b} --><r/>").is_err());
+        assert!(canon("<r/><!-- x\u{b}y -->").is_err());
+        // Well-formed PIs and comments still pass.
+        assert!(canon("<!-- c --> <?p d?> <r/>").is_ok());
+    }
+
+    #[test]
+    fn entity_values_are_validated_at_declaration() {
+        // An invalid character reference in a value the document never
+        // references: the reference validates values while building
+        // its entity table, not at first use.
+        assert!(canon("<!DOCTYPE r [<!ENTITY e \"&#x0;\">]><r/>").is_err());
+        assert!(canon("<!DOCTYPE r [<!ENTITY e \"&#xB;\">]><r/>").is_err());
+        // A bare `&` (unterminated reference), likewise unreferenced.
+        assert!(canon("<!DOCTYPE r [<!ENTITY e \"a&b\">]><r/>").is_err());
+        // Signed character references fail the digit-class check.
+        assert!(canon("<!DOCTYPE r [<!ENTITY e \"&#+65;\">]><r/>").is_err());
+        // Valid values stay accepted, referenced or not, and a general
+        // reference inside a value is only resolved at use: undeclared
+        // is fine while the holding entity is never used, an error once
+        // it is.
+        assert!(canon("<!DOCTYPE r [<!ENTITY e \"&#65;\">]><r/>").is_ok());
+        assert!(canon("<!DOCTYPE r [<!ENTITY a \"&b;\">]><r/>").is_ok());
+        assert!(canon("<!DOCTYPE r [<!ENTITY a \"&b;\">]><r>&a;</r>").is_err());
+    }
+
+    #[test]
+    fn signed_character_references_are_rejected() {
+        assert!(canon("<a>&#+65;</a>").is_err());
+        assert!(canon("<a>&#x+41;</a>").is_err());
+        assert!(canon("<a x=\"&#+65;\"/>").is_err());
+        assert_eq!(canon("<a>&#65;&#x41;</a>").unwrap(), "<a>AA</a>");
+    }
+
+    #[test]
     fn pre_root_entity_text_is_reported_as_before_the_root() {
         let xml = "<!DOCTYPE a [<!ENTITY e \"junk\">]>&e;<a/>";
         let err = canon(xml).expect_err("pre-root entity text must be rejected");
@@ -1016,5 +1209,235 @@ mod tests {
             err.contains("content before document element"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn comment_double_hyphen_is_rejected() {
+        // The `Comment` production forbids `--` in the content and a
+        // trailing `-`, beyond the `Char` validation: the reference
+        // reports a parse error for each of these.
+        for xml in [
+            "<!-- a--b --><r/>",
+            "<r><!-- a--b --></r>",
+            "<!-- a-- --><r/>",
+            "<!-- a---><r/>",
+            "<!-- ---><r/>",
+        ] {
+            assert!(canon(xml).is_err(), "{xml} must be rejected");
+        }
+        // Single dashes, and a dash just before the terminator, are fine.
+        for xml in ["<!-- a-b --><r/>", "<!-- a-b-c --><r/>", "<!-- a-b--><r/>"] {
+            assert!(canon(xml).is_ok(), "{xml} must be accepted");
+        }
+    }
+
+    #[test]
+    fn entity_reference_names_are_validated_at_declaration() {
+        // The reference rejects a reference whose name is not a legal
+        // entity name while building its table, even when the holding
+        // entity is never used; termination alone is not enough. A
+        // colon in the name is legal: the governing production is
+        // expat's `Name`, not `NCName`.
+        for value in ["&;", "& b;", "&a b;", "&1a;", "&-a;", "&\u{b7}x;"] {
+            let xml = format!("<!DOCTYPE r [<!ENTITY e \"{value}\">]><r/>");
+            assert!(canon(&xml).is_err(), "{xml} must be rejected");
+        }
+        for value in [
+            "&ab;",
+            "&a-b_c.d;",
+            "&a\u{b7}b;",
+            "&\u{e9}x;",
+            "&#65;",
+            "&ns:e;",
+        ] {
+            let xml = format!("<!DOCTYPE r [<!ENTITY e \"{value}\">]><r/>");
+            assert!(canon(&xml).is_ok(), "{xml} must be accepted");
+        }
+    }
+
+    #[test]
+    fn entity_declaration_names_are_validated() {
+        for name in ["1e", "-e", ".e"] {
+            let xml = format!("<!DOCTYPE r [<!ENTITY {name} \"v\">]><r/>");
+            assert!(canon(&xml).is_err(), "{xml} must be rejected");
+        }
+        for name in ["_e", "a-e", "e.x", "ns:e"] {
+            let xml = format!("<!DOCTYPE r [<!ENTITY {name} \"v\">]><r>&{name};</r>");
+            assert!(canon(&xml).is_ok(), "{xml} must be accepted");
+        }
+    }
+
+    #[test]
+    fn colon_entity_names_expand_like_raw_expat() {
+        // Raw expat accepts `<!ENTITY ns:e>` under its `Name`
+        // production, colons included, so the entity expands in text,
+        // in an attribute value and through another entity's value;
+        // the canonical bytes below are what the digest is computed
+        // over. `xml.etree` rejects the same document at its own
+        // layer (it enforces `NCName` above expat); that divergence
+        // is deliberate and recorded in the parity ledger.
+        assert_eq!(
+            canon("<!DOCTYPE r [<!ENTITY ns:e \"v\">]><r>&ns:e;</r>").unwrap(),
+            "<r>v</r>"
+        );
+        assert_eq!(
+            canon("<!DOCTYPE r [<!ENTITY ns:e \"v\">]><r x=\"&ns:e;\"/>").unwrap(),
+            "<r x=\"v\"></r>"
+        );
+        assert_eq!(
+            canon("<!DOCTYPE r [<!ENTITY ns:e \"v\"><!ENTITY e \"&ns:e;\">]><r>&e;</r>").unwrap(),
+            "<r>v</r>"
+        );
+        // A leading colon is a `NameStartChar` for expat too.
+        assert_eq!(
+            canon("<!DOCTYPE r [<!ENTITY :e \"v\">]><r>&:e;</r>").unwrap(),
+            "<r>v</r>"
+        );
+    }
+
+    #[test]
+    fn percent_in_an_entity_value_is_rejected() {
+        // In the internal subset a `%` in an entity value starts a
+        // parameter-entity reference for the reference parser — an
+        // error in every position, well-formed or not.
+        for value in ["100%", "a%b", "a%b;c"] {
+            let xml = format!("<!DOCTYPE r [<!ENTITY e \"{value}\">]><r/>");
+            assert!(canon(&xml).is_err(), "{xml} must be rejected");
+        }
+        // A literal percent in an attribute default stays legal.
+        assert!(canon("<!DOCTYPE r [<!ATTLIST r a CDATA \"100%\">]><r/>").is_ok());
+    }
+
+    #[test]
+    fn cdata_outside_the_root_is_rejected() {
+        // Judged by the event, like references: a CDATA section outside
+        // the document element is not well-formed even when its content
+        // is whitespace only.
+        let err = canon("<![CDATA[x]]><r/>").expect_err("prolog CDATA must be rejected");
+        assert!(
+            err.contains("content before document element"),
+            "unexpected error: {err}"
+        );
+        let err = canon("<r/><![CDATA[ ]]>").expect_err("epilog CDATA must be rejected");
+        assert!(
+            err.contains("junk after document element"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(canon("<r><![CDATA[x]]></r>").unwrap(), "<r>x</r>");
+    }
+
+    #[test]
+    fn doctype_subset_constructs_are_validated() {
+        // Comments and literals inside the internal subset get the same
+        // validation as their counterparts outside it.
+        for xml in [
+            "<!DOCTYPE r [<!-- a--b --><!ENTITY e \"v\">]><r/>",
+            "<!DOCTYPE r [<!-- a--->]><r/>",
+            "<!DOCTYPE r [<!-- \u{b} -->]><r/>",
+            "<!DOCTYPE r [<!ATTLIST r a CDATA \"\u{b}\">]><r/>",
+            "<!DOCTYPE r [<?p \u{b}>]><r/>",
+            "<!DOCTYPE r [<!ATTLIST r a CDATA \"<!-- x\">]><r/>",
+        ] {
+            assert!(canon(xml).is_err(), "{xml} must be rejected");
+        }
+        for xml in [
+            "<!DOCTYPE r [<!-- c --><!ENTITY e \"v\">]><r>&e;</r>",
+            "<!DOCTYPE r [<!ATTLIST r a CDATA \"def\">]><r/>",
+            "<!DOCTYPE r [<?p data?>]><r/>",
+        ] {
+            assert!(canon(xml).is_ok(), "{xml} must be accepted");
+        }
+    }
+
+    #[test]
+    fn subset_comment_terminator_is_searched_after_the_opener() {
+        // The reference reports an unclosed token for each of these:
+        // `<!-->` and `<!--->` have no terminator after the opener
+        // (the opener's own `--` must not count toward one), and a
+        // comment with no terminator at all is unterminated, however
+        // the subset happens to end after it.
+        for xml in [
+            "<!DOCTYPE r [<!-->]><r/>",
+            "<!DOCTYPE r [<!--->]><r/>",
+            "<!DOCTYPE r [<!--]><r/>",
+            "<!DOCTYPE r [<!-- x ]><r/>",
+        ] {
+            assert!(canon(xml).is_err(), "{xml} must be rejected");
+        }
+        // Forms where the subset scan itself is what runs: a later
+        // well-formed comment lets the reader deliver the subset with
+        // the overlapping opener inside it -- the first two panicked
+        // the old scan (start > end slice) -- and an unbracketed
+        // DOCTYPE delivers a comment with no terminator at all, which
+        // the old scan silently ended at.
+        for xml in [
+            "<!DOCTYPE r [<!--> <!-- c -->]><r/>",
+            "<!DOCTYPE r [<!---><!-- c -->]><r/>",
+            "<!DOCTYPE r <!-- x><r/>",
+            "<!DOCTYPE r <!--> <r/>",
+        ] {
+            assert!(canon(xml).is_err(), "{xml} must be rejected");
+        }
+        // A genuinely empty comment, and one holding a single space,
+        // are well-formed.
+        for xml in ["<!DOCTYPE r [<!---->]><r/>", "<!DOCTYPE r [<!-- -->]><r/>"] {
+            assert!(canon(xml).is_ok(), "{xml} must be accepted");
+        }
+        // The document-level comment path (quick-xml events, audited
+        // alongside the subset scan) rejects the same overlapping
+        // forms and accepts the genuinely empty comment.
+        for xml in ["<!--><r/>", "<!---><r/>", "<r><!--></r>"] {
+            assert!(canon(xml).is_err(), "{xml} must be rejected");
+        }
+        assert!(canon("<!----><r/>").is_ok());
+    }
+
+    #[test]
+    fn unterminated_attlist_is_rejected() {
+        // A subset ATTLIST with no closing `>` -- the open-quote form
+        // runs to the end of the subset -- is a parse error in the
+        // reference, not a declaration to skip silently.
+        for xml in [
+            "<!DOCTYPE r [<!ATTLIST r a CDATA \"x>]><r/>",
+            "<!DOCTYPE r [<!ATTLIST r a CDATA \"x\"]><r/>",
+            "<!DOCTYPE r [<!ATTLIST r a CDATA \"x\" ]><r/>",
+        ] {
+            assert!(canon(xml).is_err(), "{xml} must be rejected");
+        }
+        // The form that reaches the skip itself: an unbracketed
+        // DOCTYPE delivers an ATTLIST whose text runs to the end of
+        // the declaration with no closing `>` of its own -- the old
+        // skip fell through to accepting it at that end.
+        assert!(canon("<!DOCTYPE r <!ATTLIST r a CDATA \"x\"><r/>").is_err());
+        // A terminated ATTLIST in the same position stays accepted.
+        assert!(canon("<!DOCTYPE r [<!ATTLIST r a CDATA \"def\">]><r/>").is_ok());
+    }
+
+    #[test]
+    fn empty_character_reference_bodies_are_rejected() {
+        assert!(canon("<a>&#;</a>").is_err());
+        assert!(canon("<a>&#x;</a>").is_err());
+        assert!(canon("<a x=\"&#;\"/>").is_err());
+        assert!(canon("<!DOCTYPE r [<!ENTITY e \"&#;\">]><r/>").is_err());
+        assert!(canon("<!DOCTYPE r [<!ENTITY e \"&#x;\">]><r/>").is_err());
+    }
+
+    #[test]
+    fn entity_value_literal_runs_report_the_invalid_character() {
+        let xml = "<!DOCTYPE r [<!ENTITY e \"a\u{b}b\">]><r/>";
+        let err = canon(xml).expect_err("a non-Char literal run must be rejected");
+        assert!(err.contains("invalid character"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn epilog_is_flushed_and_judged_at_eof() {
+        // Character data trailing the root is only seen by the flush at
+        // end of input; it is judged there, not silently dropped.
+        let err = canon("<r/>junk").expect_err("epilog text must be rejected");
+        assert!(
+            err.contains("junk after document element"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(canon("<r/> <?p d?>").unwrap(), "<r></r>\n<?p d?>");
     }
 }

@@ -1011,7 +1011,7 @@ impl FileDigestCheck {
         for missing in &missing_files {
             add_info(
                 out,
-                Level::Warning,
+                Level::Error,
                 pkg,
                 &format!("{check_type}-whitelisted-file-missing"),
                 &[missing, "path present in whitelist but not in package"],
@@ -1078,6 +1078,12 @@ impl FileDigestCheck {
             }
             let mut hashes_seen: HashSet<String> = HashSet::new();
             for info in mismatch_list {
+                // A recorded digest equal to the file's own digest is a
+                // match: the group failed on a sibling file, so this path
+                // is reported only for its genuine mismatches (#755).
+                if info.expected == info.actual {
+                    continue;
+                }
                 // Several groups may list the same path; avoid printing
                 // duplicate errors for the same observed hash.
                 if !hashes_seen.insert(info.actual.clone()) {
@@ -1368,9 +1374,7 @@ hash = "{}"
             .map(|(_, l)| l.as_str())
             .unwrap();
         assert!(
-            line.starts_with(
-                "testpkg.noarch: E: pam-file-unauthorized (Badness: 1) /etc/pam.d/login"
-            ),
+            line.starts_with("testpkg.noarch: E: pam-file-unauthorized /etc/pam.d/login"),
             "level/name/detail: {line}"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1416,7 +1420,144 @@ hash = "{}"
     }
 
     #[test]
-    fn whitelisted_file_missing_is_warning() {
+    fn matching_entry_in_failed_group_not_reported() {
+        // #755: a group fails on one stale entry. The entry whose digest
+        // matches is a verified file, and a digest-mismatch line for it
+        // would claim its content changed when it did not — only the
+        // stale path is reported.
+        let dir = std::env::temp_dir().join("rpmcrab-fd-755-group");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let good_content = b"auth required pam_unix.so\n";
+        let good_disk = write_temp(&dir, "login", good_content);
+        let stale_disk = write_temp(&dir, "other", b"tampered\n");
+
+        let extra = format!(
+            r#"
+[[FileDigestGroup]]
+type = "pam"
+package = "testpkg"
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/login"
+algorithm = "sha256"
+digester = "default"
+hash = "{}"
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/other"
+algorithm = "sha256"
+digester = "default"
+hash = "{}"
+"#,
+            sha256_hex(good_content),
+            sha256_hex(b"original other\n")
+        );
+        let config = test_config(&extra);
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![
+            pkgfile("/etc/pam.d/login", &good_disk, 0o100644),
+            pkgfile("/etc/pam.d/other", &stale_disk, 0o100644),
+        ];
+
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        let mismatches: Vec<&(String, String)> = results
+            .iter()
+            .filter(|(n, _)| *n == "pam-file-digest-mismatch")
+            .collect();
+        assert_eq!(
+            mismatches.len(),
+            1,
+            "exactly the stale path is reported: {results:?}"
+        );
+        assert!(
+            mismatches[0].1.contains("/etc/pam.d/other")
+                && mismatches[0].1.contains(&format!(
+                    "expected sha256:{}",
+                    sha256_hex(b"original other\n")
+                ))
+                && mismatches[0]
+                    .1
+                    .contains(&format!("has:{}", sha256_hex(b"tampered\n"))),
+            "stale path detail: {}",
+            mismatches[0].1
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn all_matching_group_is_silent() {
+        // Near-miss for #755: a group whose entries all verify reports no
+        // digest-mismatch.
+        let dir = std::env::temp_dir().join("rpmcrab-fd-755-ok");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let content_a = b"auth required pam_unix.so\n";
+        let content_b = b"session optional pam_systemd.so\n";
+        let disk_a = write_temp(&dir, "login", content_a);
+        let disk_b = write_temp(&dir, "other", content_b);
+
+        let extra = format!(
+            r#"
+[[FileDigestGroup]]
+type = "pam"
+package = "testpkg"
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/login"
+algorithm = "sha256"
+digester = "default"
+hash = "{}"
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/other"
+algorithm = "sha256"
+digester = "default"
+hash = "{}"
+"#,
+            sha256_hex(content_a),
+            sha256_hex(content_b)
+        );
+        let config = test_config(&extra);
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![
+            pkgfile("/etc/pam.d/login", &disk_a, 0o100644),
+            pkgfile("/etc/pam.d/other", &disk_b, 0o100644),
+        ];
+
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, _)| *n == "pam-file-digest-mismatch"),
+            "all-matching group must be silent: {results:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn single_entry_mismatch_still_reported() {
+        // Near-miss for #755: a one-entry group with a stale hash still
+        // reports its mismatch.
+        let dir = std::env::temp_dir().join("rpmcrab-fd-755-single");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let ondisk = write_temp(&dir, "login", b"changed content\n");
+
+        let config = test_config(&group_toml("/etc/pam.d/login", b"original\n"));
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![pkgfile("/etc/pam.d/login", &ondisk, 0o100644)];
+
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        let count = results
+            .iter()
+            .filter(|(n, _)| *n == "pam-file-digest-mismatch")
+            .count();
+        assert_eq!(count, 1, "single stale entry must fire: {results:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn whitelisted_file_missing_is_error() {
         let dir = std::env::temp_dir().join("rpmcrab-fd-missing");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("tmpdir");
@@ -1424,7 +1565,7 @@ hash = "{}"
         let ondisk = write_temp(&dir, "login", content);
 
         // Group lists two files; only one is in the package. Both digests
-        // verify, so the absent one is reported as a warning.
+        // verify, so the absent one is reported as an error.
         let extra = format!(
             r#"
 [[FileDigestGroup]]
@@ -1461,8 +1602,8 @@ hash = "deadbeef"
         assert!(
             missing[0]
                 .1
-                .starts_with("testpkg.noarch: W: pam-whitelisted-file-missing /etc/pam.d/gone"),
-            "warning level/detail: {}",
+                .starts_with("testpkg.noarch: E: pam-whitelisted-file-missing /etc/pam.d/gone"),
+            "error level/detail: {}",
             missing[0].1
         );
         // The present file verified, so no mismatch for it.
@@ -2036,6 +2177,17 @@ last</e></root>"#,
                 r#"<?xml version="1.1"?><r><e>x</e></r>"#,
                 "ad926dabb729569ba83458b620101122db2a154ebc4a8f1a217e81d95246a9bf",
             ),
+            // Deliberate divergence from `xml.etree`, recorded in
+            // tests/parity/divergences.toml: ET enforces `NCName` at
+            // its own layer and rejects `<!ENTITY ns:e>`, but raw
+            // expat -- the reference parser for this check -- accepts
+            // it under the `Name` production. The digest is the sha256
+            // of the canonical form `<r>v</r>`.
+            (
+                "entity-colon-name.xml",
+                r#"<!DOCTYPE r [<!ENTITY ns:e "v">]><r>&ns:e;</r>"#,
+                "df43b08df48d2b5b23e7b0e806d7e8d5ebeebd60192ccd0433964bd4dc48e7be",
+            ),
         ];
         for (name, xml, expected) in cases {
             let dir = std::env::temp_dir().join("rpmcrab-fd-xmlparity");
@@ -2272,11 +2424,11 @@ hash = "0000000000000000000000000000000000000000"
         };
         assert_eq!(
             line_for("/etc/pam.d/login-md5"),
-            "testpkg.noarch: E: pam-file-digest-mismatch (Badness: 1) /etc/pam.d/login-md5 expected md5:00000000000000000000000000000000, has:5d41402abc4b2a76b9719d911017c592"
+            "testpkg.noarch: E: pam-file-digest-mismatch /etc/pam.d/login-md5 expected md5:00000000000000000000000000000000, has:5d41402abc4b2a76b9719d911017c592"
         );
         assert_eq!(
             line_for("/etc/pam.d/login-sha1"),
-            "testpkg.noarch: E: pam-file-digest-mismatch (Badness: 1) /etc/pam.d/login-sha1 expected sha1:0000000000000000000000000000000000000000, has:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
+            "testpkg.noarch: E: pam-file-digest-mismatch /etc/pam.d/login-sha1 expected sha1:0000000000000000000000000000000000000000, has:aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2377,9 +2529,9 @@ hash = "{}"
             "wrong package must not validate: {results:?}"
         );
         assert!(
-            unauthorized[0].1.starts_with(
-                "otherpkg.noarch: E: pam-file-unauthorized (Badness: 1) /etc/pam.d/login"
-            ),
+            unauthorized[0]
+                .1
+                .starts_with("otherpkg.noarch: E: pam-file-unauthorized /etc/pam.d/login"),
             "level/name/detail: {}",
             unauthorized[0].1
         );
@@ -2480,9 +2632,9 @@ nodigests = ["/etc/pam.d/skipped"]
             "extra file must be flagged: {results:?}"
         );
         assert!(
-            unauthorized[0].1.starts_with(
-                "testpkg.noarch: E: pam-file-unauthorized (Badness: 1) /etc/pam.d/evil"
-            ),
+            unauthorized[0]
+                .1
+                .starts_with("testpkg.noarch: E: pam-file-unauthorized /etc/pam.d/evil"),
             "level/name/detail: {}",
             unauthorized[0].1
         );

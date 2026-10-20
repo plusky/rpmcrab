@@ -75,6 +75,41 @@ pub(crate) fn script_body_or_prog(pkg: &Pkg, tag: librpm::Tag, prog: librpm::Tag
     }
 }
 
+/// One scriptlet of a package: its `%`-label, its interpreter (the `-p`
+/// program string, empty when the header carries none) and one body.
+/// Checks that scan scriptlets take their slots from here instead of each
+/// walking `SCRIPT_TAGS`; which slots a check reads, and which
+/// interpreters it acts on, stays the check's own business.
+pub(crate) struct ScriptletSlot {
+    pub label: &'static str,
+    pub prog: String,
+    pub body: String,
+}
+
+/// The package's scriptlets for the given `SCRIPT_TAGS` labels, in table
+/// order. A slot with several bodies (the trigger slots) yields one entry
+/// per body; the `*PROG` tag is a parallel array there, so body `i` pairs
+/// with prog `i`. A slot whose prog array has no entry for a body falls
+/// back to the joined `scriptprog` string (the single-body slots store
+/// their interpreter that way).
+pub(crate) fn scriptlets_for(pkg: &Pkg, labels: &[&str]) -> Vec<ScriptletSlot> {
+    let mut slots = Vec::new();
+    for (body_tag, prog_tag, label) in crate::pkg::SCRIPT_TAGS {
+        if !labels.contains(label) {
+            continue;
+        }
+        let progs = pkg.tag_str_array(*prog_tag);
+        for (idx, body) in pkg.tag_str_array(*body_tag).into_iter().enumerate() {
+            let prog = progs
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| pkg.scriptprog(*prog_tag));
+            slots.push(ScriptletSlot { label, prog, body });
+        }
+    }
+    slots
+}
+
 /// Python `repr()` of a string: single quotes unless the string contains `'`
 /// (then double quotes, like Python), with backslashes, the active quote and
 /// control characters escaped. The reference interpolates `str(list)` into

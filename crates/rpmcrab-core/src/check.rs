@@ -52,10 +52,10 @@ pub fn add_info_at(
 }
 
 /// One [`Finding`] with the package context filled in the way
-/// `filter.py:121-156` derives it: the basename of the package name, the arch
-/// dropped when empty, and a zero badness that scoring fills in at emit time.
-/// Checks that lint without a `Pkg` at hand (cross-package `after_checks`)
-/// build findings through this instead of repeating the derivation.
+/// `filter.py:121-156` derives it: the basename of the package name and the
+/// arch dropped when empty. Checks that lint without a `Pkg` at hand
+/// (cross-package `after_checks`) build findings through this instead of
+/// repeating the derivation.
 pub(crate) fn make_finding(
     pkg_name: &str,
     arch: &str,
@@ -68,8 +68,6 @@ pub(crate) fn make_finding(
         level,
         check: check.to_string(),
         details,
-        // Scoring decides the real badness at emit time (`Filter::add_info`).
-        badness: 0,
         // `Path(package.name).name`: the header NAME, not the path we were
         // handed, so a findings block never leaks the working directory.
         pkg_name: basename(pkg_name).to_string(),
@@ -474,7 +472,6 @@ impl Check for SyntheticCheck {
                 level: *level,
                 check: (*check).to_string(),
                 details: details.clone(),
-                badness: 0,
                 pkg_name: self.pkg_name.clone(),
                 arch: self.arch.clone(),
                 line: None,
@@ -795,7 +792,7 @@ mod add_info_tests {
         let config = Config::default();
         let mut out = Filter::new(&config, crate::color::Color::for_tty(false)).unwrap();
         add_info(&mut out, Level::Error, &pkg, "no-name", &[]);
-        assert_eq!(out.results()[0].1, ": E: no-name (Badness: 1)");
+        assert_eq!(out.results()[0].1, ": E: no-name");
     }
 
     /// A path-shaped package name is reduced to its basename, as

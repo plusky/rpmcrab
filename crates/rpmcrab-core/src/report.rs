@@ -1,6 +1,6 @@
-//! The session header, footer and abort banner. The footer and abort banner
-//! are matched verbatim by build tooling (`docs/DESIGN.md` §4.5); the session
-//! header identifies rpmcrab itself and is not grepped.
+//! The session header and footer. The footer is matched verbatim by build
+//! tooling (`docs/DESIGN.md` §4.5); the session header identifies rpmcrab
+//! itself and is not grepped.
 
 use std::collections::BTreeMap;
 
@@ -58,18 +58,6 @@ pub fn header(params: &HeaderParams) -> String {
     out
 }
 
-/// The abort banner, printed (in red) before the time report when the badness
-/// score exceeds the threshold. Grepped verbatim by build tooling.
-pub fn abort_banner(score: i64, threshold: i64, color: &Color, width: usize) -> String {
-    let msg = format!("Badness {score} exceeds threshold {threshold}, aborting.");
-    format!(
-        "{}{}{}\n",
-        color.red,
-        string_center(&msg, '-', width),
-        color.reset
-    )
-}
-
 /// The parameters for the session [`footer`].
 pub struct FooterParams<'a> {
     pub packages: usize,
@@ -77,15 +65,13 @@ pub struct FooterParams<'a> {
     pub errors: u64,
     pub warnings: u64,
     pub filtered: u64,
-    pub score: i64,
     pub duration_secs: f64,
-    pub aborted: bool,
     pub color: &'a Color,
     pub width: usize,
 }
 
-/// The footer rule. Colour is bold by default, yellow if any warning, red on
-/// abort. `I:` findings are counted nowhere.
+/// The footer rule. Colour is bold by default, yellow if any warning, red
+/// if any error. `I:` findings are counted nowhere.
 pub fn footer(params: &FooterParams) -> String {
     let &FooterParams {
         packages,
@@ -93,13 +79,11 @@ pub fn footer(params: &FooterParams) -> String {
         errors,
         warnings,
         filtered,
-        score,
         duration_secs,
-        aborted,
         color,
         width,
     } = params;
-    let quit_color = if aborted {
+    let quit_color = if errors > 0 {
         color.red
     } else if warnings > 0 {
         color.yellow
@@ -107,7 +91,7 @@ pub fn footer(params: &FooterParams) -> String {
         color.bold
     };
     let msg = format!(
-        "{packages} packages and {specfiles} specfiles checked; {errors} errors, {warnings} warnings, {filtered} filtered, {score} badness; has taken {duration_secs:.1} s"
+        "{packages} packages and {specfiles} specfiles checked; {errors} errors, {warnings} warnings, {filtered} filtered; has taken {duration_secs:.1} s"
     );
     format!(
         "{}{}{}\n",
@@ -211,16 +195,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn abort_banner_matches_captured() {
-        // Captured from a real openSUSE run (liblto21, exit 66).
-        let b = abort_banner(10000, 999, &Color::for_tty(false), 80);
-        assert_eq!(
-            b,
-            "---------------- Badness 10000 exceeds threshold 999, aborting. ----------------\n"
-        );
-    }
-
-    #[test]
     fn footer_matches_captured() {
         // Captured from a real run (llvm21-gold, exit 0).
         let color = Color::for_tty(false);
@@ -230,15 +204,13 @@ mod tests {
             errors: 2,
             warnings: 1,
             filtered: 1,
-            score: 2,
             duration_secs: 0.1,
-            aborted: false,
             color: &color,
             width: 80,
         });
         assert_eq!(
             f,
-            " 1 packages and 0 specfiles checked; 2 errors, 1 warnings, 1 filtered, 2 badness; has taken 0.1 s \n"
+            " 1 packages and 0 specfiles checked; 2 errors, 1 warnings, 1 filtered; has taken 0.1 s \n"
         );
     }
 

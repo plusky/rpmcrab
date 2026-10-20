@@ -119,9 +119,9 @@ existing checks:
 **Process / plumbing patches** (`cli.py`, `config.py`, `lint.py`, `pkg.py`,
 `filter.py`):
 
-- **Forced `--permissive`** unless `-s/--strict` (`cli.py`) — now the
-  `PermissiveByDefault` config key (default `true`, the openSUSE behaviour) —
-  see §4.6.
+- **Forced `--permissive`** unless `-s/--strict` (`cli.py`) — rpmcrab
+  originally carried this as the `PermissiveByDefault` config key; #699
+  removed the key and the forced-permissive default entirely — see §4.6.
 - **rpmlintrc auto-loading rewrite** (`lint.py`) — the OBS `SOURCES` dirs now
   come from the `RpmlintrcSearchPaths` config key; multiple files, different
   messages — see §4.8.
@@ -145,8 +145,8 @@ existing checks:
 case or an explicit ledger entry):
 
 - `BinariesCheck`: `missing-call-to-setgroups-before-setuid` severity
-  matches upstream (`E if is_uid else W`); rpmcrab's unconditional `E`
-  is the #593 severity recalibration, not a flavour patch.
+  is a uniform `W` in rpmcrab (fix-and-diverge #743); upstream splits
+  (`E if is_uid else W`). Not a flavour patch.
 - `BinariesCheck`: `binary-in-etc` also fires under `/usr/etc/`.
 - `DBusPolicyCheck`: new `E: dbus-policy-allow-wildcard` (bsc#1220215) and
   `W: dbus-policy-allow-receive`.
@@ -182,7 +182,7 @@ corpus (§6).
 ### 4.1 The finding line
 
 ```
-{filename}{arch}:{line} {L}: {check}{badness}{details}\n
+{filename}{arch}:{line} {L}: {check}{details}\n
 ```
 
 - `filename` = `Path(package.name).name` (the `Name:` tag for binaries, the
@@ -191,29 +191,27 @@ corpus (§6).
 - `line` = `{n}:` only for spec linting; omitted for binary findings.
 - `L` ∈ {`E`, `W`, `I`}.
 - `check` is space-free (rpmlint raises otherwise).
-- `badness` = ` (Badness: {n})` **only when n > 0**, positioned after the check
-  name and before details.
 - `details` = each non-empty detail prefixed with a single space, concatenated.
 
-The badness threshold is the one deliberate departure in this section:
-the reference renders the column only when n > 1, rpmcrab renders it
-whenever n > 0, so any finding that counts toward the score shows its
-weight in text output (decided in #289 D7; ledgered in
+There is no badness column. The reference renders ` (Badness: {n})` after
+the check name (only when n > 1); rpmcrab printed it whenever n > 0 until
+#699 removed the column entirely, together with the badness value itself —
+a deliberate revision of this section (#699; ledgered in
 `tests/parity/divergences.toml`).
 
 Examples that must reproduce exactly:
 
 ```
-llvm21.src: E: unused-rpmlintrc-filter (Badness: 1) "devel-file-in-non-devel-package .*/usr/include/.*"
+llvm21.src: E: unused-rpmlintrc-filter "devel-file-in-non-devel-package .*/usr/include/.*"
 qdmr.spec:24: W: mixed-use-of-spaces-and-tabs (spaces: line 24, tab: line 2)
-llvm21-gold.aarch64: E: suse-zypp-packageand (Badness: 1) packageand(clang21:binutils)
+llvm21-gold.aarch64: E: suse-zypp-packageand packageand(clang21:binutils)
 ```
 
 ### 4.2 The filter-match string
 
 `Filters` regexes run against the **de-coloured** line, in the same layout as
-the printed line but **without** the `(Badness: N)` column and without any
-description:
+the printed line (which likewise carries no badness column since #699) and
+without any description:
 
 ```
 {filename}{arch}:{line} {L}: {check}{details}
@@ -236,7 +234,7 @@ not a new attack surface.
 ### 4.3 Suppression is applied at emit time
 
 A finding suppressed by a filter is invisible to the footer **and** the exit
-code — it is dropped before the badness total and the per-level counters are
+code — it is dropped before the per-level counters are
 incremented, not merely hidden from stdout. The three mechanisms, applied in
 order at emit time:
 
@@ -273,34 +271,34 @@ keys the package insertion order is preserved.
   `checks: N` is the configured `Checks` list length, not the number of checks
   that ran: the reference computes it as `len(self.config.configuration['Checks'])`
   (`lint.py:272`), so `--checks` narrowing and `--errors-only` do not change it.
-- Footer: `{p} packages and {s} specfiles checked; {E} errors, {W} warnings, {f} filtered, {b} badness; has taken {t:.1f} s`,
+- Footer: `{p} packages and {s} specfiles checked; {E} errors, {W} warnings, {f} filtered; has taken {t:.1f} s`,
   space-padded inside an `=`-rule. `I:` findings are counted nowhere in the
-  footer and contribute `0` badness.
-- Abort banner, printed before the time report, **matched verbatim by build
-  tooling**:
-
-  ```
-  ------------------------- Badness {b} exceeds threshold {t}, aborting. ----
-  ```
+  footer. The reference footer also totals badness, and build tooling
+  matched its `Badness {b} exceeds threshold {t}, aborting.` banner
+  verbatim; #699 removed both together with the threshold itself
+  (ledgered in `tests/parity/divergences.toml`).
 
 ### 4.6 Exit codes
 
-**The `PermissiveByDefault` config key (default `true`) forces `--permissive`
-unless `-s/--strict` is passed** — the openSUSE build's SUSE-only `cli.py`
-patch ("TODO: remove once OBS integration is done"; upstream `main` has no
-such patch), now a real key. This is the single most load-bearing exit-code
-fact: with the default, **ordinary errors do not fail the run** — only
-badness over the threshold does. It is why `osc build` can produce
-RPMs and print `E:` findings yet still "succeed", and why consumers grep the
-`exceeds threshold, aborting.` banner rather than trusting the exit code.
+**Revised by #699 (2026-10), a deliberate break with the reference
+contract this section originally froze.** Severity means what it says:
+**any printed error fails the run by default.** The reference's
+forced-permissive default (the openSUSE build's SUSE-only `cli.py` patch,
+carried in rpmcrab as the `PermissiveByDefault` config key) is removed, as
+are `BadnessThreshold`, exit 66 (the over-threshold abort) and exit 65
+(the "every error was a strict promotion" split — it only distinguished
+promotion-sourced errors, which mattered only while genuine errors could
+pass). `-P/--permissive` remains as an explicit opt-in only: errors print
+but the run exits 0. `-s/--strict` remains as pure level promotion: W/I
+findings print as E and therefore fail with 64 like any other error.
+A config that still carries `BadnessThreshold` or `PermissiveByDefault`
+draws a warning on stderr and the key is ignored.
 
 | Situation | Code |
 |-----------|-----:|
 | Clean, or warnings / infos only | 0 |
-| **Errors, score ≤ threshold (the default — forced permissive)** | **0** |
-| `-s/--strict` passed (no forced permissive): any error | 64 |
-| `-s/--strict` passed, and every error was a strict promotion | 65 |
-| Badness over `BadnessThreshold` (> 0) — fires regardless of permissive | 66 |
+| Any error printed (default mode) | 64 |
+| Any error printed, `-P/--permissive` passed | 0 |
 | Internal crash reading a package | 3 (fatal-continue: reported, run continues, `rpmlint#1595`) |
 | Nonexistent positional or `-c` path | 2 |
 | Unparsable TOML config | 4 |
@@ -308,13 +306,9 @@ RPMs and print `E:` findings yet still "succeed", and why consumers grep the
 | `-p` / `-e` | 0 |
 | SIGINT | 130 |
 
-The badness branch (`score > threshold` → 66) is evaluated **before** the
-permissive error branch, so 66 fires even in the default permissive mode. The
-`64`-vs-`65` split is reachable only under `-s` and is preserved. On openSUSE,
-passing `-P` explicitly is a no-op (permissive is already forced). A fatal
-per-package result dominates: if any package failed to open, the exit code is
-3 even when the badness threshold also fired — the batch ran to completion,
-so the unreadable input is the load-bearing fact.
+A fatal per-package result dominates: if any package failed to open, the
+exit code is 3 even when errors were also printed — the batch ran to
+completion, so the unreadable input is the load-bearing fact.
 
 ### 4.7 Configuration semantics
 
@@ -333,8 +327,9 @@ so the unreadable input is the load-bearing fact.
 ### 4.8 `rpmlintrc`
 
 Two directives only, recognised by regex: `addFilter(r"…")` and
-`setBadness('name', N)`. `setBadness` values land in `Scoring` as **strings**
-and are `int()`-ed later (observable via `-p`).
+`setBadness('name', N)`. Since #699 `setBadness` is parsed and ignored —
+each occurrence draws a stderr warning — because badness no longer adjusts
+finding levels; it never reaches `Scoring`.
 
 **Auto-discovery is an openSUSE rewrite of upstream** (`lint.py`, `+-` diff).
 When no `-r/--rpmlintrc` is given, and unless `PYTEST_XDIST_TESTRUNUID` is set:
@@ -354,22 +349,24 @@ When no `-r/--rpmlintrc` is given, and unless `PYTEST_XDIST_TESTRUNUID` is set:
 The session header then prints a `rpmlintrc:` line followed by each loaded file
 indented four spaces (upstream prints a single `rpmlintrc: <file>`).
 
-### 4.9 Badness
+### 4.9 Scoring overrides
 
-There is no severity→badness table. Per-check via `[Scoring]`
-(`filter.py:124-131`): if the check is in `Scoring`, `badness =
-int(Scoring[check])`, and the level is **remapped in both directions** — to `E`
-when badness > 0, **and downgraded from `E` to `W` when the configured badness
-is 0**. If the check is not in `Scoring`: `E` → badness 1, `W`/`I` → badness 0.
-`--strict` then forces the level to `E` and increments the promoted counter.
-The default badness is computed **after** promotion (`filter.py:139-140`), so a strict-promoted warning scores the default error badness of 1. `BadnessThreshold` default is `-1` (abort branch
-dead); openSUSE sets `999`.
+**Revised by #699 (2026-10).** Badness as a number is gone: it is not
+stored on findings, not rendered, not totalled, and no threshold exists.
+What survives of the `[Scoring]` machinery in the reference is a
+level-promotion override only: a check whose `[Scoring]` value is a
+**positive** number is promoted to `E`. A value of 0 or negative is
+inert — **configured badness only ever promotes** (the reference
+downgrades an `E` to `W` at `Scoring` 0; that direction is removed
+outright). Findings not in `[Scoring]` keep their emitted level.
+`--strict` likewise only promotes (W/I print as `E`). Shipped
+configurations carry no `[Scoring]` entries: the openSUSE flavours'
+vendored scoring tables were dropped by #699.
 
 **`[SeverityOverrides]`** (finding name → `E`/`W`/`I` or long form, case-insensitive; upstream rpmlint#1335, no 2.10.0 counterpart) is the final word on a finding's level, applied **after** scoring and strict promotion:
-- An overridden finding is **not** counted as strict-promoted, so the §4.6 `printed(E) == promoted` split survives the override: two strict-promoted warnings with one overridden back to `W` exit 65 (all remaining errors are promotions), not 64.
-- The override rewrites the level only; **badness still follows `[Scoring]`** when set. A warning with `Scoring(50)` overridden back to `W` prints as `W` but keeps badness 50, so it aborts with 66 (and 0 printed errors) once over the threshold. Conversely `Scoring(0)` + override to `E` prints `E` with badness 0 — a genuine error for the §4.6 split, scored at nothing.
+- The override rewrites the level only, in either direction.
 - `Filters` regexes and `--format json` see the overridden level: suppression matches on the post-override `level.letter()`, and JSON `level` is rendered from the rewritten finding.
-- There is no static registry of finding tags (checks emit them ad hoc), so a name that never matches an emitted finding is warned on stderr after the run — the typo signal — rather than rejected at load. A non-table `SeverityOverrides` value is a fatal configuration error, like every other table key.
+- Checks emit finding tags ad hoc, so a name that never matches an emitted finding is accepted at load and warned on stderr after the run — the typo signal. A non-table `SeverityOverrides` value is a fatal configuration error, like every other table key.
 
 ### 4.10 CLI flags
 
@@ -392,8 +389,8 @@ for `-v/--verbose`: the reference's long name survives in build
 infrastructure (OBS invokes `rpmlint --info`), so drop-in replacement
 requires it.
 **`--errors-only`** (upstream rpmlint#134) skips warning-only checks entirely,
-for post-build runs that only care about errors. CLI-only: there is no config-file
-key (the filter lives in check loading, `check::load_with`). The filter is a
+for post-build runs that only care about errors. CLI-only
+(the filter lives in check loading, `check::load_with`). The filter is a
 **static pre-scoring bound** on each check's declared `max_severity`
 (`BashismsCheck`, `ConfigFilesCheck`, `FHSCheck`, `SystemdInstallCheck`,
 `TmpFilesCheck` — every
@@ -421,9 +418,8 @@ flag breaks `rpmlint-mini` outright.
 
 ### 4.11 Flavors
 
-The reference maintains separate git branches for distribution flavors
-(`opensuse`, `opensuse-slfo-1.2`, `opensuse-slfo-main`). rpmcrab does not
-branch; flavor-specific behavior is controlled by a single config key.
+rpmcrab controls flavor-specific behavior with a single config key, and
+ships one vendored data set: the SUSE flavour's.
 
 - **Key:** `Flavor` (top-level TOML key, case-insensitive value).
 - **Values:** `"opensuse"` (default), `"slfo"`.
@@ -432,43 +428,50 @@ branch; flavor-specific behavior is controlled by a single config key.
 - **No auto-detection.** rpmcrab lints arbitrary packages, often cross-distro
   (a Tumbleweed host linting SLFO packages). Flavor is a property of the
   *target*, not the host, so it is explicit config.
+- **Vendored data.** The shipped tree carries one vendored data set — the
+  openSUSE data (`crates/rpmcrab-core/data/distro/opensuse/`, vendored
+  from upstream's `opensuse` branch) — and every recognised `Flavor`
+  value selects it. The key, the pre-pass that reads it,
+  `Config::is_slfo()` and the divergence ledger's `flavor` gating form
+  the mechanism a future flavour plugs into with its own vendored set.
 
-Checks read `config.is_slfo()` at the decision point. Severity flips are
-expressed as a level variable, not duplicated emit calls.
+Flavor selects the vendored data set and the configured check list.
+Severity recalibrations are unconditional: a finding reports the same
+level under every flavor, and its ledger entry carries no flavor field.
 
-**Verified SLFO divergences.** Each candidate divergence from the SLFO
-branches was verified against upstream history before being accepted. Three
-of the four candidates turned out to be branch staleness or removed checks,
-not real flavor divergences:
+**The SLFO audit.** The reference maintains separate git branches for
+distribution flavors (`opensuse`, `opensuse-slfo-1.2`,
+`opensuse-slfo-main`). Each candidate divergence from the SLFO branches
+was verified against upstream history and Factory content (issue #714):
 
 | # | Candidate | Verdict | Reason |
 |---|-----------|---------|--------|
 | 1 | `post-without-tmpfile-creation` (new W finding) | **REJECTED** | Removed upstream in 2025-12-09 (issue #1374): the `%tmpfiles` macro is now a noop via systemd triggers; the check fires false positives on correct packages. SLFO branches are stale. Do not implement. |
 | 2 | `binary-in-etc` flags `/usr/etc/` | **REJECTED** | The `/usr/etc/` coverage was added to opensuse on 2025-06-06 (mgerstner PR #1357), after the SLFO branches forked (2025-02-04). SLFO is stale; the opensuse behavior is correct. Do not gate. |
-| 3 | `file-contains-date-and-time` / `file-contains-current-date` W→E | **QUESTIONABLE** | Plausible (immutable images need reproducibility) but undocumented: no upstream issue, no commit message justifying the severity flip. Held for Tom's decision. |
+| 3 | `file-contains-date-and-time` / `file-contains-current-date` W→E | **APPROVED** | Build dates embedded in shipped files break the reproducibility image-based installs rely on. Measured over the Factory corpus (issue #759): 578 firings in 259 srcpkgs; a 25-firing hand audit found 23 genuine build-date stamps and 2 bounded release-day cases (0.35% of firings). Both findings are Error under every flavour: the promotion is unconditional. |
 | 4 | LogrotateCheck drops `/usr/etc/logrotate.d/` | **REJECTED** | Same staleness as #2: `/usr/etc/` support added to opensuse after the SLFO fork. Do not gate. |
 
-`missing-call-to-setgroups-before-setuid` carries upstream's own level
-split (`E if is_uid else W`); rpmcrab's unconditional `E` is the #593
-severity recalibration with a ledger entry, not a flavor gate.
+`missing-call-to-setgroups-before-setuid` carries a uniform `W` in
+rpmcrab (fix-and-diverge #743 with a ledger entry); upstream's own
+level split (`E if is_uid else W`) is not carried, and it is not a
+flavor gate.
 
-If #3 is approved, the divergence matrix is:
-
-| Check | Finding | opensuse | slfo |
-|-------|---------|----------|------|
-| `checks::buildroot` (when ported) | `file-contains-date-and-time` | W | E |
-| `checks::buildroot` (when ported) | `file-contains-current-date` | W | E |
-
-Each gated divergence gets a `[[divergence]]` ledger entry (§6.2) recording
-`flavor = "slfo"`.
+**The unified data set (issue #760).** The one vendored set is the
+openSUSE branch's data with the generator's extras applied
+(`XinetdDepCheck` and `PAMModulesCheck` in `Checks`, the MinGW
+`Filters`, the 59 `BlockedFilters`): the security data covers the
+varlink locations and `/usr/etc/sudoers.d`, and the digest records
+carry the hash sets Factory ships, adjudicated from corpus content
+wherever the branches disagreed (decision D7 of issue #714).
 
 ### 4.12 Supported flavors
 
 rpmcrab supports distributions in priority order. The order decides which
 consumers a finding must serve to survive:
 
-1. **SUSE (P1).** openSUSE and SLFO/SLE — the primary family. Distro configs
-   are vendored in-tree and flavor-specific behavior is `Flavor`-gated (§4.11).
+1. **SUSE (P1).** The primary family: openSUSE, SLFO and SLE consume the
+   one vendored data set. Distro configs are vendored in-tree and
+   flavor-specific behavior is `Flavor`-gated (§4.11).
 2. **Fedora (P2).** Supported, nice to have. No vendored config yet; findings
    are kept when Fedora's own rpmlint config lets them fire.
 3. **Everything else — not considered.** No other flavor is currently
@@ -509,10 +512,10 @@ plus, where one exists, a linked upstream issue.
 Direction agreed in the RFC (#2), refined 2026-09-28: **divergence is not
 version-gated.** rpmcrab may diverge from rpmlint's findings whenever it makes
 sense — from the first check port — provided every departure is recorded in the
-ledger (§6) with justification. What does not move is the frozen output
-contract (§4): the wire format, exit codes, sort order and config semantics
-that consumers depend on. A change to *that* is a deliberate major-version
-decision, not a routine divergence.
+ledger (§6) with justification. The frozen output
+contract (§4) stays fixed: the wire format, exit codes, sort order and config
+semantics that consumers depend on. A change to *that* is a deliberate
+major-version decision.
 
 **Why the corpus still matters.** Relaxing the parity requirement does not make
 the corpus optional — it is what lets us *measure* per-check false-positive
@@ -523,7 +526,8 @@ ledger entry records the measured or argued reason.
 **Error-fast, but run to completion.** The goal is cold hard facts, not fuzzy
 warnings. Every check carries a **measured precision bar** (its FP rate on the
 corpus): what measures clean is promoted to error and fails the build; what
-does not is demoted or deleted. There is no permanent warning purgatory. But
+does not is demoted or deleted. Every warning is a transit state on the way
+to promotion or deletion. But
 the linter always **runs to completion** — the whole-report contract and the
 footer summary are frozen precisely so batch fixing works; aborting at the
 first error breaks that for no gain.
@@ -638,15 +642,15 @@ checks appears, revisit as an additive feature.
 
 ### 7.4 External tools
 
-Header, file-list and rpmdb reads go through **`librpm`** (§3.1), not a
-subprocess. **Payload extraction** is native pure-Rust code (`pkg/extract.rs`): container
+Header, file-list and rpmdb reads go through **`librpm`** (§3.1).
+**Payload extraction** is native pure-Rust code (`pkg/extract.rs`): container
 parse via the `rpm` crate, in-stream decompression (gzip/xz/zstd), direct newc
-cpio materialization — no `rpm2archive`/`tar` subprocess. The binding's
+cpio materialization. The binding's
 `archive::PackageReader` is unusable for compressed payloads (§3.1).
 ELF binary analysis uses the pure-Rust `goblin` crate (section/program
-headers, dynamic section, symbols) and `gimli` for DWARF, not `readelf`/`ldd`/
-`objdump` subprocesses — faster, no binutils dependency, and more reliable
-than text parsing. `checkbashisms`, `desktop-file-validate`, `appstreamcli`
+headers, dynamic section, symbols) and `gimli` for DWARF — in-process,
+faster, and more reliable than parsing subprocess text. `checkbashisms`,
+`desktop-file-validate`, `appstreamcli`
 and `file` are invoked as subprocesses on extracted files, matching rpmlint's
 own dependencies (they are already `Requires:` of the openSUSE package). All
 invocations go through shared quoting/path helpers with golden tests.
@@ -827,8 +831,9 @@ finding is an error only when it always implies the damage, so style
 and judgement findings moved down: `description-line-too-long` and
 `files-duplicated-waste` print as warnings, `no-%check-section` as
 info, the `systemd-service-without-service_*` family as warnings.
-`missing-call-to-setgroups-before-setuid` moved the other way and is
-now always an error. The vendored distro configs no longer bundle the
+`missing-call-to-setgroups-before-setuid` prints as a warning at
+every file mode: its symbol pattern cannot tell an identity switch
+from an effective-id drop, so it does not always imply the damage. The vendored distro configs no longer bundle the
 strict scoring layer by default; `invalid-license` keeps its badness
 of 100000 in the base scoring, and six `[Scoring]` promotions that
 printed warnings as errors are gone. Text output renders
@@ -836,6 +841,14 @@ printed warnings as errors are gone. Text output renders
 model (§4.6) is unchanged and was re-pinned against the recalibrated
 levels, and a generated inventory of every finding tag's level and
 scoring guards the calibration against silent drift.
+
+That account is superseded in part by #699: badness was removed
+entirely, so no finding keeps or renders a badness value —
+`invalid-license` carries no badness of 100000 and text output renders
+no `(Badness: N)` (§4.1); `[Scoring]` survives only as a
+promotion-only override (§4.9). The exit-code model was revised with
+it (§4.6): exits 65 and 66 are gone, the set is `0/2/3/4/64/130`, and
+any printed error fails the run by default.
 
 ---
 

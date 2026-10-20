@@ -147,8 +147,11 @@ fn unreadable_package_exits_three() {
     assert!(stderr.contains("not-an-rpm.rpm"), "stderr: {stderr}");
 }
 
-/// A `.spec` input is linted through `check_spec`: no check is ported yet, so
-/// it reports nothing, exits 0, and the footer counts it as a specfile.
+/// A `.spec` input is linted through `check_spec` and counted in the
+/// footer as a specfile. A bare `Name:`-only spec fails to parse, which
+/// draws the specfile-error finding; that finding is temporarily W
+/// (issue #699 levelling, pending #702), so the run exits 0 while the
+/// levelling stands.
 #[test]
 fn spec_input_is_linted_and_counted() {
     let dir = tempfile::tempdir().unwrap();
@@ -158,18 +161,23 @@ fn spec_input_is_linted_and_counted() {
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
+        stdout.contains("W: specfile-error"),
+        "specfile-error must render on stdout at its temporary W level: stdout: {stdout}"
+    );
+    assert!(
         stdout.contains("0 packages and 1 specfiles checked"),
         "stdout: {stdout}"
     );
 }
 
-/// The package loop runs: a real corpus RPM is opened, checked (no check is
-/// ported yet, so it reports nothing) and counted in the footer.
+/// The package loop runs: a real corpus RPM is opened, checked and
+/// counted in the footer. The corpus RPM carries error findings, so the
+/// run exits 64 (issue #699).
 #[test]
 fn a_real_package_is_counted_in_the_footer() {
     let rpm = corpus_rpm();
     let out = rpmcrab(&[rpm.to_str().unwrap()]);
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(64));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("1 packages and 0 specfiles checked"),
@@ -185,7 +193,7 @@ fn a_directory_argument_expands_to_its_packages() {
     let dir =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/parity/cases/llvm21-gold/input");
     let out = rpmcrab(&[dir.to_str().unwrap()]);
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(64));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("1 packages and 0 specfiles checked"),
@@ -198,7 +206,7 @@ fn a_directory_argument_expands_to_its_packages() {
 fn time_report_flag_prints_the_report() {
     let rpm = corpus_rpm();
     let out = rpmcrab(&["-t", rpm.to_str().unwrap()]);
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(64));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("Check time report (>1% & >0.1s):"),
@@ -212,7 +220,7 @@ fn time_report_flag_prints_the_report() {
 fn time_report_on_by_default() {
     let rpm = corpus_rpm();
     let out = rpmcrab(&[rpm.to_str().unwrap()]);
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(64));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("Check time report (>1% & >0.1s):"),
@@ -226,7 +234,7 @@ fn time_report_on_by_default() {
 fn no_time_report_flag_disables() {
     let rpm = corpus_rpm();
     let out = rpmcrab(&["--no-time-report", rpm.to_str().unwrap()]);
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(64));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!stdout.contains("Check time report"), "{stdout}");
 }
@@ -267,7 +275,7 @@ fn straightened_file_alias_is_rejected() {
 fn info_alias_is_accepted() {
     let rpm = corpus_rpm();
     let out = rpmcrab(&["--info", rpm.to_str().unwrap()]);
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(64));
 }
 
 /// `-j/--jobs` is accepted and defaults to the machine's parallelism.
@@ -278,7 +286,7 @@ fn jobs_flag_is_accepted() {
         let mut full: Vec<&str> = args.to_vec();
         full.push(rpm.to_str().unwrap());
         let out = rpmcrab(&full);
-        assert_eq!(out.status.code(), Some(0), "args: {args:?}");
+        assert_eq!(out.status.code(), Some(64), "args: {args:?}");
         assert!(
             String::from_utf8_lossy(&out.stdout).contains("1 packages and 0 specfiles checked"),
             "args: {args:?}"
@@ -349,7 +357,7 @@ fn a_repeated_argument_is_counted_once() {
     let rpm = corpus_rpm();
     let arg = rpm.to_str().unwrap();
     let out = rpmcrab(&[arg, arg]);
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(64));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("1 packages and 0 specfiles checked"),
@@ -590,13 +598,20 @@ fn fatal_package_does_not_stop_the_run() {
     );
 }
 
-/// The permissive expression (`lib.rs:173`):
-/// `cfg.permissive = cli.permissive || (!cli.strict && cfg.permissive_by_default)`.
-/// The parity RPM has 2 errors; the builtin defaults are permissive.
+/// Issue #699: errors fail the run by default. Permissive mode is the
+/// explicit `-P` opt-in only; no config key forces it. The parity RPM
+/// has 2 errors.
 
 #[test]
-fn strict_flag_disables_permissive_default() {
-    // `-s` with errors -> exit 64 (not permissive).
+fn errors_fail_by_default() {
+    // No flags: errors -> exit 64.
+    let out = rpmcrab(&["../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm"]);
+    assert_eq!(out.status.code(), Some(64));
+}
+
+#[test]
+fn strict_flag_also_exits_64() {
+    // `-s` changes printed levels, not the failing code.
     let out = rpmcrab(&[
         "-s",
         "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
@@ -615,53 +630,66 @@ fn permissive_flag_explicit() {
 }
 
 #[test]
-fn permissive_by_default_false_in_config() {
-    // Config with `PermissiveByDefault = false` -> exit 64.
-    let dir = std::env::temp_dir().join("rpmcrab-permissive-test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let cfg = dir.join("test.toml");
-    std::fs::write(&cfg, "PermissiveByDefault = false\n").unwrap();
-    let out = rpmcrab(&[
-        "-c",
-        cfg.to_str().unwrap(),
-        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
-    ]);
-    assert_eq!(out.status.code(), Some(64));
+fn permissive_by_default_key_is_inert() {
+    // `PermissiveByDefault` is no longer read: neither value changes the
+    // outcome — errors fail the run unless `-P` is passed. Its presence
+    // warns on stderr instead of going silently inert.
+    let dir = tempfile::tempdir().unwrap();
+    for (name, value) in [("test.toml", "false"), ("test-true.toml", "true")] {
+        let cfg = dir.path().join(name);
+        std::fs::write(&cfg, format!("PermissiveByDefault = {value}\n")).unwrap();
+        let out = rpmcrab(&[
+            "-c",
+            cfg.to_str().unwrap(),
+            "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+        ]);
+        assert_eq!(out.status.code(), Some(64), "PermissiveByDefault = {value}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("'PermissiveByDefault' has no effect since #699; ignoring it"),
+            "got {stderr}"
+        );
+    }
 }
 
 #[test]
-fn permissive_by_default_string_true_is_a_fatal_config_error() {
-    // `PermissiveByDefault = "true"` (a string) is not a bool: the run must
-    // fail loudly with the config diagnostic, not silently accept it.
-    let dir = std::env::temp_dir().join("rpmcrab-permissive-test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let cfg = dir.join("test-str.toml");
+fn permissive_by_default_string_value_is_inert() {
+    // A string `PermissiveByDefault` used to be a fatal config error via
+    // the bool read; the key is not read at all now, so the run proceeds
+    // and the parity RPM's errors fail it with 64.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("test-str.toml");
     std::fs::write(&cfg, "PermissiveByDefault = \"true\"\n").unwrap();
     let out = rpmcrab(&[
         "-c",
         cfg.to_str().unwrap(),
         "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
     ]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(64));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("PermissiveByDefault"), "got {stderr}");
-    assert!(stderr.contains("must be a bool"), "got {stderr}");
+    assert!(
+        !stderr.contains("fatal error in configuration"),
+        "got {stderr}"
+    );
+    assert!(
+        stderr.contains("'PermissiveByDefault' has no effect since #699; ignoring it"),
+        "got {stderr}"
+    );
 }
 
 #[test]
 fn non_table_scoring_warns_on_stderr_and_is_ignored() {
     // `Scoring = 5` is not a table: the value is ignored (the run proceeds
     // with no scoring) but the ignore leaves a warning on stderr.
-    let dir = std::env::temp_dir().join("rpmcrab-scoring-notice-test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let cfg = dir.join("scoring-int.toml");
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("scoring-int.toml");
     std::fs::write(&cfg, "Scoring = 5\n").unwrap();
     let out = rpmcrab(&[
         "-c",
         cfg.to_str().unwrap(),
         "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
     ]);
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(64));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("'Scoring' must be a table, found an integer; ignoring it"),
@@ -676,16 +704,15 @@ fn non_table_scoring_warns_on_stderr_and_is_ignored() {
 
 #[test]
 fn string_scoring_warns_on_stderr_and_is_ignored() {
-    let dir = std::env::temp_dir().join("rpmcrab-scoring-notice-test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let cfg = dir.join("scoring-str.toml");
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("scoring-str.toml");
     std::fs::write(&cfg, "Scoring = \"abc\"\n").unwrap();
     let out = rpmcrab(&[
         "-c",
         cfg.to_str().unwrap(),
         "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
     ]);
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(64));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("'Scoring' must be a table, found a string; ignoring it"),
@@ -694,38 +721,51 @@ fn string_scoring_warns_on_stderr_and_is_ignored() {
 }
 
 #[test]
-fn non_integer_badness_threshold_warns_on_stderr_and_is_ignored() {
-    // A non-integer `BadnessThreshold` falls back to -1 (no threshold) with
-    // the same stderr warning treatment as a non-table `Scoring`.
-    let dir = std::env::temp_dir().join("rpmcrab-scoring-notice-test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let cfg = dir.join("threshold-str.toml");
-    std::fs::write(&cfg, "BadnessThreshold = \"abc\"\n").unwrap();
-    let out = rpmcrab(&[
-        "-c",
-        cfg.to_str().unwrap(),
-        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
-    ]);
-    assert_eq!(out.status.code(), Some(0));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("'BadnessThreshold' must be an integer, found a string; ignoring it"),
-        "got {stderr}"
-    );
+fn badness_threshold_key_is_inert() {
+    // Issue #699: there is no badness threshold. The key may still appear
+    // in a user config; it is read by nothing — no abort — and the parity
+    // RPM's errors fail the run with 64. Its presence warns on stderr
+    // instead of going silently inert.
+    let dir = tempfile::tempdir().unwrap();
+    // The string value and the integer 999 — the openSUSE flavour's
+    // real-world abort threshold — are both inert: no abort (the
+    // reference exits 66 over the threshold), and the parity RPM's
+    // errors fail the run with 64 either way.
+    for (name, value) in [
+        ("threshold-str.toml", "\"abc\""),
+        ("threshold-999.toml", "999"),
+    ] {
+        let cfg = dir.path().join(name);
+        std::fs::write(&cfg, format!("BadnessThreshold = {value}\n")).unwrap();
+        let out = rpmcrab(&[
+            "-c",
+            cfg.to_str().unwrap(),
+            "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+        ]);
+        assert_eq!(out.status.code(), Some(64), "BadnessThreshold = {value}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("'BadnessThreshold' has no effect since #699; ignoring it"),
+            "got {stderr}"
+        );
+        assert!(
+            !stderr.contains("exceeds threshold"),
+            "no threshold abort may fire, got {stderr}"
+        );
+    }
 }
 
 #[test]
 fn valid_scoring_table_produces_no_notice() {
-    let dir = std::env::temp_dir().join("rpmcrab-scoring-notice-test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let cfg = dir.join("scoring-ok.toml");
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("scoring-ok.toml");
     std::fs::write(&cfg, "[Scoring]\n\"no-%check-section\" = 50\n").unwrap();
     let out = rpmcrab(&[
         "-c",
         cfg.to_str().unwrap(),
         "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
     ]);
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(64));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("ignoring it"), "got {stderr}");
 }
@@ -739,7 +779,7 @@ fn format_json_emits_parseable_report() {
         "json",
         "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
     ]);
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(64));
     let stdout = String::from_utf8_lossy(&out.stdout);
     let doc: serde_json::Value =
         serde_json::from_str(&stdout).expect("stdout must be a JSON document");
@@ -755,15 +795,21 @@ fn format_json_emits_parseable_report() {
         );
         assert!(f["check"].as_str().is_some());
         assert!(f["package"].as_str().is_some());
+        assert!(f.get("badness").is_none(), "no badness field: {f}");
     }
     let summary = &doc["summary"];
     assert!(summary["errors"].as_u64().is_some());
     assert!(summary["warnings"].as_u64().is_some());
     assert_eq!(
         summary["exit_code"].as_i64(),
-        Some(0),
+        Some(64),
         "summary exit code matches the process"
     );
+    assert!(
+        summary.get("score").is_none(),
+        "no badness score: {summary}"
+    );
+    assert!(summary.get("aborted").is_none(), "no abort flag: {summary}");
 }
 
 /// The findings in JSON mode are the same multiset as in text mode.
@@ -811,17 +857,7 @@ fn format_json_matches_text_findings() {
         };
         let mut parts = rest.splitn(2, " ");
         let check = parts.next().unwrap_or("").to_string();
-        let mut details = parts.next().unwrap_or("").trim().to_string();
-        // The text renderer places a `(Badness: N)` column between the
-        // check name and the details whenever the badness is positive;
-        // drop it so the triple matches the JSON form, which carries the
-        // badness as a separate field.
-        if let Some(stripped) = details.strip_prefix("(Badness: ") {
-            details = stripped
-                .split_once(')')
-                .map(|(_, after)| after.trim().to_string())
-                .unwrap_or_default();
-        }
+        let details = parts.next().unwrap_or("").trim().to_string();
         text_findings.push((check, level.to_string(), details));
     }
     json_findings.sort();
@@ -1142,16 +1178,16 @@ fn scalar_merged_into_list_config_is_fatal() {
 /// in strict mode every native error-level finding (enumerated from a
 /// non-strict `--format json` baseline) is overridden to W, so the only
 /// remaining errors are strict promotions of the non-overridden native
-/// warnings/infos -- every printed error is a promotion, so the run exits
-/// 65, not 64.
+/// warnings/infos — and the run exits 64, like any run with errors
+/// (issue #699: there is no separate all-promotions code).
 #[test]
 fn severity_override_exit_code_follows_rewritten_levels() {
     use std::collections::HashSet;
     let rpm = binaries_fixture_rpm();
-    // Non-strict baseline: permissive by default, so exit 0; the JSON
-    // findings give the native levels.
+    // Non-strict baseline: the fixture's errors fail the run (exit 64);
+    // the JSON findings give the native levels.
     let baseline = rpmcrab(&["--format", "json", rpm.to_str().unwrap()]);
-    assert_eq!(baseline.status.code(), Some(0));
+    assert_eq!(baseline.status.code(), Some(64));
     let doc: serde_json::Value =
         serde_json::from_str(&String::from_utf8_lossy(&baseline.stdout)).expect("JSON");
     let findings: Vec<serde_json::Value> = doc["findings"].as_array().expect("findings").to_vec();
@@ -1192,7 +1228,7 @@ fn severity_override_exit_code_follows_rewritten_levels() {
         cfg.to_str().unwrap(),
         rpm.to_str().unwrap(),
     ]);
-    assert_eq!(out.status.code(), Some(65));
+    assert_eq!(out.status.code(), Some(64));
     let rerun: serde_json::Value =
         serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("JSON");
     assert_eq!(rerun["summary"]["errors"], promoted.len() as u64);
@@ -1245,17 +1281,17 @@ fn severity_override_json_reports_overridden_level() {
 }
 /// `--errors-only` (upstream rpmlint#134) end-to-end: the header still reports
 /// the configured check count (`docs/DESIGN.md` §4.5 — the reference's
-/// `lint.py:272`), even though only 39 checks run.
+/// `lint.py:272`), even though only 40 checks run.
 #[test]
 fn errors_only_header_reports_configured_check_count() {
     let out = rpmcrab(&[
         "--errors-only",
         "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
     ]);
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(64));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("checks: 44, packages: 1"),
+        stdout.contains("checks: 45, packages: 1"),
         "header reports the configured count, not the run count: {stdout}"
     );
 }
@@ -1350,7 +1386,7 @@ fn errors_only_json_finding_set_matches_full_run() {
             "warning-only check ran: {check}"
         );
     }
-    assert_eq!(eo_doc["checks"], 44);
+    assert_eq!(eo_doc["checks"], 45);
     assert_eq!(
         eo_doc["summary"]["exit_code"].as_i64(),
         eo.status.code().map(i64::from)

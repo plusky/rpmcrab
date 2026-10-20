@@ -52,20 +52,16 @@ jobs:
         run: |
           set -euo pipefail
           old_opensuse=$(sed -n 's|^# opensuse: opensuse @ \([0-9a-f]\{40\}\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
-          old_slfo=$(sed -n 's|^# slfo: opensuse-slfo-main @ \([0-9a-f]\{40\}\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
-          if [ -z "${old_opensuse}" ] || [ -z "${old_slfo}" ]; then
+          if [ -z "${old_opensuse}" ]; then
             echo "failed to parse old pins from PROVENANCE" >&2
             exit 1
           fi
           python3 scripts/generate-distro-configs.py --refresh > /tmp/refresh.log 2>&1
           cat /tmp/refresh.log
           new_opensuse=$(sed -n 's|^# opensuse: opensuse @ \([0-9a-f]\{40\}\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
-          new_slfo=$(sed -n 's|^# slfo: opensuse-slfo-main @ \([0-9a-f]\{40\}\).*|\1|p' crates/rpmcrab-core/data/distro/PROVENANCE)
           {
             echo "old_opensuse=${old_opensuse}"
-            echo "old_slfo=${old_slfo}"
             echo "new_opensuse=${new_opensuse}"
-            echo "new_slfo=${new_slfo}"
           } >> "$GITHUB_OUTPUT"
           # The generator prunes Filters entries for findings rpmcrab no longer
           # emits; surface the prune log for the PR body.
@@ -101,7 +97,6 @@ jobs:
           body="Upstream rpmlint moved; regenerating the vendored distro configs.
 
           opensuse: ${{ steps.regen.outputs.old_opensuse }} -> ${{ steps.regen.outputs.new_opensuse }} (opensuse)
-          slfo: ${{ steps.regen.outputs.old_slfo }} -> ${{ steps.regen.outputs.new_slfo }} (opensuse-slfo-main)
 
           Generator prune log (Filters entries dropped for findings rpmcrab no longer emits):
           ${prunes:-none}

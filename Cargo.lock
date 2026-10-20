@@ -165,6 +165,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
+name = "bzip2"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3a53fac24f34a81bc9954b5d6cfce0c21e18ec6959f44f56e8e90e4bb7c346c"
+dependencies = [
+ "libbz2-rs-sys",
+]
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -730,6 +739,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
+name = "libbz2-rs-sys"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34b357333733e8260735ba5894eb928c02ecc69c78715f01a8019e7fa7f2db4c"
+
+[[package]]
 name = "libc"
 version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1219,6 +1234,7 @@ dependencies = [
 name = "rpmcrab-core"
 version = "0.3.0"
 dependencies = [
+ "bzip2",
  "criterion",
  "fancy-regex",
  "flate2",
@@ -1865,9 +1881,9 @@ checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 
 [[package]]
 name = "zip"
-version = "9.0.3"
+version = "9.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2d98561b612a84ae525331a7a094429ef8a5772514ed507ff6db5f54badc971"
+checksum = "a954114b47a54df49f83d2722814e86b23d4bb1b54a1b90fb7d92b41619ddc22"
 dependencies = [
  "crc32fast",
  "flate2",

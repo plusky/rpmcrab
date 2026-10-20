@@ -1190,11 +1190,8 @@ mod tests {
 
     /// The exact rendered line for one finding of `pkg`.
     fn line(pkg: &Pkg, letter: char, check: &str, details: &str) -> String {
-        // Unscored findings carry the default badness — 1 for an error,
-        // which the line renders as the `(Badness: 1)` column.
-        let badness = if letter == 'E' { " (Badness: 1)" } else { "" };
         format!(
-            "{}.{pkg_arch}: {letter}: {check}{badness} {details}",
+            "{}.{pkg_arch}: {letter}: {check} {details}",
             pkg.name,
             pkg_arch = pkg.arch
         )

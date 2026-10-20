@@ -235,8 +235,19 @@ const RPM_SCRIPTLETS: &[&str] = &[
 ];
 
 static DEPRECATED_GREP_RE: OnceLock<Regex> = OnceLock::new();
+/// Matches `egrep`/`fgrep` in command position: at line start, or behind
+/// whitespace, a path slash, a quote, `(`, a backtick, a backslash, or one
+/// of `;`, `|`, `&` — the shapes a shell command invocation takes. Group 1
+/// is the command name. The name must end the token: a following word
+/// character, `.` or `-` makes it a longer name (an `egrep-helper` script,
+/// an `egrep.foo` file), not the deprecated command. A token behind `-`,
+/// `.`, `=` or an identifier character is a name fragment or an assignment
+/// value (the findutils `posix-egrep` dialect name, a `foo.egrep` data
+/// file, a `my-egrep-helper` script, `FOO=egrep`) and never matches.
 fn deprecated_grep_re() -> &'static Regex {
-    DEPRECATED_GREP_RE.get_or_init(|| Regex::new(r"\b[ef]grep\b").expect("static regex"))
+    DEPRECATED_GREP_RE.get_or_init(|| {
+        Regex::new(r#"(?:^|[\s/'"`(;&|\\])([ef]grep)(?![\w.-])"#).expect("static regex")
+    })
 }
 
 static TMPFILES_MACRO_RE: OnceLock<Regex> = OnceLock::new();
@@ -1046,8 +1057,8 @@ impl Check for SpecCheck {
             return;
         }
         if !self.mini_mode {
-            self.check_specfile_error(pkg, out);
-            self.check_invalid_url(pkg, out);
+            let parse_failure_reported = self.check_specfile_error(pkg, out);
+            self.check_invalid_url(pkg, out, parse_failure_reported);
         }
     }
 
@@ -1076,8 +1087,15 @@ impl Check for SpecCheck {
 
 impl SpecCheck {
     /// Parse the spec with the `rpm` tool and forward its diagnostics
-    /// (`SpecCheck.py:300-322`).
-    fn check_specfile_error(&self, pkg: &SpecPkg, out: &mut Filter) {
+    /// (`SpecCheck.py:300-322`). Returns whether a fatal parse failure
+    /// is reported by a `specfile-error` finding that survives the
+    /// filter: the child signals a fatal failure with a non-zero exit
+    /// or its `can't parse` summary line, and the surviving count is
+    /// the `results()` delta around the forwarding below, so a finding
+    /// the filter suppresses counts as unreported. The caller uses
+    /// this to tell a parse failure reported here from one only the
+    /// spec parser saw.
+    fn check_specfile_error(&self, pkg: &SpecPkg, out: &mut Filter) -> bool {
         let spec_file = self.spec_file.as_deref().unwrap_or("");
         let define = format!("_sourcedir {}", self.spec_file_dir());
         // The reference lets a missing `rpm` raise here (no try/except around
@@ -1086,7 +1104,7 @@ impl SpecCheck {
         // checkbashisms entries -- and keeps a missing rpm from aborting the
         // whole run instead of one check.
         let Some(mut cmd) = self.rpm.command() else {
-            return;
+            return false;
         };
         let output = cmd
             .args(["-q", "--qf=", "-D", &define, "--specfile", spec_file])
@@ -1096,13 +1114,33 @@ impl SpecCheck {
             .stdout(Stdio::null())
             .output()
             .expect("the rpm binary is required for the specfile-error check");
+        let fatal_exit = !output.status.success();
         let stderr = match String::from_utf8(output.stderr) {
             Ok(stderr) => stderr,
             Err(e) => {
-                self.info(out, pkg, Level::Error, "specfile-error", &[&e.to_string()]);
-                return;
+                // Level follows specfile-error's temporary W levelling
+                // (issue #699, pending #702; see the stderr loop below).
+                self.info(
+                    out,
+                    pkg,
+                    Level::Warning,
+                    "specfile-error",
+                    &[&e.to_string()],
+                );
+                // An undecodable stderr reports an encoding failure of
+                // the child's output, a distinct finding from a parse
+                // failure: the parse-failure fallback stays armed.
+                return false;
             }
         };
+        let fatal = fatal_exit || stderr.lines().any(|line| line.contains("can't parse"));
+        let count_errors = |out: &Filter| {
+            out.results()
+                .iter()
+                .filter(|(check, _)| check == "specfile-error")
+                .count()
+        };
+        let errors_before = count_errors(out);
         for line in stderr.lines() {
             let line = line.trim();
             if line.is_empty() {
@@ -1111,16 +1149,26 @@ impl SpecCheck {
             if line.contains("warning:") {
                 self.info(out, pkg, Level::Warning, "specfile-warning", &[line]);
             } else {
-                self.info(out, pkg, Level::Error, "specfile-error", &[line]);
+                // TEMPORARY W (issue #699 levelling pass, ledgered in
+                // tests/parity/divergences.toml): pending #702, which
+                // gives the spec parser the distro macro context (Factory
+                // prjconf plus the macro-providing packages). The
+                // 20261018 Factory sweep's 22,528 firings across 6,876
+                // srcpkgs are overwhelmingly missing-context artefacts
+                // (unknown tags for macros the parse environment lacks),
+                // not broken specs; at E they would fail about 40% of
+                // Factory under the #699 exit doctrine.
+                self.info(out, pkg, Level::Warning, "specfile-error", &[line]);
             }
         }
+        fatal && count_errors(out) > errors_before
     }
 
     /// Check `Source`/`Patch` URLs via the spec parser (`_check_invalid_url`).
     /// Uses librpm's `Spec::parse` — the same C parser the reference reaches
     /// through `TransactionSet().parseSpec` — so the expanded source URLs
     /// match.
-    fn check_invalid_url(&self, pkg: &SpecPkg, out: &mut Filter) {
+    fn check_invalid_url(&self, pkg: &SpecPkg, out: &mut Filter, parse_failure_reported: bool) {
         use librpm::build::SpecFlags;
         let spec_file = self.spec_file.as_deref().unwrap_or("");
         let _ = pkg_init();
@@ -1137,8 +1185,16 @@ impl SpecCheck {
         let _ = macros.pop("_sourcedir");
         let Some(parsed) = parsed else {
             // The reference also reports librpm's error text here, which
-            // `Spec::parse` does not surface (ledgered).
-            self.info(out, pkg, Level::Error, "specfile-error", &[spec_file]);
+            // `Spec::parse` does not surface (ledgered). When the `rpm`
+            // child already reported this fatal parse failure with a
+            // finding that survived the filter, that report is the
+            // only one: the fallback detail is the bare spec path,
+            // so emitting it too would state the same failure twice
+            // (ledgered). The level is specfile-error's temporary W
+            // (issue #699, pending #702).
+            if !parse_failure_reported {
+                self.info(out, pkg, Level::Warning, "specfile-error", &[spec_file]);
+            }
             return;
         };
         for src in parsed.sources() {
@@ -1788,8 +1844,9 @@ impl SpecCheck {
         }
         let greps: Vec<String> = self
             .deprecated_grep_re
-            .find_iter(line)
-            .filter_map(|r| r.ok().map(|m| m.as_str().to_string()))
+            .captures_iter(line)
+            .filter_map(|r| r.ok())
+            .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
             .collect();
         if !greps.is_empty() {
             // The reference passes the list; `add_info` renders it with the
@@ -2035,7 +2092,7 @@ mod tests {
         let results = run_mini("Name: foo\nBuildArch: x86_64\n");
         let lines = lines_for(&results, "buildarch-instead-of-exclusivearch-tag");
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("E: buildarch-instead-of-exclusivearch-tag (Badness: 1) x86_64"));
+        assert!(lines[0].contains("E: buildarch-instead-of-exclusivearch-tag x86_64"));
     }
 
     #[test]
@@ -2345,7 +2402,7 @@ mod tests {
         let results = run_mini("Name: foo\n%if %{?suse_version} < 1314\n%endif\n");
         let lines = lines_for(&results, "obsolete-suse-version-check");
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("E: obsolete-suse-version-check (Badness: 1) 1314"));
+        assert!(lines[0].contains("E: obsolete-suse-version-check 1314"));
     }
 
     #[test]
@@ -2353,7 +2410,7 @@ mod tests {
         let results = run_mini("Name: foo\n%if %{?suse_version} > 1700\n%endif\n");
         let lines = lines_for(&results, "invalid-suse-version-check");
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("E: invalid-suse-version-check (Badness: 1) 1700"));
+        assert!(lines[0].contains("E: invalid-suse-version-check 1700"));
     }
 
     // Upstream rpmlint#554: NBSP in prose is not a syntax hazard.
@@ -2635,6 +2692,216 @@ make install
         assert!(comment.is_empty(), "unexpected: {comment:?}");
     }
 
+    /// The unclosed-`%if` spec the dedup tests below parse: the
+    /// in-process `Spec::parse` fails on it, so the bare-path fallback
+    /// is armed unless the child already reported the failure.
+    const UNTERM_SPEC: &str = "Name:           unterm\nVersion:        1.0\nRelease:        1\n\
+         Summary:        unterm\nLicense:        MIT\n%if 0\n\n\
+         %description\nunterm\n";
+
+    /// Write a fake `rpm` tool running `body` (a shell script body
+    /// after the shebang) into `dir`, so a test controls the child's
+    /// stderr and exit status exactly instead of depending on the
+    /// live `rpm` on `PATH`.
+    #[cfg(unix)]
+    fn fake_rpm(dir: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("rpm");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        // A just-written script can still be "text file busy" (ETXTBSY)
+        // on first spawn under parallel load; settle it so the probe in
+        // `SpecCheck::with_tool_dir` sees an exec-ready tool.
+        for _ in 0..100 {
+            match std::process::Command::new(&path).arg("--version").output() {
+                Ok(_) => return,
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(e) => panic!("fake rpm {} failed: {e}", path.display()),
+            }
+        }
+        // Exhaustion must not fall through silently: with the tool
+        // never exec-ready, the probe in `SpecCheck::with_tool_dir`
+        // treats `rpm` as absent, and the filtered/silent tests
+        // below could pass without the child ever running.
+        panic!(
+            "fake rpm {} never became exec-ready (ETXTBSY) in 100 attempts",
+            path.display()
+        );
+    }
+
+    /// Run `SpecCheck` over the unclosed-`%if` spec with `rpm`
+    /// resolved under `tool_dir`, returning the results and the spec
+    /// path (the fallback finding's detail).
+    fn run_unterm_with_tool_dir(
+        tool_dir: &Path,
+        config: &Config,
+    ) -> (Vec<(String, String)>, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unterm.spec");
+        std::fs::write(&path, UNTERM_SPEC).unwrap();
+        let pkg = SpecPkg::open(&path).unwrap();
+        let mut check = SpecCheck::with_tool_dir(config, Some(tool_dir));
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        check.check_spec(&pkg, config, &mut out);
+        (out.results().to_vec(), path.to_string_lossy().into_owned())
+    }
+
+    /// #702: one parse failure, one report. The fake `rpm` child's
+    /// stderr carries the parse diagnostics and the `can't parse`
+    /// summary and it exits non-zero, so the in-process parse failing
+    /// on the same spec must not repeat the failure with its bare-path
+    /// fallback finding. Hermetic: the child is the fake above, so the
+    /// pin holds whatever `rpm` the host carries.
+    #[test]
+    #[cfg(unix)]
+    fn specfile_error_not_duplicated_when_rpm_child_reports() {
+        let tools = tempfile::tempdir().unwrap();
+        fake_rpm(
+            tools.path(),
+            r#"for a in "$@"; do if [ "$a" = "--version" ]; then exit 0; fi; done
+printf '%s\n' 'error: line 7: unclosed %if' >&2
+printf '%s\n' "error: query of specfile failed, can't parse" >&2
+exit 1"#,
+        );
+        let (results, path) = run_unterm_with_tool_dir(tools.path(), &Config::default());
+        let errors = lines_for(&results, "specfile-error");
+        assert!(
+            errors.iter().any(|l| l.contains("can't parse")),
+            "child summary missing: {errors:?}"
+        );
+        assert!(
+            errors.iter().all(|l| l.contains("error:")),
+            "bare-path fallback repeated the failure: {errors:?}"
+        );
+        assert!(
+            errors.iter().all(|l| !l.contains(&path)),
+            "bare-path fallback repeated the failure: {errors:?}"
+        );
+    }
+
+    /// #702: a child emitting only non-fatal artefacts (an unknown-tag
+    /// line, with a successful exit and no `can't parse` summary) has
+    /// not reported the fatal failure the in-process parse hits, so
+    /// the fallback still fires alongside the artefact.
+    #[test]
+    #[cfg(unix)]
+    fn specfile_error_fallback_fires_when_child_reports_only_artefacts() {
+        let tools = tempfile::tempdir().unwrap();
+        fake_rpm(
+            tools.path(),
+            r#"for a in "$@"; do if [ "$a" = "--version" ]; then exit 0; fi; done
+printf '%s\n' 'error: line 3: Unknown tag: Frobnicate' >&2
+exit 0"#,
+        );
+        let (results, path) = run_unterm_with_tool_dir(tools.path(), &Config::default());
+        let errors = lines_for(&results, "specfile-error");
+        assert!(
+            errors.iter().any(|l| l.contains("Unknown tag")),
+            "child artefact missing: {errors:?}"
+        );
+        assert!(
+            errors.iter().any(|l| l.contains(&path)),
+            "fallback silenced by a non-fatal artefact: {errors:?}"
+        );
+    }
+
+    /// #702: filter-suppressed child diagnostics are not a report.
+    /// The filter pattern suppresses both child lines, while the
+    /// bare-path fallback (a different match string) survives it, so
+    /// the fallback fires and carries the failure alone.
+    #[test]
+    #[cfg(unix)]
+    fn specfile_error_fallback_fires_when_child_lines_are_filtered() {
+        let tools = tempfile::tempdir().unwrap();
+        fake_rpm(
+            tools.path(),
+            r#"for a in "$@"; do if [ "$a" = "--version" ]; then exit 0; fi; done
+printf '%s\n' 'error: childparse line 7: unclosed %if' >&2
+printf '%s\n' "error: childparse query of specfile failed, can't parse" >&2
+exit 1"#,
+        );
+        let config = Config {
+            filters: vec!["childparse".to_string()],
+            ..Config::default()
+        };
+        let (results, path) = run_unterm_with_tool_dir(tools.path(), &config);
+        let errors = lines_for(&results, "specfile-error");
+        assert!(
+            errors.iter().all(|l| !l.contains("childparse")),
+            "suppressed child lines leaked: {errors:?}"
+        );
+        assert_eq!(errors.len(), 1, "the lone fallback expected: {results:?}");
+        assert!(
+            errors[0].contains(&path),
+            "fallback detail is the spec path: {}",
+            errors[0]
+        );
+    }
+
+    /// #702: a silent `rpm` child (successful exit, no output) reports
+    /// nothing, so the in-process parse failure keeps its fallback
+    /// finding.
+    #[test]
+    #[cfg(unix)]
+    fn specfile_error_fallback_fires_when_rpm_child_is_silent() {
+        let tools = tempfile::tempdir().unwrap();
+        fake_rpm(tools.path(), "exit 0");
+        let (results, path) = run_unterm_with_tool_dir(tools.path(), &Config::default());
+        let errors = lines_for(&results, "specfile-error");
+        assert_eq!(errors.len(), 1, "the lone fallback expected: {results:?}");
+        assert!(
+            errors[0].contains(&path),
+            "fallback detail is the spec path: {}",
+            errors[0]
+        );
+    }
+
+    /// #702: undecodable child stderr reports an encoding failure,
+    /// a distinct finding from a parse failure, so the in-process
+    /// parse failure still gets its fallback finding alongside it.
+    #[test]
+    #[cfg(unix)]
+    fn specfile_error_fallback_fires_when_child_stderr_is_not_utf8() {
+        let tools = tempfile::tempdir().unwrap();
+        fake_rpm(
+            tools.path(),
+            r#"for a in "$@"; do if [ "$a" = "--version" ]; then exit 0; fi; done
+printf '\377\n' >&2
+exit 1"#,
+        );
+        let (results, path) = run_unterm_with_tool_dir(tools.path(), &Config::default());
+        let errors = lines_for(&results, "specfile-error");
+        assert!(
+            errors.iter().any(|l| l.contains("invalid utf-8")),
+            "encoding failure missing: {errors:?}"
+        );
+        assert!(
+            errors.iter().any(|l| l.contains(&path)),
+            "fallback silenced by an encoding failure: {errors:?}"
+        );
+    }
+
+    /// #702: with no `rpm` tool the child reports nothing, so the
+    /// in-process parse failure keeps its fallback finding -- the dedup
+    /// must not silence the only report of the failure.
+    #[test]
+    fn specfile_error_fallback_fires_without_rpm() {
+        let empty = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let (results, path) = run_unterm_with_tool_dir(empty.path(), &config);
+        let errors = lines_for(&results, "specfile-error");
+        assert_eq!(errors.len(), 1, "the lone fallback expected: {results:?}");
+        assert!(
+            errors[0].contains(&path),
+            "fallback detail is the spec path: {}",
+            errors[0]
+        );
+    }
+
     /// `check_invalid_url` defines `_sourcedir`, parses the spec and
     /// pops the define, all against the process-global macro context.
     /// Run distinct specs through the check concurrently and require
@@ -2642,6 +2909,7 @@ make install
     /// `Source` URLs embed `%{_sourcedir}`, so a sibling worker's define
     /// leaking into a parse changes that parse's `invalid-url` lines and
     /// breaks the equality.
+
     #[test]
     fn parallel_spec_checks_match_serial_results() {
         const WORKERS: usize = 8;
@@ -2933,6 +3201,159 @@ make install
         // `grep -E` is the sanctioned spelling.
         let clean = run_mini("Name: foo\n%build\ngrep -E foo\n");
         assert!(!has(&clean, "deprecated-grep"), "results: {clean:?}");
+    }
+
+    #[test]
+    fn deprecated_grep_quiet_on_name_fragments() {
+        // The findutils `-regextype` dialect names select a regex dialect
+        // for `find`; no grep command runs.
+        let results =
+            run_mini("Name: foo\n%install\nfind . -regextype posix-egrep -regex '.*\\.c'\n");
+        assert!(!has(&results, "deprecated-grep"), "results: {results:?}");
+        let results =
+            run_mini("Name: foo\n%install\nfind . -regextype posix-fgrep -regex '.*\\.h'\n");
+        assert!(!has(&results, "deprecated-grep"), "results: {results:?}");
+        // A dotted data file name.
+        let results =
+            run_mini("Name: foo\n%install\ninstall -m 644 foo.egrep %{buildroot}/usr/share/foo/\n");
+        assert!(!has(&results, "deprecated-grep"), "results: {results:?}");
+        // A hyphenated helper script name invoked as a command is a
+        // different binary, not the deprecated egrep.
+        let results = run_mini("Name: foo\n%build\nmy-egrep-helper --check\n");
+        assert!(!has(&results, "deprecated-grep"), "results: {results:?}");
+        // The suffix rule holds at command position too: a longer name
+        // that merely starts with egrep is a different binary or file.
+        let results = run_mini("Name: foo\n%build\negrep-helper --check\n");
+        assert!(!has(&results, "deprecated-grep"), "results: {results:?}");
+        let results = run_mini("Name: foo\n%build\negrep.foo --check\n");
+        assert!(!has(&results, "deprecated-grep"), "results: {results:?}");
+        let results =
+            run_mini("Name: foo\n%install\ninstall -m 644 x %{buildroot}/usr/share/egrep.foo\n");
+        assert!(!has(&results, "deprecated-grep"), "results: {results:?}");
+        // An assignment value names the command but does not run it.
+        let results = run_mini("Name: foo\n%build\nGREPPER=egrep\n");
+        assert!(!has(&results, "deprecated-grep"), "results: {results:?}");
+        let results = run_mini("Name: foo\n%build\n./configure --with-grep=fgrep\n");
+        assert!(!has(&results, "deprecated-grep"), "results: {results:?}");
+    }
+
+    #[test]
+    fn deprecated_grep_fires_on_command_invocations() {
+        // Path invocation.
+        let results = run_mini("Name: foo\n%build\n/usr/bin/egrep foo\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['egrep']"),
+            "line: {}",
+            lines[0]
+        );
+        // Command substitution.
+        let results = run_mini("Name: foo\n%build\ncount=$(egrep -c x file)\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['egrep']"),
+            "line: {}",
+            lines[0]
+        );
+        // Pipeline.
+        let results = run_mini("Name: foo\n%build\ncat file | fgrep bar\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['fgrep']"),
+            "line: {}",
+            lines[0]
+        );
+        // Backtick substitution.
+        let results = run_mini("Name: foo\n%build\ncount=`egrep -c x file`\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['egrep']"),
+            "line: {}",
+            lines[0]
+        );
+        // Two invocations on one line render as one list detail.
+        let results = run_mini("Name: foo\n%build\negrep a; fgrep b\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['egrep', 'fgrep']"),
+            "line: {}",
+            lines[0]
+        );
+        // Spaceless pipeline and semicolon separators.
+        let results = run_mini("Name: foo\n%build\ncat file|fgrep bar\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['fgrep']"),
+            "line: {}",
+            lines[0]
+        );
+        let results = run_mini("Name: foo\n%build\negrep a;fgrep b\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['egrep', 'fgrep']"),
+            "line: {}",
+            lines[0]
+        );
+        // Background separator, spaceless and spaced.
+        let results = run_mini("Name: foo\n%build\ncat file&egrep bar\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['egrep']"),
+            "line: {}",
+            lines[0]
+        );
+        let results = run_mini("Name: foo\n%build\ncat file & fgrep bar\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['fgrep']"),
+            "line: {}",
+            lines[0]
+        );
+        // Quoted command names still invoke the command.
+        let results = run_mini("Name: foo\n%build\n'egrep' foo\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['egrep']"),
+            "line: {}",
+            lines[0]
+        );
+        let results = run_mini("Name: foo\n%build\n\"fgrep\" bar\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['fgrep']"),
+            "line: {}",
+            lines[0]
+        );
+        // The backslash-escaped name is the shell alias-bypass idiom: it
+        // runs the command, and the pre-gate pattern matched it.
+        let results = run_mini("Name: foo\n%build\n\\egrep foo\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['egrep']"),
+            "line: {}",
+            lines[0]
+        );
+        // An assignment prefix does not mask a later command word.
+        let results = run_mini("Name: foo\n%build\nFOO=bar egrep foo\n");
+        let lines = lines_for(&results, "deprecated-grep");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: deprecated-grep ['egrep']"),
+            "line: {}",
+            lines[0]
+        );
     }
 
     #[test]
@@ -3510,7 +3931,7 @@ Patch0: foo.patch
         let lines = lines_for(&results, "hardcoded-library-path");
         assert_eq!(lines.len(), 1, "results: {results:?}");
         assert!(
-            lines[0].contains("E: hardcoded-library-path (Badness: 1) in /usr/lib"),
+            lines[0].contains("E: hardcoded-library-path in /usr/lib"),
             "line: {}",
             lines[0]
         );
@@ -3567,12 +3988,12 @@ Patch0: foo.patch
         let lines = lines_for(&results, "prereq-use");
         assert_eq!(lines.len(), 2, "results: {results:?}");
         assert!(
-            lines[0].contains("E: prereq-use (Badness: 1) none"),
+            lines[0].contains("E: prereq-use none"),
             "line: {}",
             lines[0]
         );
         assert!(
-            lines[1].contains("E: prereq-use (Badness: 1) none_other"),
+            lines[1].contains("E: prereq-use none_other"),
             "line: {}",
             lines[1]
         );
@@ -3594,7 +4015,7 @@ Patch0: foo.patch
         let lines = lines_for(&results, "buildprereq-use");
         assert_eq!(lines.len(), 1, "results: {results:?}");
         assert!(
-            lines[0].contains("E: buildprereq-use (Badness: 1) Something"),
+            lines[0].contains("E: buildprereq-use Something"),
             "line: {}",
             lines[0]
         );
@@ -3606,7 +4027,7 @@ Patch0: foo.patch
         let lines = lines_for(&results, "rpm-buildroot-usage");
         assert_eq!(lines.len(), 1, "results: {results:?}");
         assert!(
-            lines[0].contains("E: rpm-buildroot-usage (Badness: 1) %prep echo $RPM_BUILD_ROOT"),
+            lines[0].contains("E: rpm-buildroot-usage %prep echo $RPM_BUILD_ROOT"),
             "line: {}",
             lines[0]
         );

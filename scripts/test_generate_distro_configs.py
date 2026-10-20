@@ -331,25 +331,23 @@ def test_filelist_hits_and_cache():
 
 
 # ---------------------------------------------------------------------------
-# unknown flavor
+# pie-path pruning: pass-through
 # ---------------------------------------------------------------------------
 
-def test_unknown_flavor_names_valid_flavors():
-    try:
-        gen.prune_pie_paths("", [], "bogus")
-    except RuntimeError as e:
-        msg = str(e)
-        assert "bogus" in msg, msg
-        assert "opensuse" in msg and "slfo" in msg, msg
-    else:
-        raise AssertionError("unknown flavor did not raise")
+def test_prune_pie_paths_passes_unlisted_paths_through():
+    """Paths outside PRUNE_PIE_PATHS survive untouched and unlogged."""
+    text = 'PieExecutables = [\n    "/usr/bin/some-tool",\n]\n'
+    log = []
+    out = gen.prune_pie_paths(text, log)
+    assert out == text, out
+    assert log == [], log
 
 
 # ---------------------------------------------------------------------------
-# Leap 16.0 repomd sha512 verification (follow-up to #334)
+# Tumbleweed repomd sha512 verification (follow-up to #334)
 # ---------------------------------------------------------------------------
 
-_LEAP16_REPOMD_TMPL = (
+_PRIMARY_REPOMD_TMPL = (
     '<?xml version="1.0"?>'
     '<repomd><data type="primary">'
     '{checksum}'
@@ -357,16 +355,16 @@ _LEAP16_REPOMD_TMPL = (
     '</data></repomd>'
 )
 
-_LEAP16_PRIMARY_PAYLOAD = b"fake primary.xml payload"
-_LEAP16_PRIMARY_XML = b"<name>foo</name><name>bar</name>"
+_PRIMARY_PAYLOAD = b"fake primary.xml payload"
+_PRIMARY_XML = b"<name>foo</name><name>bar</name>"
 
 
-def _leap16_repomd(checksum_hex=None):
+def _primary_repomd(checksum_hex=None):
     checksum = (
         f'<checksum type="sha512">{checksum_hex}</checksum>'
         if checksum_hex else ''
     )
-    return _LEAP16_REPOMD_TMPL.format(checksum=checksum).encode('utf-8')
+    return _PRIMARY_REPOMD_TMPL.format(checksum=checksum).encode('utf-8')
 
 
 def _read_once(data):
@@ -402,14 +400,14 @@ class _FakeZstd:
         return 0
 
 
-def _leap16_run(repomd, payload):
-    """Run _leap16_binary_names with mocked network and zstd.
+def _primary_run(repomd, payload):
+    """Run _tw_binary_names with mocked network and zstd.
 
     The urlopen fake dispatches on the URL and never runs out of
     responses: a failed primary download is retried over fresh repomd
     fetches, so a two-response side-effect list no longer suffices.
     """
-    gen._leap16_binary_names_cache = None
+    gen._tw_binary_names_cache = None
 
     def fake_urlopen(req, timeout=None):
         if req.full_url.endswith('repomd.xml'):
@@ -420,33 +418,33 @@ def _leap16_run(repomd, payload):
             mock.patch.object(gen.urllib.request, 'urlopen',
                               side_effect=fake_urlopen), \
             mock.patch.object(gen.subprocess, 'Popen',
-                              lambda *a, **k: _FakeZstd(_LEAP16_PRIMARY_XML)), \
+                              lambda *a, **k: _FakeZstd(_PRIMARY_XML)), \
             mock.patch.object(gen.time, 'sleep'):
-        return gen._leap16_binary_names()
+        return gen._tw_binary_names()
 
 
-def test_leap16_sha512_good_returns_names():
+def test_primary_sha512_good_returns_names():
     """A matching sha512 lets the names through."""
     import hashlib
-    sha = hashlib.sha512(_LEAP16_PRIMARY_PAYLOAD).hexdigest()
-    names = _leap16_run(_leap16_repomd(sha), _LEAP16_PRIMARY_PAYLOAD)
+    sha = hashlib.sha512(_PRIMARY_PAYLOAD).hexdigest()
+    names = _primary_run(_primary_repomd(sha), _PRIMARY_PAYLOAD)
     assert names == {'foo', 'bar'}, names
 
 
-def test_leap16_sha512_corrupt_raises():
+def test_primary_sha512_corrupt_raises():
     """A tampered download must raise, never silently verify."""
     try:
-        _leap16_run(_leap16_repomd('0' * 128), _LEAP16_PRIMARY_PAYLOAD)
+        _primary_run(_primary_repomd('0' * 128), _PRIMARY_PAYLOAD)
     except RuntimeError as e:
         assert 'sha512 mismatch' in str(e), str(e)
     else:
         raise AssertionError('corrupt download did not raise')
 
 
-def test_leap16_sha512_missing_raises():
+def test_primary_sha512_missing_raises():
     """A repomd without the checksum must raise, not skip verification."""
     try:
-        _leap16_run(_leap16_repomd(), _LEAP16_PRIMARY_PAYLOAD)
+        _primary_run(_primary_repomd(), _PRIMARY_PAYLOAD)
     except RuntimeError as e:
         assert 'sha512' in str(e), str(e)
     else:
@@ -845,14 +843,14 @@ def test_append_extra_checks_lands_inside_checks_list():
         "    ' some-filter ',\n"
         ']\n'
     )
-    out = gen.append_extra_checks(text, gen.EXTRA_OPENSUSE_CHECKS)
+    out = gen.append_extra_checks(text, gen.EXTRA_CHECKS)
     checks_part, filters_part = out.split("Filters = [", 1)
     for check in ("XinetdDepCheck", "PAMModulesCheck"):
         assert f'"{check}",' in checks_part, checks_part
         assert check not in filters_part, filters_part
         # The entry is inside the list: it precedes the closing bracket.
         assert checks_part.index(f'"{check}",') < checks_part.index("]"), checks_part
-    assert gen.EXTRA_OPENSUSE_CHECKS == ["XinetdDepCheck", "PAMModulesCheck"], gen.EXTRA_OPENSUSE_CHECKS
+    assert gen.EXTRA_CHECKS == ["XinetdDepCheck", "PAMModulesCheck"], gen.EXTRA_CHECKS
 
 
 def test_append_extra_checks_without_checks_list_raises():
@@ -885,14 +883,14 @@ def test_remove_excluded_checks_drops_entry_and_explains():
         "    'AtomicUpdateCheck',\n"
         ']\n'
     )
-    out = gen.remove_excluded_checks(text, gen.EXCLUDED_OPENSUSE_CHECKS)
+    out = gen.remove_excluded_checks(text, ["AtomicUpdateCheck"])
     checks_part, filters_part = out.split("Filters = [", 1)
     assert '"AtomicUpdateCheck",' not in checks_part, checks_part
-    assert "EXCLUDED_OPENSUSE_CHECKS" in checks_part, checks_part
+    assert "EXCLUDED_CHECKS" in checks_part, checks_part
     # The comment is inside the list: it precedes the closing bracket.
-    assert checks_part.index("EXCLUDED_OPENSUSE_CHECKS") < checks_part.index("]"), checks_part
+    assert checks_part.index("EXCLUDED_CHECKS") < checks_part.index("]"), checks_part
     assert "AtomicUpdateCheck" in filters_part, filters_part
-    assert gen.EXCLUDED_OPENSUSE_CHECKS == ["AtomicUpdateCheck"], gen.EXCLUDED_OPENSUSE_CHECKS
+    assert gen.EXCLUDED_CHECKS == [], gen.EXCLUDED_CHECKS
 
 
 def test_remove_excluded_checks_without_entry_raises():
@@ -954,46 +952,89 @@ def test_retarget_filters_byte_exact_only():
     assert retargeted == [], retargeted
 
 
-def test_prune_flavoured_filters_drops_opensuse_snapshot_line():
-    """PRUNE_FLAVOURED drops the snapshot exemption for opensuse only.
+def test_add_filters_inserts_after_anchor():
+    """ADD_FILTERS entries land immediately after their anchor line.
 
-    AtomicUpdateCheck is excluded from the opensuse flavor at the Checks
-    layer (issue #478), so the line can never fire there; the slfo flavor
-    runs the check and keeps the exemption, so the same text passes
-    through untouched under that flavor (issue #565).
+    The exemption is new (upstream ships no .cache line), so it is
+    inserted behind the sibling it belongs with, in the anchor's own
+    indentation and quote style; unrelated lines survive byte-identical.
     """
     text = (
         'Filters = [\n'
-        "    '^filesystem\\..*: dir-or-file-outside-snapshot',\n"
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.config',\n"
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.local',\n"
+        "    '^filesystem\\..*: hidden-file-or-dir /tmp/.X11-unix',\n"
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.fonts',\n"
+        ']\n'
+    )
+    added = []
+    out = gen.add_filters(text, added)
+    assert out == (
+        'Filters = [\n'
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.config',\n"
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.local',\n"
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.cache',\n"
+        "    '^filesystem\\..*: hidden-file-or-dir /tmp/.X11-unix',\n"
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.fonts',\n"
+        ']\n'
+    ), out
+    assert len(added) == 1, added
+    assert '/usr/etc/skel/.cache' in added[0], added
+
+
+def test_add_filters_skips_line_upstream_now_ships():
+    """A pattern already present in Filters is not duplicated: when
+    upstream starts shipping the exemption itself, the insertion steps
+    aside instead of emitting the line twice.
+    """
+    text = (
+        'Filters = [\n'
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.local',\n"
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.cache',\n"
+        ']\n'
+    )
+    added = []
+    out = gen.add_filters(text, added)
+    assert out == text, out
+    assert added == [], added
+
+
+def test_add_filters_missing_anchor_raises():
+    """An anchor upstream reworded or dropped fails generation loudly:
+    the exemption must never be silently stranded or land in the wrong
+    place. Matching is byte-exact, so a trailing-space variant of the
+    anchor does not count.
+    """
+    text = (
+        'Filters = [\n'
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.local ',\n"
+        ']\n'
+    )
+    try:
+        gen.add_filters(text, [])
+    except AssertionError:
+        return
+    raise AssertionError("add_filters accepted a Filters list without the anchor")
+
+
+def test_add_filters_ignores_blocked_filters():
+    """The anchor is only honoured inside Filters: BlockedFilters
+    entries are exact-match guards, so an anchor there does not count
+    and the missing Filters anchor still raises.
+    """
+    text = (
+        'BlockedFilters = [\n'
+        "    '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.local',\n"
+        ']\n'
+        'Filters = [\n'
         "    ' dangerous-command.*',\n"
         ']\n'
     )
-    log = []
-    out = gen.prune_flavoured_filters(text, "opensuse", log)
-    assert 'dir-or-file-outside-snapshot' not in out, out
-    assert "    ' dangerous-command.*',\n" in out, out
-    assert len(log) == 1 and 'opensuse' in log[0], log
-
-    log = []
-    out = gen.prune_flavoured_filters(text, "slfo", log)
-    assert out == text, out
-    assert log == [], log
-
-
-def test_prune_flavoured_filters_byte_exact_only():
-    """A reworded line is NOT pruned: matching is byte-exact, so an
-    upstream reword stops the prune and the sync surfaces the line for
-    a fresh audit instead of the prune silently widening.
-    """
-    text = (
-        'Filters = [\n'
-        "    '^filesystem\\..*: dir-or-file-outside-snapshot ',\n"
-        ']\n'
-    )
-    log = []
-    out = gen.prune_flavoured_filters(text, "opensuse", log)
-    assert out == text, out
-    assert log == [], log
+    try:
+        gen.add_filters(text, [])
+    except AssertionError:
+        return
+    raise AssertionError("add_filters took the anchor from BlockedFilters")
 
 
 def test_drop_live_filters_drops_kernel_modules_line():
@@ -1492,14 +1533,16 @@ def test_drop_live_filters_drops_usr_local_line():
     """The dir-or-file-in-usr-local filter is dropped via
     DROP_LIVE_FILTERS (ruling in issue #583).
 
-    The check is a verbatim port of FilesCheck with a measured
-    misfire rate of 0/45 on the Factory corpus; the suppressed set
-    is two deliberate carriers (filesystem's %ghost /usr/local
+    The check is a port of FilesCheck with a measured misfire
+    rate of 0/45 on the Factory corpus; the suppressed set is
+    two deliberate carriers (filesystem's %ghost /usr/local
     skeleton tree, reproducible-faketools' /usr/local/bin
     PATH-shadowing wrappers) whose exceptions belong in per-package
-    rpmlintrc. The drop is unconditional -- the 45 findings
-    becoming visible is the point of this table. The line under
-    test is upstream's verbatim shape, padding and fossil comment
+    rpmlintrc. The drop is unconditional -- the findings becoming
+    visible is the point of this table; since the %ghost exemption
+    (issue #643) only reproducible-faketools' 25 real-payload
+    lines still fire (issue #654). The line under test is
+    upstream's verbatim shape, padding and fossil comment
     included.
     """
     text = (
@@ -1559,89 +1602,33 @@ def test_drop_live_filters_drops_non_standard_dir_in_usr_line():
 
 
 # ---------------------------------------------------------------------------
-# adjust_scoring: [Scoring] recalibration (issue #594)
+# strip_badness_threshold / no vendored scoring (issue #699)
 # ---------------------------------------------------------------------------
 
-def test_adjust_scoring_drops_promotions_and_keeps_the_rest():
-    """DROP_SCORING lines go; every other line survives byte-exact.
-
-    The kept lines matter as much as the dropped ones: summary-too-long
-    keeps its reference calibration (its E is an emission decision, not
-    a promotion) and the dir-or-file-outside-snapshot = 0 demote switch
-    is upstream's stated policy.
-    """
-    text = (
-        "[Scoring]\n"
-        "devel-file-in-non-devel-package = 50\n"
-        "files-duplicated-waste = 100\n"
-        "makefile-junk = 109\n"
-        "spurious-executable-perm = 50\n"
-        "summary-ended-with-dot = 20\n"
-        "summary-not-capitalized = 20\n"
-        "summary-too-long = 200\n"
-        "dir-or-file-outside-snapshot = 0\n"
-    )
-    dropped, added = [], []
-    out = gen.adjust_scoring(text, dropped, added)
-    for key in gen.DROP_SCORING:
-        assert "%s =" % key not in out, out
-    assert "summary-too-long = 200\n" in out, out
-    assert "dir-or-file-outside-snapshot = 0\n" in out, out
-    assert len(dropped) == len(gen.DROP_SCORING), dropped
-    # invalid-license is absent from the fixture, so it is appended
-    # under its explanatory comment, inside the [Scoring] table.
-    assert out.endswith("invalid-license = 100000\n"), out
-    assert "# SCORING_ADDITIONS in scripts/generate-distro-configs.py" in out, out
-    assert len(added) == 1 and "invalid-license" in added[0], added
+def test_strip_badness_threshold_drops_only_the_key_line():
+    """The BadnessThreshold line goes; every other line survives
+    byte-exact, and the removal is logged for the provenance."""
+    text = "Version = 3\nBadnessThreshold = 999\nFlavor = \"opensuse\"\n"
+    log = []
+    out = gen.strip_badness_threshold(text, "opensuse", log)
+    assert out == "Version = 3\nFlavor = \"opensuse\"\n", out
+    assert len(log) == 1 and "999" in log[0] and "opensuse" in log[0], log
 
 
-def test_adjust_scoring_is_idempotent():
-    """Re-running on adjusted text changes nothing: the monthly sync
-    regenerates from upstream, but a no-op second pass proves the
-    transform cannot compound (no duplicated additions, no re-drops)."""
-    text = "[Scoring]\nmakefile-junk = 109\nsummary-too-long = 200\n"
-    once = gen.adjust_scoring(text, [], [])
-    twice = gen.adjust_scoring(once, [], [])
-    assert once == twice, (once, twice)
-    assert once.count("invalid-license") == 1, once
+def test_strip_badness_threshold_is_idempotent():
+    text = "BadnessThreshold = 999\nVersion = 3\n"
+    once = gen.strip_badness_threshold(text, "opensuse", [])
+    twice = gen.strip_badness_threshold(once, "opensuse", [])
+    assert once == twice == "Version = 3\n", (once, twice)
 
 
-def test_adjust_scoring_replaces_an_upstream_adopted_addition():
-    """If upstream adopts an addition at another value, the line is
-    rewritten in place -- never duplicated (a duplicate key would make
-    the vendored table fail to parse)."""
-    text = "[Scoring]\ninvalid-license = 5\nsummary-too-long = 200\n"
-    dropped, added = [], []
-    out = gen.adjust_scoring(text, dropped, added)
-    assert out.count("invalid-license") == 1, out
-    assert "invalid-license = 100000\n" in out, out
-    assert "summary-too-long = 200\n" in out, out
-    assert dropped == [], dropped
-    assert len(added) == 1, added
-
-
-def test_adjust_scoring_leaves_other_tables_alone():
-    """A key named like a dropped entry outside [Scoring] is not a
-    scoring decision and must survive."""
-    text = (
-        "[Scoring]\n"
-        "summary-too-long = 200\n"
-        "[SeverityOverrides]\n"
-        "makefile-junk = \"W\"\n"
-    )
-    dropped, added = [], []
-    out = gen.adjust_scoring(text, dropped, added)
-    assert 'makefile-junk = "W"\n' in out, out
-    assert dropped == [], dropped
-
-
-def test_strict_layer_is_not_vendored():
-    """scoring-strict.override.toml stays out of the bundle (issue
-    #594): it is the rpmlint-strict subpackage's layer; the default
-    bundle carries one calibrated [Scoring] set per flavor."""
+def test_scoring_is_not_vendored():
+    """No [Scoring] table ships (issue #699): neither upstream's
+    scoring.toml nor the rpmlint-strict layer is in the bundle, so no
+    shipped config can promote or demote a finding's level."""
     for flavor, files in gen.FILES.items():
+        assert "scoring.toml" not in files, (flavor, files)
         assert "scoring-strict.override.toml" not in files, (flavor, files)
-        assert "scoring.toml" in files, (flavor, files)
 
 
 def test_append_systemd_preset_packages_before_first_table_after_blank_line():
@@ -1699,6 +1686,153 @@ def test_append_systemd_preset_packages_appends_at_eof_without_table():
     )
     assert gen.append_systemd_preset_packages('Version = 3\n', ["a"]) == 'Version = 3\n' + block
     assert gen.append_systemd_preset_packages('Version = 3', ["a"]) == 'Version = 3\n' + block
+
+
+
+def test_spelling_jargon_shipped_words_build_the_shipped_filter():
+    """The shipped jargon TOML carries the four words issue #778
+    evidenced, sorted, and the filter built from them is the one
+    EXTRA_FILTERS appends to the openSUSE config.
+
+    Pins both ends of the generator: a word silently dropping out of
+    the TOML (or out of the built alternation) re-opens #778.
+    """
+    assert gen.SPELLING_JARGON_WORDS == [
+        "init",
+        "librpm",
+        "namespace",
+        "scriptlet",
+    ], gen.SPELLING_JARGON_WORDS
+    expected = (
+        r"^.*spelling-error (Summary\([A-Za-z0-9_@.-]+\)|%description -l [A-Za-z0-9_@.-]+) "
+        r"([Ii]nits?|[Ll]ibrpms?|[Nn]amespaces?|[Ss]criptlets?)\b"
+    )
+    assert gen.spelling_jargon_filter(gen.SPELLING_JARGON_WORDS) == expected
+    patterns = [pattern for pattern, _reason in gen.EXTRA_FILTERS]
+    assert expected in patterns, patterns
+
+
+def test_spelling_jargon_added_word_appears_in_filter():
+    """A word added to the TOML appears in the built filter, regex-
+    escaped, and the loader returns the words sorted regardless of
+    file order.
+
+    The list is meant to grow one line at a time; this proves the
+    growth path end to end without touching the shipped file.
+    """
+    import re
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "jargon.toml")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('words = [\n    "scriptlet",\n    "frobnicate",\n    "lib.rpm",\n]\n')
+        words = gen.load_spelling_jargon(path)
+    assert words == ["frobnicate", "lib.rpm", "scriptlet"], words
+    pattern = gen.spelling_jargon_filter(words)
+    assert "[Ff]robnicates?" in pattern, pattern
+    assert r"[Ll]ib\.rpms?" in pattern, pattern
+    rx = re.compile(pattern)
+    assert rx.search("foo.x86_64: E: spelling-error Summary(C) frobnicate -> frob nicate")
+    assert rx.search("foo.x86_64: E: spelling-error %description -l C lib.rpm -> lib rpm")
+    # The closing word boundary keeps a longer word that merely starts
+    # with a jargon word visible, and unlisted words are untouched.
+    assert not rx.search("foo.x86_64: E: spelling-error Summary(C) frobnicated -> frob nicate")
+    assert not rx.search("foo.x86_64: E: spelling-error Summary(C) blorple -> blurple")
+
+
+def test_spelling_jargon_duplicate_words_raise():
+    """Duplicates in the TOML fail loudly: a duplicated alternative
+    would ride along as dead weight in every vendored copy of the
+    filter."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "jargon.toml")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('words = ["init", "init"]\n')
+        try:
+            gen.load_spelling_jargon(path)
+        except ValueError:
+            return
+    raise AssertionError("load_spelling_jargon accepted duplicate words")
+
+
+def test_spelling_jargon_filter_covers_capitals_plurals_and_utf8_locales():
+    """The built filter matches the shapes the spelling check actually
+    emits for a jargon word: capitalised at the start of a sentence,
+    pluralised, and under locales carrying digits and a hyphen
+    (C.UTF-8, de_DE.UTF-8). A longer word that merely starts with a
+    jargon word still surfaces."""
+    import re
+
+    rx = re.compile(gen.spelling_jargon_filter(gen.SPELLING_JARGON_WORDS))
+    for line in [
+        "foo.x86_64: E: spelling-error Summary(C.UTF-8) namespace -> name space",
+        "foo.x86_64: E: spelling-error %description -l de_DE.UTF-8 scriptlet -> script let",
+        "foo.x86_64: E: spelling-error Summary(C) Init -> i nit",
+        "foo.x86_64: E: spelling-error %description -l C Namespace -> name space",
+        "foo.x86_64: E: spelling-error Summary(C) namespaces -> name spaces",
+        "foo.x86_64: E: spelling-error %description -l C scriptlets -> script lets",
+    ]:
+        assert rx.search(line), line
+    assert not rx.search(
+        "foo.x86_64: E: spelling-error Summary(C) initialisation -> initialization"
+    )
+
+
+def test_extra_filters_carry_their_provenance_reasons():
+    """Each EXTRA_FILTERS entry pairs its pattern with the
+    reason the generator logs for it in PROVENANCE: the mingw entries
+    keep their rpmlintrc attribution and the spelling-jargon entry
+    cites issue #778 instead of inheriting the mingw label."""
+    reasons = dict(gen.EXTRA_FILTERS)
+    assert len(reasons) == len(gen.EXTRA_FILTERS)
+    for pattern, reason in gen.EXTRA_FILTERS:
+        assert pattern and reason, (pattern, reason)
+    mingw_reasons = [
+        reason
+        for pattern, reason in gen.EXTRA_FILTERS
+        if pattern.startswith("^mingw")
+    ]
+    assert mingw_reasons == ["mingw -filesystem packages' rpmlintrc"] * 2, mingw_reasons
+    jargon_pattern = gen.spelling_jargon_filter(gen.SPELLING_JARGON_WORDS)
+    assert "#778" in reasons[jargon_pattern], reasons[jargon_pattern]
+
+
+def test_apply_digest_adjudications_rewrites_cups_record():
+    """The Factory-adjudicated cups.conf record replaces the stale hash.
+
+    Pins the vendored stanza shape the function walks:
+    [[FileDigestGroup.digests]] sub-tables with path/hash lines.
+    """
+    text = (
+        '[[FileDigestGroup]]\n'
+        'package = "cups"\n'
+        'type = "dbus"\n'
+        '[[FileDigestGroup.digests]]\n'
+        'path = "/usr/share/dbus-1/system.d/cups.conf"\n'
+        'hash = "013f81b330170be3629bae66b26828beb6a6e7885c0f00e50c971acc1816a0d7"\n'
+        'digester = "xml"\n'
+        '\n'
+        '[[FileDigestGroup]]\n'
+        'package = "upower"\n'
+        'type = "dbus"\n'
+        '[[FileDigestGroup.digests]]\n'
+        'path = "/usr/share/dbus-1/system.d/org.freedesktop.UPower.conf"\n'
+        'hash = "aaaa"\n'
+        'digester = "xml"\n'
+    )
+    out, log = gen.apply_digest_adjudications(text, "dbus-services.toml")
+    assert "1bbed8c1ecac00e546a3659235855aa2e88ec1142b3908b3d662e68ad4e664fe" in out, out
+    assert "013f81b330170be3" not in out, out
+    assert 'hash = "aaaa"' in out, out  # other records untouched
+    assert len(log) == 1 and "cups" in log[0], log
+    # Idempotent, and a no-op for files without adjudicated records.
+    out2, log2 = gen.apply_digest_adjudications(out, "dbus-services.toml")
+    assert out2 == out and log2 == [], (out2, log2)
+    out3, log3 = gen.apply_digest_adjudications(text, "sysctl-whitelist.toml")
+    assert out3 == text and log3 == [], (out3, log3)
 
 
 if __name__ == "__main__":

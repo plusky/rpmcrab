@@ -2,7 +2,7 @@
 //!
 //! Ported from `rpmlint/checks/DocCheck.py`. Four findings:
 //! `executable-docs` (E), `doc-file-dependency` (W), `install-file-in-docs`
-//! (W), `package-with-huge-docs` (W).
+//! (I), `package-with-huge-docs` (W).
 //!
 //! `package-with-huge-docs` is additionally skipped for package names ending in
 //! an `ExemptDocSuffixes` entry (default `-javadoc`): fix-in-port for
@@ -208,7 +208,7 @@ impl Check for DocCheck {
         }
 
         for f in Self::install_files(&doc_refs) {
-            add_info(out, Level::Warning, pkg, "install-file-in-docs", &[f]);
+            add_info(out, Level::Info, pkg, "install-file-in-docs", &[f]);
         }
 
         if !Self::ignore_pkg(&pkg.name)

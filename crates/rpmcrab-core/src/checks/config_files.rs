@@ -3,9 +3,13 @@
 //!
 //! Ported from `rpmlint/checks/ConfigFilesCheck.py`. Two findings:
 //! `non-etc-or-var-file-marked-as-conffile` (info) and
-//! `conffile-without-noreplace-flag` (warning).
+//! `conffile-without-noreplace-flag` (warning). A third finding,
+//! `usr-etc-file-marked-as-conffile` (warning), is crab-only — the
+//! reference has no UsrEtc rule; its predicate lives with the
+//! transactional-update family in `checks::atomic_update`.
 
 use crate::check::{Check, add_info};
+use crate::checks::atomic_update::usr_etc_conffile;
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
@@ -52,6 +56,20 @@ impl Check for ConfigFilesCheck {
                 Self::check_one(filename, pkg.noreplace_files.contains(filename))
             {
                 add_info(out, level, pkg, finding, &[filename]);
+            }
+        }
+        // UsrEtc: /usr/etc holds vendor defaults, not administrator
+        // configuration, so the `%config` mark is wrong there no matter
+        // what the placement findings above said about the same file.
+        for pkgfile in &pkg.files {
+            if usr_etc_conffile(pkgfile) {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "usr-etc-file-marked-as-conffile",
+                    &[pkgfile.name.as_str()],
+                );
             }
         }
     }
@@ -129,6 +147,68 @@ mod tests {
         );
     }
     #[test]
+    fn check_binary_entry_point_reports_usr_etc_conffile() {
+        // Kills the neutered-wiring mutant: the loop over `pkg.files`
+        // must run the family predicate for the finding to reach the
+        // `Filter`, exactly once per marked /usr/etc entry.
+        use crate::pkg::pkgfile::{PkgFile, RPMFILE_CONFIG, RPMFILE_GHOST, RPMFILE_NOREPLACE};
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
+        pkg.config_files = vec![];
+        pkg.noreplace_files = vec![];
+        pkg.files = vec![
+            PkgFile {
+                name: "/usr/etc/foo.conf".to_string(),
+                mode: 0o100644,
+                flags: RPMFILE_CONFIG | RPMFILE_NOREPLACE,
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/etc/plain.conf".to_string(),
+                mode: 0o100644,
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/etc/foo.conf".to_string(),
+                mode: 0o100644,
+                flags: RPMFILE_CONFIG,
+                ..Default::default()
+            },
+            // A %ghost ships no vendor default: excluded.
+            PkgFile {
+                name: "/usr/etc/ghost.conf".to_string(),
+                mode: 0o100644,
+                flags: RPMFILE_CONFIG | RPMFILE_GHOST,
+                ..Default::default()
+            },
+            // A directory never gets .rpmnew/.rpmsave treatment: excluded.
+            PkgFile {
+                name: "/usr/etc/subdir".to_string(),
+                mode: 0o040755,
+                flags: RPMFILE_CONFIG,
+                ..Default::default()
+            },
+        ];
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = ConfigFilesCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let hits: Vec<&(String, String)> = out
+            .results()
+            .iter()
+            .filter(|(n, _)| n == "usr-etc-file-marked-as-conffile")
+            .collect();
+        assert_eq!(hits.len(), 1, "results: {:?}", out.results());
+        assert!(hits[0].1.contains(": W: "), "level: {}", hits[0].1);
+        assert!(
+            hits[0].1.contains("/usr/etc/foo.conf"),
+            "detail: {}",
+            hits[0].1
+        );
+    }
+
+    #[test]
     fn staged_descriptions_carry_deliberate_rewords() {
         // Staged for the M2 `--explain` wiring (see data/descriptions/README.md).
         // `non-etc-or-var-file-marked-as-conffile` carries the reword from
@@ -147,6 +227,17 @@ mod tests {
                 "A file not in /etc or /var is marked as being a configuration file (%config).\n\
                  Put your configuration files in /etc or /var, or remove the %config attribute\n\
                  from the corresponding line in the %files section.\n"
+            )
+        );
+        assert_eq!(
+            table["usr-etc-file-marked-as-conffile"].as_str(),
+            Some(
+                "A file in /usr/etc is marked as a configuration file (%config).\n\
+                 Files in /usr/etc are vendor defaults; administrator configuration\n\
+                 belongs in /etc, which takes precedence over them. The %config mark\n\
+                 makes rpm preserve local edits to the vendor default across updates\n\
+                 (.rpmsave/.rpmnew), which fights the /usr/etc split. Remove the\n\
+                 %config attribute from the corresponding line in the %files section.\n"
             )
         );
         assert_eq!(

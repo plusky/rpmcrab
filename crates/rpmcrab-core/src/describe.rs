@@ -309,7 +309,7 @@ mod tests {
             ),
             (
                 "AtomicUpdateCheck.toml",
-                "d3878db058303c051de21eeb464179e1fe660457f318fb2756f51d42f58e289c",
+                "48e70698834e7e12da9ef045ea862dae07a7cbe4ce473b9af59e697d292cc670",
             ),
             (
                 "BashismsCheck.toml",
@@ -333,7 +333,7 @@ mod tests {
             ),
             (
                 "ConfigFilesCheck.toml",
-                "87e2c684472af24816070ab57688fc3005558a473559309d710eef6dd5d3a108",
+                "0f2f2f5eee854150770d04c284282eb22ed6d1bcc42b6bff5c2eac94da5ea648",
             ),
             (
                 "DBusPolicyCheck.toml",
@@ -369,7 +369,7 @@ mod tests {
             ),
             (
                 "FilesCheck.toml",
-                "7223534bc48268a15a30fbc64113cc434bcbbc0ce161e25d2f9e9dddf97d4128",
+                "a9d8d96d8ffe7063aa5701831afdfd7886036439d1230b99f4ebc8765cc94507",
             ),
             (
                 "I18NCheck.toml",

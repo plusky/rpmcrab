@@ -1,122 +1,73 @@
-# SLFO Flavor: Implementation Sketch
+# Flavor: Implementation
 
-**Status:** Config plumbing landed (`Config.flavor`, `is_slfo()`,
-`divergence_applies()`); ledger `flavor` key validated. No flavor-gated
-checks yet.
+**Status:** Landed. One vendored data set ships — the SUSE flavour's —
+and the `Flavor` key with its gating helpers carries flavour-specific
+behaviour.
 
-This document sketches how the `Flavor` config key (§4.11) would be
-implemented when the first flavor-gated check lands. It is not a
-specification; the implementing PR may deviate where the code demands it.
+## The mechanism
 
-## Config plumbing
+`Config.flavor` holds the selected flavour
+(`crates/rpmcrab-core/src/config.rs`):
 
-In `crates/rpmcrab-core/src/config.rs`:
+- The `Flavor` top-level TOML key sets it; values are case-insensitive.
+- `"opensuse"` is the default; `"slfo"` is recognised; unknown values
+  warn and fall back to `"opensuse"`.
+- A pre-pass over the config file layers reads the key before the
+  vendored layer is chosen, so the pre-pass and `Config::finalize()`
+  agree on the selection for every input.
+- `Config::is_slfo()` reports the selection, and the parity ledger's
+  `divergence_applies()` applies a ledger entry's `flavor` key against
+  it, so flavour-gated divergences stay expressible in code and in the
+  ledger.
 
-```rust
-/// Distribution flavor for flavor-gated check behavior.
-/// `"opensuse"` (default) or `"slfo"`. Unknown values warn and
-/// fall back to `"opensuse"`.
-pub flavor: String,
-```
+## The vendored data set
 
-Derived in `Config::finalize()` from the merged TOML table:
+`scripts/generate-distro-configs.py` vendors the distro data from
+upstream rpmlint's `opensuse` branch at a pinned commit into
+`crates/rpmcrab-core/data/distro/opensuse/`, and
+`crates/rpmcrab-core/src/distro_files_generated.rs` embeds that set as
+`DISTRO_OPENSUSE_FILES`. Every recognised `Flavor` value selects this
+set: the SUSE flavour's data serves openSUSE, SLFO and SLE targets.
 
-```rust
-let flavor = table
-    .get("Flavor")
-    .and_then(|v| v.as_str())
-    .unwrap_or("opensuse")
-    .to_ascii_lowercase();
-let flavor = match flavor.as_str() {
-    "opensuse" | "slfo" => flavor,
-    other => {
-        eprintln!("warning: unknown Flavor {other:?}, falling back to \"opensuse\"");
-        "opensuse".to_string()
-    }
-};
-```
+The set carries the generator's extras on top of upstream:
+`XinetdDepCheck` and `PAMModulesCheck` in `Checks`, the MinGW
+`Filters` (the reference loads them from the mingw-filesystem
+packages' rpmlintrc files) and the 59 `BlockedFilters`. Its security
+data covers the varlink locations and `/usr/etc/sudoers.d`, and its
+digest records carry the hash sets Factory ships:
+`DIGEST_ADJUDICATIONS` in the generator holds the records adjudicated
+from Factory corpus content, applied at generation time and by the
+daily whitelist sync, so the vendored records carry the Factory
+hashes by construction.
 
-Helper, next to the existing config predicates:
-
-```rust
-impl Config {
-    /// True when the `slfo` flavor is selected.
-    pub fn is_slfo(&self) -> bool {
-        self.flavor == "slfo"
-    }
-}
-```
-
-No trait changes: `Config` (or `&Config`) is already passed to every check's
-`check` / `check_binary` entry points.
+Two jobs keep the set current: `distro-config-sync` refreshes the
+vendored files from upstream monthly, with the drift job comparing
+the tree against the generator's output at the pins; and
+`upstream-whitelist-sync` merges new whitelist stanzas from the
+upstream branch tip daily.
 
 ## Gating pattern
 
-At the decision point, branch on `config.is_slfo()`. For severity flips,
-make the level a variable rather than duplicating the emit call:
+Checks branch at the decision point on `config.is_slfo()`. For
+severity flips, the level is a variable rather than a duplicated emit
+call:
 
 ```rust
-// checks/buildroot.rs (when ported)
 let level = if config.is_slfo() { Level::Error } else { Level::Warning };
-if self.istoday.is_match(data) {
-    if self.looksliketime.is_match(data) {
-        out.add_info(level, pkg, "file-contains-date-and-time", filename);
-    } else {
-        out.add_info(level, pkg, "file-contains-current-date", filename);
-    }
-}
 ```
-
-For path-prefix differences, gate the prefix list:
-
-```rust
-// (illustrative; the /usr/etc LogrotateCheck/BinariesCheck divergences
-// were REJECTED as staleness — see §4.11 — and are shown here only
-// as the pattern, not as planned work)
-let etc_prefixes: &[&str] = if config.is_slfo() {
-    &["/etc/"]
-} else {
-    &["/etc/", "/usr/etc/"]
-};
-```
-
-## Ledger entries
 
 Each gated divergence gets a `[[divergence]]` entry in
-`tests/parity/divergences.toml`, with the flavor recorded so corpus diffs
-stay legible:
+`tests/parity/divergences.toml` with `flavor = "slfo"` recorded, so
+corpus diffs stay legible.
 
-```toml
-[[divergence]]
-case = "buildroot"
-finding = "file-contains-date-and-time"
-flavor = "slfo"
-kind = "behaviour"
-reason = "Severity is Error under Flavor=\"slfo\" (immutable images require reproducible builds); Warning otherwise, matching the frozen 2.10.0 opensuse reference."
-```
+## Severity decisions the audit settled
 
-The corpus runner (§6) runs in the default `"opensuse"` flavor, so the
-ledger remains the record of intentional departures from the reference.
-
-## What is explicitly out of scope
-
-- **No `slfo-1.2` vs `slfo-main` distinction.** The check-level divergences
-  are identical in both branches; 1.2 is simply older. One `"slfo"` value
-  covers both.
-- **No code gating for `AtomicUpdateCheck`.** It exists in opensuse too;
-  the port runs it whenever a config enables it. It is absent from the
-  bundled default config and from the opensuse flavor config's `Checks`
-  list (snapshot layout is an slfo requirement, issue #478); the slfo
-  flavor config enables it.
-- **No gating for the three REJECTED candidates** (§4.11): they are
-  staleness or removed checks, not flavor behavior.
-- **No auto-detection** (no `/etc/os-release` sniffing). Flavor is a
-  property of the lint target, not the host.
-
-## Open question for Tom
-
-Divergence #3 (`file-contains-date-and-time` / `file-contains-current-date`
-W→E) is marked QUESTIONABLE in §4.11: the immutable-reproducibility
-rationale is plausible but undocumented upstream. If rejected, the `Flavor`
-key still ships (the mechanism is sound and future flavors will need it),
-but the divergence matrix stays empty until a verified divergence lands.
+The SLFO-branch audit (§4.11, issue #714) verified each candidate
+divergence against upstream history and Factory content. The date
+findings (`file-contains-date-and-time`, `file-contains-current-date`)
+are Error under every flavour (issue #759): build dates in shipped
+files break the reproducibility image-based installs rely on, and the
+Factory measurement (578 firings in 259 srcpkgs, hand-audited)
+supports the unconditional promotion. `AtomicUpdateCheck` runs in the
+bundled defaults and in the vendored config (issue #698):
+transactional updates are mandatory for the whole SUSE family.

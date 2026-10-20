@@ -33,7 +33,7 @@ pub trait Renderer {
 /// Human-readable text report (default). Byte shape is frozen, pinned by
 /// the `report` golden tests.
 ///
-/// The order is the reference's: results, banner, reports, footer
+/// The order is the reference's: results, reports, footer
 /// (`lint.py:94-118`). The header and footer count different things:
 /// `header_packages` is the CLI *argument* count (`len(installed) +
 /// len(rpmfile)`, `lint.py:242`), while the footer counts the packages
@@ -81,14 +81,6 @@ impl Renderer for TextRenderer {
             width: lint.width,
         }));
         out.push_str(&lint.filter().render_results(lint.config()));
-        if lint.aborted() {
-            out.push_str(&report::abort_banner(
-                lint.filter().score,
-                lint.config().badness_threshold,
-                &lint.color,
-                lint.width,
-            ));
-        }
         if ctx.time_report {
             out.push_str(&lint.time_report());
         }
@@ -98,9 +90,7 @@ impl Renderer for TextRenderer {
             errors: lint.filter().printed(Level::Error),
             warnings: lint.filter().printed(Level::Warning),
             filtered: lint.filter().filtered_out,
-            score: lint.filter().score,
             duration_secs: ctx.duration_secs,
-            aborted: lint.aborted(),
             color: &lint.color,
             width: lint.width,
         }));
@@ -128,8 +118,6 @@ impl Renderer for JsonRenderer {
                 "errors": lint.filter().printed(Level::Error),
                 "warnings": lint.filter().printed(Level::Warning),
                 "filtered": lint.filter().filtered_out,
-                "score": lint.filter().score,
-                "aborted": lint.aborted(),
                 "exit_code": lint.exit_code(),
             },
         });

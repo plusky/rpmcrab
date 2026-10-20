@@ -56,7 +56,6 @@ impl Check for Recorder {
             level: Level::Info,
             check: "recorder-after-checks".to_string(),
             details: vec![],
-            badness: 0,
             pkg_name: "(none)".to_string(),
             arch: None,
             line: None,

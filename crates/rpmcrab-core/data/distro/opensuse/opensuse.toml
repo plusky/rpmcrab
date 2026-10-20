@@ -4,7 +4,6 @@
 CompressExtension = "gz"
 UseVarLockSubsys = false
 UseVersionInChangelog = false
-BadnessThreshold = 999
 
 # Set to true to issue a warning for ghost entries outside snapshots
 # when checking for atomic update compatibility
@@ -28,13 +27,11 @@ Checks = [
     "SystemdTmpfilesCheck",
     "SUIDPermissionsCheck",
     "WorldWritableCheck",
-    # Excluded: "AtomicUpdateCheck" is not run under the opensuse
-    # flavor (deliberate, ledgered divergence); see
-    # EXCLUDED_OPENSUSE_CHECKS in scripts/generate-distro-configs.py.
+    "AtomicUpdateCheck",
 
     # Extra: enabled by rpmcrab; upstream lists these checks in no
     # shipped config (deliberate, ledgered divergence); see
-    # EXTRA_OPENSUSE_CHECKS in scripts/generate-distro-configs.py.
+    # EXTRA_CHECKS in scripts/generate-distro-configs.py.
     "XinetdDepCheck",
     "PAMModulesCheck",
 ]
@@ -95,9 +92,11 @@ Filters = [
     '^filesystem\..*: dir-or-file-in-tmp',
     '^filesystem\..*: dir-or-file-in-mnt',
     '^filesystem\..*: dir-or-file-in-home',
+    '^filesystem\..*: dir-or-file-outside-snapshot',
     '^filesystem\..*: hidden-file-or-dir /root/.gnupg',
     '^filesystem\..*: hidden-file-or-dir /usr/etc/skel/.config',
     '^filesystem\..*: hidden-file-or-dir /usr/etc/skel/.local',
+    '^filesystem\..*: hidden-file-or-dir /usr/etc/skel/.cache',
     '^filesystem\..*: hidden-file-or-dir /tmp/.X11-unix',
     '^filesystem\..*: hidden-file-or-dir /tmp/.ICE-unix',
     '^filesystem\..*: hidden-file-or-dir /usr/etc/skel/.fonts',
@@ -201,10 +200,11 @@ Filters = [
 
     # Extra: *.dll.a and *.a files are permitted arch-independent objects.
     # From mingw{32,64}-filesystem's mingw{32,64}-rpmlintrc (shipped as
-    # /opt/testing/share/rpmlint/mingw{32,64}.toml); see EXTRA_OPENSUSE_FILTERS
+    # /opt/testing/share/rpmlint/mingw{32,64}.toml); see EXTRA_FILTERS
     # in scripts/generate-distro-configs.py.
     '^mingw32-.*arch-independent-package-contains-binary-or-object.*\.a$',
     '^mingw64-.*arch-independent-package-contains-binary-or-object.*\.a$',
+    '^.*spelling-error (Summary\([A-Za-z0-9_@.-]+\)|%description -l [A-Za-z0-9_@.-]+) ([Ii]nits?|[Ll]ibrpms?|[Nn]amespaces?|[Ss]criptlets?)\b',
 ]
 
 BlockedFilters = [

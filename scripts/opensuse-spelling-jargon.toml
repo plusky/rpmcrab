@@ -1,0 +1,22 @@
+# RPM-ecosystem jargon that openSUSE package summaries and descriptions
+# legitimately use and the hunspell en_US dictionary lacks, in both the
+# system dictionary and the LibreOffice dictionaries pinned by
+# scripts/install-hunspell-dicts.sh. A provisioned rpmlint flags these
+# words too; the distro-config Filters list is the channel the ecosystem
+# uses for this class (Fedora's rpmlint config carries the same kind of
+# spelling-error jargon list, citing
+# https://bugzilla.redhat.com/show_bug.cgi?id=1424684#c9).
+#
+# scripts/generate-distro-configs.py builds the openSUSE config's
+# spelling-error filter from this list (see SPELLING_JARGON_TOML there).
+# One word per line, sorted. A word belongs here only when it is an
+# established technical term of the RPM ecosystem, never as a mask for
+# a genuine typo. Issue #778 has the evidence for the initial entries:
+# init (SysV init), librpm (the library's own name), namespace (the
+# kernel isolation feature) and scriptlet (the spec script sections).
+words = [
+    "init",
+    "librpm",
+    "namespace",
+    "scriptlet",
+]

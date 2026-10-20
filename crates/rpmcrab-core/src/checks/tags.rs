@@ -427,8 +427,26 @@ impl TagsCheck {
                     // Requires: zlib, where the reference is right.
                     // Biarch/flavored devel requirers are devel packages, so
                     // their lib requirements must not trip this either.
+                    // Capability names are not library package names either
+                    // (#753): symbol capabilities in the SUSE
+                    // lib<name>__<symbol> namespace (libuuid1 provides
+                    // libuuid__uuid_generate_time_cont, which uuidd
+                    // requires to restart against the new libuuid after an
+                    // update — a deliberate ABI pin, not a package rpm
+                    // should be left to find), and qualified capabilities
+                    // such as libzypp(econf) or libclc(llvm23). The
+                    // separators are decidable: plain library package
+                    // names contain neither "__" nor "(", and carry no
+                    // qualifier — the qualifier reaches the check
+                    // structured on the leaf, so a capability embedded
+                    // in a rich expression is recognised the same way
+                    // as a top-level one. The reference fires on both
+                    // forms.
                     if !requirer_is_biarch_devel
                         && leaf.flags == 0
+                        && leaf.qualifier.is_none()
+                        && !leaf.name.contains("__")
+                        && !leaf.name.contains('(')
                         && let Ok(Some(caps)) = self.lib_package_re.captures(&leaf.name)
                         && caps.get(1).is_none()
                     {
@@ -1135,7 +1153,7 @@ impl TagsCheck {
         // Did-you-mean suggestions are the port's own Info finding, not the
         // reference's: cap them per package so a pathological License tag
         // with thousands of invalid ids cannot burn minutes in edit-distance
-        // computation. The invalid-license warnings themselves are untouched.
+        // computation. The invalid-license findings themselves are untouched.
         let mut spellchecks_emitted = 0;
         const MAX_SPELLCHECK_SUGGESTIONS: usize = 10;
         if !self.valid_licenses.contains(&rpm_license.to_string()) {
@@ -1167,7 +1185,13 @@ impl TagsCheck {
                 }
                 for l2 in Self::split_license(&lic) {
                     if !self.valid_licenses.contains(&l2) {
-                        add_info(out, Level::Warning, pkg, "invalid-license", &[&l2]);
+                        // An error outright (issue #699): a license string
+                        // that fails SPDX validation is a legal metadata
+                        // defect in itself. The reference emits W; the port
+                        // previously reached E only via shipped scoring
+                        // (issue #594). Near-miss spellings are the separate
+                        // I-level spellcheck tag's job.
+                        add_info(out, Level::Error, pkg, "invalid-license", &[&l2]);
                         if spellchecks_emitted < MAX_SPELLCHECK_SUGGESTIONS {
                             spellchecks_emitted += 1;
                             let suggestions = suggest_licenses(&l2, 3);
@@ -1723,7 +1747,7 @@ mod tests {
         assert_eq!(
             hits[0].1,
             format!(
-                "w6-tmpfiles.noarch: E: changelog-time-in-future (Badness: 1) {}",
+                "w6-tmpfiles.noarch: E: changelog-time-in-future {}",
                 format_date(first - 26 * 3600)
             ),
             "unexpected line"
@@ -2177,9 +2201,9 @@ mod tests {
         out.results().to_vec()
     }
 
-    fn invalid_license_warnings(results: Vec<(String, String)>) -> Vec<(String, String)> {
+    fn invalid_license_findings(results: Vec<(String, String)>) -> Vec<(String, String)> {
         // The `invalid-license-spellcheck` info finding accompanies every
-        // invalid-license warning; these tests pin the warning itself. The
+        // invalid-license error; these tests pin the error itself. The
         // total is asserted so an unexpected extra finding cannot slip past
         // the filter unnoticed.
         for (name, _) in &results {
@@ -2256,12 +2280,12 @@ mod tests {
     fn license_empty_paren_group_is_reported() {
         // The reference reports `W: invalid-license ()` for an empty
         // group: the leaf must not vanish.
-        let warnings = invalid_license_warnings(license_findings("()"));
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].1, "fcprobe.noarch: W: invalid-license ()");
-        let warnings = invalid_license_warnings(license_findings("MIT and ()"));
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].1, "fcprobe.noarch: W: invalid-license ()");
+        let errors = invalid_license_findings(license_findings("()"));
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].1, "fcprobe.noarch: E: invalid-license ()");
+        let errors = invalid_license_findings(license_findings("MIT and ()"));
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].1, "fcprobe.noarch: E: invalid-license ()");
         // A whitespace-only group vanishes, like the reference's
         // empty-split filtering.
         assert!(license_findings("( )").is_empty());
@@ -2283,17 +2307,17 @@ mod tests {
     fn license_doubly_wrapped_parens_are_reported() {
         // The reference flags the unbalanced pieces of `((GPLv2))`; the
         // splitter must not silently accept them.
-        let warnings = invalid_license_warnings(license_findings("((GPLv2))"));
-        assert_eq!(warnings.len(), 2);
-        assert_eq!(warnings[0].1, "fcprobe.noarch: W: invalid-license (GPLv2");
-        assert_eq!(warnings[1].1, "fcprobe.noarch: W: invalid-license )");
+        let errors = invalid_license_findings(license_findings("((GPLv2))"));
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0].1, "fcprobe.noarch: E: invalid-license (GPLv2");
+        assert_eq!(errors[1].1, "fcprobe.noarch: E: invalid-license )");
         // Neighbouring unbalanced shapes agree with the reference too.
-        let warnings = invalid_license_warnings(license_findings("((GPLv2)"));
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].1, "fcprobe.noarch: W: invalid-license (GPLv2");
-        let warnings = invalid_license_warnings(license_findings("(GPLv2))"));
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].1, "fcprobe.noarch: W: invalid-license )");
+        let errors = invalid_license_findings(license_findings("((GPLv2)"));
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].1, "fcprobe.noarch: E: invalid-license (GPLv2");
+        let errors = invalid_license_findings(license_findings("(GPLv2))"));
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].1, "fcprobe.noarch: E: invalid-license )");
     }
 
     #[test]
@@ -2315,7 +2339,7 @@ mod tests {
             .filter(|(n, _)| n == "invalid-license")
             .collect();
         assert_eq!(bad.len(), 1);
-        assert_eq!(bad[0].1, "fcprobe.noarch: W: invalid-license BogusLicense");
+        assert_eq!(bad[0].1, "fcprobe.noarch: E: invalid-license BogusLicense");
     }
 
     #[test]
@@ -2323,8 +2347,8 @@ mod tests {
         // `and MIT` after a WITH expression used to be dropped entirely.
         let results =
             license_findings("GPL-2.0-only WITH Classpath-exception-2.0 and BogusLicense");
-        let warnings = invalid_license_warnings(results);
-        let names: Vec<&str> = warnings.iter().map(|(n, _)| n.as_str()).collect();
+        let errors = invalid_license_findings(results);
+        let names: Vec<&str> = errors.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["invalid-license"]);
     }
 
@@ -2336,12 +2360,12 @@ mod tests {
 
     #[test]
     fn license_plain_invalid_is_reported() {
-        let warnings = invalid_license_warnings(license_findings("BogusLicense-1.0"));
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].0, "invalid-license");
+        let errors = invalid_license_findings(license_findings("BogusLicense-1.0"));
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].0, "invalid-license");
         assert_eq!(
-            warnings[0].1,
-            "fcprobe.noarch: W: invalid-license BogusLicense-1.0"
+            errors[0].1,
+            "fcprobe.noarch: E: invalid-license BogusLicense-1.0"
         );
     }
 
@@ -2355,7 +2379,7 @@ mod tests {
             vec![
                 (
                     "invalid-license".to_string(),
-                    "fcprobe.noarch: W: invalid-license GPL-2.0-or-latr".to_string(),
+                    "fcprobe.noarch: E: invalid-license GPL-2.0-or-latr".to_string(),
                 ),
                 (
                     "invalid-license-spellcheck".to_string(),
@@ -2410,7 +2434,7 @@ mod tests {
         assert_eq!(hits.len(), 1, "all: {results:?}");
         assert_eq!(
             hits[0].1,
-            "tags-emission-pins-longsummary.noarch: E: summary-too-long (Badness: 1) This is a deliberately overlong summary that stretches well past seventy nine characters"
+            "tags-emission-pins-longsummary.noarch: E: summary-too-long This is a deliberately overlong summary that stretches well past seventy nine characters"
         );
     }
 
@@ -2511,7 +2535,7 @@ mod tests {
         assert_eq!(hits.len(), 1, "all: {results:?}");
         assert_eq!(
             hits[0].1,
-            "tags-emission-pins-multiline.noarch: E: summary-on-multiple-lines (Badness: 1)"
+            "tags-emission-pins-multiline.noarch: E: summary-on-multiple-lines"
         );
     }
 
@@ -2523,7 +2547,7 @@ mod tests {
         assert_eq!(hits.len(), 1, "all: {results:?}");
         assert_eq!(
             hits[0].1,
-            "tags-emission-pins-nodesc.noarch: E: no-description-tag (Badness: 1)"
+            "tags-emission-pins-nodesc.noarch: E: no-description-tag"
         );
     }
 
@@ -2592,7 +2616,7 @@ mod tests {
         assert_eq!(hits.len(), 1, "all: {results:?}");
         assert!(
             hits[0].1.starts_with(
-                "tags-emission-pins-spell.noarch: E: spelling-error (Badness: 1) %description -l C packag"
+                "tags-emission-pins-spell.noarch: E: spelling-error %description -l C packag"
             ),
             "line: {}",
             hits[0].1
@@ -2622,7 +2646,7 @@ mod tests {
         assert_eq!(hits.len(), 1, "all: {results:?}");
         assert_eq!(
             hits[0].1,
-            "tags-emission-pins-pcreq-devel.noarch: E: no-pkg-config-provides (Badness: 1)"
+            "tags-emission-pins-pcreq-devel.noarch: E: no-pkg-config-provides"
         );
     }
 
@@ -2632,10 +2656,7 @@ mod tests {
         let results = run_check(&pkg);
         let hits = tag_hits(&results, "invalid-version");
         assert_eq!(hits.len(), 1, "all: {results:?}");
-        assert_eq!(
-            hits[0].1,
-            "tags-badversion.noarch: E: invalid-version (Badness: 1) 0pre"
-        );
+        assert_eq!(hits[0].1, "tags-badversion.noarch: E: invalid-version 0pre");
     }
 
     #[test]
@@ -2808,7 +2829,7 @@ mod rich_dep_emission_tests {
             "unexpected emissions: {results:?}"
         );
         assert_eq!(
-            results[0].1, "i18n-two-locale.noarch: W: invalid-license MIT",
+            results[0].1, "i18n-two-locale.noarch: E: invalid-license MIT",
             "level and detail pinned on the rendered line"
         );
     }
@@ -3147,6 +3168,90 @@ mod rich_dep_emission_tests {
             named(&results, "explicit-lib-dependency").is_empty(),
             "all: {results:?}"
         );
+    }
+
+    #[test]
+    fn explicit_lib_dependency_symbol_capability_is_silent() {
+        // #753: lib<name>__<symbol> is a symbol capability provided by a
+        // library package, not a library package name. uuidd requires
+        // libuuid__uuid_generate_time_cont in exactly this shape to pin
+        // the libuuid ABI across updates (a seamless-restart requirement,
+        // documented in the spec); the reference fires on it, we
+        // deliberately do not.
+        let config = rich_test_config(&[], false);
+        for cap in [
+            "libuuid__uuid_generate_time_cont",
+            "libfoo__some_exported_symbol",
+        ] {
+            let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+            pkg.requires = vec![plain_dep(cap)];
+            let results = run(&pkg, &config);
+            assert!(
+                named(&results, "explicit-lib-dependency").is_empty(),
+                "capability {cap}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_lib_dependency_qualified_capability_is_silent() {
+        // #753: qualified capabilities are capability names, not package
+        // names — a package name cannot contain "(". libzypp(econf)
+        // selects the econf flavour of libzypp; libclc(llvm23) the
+        // llvm23 build of libclc. The reference fires on both, we
+        // deliberately do not.
+        let config = rich_test_config(&[], false);
+        for cap in ["libzypp(econf)", "libclc(llvm23)"] {
+            let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+            pkg.requires = vec![plain_dep(cap)];
+            let results = run(&pkg, &config);
+            assert!(
+                named(&results, "explicit-lib-dependency").is_empty(),
+                "capability {cap}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_lib_dependency_rich_qualified_capability_is_silent() {
+        // #753: inside a rich expression the qualifier is structured on
+        // the leaf and the leaf name is the bare "libzypp", which the
+        // "(" name test cannot see; the qualifier test keeps the
+        // rich-embedded spelling as silent as the top-level one. The
+        // reference fires on it.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![rich_dep("(libzypp(econf) or foo)")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "explicit-lib-dependency").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_lib_dependency_rich_symbol_capability_is_silent() {
+        // #753: a symbol capability inside a rich expression is the
+        // same capability as the top-level spelling pinned above.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![rich_dep("(libuuid__uuid_generate_time_cont or foo)")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "explicit-lib-dependency").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_lib_dependency_rich_plain_lib_still_fires() {
+        // A plain unversioned library package name inside a rich
+        // expression is still an explicit lib dependency: the leaves
+        // are analysed individually, exactly like top-level names.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![rich_dep("(libexplicit or foo)")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "explicit-lib-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(hits[0].1.ends_with(" libexplicit"), "line: {}", hits[0].1);
     }
 
     #[test]

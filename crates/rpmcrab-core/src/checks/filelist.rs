@@ -604,7 +604,7 @@ mod tests {
         let lines = lines_for(&results, "filelist-forbidden-fhs23");
         assert_eq!(lines.len(), 1);
         assert!(
-            lines[0].contains("E: filelist-forbidden-fhs23 (Badness: 1) /usr/foobar"),
+            lines[0].contains("E: filelist-forbidden-fhs23 /usr/foobar"),
             "name, level and detail: {}",
             lines[0]
         );
@@ -688,12 +688,12 @@ mod tests {
         let lines = lines_for(&results, "filelist-forbidden-opt");
         assert_eq!(lines.len(), 2, "lines: {lines:?}");
         assert!(
-            lines[0].contains("E: filelist-forbidden-opt (Badness: 1) /opt/acme"),
+            lines[0].contains("E: filelist-forbidden-opt /opt/acme"),
             "name, level and detail: {}",
             lines[0]
         );
         assert!(
-            lines[1].contains("E: filelist-forbidden-opt (Badness: 1) /opt/other"),
+            lines[1].contains("E: filelist-forbidden-opt /opt/other"),
             "name, level and detail: {}",
             lines[1]
         );
@@ -732,7 +732,7 @@ mod tests {
         let lines = lines_for(&results, "filelist-forbidden-sysconfig");
         assert_eq!(lines.len(), 1);
         assert!(
-            lines[0].contains("E: filelist-forbidden-sysconfig (Badness: 1) /etc/sysconfig/munge"),
+            lines[0].contains("E: filelist-forbidden-sysconfig /etc/sysconfig/munge"),
             "name, level and detail: {}",
             lines[0]
         );
@@ -759,8 +759,7 @@ mod tests {
         let lines = lines_for(&results, "filelist-forbidden-sysconfig");
         assert_eq!(lines.len(), 1);
         assert!(
-            lines[0]
-                .contains("E: filelist-forbidden-sysconfig (Badness: 1) /etc/rc.config.d/munge"),
+            lines[0].contains("E: filelist-forbidden-sysconfig /etc/rc.config.d/munge"),
             "name, level and detail: {}",
             lines[0]
         );
@@ -779,7 +778,7 @@ mod tests {
         let lines = lines_for(&results, "filelist-forbidden-sysconfig");
         assert_eq!(lines.len(), 1, "lines: {lines:?}");
         assert!(
-            lines[0].contains("E: filelist-forbidden-sysconfig (Badness: 1) /etc/sysconfig/real"),
+            lines[0].contains("E: filelist-forbidden-sysconfig /etc/sysconfig/real"),
             "name, level and detail: {}",
             lines[0]
         );
@@ -808,7 +807,7 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert!(
             lines[0].contains(
-                "E: filelist-forbidden-sysconfig (Badness: 1) /var/adm/fillup-templates/sysconfig.munge"
+                "E: filelist-forbidden-sysconfig /var/adm/fillup-templates/sysconfig.munge"
             ),
             "name, level and detail: {}",
             lines[0]
@@ -862,9 +861,8 @@ mod tests {
         let lines = lines_for(&results, "filelist-forbidden-bashcomp-userdirs");
         assert_eq!(lines.len(), 1);
         assert!(
-            lines[0].contains(
-                "E: filelist-forbidden-bashcomp-userdirs (Badness: 1) /etc/bash_completion.d/w6comp"
-            ),
+            lines[0]
+                .contains("E: filelist-forbidden-bashcomp-userdirs /etc/bash_completion.d/w6comp"),
             "name, level and detail: {}",
             lines[0]
         );

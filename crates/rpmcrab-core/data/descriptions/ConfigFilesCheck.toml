@@ -12,3 +12,11 @@ the local modifications stop being in effect; with %config(noreplace) the
 local modifications stay in effect and the newly shipped file arrives as
 .rpmnew instead. Consider per file which behaviour fits the file.
 """
+usr-etc-file-marked-as-conffile="""
+A file in /usr/etc is marked as a configuration file (%config).
+Files in /usr/etc are vendor defaults; administrator configuration
+belongs in /etc, which takes precedence over them. The %config mark
+makes rpm preserve local edits to the vendor default across updates
+(.rpmsave/.rpmnew), which fights the /usr/etc split. Remove the
+%config attribute from the corresponding line in the %files section.
+"""

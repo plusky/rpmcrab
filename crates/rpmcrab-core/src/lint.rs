@@ -216,8 +216,6 @@ impl Lint {
                 level: Level::Error,
                 check: "unused-rpmlintrc-filter".to_string(),
                 details: vec![detail],
-                // Scoring decides the real badness at emit time.
-                badness: 0,
                 // `Path(package.name).name`, as for binary findings; specs
                 // carry no arch, like the reference's `FakePkg`.
                 pkg_name: basename(&pkg_name).to_string(),
@@ -247,24 +245,14 @@ impl Lint {
             .collect()
     }
 
-    /// The abort condition: badness score over a positive threshold.
-    pub(crate) fn aborted(&self) -> bool {
-        self.config.badness_threshold > 0 && self.filter.score > self.config.badness_threshold
-    }
-
-    /// The process exit code (`docs/DESIGN.md` §4.6). Badness-over-threshold
-    /// (66) is evaluated before the permissive error branch (64/65); a fatal
-    /// per-package error fails the run with 3, but only after everything else
-    /// has been processed and reported (`rpmlint#1595`).
+    /// The process exit code (`docs/DESIGN.md` §4.6): any printed error
+    /// fails the run with 64, unless `--permissive` was passed explicitly.
+    /// A fatal per-package error fails the run with 3, dominating the
+    /// error branch, but only after everything else has been processed
+    /// and reported (`rpmlint#1595`).
     pub fn exit_code(&self) -> i32 {
-        let code = if self.aborted() {
-            66
-        } else if self.filter.printed(Level::Error) > 0 && !self.config.permissive {
-            if self.filter.printed(Level::Error) == self.filter.promoted_to_error {
-                65
-            } else {
-                64
-            }
+        let code = if self.filter.printed(Level::Error) > 0 && !self.config.permissive {
+            64
         } else {
             0
         };
@@ -381,18 +369,13 @@ mod exit_code_tests {
     use crate::finding::Finding;
     use crate::level::Level;
 
-    /// Two warnings + BadnessThreshold=1 + --strict → exit 66.
-    ///
-    /// The reference (filter.py:139-140) computes default badness AFTER strict
-    /// promotion, so each strict-promoted warning scores 1. With threshold 1,
-    /// score 2 > 1 triggers the badness abort (exit 66), not the permissive
-    /// error path (64/65). This pins the score > threshold → 66 interaction
-    /// that unit tests on Filter.score alone do not cover.
+    /// Two warnings under --strict print as errors and exit 64 — the
+    /// same code as genuine errors (issue #699: the 64/65 split and the
+    /// badness-threshold exit are gone).
     #[test]
-    fn strict_warnings_cross_badness_threshold() {
+    fn strict_warnings_exit_64() {
         let config = Config {
             strict: true,
-            badness_threshold: 1,
             ..Default::default()
         };
         let mut lint = Lint::new(config, vec![], Color::for_tty(false), 80).unwrap();
@@ -401,23 +384,44 @@ mod exit_code_tests {
                 level: Level::Warning,
                 check: check.to_string(),
                 details: vec![],
-                badness: 0,
                 pkg_name: "testpkg".to_string(),
                 arch: None,
                 line: None,
                 filter_alias: None,
             });
         }
-        assert_eq!(lint.filter.score, 2);
-        assert_eq!(lint.exit_code(), 66);
+        assert_eq!(lint.filter.printed(Level::Error), 2);
+        assert_eq!(lint.exit_code(), 64);
     }
 
-    /// The exit-code bug: 2 strict-promoted warnings with one overridden
-    /// back. The overridden finding must not count as strict-promoted, so
-    /// printed(E) == promoted_to_error (1 == 1) and the run exits 65 (all
-    /// errors are strict promotions), not 64 (DESIGN §4.6).
+    /// An error fails the run in the default mode: no flags, no config —
+    /// a single printed E is exit 64 (issue #699).
     #[test]
-    fn strict_promotion_with_override_back_exits_65() {
+    fn error_exits_64_by_default() {
+        let config = Config::default();
+        let mut lint = Lint::new(config, vec![], Color::for_tty(false), 80).unwrap();
+        add(&mut lint, "genuine-error", Level::Error);
+        assert_eq!(lint.exit_code(), 64);
+    }
+
+    /// Explicit `--permissive` is the only way errors print without
+    /// failing the run.
+    #[test]
+    fn permissive_errors_exit_zero() {
+        let config = Config {
+            permissive: true,
+            ..Default::default()
+        };
+        let mut lint = Lint::new(config, vec![], Color::for_tty(false), 80).unwrap();
+        add(&mut lint, "genuine-error", Level::Error);
+        assert_eq!(lint.filter.printed(Level::Error), 1);
+        assert_eq!(lint.exit_code(), 0);
+    }
+
+    /// Two strict-promoted warnings with one overridden back: the
+    /// remaining printed error fails the run with 64.
+    #[test]
+    fn strict_promotion_with_override_back_exits_64() {
         let config = Config {
             strict: true,
             permissive: false,
@@ -432,7 +436,6 @@ mod exit_code_tests {
                 level: Level::Warning,
                 check: check.to_string(),
                 details: vec![],
-                badness: 0,
                 pkg_name: "testpkg".to_string(),
                 arch: None,
                 line: None,
@@ -441,22 +444,17 @@ mod exit_code_tests {
         }
         assert_eq!(lint.filter.printed(Level::Error), 1);
         assert_eq!(lint.filter.printed(Level::Warning), 1);
-        assert_eq!(lint.filter.promoted_to_error, 1);
-        assert_eq!(lint.exit_code(), 65);
+        assert_eq!(lint.exit_code(), 64);
         // The typo audit sees the used name and stays silent.
         assert!(lint.unused_severity_overrides().is_empty());
     }
 
-    /// An override name that never matched a finding is reported by the
-    /// post-run audit (the only honest typo signal: no static registry of
-    /// finding tags exists).
-    /// The W+Scoring(50) interaction (DESIGN §4.9): a warning overridden back
-    /// from scoring-driven E prints as W with badness 50, so with a threshold
-    /// it aborts with 66 while printing 0 errors.
+    /// The W+Scoring(50) interaction (DESIGN §4.9): a warning promoted by
+    /// scoring and overridden back prints as W, so the run has no errors
+    /// and exits 0 — the override is the final word on the level.
     #[test]
-    fn scoring_override_back_to_warning_aborts_with_66_and_zero_errors() {
+    fn scoring_override_back_to_warning_exits_zero() {
         let config = Config {
-            badness_threshold: 30,
             scoring: [("some-check".to_string(), toml::Value::Integer(50))]
                 .into_iter()
                 .collect(),
@@ -470,7 +468,6 @@ mod exit_code_tests {
             level: Level::Warning,
             check: "some-check".to_string(),
             details: vec![],
-            badness: 0,
             pkg_name: "testpkg".to_string(),
             arch: None,
             line: None,
@@ -478,8 +475,7 @@ mod exit_code_tests {
         });
         assert_eq!(lint.filter.printed(Level::Warning), 1);
         assert_eq!(lint.filter.printed(Level::Error), 0);
-        assert_eq!(lint.filter.score, 50);
-        assert_eq!(lint.exit_code(), 66);
+        assert_eq!(lint.exit_code(), 0);
     }
 
     fn add(lint: &mut Lint, check: &str, level: Level) {
@@ -487,7 +483,6 @@ mod exit_code_tests {
             level,
             check: check.to_string(),
             details: vec![],
-            badness: 0,
             pkg_name: "testpkg".to_string(),
             arch: None,
             line: None,
@@ -495,11 +490,10 @@ mod exit_code_tests {
         });
     }
 
-    /// Info findings alone never fail a run, even with permissive off: no
-    /// printed errors means the 64/65 branch is never reached. This pins
-    /// the post-recalibration shape — the tags the buckets pass demoted to
-    /// I (e.g. `no-%check-section`, #593) cannot fail a build outside
-    /// `--strict`.
+    /// Info findings alone never fail a run: no printed errors means the
+    /// error branch is never reached. This pins the post-recalibration
+    /// shape — the tags the buckets pass demoted to I (e.g.
+    /// `no-%check-section`, #593) cannot fail a build outside `--strict`.
     #[test]
     fn info_findings_alone_exit_zero() {
         let config = Config {
@@ -513,12 +507,11 @@ mod exit_code_tests {
         assert_eq!(lint.exit_code(), 0);
     }
 
-    /// D3: --strict promotion stays reference-exact and applies to Info
-    /// findings too (filter.py:134-140). A run whose only printed error is
-    /// a strict-promoted info exits 65 — every printed error is a
-    /// promotion (DESIGN §4.6).
+    /// --strict promotion applies to Info findings too (filter.py:134-140).
+    /// A run whose only printed error is a strict-promoted info exits 64,
+    /// like any other error (issue #699).
     #[test]
-    fn strict_promoted_info_exits_65() {
+    fn strict_promoted_info_exits_64() {
         let config = Config {
             strict: true,
             permissive: false,
@@ -527,13 +520,11 @@ mod exit_code_tests {
         let mut lint = Lint::new(config, vec![], Color::for_tty(false), 80).unwrap();
         add(&mut lint, "no-%check-section", Level::Info);
         assert_eq!(lint.filter.printed(Level::Error), 1);
-        assert_eq!(lint.filter.promoted_to_error, 1);
-        assert_eq!(lint.exit_code(), 65);
+        assert_eq!(lint.exit_code(), 64);
     }
 
-    /// The 64/65 split with recalibrated inputs: a genuine error beside a
-    /// strict-promoted info exits 64 — not every printed error is a
-    /// promotion.
+    /// A genuine error beside a strict-promoted info: both print as
+    /// errors, exit 64.
     #[test]
     fn genuine_error_beside_promoted_info_exits_64() {
         let config = Config {
@@ -545,7 +536,6 @@ mod exit_code_tests {
         add(&mut lint, "genuine-error", Level::Error);
         add(&mut lint, "no-%check-section", Level::Info);
         assert_eq!(lint.filter.printed(Level::Error), 2);
-        assert_eq!(lint.filter.promoted_to_error, 1);
         assert_eq!(lint.exit_code(), 64);
     }
 
@@ -579,7 +569,6 @@ mod exit_code_tests {
             level: Level::Error,
             check: "downgraded".to_string(),
             details: vec![],
-            badness: 0,
             pkg_name: "testpkg".to_string(),
             arch: None,
             line: None,
@@ -647,7 +636,6 @@ mod exit_code_tests {
                 level,
                 check: check.to_string(),
                 details: vec!["d".to_string()],
-                badness: 0,
                 pkg_name: "testpkg".to_string(),
                 arch: None,
                 line: None,
