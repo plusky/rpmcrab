@@ -246,14 +246,17 @@ fn scan_preamble(lines: &[String]) -> PreambleScan {
                 .chars()
                 .take_while(|c| c.is_ascii_alphabetic() || *c == '_')
                 .collect();
-            // A directive word ends at a word boundary: a digit or
-            // a dash right after it makes the token a longer macro
-            // name (`%files-foo` is an invocation, not the `%files`
-            // section), which is preamble content like any other
-            // invocation.
+            // A directive word ends at a word boundary: the
+            // reference requires whitespace or the end of the line
+            // after a directive keyword, so any other character
+            // right after the word makes the token something else —
+            // a longer macro name (`%files-foo`, `%define2`), a
+            // suffixed token (`%files.foo`, `%files/foo`) or a
+            // parenthesised conditional (`%if(0)`) — which is
+            // preamble content like any other invocation.
             if matches!(
                 rest[directive.len()..].chars().next(),
-                Some(c) if c.is_ascii_digit() || c == '-'
+                Some(c) if !c.is_whitespace()
             ) {
                 continue;
             }
@@ -1365,6 +1368,27 @@ mod name_patterns_tests {
         );
         assert_eq!(patterns("%files\nName: bar\n"), None);
         assert_eq!(patterns("%files -f list\nName: bar\n"), None);
+    }
+
+    #[test]
+    fn punctuated_directive_tokens_are_not_directives() {
+        // `%files.foo` and `%files/foo` are not the `%files`
+        // section either — the reference requires whitespace or
+        // the end of the line after a section keyword — so the
+        // scan reads past them and still finds the `Name:`.
+        assert_matches("%files.foo\nName: bar\n", &["bar"], &["foo"]);
+        assert_matches("%files/foo\nName: bar\n", &["bar"], &["foo"]);
+        // `%if(0)` is not a conditional: it opens no branch, so
+        // the `%undefine` after it sits outside every branch and
+        // removes the definition for every reading — the pattern
+        // set is the single unconstrained pattern of the undefined
+        // macro, with no `-x` alternative left. (Had the line
+        // opened a branch, the undefine would have been a branch
+        // undefine and the `-x` pattern would stand alongside.)
+        let pats = patterns("%define sfx -x\n%if(0)\n%undefine sfx\nName: %{sfx}\n")
+            .expect("patterns declared");
+        assert_eq!(pats.len(), 1);
+        assert!(pats[0].is_unconstrained());
     }
 
     #[test]
