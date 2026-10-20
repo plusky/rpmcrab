@@ -174,6 +174,11 @@ by_offset = sorted(e1, key=lambda e: e[2])
 regions = {}
 for i, e in enumerate(by_offset):
     end = by_offset[i + 1][2] if i + 1 < len(by_offset) else ss1
+    if e[1] == 7:
+        # A BIN entry's count is its data length; the span up to
+        # the next entry also covers the alignment padding before
+        # it, which is layout, not data.
+        end = e[2] + e[3]
     regions[e[0]] = data1[store1 + e[2]: store1 + end]
 
 reserved = [e for e in e1 if e[0] == 1008 and e[1] == 7]
@@ -227,15 +232,17 @@ new_entries = []
 for tag, ty, off, blob in laid:
     store[off:off + len(blob)] = blob
     new_entries.append([tag, ty, off, blob])
-# Counts: BIN entries count bytes; others keep their original count.
+# Counts: an original entry keeps its recorded count (a BIN
+# entry's count is its data length — the length of its blob now
+# that the regions above are truncated to the data); the
+# transplanted entry counts its packet and the resized reserved
+# space its new length.
 orig_count = {e[0]: e[3] for e in e1}
 final_entries = []
 for tag, ty, off, blob in new_entries:
     if tag == 1002:
         final_entries.append([tag, ty, off, len(packet2)])
     elif tag == 1008:
-        final_entries.append([tag, ty, off, len(blob)])
-    elif ty == 7:
         final_entries.append([tag, ty, off, len(blob)])
     else:
         final_entries.append([tag, ty, off, orig_count[tag]])
@@ -357,8 +364,10 @@ cp /work/signed.rpm /work/staged/signature-signed-1.0-1.noarch.rpm
 # the shape the Factory corpus' dual-signed packages carry
 # (signature entries at tags 268 and 1002). The parity matrix
 # below verifies both signatures: each key's line reads NOKEY
-# against the empty rpmdb and the first key's reads OK once it is
-# imported.
+# against the empty rpmdb, and each key's reads OK once that key
+# is imported — the second key against its own rpmdb, since a
+# NOKEY line alone cannot show the transplanted signature
+# verifies (a broken one prints NOKEY too).
 python3 - "$UNSIGNED" <<'HPEOF'
 import struct
 import sys
@@ -382,10 +391,12 @@ python3 /work/stack.py /work/signed.rpm /work/sig2.pgp /work/staged/signature-st
 # entry before it mutates anything.
 python3 /work/mutate.py /work/signed.rpm /work/staged
 
-mkdir -p /work/db-empty /work/db-key
+mkdir -p /work/db-empty /work/db-key /work/db-key2
 rpm --dbpath /work/db-empty --initdb
 rpm --dbpath /work/db-key --initdb
 rpm --dbpath /work/db-key --import /work/staged/signature-testkey.asc
+rpm --dbpath /work/db-key2 --initdb
+rpm --dbpath /work/db-key2 --import /work/staged/signature-testkey2.asc
 
 expect() {
     # expect <file> <db> <pattern>
@@ -428,6 +439,8 @@ expect signature-stacked-1.0-1.noarch.rpm /work/db-empty "key ID $PRINTED: NOKEY
 expect signature-stacked-1.0-1.noarch.rpm /work/db-empty "key ID $PRINTED2: NOKEY"
 expect signature-stacked-1.0-1.noarch.rpm /work/db-key "key ID $PRINTED: OK"
 expect signature-stacked-1.0-1.noarch.rpm /work/db-key "key ID $PRINTED2: NOKEY"
+expect signature-stacked-1.0-1.noarch.rpm /work/db-key2 "key ID $PRINTED2: OK"
+expect signature-stacked-1.0-1.noarch.rpm /work/db-key2 "key ID $PRINTED: NOKEY"
 expect signature-corrupt-1.0-1.noarch.rpm /work/db-key "invalid OpenPGP signature"
 expect signature-corrupt-1.0-1.noarch.rpm /work/db-empty "invalid OpenPGP signature"
 expect signature-badsig-1.0-1.noarch.rpm /work/db-key "key ID $PRINTED: BAD"

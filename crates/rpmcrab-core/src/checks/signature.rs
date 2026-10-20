@@ -437,11 +437,11 @@ mod tests {
     /// `rpm -Kv`. Regenerating the fixtures with
     /// `build-signature-fixtures.sh` creates new keys; the script
     /// prints the new values to put here.
-    const EXPECTED_KEY_ID: &str = "1e2d069b";
+    const EXPECTED_KEY_ID: &str = "c5395b5e";
 
     /// The low-32-bit key ID of the second fixture signing key: the
     /// stacked fixture carries one signature from each fixture key.
-    const EXPECTED_KEY_ID_2: &str = "8e96b3bf";
+    const EXPECTED_KEY_ID_2: &str = "7cbec8b5";
 
     fn inputs() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/parity/pkg/inputs")
