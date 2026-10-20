@@ -169,7 +169,7 @@ pub fn is_mingw_package(name: &str) -> bool {
 /// (`x86_64_v3`, `x86_64_v4`) and builds for the base arch, so its
 /// packages ship files under the base arch's libdirs. Any string
 /// without such a component is its own base arch.
-fn base_arch(arch: &str) -> &str {
+pub fn base_arch(arch: &str) -> &str {
     match arch.rsplit_once('_') {
         Some((base, level))
             if level.len() > 1
