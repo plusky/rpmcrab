@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use fancy_regex::Regex;
 use rayon::prelude::*;
 
-use crate::check::{Check, add_info, basename};
+use crate::check::{Check, add_info, basename, make_finding};
 use crate::checks::shared::is_64bit_arch;
 use crate::config::Config;
 use crate::filter::Filter;
@@ -1258,10 +1258,12 @@ fn parse_ld_so_cache(data: &[u8]) -> Option<HashMap<String, Vec<PathBuf>>> {
 }
 
 /// Memoisation key for DT_NEEDED closures: a file's direct
-/// dependency list, its ELF class, and its search context (system
-/// candidates are class-matched, and the provided set depends on
-/// the directories the file's own entries are searched in).
-type ClosureKey = (Vec<String>, Option<bool>, SearchContext);
+/// dependency list, its ELF class, its search context, and the
+/// package the file belongs to (system candidates are
+/// class-matched, the provided set depends on the directories
+/// the file's own entries are searched in, and the walk sees the
+/// file's own package's providers first).
+type ClosureKey = (Vec<String>, Option<bool>, SearchContext, PackageId);
 
 /// The directory the loader treats an object as installed in:
 /// the parent of its package path, made absolute. This is the
@@ -1353,6 +1355,285 @@ impl SearchContext {
     }
 }
 
+/// The symbol providers one package ships, indexed by every name a
+/// DT_NEEDED entry can carry: the library's SONAME and its file
+/// basename. The two are equal for most libraries; when a package
+/// file is a symlink, the real file behind it carries the SONAME.
+/// Duplicate providers under one key (e.g. /lib64 and /usr/lib64
+/// copies of one library) merge, keeping the first file's search
+/// paths: the copies are the same library, and their defined
+/// symbols and DT_NEEDED entries merge regardless.
+fn package_providers(
+    analyses: &[Option<ElfAnalysis>],
+    files: &[PkgFile],
+) -> HashMap<String, SymbolProvider> {
+    let mut providers: HashMap<String, SymbolProvider> = HashMap::new();
+    for (analysis, pkgfile) in analyses.iter().zip(files.iter()) {
+        let Some(analysis) = analysis else { continue };
+        let Some(ldd) = &analysis.ldd else { continue };
+        if ldd.failed.is_some() {
+            continue;
+        }
+        let mut keys = vec![basename(&pkgfile.name).to_string()];
+        if let Some(soname) = &analysis.info.soname {
+            if !keys.contains(soname) {
+                keys.push(soname.clone());
+            }
+        }
+        for key in keys {
+            let entry = providers.entry(key).or_insert_with(|| SymbolProvider {
+                defined: HashSet::new(),
+                needs: Vec::new(),
+                origin: installed_dir(&pkgfile.name),
+                rpath: ldd.rpath.clone(),
+                runpath: ldd.runpath.clone(),
+                has_runpath: ldd.has_runpath,
+            });
+            entry.defined.extend(ldd.defined_symbols.iter().cloned());
+            for need in &ldd.dependencies {
+                if !entry.needs.contains(need) {
+                    entry.needs.push(need.clone());
+                }
+            }
+        }
+    }
+    providers
+}
+
+/// The symbol providers one package ships, kept as a unit: a
+/// package is the resolution boundary across an invocation
+/// (plusky/rpmcrab#735). Two packages can ship the same SONAME
+/// with different symbol sets, DT_NEEDED entries and search
+/// paths -- two versions or two architectures of one library --
+/// so provider sets stay separate per package: unioning them
+/// would invent a provider that exists in no package, masking
+/// symbols the consumer's actual provider does not define and
+/// mixing transitive closures through the wrong search paths.
+struct PackageProviders {
+    pkg_name: String,
+    pkg_arch: String,
+    providers: HashMap<String, SymbolProvider>,
+}
+
+/// Identity of the package a resolution request originates from:
+/// its name and architecture.
+type PackageId = (String, String);
+
+/// The resolution view over an invocation's per-package provider
+/// sets, in package check order. A lookup for one needing object
+/// considers its own package's set first, then the sets of other
+/// packages with the object's own architecture, in check order,
+/// and returns the first provider found for the SONAME (exact
+/// spelling first, then the entry's basename). Sets of a
+/// different architecture are never consulted: the loader does
+/// not bind a consumer to a library built for another
+/// architecture.
+struct ProviderIndex {
+    sets: Vec<(PackageId, HashMap<String, Arc<SymbolProvider>>)>,
+}
+
+impl ProviderIndex {
+    fn new(sets: Vec<PackageProviders>) -> Self {
+        ProviderIndex {
+            sets: sets
+                .into_iter()
+                .map(|set| {
+                    (
+                        (set.pkg_name, set.pkg_arch),
+                        set.providers
+                            .into_iter()
+                            .map(|(k, v)| (k, Arc::new(v)))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// The provider for `soname` as seen by a needing object owned
+    /// by `owner`, together with the identity of the package that
+    /// ships it: the walk continues from that package's point of
+    /// view for the provider's own DT_NEEDED entries.
+    fn lookup(&self, soname: &str, owner: &PackageId) -> Option<(PackageId, Arc<SymbolProvider>)> {
+        let base = basename(soname);
+        for (id, map) in &self.sets {
+            if id == owner {
+                if let Some(provider) = map.get(soname).or_else(|| map.get(base)) {
+                    return Some((id.clone(), provider.clone()));
+                }
+            }
+        }
+        for (id, map) in &self.sets {
+            if id != owner && id.1 == owner.1 {
+                if let Some(provider) = map.get(soname).or_else(|| map.get(base)) {
+                    return Some((id.clone(), provider.clone()));
+                }
+            }
+        }
+        None
+    }
+}
+
+/// One file's undefined-symbol resolution inputs, captured while
+/// its package is checked and resolved in `after_checks`
+/// (plusky/rpmcrab#701). Only files the emission gate in
+/// `check_dependency` passes are captured, so a record exists
+/// exactly where the finding could fire.
+struct ConsumerFile {
+    /// The package-internal path: the finding detail, and the base
+    /// for the file's own search context (`installed_dir`).
+    file_name: String,
+    /// Undefined non-weak `.dynsym` names, in `.dynsym` order (the
+    /// emission order).
+    undefined_symbols: Vec<String>,
+    /// The file's own defined symbols: subtracted after the closure
+    /// walk, as in `resolve_undefined_symbols`. A set: the residue
+    /// loop tests every undefined symbol against it.
+    defined_symbols: HashSet<String>,
+    /// The file's DT_NEEDED entries: the closure walk's roots.
+    dependencies: Vec<String>,
+    /// ELF class of the file (`Some(true)` = 64-bit); system
+    /// candidates are matched against it.
+    is_64: Option<bool>,
+    /// DT_RPATH entries, colon-split, in order.
+    rpath: Vec<String>,
+    /// DT_RUNPATH entries, colon-split, in order.
+    runpath: Vec<String>,
+    /// A DT_RUNPATH tag is present at all (see `LddInfo`).
+    has_runpath: bool,
+}
+
+/// One checked package's captured consumers, in file order.
+struct PackageConsumers {
+    pkg_name: String,
+    pkg_arch: String,
+    pkg_filename: String,
+    files: Vec<ConsumerFile>,
+}
+
+/// Cross-package state for undefined-symbol resolution: exported
+/// per package and merged before `after_checks`
+/// (plusky/rpmcrab#701, `rpmlint#1595` plumbing).
+#[derive(Default)]
+struct BinariesState {
+    /// The provider set of every contributing package, in package
+    /// check order, kept per package (see `PackageProviders`).
+    provider_sets: Vec<PackageProviders>,
+    /// Captured consumers, in package check order.
+    packages: Vec<PackageConsumers>,
+    /// `(name, arch, filename)` of every package that carried
+    /// ELF content (a provider or a consumer), in check order.
+    /// The filename keeps two distinct packages that share a name
+    /// and arch (two versions in one invocation) from collapsing
+    /// into one contributor. The count is the invocation-mode
+    /// switch in `after_checks`: one contributing package
+    /// resolves with the system fallback, a wider batch resolves
+    /// inside the invocation's set alone.
+    contributors: Vec<(String, String, String)>,
+}
+
+impl BinariesState {
+    fn is_empty(&self) -> bool {
+        self.provider_sets
+            .iter()
+            .all(|set| set.providers.is_empty())
+            && self.packages.is_empty()
+            && self.contributors.is_empty()
+    }
+
+    fn merge(&mut self, other: BinariesState) {
+        self.provider_sets.extend(other.provider_sets);
+        self.packages.extend(other.packages);
+        for contributor in other.contributors {
+            if !self.contributors.contains(&contributor) {
+                self.contributors.push(contributor);
+            }
+        }
+    }
+}
+
+/// The set of symbols one file's DT_NEEDED closure provides: walk
+/// the closure from the file's direct dependencies, looking each
+/// entry up in the provider index first, then the way the loader
+/// locates it -- in the needing object's DT_RPATH chain and
+/// DT_RUNPATH (with `$ORIGIN` expansion, against the filesystem
+/// rpmcrab runs on), then on the system (`SystemLibraries`), whose
+/// libraries join the closure with their own DT_NEEDED entries in
+/// turn. Most libraries share the same direct dependencies and
+/// search paths, so the provided set is memoised on the
+/// direct-dependency list, the file's ELF class (system candidates
+/// are class-matched), the file's search context, and the
+/// package the file belongs to.
+fn provided_by_closure(
+    providers: &ProviderIndex,
+    system: &SystemLibraries,
+    closures: &mut HashMap<ClosureKey, Rc<HashSet<String>>>,
+    direct: &[String],
+    is_64: Option<bool>,
+    root_ctx: &SearchContext,
+    root_owner: &PackageId,
+) -> Rc<HashSet<String>> {
+    closures
+        .entry((direct.to_vec(), is_64, root_ctx.clone(), root_owner.clone()))
+        .or_insert_with(|| {
+            let mut provided: HashSet<String> = HashSet::new();
+            let mut visited: HashSet<(String, SearchContext, PackageId)> = HashSet::new();
+            let mut stack: Vec<(String, SearchContext, PackageId)> = direct
+                .iter()
+                .cloned()
+                .map(|need| (need, root_ctx.clone(), root_owner.clone()))
+                .collect();
+            while let Some((soname, ctx, owner)) = stack.pop() {
+                if !visited.insert((soname.clone(), ctx.clone(), owner.clone())) {
+                    continue;
+                }
+                // The provider's owning package travels with the
+                // walk: the provider's own DT_NEEDED entries are
+                // looked up from its package's point of view, so a
+                // closure is built from the providers of the
+                // packages that actually ship each library in it.
+                let (package_provider, provider_owner) = match providers.lookup(&soname, &owner) {
+                    Some((id, provider)) => (Some(provider), id),
+                    None => (None, owner.clone()),
+                };
+                let provider = package_provider
+                    .or_else(|| {
+                        // The loader's order: the RPATH chain
+                        // (the needing object's own RPATH
+                        // first, then its loaders'), then the
+                        // needing object's RUNPATH, then the
+                        // system fallback (ldconfig cache, then
+                        // the standard directories).
+                        let chain_dirs: Vec<PathBuf> =
+                            ctx.rpath_chain.iter().flatten().cloned().collect();
+                        system
+                            .provider_in_dirs(&soname, is_64, &chain_dirs)
+                            .or_else(|| system.provider_in_dirs(&soname, is_64, &ctx.runpath_dirs))
+                    })
+                    .or_else(|| system.provider(&soname, is_64));
+                if let Some(provider) = provider {
+                    provided.extend(provider.defined.iter().cloned());
+                    let child_ctx = SearchContext::for_object(
+                        &provider.rpath,
+                        &provider.runpath,
+                        provider.has_runpath,
+                        &provider.origin,
+                        &ctx.rpath_chain,
+                    );
+                    stack.extend(
+                        provider
+                            .needs
+                            .iter()
+                            .cloned()
+                            .map(|need| (need, child_ctx.clone(), provider_owner.clone())),
+                    );
+                }
+            }
+            Rc::new(provided)
+        })
+        .clone()
+}
+
 /// Resolve undefined symbols the way the reference's `ldd -r`
 /// does: a file's undefined symbol is satisfied when a library in
 /// its DT_NEEDED closure -- the file itself included, as in the
@@ -1370,61 +1651,19 @@ fn resolve_undefined_symbols(
     analyses: &mut [Option<ElfAnalysis>],
     files: &[PkgFile],
     system: &SystemLibraries,
+    owner: &PackageId,
 ) {
-    // Index providers by every name a DT_NEEDED entry can carry: the
-    // library's SONAME and its file basename. The two are equal for
-    // most libraries; when a package file is a symlink, the real file
-    // behind it carries the SONAME. Duplicate providers under one key
-    // (e.g. /lib64 and /usr/lib64 copies of one library) merge.
-    let mut providers: HashMap<String, SymbolProvider> = HashMap::new();
-    for (analysis, pkgfile) in analyses.iter().zip(files.iter()) {
-        let Some(analysis) = analysis else { continue };
-        let Some(ldd) = &analysis.ldd else { continue };
-        if ldd.failed.is_some() {
-            continue;
-        }
-        let mut keys = vec![basename(&pkgfile.name).to_string()];
-        if let Some(soname) = &analysis.info.soname {
-            if !keys.contains(soname) {
-                keys.push(soname.clone());
-            }
-        }
-        for key in keys {
-            // Duplicate providers merged under one key keep the
-            // first file's search paths: the copies are the same
-            // library (e.g. /lib64 and /usr/lib64), and their
-            // defined symbols and DT_NEEDED entries merge below
-            // regardless.
-            let entry = providers.entry(key).or_insert_with(|| SymbolProvider {
-                defined: HashSet::new(),
-                needs: Vec::new(),
-                origin: installed_dir(&pkgfile.name),
-                rpath: ldd.rpath.clone(),
-                runpath: ldd.runpath.clone(),
-                has_runpath: ldd.has_runpath,
-            });
-            entry.defined.extend(ldd.defined_symbols.iter().cloned());
-            for need in &ldd.dependencies {
-                if !entry.needs.contains(need) {
-                    entry.needs.push(need.clone());
-                }
-            }
-        }
-    }
+    let providers = package_providers(analyses, files);
     if providers.is_empty() && system.is_empty() {
         return;
     }
-    let providers: HashMap<String, Arc<SymbolProvider>> = providers
-        .into_iter()
-        .map(|(k, v)| (k, Arc::new(v)))
-        .collect();
+    let providers = ProviderIndex::new(vec![PackageProviders {
+        pkg_name: owner.0.clone(),
+        pkg_arch: owner.1.clone(),
+        providers,
+    }]);
 
-    // Walk each file's DT_NEEDED closure. Most libraries in a package
-    // share the same direct dependencies and search paths, so
-    // memoise the provided set on the direct-dependency list, the
-    // file's ELF class (system candidates are class-matched), and
-    // the file's search context.
-    let mut closures: HashMap<ClosureKey, std::rc::Rc<HashSet<String>>> = HashMap::new();
+    let mut closures: HashMap<ClosureKey, Rc<HashSet<String>>> = HashMap::new();
     for (analysis, pkgfile) in analyses.iter_mut().zip(files.iter()) {
         let Some(analysis) = analysis else { continue };
         let Some(ldd) = &mut analysis.ldd else {
@@ -1442,61 +1681,15 @@ fn resolve_undefined_symbols(
             &installed_dir(&pkgfile.name),
             &[],
         );
-        let provided = closures
-            .entry((direct.clone(), is_64, root_ctx.clone()))
-            .or_insert_with(|| {
-                let mut provided: HashSet<String> = HashSet::new();
-                let mut visited: HashSet<(String, SearchContext)> = HashSet::new();
-                let mut stack: Vec<(String, SearchContext)> = direct
-                    .iter()
-                    .cloned()
-                    .map(|need| (need, root_ctx.clone()))
-                    .collect();
-                while let Some((soname, ctx)) = stack.pop() {
-                    if !visited.insert((soname.clone(), ctx.clone())) {
-                        continue;
-                    }
-                    let provider = providers
-                        .get(&soname)
-                        .or_else(|| providers.get(basename(&soname)))
-                        .cloned()
-                        .or_else(|| {
-                            // The loader's order: the RPATH chain
-                            // (the needing object's own RPATH
-                            // first, then its loaders'), then the
-                            // needing object's RUNPATH, then the
-                            // system fallback (ldconfig cache, then
-                            // the standard directories).
-                            let chain_dirs: Vec<PathBuf> =
-                                ctx.rpath_chain.iter().flatten().cloned().collect();
-                            system
-                                .provider_in_dirs(&soname, is_64, &chain_dirs)
-                                .or_else(|| {
-                                    system.provider_in_dirs(&soname, is_64, &ctx.runpath_dirs)
-                                })
-                        })
-                        .or_else(|| system.provider(&soname, is_64));
-                    if let Some(provider) = provider {
-                        provided.extend(provider.defined.iter().cloned());
-                        let child_ctx = SearchContext::for_object(
-                            &provider.rpath,
-                            &provider.runpath,
-                            provider.has_runpath,
-                            &provider.origin,
-                            &ctx.rpath_chain,
-                        );
-                        stack.extend(
-                            provider
-                                .needs
-                                .iter()
-                                .cloned()
-                                .map(|need| (need, child_ctx.clone())),
-                        );
-                    }
-                }
-                Rc::new(provided)
-            })
-            .clone();
+        let provided = provided_by_closure(
+            &providers,
+            system,
+            &mut closures,
+            &direct,
+            is_64,
+            &root_ctx,
+            owner,
+        );
         ldd.undefined_symbols
             .retain(|sym| !provided.contains(sym) && !ldd.defined_symbols.contains(sym));
     }
@@ -1816,6 +2009,16 @@ pub struct BinariesCheck {
     is_dynamically_linked: bool,
     is_pie_exec: bool,
     is_nonstandard_archive: bool,
+    // Undefined-symbol resolution state (plusky/rpmcrab#701):
+    // `pending_state` is the package being checked (worker side,
+    // exported after each package); `deferred_state` is the merged
+    // state of the whole batch (main side, resolved in
+    // `after_checks`); `defer_undefined` is set by `check_binary`
+    // for extracted packages -- an installed package resolves in
+    // place instead.
+    pending_state: Option<BinariesState>,
+    deferred_state: BinariesState,
+    defer_undefined: bool,
 }
 
 /// A `_FORTIFY_SOURCE` wrapper from libc, i.e. a `__foo_chk` symbol
@@ -2217,6 +2420,9 @@ impl BinariesCheck {
             is_dynamically_linked: false,
             is_pie_exec: false,
             is_nonstandard_archive: false,
+            pending_state: None,
+            deferred_state: BinariesState::default(),
+            defer_undefined: false,
         }
     }
 
@@ -2932,7 +3138,7 @@ impl BinariesCheck {
     }
 
     fn check_dependency(
-        &self,
+        &mut self,
         pkg: &Pkg,
         pkgfile: &PkgFile,
         info: &ReadelfInfo,
@@ -2955,23 +3161,56 @@ impl BinariesCheck {
         // in an executable the undefined symbols resolve at load time, so the
         // reference's `ldd -r` stays silent there while a raw UND scan fires
         // hundreds of bogus hits.
-        // The level is Warning TEMPORARILY (issue #699, pending #701): the
-        // resolver's provider universe is the same package plus ambient
-        // system libraries, so a symbol provided by another package in the
-        // dependency closure reads as undefined; the #701 investigation
-        // sampled the Factory corpus and found 97.6% of findings resolve
-        // within the closure. #701 tightens the resolver (provider
-        // universe = the whole invocation's package set); the residue
-        // returns to Error there.
         if info.is_shlib {
-            for symbol in &ldd.undefined_symbols {
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "undefined-non-weak-symbol",
-                    &[&pkgfile.name, symbol],
-                );
+            if self.defer_undefined {
+                // Captured for the invocation-wide resolution in
+                // `after_checks` (plusky/rpmcrab#701); this gate is
+                // the only capture point, so a record exists
+                // exactly where the finding could fire. A file
+                // with no undefined symbols has nothing to resolve,
+                // so it is not captured: its symbol lists would be
+                // cloned into the state only to be skipped in
+                // `after_checks`.
+                if !ldd.undefined_symbols.is_empty() {
+                    let state = self
+                        .pending_state
+                        .get_or_insert_with(BinariesState::default);
+                    if !matches!(
+                        state.packages.last(),
+                        Some(record) if record.pkg_name == pkg.name
+                            && record.pkg_arch == pkg.arch
+                            && record.pkg_filename == pkg.filename
+                    ) {
+                        state.packages.push(PackageConsumers {
+                            pkg_name: pkg.name.clone(),
+                            pkg_arch: pkg.arch.clone(),
+                            pkg_filename: pkg.filename.clone(),
+                            files: Vec::new(),
+                        });
+                    }
+                    if let Some(record) = state.packages.last_mut() {
+                        record.files.push(ConsumerFile {
+                            file_name: pkgfile.name.clone(),
+                            undefined_symbols: ldd.undefined_symbols.clone(),
+                            defined_symbols: ldd.defined_symbols.iter().cloned().collect(),
+                            dependencies: ldd.dependencies.clone(),
+                            is_64: ldd.is_64,
+                            rpath: ldd.rpath.clone(),
+                            runpath: ldd.runpath.clone(),
+                            has_runpath: ldd.has_runpath,
+                        });
+                    }
+                }
+            } else {
+                for symbol in &ldd.undefined_symbols {
+                    add_info(
+                        out,
+                        Level::Error,
+                        pkg,
+                        "undefined-non-weak-symbol",
+                        &[&pkgfile.name, symbol],
+                    );
+                }
             }
         }
         let info_type = if info.is_shlib {
@@ -3445,7 +3684,34 @@ impl Check for BinariesCheck {
         // subtract the undefined symbols each file's DT_NEEDED
         // closure defines, looking providers up in the package
         // first and on the system second (plusky/rpmcrab#467).
-        resolve_undefined_symbols(&mut analyses, &pkg.files, &self.system_libraries);
+        //
+        // An installed package resolves in place: its own files and
+        // the system are the reference's whole universe there. An
+        // extracted package is captured instead (plusky/rpmcrab#701):
+        // the providers it ships join the invocation-wide index and
+        // its consumers are recorded by `check_dependency`, then
+        // resolved in `after_checks` once every package of the
+        // batch has contributed -- resolution inside one package
+        // alone cannot see the sibling packages a multi-package
+        // invocation installs side by side.
+        self.defer_undefined = !pkg.is_installed();
+        if self.defer_undefined {
+            let state = BinariesState {
+                provider_sets: vec![PackageProviders {
+                    pkg_name: pkg.name.clone(),
+                    pkg_arch: pkg.arch.clone(),
+                    providers: package_providers(&analyses, &pkg.files),
+                }],
+                ..BinariesState::default()
+            };
+            match &mut self.pending_state {
+                Some(existing) => existing.merge(state),
+                None => self.pending_state = Some(state),
+            }
+        } else {
+            let owner: PackageId = (pkg.name.clone(), pkg.arch.clone());
+            resolve_undefined_symbols(&mut analyses, &pkg.files, &self.system_libraries, &owner);
+        }
 
         for (idx, pkgfile) in pkg.files.iter().enumerate() {
             let fname: &str = &pkgfile.name;
@@ -3536,6 +3802,47 @@ impl Check for BinariesCheck {
             }
         }
 
+        // Register this package as an invocation contributor only
+        // now, when what it actually contributed is known
+        // (plusky/rpmcrab#735 review): a captured consumer (the
+        // records `check_dependency` left in the pending state) or a
+        // provider library (an `ldd`-clean file that is a shared
+        // library, carries a SONAME, or is named like one). A package
+        // shipping only executables contributes neither --
+        // executables are never captured as consumers and their
+        // basenames are not library providers -- so it must not flip
+        // a batch into invocation-wide resolution in `after_checks`.
+        if self.defer_undefined {
+            let captured = self.pending_state.as_ref().is_some_and(|state| {
+                state.packages.iter().any(|p| {
+                    p.pkg_name == pkg.name
+                        && p.pkg_arch == pkg.arch
+                        && p.pkg_filename == pkg.filename
+                })
+            });
+            let provides = analyses
+                .iter()
+                .zip(pkg.files.iter())
+                .any(|(analysis, pkgfile)| {
+                    let Some(analysis) = analysis else {
+                        return false;
+                    };
+                    analysis.ldd.as_ref().is_some_and(|l| l.failed.is_none())
+                        && (analysis.info.is_shlib
+                            || analysis.info.soname.is_some()
+                            || basename(&pkgfile.name).contains(".so"))
+                });
+            if captured || provides {
+                let state = self
+                    .pending_state
+                    .get_or_insert_with(BinariesState::default);
+                let contributor = (pkg.name.clone(), pkg.arch.clone(), pkg.filename.clone());
+                if !state.contributors.contains(&contributor) {
+                    state.contributors.push(contributor);
+                }
+            }
+        }
+
         self.check_no_binary(pkg, pkg_has_binary, pkg_has_file_in_libdir, out);
         self.check_noarch_with_lib64(pkg, pkg_has_file_in_lib64, out);
     }
@@ -3546,6 +3853,88 @@ impl Check for BinariesCheck {
 
     fn add_checked_files(&mut self, n: usize) {
         self.checked_files += n;
+    }
+
+    fn reset(&mut self) {
+        self.pending_state = None;
+        self.deferred_state = BinariesState::default();
+        self.defer_undefined = false;
+    }
+
+    fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
+        match self.pending_state.take() {
+            Some(state) if !state.is_empty() => Some(Box::new(state)),
+            _ => None,
+        }
+    }
+
+    fn import_state(&mut self, state: Box<dyn std::any::Any + Send>) {
+        if let Ok(state) = state.downcast::<BinariesState>() {
+            self.deferred_state.merge(*state);
+        }
+    }
+
+    /// Resolve the batch's captured consumers against the
+    /// per-package provider sets and emit the residue
+    /// (plusky/rpmcrab#701).
+    /// A batch with one contributing package resolves against that
+    /// package's providers plus the system -- the single-package
+    /// model extracted packages have always used. A wider batch
+    /// resolves inside the invocation's set alone: the system the
+    /// scan happens to run on is not part of the install the
+    /// invocation describes, and its libraries must not mask a
+    /// provider the invocation itself lacks.
+    fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
+        if self.deferred_state.is_empty() {
+            return;
+        }
+        let state = std::mem::take(&mut self.deferred_state);
+        let invocation_wide = state.contributors.len() > 1;
+        let providers = ProviderIndex::new(state.provider_sets);
+        let empty_system;
+        let system = if invocation_wide {
+            empty_system = SystemLibraries::empty();
+            &empty_system
+        } else {
+            &self.system_libraries
+        };
+        let mut closures: HashMap<ClosureKey, Rc<HashSet<String>>> = HashMap::new();
+        for package in &state.packages {
+            let owner: PackageId = (package.pkg_name.clone(), package.pkg_arch.clone());
+            for consumer in &package.files {
+                if consumer.undefined_symbols.is_empty() {
+                    continue;
+                }
+                let root_ctx = SearchContext::for_object(
+                    &consumer.rpath,
+                    &consumer.runpath,
+                    consumer.has_runpath,
+                    &installed_dir(&consumer.file_name),
+                    &[],
+                );
+                let provided = provided_by_closure(
+                    &providers,
+                    system,
+                    &mut closures,
+                    &consumer.dependencies,
+                    consumer.is_64,
+                    &root_ctx,
+                    &owner,
+                );
+                for symbol in &consumer.undefined_symbols {
+                    if !provided.contains(symbol) && !consumer.defined_symbols.contains(symbol) {
+                        out.add_info(make_finding(
+                            &package.pkg_name,
+                            &package.pkg_arch,
+                            Level::Error,
+                            "undefined-non-weak-symbol",
+                            vec![consumer.file_name.clone(), symbol.clone()],
+                            None,
+                        ));
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -4157,7 +4546,7 @@ mod tests {
         let config = test_config();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = BinariesCheck::with_tool_dir(&config, tool_dir);
-        check.check_binary(&pkg, &config, &mut out);
+        run_batch(&mut check, &pkg, &config, &mut out);
         (out.results().to_vec(), dir)
     }
 
@@ -6290,7 +6679,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let pkg = Pkg::open(std::path::Path::new(rpm), dir.path(), true).expect("open fixture");
         let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
         let mut check = BinariesCheck::with_tool_dir(config, None);
-        check.check_binary(&pkg, config, &mut out);
+        run_batch(&mut check, &pkg, config, &mut out);
         (
             out.results().to_vec(),
             out.result_levels().to_vec(),
@@ -6673,10 +7062,40 @@ description = "explicit priority string bypasses the system crypto policy"
         }
     }
 
+    /// Run one package through the production batch flow on one
+    /// check instance: check it, export its per-package state,
+    /// merge the state back, and run `after_checks`. Undefined
+    /// symbols of extracted packages resolve in `after_checks`
+    /// (plusky/rpmcrab#701), so a bare `check_binary` no longer
+    /// shows their findings.
+    fn run_batch(check: &mut BinariesCheck, pkg: &Pkg, config: &Config, out: &mut Filter) {
+        check.check_binary(pkg, config, out);
+        if let Some(state) = check.export_state() {
+            check.import_state(state);
+        }
+        check.after_checks(config, out);
+    }
+
+    /// Run several packages as one invocation on one check
+    /// instance: each package is checked and its exported state
+    /// merged, then a single `after_checks` resolves the whole
+    /// batch (plusky/rpmcrab#701) -- the worker/main split of
+    /// `run_batch`, with the merge accumulating across packages
+    /// instead of resolving after each one.
+    fn run_invocation(check: &mut BinariesCheck, pkgs: &[&Pkg], config: &Config, out: &mut Filter) {
+        for pkg in pkgs {
+            check.check_binary(pkg, config, out);
+            if let Some(state) = check.export_state() {
+                check.import_state(state);
+            }
+        }
+        check.after_checks(config, out);
+    }
+
     fn driver_results(pkg: &Pkg, config: &Config) -> Vec<(String, String)> {
         let mut check = BinariesCheck::with_tool_dir(config, None);
         let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
-        check.check_binary(pkg, config, &mut out);
+        run_batch(&mut check, pkg, config, &mut out);
         out.results().to_vec()
     }
 
@@ -7500,7 +7919,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let config = test_config();
         let mut check = BinariesCheck::with_tool_dir(&config, None);
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_binary(&pkg, &config, &mut out);
+        run_batch(&mut check, &pkg, &config, &mut out);
         let results = out.results().to_vec();
         assert_lacks(&results, "shared-library-not-executable");
     }
@@ -7733,7 +8152,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let mut check = BinariesCheck::with_tool_dir(&config, None);
         let pkg = synthetic_pkg("kernel-default-base", "x86_64", vec![ghost.clone(), real]);
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_binary(&pkg, &config, &mut out);
+        run_batch(&mut check, &pkg, &config, &mut out);
         let results = out.results().to_vec();
         assert_lacks(&results, "readelf-failed");
         assert!(
@@ -7766,7 +8185,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let mut check = BinariesCheck::with_tool_dir(&config, None);
         let pkg = synthetic_pkg("kernel-default-base", "x86_64", vec![ghost]);
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_binary(&pkg, &config, &mut out);
+        run_batch(&mut check, &pkg, &config, &mut out);
         let results = out.results().to_vec();
         assert_lacks(&results, "no-binary");
         assert!(
@@ -7793,7 +8212,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let mut check = BinariesCheck::with_tool_dir(&config, None);
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![file]);
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_binary(&pkg, &config, &mut out);
+        run_batch(&mut check, &pkg, &config, &mut out);
         let results = out.results().to_vec();
         let lines = lines_for(&results, "readelf-failed");
         assert_eq!(lines.len(), 1, "exactly one readelf-failed: {results:?}");
@@ -8132,6 +8551,23 @@ description = "explicit priority string bypasses the system crypto policy"
         }
     }
 
+    /// Write a crafted executable into `dir` and return its
+    /// `PkgFile`, named `/usr/bin/<base>` inside the package. The
+    /// bytes are the crafted ET_DYN shape; executability follows
+    /// from the file's name and magic, as in the reference.
+    fn exe_pkgfile(dir: &std::path::Path, base: &str, elf: &[u8]) -> PkgFile {
+        let path = dir.join(base);
+        std::fs::write(&path, elf).expect("write exe");
+        PkgFile {
+            name: format!("/usr/bin/{base}"),
+            path: path.to_string_lossy().into_owned(),
+            magic: "ELF 64-bit LSB executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, not stripped"
+                .to_string(),
+            mode: 0o100755,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn undefined_symbol_provided_by_needed_library_is_quiet() {
         // plusky/rpmcrab#467: the symbol is undefined in the consumer
@@ -8247,8 +8683,519 @@ description = "explicit priority string bypasses the system crypto policy"
             "orphan finding names file and symbol: {lines:?}"
         );
         assert!(
-            lines.iter().all(|l| l.contains(" W: ")),
-            "Warning level (temporary levelling pending #701): {lines:?}"
+            lines.iter().all(|l| l.contains(" E: ")),
+            "Error level: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn undefined_symbol_provided_by_another_package_is_quiet() {
+        // plusky/rpmcrab#701: in a multi-package invocation the
+        // provider universe is the whole batch -- a consumer in one
+        // package resolves against a library shipped by another
+        // package, whichever order the two are checked in. The
+        // symbol nobody in the batch provides keeps firing.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let provider =
+            craft_shlib_elf(false, None, Some("libfoo.so.1"), &[("shared_sym", 1, 0, 1)]);
+        let consumer = craft_shlib_elf(
+            false,
+            Some("libfoo.so.1"),
+            Some("libbar.so.1"),
+            &[("shared_sym", 1, 0, 0), ("nowhere_sym", 1, 0, 0)],
+        );
+        let provider_pkg = synthetic_pkg(
+            "providerpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libfoo.so.1", &provider)],
+        );
+        let consumer_pkg = synthetic_pkg(
+            "consumerpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let config = test_config();
+
+        // The consumer alone: both symbols are unresolvable.
+        let alone = driver_results(&consumer_pkg, &config);
+        let lines = lines_for(&alone, "undefined-non-weak-symbol");
+        assert_eq!(lines.len(), 2, "both symbols fire alone: {alone:?}");
+
+        // Consumer first, provider second: the batch still
+        // resolves shared_sym; only nowhere_sym remains.
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        run_invocation(
+            &mut check,
+            &[&consumer_pkg, &provider_pkg],
+            &config,
+            &mut out,
+        );
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(lines.len(), 1, "only the residue fires: {results:?}");
+        assert!(
+            lines[0].contains("nowhere_sym"),
+            "the residue names the unprovided symbol: {lines:?}"
+        );
+        assert!(
+            lines[0].contains(" E: "),
+            "the residue is an error: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn system_provider_does_not_rescue_inside_an_invocation() {
+        // plusky/rpmcrab#701: the system fallback belongs to the
+        // single-package and installed cases. Inside a
+        // multi-package invocation the batch is the universe: a
+        // symbol only the host system provides keeps firing, so a
+        // scan's results do not depend on the host it runs on.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let sysroot = dir.path().join("sysroot");
+        std::fs::create_dir(&sysroot).expect("mkdir sysroot");
+        let syslib = craft_shlib_elf(false, None, Some("libsys.so.1"), &[("sys_sym", 1, 0, 1)]);
+        write_system_lib(&sysroot, "libsys.so.1", &syslib);
+        let consumer = craft_shlib_elf(
+            false,
+            Some("libsys.so.1"),
+            Some("libbar.so.1"),
+            &[("sys_sym", 1, 0, 0)],
+        );
+        let other = craft_shlib_elf(
+            false,
+            None,
+            Some("libother.so.1"),
+            &[("other_sym", 1, 0, 1)],
+        );
+        let consumer_pkg = synthetic_pkg(
+            "consumerpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let other_pkg = synthetic_pkg(
+            "otherpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libother.so.1", &other)],
+        );
+        let config = test_config();
+
+        // Alone, the system provider rescues the consumer.
+        let alone = driver_results_with_system(
+            &consumer_pkg,
+            &config,
+            SystemLibraries::with_roots(vec![sysroot.clone()], None),
+        );
+        assert!(
+            lines_for(&alone, "undefined-non-weak-symbol").is_empty(),
+            "system provider rescues a lone package: {alone:?}"
+        );
+
+        // In a batch, it does not.
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.system_libraries = SystemLibraries::with_roots(vec![sysroot], None);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        run_invocation(&mut check, &[&consumer_pkg, &other_pkg], &config, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(
+            lines.len(),
+            1,
+            "host-only provider must not rescue: {results:?}"
+        );
+        assert!(lines[0].contains("sys_sym"), "names the symbol: {lines:?}");
+    }
+
+    #[test]
+    fn exe_only_package_does_not_flip_invocation_wide() {
+        // plusky/rpmcrab#735 review: a package shipping only
+        // executables contributes no provider library and no captured
+        // consumer (executables are never captured -- the shlib gate
+        // in `check_dependency`), so it must not count as an
+        // invocation contributor. Otherwise adding it to a batch
+        // disables the system fallback for a sibling package whose
+        // symbols the system provides, and the sibling's verdict
+        // depends on an unrelated package.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let sysroot = dir.path().join("sysroot");
+        std::fs::create_dir(&sysroot).expect("mkdir sysroot");
+        let syslib = craft_shlib_elf(false, None, Some("libsys.so.1"), &[("sys_sym", 1, 0, 1)]);
+        write_system_lib(&sysroot, "libsys.so.1", &syslib);
+        let consumer = craft_shlib_elf(
+            false,
+            Some("libsys.so.1"),
+            Some("libbar.so.1"),
+            &[("sys_sym", 1, 0, 0)],
+        );
+        let exe = craft_shlib_elf(false, Some("libsys.so.1"), None, &[("main", 1, 2, 1)]);
+        let other = craft_shlib_elf(
+            false,
+            None,
+            Some("libother.so.1"),
+            &[("other_sym", 1, 0, 1)],
+        );
+        let consumer_pkg = synthetic_pkg(
+            "consumerpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let exe_pkg = synthetic_pkg(
+            "exepkg",
+            "x86_64",
+            vec![exe_pkgfile(dir.path(), "tool", &exe)],
+        );
+        let other_pkg = synthetic_pkg(
+            "otherpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libother.so.1", &other)],
+        );
+        let config = test_config();
+
+        // Alone, the system provider rescues the consumer.
+        let alone = driver_results_with_system(
+            &consumer_pkg,
+            &config,
+            SystemLibraries::with_roots(vec![sysroot.clone()], None),
+        );
+        assert!(
+            lines_for(&alone, "undefined-non-weak-symbol").is_empty(),
+            "system provider rescues a lone package: {alone:?}"
+        );
+
+        // Batched with the exe-only package, the consumer is still
+        // the only contributor: the system fallback stays in place
+        // and the verdict is the same as alone.
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.system_libraries = SystemLibraries::with_roots(vec![sysroot.clone()], None);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        run_invocation(&mut check, &[&consumer_pkg, &exe_pkg], &config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "exe-only package must not disable the system fallback: {results:?}"
+        );
+
+        // A genuine contributor alongside still flips the batch:
+        // with a second library package in the invocation the system
+        // fallback is off and the host-only symbol fires.
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.system_libraries = SystemLibraries::with_roots(vec![sysroot], None);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        run_invocation(
+            &mut check,
+            &[&consumer_pkg, &exe_pkg, &other_pkg],
+            &config,
+            &mut out,
+        );
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(
+            lines.len(),
+            1,
+            "genuine contributor still flips the batch: {results:?}"
+        );
+        assert!(lines[0].contains("sys_sym"), "names the symbol: {lines:?}");
+    }
+
+    #[test]
+    fn cross_package_same_soname_provider_does_not_mask_consumers_own() {
+        // plusky/rpmcrab#735 blocker 3: two packages in one
+        // invocation ship the same SONAME with different symbol
+        // sets (two versions of one library). The consumer's own
+        // package ships the older copy, which does not define
+        // `versioned_sym`; the sibling's copy does. Unioning the
+        // two providers under the bare SONAME would mask the
+        // missing symbol -- the consumer resolves against its own
+        // package's provider, so the symbol must fire, in either
+        // package order (order-independence pin).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let own_dir = dir.path().join("own");
+        let sibling_dir = dir.path().join("sibling");
+        std::fs::create_dir(&own_dir).expect("mkdir own");
+        std::fs::create_dir(&sibling_dir).expect("mkdir sibling");
+        let own_provider =
+            craft_shlib_elf(false, None, Some("libfoo.so.1"), &[("shared_sym", 1, 0, 1)]);
+        let sibling_provider = craft_shlib_elf(
+            false,
+            None,
+            Some("libfoo.so.1"),
+            &[("shared_sym", 1, 0, 1), ("versioned_sym", 1, 0, 1)],
+        );
+        let consumer = craft_shlib_elf(
+            false,
+            Some("libfoo.so.1"),
+            Some("libbar.so.1"),
+            &[("shared_sym", 1, 0, 0), ("versioned_sym", 1, 0, 0)],
+        );
+        let consumer_pkg = synthetic_pkg(
+            "consumerpkg",
+            "x86_64",
+            vec![
+                shlib_pkgfile(&own_dir, "libfoo.so.1", &own_provider),
+                shlib_pkgfile(dir.path(), "libbar.so.1", &consumer),
+            ],
+        );
+        let sibling_pkg = synthetic_pkg(
+            "siblingpkg",
+            "x86_64",
+            vec![shlib_pkgfile(
+                &sibling_dir,
+                "libfoo.so.1",
+                &sibling_provider,
+            )],
+        );
+        let config = test_config();
+        for pkgs in [
+            &[&consumer_pkg, &sibling_pkg][..],
+            &[&sibling_pkg, &consumer_pkg][..],
+        ] {
+            let mut check = BinariesCheck::with_tool_dir(&config, None);
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            run_invocation(&mut check, pkgs, &config, &mut out);
+            let results = out.results().to_vec();
+            let lines = lines_for(&results, "undefined-non-weak-symbol");
+            assert_eq!(
+                lines.len(),
+                1,
+                "only the symbol the consumer's own provider lacks fires, \
+                 in either package order: {results:?}"
+            );
+            assert!(
+                lines[0].contains("versioned_sym"),
+                "the residue names the masked symbol: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cross_package_same_soname_needs_do_not_join_consumers_closure() {
+        // plusky/rpmcrab#735 blocker 3, transitive half: the
+        // sibling's copy of libfoo NEEDs libdeep, the consumer's
+        // own copy does not. Unioning the providers would also
+        // union their DT_NEEDED entries and pull libdeep into the
+        // consumer's closure through a provider it never loads,
+        // masking `deep_sym`.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let own_dir = dir.path().join("own");
+        let sibling_dir = dir.path().join("sibling");
+        std::fs::create_dir(&own_dir).expect("mkdir own");
+        std::fs::create_dir(&sibling_dir).expect("mkdir sibling");
+        let own_provider = craft_shlib_elf_paths(
+            false,
+            &[],
+            Some("libfoo.so.1"),
+            None,
+            None,
+            &[("foo_sym", 1, 0, 1)],
+        );
+        let sibling_provider = craft_shlib_elf_paths(
+            false,
+            &["libdeep.so.1"],
+            Some("libfoo.so.1"),
+            None,
+            None,
+            &[("foo_sym", 1, 0, 1)],
+        );
+        let deep_provider =
+            craft_shlib_elf(false, None, Some("libdeep.so.1"), &[("deep_sym", 1, 0, 1)]);
+        let consumer = craft_shlib_elf(
+            false,
+            Some("libfoo.so.1"),
+            Some("libbar.so.1"),
+            &[("foo_sym", 1, 0, 0), ("deep_sym", 1, 0, 0)],
+        );
+        let consumer_pkg = synthetic_pkg(
+            "consumerpkg",
+            "x86_64",
+            vec![
+                shlib_pkgfile(&own_dir, "libfoo.so.1", &own_provider),
+                shlib_pkgfile(dir.path(), "libbar.so.1", &consumer),
+            ],
+        );
+        let sibling_pkg = synthetic_pkg(
+            "siblingpkg",
+            "x86_64",
+            vec![
+                shlib_pkgfile(&sibling_dir, "libfoo.so.1", &sibling_provider),
+                shlib_pkgfile(&sibling_dir, "libdeep.so.1", &deep_provider),
+            ],
+        );
+        let config = test_config();
+        for pkgs in [
+            &[&consumer_pkg, &sibling_pkg][..],
+            &[&sibling_pkg, &consumer_pkg][..],
+        ] {
+            let mut check = BinariesCheck::with_tool_dir(&config, None);
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            run_invocation(&mut check, pkgs, &config, &mut out);
+            let results = out.results().to_vec();
+            let lines = lines_for(&results, "undefined-non-weak-symbol");
+            assert_eq!(
+                lines.len(),
+                1,
+                "only the symbol reachable solely through the sibling \
+                 provider's needs fires, in either package order: {results:?}"
+            );
+            assert!(
+                lines[0].contains("deep_sym"),
+                "the residue names the transitively masked symbol: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_from_a_different_arch_package_does_not_resolve() {
+        // plusky/rpmcrab#735 blocker 3, arch half: a provider
+        // shipped by a package of a different architecture is not
+        // a provider for this consumer at all -- the loader would
+        // never bind an x86_64 consumer to an aarch64 library,
+        // however the two are keyed.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let provider = craft_shlib_elf(false, None, Some("libfoo.so.1"), &[("arch_sym", 1, 0, 1)]);
+        let consumer = craft_shlib_elf(
+            false,
+            Some("libfoo.so.1"),
+            Some("libbar.so.1"),
+            &[("arch_sym", 1, 0, 0)],
+        );
+        let provider_pkg = synthetic_pkg(
+            "providerpkg",
+            "aarch64",
+            vec![shlib_pkgfile(dir.path(), "libfoo.so.1", &provider)],
+        );
+        let consumer_pkg = synthetic_pkg(
+            "consumerpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        run_invocation(
+            &mut check,
+            &[&consumer_pkg, &provider_pkg],
+            &config,
+            &mut out,
+        );
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(
+            lines.len(),
+            1,
+            "a different-arch provider must not resolve: {results:?}"
+        );
+        assert!(
+            lines[0].contains("arch_sym"),
+            "the residue names the symbol: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn same_name_arch_packages_with_distinct_files_both_count_as_contributors() {
+        // plusky/rpmcrab#735 OCR nit: contributor dedup keyed on
+        // (name, arch) collapses two distinct packages that share
+        // a name and arch (two versions in one invocation) into
+        // one contributor, so the batch wrongly stays in
+        // single-package mode and the system fallback rescues a
+        // symbol the invocation itself does not provide.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let sysroot = dir.path().join("sysroot");
+        std::fs::create_dir(&sysroot).expect("mkdir sysroot");
+        let syslib = craft_shlib_elf(false, None, Some("libsys.so.1"), &[("sys_sym", 1, 0, 1)]);
+        write_system_lib(&sysroot, "libsys.so.1", &syslib);
+        let consumer = craft_shlib_elf(
+            false,
+            Some("libsys.so.1"),
+            Some("libbar.so.1"),
+            &[("sys_sym", 1, 0, 0)],
+        );
+        let other = craft_shlib_elf(
+            false,
+            None,
+            Some("libother.so.1"),
+            &[("other_sym", 1, 0, 1)],
+        );
+        let mut consumer_pkg = synthetic_pkg(
+            "samepkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libbar.so.1", &consumer)],
+        );
+        consumer_pkg.filename = "samepkg-1.0-1.x86_64.rpm".to_string();
+        let mut other_pkg = synthetic_pkg(
+            "samepkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libother.so.1", &other)],
+        );
+        other_pkg.filename = "samepkg-2.0-1.x86_64.rpm".to_string();
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.system_libraries = SystemLibraries::with_roots(vec![sysroot], None);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        run_invocation(&mut check, &[&consumer_pkg, &other_pkg], &config, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(
+            lines.len(),
+            1,
+            "two distinct same-name packages flip the batch to \
+             invocation-wide resolution: {results:?}"
+        );
+        assert!(lines[0].contains("sys_sym"), "names the symbol: {lines:?}");
+    }
+
+    #[test]
+    fn installed_package_resolves_undefined_symbols_in_place() {
+        // The installed path (`resolve_undefined_symbols` during
+        // `check_binary`, no deferral): a symbol the package's own
+        // provider defines stays quiet and a symbol nobody defines
+        // fires, at Error, during the package's own check.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let provider = craft_shlib_elf(
+            false,
+            None,
+            Some("libfoo.so.1"),
+            &[("provided_sym", 1, 0, 1)],
+        );
+        let consumer = craft_shlib_elf(
+            false,
+            Some("libfoo.so.1"),
+            Some("libbar.so.1"),
+            &[("provided_sym", 1, 0, 0), ("missing_sym", 1, 0, 0)],
+        );
+        let rpm = format!(
+            "{}/../../tests/fixtures/binaries-check/input/rpmcrab-binaries-fixture-1.0-1.aarch64.rpm",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let header = librpm::PackageHeader::from_file(
+            std::path::Path::new(&rpm),
+            Some(&librpm::verify::VerifyOptions::skip_verification()),
+        )
+        .expect("open fixture header");
+        let mut pkg = Pkg::installed(header).expect("build installed package");
+        pkg.name = "testpkg".to_string();
+        pkg.arch = "x86_64".to_string();
+        pkg.files = vec![
+            shlib_pkgfile(dir.path(), "libfoo.so.1", &provider),
+            shlib_pkgfile(dir.path(), "libbar.so.1", &consumer),
+        ];
+        assert!(
+            pkg.is_installed(),
+            "the fixture must take the installed path"
+        );
+        let results = driver_results(&pkg, &test_config());
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(
+            lines.len(),
+            1,
+            "only the unprovided symbol fires for an installed package: {results:?}"
+        );
+        assert!(
+            lines[0].contains("missing_sym"),
+            "the residue names the symbol: {lines:?}"
+        );
+        assert!(
+            lines[0].contains(" E: "),
+            "the residue is an error: {lines:?}"
         );
     }
 
@@ -8348,7 +9295,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let mut check = BinariesCheck::with_tool_dir(config, None);
         check.system_libraries = system;
         let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
-        check.check_binary(pkg, config, &mut out);
+        run_batch(&mut check, pkg, config, &mut out);
         out.results().to_vec()
     }
 
@@ -9166,8 +10113,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let mut ldd = syn_ldd();
         ldd.undefined_symbols = vec!["GSS_C_NT_HOSTBASED_SERVICE".to_string()];
 
-        // Undefined symbols in a shared object -> Warning
-        // (temporary levelling pending the #701 resolver fix).
+        // Undefined symbols in a shared object -> Error.
         let mut info = syn_info();
         info.is_shlib = true;
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
@@ -9175,7 +10121,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let results = out.results().to_vec();
         let lines = lines_for(&results, "undefined-non-weak-symbol");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
-        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
         assert!(
             lines[0].contains("GSS_C_NT_HOSTBASED_SERVICE"),
             "detail names the symbol: {}",
@@ -9468,7 +10414,7 @@ description = "explicit priority string bypasses the system crypto policy"
                     let config = test_config();
                     let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
                     let mut check = BinariesCheck::with_tool_dir(&config, None);
-                    check.check_binary(&pkg, &config, &mut out);
+                    run_batch(&mut check, &pkg, &config, &mut out);
                     out.results().to_vec()
                 })
         };
@@ -9503,7 +10449,7 @@ description = "explicit priority string bypasses the system crypto policy"
             ],
         );
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_binary(&pkg, &config, &mut out);
+        run_batch(&mut check, &pkg, &config, &mut out);
         let results = out.results().to_vec();
         assert_lacks(&results, "executable-in-library-package");
         assert_lacks(&results, "non-versioned-file-in-library-package");
