@@ -19,7 +19,11 @@ trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/rpmbuild"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 
 podman_bin="${PODMAN:-podman}"
-image="${IMAGE:-registry.opensuse.org/opensuse/tumbleweed:latest}"
+# Pinned by digest (issue #797): the fixture RPMs must rebuild with
+# the same shape; a floating tag would let a regenerated fixture
+# silently change as rpm's generators evolve. Refresh the digest
+# deliberately when the base image is meant to move.
+image="${IMAGE:-registry.opensuse.org/opensuse/tumbleweed@sha256:1a7032dc8d017b2b8e8c63656ca53e625b9b591a5e856ba0c546c8c503dd42a8}"
 
 cp "$here/uidgid-session.spec" "$work/rpmbuild/SPECS/"
 
@@ -28,5 +32,17 @@ cp "$here/uidgid-session.spec" "$work/rpmbuild/SPECS/"
     "$image" \
     bash -c 'zypper -n in -y rpm-build >/dev/null && rpmbuild -bb --define "_topdir /rpmbuild" /rpmbuild/SPECS/uidgid-session.spec'
 
+rm -f "$here/uidgid-session-main-1.0-1.noarch.rpm" "$here/uidgid-session-sysusers-1.0-1.noarch.rpm"
 find "$work/rpmbuild/RPMS" -name '*.rpm' -exec cp {} "$here/" \;
-echo "built: $(ls "$here"/uidgid-session-*.rpm)"
+
+# Fail loudly on a zero or misnamed build (issue #797): `ls` inside
+# $(...) masks its own failure under `set -e` and would happily list
+# a previous run's files, so assert the two expected outputs of this
+# run exist (the stale copies were removed above).
+for expected in uidgid-session-main-1.0-1.noarch.rpm uidgid-session-sysusers-1.0-1.noarch.rpm; do
+    if [ ! -f "$here/$expected" ]; then
+        echo "error: expected fixture $expected was not built" >&2
+        exit 1
+    fi
+done
+echo "built: uidgid-session-main-1.0-1.noarch.rpm uidgid-session-sysusers-1.0-1.noarch.rpm"
