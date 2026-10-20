@@ -476,7 +476,15 @@ pub fn load_bundled() -> Config {
 /// error. An unreadable file exits 1 and an unparsable TOML file exits 4 at
 /// the read site instead, as rpmlint does.
 pub fn load(extra: &[PathBuf]) -> Result<Config, String> {
-    let (cfg, warnings) = load_with_warnings(extra)?;
+    let (cfg, warnings) = match load_with_warnings(extra) {
+        Ok(pair) => pair,
+        Err((e, warnings)) => {
+            for warning in &warnings {
+                eprintln!("{warning}");
+            }
+            return Err(e);
+        }
+    };
     for warning in &warnings {
         eprintln!("{warning}");
     }
@@ -490,8 +498,12 @@ pub fn load(extra: &[PathBuf]) -> Result<Config, String> {
 /// configuration and prints its.
 ///
 /// # Errors
-/// Same as [`load`].
-pub fn load_with_warnings(extra: &[PathBuf]) -> Result<(Config, Vec<String>), String> {
+/// Same diagnostics as [`load`], returned together with the warnings
+/// collected before the failure, in emission order, so a caller that
+/// deferred printing can still show them ahead of the fatal error.
+pub fn load_with_warnings(
+    extra: &[PathBuf],
+) -> Result<(Config, Vec<String>), (String, Vec<String>)> {
     let autoload = std::env::var("PYTEST_XDIST_TESTRUNUID").is_err()
         && std::env::var("CONFIG_DISABLE_AUTOLOADING").is_err();
     let mut cfg = load_inner(extra, &xdg_config_dirs(), autoload)?;
@@ -537,7 +549,11 @@ fn read_flavor_key(path: &Path) -> FlavorRead {
 
 /// The env-independent core of [`load`], so tests can drive it without
 /// process-global environment races.
-fn load_inner(extra: &[PathBuf], xdg_dirs: &[PathBuf], autoload: bool) -> Result<Config, String> {
+fn load_inner(
+    extra: &[PathBuf],
+    xdg_dirs: &[PathBuf],
+    autoload: bool,
+) -> Result<Config, (String, Vec<String>)> {
     // (is_defaults, display_path, source).
     let mut entries: Vec<(bool, String, Layer)> =
         vec![(true, "<builtin>".to_string(), Layer::Bundled)];
@@ -635,7 +651,13 @@ fn load_inner(extra: &[PathBuf], xdg_dirs: &[PathBuf], autoload: bool) -> Result
     let mut indexed: Vec<(usize, &Entry)> = entries.iter().enumerate().collect();
     indexed.sort_by_key(|(i, (is_def, name, _))| (sort_key(*is_def, name), *i));
 
-    let mut cfg = Config::default();
+    // The early warnings head the collected list from the start, so a
+    // merge failure below carries them out with its error instead of
+    // dropping them with the unfinished `Config`.
+    let mut cfg = Config {
+        load_warnings: early_warnings,
+        ..Config::default()
+    };
     for (_, (is_def, display, layer)) in indexed {
         let text = match layer {
             Layer::Bundled => CONFIG_DEFAULTS.to_string(),
@@ -665,13 +687,20 @@ fn load_inner(extra: &[PathBuf], xdg_dirs: &[PathBuf], autoload: bool) -> Result
             .map(|n| n.to_string_lossy())
             .unwrap_or_default();
         let is_override = !*is_def && file_name.contains(".override.");
-        merge_into(&mut cfg.configuration, &parsed, is_override)
-            .map_err(|e| format!("{e} (while merging configuration file {display})"))?;
+        if let Err(e) = merge_into(&mut cfg.configuration, &parsed, is_override) {
+            let warnings = cfg.take_load_warnings();
+            return Err((
+                format!("{e} (while merging configuration file {display})"),
+                warnings,
+            ));
+        }
         cfg.conf_files.push(display.clone());
     }
 
-    cfg.load_warnings = early_warnings;
-    cfg.finalize()?;
+    if let Err(e) = cfg.finalize() {
+        let warnings = cfg.take_load_warnings();
+        return Err((e, warnings));
+    }
     Ok(cfg)
 }
 
@@ -1225,13 +1254,39 @@ mod tests {
         let rpmlint_dir = tmp.path().join("xdg").join("rpmlint");
         std::fs::create_dir_all(&rpmlint_dir).unwrap();
         std::fs::write(rpmlint_dir.join("bad.toml"), "Checks = 42\n").unwrap();
-        let err = load_inner(&[], &[tmp.path().join("xdg")], true).unwrap_err();
+        let (err, _warnings) = load_inner(&[], &[tmp.path().join("xdg")], true).unwrap_err();
         assert!(err.contains("'Checks'"), "error names the key: {err}");
         assert!(
             err.contains("an integer (42)"),
             "error names the value: {err}"
         );
         assert!(err.contains("bad.toml"), "error names the file: {err}");
+    }
+
+    #[test]
+    fn load_error_carries_the_warnings_collected_before_it() {
+        // A key that warns (`BadnessThreshold`, inert since #699) in
+        // the same load as a fatal one (`SeverityOverrides` as a
+        // scalar): the error returns the warning with it, so a caller
+        // that deferred printing can still show it ahead of the
+        // fatal diagnostic.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("fatal.toml");
+        std::fs::write(
+            &cfg_path,
+            "BadnessThreshold = 999\nSeverityOverrides = 42\n",
+        )
+        .unwrap();
+        let (err, warnings) = load_inner(&[cfg_path], &[], false).unwrap_err();
+        assert!(
+            err.contains("'SeverityOverrides' must be a table"),
+            "error names the fatal key: {err}"
+        );
+        assert_eq!(warnings.len(), 1, "warnings: {warnings:?}");
+        assert!(
+            warnings[0].contains("'BadnessThreshold' has no effect"),
+            "the collected warning travels with the error: {warnings:?}"
+        );
     }
 
     #[test]
