@@ -75,34 +75,43 @@ impl SpecPkg {
 }
 
 /// The section headers that end the main preamble: the scan runs
-/// until the first of these. Every other `%`-led line — macro
-/// definitions, conditionals (`%if`, `%ifdef`, `%else`, …),
-/// build-conditionals and bare macro invocations — is preamble
-/// content the scan reads past.
+/// until the first of these. The list is the reference's section
+/// set (SpecCheck's `section_regexs` keys: the script sections plus
+/// `RPM_SCRIPTLETS`), with `%generate_buildrequires` added; every
+/// other `%`-led line — macro definitions, conditionals (`%if`,
+/// `%ifdef`, `%else`, …), build-conditionals and bare macro
+/// invocations — is preamble content the scan reads past.
 const SECTION_HEADERS: &[&str] = &[
     "build",
     "changelog",
     "check",
     "clean",
-    "conf",
-    "configure",
     "description",
     "files",
     "generate_buildrequires",
     "install",
     "package",
-    "post",
-    "posttrans",
-    "postun",
-    "pre",
     "prep",
-    "pretrans",
+    "pre",
+    "post",
     "preun",
+    "postun",
+    "pretrans",
+    "posttrans",
     "trigger",
     "triggerin",
-    "triggerpostun",
+    "triggerprein",
     "triggerun",
-    "verify",
+    "triggerpostun",
+    "verifyscript",
+    "filetriggerin",
+    "filetrigger",
+    "filetriggerun",
+    "filetriggerpostun",
+    "transfiletriggerin",
+    "transfiletrigger",
+    "transfiletriggerun",
+    "transfiletriggerpostun",
 ];
 
 /// One segment of a [`NamePattern`].
@@ -805,6 +814,40 @@ mod name_patterns_tests {
                     %if \"%subset\" == \"systemd\"\nName: foo-systemd\n%endif\n\
                     Version: 1\n";
         assert_matches(text, &["foo", "foo-systemd"], &["foo-python", "bar"]);
+    }
+
+    #[test]
+    fn scan_stops_at_every_canonical_section() {
+        // Every section of the reference's set ends the scan: a
+        // `Name:` behind any of them is outside the preamble.
+        for sec in [
+            "verifyscript",
+            "triggerprein",
+            "filetriggerin",
+            "filetrigger",
+            "filetriggerun",
+            "filetriggerpostun",
+            "transfiletriggerin",
+            "transfiletrigger",
+            "transfiletriggerun",
+            "transfiletriggerpostun",
+        ] {
+            assert_eq!(
+                patterns(&format!("%{sec}\nName: late\n")),
+                None,
+                "%{sec} should end the scan"
+            );
+        }
+    }
+
+    #[test]
+    fn non_section_directives_do_not_end_the_scan() {
+        // `%configure` is a macro, `%verify` a `%files` attribute
+        // and `%conf` no directive at all: none of them is a section
+        // header, so the preamble runs past them.
+        assert_matches("%configure\nName: foo\n", &["foo"], &["bar"]);
+        assert_matches("%verify\nName: foo\n", &["foo"], &["bar"]);
+        assert_matches("%conf\nName: foo\n", &["foo"], &["bar"]);
     }
 
     #[test]
