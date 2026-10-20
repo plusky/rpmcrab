@@ -33,6 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
+      contents: read
       issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -61,7 +62,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/watch-upstream-configs.py --report-file /tmp/upstream-watch-report.md 2>&1 | tee /tmp/watch.log
-          grep '^watch-summary: ' /tmp/watch.log > /tmp/watch-summary.txt || true
+          grep '^watch-summary: ' /tmp/watch.log >> "$GITHUB_STEP_SUMMARY" || true
       - name: Open or update the tracking issue
         if: steps.watch.outputs.changed == 'true'
         env:
@@ -69,7 +70,7 @@ jobs:
         run: |
           set -euo pipefail
           title='Vendored distro configs are stale: upstream rpmlint moved'
-          existing=$(gh issue list --search "$title in:title state:open" --state open --json number --jq '.[0].number // empty')
+          existing=$(gh issue list --state open --limit 100 --json number,title | jq --arg t "$title" -r '.[] | select(.title == $t) | .number' | head -n 1)
           if [ -z "$existing" ]; then
             gh issue create --title "$title" --body-file /tmp/upstream-watch-report.md
           else
@@ -82,7 +83,7 @@ jobs:
         run: |
           set -euo pipefail
           title='Vendored distro configs are stale: upstream rpmlint moved'
-          existing=$(gh issue list --search "$title in:title state:open" --state open --json number --jq '.[0].number // empty')
+          existing=$(gh issue list --state open --limit 100 --json number,title | jq --arg t "$title" -r '.[] | select(.title == $t) | .number' | head -n 1)
           if [ -n "$existing" ]; then
             gh issue close "$existing" --comment 'The vendored pins match the upstream tips again; closing the drift watch.'
           fi
