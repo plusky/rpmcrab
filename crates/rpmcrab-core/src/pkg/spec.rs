@@ -515,18 +515,6 @@ fn expand_value(
     expand_items(&tokenise_value(value, depth), macros, depth, visiting)
 }
 
-/// Collapse a completed pattern set that contains an unconstrained
-/// pattern: the unconstrained alternative produces every name the
-/// other alternatives produce, so the set is the single unconstrained
-/// pattern. Keeps widened expansions from being enumerated further.
-fn collapse_unconstrained(patterns: Vec<NamePattern>) -> Vec<NamePattern> {
-    if patterns.iter().any(|p| p.is_unconstrained()) {
-        vec![NamePattern(vec![NameSegment::Any])]
-    } else {
-        patterns
-    }
-}
-
 /// Expand tokenised items into patterns by composing the items'
 /// alternatives in order.
 fn expand_items(
@@ -570,7 +558,7 @@ fn expand_items(
             return vec![NamePattern(vec![NameSegment::Any])];
         }
     }
-    collapse_unconstrained(patterns)
+    patterns
 }
 
 /// The patterns for one macro reference: each of the macro's preamble
@@ -613,7 +601,7 @@ fn macro_patterns(
     if out.len() > MAX_NAME_PATTERNS {
         return vec![NamePattern(vec![NameSegment::Any])];
     }
-    collapse_unconstrained(out.into_iter().collect())
+    out.into_iter().collect()
 }
 
 /// Concatenate two pattern sets pairwise, merging adjacent literal
@@ -1072,16 +1060,20 @@ mod name_patterns_tests {
     }
 
     #[test]
-    fn widened_expansions_collapse_to_one_unconstrained_pattern() {
-        // One undeterminable definition among concrete ones collapses
-        // the macro's set: the unconstrained alternative already
-        // produces every name the concrete ones do.
+    fn undeterminable_definitions_do_not_erase_concrete_alternatives() {
+        // One undeterminable definition among concrete ones: the
+        // concrete alternatives stay in the set alongside the
+        // unconstrained one — the verdict sets the unconstrained
+        // pattern aside, it does not erase the names the preamble
+        // does determine.
         let pats =
             patterns("%define v one\n%define v %(shell)\nName: %{v}\n").expect("patterns declared");
-        assert_eq!(pats.len(), 1);
-        assert!(pats[0].is_unconstrained());
+        assert_eq!(pats.len(), 2);
+        assert!(pats.iter().any(|p| p.matches("one")));
+        assert!(pats.iter().any(|p| p.is_unconstrained()));
 
-        // A chain deeper than the recursion budget widens the same way.
+        // A chain deeper than the recursion budget widens to the
+        // single unconstrained pattern.
         let mut text = String::from("%define m0 x\n");
         for n in 1..=12 {
             text.push_str(&format!("%define m{n} %{{m{}}}\n", n - 1));
@@ -1104,8 +1096,13 @@ mod name_patterns_tests {
         value.push_str(&"}".repeat(20_000));
         let text = format!("Name: {value}\n");
         let pats = patterns(&text).expect("patterns declared");
-        assert_eq!(pats.len(), 1);
-        assert!(pats[0].is_unconstrained());
+        // The widened set holds the unconstrained pattern; the only
+        // other alternative the nested conditionals contribute is
+        // the empty name (every condition false).
+        assert!(pats.iter().any(|p| p.is_unconstrained()));
+        assert!(pats
+            .iter()
+            .all(|p| p.is_unconstrained() || p.matches("")));
     }
 
     #[test]
