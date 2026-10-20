@@ -292,10 +292,7 @@ def test_provenance_strip_keeps_rest():
 
 def test_check_rs_files_returns_regen_set():
     """--check compares the manifest against the regenerated file set."""
-    import pathlib
-    import tempfile
-    d = pathlib.Path(tempfile.mkdtemp())
-    got = gen.check_rs_files(["a.toml", "b.toml"], d)
+    got = gen.check_rs_files(["a.toml", "b.toml"])
     assert got == ["a.toml", "b.toml"]
 
 
