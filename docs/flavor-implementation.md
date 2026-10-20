@@ -40,11 +40,15 @@ from Factory corpus content, applied at generation time and by the
 daily whitelist sync, so the vendored records carry the Factory
 hashes by construction.
 
-Two jobs keep the set current: `distro-config-sync` refreshes the
+Three jobs keep the set current: `distro-config-sync` refreshes the
 vendored files from upstream monthly, with the drift job comparing
-the tree against the generator's output at the pins; and
+the tree against the generator's output at the pins;
 `upstream-whitelist-sync` merges new whitelist stanzas from the
-upstream branch tip daily.
+upstream branch tip daily; and `upstream-config-watch` regenerates
+the set at the upstream tip weekly and reports the difference — the
+upstream commits in the pin range and the files a refresh rewrites —
+on a tracking issue, so upstream movement between refreshes is
+visible as it lands.
 
 ## Gating pattern
 
