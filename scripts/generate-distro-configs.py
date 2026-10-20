@@ -39,6 +39,29 @@ Usage:
                  GitHub (the pinned SHA must exist in it).
     --pin        override a pinned SHA for the refresh workflow; DATE is the
                  commit date (YYYY-MM-DD) used for the provenance stamp.
+
+Refresh procedure:
+    The vendored files are generator output end to end: a change to a
+    shipped file is made in this script (the delta tables or the
+    emission code) and regenerated, so the tree always matches what the
+    generator produces at the pins. The monthly distro-config-sync job
+    performs the refresh as a PR — it resolves the pins to the latest
+    upstream commits, regenerates, and opens the PR with the provenance
+    (old and new SHAs, prune log). A manual refresh runs the same steps
+    by hand:
+
+        scripts/generate-distro-configs.py --refresh
+        scripts/test_generate_distro_configs.py
+        UPDATE_SEVERITY_INVENTORY=1 cargo test -p rpmcrab-core \
+            --test severity_inventory
+
+    The generator test suite runs because a refresh re-derives the
+    vendored set from new upstream data; the severity inventory
+    regenerates because the vendored configs carry [Scoring] and
+    [SeverityOverrides] tables the inventory derives from. The weekly
+    upstream-config-watch job reports upstream movement between
+    refreshes — the upstream commits in the pin range and the vendored
+    files a refresh rewrites — on a tracking issue.
 """
 
 import argparse
