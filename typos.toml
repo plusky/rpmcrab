@@ -20,6 +20,9 @@ extend-exclude = [
   # Only the captured case bytes are excluded — the authored schema doc and
   # manifests under tests/parity/ stay in scope.
   "tests/parity/cases/**",
+  # The signature fixtures' public keys are generated key material:
+  # the ASCII armour is base64 data, not prose.
+  "tests/parity/pkg/inputs/signature-testkey*.asc",
 ]
 
 [default.extend-words]
