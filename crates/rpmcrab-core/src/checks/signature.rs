@@ -79,7 +79,15 @@ impl SignatureCheck {
         // read runs (NOKEY at warning, BAD at error); the structured
         // result carries the same information, so the read runs with
         // rpmlog masked down to critical. The mask is process-global,
-        // hence the serialisation across worker threads.
+        // hence the serialisation: verified reads run one at a time
+        // even under `-j` parallelism, and while one runs, librpm
+        // diagnostics from other checks running concurrently are
+        // masked along with it — rpmlog offers no per-read sink, so
+        // the global mask is the only way to keep the duplicate
+        // verdict text out of the report. The lock scopes to this
+        // check's verified reads only: other checks are not locked
+        // and keep running, and the lock is released as soon as the
+        // read returns.
         static VERIFY_LOCK: Mutex<()> = Mutex::new(());
         let _guard = VERIFY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _mask = RpmlogMask::hush();
@@ -288,17 +296,24 @@ fn issuer_of(sig: &Signature) -> Option<[u8; 8]> {
         let mut issuer = None;
         let mut from_fingerprint = None;
         for subpacket in area.iter() {
+            // A subpacket whose value cannot be read as an issuer is
+            // skipped, uniformly for both issuer kinds: it neither
+            // aborts the scan of the rest of the area nor panics, so
+            // a later well-formed subpacket still provides the issuer.
             match subpacket.value() {
                 SubpacketValue::Issuer(key_id) => {
-                    if issuer.is_none() {
-                        issuer = Some(key_id.as_bytes().try_into().ok()?);
+                    if issuer.is_none()
+                        && let Ok(key_id) = key_id.as_bytes().try_into()
+                    {
+                        issuer = Some(key_id);
                     }
                 }
                 SubpacketValue::IssuerFingerprint(fingerprint) => {
                     let bytes = fingerprint.as_bytes();
-                    if bytes.len() >= 8 {
-                        from_fingerprint =
-                            Some(bytes[bytes.len() - 8..].try_into().expect("8 bytes"));
+                    if bytes.len() >= 8
+                        && let Ok(key_id) = bytes[bytes.len() - 8..].try_into()
+                    {
+                        from_fingerprint = Some(key_id);
                     }
                 }
                 _ => {}
@@ -331,18 +346,26 @@ fn key_id_string(issuer: &[u8; 8]) -> String {
         .collect()
 }
 
-/// The details an `unknown-key` report carries: the first issuer's
-/// key ID when a packet provides one, and no detail when none does
-/// — the reference's NOKEY pattern fires with an empty key ID for
-/// an issuer-less signature too, so the report in `check` is
-/// unconditional and only its detail varies.
+/// The details `unknown-key` reports carry: one key ID per distinct
+/// issuer among the parsed packets, in packet order, and no detail
+/// when no packet provides an issuer — the reference's NOKEY pattern
+/// fires with an empty key ID for an issuer-less signature too, so
+/// the report in `check` is unconditional and only its details vary.
+/// A package can carry several signatures; the verified read's
+/// `NoKey` verdict does not say which signature's key is missing, so
+/// each issuer gets its own report in `check` and the missing key is
+/// never silently attributed to the first packet's issuer alone.
 fn unknown_key_details(parsed: &[Option<SigPacket>]) -> Vec<String> {
-    parsed
-        .iter()
-        .flatten()
-        .find_map(|packet| packet.issuer)
-        .map(|issuer| vec![key_id_string(&issuer)])
-        .unwrap_or_default()
+    let mut details = Vec::new();
+    for packet in parsed.iter().flatten() {
+        if let Some(issuer) = packet.issuer {
+            let key_id = key_id_string(&issuer);
+            if !details.contains(&key_id) {
+                details.push(key_id);
+            }
+        }
+    }
+    details
 }
 
 impl Check for SignatureCheck {
@@ -378,9 +401,17 @@ impl Check for SignatureCheck {
                 if any_corrupt {
                     add_info(out, Level::Error, pkg, "invalid-signature", &[]);
                 } else {
-                    let detail_strings = unknown_key_details(&parsed);
-                    let details: Vec<&str> = detail_strings.iter().map(String::as_str).collect();
-                    add_info(out, Level::Error, pkg, "unknown-key", &details);
+                    let details = unknown_key_details(&parsed);
+                    if details.is_empty() {
+                        add_info(out, Level::Error, pkg, "unknown-key", &[]);
+                    } else {
+                        // One report per distinct issuer, mirroring
+                        // the one NOKEY line per signature `rpm -Kv`
+                        // prints.
+                        for detail in &details {
+                            add_info(out, Level::Error, pkg, "unknown-key", &[detail.as_str()]);
+                        }
+                    }
                 }
             }
             Verdict::Failed => {
@@ -1019,6 +1050,24 @@ mod tests {
             }),
         ];
         assert_eq!(unknown_key_details(&mixed), ["05060708".to_string()]);
+        // Several signatures: every distinct issuer is named, in
+        // packet order, with duplicates collapsed — the missing key
+        // is not attributed to the first packet alone.
+        let multi = [
+            Some(SigPacket {
+                issuer: Some([1, 2, 3, 4, 5, 6, 7, 8]),
+            }),
+            Some(SigPacket {
+                issuer: Some([0xaa; 8]),
+            }),
+            Some(SigPacket {
+                issuer: Some([1, 2, 3, 4, 5, 6, 7, 8]),
+            }),
+        ];
+        assert_eq!(
+            unknown_key_details(&multi),
+            ["05060708".to_string(), "aaaaaaaa".to_string()]
+        );
     }
 
     #[test]
