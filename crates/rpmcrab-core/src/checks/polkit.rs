@@ -7,7 +7,14 @@
 //! The reference reads the `polkit-default-privs` standard profile from the
 //! live filesystem (`PolkitPrivsFiles`, default
 //! `/usr/etc/polkit-default-privs/profiles/standard`); an action whose id is
-//! listed there is whitelisted.
+//! listed there is whitelisted. The untracked verdict is emitted when at
+//! least one configured privs file was read: a file that reads as empty or
+//! holds no usable entries still establishes the tracking set (an empty
+//! one), so an action the data does not list draws the verdict. When no
+//! configured file could be read at all, the distro's tracking set is
+//! unknown on this host, so the check reports only the verdicts decidable
+//! from the package itself (ghost files, malformed XML, and defaults that
+//! grant access without admin authentication).
 
 use std::collections::HashMap;
 
@@ -36,6 +43,10 @@ struct OpenAction {
 
 pub struct PolkitCheck {
     privs: HashMap<String, String>,
+    /// Whether any configured privs file was successfully read. A
+    /// file that was read counts even when it yields no entries:
+    /// its content establishes the tracking set.
+    privs_read: bool,
 }
 
 impl PolkitCheck {
@@ -51,10 +62,11 @@ impl PolkitCheck {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_else(|| vec!["/usr/etc/polkit-default-privs/profiles/standard".to_string()]);
+        let mut privs_read = false;
         for filename in &files {
-            Self::parse_privs_file(filename, &mut privs);
+            privs_read |= Self::parse_privs_file(filename, &mut privs);
         }
-        Self { privs }
+        Self { privs, privs_read }
     }
 
     /// Parse a `polkit-default-privs` profile: `action value` per line,
@@ -62,9 +74,12 @@ impl PolkitCheck {
     /// and both line ends are trimmed; both are deliberate divergences from
     /// the reference (see divergences.toml), which crashes the whole run on
     /// a one-token line and whitelists an empty action id for indented ones.
-    fn parse_privs_file(filename: &str, privs: &mut HashMap<String, String>) {
+    /// Returns whether the file was read; a file that was read
+    /// counts towards the tracking set even when no line in it
+    /// yields an entry.
+    fn parse_privs_file(filename: &str, privs: &mut HashMap<String, String>) -> bool {
         let Ok(content) = std::fs::read_to_string(filename) else {
-            return;
+            return false;
         };
         for line in content.lines() {
             let line = line.split('#').next().unwrap_or("").trim();
@@ -76,6 +91,7 @@ impl PolkitCheck {
                 privs.insert(parts[0].to_string(), parts[1].to_string());
             }
         }
+        true
     }
 
     /// Check one `<action>` element. Returns the finding, if any.
@@ -110,6 +126,14 @@ impl PolkitCheck {
         );
         if found_unauthorized {
             Some((Level::Error, "polkit-user-privilege".to_string(), detail))
+        } else if !self.privs_read {
+            // No configured privs file could be read: whether this
+            // action is tracked is a fact about the lint host's data,
+            // not about the package, so the untracked verdict is not
+            // decidable here. The unauthorised verdict above is
+            // unaffected — it is decidable from the action's own
+            // defaults alone.
+            None
         } else {
             Some((
                 Level::Error,
@@ -292,17 +316,64 @@ mod tests {
     use crate::color::Color;
     use crate::pkg::pkgfile::PkgFile;
 
+    /// A check with privs data loaded (one unrelated tracked
+    /// action): actions absent from the data draw the untracked
+    /// verdict.
     fn check() -> PolkitCheck {
+        let mut privs = HashMap::new();
+        privs.insert("org.example.tracked".to_string(), "auth_admin".to_string());
+        PolkitCheck {
+            privs,
+            privs_read: true,
+        }
+    }
+
+    /// A check that read no configured privs file — no configured
+    /// file existed or was readable: the untracked verdict is not
+    /// decidable in this state.
+    fn check_no_data() -> PolkitCheck {
         PolkitCheck {
             privs: HashMap::new(),
+            privs_read: false,
         }
+    }
+
+    /// A check whose configured privs file was read and yielded no
+    /// entries — an empty file, or one holding only comments and
+    /// unusable lines: the read establishes the tracking set as
+    /// empty, so actions the data does not list draw the untracked
+    /// verdict.
+    fn check_empty_profile() -> PolkitCheck {
+        PolkitCheck {
+            privs: HashMap::new(),
+            privs_read: true,
+        }
+    }
+
+    /// A check built through the constructor with `files` as its
+    /// configured `PolkitPrivsFiles`.
+    fn check_from_privs_files(files: &[&std::path::Path]) -> PolkitCheck {
+        let mut config = Config::default();
+        config.configuration.insert(
+            "PolkitPrivsFiles".to_string(),
+            toml::Value::Array(
+                files
+                    .iter()
+                    .map(|f| toml::Value::String(f.to_str().unwrap().to_string()))
+                    .collect(),
+            ),
+        );
+        PolkitCheck::new(&config)
     }
 
     #[test]
     fn whitelisted_action_is_quiet() {
         let mut privs = HashMap::new();
         privs.insert("org.foo.bar".to_string(), "auth_admin".to_string());
-        let check = PolkitCheck { privs };
+        let check = PolkitCheck {
+            privs,
+            privs_read: true,
+        };
         assert!(check.check_action("org.foo.bar", &HashMap::new()).is_none());
     }
 
@@ -334,6 +405,147 @@ mod tests {
             .check_action("org.foo.baz", &defaults)
             .expect("finding");
         assert_eq!(finding, "polkit-untracked-privilege");
+    }
+
+    #[test]
+    fn no_privs_data_loaded_untracked_is_silent() {
+        // With no configured file read, an action the data does
+        // not list draws no verdict: neither the
+        // all-`no` defaults shape nor the auth_admin shape.
+        assert!(
+            check_no_data()
+                .check_action("org.foo.baz", &HashMap::new())
+                .is_none()
+        );
+        let mut defaults = HashMap::new();
+        defaults.insert("allow_any".to_string(), "auth_admin".to_string());
+        assert!(
+            check_no_data()
+                .check_action("org.foo.baz", &defaults)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn read_but_empty_profile_reports_untracked() {
+        // A profile that was read and yielded no entries establishes
+        // an empty tracking set: an unlisted action with decidable
+        // defaults draws the untracked verdict, in both the all-`no`
+        // shape and the auth_admin shape.
+        let (_, finding, _) = check_empty_profile()
+            .check_action("org.foo.baz", &HashMap::new())
+            .expect("finding");
+        assert_eq!(finding, "polkit-untracked-privilege");
+        let mut defaults = HashMap::new();
+        defaults.insert("allow_any".to_string(), "auth_admin".to_string());
+        let (_, finding, _) = check_empty_profile()
+            .check_action("org.foo.baz", &defaults)
+            .expect("finding");
+        assert_eq!(finding, "polkit-untracked-privilege");
+    }
+
+    #[test]
+    fn empty_privs_file_via_config_reports_untracked() {
+        // Through the constructor: an empty configured file and a
+        // file holding only a comment and a one-token line both
+        // count as read, so each reports untracked on its own, and
+        // a readable file counts alongside an unreadable one.
+        let dir = std::env::temp_dir();
+        let empty = dir.join("rpmcrab-polkit-empty.privs");
+        std::fs::write(&empty, "").unwrap();
+        let garbage = dir.join("rpmcrab-polkit-garbage.privs");
+        std::fs::write(&garbage, "# only a comment\none-token-line\n\n").unwrap();
+        let missing = dir.join("rpmcrab-polkit-absent.privs");
+        std::fs::remove_file(&missing).ok();
+        for files in [
+            vec![empty.as_path()],
+            vec![garbage.as_path()],
+            vec![missing.as_path(), empty.as_path()],
+        ] {
+            let check = check_from_privs_files(&files);
+            assert!(check.privs.is_empty(), "privs: {:?}", check.privs);
+            let (_, finding, _) = check
+                .check_action("org.foo.baz", &HashMap::new())
+                .expect("finding");
+            assert_eq!(finding, "polkit-untracked-privilege", "files: {files:?}");
+        }
+        std::fs::remove_file(&empty).ok();
+        std::fs::remove_file(&garbage).ok();
+    }
+
+    #[test]
+    fn unreadable_privs_files_via_config_are_silent() {
+        // Through the constructor: when no configured file can be
+        // read, the untracked verdict stays silent.
+        let dir = std::env::temp_dir();
+        let missing = dir.join("rpmcrab-polkit-absent2.privs");
+        std::fs::remove_file(&missing).ok();
+        let check = check_from_privs_files(&[missing.as_path()]);
+        assert!(check.check_action("org.foo.baz", &HashMap::new()).is_none());
+    }
+
+    #[test]
+    fn privs_file_read_tracking_distinguishes_missing_from_empty() {
+        let dir = std::env::temp_dir();
+        let missing = dir.join("rpmcrab-polkit-absent3.privs");
+        std::fs::remove_file(&missing).ok();
+        let mut privs = HashMap::new();
+        assert!(!PolkitCheck::parse_privs_file(
+            missing.to_str().unwrap(),
+            &mut privs
+        ));
+        let empty = dir.join("rpmcrab-polkit-readtrack.privs");
+        std::fs::write(&empty, "").unwrap();
+        assert!(PolkitCheck::parse_privs_file(
+            empty.to_str().unwrap(),
+            &mut privs
+        ));
+        assert!(privs.is_empty(), "privs: {privs:?}");
+        std::fs::remove_file(&empty).ok();
+    }
+
+    #[test]
+    fn no_privs_data_loaded_still_flags_unauthorised() {
+        // The unauthorised verdict is decidable from the action's
+        // own defaults alone, so it fires with no file read too
+        // (the w6-polkit parity shape: auth_self defaults on a host
+        // whose profile the reference expects to be installed).
+        let mut defaults = HashMap::new();
+        defaults.insert("allow_any".to_string(), "yes".to_string());
+        let (level, finding, _) = check_no_data()
+            .check_action("org.foo.baz", &defaults)
+            .expect("finding");
+        assert_eq!(level, Level::Error);
+        assert_eq!(finding, "polkit-user-privilege");
+    }
+
+    #[test]
+    fn no_privs_data_loaded_check_binary_reports_nothing() {
+        // Through the entry point: a package shipping a plain
+        // action yields no findings at all when no privs file
+        // could be read.
+        let dir = std::env::temp_dir();
+        let path = dir.join("rpmcrab-polkit-nodata.policy");
+        std::fs::write(
+            &path,
+            "<policyconfig><action id=\"org.foo.plain\"></action></policyconfig>",
+        )
+        .unwrap();
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        let name = "/usr/share/polkit-1/actions/org.foo.policy";
+        pkg.files = vec![PkgFile {
+            name: name.to_string(),
+            path: path.to_str().unwrap().to_string(),
+            ..Default::default()
+        }];
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = check_no_data();
+        check.check_binary(&pkg, &config, &mut out);
+        std::fs::remove_file(&path).ok();
+        assert!(out.results().is_empty(), "results: {:?}", out.results());
     }
 
     #[test]

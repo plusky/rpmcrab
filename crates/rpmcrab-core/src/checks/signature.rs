@@ -435,9 +435,13 @@ mod tests {
 
     /// The low-32-bit key ID of the fixture signing key, as printed by
     /// `rpm -Kv`. Regenerating the fixtures with
-    /// `build-signature-fixtures.sh` creates a new key; the script
-    /// prints the new value to put here.
-    const EXPECTED_KEY_ID: &str = "fc85304d";
+    /// `build-signature-fixtures.sh` creates new keys; the script
+    /// prints the new values to put here.
+    const EXPECTED_KEY_ID: &str = "1e2d069b";
+
+    /// The low-32-bit key ID of the second fixture signing key: the
+    /// stacked fixture carries one signature from each fixture key.
+    const EXPECTED_KEY_ID_2: &str = "8e96b3bf";
 
     fn inputs() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/parity/pkg/inputs")
@@ -511,6 +515,34 @@ mod tests {
             results[0].1.contains(EXPECTED_KEY_ID),
             "key id detail: {}",
             results[0].1
+        );
+    }
+
+    #[test]
+    fn stacked_signatures_report_each_issuer() {
+        // The stacked fixture carries signatures from two distinct
+        // keys (the header signature at tag 268 from the fixture
+        // key, the legacy PGP signature at tag 1002 from the second
+        // key) and the keyring holds neither: one `unknown-key`
+        // report per distinct issuer, each with its own key ID, in
+        // packet order — a regression to first-issuer-only
+        // reporting fails this with a single report.
+        let pkg = fixture_pkg("signature-stacked-1.0-1.noarch.rpm");
+        let results = run_check(&pkg, KeyringChoice::Empty);
+        assert_eq!(
+            finding_names(&results),
+            ["unknown-key", "unknown-key"],
+            "{results:?}"
+        );
+        assert!(
+            results[0].1.contains(EXPECTED_KEY_ID),
+            "first detail: {}",
+            results[0].1
+        );
+        assert!(
+            results[1].1.contains(EXPECTED_KEY_ID_2),
+            "second detail: {}",
+            results[1].1
         );
     }
 

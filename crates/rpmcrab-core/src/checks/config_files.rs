@@ -24,13 +24,17 @@ impl ConfigFilesCheck {
 
     /// Returns the findings for `filename` with their levels, or an
     /// empty vec when it is fine. `noreplace` indicates whether the
-    /// file has the noreplace flag.
-    fn check_one(filename: &str, noreplace: bool) -> Vec<(&'static str, Level)> {
+    /// file has the noreplace flag. A `ghost` entry ships no vendor
+    /// content, so the noreplace finding does not apply to it: the
+    /// flag protects a shipped default against local edits, and a
+    /// ghost has no shipped default. The placement finding still
+    /// applies — it judges the `%config` mark itself.
+    fn check_one(filename: &str, noreplace: bool, ghost: bool) -> Vec<(&'static str, Level)> {
         let mut out = Vec::new();
         if !filename.starts_with("/etc/") && !filename.starts_with("/var/") {
             out.push(("non-etc-or-var-file-marked-as-conffile", Level::Info));
         }
-        if !noreplace {
+        if !noreplace && !ghost {
             out.push(("conffile-without-noreplace-flag", Level::Warning));
         }
         out
@@ -52,9 +56,11 @@ impl Check for ConfigFilesCheck {
         // `pkg.config_files` lists the paths; `noreplace_files` lists those
         // with the flag. Mirror the reference's two loops over the same list.
         for filename in &pkg.config_files {
-            for (finding, level) in
-                Self::check_one(filename, pkg.noreplace_files.contains(filename))
-            {
+            for (finding, level) in Self::check_one(
+                filename,
+                pkg.noreplace_files.contains(filename),
+                pkg.ghost_files.contains(filename),
+            ) {
                 add_info(out, level, pkg, finding, &[filename]);
             }
         }
@@ -84,17 +90,17 @@ mod tests {
 
     #[test]
     fn etc_noreplace_is_quiet() {
-        assert!(ConfigFilesCheck::check_one("/etc/foo.conf", true).is_empty());
+        assert!(ConfigFilesCheck::check_one("/etc/foo.conf", true, false).is_empty());
     }
 
     #[test]
     fn var_noreplace_is_quiet() {
-        assert!(ConfigFilesCheck::check_one("/var/lib/foo.conf", true).is_empty());
+        assert!(ConfigFilesCheck::check_one("/var/lib/foo.conf", true, false).is_empty());
     }
 
     #[test]
     fn non_etc_var_is_flagged() {
-        let findings = ConfigFilesCheck::check_one("/usr/share/foo.conf", true);
+        let findings = ConfigFilesCheck::check_one("/usr/share/foo.conf", true, false);
         assert_eq!(
             findings,
             vec![("non-etc-or-var-file-marked-as-conffile", Level::Info)]
@@ -103,7 +109,7 @@ mod tests {
 
     #[test]
     fn missing_noreplace_is_flagged() {
-        let findings = ConfigFilesCheck::check_one("/etc/foo.conf", false);
+        let findings = ConfigFilesCheck::check_one("/etc/foo.conf", false, false);
         assert_eq!(
             findings,
             vec![("conffile-without-noreplace-flag", Level::Warning)]
@@ -111,8 +117,29 @@ mod tests {
     }
 
     #[test]
+    fn ghost_conffile_without_noreplace_is_quiet() {
+        // A %ghost %config entry ships no vendor content: there is
+        // no shipped default for noreplace to protect, so the
+        // missing flag is not a finding (the apparmor-profiles
+        // shape: dozens of %ghost %config placeholders under
+        // /etc/apparmor.d/local).
+        assert!(ConfigFilesCheck::check_one("/etc/foo.conf", false, true).is_empty());
+    }
+
+    #[test]
+    fn ghost_conffile_outside_etc_reports_placement_only() {
+        // Only the noreplace finding is ghost-exempt: the placement
+        // finding judges the %config mark itself and still fires.
+        let findings = ConfigFilesCheck::check_one("/opt/foo.conf", false, true);
+        assert_eq!(
+            findings,
+            vec![("non-etc-or-var-file-marked-as-conffile", Level::Info)]
+        );
+    }
+
+    #[test]
     fn both_problems_both_findings() {
-        let findings = ConfigFilesCheck::check_one("/opt/foo.conf", false);
+        let findings = ConfigFilesCheck::check_one("/opt/foo.conf", false, false);
         assert_eq!(
             findings,
             vec![
@@ -146,6 +173,35 @@ mod tests {
             "expected conffile-without-noreplace-flag in {names:?}"
         );
     }
+    #[test]
+    fn check_binary_entry_point_skips_ghost_conffiles() {
+        // Kills the ghost-blind glue mutant: `check_binary` must
+        // consult `pkg.ghost_files`, so the ghost conffile without
+        // noreplace stays quiet while the real one beside it fires.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
+        pkg.config_files = vec!["/etc/ghost.conf".to_string(), "/etc/real.conf".to_string()];
+        pkg.noreplace_files = vec![];
+        pkg.ghost_files = vec!["/etc/ghost.conf".to_string()];
+        pkg.files = vec![];
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = ConfigFilesCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let hits: Vec<&(String, String)> = out
+            .results()
+            .iter()
+            .filter(|(n, _)| n == "conffile-without-noreplace-flag")
+            .collect();
+        assert_eq!(hits.len(), 1, "results: {:?}", out.results());
+        assert!(
+            hits[0].1.contains("/etc/real.conf"),
+            "detail: {}",
+            hits[0].1
+        );
+    }
+
     #[test]
     fn check_binary_entry_point_reports_usr_etc_conffile() {
         // Kills the neutered-wiring mutant: the loop over `pkg.files`
