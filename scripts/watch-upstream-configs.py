@@ -158,7 +158,7 @@ def commits_in_range(old, new, ref_dir):
             capture_output=True,
             text=True,
             check=True,
-        ).stdout.split()
+        ).stdout.splitlines()
         return commits, sorted(files), None, len(commits)
     url = (
         f"https://api.github.com/repos/{gen.UPSTREAM_REPO}"
@@ -362,8 +362,7 @@ def render_report(movements, drift):
     if shown < len(drift):
         lines.append(
             f"\nDiff detail for the remaining {len(drift) - shown} file(s) "
-            "is in the workflow run log; the refresh PR carries the full "
-            "diff."
+            "is not shown here; the refresh PR carries the full diff."
         )
     lines += [
         "",
