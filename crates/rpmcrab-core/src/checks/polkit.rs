@@ -7,7 +7,11 @@
 //! The reference reads the `polkit-default-privs` standard profile from the
 //! live filesystem (`PolkitPrivsFiles`, default
 //! `/usr/etc/polkit-default-privs/profiles/standard`); an action whose id is
-//! listed there is whitelisted.
+//! listed there is whitelisted. The untracked verdict is emitted when privs
+//! data was loaded: with no entries loaded from any configured file, the
+//! distro's tracking set is unknown on this host, so the check reports only
+//! the verdicts decidable from the package itself (ghost files, malformed
+//! XML, and defaults that grant access without admin authentication).
 
 use std::collections::HashMap;
 
@@ -110,6 +114,14 @@ impl PolkitCheck {
         );
         if found_unauthorized {
             Some((Level::Error, "polkit-user-privilege".to_string(), detail))
+        } else if self.privs.is_empty() {
+            // No privs entries were loaded from any configured
+            // source: whether this action is tracked is a fact about
+            // the lint host's data, not about the package, so the
+            // untracked verdict is not decidable here. The
+            // unauthorised verdict above is unaffected — it is
+            // decidable from the action's own defaults alone.
+            None
         } else {
             Some((
                 Level::Error,
@@ -292,7 +304,19 @@ mod tests {
     use crate::color::Color;
     use crate::pkg::pkgfile::PkgFile;
 
+    /// A check with privs data loaded (one unrelated tracked
+    /// action): actions absent from the data draw the untracked
+    /// verdict.
     fn check() -> PolkitCheck {
+        let mut privs = HashMap::new();
+        privs.insert("org.example.tracked".to_string(), "auth_admin".to_string());
+        PolkitCheck { privs }
+    }
+
+    /// A check with no privs data loaded at all — no configured
+    /// file existed or was readable: the untracked verdict is not
+    /// decidable in this state.
+    fn check_no_data() -> PolkitCheck {
         PolkitCheck {
             privs: HashMap::new(),
         }
@@ -334,6 +358,69 @@ mod tests {
             .check_action("org.foo.baz", &defaults)
             .expect("finding");
         assert_eq!(finding, "polkit-untracked-privilege");
+    }
+
+    #[test]
+    fn no_privs_data_loaded_untracked_is_silent() {
+        // With no entries loaded from any source, an action the
+        // (absent) data does not list draws no verdict: neither the
+        // all-`no` defaults shape nor the auth_admin shape.
+        assert!(
+            check_no_data()
+                .check_action("org.foo.baz", &HashMap::new())
+                .is_none()
+        );
+        let mut defaults = HashMap::new();
+        defaults.insert("allow_any".to_string(), "auth_admin".to_string());
+        assert!(
+            check_no_data()
+                .check_action("org.foo.baz", &defaults)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn no_privs_data_loaded_still_flags_unauthorised() {
+        // The unauthorised verdict is decidable from the action's
+        // own defaults alone, so it fires with no data loaded too
+        // (the w6-polkit parity shape: auth_self defaults on a host
+        // whose profile the reference expects to be installed).
+        let mut defaults = HashMap::new();
+        defaults.insert("allow_any".to_string(), "yes".to_string());
+        let (level, finding, _) = check_no_data()
+            .check_action("org.foo.baz", &defaults)
+            .expect("finding");
+        assert_eq!(level, Level::Error);
+        assert_eq!(finding, "polkit-user-privilege");
+    }
+
+    #[test]
+    fn no_privs_data_loaded_check_binary_reports_nothing() {
+        // Through the entry point: a package shipping a plain
+        // action yields no findings at all when no privs data
+        // could be loaded.
+        let dir = std::env::temp_dir();
+        let path = dir.join("rpmcrab-polkit-nodata.policy");
+        std::fs::write(
+            &path,
+            "<policyconfig><action id=\"org.foo.plain\"></action></policyconfig>",
+        )
+        .unwrap();
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        let name = "/usr/share/polkit-1/actions/org.foo.policy";
+        pkg.files = vec![PkgFile {
+            name: name.to_string(),
+            path: path.to_str().unwrap().to_string(),
+            ..Default::default()
+        }];
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = check_no_data();
+        check.check_binary(&pkg, &config, &mut out);
+        std::fs::remove_file(&path).ok();
+        assert!(out.results().is_empty(), "results: {:?}", out.results());
     }
 
     #[test]
