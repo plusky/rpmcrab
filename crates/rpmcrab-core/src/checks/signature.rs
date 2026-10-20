@@ -12,6 +12,13 @@
 //! read from the signature packet's issuer field and formatted as the
 //! low 32 bits in lowercase hex, the way `rpm -Kv` prints it.
 //!
+//! Extraction reads both signature storage forms: the classic
+//! signature-header tags, each carrying one raw signature packet,
+//! and the v6 `RPMSIGTAG_OPENPGP` entry, a string array whose
+//! strings are base64-encoded signature packets. A container string
+//! whose packet is already collected is not collected again, so a
+//! signature stored in both forms is classified once.
+//!
 //! Signature packets are parsed with sequoia-openpgp's low-level
 //! packet parser: the parse classifies each signature blob — a
 //! structurally invalid packet is the `invalid-signature` case —
@@ -22,6 +29,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Mutex;
 
+use base64::Engine as _;
 use librpm::keyring::Keyring;
 use librpm::verify::{VerificationFlags, VerifyOptions};
 use librpm::{PackageHeader, RpmErrorKind};
@@ -151,6 +159,11 @@ impl Drop for RpmlogMask {
 /// (1005) and `RPMSIGTAG_PGP5` (1006).
 const SIG_TAGS: [u32; 5] = [267, 268, 1002, 1005, 1006];
 
+/// The v6 signature entry: `RPMSIGTAG_OPENPGP` (278), a STRING_ARRAY
+/// whose strings are base64-encoded OpenPGP signature packets, one
+/// string per signature — the form `rpmsign` from rpm 6.x writes.
+const OPENPGP_TAG: u32 = 278;
+
 /// The RPM lead magic (`0xEDABEEDB`).
 const LEAD_MAGIC: [u8; 4] = [0xed, 0xab, 0xee, 0xdb];
 
@@ -169,6 +182,13 @@ const MAX_BLOB_BYTES: usize = 65_536;
 /// The total size cap across all signature blobs in one header: the
 /// cap bounds the total read work for one package.
 const MAX_TOTAL_BLOB_BYTES: usize = 1_048_576;
+
+/// The raw-text size cap for one `RPMSIGTAG_OPENPGP` entry: base64
+/// text runs 4/3 the size of the packets it encodes, so an entry
+/// whose text exceeds twice the total blob cap would decode past
+/// that cap anyway; the bound keeps the entry's read in the same
+/// order as the decoded data it can yield.
+const MAX_CONTAINER_BYTES: usize = 2 * MAX_TOTAL_BLOB_BYTES;
 
 /// The signature blobs read from a package's signature header, plus
 /// the header's signature presence: `has_entries` records that the
@@ -221,6 +241,20 @@ fn signature_blobs(path: &Path) -> SignatureBlobs {
         let entry_type = be_u32(&entry[4..8]);
         let offset = be_u32(&entry[8..12]) as usize;
         let count = be_u32(&entry[12..16]) as usize;
+        if tag == OPENPGP_TAG && entry_type == 8 {
+            // Type 8 is STRING_ARRAY; for the OPENPGP entry the
+            // count is the number of base64 strings.
+            read_openpgp_entry(
+                &mut file,
+                store_start,
+                store_size,
+                offset,
+                count,
+                &mut total_bytes,
+                &mut result,
+            );
+            continue;
+        }
         // Type 7 is BIN; for BIN entries the count is a byte count.
         if !SIG_TAGS.contains(&tag) || entry_type != 7 {
             continue;
@@ -258,6 +292,65 @@ fn signature_blobs(path: &Path) -> SignatureBlobs {
         }
     }
     result
+}
+
+/// Read one `RPMSIGTAG_OPENPGP` entry: `count` NUL-terminated base64
+/// strings starting at `offset` in the header store. Each string
+/// decodes to one signature packet, which joins the collected blobs
+/// unless the identical packet is already there. A string that
+/// does not terminate within the entry's readable span, is not valid
+/// base64, or decodes past a size cap counts toward the entry's
+/// unreadable side, the same outcome an unreadable classic entry
+/// produces.
+fn read_openpgp_entry(
+    file: &mut File,
+    store_start: u64,
+    store_size: usize,
+    offset: usize,
+    count: usize,
+    total_bytes: &mut usize,
+    result: &mut SignatureBlobs,
+) {
+    result.has_entries = true;
+    if offset > store_size {
+        result.has_unreadable = true;
+        return;
+    }
+    let span = (store_size - offset).min(MAX_CONTAINER_BYTES);
+    let mut raw = vec![0u8; span];
+    if file
+        .seek(SeekFrom::Start(store_start + offset as u64))
+        .is_err()
+        || file.read_exact(&mut raw).is_err()
+    {
+        result.has_unreadable = true;
+        return;
+    }
+    let mut pos = 0usize;
+    for _ in 0..count {
+        let Some(nul) = raw[pos..].iter().position(|&b| b == 0) else {
+            result.has_unreadable = true;
+            return;
+        };
+        let text = &raw[pos..pos + nul];
+        pos += nul + 1;
+        let Ok(packet) = base64::engine::general_purpose::STANDARD.decode(text) else {
+            result.has_unreadable = true;
+            continue;
+        };
+        if packet.len() > MAX_BLOB_BYTES {
+            result.has_unreadable = true;
+            continue;
+        }
+        if total_bytes.saturating_add(packet.len()) > MAX_TOTAL_BLOB_BYTES {
+            result.has_unreadable = true;
+            return;
+        }
+        *total_bytes += packet.len();
+        if !result.blobs.contains(&packet) {
+            result.blobs.push(packet);
+        }
+    }
 }
 
 /// A parsed OpenPGP signature packet.
@@ -443,6 +536,16 @@ mod tests {
     /// stacked fixture carries one signature from each fixture key.
     const EXPECTED_KEY_ID_2: &str = "7cbec8b5";
 
+    /// The low-32-bit key ID of the first OPENPGP fixture signing
+    /// key, as the check reports it. Regenerating the fixtures with
+    /// `build-signature-openpgp-fixtures.sh` creates new keys; the
+    /// script prints the new values to put here.
+    const EXPECTED_OPENPGP_KEY_ID: &str = "3d3f5948";
+
+    /// The low-32-bit key ID of the second OPENPGP fixture signing
+    /// key, which signs only the dual-signature fixture.
+    const EXPECTED_OPENPGP_KEY2_ID: &str = "c96e0115";
+
     fn inputs() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/parity/pkg/inputs")
     }
@@ -459,12 +562,7 @@ mod tests {
 
     /// A keyring holding only the fixture signing key.
     fn test_keyring() -> Keyring {
-        let raw = std::fs::read(inputs().join("signature-testkey.gpg")).expect("read test key");
-        let mut keyring = Keyring::new();
-        keyring
-            .add_key(&PubKey::new(&raw).expect("test key parses"))
-            .expect("test key added");
-        keyring
+        keyring_with(&["signature-testkey.gpg"])
     }
 
     /// Which keyring a test run verifies against.
@@ -477,12 +575,13 @@ mod tests {
         System,
     }
 
+    /// librpm's OpenPGP backend keeps process-global state, and
+    /// concurrent first use from several test threads can corrupt a
+    /// verdict, so keyring construction and the verified read run
+    /// serially within this module.
+    static LOCK: Mutex<()> = Mutex::new(());
+
     fn run_check(pkg: &Pkg, choice: KeyringChoice) -> Vec<(String, String)> {
-        // librpm's OpenPGP backend keeps process-global state, and
-        // concurrent first use from several test threads can corrupt a
-        // verdict, so keyring construction and the verified read run
-        // serially within this module.
-        static LOCK: Mutex<()> = Mutex::new(());
         let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let config = Config::default();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
@@ -684,6 +783,20 @@ mod tests {
         entries: &[(u32, u32, u32)],
         store: &[u8],
     ) -> (tempfile::TempDir, std::path::PathBuf) {
+        let typed: Vec<(u32, u32, u32, u32)> = entries
+            .iter()
+            .map(|&(tag, offset, count)| (tag, 7, offset, count))
+            .collect();
+        write_typed_signature_header(&typed, store)
+    }
+
+    /// Write a synthetic package like `write_signature_header`, with
+    /// an explicit entry type per entry: `entries` are
+    /// `(tag, type, offset, count)`.
+    fn write_typed_signature_header(
+        entries: &[(u32, u32, u32, u32)],
+        store: &[u8],
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
         use std::io::Write as _;
         let dir = tempfile::tempdir().expect("tmpdir");
         let path = dir.path().join("synthetic.rpm");
@@ -696,9 +809,9 @@ mod tests {
         preamble[8..12].copy_from_slice(&(entries.len() as u32).to_be_bytes());
         preamble[12..16].copy_from_slice(&(store.len() as u32).to_be_bytes());
         data.extend_from_slice(&preamble);
-        for &(tag, offset, count) in entries {
+        for &(tag, entry_type, offset, count) in entries {
             data.extend_from_slice(&tag.to_be_bytes());
-            data.extend_from_slice(&7u32.to_be_bytes());
+            data.extend_from_slice(&entry_type.to_be_bytes());
             data.extend_from_slice(&offset.to_be_bytes());
             data.extend_from_slice(&count.to_be_bytes());
         }
@@ -1117,5 +1230,284 @@ mod tests {
         let parsed =
             parse_sig_packet(&v4_packet(&[9, 16, 1, 2, 3, 4, 5, 6, 7, 8])).expect("packet parses");
         assert_eq!(parsed.issuer, Some([1, 2, 3, 4, 5, 6, 7, 8]));
+    }
+
+    /// A keyring holding the given OPENPGP fixture keys.
+    fn keyring_with(files: &[&str]) -> Keyring {
+        let mut keyring = Keyring::new();
+        for name in files {
+            let raw = std::fs::read(inputs().join(name)).expect("read fixture key");
+            keyring
+                .add_key(&PubKey::new(&raw).expect("fixture key parses"))
+                .expect("fixture key added");
+        }
+        keyring
+    }
+
+    /// Run the check against a keyring holding `key_files`. The
+    /// OPENPGP fixtures are signed with their own keys, so they do
+    /// not go through `run_check`'s keyring choices.
+    fn run_check_openpgp(pkg: &Pkg, key_files: &[&str]) -> Vec<(String, String)> {
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SignatureCheck::with_keyring(keyring_with(key_files));
+        check.check(pkg, &config, &mut out);
+        out.results().to_vec()
+    }
+
+    /// Whether the linked librpm reads the v6 OPENPGP signature
+    /// entry: librpm from rpm 6 verifies those signatures, so the
+    /// container-only fixture reports `NoKey` against an empty
+    /// keyring; an older librpm sees no signatures in the package at
+    /// all and the verified read comes back clean. The check-level
+    /// expectations for the container-only and dual fixtures branch
+    /// on this; the extraction assertions pin the behaviour this
+    /// crate controls on every platform.
+    fn librpm_reads_openpgp_container() -> bool {
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let check = SignatureCheck::with_keyring(Keyring::new());
+        matches!(
+            check.verify(&inputs().join("signature-openpgp-1.0-1.noarch.rpm")),
+            Verdict::NoKey
+        )
+    }
+
+    /// Base64-encode `bytes` the way `rpmsign` writes the OPENPGP
+    /// entry's strings.
+    fn base64_of(bytes: &[u8]) -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .encode(bytes)
+            .into_bytes()
+    }
+
+    #[test]
+    fn openpgp_container_only_extracts_its_signature() {
+        // The container-only fixture carries one signature in the v6
+        // entry and none in the classic tags; extraction returns the
+        // decoded packet, which parses and names the fixture key.
+        let blobs = signature_blobs(&inputs().join("signature-openpgp-1.0-1.noarch.rpm"));
+        assert!(blobs.has_entries);
+        assert!(!blobs.has_unreadable);
+        assert_eq!(blobs.blobs.len(), 1);
+        let parsed = parse_sig_packet(&blobs.blobs[0]).expect("container packet parses");
+        assert_eq!(
+            key_id_string(&parsed.issuer.expect("issuer present")),
+            EXPECTED_OPENPGP_KEY_ID
+        );
+    }
+
+    #[test]
+    fn openpgp_dual_extracts_two_distinct_signatures() {
+        let blobs = signature_blobs(&inputs().join("signature-openpgp-dual-1.0-1.noarch.rpm"));
+        assert!(blobs.has_entries);
+        assert!(!blobs.has_unreadable);
+        assert_eq!(blobs.blobs.len(), 2);
+        let mut ids: Vec<String> = blobs
+            .blobs
+            .iter()
+            .map(|b| {
+                let parsed = parse_sig_packet(b).expect("container packet parses");
+                key_id_string(&parsed.issuer.expect("issuer present"))
+            })
+            .collect();
+        ids.sort();
+        assert_eq!(ids, [EXPECTED_OPENPGP_KEY_ID, EXPECTED_OPENPGP_KEY2_ID]);
+    }
+
+    #[test]
+    fn openpgp_mixed_counts_a_shared_signature_once() {
+        // The mixed fixture stores the same signature in the classic
+        // tag and in the container; extraction returns it once.
+        let blobs = signature_blobs(&inputs().join("signature-openpgp-mixed-1.0-1.noarch.rpm"));
+        assert!(blobs.has_entries);
+        assert!(!blobs.has_unreadable);
+        assert_eq!(blobs.blobs.len(), 1);
+        let parsed = parse_sig_packet(&blobs.blobs[0]).expect("mixed packet parses");
+        assert_eq!(
+            key_id_string(&parsed.issuer.expect("issuer present")),
+            EXPECTED_OPENPGP_KEY_ID
+        );
+    }
+
+    #[test]
+    fn openpgp_entry_reads_each_of_its_strings() {
+        // Two distinct packets as two base64 strings in one entry.
+        let first = v4_packet(&[0, 2, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1]);
+        let second = v4_packet(&[0, 2, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2]);
+        let mut store = base64_of(&first);
+        store.push(0);
+        store.extend_from_slice(&base64_of(&second));
+        store.push(0);
+        let (_dir, path) = write_typed_signature_header(&[(OPENPGP_TAG, 8, 0, 2)], &store);
+        let blobs = signature_blobs(&path);
+        assert!(blobs.has_entries);
+        assert!(!blobs.has_unreadable);
+        assert_eq!(blobs.blobs, [first, second]);
+    }
+
+    #[test]
+    fn openpgp_duplicate_of_a_classic_signature_counts_once() {
+        // The same packet in a classic tag and in the container.
+        let packet = v4_packet(&[0, 2, 0, 0, 3, 3, 3, 3, 3, 3, 3, 3]);
+        let mut store = Vec::new();
+        store.extend_from_slice(&base64_of(&packet));
+        store.push(0);
+        store.extend_from_slice(&packet);
+        let classic_offset = (base64_of(&packet).len() + 1) as u32;
+        let (_dir, path) = write_typed_signature_header(
+            &[
+                (268, 7, classic_offset, packet.len() as u32),
+                (OPENPGP_TAG, 8, 0, 1),
+            ],
+            &store,
+        );
+        let blobs = signature_blobs(&path);
+        assert!(blobs.has_entries);
+        assert!(!blobs.has_unreadable);
+        assert_eq!(blobs.blobs, [packet]);
+    }
+
+    #[test]
+    fn openpgp_string_that_is_not_base64_is_unreadable() {
+        let store = b"not base64!\0".to_vec();
+        let (_dir, path) = write_typed_signature_header(&[(OPENPGP_TAG, 8, 0, 1)], &store);
+        let blobs = signature_blobs(&path);
+        assert!(blobs.has_entries);
+        assert!(blobs.has_unreadable);
+        assert!(blobs.blobs.is_empty());
+    }
+
+    #[test]
+    fn openpgp_string_without_a_terminator_is_unreadable() {
+        let store = base64_of(&v4_packet(&[0, 2, 0, 0, 4, 4, 4, 4, 4, 4, 4, 4]));
+        let (_dir, path) = write_typed_signature_header(&[(OPENPGP_TAG, 8, 0, 1)], &store);
+        let blobs = signature_blobs(&path);
+        assert!(blobs.has_entries);
+        assert!(blobs.has_unreadable);
+        assert!(blobs.blobs.is_empty());
+    }
+
+    #[test]
+    fn openpgp_entry_with_a_binary_type_is_not_an_entry() {
+        // A 278 entry typed BIN is skipped like a wrong-typed classic
+        // entry: it is not a signature entry at all.
+        let store = vec![0u8; 16];
+        let (_dir, path) = write_typed_signature_header(&[(OPENPGP_TAG, 7, 0, 16)], &store);
+        let blobs = signature_blobs(&path);
+        assert!(!blobs.has_entries);
+        assert!(!blobs.has_unreadable);
+        assert!(blobs.blobs.is_empty());
+    }
+
+    #[test]
+    fn openpgp_packet_past_the_blob_cap_is_unreadable() {
+        let packet = vec![0x89u8; MAX_BLOB_BYTES + 1];
+        let mut store = base64_of(&packet);
+        store.push(0);
+        let (_dir, path) = write_typed_signature_header(&[(OPENPGP_TAG, 8, 0, 1)], &store);
+        let blobs = signature_blobs(&path);
+        assert!(blobs.has_entries);
+        assert!(blobs.has_unreadable);
+        assert!(blobs.blobs.is_empty());
+    }
+
+    #[test]
+    fn openpgp_container_only_with_key_is_quiet() {
+        let pkg = fixture_pkg("signature-openpgp-1.0-1.noarch.rpm");
+        let results = run_check_openpgp(&pkg, &["signature-openpgp-testkey.gpg"]);
+        assert_eq!(results, Vec::<(String, String)>::new());
+    }
+
+    #[test]
+    fn openpgp_container_only_without_key_reports_unknown_key() {
+        let pkg = fixture_pkg("signature-openpgp-1.0-1.noarch.rpm");
+        let results = run_check_openpgp(&pkg, &[]);
+        if librpm_reads_openpgp_container() {
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].0, "unknown-key");
+            assert!(results[0].1.contains(EXPECTED_OPENPGP_KEY_ID));
+        } else {
+            assert_eq!(results, Vec::<(String, String)>::new());
+        }
+    }
+
+    #[test]
+    fn openpgp_container_only_matches_its_classic_control() {
+        // The control carries the same key's signature in the classic
+        // tag only: with the key both are quiet, without it both
+        // report the same unknown key.
+        let control = fixture_pkg("signature-openpgp-classic-1.0-1.noarch.rpm");
+        let control_results = run_check_openpgp(&control, &[]);
+        assert_eq!(control_results.len(), 1);
+        assert_eq!(control_results[0].0, "unknown-key");
+        assert!(control_results[0].1.contains(EXPECTED_OPENPGP_KEY_ID));
+        let control_with_key = run_check_openpgp(&control, &["signature-openpgp-testkey.gpg"]);
+        assert_eq!(control_with_key, Vec::<(String, String)>::new());
+
+        let container = fixture_pkg("signature-openpgp-1.0-1.noarch.rpm");
+        if librpm_reads_openpgp_container() {
+            let container_results = run_check_openpgp(&container, &[]);
+            assert_eq!(container_results, control_results);
+        }
+    }
+
+    #[test]
+    fn openpgp_container_only_default_keyring_reports_unknown_key() {
+        let pkg = fixture_pkg("signature-openpgp-1.0-1.noarch.rpm");
+        let results = run_check(&pkg, KeyringChoice::System);
+        if librpm_reads_openpgp_container() {
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].0, "unknown-key");
+            assert!(results[0].1.contains(EXPECTED_OPENPGP_KEY_ID));
+        } else {
+            assert_eq!(results, Vec::<(String, String)>::new());
+        }
+    }
+
+    #[test]
+    fn openpgp_mixed_with_key_is_quiet() {
+        let pkg = fixture_pkg("signature-openpgp-mixed-1.0-1.noarch.rpm");
+        let results = run_check_openpgp(&pkg, &["signature-openpgp-testkey.gpg"]);
+        assert_eq!(results, Vec::<(String, String)>::new());
+    }
+
+    #[test]
+    fn openpgp_mixed_without_key_reports_one_unknown_key() {
+        // The signature sits in both storage forms; the finding names
+        // its key once, not once per form.
+        let pkg = fixture_pkg("signature-openpgp-mixed-1.0-1.noarch.rpm");
+        let results = run_check_openpgp(&pkg, &[]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "unknown-key");
+        assert!(results[0].1.contains(EXPECTED_OPENPGP_KEY_ID));
+    }
+
+    #[test]
+    fn openpgp_dual_without_key_reports_each_issuer() {
+        let pkg = fixture_pkg("signature-openpgp-dual-1.0-1.noarch.rpm");
+        let results = run_check_openpgp(&pkg, &[]);
+        if librpm_reads_openpgp_container() {
+            assert_eq!(results.len(), 2);
+            assert_eq!(results[0].0, "unknown-key");
+            assert!(results[0].1.contains(EXPECTED_OPENPGP_KEY_ID));
+            assert_eq!(results[1].0, "unknown-key");
+            assert!(results[1].1.contains(EXPECTED_OPENPGP_KEY2_ID));
+        } else {
+            assert_eq!(results, Vec::<(String, String)>::new());
+        }
+    }
+
+    #[test]
+    fn openpgp_dual_with_both_keys_is_quiet() {
+        let pkg = fixture_pkg("signature-openpgp-dual-1.0-1.noarch.rpm");
+        let results = run_check_openpgp(
+            &pkg,
+            &[
+                "signature-openpgp-testkey.gpg",
+                "signature-openpgp-testkey2.gpg",
+            ],
+        );
+        assert_eq!(results, Vec::<(String, String)>::new());
     }
 }
