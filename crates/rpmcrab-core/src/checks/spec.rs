@@ -984,9 +984,11 @@ impl Check for SpecCheck {
         // the spec checks run on — the first the header names, else
         // the first a declaration names, else the last. Each payload
         // spec is opened once, for its verdict; the selection reuses
-        // that opened spec, and a selection whose open failed is
-        // skipped — a payload file can vanish between the SRPM
-        // listing and the read.
+        // that opened spec. The selection considers only specs that
+        // opened, in each tier — header-named first, then
+        // declaration-named, then the last readable one — so a payload
+        // file that vanished between the SRPM listing and the read
+        // leaves its tier to a readable file.
         let scans: Vec<(&crate::pkg::pkgfile::PkgFile, Option<SpecPkg>, NameVerdict)> = pkg
             .files
             .iter()
@@ -1007,9 +1009,15 @@ impl Check for SpecCheck {
 
         let selected = scans
             .iter()
+            .filter(|(_, spec, _)| spec.is_some())
             .find(|(_, _, verdict)| verdict.header)
-            .or_else(|| scans.iter().find(|(_, _, verdict)| verdict.declared))
-            .or_else(|| scans.last());
+            .or_else(|| {
+                scans
+                    .iter()
+                    .filter(|(_, spec, _)| spec.is_some())
+                    .find(|(_, _, verdict)| verdict.declared)
+            })
+            .or_else(|| scans.iter().filter(|(_, spec, _)| spec.is_some()).last());
         if let Some((f, Some(spec_pkg), _)) = selected {
             self.spec_name = Some(f.name.clone());
             self.check_spec(spec_pkg, config, out);
@@ -3507,6 +3515,56 @@ exit 1"#,
         let lines = lines_for(&results, "no-%prep-section");
         assert_eq!(lines.len(), 1, "results: {results:?}");
         assert!(lines[0].contains("w6-tmpfiles.spec"), "line: {}", lines[0]);
+    }
+
+    #[test]
+    fn check_source_unreadable_header_named_spec_falls_back_to_a_declared_one() {
+        // The header-named payload file cannot be opened — it vanished
+        // between the SRPM listing and the read — while a later
+        // declaration-named file is readable: the spec checks run on
+        // the readable declaration-named file.
+        let missing_header = crate::pkg::pkgfile::PkgFile {
+            name: "w6-tmpfiles.spec".to_string(),
+            path: "/nonexistent/w6-tmpfiles.spec".to_string(),
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let declared = source_spec(
+            &dir,
+            "alpha.spec",
+            "Name: alpha\nVersion: 1\n%clean\nrm -rf %{buildroot}\n",
+        );
+        let results = run_source(vec![missing_header, declared]);
+        assert!(!has(&results, "invalid-spec-name"), "results: {results:?}");
+        let lines = lines_for(&results, "superfluous-%clean-section");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(lines[0].contains("alpha.spec"), "line: {}", lines[0]);
+    }
+
+    #[test]
+    fn check_source_fallback_uses_the_last_readable_spec() {
+        // No payload spec is consistent and the last one cannot be
+        // opened: the spec checks run on the last readable file.
+        let dir = tempfile::tempdir().unwrap();
+        let readable = source_spec(
+            &dir,
+            "one.spec",
+            "Name: uno\nVersion: 1\n%clean\nrm -rf %{buildroot}\n",
+        );
+        let missing_last = crate::pkg::pkgfile::PkgFile {
+            name: "dos.spec".to_string(),
+            path: "/nonexistent/dos.spec".to_string(),
+            ..Default::default()
+        };
+        let results = run_source(vec![readable, missing_last]);
+        assert_eq!(
+            lines_for(&results, "invalid-spec-name").len(),
+            1,
+            "results: {results:?}"
+        );
+        let lines = lines_for(&results, "superfluous-%clean-section");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(lines[0].contains("one.spec"), "line: {}", lines[0]);
     }
 
     #[test]
