@@ -32,6 +32,7 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
+use crate::pkg::dep::DepLeaf;
 use crate::pkg::pkgfile::{self, PkgFile, is_reg};
 use crate::tools::{Tool, ToolSource, test_source};
 use std::sync::OnceLock;
@@ -678,9 +679,6 @@ impl FilesCheck {
 #[derive(Default)]
 #[allow(dead_code)]
 struct PkgState {
-    /// The package's source key (`source_key`), for the session-aware
-    /// decisions that group sibling packages.
-    source: String,
     devel_pkg: bool,
     is_kernel_package: bool,
     debuginfo_package: bool,
@@ -723,7 +721,6 @@ impl Check for FilesCheck {
         // `__init__` dict which installs them unconditionally.
         Self::register_error_details(config, out);
         let mut st = PkgState {
-            source: source_key(pkg),
             ..Default::default()
         };
         self.check_utf8(pkg, out);
@@ -834,8 +831,9 @@ impl Check for FilesCheck {
         // built from the same source (see `note_declared_owners`) --
         // or the file-owning package itself Requires the capability
         // (`cand.own_requires`). A sibling's Requires credits nothing:
-        // the owning package installed standalone has no creator for
-        // the account. Candidates are in lint order, which the stable
+        // installed standalone, the owning package carries no
+        // declaration of the account through any of these routes.
+        // Candidates are in lint order, which the stable
         // output sort preserves for equal keys.
         for cand in &self.owner_candidates {
             if cand.own_requires {
@@ -1009,18 +1007,41 @@ fn account_capability(dep_name: &str) -> Option<(bool, &str)> {
     }
 }
 
+/// The account capability a single dependency leaf names, when it
+/// names one. A plain header entry carries the capability whole in
+/// the leaf name (`user(svcfoo)`); inside a rich expression the
+/// dependency grammar splits the same spelling into name `user` /
+/// `group` plus qualifier `svcfoo` (see `DepInfo::leaves`), so both
+/// shapes are matched. A capability's version constraint rides on
+/// the leaf's flags and EVR, never on the name, so versioned
+/// capabilities credit by account name exactly like unversioned
+/// ones.
+fn leaf_account_capability(leaf: &DepLeaf) -> Option<(bool, &str)> {
+    if let Some(cap) = account_capability(&leaf.name) {
+        return Some(cap);
+    }
+    let qualifier = leaf.qualifier.as_deref().filter(|q| !q.is_empty())?;
+    match leaf.name.as_str() {
+        "user" => Some((false, qualifier)),
+        "group" => Some((true, qualifier)),
+        _ => None,
+    }
+}
+
 /// Whether `pkg`'s own Requires -- plain, or the scriptlet-context
 /// split into `prereq` (`Requires(pre): user(<name>)`, the form account
 /// Requires take in real headers) -- name the `user(<name>)` /
 /// `group(<name>)` capability for `name`. This is the per-package
 /// Requires route of the `non-standard-uid` / `non-standard-gid`
 /// crediting (issue #756): only the file-owning package's own Requires
-/// count, never a sibling's.
+/// count, never a sibling's. Every leaf of each entry is matched (see
+/// `leaf_account_capability`), so plain, versioned and rich-wrapped
+/// capability spellings all credit.
 fn own_requires_account(pkg: &Pkg, group: bool, name: &str) -> bool {
     pkg.requires.iter().chain(pkg.prereq.iter()).any(|dep| {
         dep.leaves()
             .iter()
-            .any(|leaf| account_capability(&leaf.name) == Some((group, name)))
+            .any(|leaf| leaf_account_capability(leaf) == Some((group, name)))
     })
 }
 
@@ -1479,7 +1500,12 @@ impl FilesCheck {
     /// separately and per file-owning package (see
     /// `own_requires_account`): a sibling's Requires does not create
     /// the account for a standalone install of the owning package, so
-    /// Requires capabilities are not merged in here.
+    /// Requires capabilities are not merged in here. The header
+    /// Provides are the declaration, hand-written or generated alike
+    /// (rpm's sysusers generator emits the same entries for a package
+    /// shipping a snippet); every leaf of each entry is matched (see
+    /// `leaf_account_capability`), so plain, versioned and
+    /// rich-wrapped capability spellings all credit.
     fn note_declared_owners(&mut self, pkg: &Pkg) {
         let source = source_key(pkg);
         let mut users = HashSet::new();
@@ -1497,7 +1523,7 @@ impl FilesCheck {
         // `own_requires_account`).
         for dep in &pkg.provides {
             for leaf in dep.leaves() {
-                if let Some((group, name)) = account_capability(&leaf.name) {
+                if let Some((group, name)) = leaf_account_capability(&leaf) {
                     if group {
                         groups.insert(name.to_string());
                     } else {
@@ -1539,8 +1565,8 @@ impl FilesCheck {
         self.check_file_manpage(pkg, fname, pkgfile, st, out);
         self.check_file_infopage_compressed(pkg, fname, out);
         self.check_file_unexpanded_macro(pkg, fname, out);
-        self.check_file_non_standard_uid(pkg, fname, pkgfile, st);
-        self.check_file_non_standard_gid(pkg, fname, pkgfile, st);
+        self.check_file_non_standard_uid(pkg, fname, pkgfile);
+        self.check_file_non_standard_gid(pkg, fname, pkgfile);
         self.check_file_kernel_modules(pkg, fname, &st.is_kernel_package, out);
         self.check_file_dir_or_file(pkg, fname, pkgfile, out);
         self.check_file_non_ghost_in_run(pkg, fname, pkg, out);
@@ -2348,18 +2374,12 @@ impl FilesCheck {
         }
     }
 
-    fn check_file_non_standard_uid(
-        &mut self,
-        pkg: &Pkg,
-        fname: &str,
-        pkgfile: &PkgFile,
-        st: &PkgState,
-    ) {
+    fn check_file_non_standard_uid(&mut self, pkg: &Pkg, fname: &str, pkgfile: &PkgFile) {
         if !self.standard_users.contains(&pkgfile.user) {
             self.owner_candidates.push(OwnerCandidate {
                 name: pkg.name.clone(),
                 arch: pkg.arch.clone(),
-                source: st.source.clone(),
+                source: source_key(pkg),
                 fname: fname.to_string(),
                 owner: pkgfile.user.clone(),
                 group: false,
@@ -2368,18 +2388,12 @@ impl FilesCheck {
         }
     }
 
-    fn check_file_non_standard_gid(
-        &mut self,
-        pkg: &Pkg,
-        fname: &str,
-        pkgfile: &PkgFile,
-        st: &PkgState,
-    ) {
+    fn check_file_non_standard_gid(&mut self, pkg: &Pkg, fname: &str, pkgfile: &PkgFile) {
         if !self.standard_groups.contains(&pkgfile.group) {
             self.owner_candidates.push(OwnerCandidate {
                 name: pkg.name.clone(),
                 arch: pkg.arch.clone(),
-                source: st.source.clone(),
+                source: source_key(pkg),
                 fname: fname.to_string(),
                 owner: pkgfile.group.clone(),
                 group: true,
@@ -6021,6 +6035,19 @@ mod tests {
         (pkg, dir)
     }
 
+    /// Clear a fixture package's dependency headers, so a test of
+    /// one crediting route cannot be satisfied through another
+    /// route's data riding on the same fixture (issue #766): rpm's
+    /// sysusers generator emits `user()` / `group()` Provides for a
+    /// package shipping a snippet, and a regenerated fixture would
+    /// otherwise credit through the Provides route while the test
+    /// names the snippet route.
+    fn clear_dep_headers(pkg: &mut Pkg) {
+        pkg.provides.clear();
+        pkg.requires.clear();
+        pkg.prereq.clear();
+    }
+
     #[test]
     fn non_standard_uid_quiet_when_sibling_ships_sysusers_snippet() {
         // The uidgid-session-sysusers subpackage ships the snippet
@@ -6037,7 +6064,15 @@ mod tests {
             group: "root".to_string(),
             ..Default::default()
         });
-        let (sysusers_pkg, _d2) = uidgid_fixture("uidgid-session-sysusers-1.0-1.noarch.rpm");
+        let (mut sysusers_pkg, _d2) = uidgid_fixture("uidgid-session-sysusers-1.0-1.noarch.rpm");
+        // Route isolation (issue #766): clear both packages'
+        // dependency headers, so the verdict pins the sysusers
+        // snippet route only -- rpm's sysusers generator emits
+        // `user()` / `group()` Provides for a package shipping a
+        // snippet, which a regenerated fixture would otherwise
+        // credit through the Provides route.
+        clear_dep_headers(&mut main_pkg);
+        clear_dep_headers(&mut sysusers_pkg);
         let config = test_config();
         let (results, _levels) = run_files_check_pkgs(&[main_pkg, sysusers_pkg], &config);
         let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
@@ -6057,7 +6092,15 @@ mod tests {
             group: "svcfoo".to_string(),
             ..Default::default()
         });
-        let (sysusers_pkg, _d2) = uidgid_fixture("uidgid-session-sysusers-1.0-1.noarch.rpm");
+        let (mut sysusers_pkg, _d2) = uidgid_fixture("uidgid-session-sysusers-1.0-1.noarch.rpm");
+        // Route isolation (issue #766): clear both packages'
+        // dependency headers, so the verdict pins the sysusers
+        // snippet route only -- rpm's sysusers generator emits
+        // `user()` / `group()` Provides for a package shipping a
+        // snippet, which a regenerated fixture would otherwise
+        // credit through the Provides route.
+        clear_dep_headers(&mut main_pkg);
+        clear_dep_headers(&mut sysusers_pkg);
         let config = test_config();
         let (results, _levels) = run_files_check_pkgs(&[main_pkg, sysusers_pkg], &config);
         let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
@@ -6077,7 +6120,15 @@ mod tests {
             group: "root".to_string(),
             ..Default::default()
         });
-        let (sysusers_pkg, _d2) = uidgid_fixture("uidgid-session-sysusers-1.0-1.noarch.rpm");
+        let (mut sysusers_pkg, _d2) = uidgid_fixture("uidgid-session-sysusers-1.0-1.noarch.rpm");
+        // Route isolation (issue #766): clear both packages'
+        // dependency headers, so the verdict pins the sysusers
+        // snippet route only -- rpm's sysusers generator emits
+        // `user()` / `group()` Provides for a package shipping a
+        // snippet, which a regenerated fixture would otherwise
+        // credit through the Provides route.
+        clear_dep_headers(&mut main_pkg);
+        clear_dep_headers(&mut sysusers_pkg);
         let config = test_config();
         let (results, _levels) = run_files_check_pkgs(&[main_pkg, sysusers_pkg], &config);
         let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
@@ -6096,7 +6147,15 @@ mod tests {
             group: "root".to_string(),
             ..Default::default()
         });
-        let (sysusers_pkg, _d2) = uidgid_fixture("uidgid-session-sysusers-1.0-1.noarch.rpm");
+        let (mut sysusers_pkg, _d2) = uidgid_fixture("uidgid-session-sysusers-1.0-1.noarch.rpm");
+        // Route isolation (issue #766): clear both packages'
+        // dependency headers, so the verdict pins the sysusers
+        // snippet route only -- rpm's sysusers generator emits
+        // `user()` / `group()` Provides for a package shipping a
+        // snippet, which a regenerated fixture would otherwise
+        // credit through the Provides route.
+        clear_dep_headers(&mut main_pkg);
+        clear_dep_headers(&mut sysusers_pkg);
         let config = test_config();
         let (results, _levels) = run_files_check_pkgs(&[main_pkg, sysusers_pkg], &config);
         let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
@@ -6222,7 +6281,11 @@ mod tests {
             group: "root".to_string(),
             ..Default::default()
         }];
-        let (sysusers_pkg, _d2) = uidgid_fixture("uidgid-session-sysusers-1.0-1.noarch.rpm");
+        let (mut sysusers_pkg, _d2) = uidgid_fixture("uidgid-session-sysusers-1.0-1.noarch.rpm");
+        // Route isolation (issue #766): the verdict must pin the
+        // snippet route, not either package's dependency headers.
+        clear_dep_headers(&mut lone);
+        clear_dep_headers(&mut sysusers_pkg);
         let config = test_config();
         let (results, _levels) = run_files_check_pkgs(&[lone, sysusers_pkg], &config);
         let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
@@ -6323,6 +6386,105 @@ mod tests {
             level_of(&results, &levels, "non-standard-gid"),
             Some(Level::Error)
         );
+    }
+
+    #[test]
+    fn rich_wrapped_requires_capability_credits() {
+        // Issue #766: inside a rich expression the dependency
+        // grammar splits a `user(svcfoo)` spelling into name `user`
+        // plus qualifier `svcfoo` (see `DepInfo::leaves`); the leaf
+        // matcher must credit the capability through the qualifier
+        // too, or the owning package's files fire a spurious error.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.provides = vec![];
+        pkg.prereq = vec![];
+        pkg.requires = vec![
+            DepInfo {
+                name: "(user(svcfoo) or bash)".to_string(),
+                flags: 0,
+                epoch: None,
+                version: None,
+                release: None,
+            },
+            DepInfo {
+                name: "(group(svcfoo) and bash)".to_string(),
+                flags: 0,
+                epoch: None,
+                version: None,
+                release: None,
+            },
+        ];
+        pkg.files = vec![PkgFile {
+            name: "/var/lib/svcfoo/state".to_string(),
+            path: "/var/lib/svcfoo/state".to_string(),
+            user: "svcfoo".to_string(),
+            group: "svcfoo".to_string(),
+            ..Default::default()
+        }];
+        let config = test_config();
+        let (results, _levels) = run_files_check_pkgs(&[pkg], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        assert_lacks(&names, "non-standard-uid");
+        assert_lacks(&names, "non-standard-gid");
+
+        // A rich capability naming a different account credits
+        // nothing: the owner still fires.
+        let mut pkg2 = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg2.provides = vec![];
+        pkg2.prereq = vec![];
+        pkg2.requires = vec![DepInfo {
+            name: "(user(other) or bash)".to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        }];
+        pkg2.files = vec![PkgFile {
+            name: "/var/lib/svcfoo/state".to_string(),
+            path: "/var/lib/svcfoo/state".to_string(),
+            user: "svcfoo".to_string(),
+            group: "root".to_string(),
+            ..Default::default()
+        }];
+        let (results, _levels) = run_files_check_pkgs(&[pkg2], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "non-standard-uid");
+    }
+
+    #[test]
+    fn rich_wrapped_provides_capability_credits() {
+        // Issue #766: the same split leaf feeds the Provides route --
+        // a rich-wrapped `user(svcfoo)` Provides on the declaring
+        // package quiets the uid finding while the group, declared
+        // nowhere, still fires.
+        let (mut main_pkg, _d1) = uidgid_fixture("uidgid-session-main-1.0-1.noarch.rpm");
+        main_pkg.files.push(PkgFile {
+            name: "/var/lib/svcfoo/state".to_string(),
+            path: "/var/lib/svcfoo/state".to_string(),
+            user: "svcfoo".to_string(),
+            group: "svcfoo".to_string(),
+            ..Default::default()
+        });
+        let (mut declaring_pkg, _d2) = uidgid_fixture("uidgid-session-sysusers-1.0-1.noarch.rpm");
+        // Strip the shipped files so the sysusers snippet cannot
+        // credit: the only declaration left is the rich Provides.
+        declaring_pkg.files = vec![];
+        declaring_pkg.requires = vec![];
+        declaring_pkg.prereq = vec![];
+        declaring_pkg.provides = vec![DepInfo {
+            name: "(user(svcfoo) or bash)".to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        }];
+        let config = test_config();
+        let (results, _levels) = run_files_check_pkgs(&[main_pkg, declaring_pkg], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        assert_lacks(&names, "non-standard-uid");
+        assert_has(&names, "non-standard-gid");
     }
 
     #[test]
