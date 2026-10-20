@@ -326,9 +326,16 @@ fn exit_code_of(status: &std::process::ExitStatus) -> ExitCode {
 /// command line naming a real file such as `~/.bashrc`), and writing
 /// with create+truncate would destroy the named file, so the write is
 /// refused before the file is opened: the target is inspected with
-/// `symlink_metadata` and the open passes no `create`, hence a refused
-/// or vanished target is never created, truncated or followed through
-/// a symlink.
+/// `symlink_metadata` and no step creates, truncates or follows
+/// through a symlink at the target path.
+///
+/// The document itself is staged in a sibling temporary file in the
+/// target's directory and renamed over the target once complete, so
+/// the target holds either nothing or the whole document: a writer
+/// that fails or dies mid-write leaves the target empty, and the
+/// parent copies out only complete documents. The rename replaces
+/// the target directory entry itself, so a target swapped after the
+/// inspection is replaced rather than followed.
 ///
 /// # Errors
 /// Returns a description of the refusal or write failure; the caller
@@ -370,14 +377,41 @@ fn write_diverted_report(path: &Path, report: &str) -> Result<(), String> {
             )));
         }
     }
-    // No `.create(...)`: a target that vanished since the inspection
-    // fails loudly here instead of springing into existence.
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .map_err(|e| e.to_string())?;
+    // Stage the document beside the target and rename it over: the
+    // staging file is a `NamedTempFile` in the target's directory (so
+    // the rename stays on one filesystem), created exclusively under
+    // an unpredictable name with owner-only permissions, and removed
+    // on drop whenever it was not renamed away.
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut staging = tempfile::NamedTempFile::new_in(dir).map_err(|e| {
+        format!(
+            "staging the diverted report beside {} failed: {e}",
+            path.display()
+        )
+    })?;
     use std::io::Write;
-    file.write_all(report.as_bytes()).map_err(|e| e.to_string())
+    staging.write_all(report.as_bytes()).map_err(|e| {
+        format!(
+            "writing the diverted report for {} failed: {e}",
+            path.display()
+        )
+    })?;
+    let (_file, staging_path) = staging.keep().map_err(|e| {
+        format!(
+            "staging the diverted report beside {} failed: {e}",
+            path.display()
+        )
+    })?;
+    std::fs::rename(&staging_path, path).map_err(|e| {
+        let _ = std::fs::remove_file(&staging_path);
+        format!(
+            "delivering the diverted report to {} failed: {e}",
+            path.display()
+        )
+    })
 }
 
 /// Parse arguments and run the linter, returning the process exit code.
@@ -447,7 +481,16 @@ pub fn run() -> ExitCode {
     // that stays in-process.
     let (mut cfg, load_warnings) = match config::load_with_warnings(&cli.config) {
         Ok(pair) => pair,
-        Err(e) => {
+        Err((e, warnings)) => {
+            // The warnings collected before the failure travel with
+            // the error (see `load_with_warnings`): flush them here,
+            // ahead of the fatal line, in emission order. This run
+            // stays in-process on this path -- a parent that diverted
+            // never loads the configuration itself, and a diverted
+            // child flushes its own copies the same way.
+            for warning in &warnings {
+                eprintln!("{warning}");
+            }
             warn!(color, "(none): E: fatal error in configuration: {e}");
             return ExitCode::from(1);
         }

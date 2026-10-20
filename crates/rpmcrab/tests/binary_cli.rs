@@ -1129,6 +1129,106 @@ fn diverted_json_accepts_a_fresh_handoff_file() {
     assert_eq!(doc["program"], "rpmcrab");
 }
 
+/// The hand-back write replaces the target instead of writing into
+/// it: the document is staged in a sibling file and renamed over the
+/// target, so the target's inode changes across a successful write.
+/// Writing into the validated file directly would keep the inode --
+/// and a writer dying mid-write would leave a partial prefix in it
+/// for the parent to copy out as the document.
+#[test]
+#[cfg(unix)]
+fn diverted_json_handoff_write_replaces_the_target() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let dir = tempfile::tempdir().unwrap();
+    let handoff = dir.path().join("handoff.json");
+    std::fs::write(&handoff, "").unwrap();
+    std::fs::set_permissions(&handoff, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let inode_before = std::fs::metadata(&handoff).unwrap().ino();
+    let out = rpmcrab(&[
+        "--format",
+        "json",
+        "--__diverted-json",
+        handoff.to_str().unwrap(),
+        "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+    ]);
+    assert!(out.stdout.is_empty());
+    assert_ne!(
+        std::fs::metadata(&handoff).unwrap().ino(),
+        inode_before,
+        "the staged document is renamed over the target, replacing it"
+    );
+    let written = std::fs::read_to_string(&handoff).unwrap();
+    let doc: serde_json::Value =
+        serde_json::from_str(&written).expect("the hand-back file holds the JSON document");
+    assert_eq!(doc["program"], "rpmcrab");
+}
+
+/// A configuration that both warns and fails fatally still shows its
+/// warnings: they are collected (not printed) while loading so a
+/// diverted run can dedup them, and the fatal path flushes the
+/// collected copies ahead of the fatal line instead of dropping
+/// them with the failed load.
+#[test]
+fn config_fatal_still_prints_load_warnings() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("fatal.toml");
+    std::fs::write(&cfg, "BadnessThreshold = 999\nSeverityOverrides = 42\n").unwrap();
+    let spec = write_echo_spec(dir.path());
+    let out = rpmcrab(&["-c", cfg.to_str().unwrap(), spec.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("'BadnessThreshold' has no effect"),
+        "the load warning survives the fatal load: {stderr}"
+    );
+    assert!(
+        stderr.contains("fatal error in configuration"),
+        "the fatal error is reported: {stderr}"
+    );
+    let warning_at = stderr.find("'BadnessThreshold' has no effect").unwrap();
+    let fatal_at = stderr.find("fatal error in configuration").unwrap();
+    assert!(
+        warning_at < fatal_at,
+        "the warning is flushed ahead of the fatal line: {stderr}"
+    );
+}
+
+/// The same flush happens in a diverted run's child: a
+/// command-line `--format json` run diverts before the configuration
+/// is loaded, so the child's fatal load is the only place the
+/// warnings can be printed -- exactly once, on the forwarded stderr.
+#[test]
+fn diverted_config_fatal_still_prints_load_warnings_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("fatal.toml");
+    std::fs::write(&cfg, "BadnessThreshold = 999\nSeverityOverrides = 42\n").unwrap();
+    let spec = write_echo_spec(dir.path());
+    let out = rpmcrab(&[
+        "--format",
+        "json",
+        "-c",
+        cfg.to_str().unwrap(),
+        spec.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        out.stdout.is_empty(),
+        "no document may be delivered when the load fails, got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        stderr.matches("'BadnessThreshold' has no effect").count(),
+        1,
+        "the load warning survives the child's fatal load, once: {stderr}"
+    );
+    assert!(
+        stderr.contains("fatal error in configuration"),
+        "the child's fatal error is forwarded: {stderr}"
+    );
+}
+
 /// A config-selected JSON run emits each load warning exactly once:
 /// the parent holds its copies back when it hands the run to the
 /// child, and the child prints its own.
