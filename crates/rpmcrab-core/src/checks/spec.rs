@@ -48,7 +48,7 @@ use crate::pkg::dep::{
     first_dep_token, has_forbidden_controlchars, has_forbidden_controlchars_deps,
     is_parenthesized_versioned, is_rich_dep_expr, parse_deps,
 };
-use crate::pkg::spec::{self, SpecPkg};
+use crate::pkg::spec::SpecPkg;
 use crate::pkg::{Pkg, init as pkg_init};
 use crate::tools::{Tool, ToolSource, test_source};
 use std::sync::OnceLock;
@@ -1032,7 +1032,7 @@ impl Check for SpecCheck {
 
         self.spec_file = Some(pkg.name.clone());
 
-        if !spec::is_utf8(Path::new(&pkg.name)) {
+        if !pkg.utf8 {
             let detail = self.spec_name.clone().unwrap_or_else(|| pkg.name.clone());
             self.info(out, pkg, Level::Error, "non-utf8-spec-file", &[&detail]);
         }
@@ -4166,6 +4166,7 @@ Patch0: foo.patch
             name: "test.spec".to_string(),
             lines: Vec::new(),
             current_linenum: std::cell::Cell::new(None),
+            utf8: true,
         };
         let config = config_mini();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
@@ -4198,6 +4199,7 @@ Patch0: foo.patch
             name: "test.spec".to_string(),
             lines: Vec::new(),
             current_linenum: std::cell::Cell::new(None),
+            utf8: true,
         };
         let config = config_mini();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
