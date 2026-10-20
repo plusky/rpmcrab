@@ -65,9 +65,11 @@ impl SpecPkg {
     /// patterns: literal text anchors a pattern, and a macro the
     /// preamble does not define contributes an unconstrained segment.
     /// Macro definitions take effect from their own line on — a
-    /// `%undefine` removes a macro's earlier definitions — and the
-    /// definitions of every conditional branch count, since branch
-    /// conditions are not evaluated. `None` when the preamble
+    /// `%undefine` removes a macro's earlier definitions, and one
+    /// inside a conditional branch removes them for that branch
+    /// only, so the defined and undefined readings both count — and
+    /// the definitions of every conditional branch count, since
+    /// branch conditions are not evaluated. `None` when the preamble
     /// declares no `Name:` at all.
     pub fn declared_name_patterns(&self) -> Option<Vec<NamePattern>> {
         declared_name_patterns(&self.lines)
@@ -178,11 +180,14 @@ type PreambleScan = (Vec<(usize, String)>, Vec<(usize, MacroEvent)>);
 
 /// One macro-environment event of the preamble scan: a `%define` /
 /// `%global` definition or a `%undefine`, in declaration order.
+/// A `%undefine` also carries the conditional nesting depth of
+/// its line: one inside a branch removes the macro for that
+/// branch's reading only.
 enum MacroEvent {
     /// `%define name body` / `%global name body`.
     Define(String, String),
     /// `%undefine name`.
-    Undefine(String),
+    Undefine(String, usize),
 }
 
 /// The preamble scan behind [`SpecPkg::declared_name_patterns`]: the
@@ -210,6 +215,7 @@ fn scan_preamble(lines: &[String]) -> PreambleScan {
 
     let mut names = Vec::new();
     let mut events = Vec::new();
+    let mut cond_depth = 0usize;
     for (pos, line) in logical.iter().enumerate() {
         if line.starts_with('#') {
             continue;
@@ -233,9 +239,13 @@ fn scan_preamble(lines: &[String]) -> PreambleScan {
                 }
                 "undefine" => {
                     if let Some(name) = parse_undefine(&rest[directive.len()..]) {
-                        events.push((pos, MacroEvent::Undefine(name)));
+                        events.push((pos, MacroEvent::Undefine(name, cond_depth)));
                     }
                 }
+                "if" | "ifarch" | "ifnarch" | "ifos" | "ifnos" | "ifdef" | "ifndef" | "ifexpr" => {
+                    cond_depth += 1
+                }
+                "endif" => cond_depth = cond_depth.saturating_sub(1),
                 d if SECTION_HEADERS.contains(&d) => break,
                 _ => {}
             }
@@ -509,10 +519,17 @@ const MAX_EXPANSION_DEPTH: usize = 8;
 fn expand_value(
     value: &str,
     macros: &[(String, String)],
+    undefined: &std::collections::HashSet<String>,
     depth: usize,
     visiting: &mut Vec<String>,
 ) -> Vec<NamePattern> {
-    expand_items(&tokenise_value(value, depth), macros, depth, visiting)
+    expand_items(
+        &tokenise_value(value, depth),
+        macros,
+        undefined,
+        depth,
+        visiting,
+    )
 }
 
 /// Expand tokenised items into patterns by composing the items'
@@ -520,6 +537,7 @@ fn expand_value(
 fn expand_items(
     items: &[ValueItem],
     macros: &[(String, String)],
+    undefined: &std::collections::HashSet<String>,
     depth: usize,
     visiting: &mut Vec<String>,
 ) -> Vec<NamePattern> {
@@ -529,10 +547,10 @@ fn expand_items(
             ValueItem::Lit(text) => {
                 vec![NamePattern(vec![NameSegment::Literal(text.clone())])]
             }
-            ValueItem::Value(name) => macro_patterns(name, macros, depth, visiting),
+            ValueItem::Value(name) => macro_patterns(name, macros, undefined, depth, visiting),
             ValueItem::Query(name) => {
                 let mut alts = vec![NamePattern(Vec::new())];
-                alts.extend(macro_patterns(name, macros, depth, visiting));
+                alts.extend(macro_patterns(name, macros, undefined, depth, visiting));
                 alts
             }
             ValueItem::Choice(inner) => {
@@ -540,7 +558,7 @@ fn expand_items(
                     vec![NamePattern(vec![NameSegment::Any])]
                 } else {
                     let mut alts = vec![NamePattern(Vec::new())];
-                    alts.extend(expand_items(inner, macros, depth + 1, visiting));
+                    alts.extend(expand_items(inner, macros, undefined, depth + 1, visiting));
                     alts
                 }
             }
@@ -548,7 +566,7 @@ fn expand_items(
                 if depth >= MAX_EXPANSION_DEPTH {
                     vec![NamePattern(vec![NameSegment::Any])]
                 } else {
-                    expand_items(inner, macros, depth + 1, visiting)
+                    expand_items(inner, macros, undefined, depth + 1, visiting)
                 }
             }
             ValueItem::Opaque => vec![NamePattern(vec![NameSegment::Any])],
@@ -564,10 +582,14 @@ fn expand_items(
 /// The patterns for one macro reference: each of the macro's preamble
 /// definitions expanded in turn. `%{nil}` is empty; a macro the
 /// preamble does not define, a recursive reference and an exhausted
-/// depth budget are unconstrained.
+/// depth budget are unconstrained. A macro removed in a conditional
+/// branch also contributes the unconstrained alternative: the
+/// branch that removes it is one reading, and the definitions the
+/// other readings keep are the rest.
 fn macro_patterns(
     name: &str,
     macros: &[(String, String)],
+    undefined: &std::collections::HashSet<String>,
     depth: usize,
     visiting: &mut Vec<String>,
 ) -> Vec<NamePattern> {
@@ -587,10 +609,14 @@ fn macro_patterns(
     }
     visiting.push(name.to_string());
     let mut out = std::collections::BTreeSet::new();
+    if undefined.contains(name) {
+        out.insert(NamePattern(vec![NameSegment::Any]));
+    }
     for body in bodies {
         for pattern in expand_items(
             &tokenise_value(body, depth + 1),
             macros,
+            undefined,
             depth + 1,
             visiting,
         ) {
@@ -638,23 +664,33 @@ fn declared_name_patterns(lines: &[String]) -> Option<Vec<NamePattern>> {
     for (pos, value) in &names {
         // The macro environment in effect at the `Name:` line: the
         // preamble's events before it, replayed in order — a
-        // definition takes effect from its own line on, a `%undefine`
-        // removes the definitions before it, and a definition below
-        // the tag is not in effect yet. Branch conditions are not
-        // evaluated, so the definitions of every branch before the
-        // tag accumulate as alternatives.
+        // definition takes effect from its own line on, a definition
+        // below the tag is not in effect yet, and branch conditions
+        // are not evaluated, so the definitions of every branch
+        // before the tag accumulate as alternatives. A `%undefine`
+        // outside any branch removes the definitions before it; one
+        // inside a branch removes them for that branch's reading
+        // only, so the macro counts as undefined there as well.
         let mut env: Vec<(String, String)> = Vec::new();
+        let mut undefined: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (at, event) in &events {
             if at >= pos {
                 break;
             }
             match event {
                 MacroEvent::Define(name, body) => env.push((name.clone(), body.clone())),
-                MacroEvent::Undefine(name) => env.retain(|(n, _)| n != name),
+                MacroEvent::Undefine(name, depth) => {
+                    if *depth == 0 {
+                        env.retain(|(n, _)| n != name);
+                        undefined.remove(name);
+                    } else {
+                        undefined.insert(name.clone());
+                    }
+                }
             }
         }
         let mut visiting = Vec::new();
-        for pattern in expand_value(value, &env, 0, &mut visiting) {
+        for pattern in expand_value(value, &env, &undefined, 0, &mut visiting) {
             out.insert(pattern);
         }
     }
@@ -1043,6 +1079,37 @@ mod name_patterns_tests {
     }
 
     #[test]
+    fn undefine_inside_a_branch_keeps_the_other_readings() {
+        // The `%undefine` runs in one conditional branch only: the
+        // definition the other readings keep and the undefined
+        // reading both count.
+        assert_matches(
+            "%define sfx -x\n%if 0\n%undefine sfx\n%endif\nName: foo%{sfx}\n",
+            &["foo-x", "foo", "foo-zzz"],
+            &["xfoo"],
+        );
+        // Defined in one branch, removed in the sibling branch.
+        assert_matches(
+            "%if 0\n%define sfx -a\n%else\n%undefine sfx\n%endif\nName: foo%{sfx}\n",
+            &["foo-a", "foo", "foo-zzz"],
+            &["xfoo"],
+        );
+        // The macro itself: its set holds the literal name and the
+        // unconstrained pattern of the undefined reading.
+        let pats = patterns("%define v one\n%if 0\n%undefine v\n%endif\nName: %{v}\n")
+            .expect("patterns declared");
+        assert!(pats.iter().any(|p| p.matches("one")));
+        assert!(pats.iter().any(|p| p.is_unconstrained()));
+        // A `%undefine` outside any branch, after the branch, still
+        // removes the macro for every reading.
+        assert_matches(
+            "%define sfx -x\n%if 0\n%define sfx -y\n%endif\n%undefine sfx\nName: foo%{sfx}\n",
+            &["foo", "foo-zzz"],
+            &["xfoo", "bar"],
+        );
+    }
+
+    #[test]
     fn forward_reference_inside_a_definition_stays_undefined() {
         // A definition's own forward reference resolves against the
         // environment at the `Name:` tag: `b` is defined only below
@@ -1100,9 +1167,7 @@ mod name_patterns_tests {
         // other alternative the nested conditionals contribute is
         // the empty name (every condition false).
         assert!(pats.iter().any(|p| p.is_unconstrained()));
-        assert!(pats
-            .iter()
-            .all(|p| p.is_unconstrained() || p.matches("")));
+        assert!(pats.iter().all(|p| p.is_unconstrained() || p.matches("")));
     }
 
     #[test]
