@@ -72,10 +72,11 @@ impl SpecPkg {
     /// Macro definitions take effect from their own line on — a
     /// `%undefine` removes a macro's earlier definitions, and one
     /// inside a conditional branch removes them for that branch
-    /// only, so the defined and undefined readings both count — and
-    /// the definitions of every conditional branch count, since
-    /// branch conditions are not evaluated. `None` when the preamble
-    /// declares no `Name:` at all.
+    /// only, so the defined and undefined readings both count,
+    /// until a definition at the branch's depth or outside it
+    /// re-establishes the macro — and the definitions of every
+    /// conditional branch count, since branch conditions are not
+    /// evaluated. `None` when the preamble declares no `Name:` at all.
     pub fn declared_name_patterns(&self) -> Option<Vec<NamePattern>> {
         declared_name_patterns(&self.lines)
     }
@@ -185,13 +186,16 @@ type PreambleScan = (Vec<(usize, String)>, Vec<(usize, MacroEvent)>);
 
 /// One macro-environment event of the preamble scan: a `%define` /
 /// `%global` definition or a `%undefine`, in declaration order.
-/// A `%undefine` also carries the conditional nesting depth of
-/// its line: one inside a branch removes the macro for that
-/// branch's reading only.
+/// Both carry the conditional nesting depth of their line: a
+/// `%undefine` inside a branch removes the macro for that
+/// branch's reading only, and a definition at that depth or
+/// outside it re-establishes the macro from its line on.
 enum MacroEvent {
-    /// `%define name body` / `%global name body`.
-    Define(String, String),
-    /// `%undefine name`.
+    /// `%define name body` / `%global name body`, with the
+    /// conditional nesting depth of the definition's line.
+    Define(String, String, usize),
+    /// `%undefine name`, with the conditional nesting depth of
+    /// its line.
     Undefine(String, usize),
 }
 
@@ -236,10 +240,21 @@ fn scan_preamble(lines: &[String]) -> PreambleScan {
                 .chars()
                 .take_while(|c| c.is_ascii_alphabetic() || *c == '_')
                 .collect();
+            // A directive word ends at a word boundary: a digit or
+            // a dash right after it makes the token a longer macro
+            // name (`%files-foo` is an invocation, not the `%files`
+            // section), which is preamble content like any other
+            // invocation.
+            if matches!(
+                rest[directive.len()..].chars().next(),
+                Some(c) if c.is_ascii_digit() || c == '-'
+            ) {
+                continue;
+            }
             match directive.as_str() {
                 "define" | "global" => {
                     if let Some((name, body)) = parse_macro(&rest[directive.len()..]) {
-                        events.push((pos, MacroEvent::Define(name, body)));
+                        events.push((pos, MacroEvent::Define(name, body, cond_depth)));
                     }
                 }
                 "undefine" => {
@@ -289,7 +304,9 @@ fn is_name_line(line: &str) -> bool {
 
 /// Parse one `%define` / `%global` definition from the text after
 /// the directive word. Parametric definitions (`%define name(args)
-/// body`) define functions, not values, and do not parse.
+/// body`) define functions, not values, and do not parse. A body
+/// that opens with a parenthesis is literal text: rpm expands a
+/// use of `%define sfx (foo)` to the body `(foo)`.
 fn parse_macro(rest: &str) -> Option<(String, String)> {
     let mut parts = rest.trim_start().splitn(2, char::is_whitespace);
     let name = parts.next().unwrap_or_default();
@@ -297,9 +314,6 @@ fn parse_macro(rest: &str) -> Option<(String, String)> {
         return None;
     }
     let body = parts.next().unwrap_or_default().trim();
-    if body.starts_with('(') {
-        return None;
-    }
     Some((name.to_string(), body.to_string()))
 }
 
@@ -393,7 +407,8 @@ fn tokenise_value(value: &str, depth: usize) -> Vec<ValueItem> {
                     i = chars.len();
                 } else if next == '{' {
                     let inner: String = chars[i + 2..j].iter().collect();
-                    items.push(brace_item(&inner, depth));
+                    let literal: String = chars[i..=j].iter().collect();
+                    items.push(brace_item(&inner, &literal, depth));
                     i = j + 1;
                 } else {
                     items.push(ValueItem::Opaque);
@@ -441,7 +456,8 @@ fn tokenise_value(value: &str, depth: usize) -> Vec<ValueItem> {
                             i = chars.len();
                         } else {
                             let inner: String = chars[i + 3..j].iter().collect();
-                            items.push(brace_item(&format!("{next}{inner}"), depth));
+                            let literal: String = chars[i..=j].iter().collect();
+                            items.push(brace_item(&format!("{next}{inner}"), &literal, depth));
                             i = j + 1;
                         }
                     }
@@ -483,7 +499,11 @@ fn tokenise_value(value: &str, depth: usize) -> Vec<ValueItem> {
 
 /// The item for a `%{...}` group, from its inner text. The group's
 /// nested text tokenises one budget step deeper than the group itself.
-fn brace_item(inner: &str, depth: usize) -> ValueItem {
+/// `literal` is the group's source text, braces included: a group
+/// whose name is empty is not a macro construct rpm expands — `%{?}`,
+/// `%{?:text}` and `%{}` pass through literally — so it counts as
+/// literal text.
+fn brace_item(inner: &str, literal: &str, depth: usize) -> ValueItem {
     let (conditional, rest) = match inner.strip_prefix('?').or_else(|| inner.strip_prefix('!')) {
         Some(rest) => (true, rest),
         None => (false, inner),
@@ -492,6 +512,9 @@ fn brace_item(inner: &str, depth: usize) -> ValueItem {
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
         .collect();
+    if name.is_empty() {
+        return ValueItem::Lit(literal.to_string());
+    }
     let after = &rest[name.len()..];
     if after.is_empty() {
         return if conditional {
@@ -524,7 +547,7 @@ const MAX_EXPANSION_DEPTH: usize = 8;
 fn expand_value(
     value: &str,
     macros: &[(String, String)],
-    undefined: &std::collections::HashSet<String>,
+    undefined: &std::collections::HashMap<String, usize>,
     depth: usize,
     visiting: &mut Vec<String>,
 ) -> Vec<NamePattern> {
@@ -542,7 +565,7 @@ fn expand_value(
 fn expand_items(
     items: &[ValueItem],
     macros: &[(String, String)],
-    undefined: &std::collections::HashSet<String>,
+    undefined: &std::collections::HashMap<String, usize>,
     depth: usize,
     visiting: &mut Vec<String>,
 ) -> Vec<NamePattern> {
@@ -594,7 +617,7 @@ fn expand_items(
 fn macro_patterns(
     name: &str,
     macros: &[(String, String)],
-    undefined: &std::collections::HashSet<String>,
+    undefined: &std::collections::HashMap<String, usize>,
     depth: usize,
     visiting: &mut Vec<String>,
 ) -> Vec<NamePattern> {
@@ -614,7 +637,7 @@ fn macro_patterns(
     }
     visiting.push(name.to_string());
     let mut out = std::collections::BTreeSet::new();
-    if undefined.contains(name) {
+    if undefined.contains_key(name) {
         out.insert(NamePattern(vec![NameSegment::Any]));
     }
     for body in bodies {
@@ -675,21 +698,36 @@ fn declared_name_patterns(lines: &[String]) -> Option<Vec<NamePattern>> {
         // before the tag accumulate as alternatives. A `%undefine`
         // outside any branch removes the definitions before it; one
         // inside a branch removes them for that branch's reading
-        // only, so the macro counts as undefined there as well.
+        // only, so the macro counts as undefined there as well,
+        // until a definition at the branch's depth or outside it
+        // re-establishes the macro — a definition deeper inside a
+        // nested branch does not, since that branch's readings may
+        // not run where the undefine's did. The undefined map
+        // carries the shallowest depth at which an undefine of the
+        // macro is outstanding.
         let mut env: Vec<(String, String)> = Vec::new();
-        let mut undefined: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut undefined: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         for (at, event) in &events {
             if at >= pos {
                 break;
             }
             match event {
-                MacroEvent::Define(name, body) => env.push((name.clone(), body.clone())),
+                MacroEvent::Define(name, body, depth) => {
+                    env.push((name.clone(), body.clone()));
+                    if undefined.get(name).is_some_and(|d| depth <= d) {
+                        undefined.remove(name);
+                    }
+                }
                 MacroEvent::Undefine(name, depth) => {
                     if *depth == 0 {
                         env.retain(|(n, _)| n != name);
                         undefined.remove(name);
                     } else {
-                        undefined.insert(name.clone());
+                        undefined
+                            .entry(name.clone())
+                            .and_modify(|d| *d = (*d).min(*depth))
+                            .or_insert(*depth);
                     }
                 }
             }
@@ -1250,6 +1288,100 @@ mod name_patterns_tests {
             &["prefix-leafword"],
             &["prefix-anything"],
         );
+    }
+
+    #[test]
+    fn paren_bodied_definition_is_literal_text() {
+        // rpm expands a use of `%define sfx (foo)` to the literal
+        // body `(foo)`: the definition counts, with that exact text
+        // — the pattern is the one name it spells, not an
+        // unconstrained segment.
+        assert_matches(
+            "%define sfx (foo)\nName: pkg%{sfx}\n",
+            &["pkg(foo)"],
+            &["pkg", "pkg-foo", "pkgx"],
+        );
+        // Alongside a plain definition of the same macro, both
+        // bodies are alternatives.
+        assert_matches(
+            "%define sfx (foo)\n%define sfx -bar\nName: pkg%{sfx}\n",
+            &["pkg(foo)", "pkg-bar"],
+            &["pkg"],
+        );
+    }
+
+    #[test]
+    fn suffixed_directive_tokens_are_not_sections() {
+        // `%files-foo` is a longer macro token, not the `%files`
+        // section: the scan reads past it like any other preamble
+        // content, and a `%define2` is not a definition either. A
+        // bare `%files`, with or without arguments, still ends the
+        // scan.
+        assert_matches("%files-foo\nName: bar\n", &["bar"], &["foo"]);
+        assert_matches(
+            "%define2 sfx -x\nName: foo%{sfx}\n",
+            &["foo-x", "foo-zzz"],
+            &["bar"],
+        );
+        assert_eq!(patterns("%files\nName: bar\n"), None);
+        assert_eq!(patterns("%files -f list\nName: bar\n"), None);
+    }
+
+    #[test]
+    fn outer_redefinition_ends_a_branch_undefine() {
+        // Defined, removed in a branch, then redefined outside the
+        // branch: the undefined reading is stale, so no
+        // unconstrained segment remains (the definitions themselves
+        // still accumulate as alternatives, as everywhere in this
+        // scan).
+        assert_matches(
+            "%define sfx -x\n%if 0\n%undefine sfx\n%endif\n%define sfx -y\nName: foo%{sfx}\n",
+            &["foo-x", "foo-y"],
+            &["foo", "foo-zzz"],
+        );
+        // A redefinition at the branch's own depth, after the
+        // undefine, re-establishes the macro there too.
+        assert_matches(
+            "%define sfx -x\n%if 0\n%undefine sfx\n%define sfx -z\n%endif\nName: foo%{sfx}\n",
+            &["foo-x", "foo-z"],
+            &["foo", "foo-zzz"],
+        );
+        // A redefinition deeper than the undefine does not end it:
+        // the inner branch may not run where the undefine's did,
+        // so the undefined reading counts alongside.
+        assert_matches(
+            "%define sfx -x\n%if 0\n%undefine sfx\n%if 1\n%define sfx -z\n%endif\n%endif\nName: foo%{sfx}\n",
+            &["foo-x", "foo-z", "foo", "foo-zzz"],
+            &["xfoo"],
+        );
+    }
+
+    #[test]
+    fn empty_name_groups_are_literal_text() {
+        // rpm does not expand a `%{...}` group whose name is empty:
+        // `%{?}`, `%{?:text}`, `%{!}` and `%{}` pass through
+        // literally, so the group counts as literal text in the
+        // name — it neither vanishes nor widens the pattern.
+        assert_matches("Name: pkg%{?:-x}\n", &["pkg%{?:-x}"], &["pkg", "pkg-x"]);
+        assert_matches("Name: pkg%{?}\n", &["pkg%{?}"], &["pkg"]);
+        assert_matches("Name: pkg%{!}\n", &["pkg%{!}"], &["pkg"]);
+        assert_matches("Name: pkg%{}\n", &["pkg%{}"], &["pkg"]);
+        assert_matches("Name: pkg%?{}\n", &["pkg%?{}"], &["pkg"]);
+    }
+
+    #[test]
+    fn many_alternatives_widen_at_the_pattern_cap() {
+        // Seven conditional suffixes compose to 2^7 = 128
+        // alternatives — past the pattern cap the value widens to
+        // the single unconstrained pattern instead of enumerating
+        // them, so adversarial alternative counts stay bounded.
+        let pats = patterns("Name: x%{?a:-1}%{?b:-2}%{?c:-3}%{?d:-4}%{?e:-5}%{?f:-6}%{?g:-7}\n")
+            .expect("patterns declared");
+        assert_eq!(pats.len(), 1);
+        assert!(pats[0].is_unconstrained());
+        // Below the cap the alternatives enumerate exactly.
+        let pats = patterns("Name: x%{?a:-1}%{?b:-2}%{?c:-3}\n").expect("patterns declared");
+        assert_eq!(pats.len(), 8);
     }
 
     #[test]
