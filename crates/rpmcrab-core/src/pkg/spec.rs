@@ -19,6 +19,10 @@ pub struct SpecPkg {
     /// The spec text, read at [`SpecPkg::open`] time
     /// (`rpmlint.helpers.readlines` at the top of `SpecCheck.check_spec`).
     pub lines: Vec<String>,
+    /// Whether the file's bytes are valid UTF-8, judged from the
+    /// bytes read at [`SpecPkg::open`] time (`rpmlint.pkg.is_utf8`
+    /// on the same file).
+    pub utf8: bool,
     /// The 1-based line the check is currently looking at
     /// (`FakePkg.current_linenum`, rendered as `file.spec:NN:`). Interior
     /// mutability: the `Check` trait hands the check a shared reference,
@@ -45,14 +49,15 @@ impl SpecPkg {
     /// here: the reference's `validate_file` treats any read failure as
     /// fatal, surfacing when `SpecCheck` first reads the file.
     pub fn open(path: &Path) -> Result<Self, SpecError> {
-        let lines = readlines(path).map_err(|source| SpecError::Read {
+        let bytes = std::fs::read(path).map_err(|source| SpecError::Read {
             path: path.to_path_buf(),
             source,
         })?;
         Ok(Self {
             name: path.to_string_lossy().into_owned(),
-            lines,
+            lines: split_lines(&bytes),
             current_linenum: Cell::new(None),
+            utf8: std::str::from_utf8(&bytes).is_ok(),
         })
     }
 
@@ -706,10 +711,17 @@ fn declared_name_patterns(lines: &[String]) -> Option<Vec<NamePattern>> {
 /// undecodable bytes replaced (`helpers.byte_to_string`).
 pub fn readlines(path: &Path) -> io::Result<Vec<String>> {
     let bytes = std::fs::read(path)?;
-    Ok(bytes
+    Ok(split_lines(&bytes))
+}
+
+/// Split raw file bytes into text lines: each line keeps its
+/// trailing newline, decoded as UTF-8 with undecodable bytes
+/// replaced.
+fn split_lines(bytes: &[u8]) -> Vec<String> {
+    bytes
         .split_inclusive(|b: &u8| *b == b'\n')
         .map(|line| String::from_utf8_lossy(line).into_owned())
-        .collect())
+        .collect()
 }
 
 /// `rpmlint.pkg.is_utf8` for a spec file: true when the bytes are valid
@@ -761,6 +773,17 @@ mod tests {
     }
 
     #[test]
+    fn open_records_utf8_from_the_same_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = dir.path().join("ok.spec");
+        std::fs::write(&ok, "Name: foo\n").unwrap();
+        assert!(SpecPkg::open(&ok).unwrap().utf8);
+        let bad = dir.path().join("bad.spec");
+        std::fs::write(&bad, b"Name: f\xffoo\n").unwrap();
+        assert!(!SpecPkg::open(&bad).unwrap().utf8);
+    }
+
+    #[test]
     fn open_reads_lines_and_starts_without_linenum() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.spec");
@@ -780,6 +803,7 @@ mod name_patterns_tests {
             name: "t.spec".to_string(),
             lines: text.lines().map(str::to_string).collect(),
             current_linenum: Cell::new(None),
+            utf8: true,
         };
         pkg.declared_name_patterns()
     }
