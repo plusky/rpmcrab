@@ -264,7 +264,7 @@ def compute_drift(ref_dir, tip_pins):
                     ),
                 )
             )
-    want_rs = gen.emit_rs(gen.check_rs_files(files_out, gen.DISTRO_DIR))
+    want_rs = gen.emit_rs(gen.check_rs_files(files_out))
     have_rs = (
         gen.GENERATED_RS.read_text(encoding="utf-8")
         if gen.GENERATED_RS.exists()
