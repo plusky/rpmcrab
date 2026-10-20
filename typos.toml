@@ -39,10 +39,10 @@ vai = "vai"
 # sourcen is the RPM %{SOURCEN} macro (Source#: references), not a typo for source.
 sourcen = "sourcen"
 # packag is a deliberate misspelling in the tags-emission-pins spelling-error
-# fixture and its expected finding detail. Scoped to those two files so the
+# fixture and its expected finding detail. Scoped to those files so the
 # allow-list does not silence a real "packag" typo repo-wide.
 [type.packag-fixture]
-extend-glob = ["**/tags-emission-pins.spec", "**/tags.rs"]
+extend-glob = ["**/tags-emission-pins.spec", "**/tags.rs", "**/binary_cli.rs"]
 extend-words = { packag = "packag" }
 
 # recieve is a deliberate misspelling in the jargon-filter negative
