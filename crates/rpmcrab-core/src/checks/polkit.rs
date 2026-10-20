@@ -328,7 +328,7 @@ mod tests {
         }
     }
 
-    /// A check with no privs data loaded at all — no configured
+    /// A check that read no configured privs file — no configured
     /// file existed or was readable: the untracked verdict is not
     /// decidable in this state.
     fn check_no_data() -> PolkitCheck {
@@ -409,8 +409,8 @@ mod tests {
 
     #[test]
     fn no_privs_data_loaded_untracked_is_silent() {
-        // With no entries loaded from any source, an action the
-        // (absent) data does not list draws no verdict: neither the
+        // With no configured file read, an action the data does
+        // not list draws no verdict: neither the
         // all-`no` defaults shape nor the auth_admin shape.
         assert!(
             check_no_data()
@@ -507,7 +507,7 @@ mod tests {
     #[test]
     fn no_privs_data_loaded_still_flags_unauthorised() {
         // The unauthorised verdict is decidable from the action's
-        // own defaults alone, so it fires with no data loaded too
+        // own defaults alone, so it fires with no file read too
         // (the w6-polkit parity shape: auth_self defaults on a host
         // whose profile the reference expects to be installed).
         let mut defaults = HashMap::new();
@@ -522,8 +522,8 @@ mod tests {
     #[test]
     fn no_privs_data_loaded_check_binary_reports_nothing() {
         // Through the entry point: a package shipping a plain
-        // action yields no findings at all when no privs data
-        // could be loaded.
+        // action yields no findings at all when no privs file
+        // could be read.
         let dir = std::env::temp_dir();
         let path = dir.join("rpmcrab-polkit-nodata.policy");
         std::fs::write(
