@@ -2644,6 +2644,7 @@ kind = "behaviour"
 reason = "A `%ghost %config` entry does not fire (issue #793): a ghost ships no vendor content, so there is no shipped default for the noreplace flag to protect and the flag is meaningless for the entry. The reference's check iterates its config-file list the same way; it stays silent on shapes like the apparmor-profiles placeholders (49 `%ghost %config` files under /etc/apparmor.d/local) only because its openSUSE config blanket-filters the whole finding — the filter #556 dropped. The exclusion mirrors the one this check's UsrEtc rule already applies to ghost entries on the same rationale. Real conffiles without noreplace keep firing, and a ghost entry outside /etc and /var still draws the placement finding, which judges the %config mark itself."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/793"
+
 [[divergence]]
 case = "global"
 check = "polkit-untracked-privilege"
