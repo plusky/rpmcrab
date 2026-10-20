@@ -57,21 +57,32 @@ fn completions_hide_internal_args() {
     let hidden: Vec<String> = rpmcrab::cli_command()
         .get_arguments()
         .filter(|a| a.is_hide_set())
-        .filter_map(|a| a.get_long().map(|long| format!("--{long}")))
+        .filter_map(|a| a.get_long().map(|long| long.to_string()))
         .collect();
     assert!(
         !hidden.is_empty(),
         "the CLI has a hidden arg to keep hidden"
     );
-    for name in ["rpmcrab.bash", "rpmcrab.zsh", "rpmcrab.fish"] {
+    for name in ["rpmcrab.bash", "rpmcrab.zsh"] {
         let content = std::fs::read_to_string(crate_dir().join("completions").join(name))
             .unwrap_or_else(|_| panic!("{name} is checked in"));
         for flag in &hidden {
             assert!(
-                !content.contains(flag.as_str()),
-                "{name} advertises the hidden {flag}"
+                !content.contains(&format!("--{flag}")),
+                "{name} advertises the hidden --{flag}"
             );
         }
+    }
+    // Fish renders long flags by bare name (`-l format`), so the
+    // `--name` form can never appear in the fish file at all; the
+    // bare long name is what has to be absent there.
+    let content = std::fs::read_to_string(crate_dir().join("completions").join("rpmcrab.fish"))
+        .unwrap_or_else(|_| panic!("rpmcrab.fish is checked in"));
+    for flag in &hidden {
+        assert!(
+            !content.contains(flag.as_str()),
+            "rpmcrab.fish advertises the hidden {flag}"
+        );
     }
 }
 

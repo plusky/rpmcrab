@@ -476,19 +476,14 @@ pub fn load_bundled() -> Config {
 /// error. An unreadable file exits 1 and an unparsable TOML file exits 4 at
 /// the read site instead, as rpmlint does.
 pub fn load(extra: &[PathBuf]) -> Result<Config, String> {
-    let (cfg, warnings) = match load_with_warnings(extra) {
-        Ok(pair) => pair,
-        Err((e, warnings)) => {
-            for warning in &warnings {
-                eprintln!("{warning}");
-            }
-            return Err(e);
-        }
+    let (result, warnings) = match load_with_warnings(extra) {
+        Ok((cfg, warnings)) => (Ok(cfg), warnings),
+        Err((e, warnings)) => (Err(e), warnings),
     };
     for warning in &warnings {
         eprintln!("{warning}");
     }
-    Ok(cfg)
+    result
 }
 
 /// Like [`load`], but returns the load warnings instead of printing

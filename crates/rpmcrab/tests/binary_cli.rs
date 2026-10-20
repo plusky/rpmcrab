@@ -5,8 +5,20 @@
 use std::path::Path;
 use std::process::Command;
 
-fn rpmcrab(args: &[&str]) -> std::process::Output {
+/// The spawn command every harness helper starts from: the binary
+/// under test, with the ambient terminal variables removed, so a
+/// developer's shell cannot leak width or colour settings into a
+/// run. Each helper layers its own environment policy on top.
+fn rpmcrab_command() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rpmcrab"));
+    cmd.env_remove("COLUMNS")
+        .env_remove("NO_COLOR")
+        .env_remove("CLICOLOR");
+    cmd
+}
+
+fn rpmcrab(args: &[&str]) -> std::process::Output {
+    let mut cmd = rpmcrab_command();
     cmd.args(args)
         // Hermetic: no XDG auto-load, no colour, no ambient COLUMNS.
         .env("CONFIG_DISABLE_AUTOLOADING", "1")
@@ -15,10 +27,7 @@ fn rpmcrab(args: &[&str]) -> std::process::Output {
         // #688), so the harness disables the ngram suggester in the
         // spawned checker. Production runs leave the variable unset
         // and keep the full suggestions.
-        .env("RPMCRAB_DISABLE_NGRAM_SUGGESTIONS", "1")
-        .env_remove("COLUMNS")
-        .env_remove("NO_COLOR")
-        .env_remove("CLICOLOR");
+        .env("RPMCRAB_DISABLE_NGRAM_SUGGESTIONS", "1");
     cmd.output().expect("spawn rpmcrab")
 }
 
@@ -864,12 +873,8 @@ fn write_loud_echo_spec(dir: &Path) -> std::path::PathBuf {
 /// `rpmcrab` with extra environment variables, for tests that must prove
 /// the binary ignores (or honours) a specific ambient variable.
 fn rpmcrab_env(args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rpmcrab"));
-    cmd.args(args)
-        .env("CONFIG_DISABLE_AUTOLOADING", "1")
-        .env_remove("COLUMNS")
-        .env_remove("NO_COLOR")
-        .env_remove("CLICOLOR");
+    let mut cmd = rpmcrab_command();
+    cmd.args(args).env("CONFIG_DISABLE_AUTOLOADING", "1");
     for (key, value) in envs {
         cmd.env(key, value);
     }
@@ -1299,8 +1304,8 @@ fn diverted_run_delivers_the_document_on_a_nonzero_verdict() {
 
 /// A diverted child that fails has already explained itself on the
 /// forwarded stderr (here: a positional path that does not exist);
-/// the parent forwards its exit code without adding an "empty
-/// report" complaint of its own.
+/// the parent forwards its exit code without adding a hand-off
+/// complaint of its own.
 #[test]
 fn diverted_child_failure_adds_no_parent_noise() {
     let out = rpmcrab(&["--format", "json", "/no/such/package.rpm"]);
@@ -1311,8 +1316,10 @@ fn diverted_child_failure_adds_no_parent_noise() {
         stderr.contains("does not exist"),
         "the child's own explanation is forwarded, got: {stderr}"
     );
+    // The parent's hand-off diagnostics all share the one stem;
+    // none of them may appear here, not just the empty-report one.
     assert!(
-        !stderr.contains("empty report"),
+        !stderr.contains("the diverted JSON run"),
         "the parent must not add noise to a child-explained failure, got: {stderr}"
     );
 }
@@ -1333,12 +1340,9 @@ fn diverted_run_survives_a_broken_stderr() {
     // downstream the forwarder must survive, on any Unix.
     let (reader, writer) = std::io::pipe().expect("pipe for the broken stderr");
     drop(reader);
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rpmcrab"));
+    let mut cmd = rpmcrab_command();
     cmd.args(["--format", "json", spec.to_str().unwrap()])
         .env("CONFIG_DISABLE_AUTOLOADING", "1")
-        .env_remove("COLUMNS")
-        .env_remove("NO_COLOR")
-        .env_remove("CLICOLOR")
         .stderr(std::process::Stdio::from(writer))
         .stdout(std::process::Stdio::piped());
     let out = cmd.output().expect("spawn rpmcrab");
@@ -2830,7 +2834,7 @@ fn rpmcrab_flavoured(args: &[&str]) -> std::process::Output {
     let xdg = tempfile::tempdir().expect("xdg tempdir");
     std::fs::create_dir_all(xdg.path().join("home")).expect("xdg home");
     std::fs::create_dir_all(xdg.path().join("dirs")).expect("xdg dirs");
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rpmcrab"));
+    let mut cmd = rpmcrab_command();
     cmd.args(args)
         .env("XDG_CONFIG_HOME", xdg.path().join("home"))
         .env("XDG_CONFIG_DIRS", xdg.path().join("dirs"))
@@ -2838,10 +2842,7 @@ fn rpmcrab_flavoured(args: &[&str]) -> std::process::Output {
         // ambient value cannot leak into flavoured runs.
         .env("RPMCRAB_DISABLE_NGRAM_SUGGESTIONS", "1")
         .env_remove("CONFIG_DISABLE_AUTOLOADING")
-        .env_remove("PYTEST_XDIST_TESTRUNUID")
-        .env_remove("COLUMNS")
-        .env_remove("NO_COLOR")
-        .env_remove("CLICOLOR");
+        .env_remove("PYTEST_XDIST_TESTRUNUID");
     cmd.output().expect("spawn rpmcrab")
 }
 
@@ -2888,13 +2889,10 @@ fn system_dictionary_installed() -> bool {
 /// Run the binary without the harness's ngram switch, for the runs
 /// that pin the production default (ngram suggester on) end to end.
 fn rpmcrab_default_env(args: &[&str]) -> std::process::Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rpmcrab"));
+    let mut cmd = rpmcrab_command();
     cmd.args(args)
         .env("CONFIG_DISABLE_AUTOLOADING", "1")
-        .env_remove("RPMCRAB_DISABLE_NGRAM_SUGGESTIONS")
-        .env_remove("COLUMNS")
-        .env_remove("NO_COLOR")
-        .env_remove("CLICOLOR");
+        .env_remove("RPMCRAB_DISABLE_NGRAM_SUGGESTIONS");
     cmd.output().expect("spawn rpmcrab")
 }
 
