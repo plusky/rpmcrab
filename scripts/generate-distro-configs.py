@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""Vendor upstream distro configs (openSUSE + SLFO) into rpmcrab.
+"""Vendor the upstream distro configs (the SUSE flavor) into rpmcrab.
 
-Copies ``configs/openSUSE/*.toml`` from the pinned upstream rpmlint commits
-into ``crates/rpmcrab-core/data/distro/<flavor>/``, prunes ``Filters`` /
+Copies ``configs/openSUSE/*.toml`` from the pinned upstream rpmlint commit
+into ``crates/rpmcrab-core/data/distro/opensuse/``, prunes ``Filters`` /
 ``BlockedFilters`` entries that reference findings rpmcrab no longer emits,
 drops ``Filters`` entries for live findings rpmcrab deliberately surfaces
 (see DROP_LIVE_FILTERS), drops duplicate ``Filters`` lines and lines
 subsumed by a broader line for the same finding (see dedupe_filters),
 drops whitelist stanzas for packages gone from
-Tumbleweed/SLE 16 and stale pie-executables paths, retargets ``Filters``
-entries whose target path moved (see RETARGET_FILTERS), prunes ``Filters``
-entries dead in one flavor only (see PRUNE_FLAVOURED), appends the extra
+Tumbleweed and stale pie-executables paths, retargets ``Filters``
+entries whose target path moved (see RETARGET_FILTERS), appends the extra
 Filters/Checks rpmcrab carries on top of upstream, removes the Checks
-the opensuse flavor deliberately does not run, strips the
-``BadnessThreshold`` line from the flavor configs (see
+the flavor deliberately does not run, strips the
+``BadnessThreshold`` line from the flavor config (see
 strip_badness_threshold; upstream's ``scoring.toml`` is not vendored
-at all — issue #699), and stamps provenance.
+at all — issue #699), applies the Factory-adjudicated digest records
+(see DIGEST_ADJUDICATIONS), and stamps provenance.
 
 The checked-in files are the build's source of truth; this script runs by hand
 and in CI (drift check + monthly refresh), never at build time.
@@ -27,7 +27,7 @@ diverge from what this script produces at the pinned SHAs.
 
 Usage:
     scripts/generate-distro-configs.py [--check] [--ref-dir DIR]
-        [--pin opensuse=SHA:DATE] [--pin slfo=SHA:DATE] [--refresh]
+        [--pin opensuse=SHA:DATE] [--refresh]
 
     --check      regenerate into a temp dir and diff against the repo;
                  exit 1 with a unified diff on any divergence.
@@ -36,9 +36,32 @@ Usage:
     --refresh    resolve PINS to the latest upstream commits, persist them
                  into the PINS constant above, and regenerate (monthly job).
     --ref-dir    use a local rpmlint checkout instead of fetching from
-                 GitHub (both pinned SHAs must exist in it).
+                 GitHub (the pinned SHA must exist in it).
     --pin        override a pinned SHA for the refresh workflow; DATE is the
                  commit date (YYYY-MM-DD) used for the provenance stamp.
+
+Refresh procedure:
+    The vendored files are generator output end to end: a change to a
+    shipped file is made in this script (the delta tables or the
+    emission code) and regenerated, so the tree always matches what the
+    generator produces at the pins. The monthly distro-config-sync job
+    performs the refresh as a PR — it resolves the pins to the latest
+    upstream commits, regenerates, and opens the PR with the provenance
+    (old and new SHAs, prune log). A manual refresh runs the same steps
+    by hand:
+
+        scripts/generate-distro-configs.py --refresh
+        scripts/test_generate_distro_configs.py
+        UPDATE_SEVERITY_INVENTORY=1 cargo test -p rpmcrab-core \
+            --test severity_inventory
+
+    The generator test suite runs because a refresh re-derives the
+    vendored set from new upstream data; the severity inventory
+    regenerates because the vendored configs carry [Scoring] and
+    [SeverityOverrides] tables the inventory derives from. The weekly
+    upstream-config-watch job reports upstream movement between
+    refreshes — the upstream commits in the pin range and the vendored
+    files a refresh rewrites — on a tracking issue.
 """
 
 import argparse
@@ -72,15 +95,9 @@ PINS = {
         "2026-10-09",
         "opensuse",
     ),
-    "slfo": (
-        "5c758cf12f9be87e9487bb60b023397f1e97115e",
-        "2026-06-18",
-        "opensuse-slfo-main",
-    ),
 }
 
-# The vendored file sets, per flavor (configs/openSUSE/*.toml at the pinned
-# SHAs; SLFO dropped varlink-whitelist.toml).
+# The vendored file set (configs/openSUSE/*.toml at the pinned SHA).
 # Upstream's scoring.toml and scoring-strict.override.toml are deliberately
 # not vendored (issue #699): shipped configs carry no badness — severity is
 # decided at the emission sites. Users who want a [Scoring] table can still
@@ -106,12 +123,11 @@ FILES = {
         "zypper-plugins.toml",
     ],
 }
-FILES["slfo"] = [f for f in FILES["opensuse"] if f != "varlink-whitelist.toml"]
 
 # Whitelist files that carry per-package stanzas. The daily
 # sync-upstream-whitelists job advances these day-to-day at branch TIPs while
 # this script regenerates everything else at the monthly PINS, so --check
-# skips them (and the per-flavor whitelist pins below): a successful daily
+# skips them (and the whitelist pin below): a successful daily
 # sync must never read as drift. Canonical home of this list (the sync tool
 # loads it from here; guarded by test_sync_sets_match_generator).
 SYNC_MANAGED_FILES = [
@@ -129,60 +145,261 @@ SYNC_MANAGED_FILES = [
     "zypper-plugins.toml",
 ]
 
-# PROVENANCE lines owned by the daily sync (per-flavor TIPs it merged).
+# Digest records adjudicated from Factory content (issue #760, decision
+# D7 of the single-flavor programme): for these (file, stanza packages,
+# path) records the acceptable sha256 set is the set the Factory corpus
+# actually ships for the path, measured over the full corpus — not the
+# set either upstream branch recorded. Upstream's openSUSE branch records
+# a stale hash for cups' cups.conf (013f81b3…) while Factory ships the
+# file whose xml digest is 1bbed8c1…; the record below carries the
+# Factory hash so the shipped file verifies. Applied by generate() when
+# vendoring and by the daily sync's plan_merge to both sides of a merge,
+# so neither path can silently restore the stale record. Keys are
+# (filename, frozenset(packages), path); the value is the full
+# replacement hash list for that record.
+DIGEST_ADJUDICATIONS = {
+    (
+        "dbus-services.toml",
+        frozenset({"cups"}),
+        "/usr/share/dbus-1/system.d/cups.conf",
+    ): ["1bbed8c1ecac00e546a3659235855aa2e88ec1142b3908b3d662e68ad4e664fe"],
+}
+
+
+def apply_digest_adjudications(text, filename):
+    """Rewrite digest records named in DIGEST_ADJUDICATIONS to the
+    adjudicated hash sets. Returns (text, log lines).
+
+    A record is identified by its file, the owning stanza's package
+    set and the digest entry's path. Digest entries are
+    ``[[<Group>.digests]]`` sub-tables carrying ``path =`` and
+    ``hash =`` lines; the entries for an adjudicated path are rebuilt
+    to carry exactly the adjudicated hashes. Text with no adjudicated
+    record in it passes through byte-identical.
+    """
+    log = []
+    targets = {}
+    for (fn, pkgs, path), hashes in DIGEST_ADJUDICATIONS.items():
+        if fn == filename:
+            targets.setdefault(pkgs, {})[path] = hashes
+    if not targets:
+        return text, log
+
+    lines = text.splitlines(keepends=True)
+    # Segment the text: ("raw", lines) spans and ("entry", lines,
+    # packages, path) digest-entry blocks. `packages` is the package
+    # set of the stanza that owns the entry.
+    segments = []
+    raw = []
+    packages = set()
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        hdr = re.match(r"\s*\[\[([A-Za-z0-9_.]+)\]\]\s*$", ln)
+        if hdr and hdr.group(1).endswith(".digests"):
+            block = [ln]
+            path = None
+            i += 1
+            while i < len(lines) and not re.match(r"\s*\[", lines[i]):
+                block.append(lines[i])
+                pm = re.match(r'\s*path\s*=\s*"([^"]+)"', lines[i])
+                if pm:
+                    path = pm.group(1)
+                i += 1
+            if raw:
+                segments.append(("raw", raw))
+                raw = []
+            segments.append(("entry", block, frozenset(packages), path))
+            continue
+        if hdr:
+            packages = set()
+            raw.append(ln)
+            i += 1
+            continue
+        if re.match(r"\s*\[", ln):
+            packages = set()
+            raw.append(ln)
+            i += 1
+            continue
+        pm = re.match(r'\s*package\s*=\s*"([^"]+)"', ln)
+        if pm:
+            packages.add(pm.group(1))
+        pm = re.match(r"\s*packages\s*=\s*\[([^\]]*)\]", ln)
+        if pm:
+            packages.update(re.findall(r'"([^"]+)"', pm.group(1)))
+        raw.append(ln)
+        i += 1
+    if raw:
+        segments.append(("raw", raw))
+
+    # Group entry segments by (packages, path); rebuild adjudicated ones.
+    by_record = {}
+    for idx, seg in enumerate(segments):
+        if seg[0] == "entry":
+            by_record.setdefault((seg[2], seg[3]), []).append(idx)
+    drop = set()
+    replace = {}
+    for (pkgs, path), idxs in by_record.items():
+        hashes = targets.get(pkgs, {}).get(path)
+        if hashes is None:
+            continue
+        first = idxs[0]
+        block = segments[first][1]
+        hash_idx = next(
+            (j for j, l in enumerate(block) if re.match(r"\s*hash\s*=", l)),
+            None,
+        )
+        if hash_idx is None:
+            continue
+        rebuilt_first = list(block)
+        newline = "\n" if block[hash_idx].endswith("\n") else ""
+        indent = re.match(r"(\s*)hash\s*=", block[hash_idx]).group(1)
+        rebuilt_first[hash_idx] = f'{indent}hash = "{hashes[0]}"{newline}'
+        changed = rebuilt_first != block
+        replace[first] = rebuilt_first
+        # Extra hashes get cloned blocks right after the first entry.
+        clones = []
+        for h in hashes[1:]:
+            clone = list(block)
+            clone[hash_idx] = f'{indent}hash = "{h}"{newline}'
+            clones.append(clone)
+            changed = True
+        if clones:
+            replace[first] = rebuilt_first + [
+                line for clone in clones for line in clone
+            ]
+        for j in idxs[1:]:
+            drop.add(j)
+            changed = True
+        if changed:
+            log.append(
+                f"digest: adjudicated {filename} record for "
+                f"{', '.join(sorted(pkgs))} path {path} to the "
+                "Factory-shipped hash set (issue #760)"
+            )
+    out = []
+    for idx, seg in enumerate(segments):
+        if idx in drop:
+            continue
+        if idx in replace:
+            out.extend(replace[idx])
+        elif seg[0] == "entry":
+            out.extend(seg[1])
+        else:
+            out.extend(seg[1])
+    return "".join(out), log
+
+
+# PROVENANCE lines owned by the daily sync (the TIP it merged).
 # Stripped before --check comparison; the sync keeps them accurate.
 SYNC_OWNED_PROVENANCE_PREFIXES = (
     "# opensuse-whitelists:",
-    "# slfo-whitelists:",
 )
 
 
 def strip_sync_owned_provenance(text):
     """Drop sync-influenced lines for drift comparison.
 
-    The per-flavor whitelist pins follow daily TIPs, and so does the
-    trailing SLFO-dedup section (materialize/unlink flips it); both are
-    owned day-to-day by sync-upstream-whitelists, whose own tests guard
-    them. Assumes the dedup section stays last in PROVENANCE.
+    The whitelist pin follows the daily TIP and is owned day-to-day by
+    sync-upstream-whitelists, whose own tests guard it.
     """
     lines = [
         line
         for line in text.splitlines()
         if not line.startswith(SYNC_OWNED_PROVENANCE_PREFIXES)
     ]
-    # The SLFO-dedup section is always last; drop it wholesale.
-    for i, line in enumerate(lines):
-        if line.startswith("# SLFO files byte-identical") or line.startswith(
-            "# No SLFO files deduplicated"
-        ):
-            lines = lines[:i]
-            break
     return "\n".join(lines)
 
 
-def check_rs_deduped(regen_deduped, distro_dir):
-    """Deduped set for the --check manifest comparison.
+def check_rs_files(regen_files):
+    """File set for the --check manifest comparison.
 
-    PINS-derived, except sync-managed files whose dedup follows on-disk
-    bytes (the daily sync owns them between monthly refreshes): a TIP
-    materialization must not read as manifest drift.
+    The regenerated set is the manifest, so the comparison is direct.
     """
-    disk_managed = set()
-    for filename in SYNC_MANAGED_FILES:
-        if filename not in FILES["slfo"]:
-            continue
-        slfo_path = distro_dir / "slfo" / filename
-        base_path = distro_dir / "opensuse" / filename
-        if not slfo_path.exists() or (
-            base_path.exists() and slfo_path.read_bytes() == base_path.read_bytes()
-        ):
-            disk_managed.add(filename)
-    return [f for f in regen_deduped if f not in SYNC_MANAGED_FILES] + sorted(
-        disk_managed
+    return list(regen_files)
+
+# The openSUSE config's spelling-error jargon filter. The words are
+# RPM-ecosystem technical terms the hunspell en_US dictionary lacks, in
+# both the system dictionary and the LibreOffice dictionaries pinned by
+# scripts/install-hunspell-dicts.sh, so a provisioned reference flags
+# them too; issue #778 has the evidence (the rpm 6.1.0 package set flags
+# all four in the Summary(C) and %description -l C detail shapes).
+# Fedora's rpmlint config carries the same kind of spelling-error
+# jargon list, citing
+# https://bugzilla.redhat.com/show_bug.cgi?id=1424684#c9, and its list
+# includes namespace. The word list itself lives in a line-itemized
+# TOML next to this script so it stays reviewable as it grows; the
+# filter pattern is built from it here.
+SPELLING_JARGON_TOML = (
+    Path(__file__).resolve().parent / "opensuse-spelling-jargon.toml"
+)
+
+
+def load_spelling_jargon(path=SPELLING_JARGON_TOML):
+    """Load the spelling-error jargon words from their TOML file.
+
+    Returns the words sorted. The TOML is the reviewable source of the
+    list, so duplicates and non-string entries fail loudly instead of
+    silently warping the built filter.
+    """
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        sys.stderr.write(
+            "error: generate-distro-configs.py needs Python 3.11+ (tomllib)\n"
+        )
+        raise
+    with open(path, "rb") as f:
+        data = tomllib.load(f)
+    words = data["words"]
+    if not all(isinstance(word, str) for word in words):
+        raise ValueError(f"{path}: 'words' must be a list of strings")
+    if len(set(words)) != len(words):
+        raise ValueError(f"{path}: 'words' contains duplicates")
+    return sorted(words)
+
+
+def _spelling_jargon_word_pattern(word):
+    """One jargon word as a regex alternative.
+
+    The spelling check reports words as written, so the first letter
+    is case-flexible (a jargon word at the start of a sentence arrives
+    capitalised) and a trailing plural s is optional (the plural of a
+    jargon term is the same jargon). The rest of the word is
+    regex-escaped.
+    """
+    first = word[0]
+    if first.isascii() and first.isalpha():
+        head = f"[{first.upper()}{first.lower()}]"
+    else:
+        head = re.escape(first)
+    return head + re.escape(word[1:]) + "s?"
+
+
+def spelling_jargon_filter(words):
+    """Build the spelling-error Filters pattern for the jargon words.
+
+    One alternative per word (see _spelling_jargon_word_pattern),
+    closed by a word boundary so a word merely starting with a jargon
+    word still surfaces; the two detail shapes are the ones the
+    spelling check renders (Summary(<lang>) and %description
+    -l <lang>), and the locale class also carries the digits and
+    hyphen of real locales such as C.UTF-8 and de_DE.UTF-8.
+    """
+    alternation = "|".join(_spelling_jargon_word_pattern(word) for word in words)
+    return (
+        r"^.*spelling-error (Summary\([A-Za-z0-9_@.-]+\)|%description -l [A-Za-z0-9_@.-]+) ("
+        + alternation
+        + r")\b"
     )
 
+
+SPELLING_JARGON_WORDS = load_spelling_jargon()
+
 # Extra Filters appended to the openSUSE config that do not come from upstream
-# rpmlint's configs/openSUSE/*.toml. The reference loads these from
+# rpmlint's configs/openSUSE/*.toml. Each entry pairs the filter pattern
+# with the reason the generator logs for it in data/distro/PROVENANCE.
+# The reference loads the mingw entries from
 # /opt/testing/share/rpmlint/mingw32.toml and mingw64.toml, which are shipped
 # by the mingw32-filesystem and mingw64-filesystem packages (converted from
 # their mingw{32,64}-rpmlintrc sources at package build time). They are part
@@ -190,12 +407,27 @@ def check_rs_deduped(regen_deduped, distro_dir):
 # vendors them here to match. Kept minimal: only the filters for findings
 # rpmcrab actually emits are included; the rest (e.g. devel-file-in-non-devel,
 # mono-versioned-deps-missing) are added if their findings start diverging.
-EXTRA_OPENSUSE_FILTERS = [
+EXTRA_FILTERS = [
     # *.dll.a and *.a files are permitted arch-independent objects
     # (mingw32-filesystem's mingw32-rpmlintrc).
-    r"^mingw32-.*arch-independent-package-contains-binary-or-object.*\.a$",
+    (
+        r"^mingw32-.*arch-independent-package-contains-binary-or-object.*\.a$",
+        "mingw -filesystem packages' rpmlintrc",
+    ),
     # Same for mingw64 (mingw64-filesystem's mingw64-rpmlintrc).
-    r"^mingw64-.*arch-independent-package-contains-binary-or-object.*\.a$",
+    (
+        r"^mingw64-.*arch-independent-package-contains-binary-or-object.*\.a$",
+        "mingw -filesystem packages' rpmlintrc",
+    ),
+    # Spelling-error filter for the jargon word list in
+    # scripts/opensuse-spelling-jargon.toml, built by
+    # spelling_jargon_filter (see SPELLING_JARGON_TOML above).
+    (
+        spelling_jargon_filter(SPELLING_JARGON_WORDS),
+        "RPM-ecosystem jargon the hunspell en_US dictionary lacks"
+        " (issue #778); the words are itemised in"
+        " scripts/opensuse-spelling-jargon.toml",
+    ),
 ]
 
 # Extra Checks enabled in the openSUSE config that upstream rpmlint lists in
@@ -209,32 +441,32 @@ EXTRA_OPENSUSE_FILTERS = [
 # pam_systemd_home.so). rpmcrab enables the check and derives the authorized
 # modules from the FileDigestGroup data instead (see PAMModulesCheck).
 # Ledgered in tests/parity/divergences.toml.
-EXTRA_OPENSUSE_CHECKS = [
+EXTRA_CHECKS = [
     "XinetdDepCheck",
     "PAMModulesCheck",
 ]
 
 # Checks upstream lists in the openSUSE config that rpmcrab deliberately
-# does NOT run under the opensuse flavor. Currently empty: the snapshot
+# does NOT run under the flavor. Currently empty: the snapshot
 # layout AtomicUpdateCheck enforces is a transactional-update requirement
 # that binds every flavor (issue #698), so the check runs in the bundled
-# default config and in both vendored flavor configs and nothing is
+# default config and in the vendored flavor config and nothing is
 # excluded here. Config list merging appends, so a check listed here must
 # also stay out of the bundled default config
 # (crates/rpmcrab-core/data/configdefaults.toml).
-EXCLUDED_OPENSUSE_CHECKS = []
+EXCLUDED_CHECKS = []
 
-# Packages the vendored distro configs name in the `SystemdPresetPackages`
-# key: the distributions' preset packages, the only packages allowed to
+# Packages the vendored distro config names in the `SystemdPresetPackages`
+# key: the distribution's preset packages, the only packages allowed to
 # ship systemd preset files (the `systemd-preset-packaged` finding exempts
 # exactly these names). The key is rpmcrab-only; upstream configs carry
-# no such list, so both flavors carry the same set in their
-# opensuse.toml. The set is the union of the preset shippers verified in
-# openSUSE Factory and in SLFO:Main: the openSUSE branding packages and
+# no such list, so the vendored opensuse.toml carries the set. The set is
+# the union of the preset shippers verified in openSUSE Factory and in
+# SLFO:Main: the openSUSE branding packages and
 # `systemd-presets-common-SUSE` ship in Factory, the SLE/Elemental
 # branding packages ship in SLFO:Main, and a name shipped by only one
-# flavor is inert in the other. `systemd` and `systemd-mini` ship
-# systemd's own fallback presets in both flavors; `systemd-mini` is not
+# product is inert in the other. `systemd` and `systemd-mini` ship
+# systemd's own fallback presets in both products; `systemd-mini` is not
 # a standalone source package in either — it is the `mini` multibuild
 # flavor of the `systemd` source package, and its binary ships the same
 # preset files as `systemd`.
@@ -450,16 +682,6 @@ PRUNE_RAW = {
     r"glibc\.\S+: \w: statically-linked-binary /usr/sbin/glibc_post_upgrade": "dead pattern: glibc 2.44 no longer ships glibc_post_upgrade; zero emissions in the Factory sweep (issue #538)",
 }
 
-# Filters lines pruned for one flavor only: flavor -> {pattern: reason}.
-# Every other PRUNE_* table applies to both flavors; these name lines that
-# are dead under one flavor because that flavor's Checks layer differs,
-# while the other flavor runs the check and keeps the exemption. Matching
-# is byte-exact like PRUNE_RAW: when upstream rewords the line the entry
-# stops matching and the monthly sync surfaces the line again for a fresh
-# audit — a flavor prune can never silently widen. Currently empty:
-# the filesystem snapshot exemption is live in both flavors (issue #698).
-PRUNE_FLAVOURED = {}
-
 # Filters lines whose exemption is still wanted but whose target moved:
 # old pattern -> (new pattern, reason). The PRUNE_* tables drop lines
 # whose finding or scope is gone; these lines name a live finding scoped
@@ -508,6 +730,29 @@ RETARGET_FILTERS = {
     ),
 }
 
+# Filters entries whose exemption is wanted but that upstream does not
+# ship at all: anchor pattern -> (added pattern, reason). There is no
+# upstream line to rewrite the way RETARGET_FILTERS does, so the added
+# line is inserted immediately after the byte-exact anchor line inside
+# Filters, keeping the family it belongs to adjacent in the vendored
+# output. When upstream rewords or drops the anchor the insertion
+# raises instead of landing in the wrong place, and when upstream ships
+# the added line itself the insertion is skipped -- a monthly sync can
+# never silently duplicate or misplace an exemption. Each entry is a
+# deliberate divergence from the upstream distro config, ledgered in
+# tests/parity/divergences.toml.
+ADD_FILTERS = {
+    # filesystem ships /usr/etc/skel/.cache as one of the deliberate
+    # 0700 XDG skeleton dotdirs, alongside .config and .local.
+    # Upstream's config filters the siblings (retargeted to
+    # /usr/etc/skel above) but carries no .cache line, so this one
+    # member of the set fired while the rest stayed quiet.
+    r"^filesystem\..*: hidden-file-or-dir /usr/etc/skel/.local": (
+        r"^filesystem\..*: hidden-file-or-dir /usr/etc/skel/.cache",
+        "filesystem ships /usr/etc/skel/.cache in the same deliberate 0700 XDG skeleton set as .config/.local; upstream filters the siblings but carries no .cache line (issue #739)",
+    ),
+}
+
 # Filters entries narrowed to the scope their recorded rationale covers:
 # {bare pattern: (scoped pattern, reason)}. The finding stays live and the
 # filter stays, but only for the shape the rationale justifies; everywhere
@@ -548,24 +793,23 @@ SCOPE_FILTERS = {
     ),
 }
 
-# Packages gone from the distros: whitelist stanzas naming them are pruned.
-# A stanza is pruned only when the package is actually absent from the
-# flavor's codebase (openSUSE:Factory for the opensuse flavor,
-# openSUSE:Leap:16.0 for the slfo flavor — checked live at generation time),
+# Packages gone from the distro: whitelist stanzas naming them are pruned.
+# A stanza is pruned only when the package is actually absent from
+# openSUSE:Factory (checked live at generation time),
 # so the vendored config always matches reality. A package that reappears is
 # kept and logged — reintroduced software gets a fresh audit, never a silent
 # free pass on a stale stanza.
 # Entries name binary packages: that is the namespace whitelist `package =`
-# entries match against at lint time. Presence is checked per flavor (see
-# package_present()): via the OBS source-package API for openSUSE:Factory,
-# via the published Leap 16.0 binary repodata for the slfo flavor. An entry
+# entries match against at lint time. Presence is checked live (see
+# package_present()): via the OBS source-package API for openSUSE:Factory
+# and the published Tumbleweed binary repodata. An entry
 # whose source package has a different name would wrongly prune on the Factory
 # side, so keep entries to packages where both names agree. (All entries
-# below were verified absent in both namespaces for the flavor they prune.)
+# below were verified absent in both namespaces.)
 PRUNE_PACKAGES = {
     # package: reason
     "snapd": "removed from Factory (bsc#1256175, bsc#1248682, bsc#1261739)",
-    "lxd": "removed from Factory after the Canonical license change (replaced by incus); still in SLE 16, kept there",
+    "lxd": "removed from Factory after the Canonical license change (replaced by incus); not in SLE 16",
     "nscd": "removed from Factory and SLE 16 (use the system resolver)",
     "foomuuri": "removed from Factory (bsc#1254385)",
     "foomuuri-firewalld": "removed from Factory (bsc#1254385)",
@@ -580,38 +824,6 @@ PRUNE_PACKAGES = {
     "pam_csync": "removed from Factory; legacy: not audited",
     "pcfclock": "removed from Factory; not in SLE 16",
     "rpmlint-integration-test": "rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap",
-}
-
-# Packages absent from Leap 16.0 (verified 2026-10-08 against
-# openSUSE:Leap:16.0): pruned from the slfo flavor only; kept for the
-# opensuse flavor where the package still ships in Tumbleweed.
-PRUNE_PACKAGES_LEAP_ONLY = {
-    "pulseaudio": "not shipped in Leap 16.0 (PipeWire-only)",
-    "pommed": "not shipped in Leap 16.0; legacy: not audited",
-    "neard": "not shipped in Leap 16.0",
-    "xpra": "not shipped in Leap 16.0",
-    "iwd": "not shipped in Leap 16.0",
-    "udev-mini": "not shipped in Leap 16.0 (no -mini variants built)",
-    "low-memory-monitor": "not shipped in Leap 16.0",
-    "transactional-update-notifier": "not shipped in Leap 16.0",
-    "libgpiod-manager": "not shipped in Leap 16.0",
-    "pam_ccreds": "not shipped in Leap 16.0; legacy: not audited",
-    "nss-pam-ldapd": "not shipped in Leap 16.0; legacy: not audited",
-    "pam_passwdqc": "not shipped in Leap 16.0; legacy: not audited",
-    "pam_mktemp": "not shipped in Leap 16.0; legacy: not audited",
-    "pam_chroot": "not shipped in Leap 16.0; legacy: not audited",
-    "pam_yubico": "not shipped in Leap 16.0",
-    "pam_saslauthd": "not shipped in Leap 16.0",
-    "libcgroup-pam": "not shipped in Leap 16.0",
-    "libcgroup-tools": "not shipped in Leap 16.0",
-    "gnome-branding-Aeon": "not shipped in Leap 16.0 (Tumbleweed-only desktop branding)",
-    "plasma-branding-Kalpa": "not shipped in Leap 16.0 (Tumbleweed-only desktop branding)",
-    "monitoring-plugins-smart": "not shipped in Leap 16.0",
-    "cscreen": "not shipped in Leap 16.0",
-    "leafnode": "not shipped in Leap 16.0",
-    "soapy-remote-server": "not shipped in Leap 16.0",
-    "rubygem-passenger": "not shipped in Leap 16.0",
-    "parallel-printer-support": "not shipped in Leap 16.0",
 }
 
 # Historical prunes: deliberate removals that must always be documented in
@@ -638,15 +850,11 @@ HISTORICAL_PRUNES = [
 # stale - keeps the path and logs loudly, so the drift check fails for a
 # fresh audit instead of the path staying silently pruned. "moved" entries are
 # additionally checked at filelist level at generation time: an old path that
-# still ships in the current Factory filelist is kept with a loud log, and
-# the Leap 16.0 filelists are checked the same way as the SLES proxy (Leap
-# 16 is SLES-based and public; SLE sources sit behind Customer Center auth).
+# still ships in the current Factory filelist is kept with a loud log.
 # Verified 2026-10-07 against the openSUSE:Factory filelists (97 paths shipped
-# by no TW package), and 2026-10-08 against the Leap 16.0 binary repodata
-# for the slfo flavor (same upstream removals apply). Pruning runs per-flavor:
-# each entry's owning package is checked live against the flavor's own
-# codebase at generation time (OBS source API for openSUSE:Factory, published
-# binary repodata for Leap 16.0 — see package_present()).
+# by no TW package). Each entry's owning package is checked live against
+# Factory at generation time (OBS source API for openSUSE:Factory, published
+# binary repodata for Tumbleweed — see package_present()).
 PRUNE_PIE_PATHS = {
     "/usr/bin/achfile": ("netatalk", "removed", "netatalk removed from Factory"),
     "/usr/bin/adv1tov2": ("netatalk", "removed", "netatalk removed from Factory"),
@@ -917,42 +1125,6 @@ def prune_stale_filters(text, known, pruned_log, dropped_log, retargeted_log):
     return "".join(out)
 
 
-def prune_flavoured_filters(text, flavor, flavoured_pruned_log):
-    """Drop Filters/BlockedFilters lines pruned for this flavor only.
-
-    PRUNE_FLAVOURED maps a flavor to byte-exact patterns (PRUNE_RAW
-    semantics) that are dead under that flavor's Checks layer while the
-    other flavor still runs the check and keeps the exemption. Flavors
-    with no table pass through untouched.
-    """
-    table = PRUNE_FLAVOURED.get(flavor)
-    if not table:
-        return text
-    lines = text.splitlines(keepends=True)
-    out = []
-    in_list = None
-    for line in lines:
-        stripped = line.strip()
-        m = re.match(r"^(Filters|BlockedFilters)\s*=\s*\[", stripped)
-        if m:
-            in_list = m.group(1)
-            out.append(line)
-            continue
-        if in_list and stripped.startswith("]"):
-            in_list = None
-            out.append(line)
-            continue
-        if in_list:
-            raw = raw_filter_pattern(line)
-            if raw is not None and raw in table:
-                flavoured_pruned_log.append(
-                    f"{flavor} {in_list}: dropped {raw!r} ({table[raw]})"
-                )
-                continue
-        out.append(line)
-    return "".join(out)
-
-
 def scope_filters(text, scoped_log):
     """Rewrite bare Filters entries listed in SCOPE_FILTERS.
 
@@ -992,6 +1164,74 @@ def scope_filters(text, scoped_log):
                 )
                 continue
         out.append(line)
+    return "".join(out)
+
+
+def add_filters(text, added_log):
+    """Insert Filters entries listed in ADD_FILTERS after their anchors.
+
+    ADD_FILTERS covers exemptions upstream does not ship at all, so there
+    is no upstream line to rewrite the way RETARGET_FILTERS does; each
+    entry names the byte-exact Filters pattern it belongs behind and is
+    inserted immediately after that line, in the anchor line's
+    indentation and quote style. Filters only: BlockedFilters entries
+    are matched by exact string equality, so an inserted line there
+    would be a guard, not an exemption. A missing anchor raises --
+    upstream rewording or dropping the anchor must surface at generation
+    time, never silently strand the exemption. A pattern upstream has
+    started shipping itself is not duplicated.
+    """
+    lines = text.splitlines(keepends=True)
+    present = set()
+    in_list = False
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"^Filters\s*=\s*\[", stripped):
+            in_list = True
+            continue
+        if in_list and stripped.startswith("]"):
+            in_list = False
+            continue
+        if in_list:
+            raw = raw_filter_pattern(line)
+            if raw is not None:
+                present.add(raw)
+    pending = {
+        anchor: entry
+        for anchor, entry in ADD_FILTERS.items()
+        if entry[0] not in present
+    }
+    out = []
+    in_list = False
+    done = set()
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"^Filters\s*=\s*\[", stripped):
+            in_list = True
+            out.append(line)
+            continue
+        if in_list and stripped.startswith("]"):
+            in_list = False
+            out.append(line)
+            continue
+        out.append(line)
+        if in_list:
+            raw = raw_filter_pattern(line)
+            if raw is not None and raw in pending and raw not in done:
+                pattern, reason = pending[raw]
+                indent = line[: len(line) - len(line.lstrip())]
+                quote = stripped[:1] if stripped[:1] in ("'", '"') else "'"
+                eol = "\n" if line.endswith("\n") else ""
+                out.append(f"{indent}{quote}{pattern}{quote},{eol}")
+                added_log.append(
+                    f"Filters: added {pattern!r} after {raw!r} ({reason})"
+                )
+                done.add(raw)
+    missing = [anchor for anchor in pending if anchor not in done]
+    if missing:
+        raise AssertionError(
+            f"ADD_FILTERS anchor(s) not found in Filters: {missing!r}"
+        )
     return "".join(out)
 
 
@@ -1122,28 +1362,10 @@ WHITELIST_TABLES = {
 
 _package_presence_cache = {}
 
-# Project checked per flavor: the opensuse flavor tracks Tumbleweed, the
-# slfo flavor tracks the SLE 16 codebase (openSUSE:Leap:16.0 is built on it).
-FLAVOR_PROJECTS = {
-    "opensuse": ("openSUSE:Factory",),
-    "slfo": ("openSUSE:Leap:16.0",),
-}
+# Project checked for package presence: the flavor tracks Tumbleweed.
+FACTORY_PROJECTS = ("openSUSE:Factory",)
 
 
-# The Leap 16.0 codebase behind the slfo flavor: its SLE-derived sources are
-# not visible via the OBS source API (openSUSE:Leap:16.0 only hosts
-# Leap-specific sources — e.g. krb5, sudo, samba 404 there while shipping in
-# the distro), so package presence for slfo is checked against the published
-# binary repodata instead. Whitelist `package =` entries match the binary
-# package name being linted, so binary presence is the right signal there.
-LEAP16_OSS_REPOMD_URL = (
-    "https://download.opensuse.org/distribution/leap/16.0/repo/oss"
-    "/repodata/repomd.xml"
-)
-LEAP16_OSS_REPO_BASE = (
-    "https://download.opensuse.org/distribution/leap/16.0/repo/oss/"
-)
-_leap16_binary_names_cache = None
 TW_OSS_REPOMD_URL = (
     "https://download.opensuse.org/tumbleweed/repo/oss/repodata/repomd.xml"
 )
@@ -1313,24 +1535,13 @@ def _binary_names(repomd_url, repo_base, label):
     return names
 
 
-def _leap16_binary_names():
-    """Binary package names shipped in Leap 16.0 (oss), fetched once, cached."""
-    global _leap16_binary_names_cache
-    if _leap16_binary_names_cache is None:
-        _leap16_binary_names_cache = _binary_names(
-            LEAP16_OSS_REPOMD_URL, LEAP16_OSS_REPO_BASE, "Leap 16.0"
-        )
-    return _leap16_binary_names_cache
-
-
 def _tw_binary_names():
     """Binary package names shipped in Tumbleweed (oss), fetched once, cached.
 
-    Mirrors _leap16_binary_names() for the opensuse flavor: whitelist
-    `package =` entries name the binary being linted, but the OBS source
-    API 404s on binary-only names (e.g. udev-mini, libcgroup-tools are
-    subpackages of another source). The published repodata is the ground
-    truth for binary presence.
+    Whitelist `package =` entries name the binary being linted, but the
+    OBS source API 404s on binary-only names (e.g. udev-mini,
+    libcgroup-tools are subpackages of another source). The published
+    repodata is the ground truth for binary presence.
     """
     global _tw_binary_names_cache
     if _tw_binary_names_cache is None:
@@ -1341,47 +1552,40 @@ def _tw_binary_names():
 
 
 
-def package_present(pkg, flavor):
-    """True if the package exists in the flavor's distro codebase.
+def package_present(pkg):
+    """True if the package exists in the distro codebase.
 
-    For the opensuse flavor this queries the OBS source-package API
-    (openSUSE:Factory hosts all its sources), falling back to the
-    Tumbleweed binary repodata: whitelist `package =` entries name the
-    binary being linted, and the source API 404s on binary-only names
-    (e.g. udev-mini, libcgroup-tools are subpackages of another source).
-    For the slfo flavor the SLE-derived sources are not visible via the
-    source API, so presence is checked against the binary names in the
-    published Leap 16.0 repodata.
+    This queries the OBS source-package API (openSUSE:Factory hosts all
+    its sources), falling back to the Tumbleweed binary repodata:
+    whitelist `package =` entries name the binary being linted, and the
+    source API 404s on binary-only names (e.g. udev-mini,
+    libcgroup-tools are subpackages of another source).
     """
-    key = (pkg, flavor)
+    key = pkg
     if key not in _package_presence_cache:
-        if flavor == "slfo":
-            present = pkg in _leap16_binary_names()
-        else:
-            present = False
-            for project in FLAVOR_PROJECTS[flavor]:
-                url = f"https://api.opensuse.org/public/source/{project}/{pkg}"
-                req = urllib.request.Request(
-                    url, headers={"User-Agent": "rpmcrab-distro-config-sync"}
-                )
-                try:
-                    with urllib.request.urlopen(req, timeout=30) as resp:
-                        if resp.status == 200:
-                            present = True
-                            break
-                except urllib.error.HTTPError as e:
-                    if e.code != 404:
-                        raise
-            if not present:
-                # Binary-only name (subpackage of another source): the
-                # source API 404s, so check the published binary repodata.
-                present = pkg in _tw_binary_names()
+        present = False
+        for project in FACTORY_PROJECTS:
+            url = f"https://api.opensuse.org/public/source/{project}/{pkg}"
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "rpmcrab-distro-config-sync"}
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    if resp.status == 200:
+                        present = True
+                        break
+            except urllib.error.HTTPError as e:
+                if e.code != 404:
+                    raise
+        if not present:
+            # Binary-only name (subpackage of another source): the
+            # source API 404s, so check the published binary repodata.
+            present = pkg in _tw_binary_names()
         _package_presence_cache[key] = present
     return _package_presence_cache[key]
 
 
 _filelist_cache_tw = {}
-_filelist_cache_leap = {}
 
 # Attempts for the repomd.xml fetch before giving up.
 _REPOMD_ATTEMPTS = 4
@@ -1636,31 +1840,6 @@ def factory_filelist_hits(paths):
     )
 
 
-def leap_filelist_hits(paths):
-    """Subset of `paths` still shipped by some Leap 16.0 package.
-
-    Leap 16 is SLES-based, so its public filelists serve as the proxy
-    for the SLE 16 codebase behind the slfo flavor, whose own sources
-    sit behind SUSE Customer Center auth.
-    """
-    return _filelist_hits(
-        paths,
-        "https://download.opensuse.org/distribution/leap/16.0/repo/oss/repodata/repomd.xml",
-        "https://download.opensuse.org/distribution/leap/16.0/repo/oss/",
-        _filelist_cache_leap,
-        "Leap 16.0",
-    )
-
-
-# Filelist evidence per flavor: each flavor consults only its own distro
-# codebase. A flavor without an entry fails loudly instead of silently
-# misapplying another flavor's evidence.
-FLAVOR_FILELIST_SOURCES = {
-    "opensuse": (("Factory", factory_filelist_hits),),
-    "slfo": (("Leap 16.0 (SLES proxy)", leap_filelist_hits),),
-}
-
-
 _package_re = re.compile(r'^package\s*=\s*"([^"]+)"', re.MULTILINE)
 _packages_re = re.compile(r"^packages\s*=\s*\[(.*?)\]", re.MULTILINE | re.DOTALL)
 
@@ -1682,8 +1861,8 @@ def split_stanzas(text):
     return chunks
 
 
-def prune_stale_packages(text, pruned_log, flavor):
-    """Drop whitelist stanzas whose package(s) are all gone from the flavor's distro."""
+def prune_stale_packages(text, pruned_log):
+    """Drop whitelist stanzas whose package(s) are all gone from the distro."""
     out = []
     for table, block in split_stanzas(text):
         if table not in WHITELIST_TABLES:
@@ -1697,15 +1876,9 @@ def prune_stale_packages(text, pruned_log, flavor):
             m = _packages_re.search(block)
             if m:
                 pkgs = re.findall(r'"([^"]+)"', m.group(1))
-        # For the opensuse flavor (Tumbleweed), only prune packages removed
-        # from Factory. The Leap-only absences (PRUNE_PACKAGES_LEAP_ONLY)
-        # are kept for opensuse where they still ship.
         prune_dict = PRUNE_PACKAGES
-        if flavor == "slfo":
-            # slfo also prunes packages absent from Leap 16.0
-            prune_dict = {**PRUNE_PACKAGES, **PRUNE_PACKAGES_LEAP_ONLY}
         if pkgs and all(p in prune_dict for p in pkgs):
-            if all(not package_present(p, flavor) for p in pkgs):
+            if all(not package_present(p) for p in pkgs):
                 pruned_log.append(
                     "whitelist: dropped [[%s]] stanza for %s"
                     % (
@@ -1715,8 +1888,8 @@ def prune_stale_packages(text, pruned_log, flavor):
                 )
                 continue
             pruned_log.append(
-                "whitelist: KEPT [[%s]] stanza for %s — package present in the "
-                "flavor's distro, needs a fresh audit before any allowance "
+                "whitelist: KEPT [[%s]] stanza for %s — package present in "
+                "Factory, needs a fresh audit before any allowance "
                 "is trusted" % (table, ", ".join(pkgs))
             )
         out.append(block)
@@ -1731,22 +1904,18 @@ def _usrmerge_norm(path):
     return path
 
 
-def prune_pie_paths(text, pruned_log, flavor):
+def prune_pie_paths(text, pruned_log):
     """Drop pie-executables.toml entries for paths no distro package ships.
 
-    Each entry names its owning package, checked live against the flavor's
-    distro (OBS source API, like PRUNE_PACKAGES): a reintroduced "removed"
+    Each entry names its owning package, checked live against Factory
+    (OBS source API, like PRUNE_PACKAGES): a reintroduced "removed"
     package - or a vanished "moved" package, whose relocation evidence is
     then stale - keeps the path and logs loudly, so the drift check fails
     for a fresh audit instead of the path staying silently pruned.
 
     "moved" entries get a second, filelist-level check against the
-    flavor's own distro codebase (FLAVOR_FILELIST_SOURCES): the old path
-    must not still be shipped there - the opensuse flavor checks the
-    Tumbleweed filelists, slfo checks Leap 16.0 (SLES proxy: Leap 16 is
-    SLES-based and its filelists are public, while SLE sources sit behind
-    Customer Center auth). A reappearing old path is kept with a loud log
-    for the same reason.
+    Tumbleweed filelists: the old path must not still be shipped there.
+    A reappearing old path is kept with a loud log for the same reason.
     """
     entries = []
     moved_paths = []
@@ -1761,25 +1930,18 @@ def prune_pie_paths(text, pruned_log, flavor):
         else:
             entries.append((line, None, None, None, None, None))
     shipped = {}
-    if flavor not in FLAVOR_FILELIST_SOURCES:
-        raise RuntimeError(
-            "no filelist source configured for flavor %r "
-            "(known flavors: %s)"
-            % (flavor, ", ".join(sorted(FLAVOR_FILELIST_SOURCES)))
-        )
-    for label, source in FLAVOR_FILELIST_SOURCES[flavor]:
-        for path in source(moved_paths):
-            shipped.setdefault(path, label)
+    for path in factory_filelist_hits(moved_paths):
+        shipped.setdefault(path, "Factory")
     out = []
     for line, raw, norm, pkg, kind, reason in entries:
         if raw is None:
             out.append(line)
             continue
-        present = package_present(pkg, flavor)
+        present = package_present(pkg)
         if (kind == "removed" and present) or (kind == "moved" and not present):
             pruned_log.append(
                 "pie-executables: KEPT stale path %r - owning package %r "
-                "changed state in the flavor's distro (%s), needs a fresh "
+                "changed state in Factory (%s), needs a fresh "
                 "audit" % (raw, pkg, reason)
             )
             out.append(line)
@@ -1801,7 +1963,7 @@ def append_extra_filters(text, filters):
     """Append regexes to the `Filters = [...]` list in a TOML document.
 
     Used for distro-config filters that do not come from upstream rpmlint
-    (see EXTRA_OPENSUSE_FILTERS). Inserted before the list's closing bracket
+    (see EXTRA_FILTERS). Inserted before the list's closing bracket
     so the monthly sync re-emits them deterministically.
     """
     lines = text.splitlines(keepends=True)
@@ -1818,7 +1980,7 @@ def append_extra_filters(text, filters):
             out.append("\n")
             out.append("    # Extra: *.dll.a and *.a files are permitted arch-independent objects.\n")
             out.append("    # From mingw{32,64}-filesystem's mingw{32,64}-rpmlintrc (shipped as\n")
-            out.append("    # /opt/testing/share/rpmlint/mingw{32,64}.toml); see EXTRA_OPENSUSE_FILTERS\n")
+            out.append("    # /opt/testing/share/rpmlint/mingw{32,64}.toml); see EXTRA_FILTERS\n")
             out.append("    # in scripts/generate-distro-configs.py.\n")
             for f in filters:
                 out.append(f"    '{f}',\n")
@@ -1835,7 +1997,7 @@ def append_extra_checks(text, checks):
     """Append check names to the `Checks = [...]` list in a TOML document.
 
     Used for checks rpmcrab enables in the distro config that upstream does
-    not list in any shipped config (see EXTRA_OPENSUSE_CHECKS). Inserted
+    not list in any shipped config (see EXTRA_CHECKS). Inserted
     before the list's closing bracket so the monthly sync re-emits them
     deterministically.
     """
@@ -1853,7 +2015,7 @@ def append_extra_checks(text, checks):
             out.append("\n")
             out.append("    # Extra: enabled by rpmcrab; upstream lists these checks in no\n")
             out.append("    # shipped config (deliberate, ledgered divergence); see\n")
-            out.append("    # EXTRA_OPENSUSE_CHECKS in scripts/generate-distro-configs.py.\n")
+            out.append("    # EXTRA_CHECKS in scripts/generate-distro-configs.py.\n")
             for c in checks:
                 out.append(f'    "{c}",\n')
             in_list = False
@@ -1897,8 +2059,8 @@ def remove_excluded_checks(text, checks):
     """Remove check names from the `Checks = [...]` list in a TOML document.
 
     Used for checks upstream lists in the openSUSE config that rpmcrab
-    deliberately does not run under the opensuse flavor (see
-    EXCLUDED_OPENSUSE_CHECKS). Each removed entry is replaced by an
+    deliberately does not run under the flavor (see
+    EXCLUDED_CHECKS). Each removed entry is replaced by an
     explanation comment at the same spot so the vendored config itself
     records the absence; the monthly sync re-emits it deterministically.
     A listed check missing from the list fails loudly: silently passing
@@ -1922,11 +2084,11 @@ def remove_excluded_checks(text, checks):
         if in_list and stripped in wanted:
             name = wanted.pop(stripped)
             out.append(
-                '    # Excluded: "%s" is not run under the opensuse\n' % name
+                '    # Excluded: "%s" is not run under the flavor\n' % name
             )
-            out.append("    # flavor (deliberate, ledgered divergence); see\n")
+            out.append("    # (deliberate, ledgered divergence); see\n")
             out.append(
-                "    # EXCLUDED_OPENSUSE_CHECKS in scripts/generate-distro-configs.py.\n"
+                "    # EXCLUDED_CHECKS in scripts/generate-distro-configs.py.\n"
             )
             continue
         out.append(line)
@@ -1980,7 +2142,8 @@ def generate(ref_dir=None, pins=None):
     scoped_log = []
     deduped_filters_log = []
     threshold_log = []
-    flavoured_pruned_log = []
+    added_log = []
+    adjudicated_log = []
     for flavor, data in result.items():
         for filename, text in data["files"].items():
             assert_no_flavor_key(flavor, filename, text)
@@ -1989,55 +2152,28 @@ def generate(ref_dir=None, pins=None):
             )
             text = scope_filters(text, scoped_log)
             text = dedupe_filters(text, deduped_filters_log)
-            text = prune_flavoured_filters(text, flavor, flavoured_pruned_log)
-            text = prune_stale_packages(text, pkg_pruned_log, flavor)
+            text = prune_stale_packages(text, pkg_pruned_log)
             if filename == "pie-executables.toml":
-                # Per-flavor evidence (see PRUNE_PIE_PATHS): the owning
-                # package is checked live against the flavor's own codebase
-                # (openSUSE:Factory / openSUSE:Leap:16.0, both publicly
-                # queryable), so both flavors prune their stale paths.
-                text = prune_pie_paths(text, pie_pruned_log, flavor)
-            # The preset-package exemption (see
-            # SYSTEMD_PRESET_PACKAGES) lands in both flavors'
-            # opensuse.toml: unlike the extra filters below it is
-            # not gated on the flavor.
+                # The owning package is checked live against Factory
+                # (see PRUNE_PIE_PATHS).
+                text = prune_pie_paths(text, pie_pruned_log)
             if filename == "opensuse.toml":
                 text = strip_badness_threshold(text, flavor, threshold_log)
                 text = append_systemd_preset_packages(
                     text, SYSTEMD_PRESET_PACKAGES
                 )
-            # SLFO is currently excluded from the extra filters: the gate
-            # below appends only for flavor=="opensuse", and the vendored
-            # slfo/opensuse.toml has zero mingw hits. That exclusion is a
-            # known gap, not a deliberate choice -- checked 2026-10-10,
-            # openSUSE:Leap:16.0 (the SLFO codebase) ships mingw32-filesystem
-            # and mingw64-filesystem, and both ship the same
-            # mingw{32,64}-rpmlintrc containing the identical
-            # arch-independent-package-contains-binary-or-object filter, so
-            # the reference effective SLFO config includes it for mingw
-            # packages too. Extending this gate to the slfo flavor is the
-            # natural fix; kept separate for review (follow-up to #412).
-            if flavor == "opensuse" and filename == "opensuse.toml":
-                text = append_extra_filters(text, EXTRA_OPENSUSE_FILTERS)
-                # Same gate as the extra filters: SLFO's vendored config
-                # stays a pure mirror of the opensuse-slfo-main branch.
-                text = append_extra_checks(text, EXTRA_OPENSUSE_CHECKS)
-                text = remove_excluded_checks(text, EXCLUDED_OPENSUSE_CHECKS)
+                # Exemptions upstream does not ship (see ADD_FILTERS).
+                text = add_filters(text, added_log)
+                text = append_extra_filters(
+                    text, [pattern for pattern, _reason in EXTRA_FILTERS]
+                )
+                text = append_extra_checks(text, EXTRA_CHECKS)
+                text = remove_excluded_checks(text, EXCLUDED_CHECKS)
+            text, adj_log = apply_digest_adjudications(text, filename)
+            adjudicated_log.extend(adj_log)
             data["files"][filename] = text
 
-    # Dedupe: an SLFO file byte-identical to its openSUSE counterpart (after
-    # pruning) is not vendored twice; the generated Rust consts fall back to
-    # the openSUSE copy. This is self-maintaining across syncs: a diverged
-    # file is re-materialized, a converged one is dropped by write_all's
-    # stale-file removal. Absence stays meaningful — FILES["slfo"] never
-    # contains varlink-whitelist.toml, which SLFO deleted upstream.
-    deduped = []
-    opensuse_files = result["opensuse"]["files"]
-    slfo_files = result["slfo"]["files"]
-    for filename in list(slfo_files):
-        if slfo_files[filename] == opensuse_files[filename]:
-            del slfo_files[filename]
-            deduped.append(filename)
+    files_out = list(FILES["opensuse"])
 
     provenance = [
         "# Generated by scripts/generate-distro-configs.py — do not edit by hand.",
@@ -2052,12 +2188,12 @@ def generate(ref_dir=None, pins=None):
             f"# {flavor}-whitelists: {data['branch']} @ {data['sha']} ({data['date']})"
         )
     provenance.append("#")
-    provenance.append("# Extra Filters appended (not from upstream; see EXTRA_OPENSUSE_FILTERS):")
-    for f in EXTRA_OPENSUSE_FILTERS:
-        provenance.append(f"#   Filters: added {f!r} (mingw -filesystem packages' rpmlintrc)")
+    provenance.append("# Extra Filters appended (not from upstream; see EXTRA_FILTERS):")
+    for filter_pattern, reason in EXTRA_FILTERS:
+        provenance.append(f"#   Filters: added {filter_pattern!r} ({reason})")
     provenance.append("#")
-    provenance.append("# Extra Checks appended (not from upstream; see EXTRA_OPENSUSE_CHECKS):")
-    for c in EXTRA_OPENSUSE_CHECKS:
+    provenance.append("# Extra Checks appended (not from upstream; see EXTRA_CHECKS):")
+    for c in EXTRA_CHECKS:
         provenance.append(
             f"#   Checks: added {c!r} (deliberate rpmcrab divergence, ledgered in"
             " tests/parity/divergences.toml)"
@@ -2069,10 +2205,10 @@ def generate(ref_dir=None, pins=None):
     for p in SYSTEMD_PRESET_PACKAGES:
         provenance.append(f"#   SystemdPresetPackages: added {p!r}")
     provenance.append("#")
-    provenance.append("# Excluded Checks (removed from the opensuse flavor; see EXCLUDED_OPENSUSE_CHECKS):")
-    for c in EXCLUDED_OPENSUSE_CHECKS:
+    provenance.append("# Excluded Checks (removed from the flavor; see EXCLUDED_CHECKS):")
+    for c in EXCLUDED_CHECKS:
         provenance.append(
-            f"#   Checks: removed {c!r} from the opensuse flavor (deliberate"
+            f"#   Checks: removed {c!r} from the flavor (deliberate"
             " rpmcrab divergence, ledgered in tests/parity/divergences.toml)"
         )
     if pruned_log:
@@ -2085,16 +2221,6 @@ def generate(ref_dir=None, pins=None):
                 provenance.append(f"#   {entry}")
     else:
         provenance.append("# No Filters entries pruned: all referenced findings exist.")
-    if flavoured_pruned_log:
-        provenance.append("#")
-        provenance.append("# Pruned Filters entries (one flavor only; the other")
-        provenance.append("# flavor runs the check and keeps the exemption;")
-        provenance.append("# see PRUNE_FLAVOURED):")
-        seen_flavoured = set()
-        for entry in flavoured_pruned_log:
-            if entry not in seen_flavoured:
-                seen_flavoured.add(entry)
-                provenance.append(f"#   {entry}")
     if retargeted_log:
         provenance.append("#")
         provenance.append("# Retargeted Filters entries (exemption kept, its target")
@@ -2103,6 +2229,15 @@ def generate(ref_dir=None, pins=None):
         for entry in retargeted_log:
             if entry not in seen_retargeted:
                 seen_retargeted.add(entry)
+                provenance.append(f"#   {entry}")
+    if added_log:
+        provenance.append("#")
+        provenance.append("# Added Filters entries (exemption upstream does not")
+        provenance.append("# ship; see ADD_FILTERS):")
+        seen_added = set()
+        for entry in added_log:
+            if entry not in seen_added:
+                seen_added.add(entry)
                 provenance.append(f"#   {entry}")
     if dropped_log:
         provenance.append("#")
@@ -2139,7 +2274,7 @@ def generate(ref_dir=None, pins=None):
     if pkg_pruned_log or HISTORICAL_PRUNES:
         provenance.append("#")
         provenance.append(
-            "# Pruned whitelist stanzas (packages gone from Tumbleweed/SLE 16):"
+            "# Pruned whitelist stanzas (packages gone from Tumbleweed):"
         )
         seen_pkg = set()
         for entry in pkg_pruned_log:
@@ -2155,8 +2290,8 @@ def generate(ref_dir=None, pins=None):
                 provenance.append(f"#   {entry}")
     if pie_pruned_log:
         provenance.append("#")
-        provenance.append("# Pruned pie-executables paths (shipped by no package in the")
-        provenance.append("# flavor's distro codebase):")
+        provenance.append("# Pruned pie-executables paths (shipped by no package in")
+        provenance.append("# Factory):")
         for entry in pie_pruned_log:
             provenance.append(f"#   {entry}")
     if threshold_log:
@@ -2168,14 +2303,15 @@ def generate(ref_dir=None, pins=None):
             if entry not in seen_threshold:
                 seen_threshold.add(entry)
                 provenance.append(f"#   {entry}")
-    if deduped:
+    if adjudicated_log:
         provenance.append("#")
-        provenance.append("# SLFO files byte-identical to openSUSE (not vendored twice;")
-        provenance.append("# the generated Rust consts fall back to the openSUSE copy):")
-        for filename in deduped:
-            provenance.append(f"#   slfo/{filename}")
-    else:
-        provenance.append("# No SLFO files deduplicated: every SLFO file differs.")
+        provenance.append("# Adjudicated digest records (Factory content decides;")
+        provenance.append("# see DIGEST_ADJUDICATIONS):")
+        seen_adjudicated = set()
+        for entry in adjudicated_log:
+            if entry not in seen_adjudicated:
+                seen_adjudicated.add(entry)
+                provenance.append(f"#   {entry}")
     provenance.append("")
     return (
         result,
@@ -2183,22 +2319,21 @@ def generate(ref_dir=None, pins=None):
         pruned_log,
         pkg_pruned_log,
         pie_pruned_log,
-        deduped,
+        files_out,
         dropped_log,
         retargeted_log,
         scoped_log,
         deduped_filters_log,
-        flavoured_pruned_log,
         threshold_log,
+        added_log,
+        adjudicated_log,
     )
 
 
-def emit_rs(deduped):
+def emit_rs(files):
     """Render the generated Rust consts wiring the vendored files into the binary.
 
-    The manifest is the full FILES[flavor] set, so a deduped SLFO entry keeps
-    its `<distro:slfo>/` identity in conf_files while its content comes from
-    the openSUSE copy.
+    The manifest is the full FILES set for the single vendored flavor.
     """
     lines = [
         "// Generated by scripts/generate-distro-configs.py — do not edit by hand.",
@@ -2206,16 +2341,13 @@ def emit_rs(deduped):
         "// (filename, content) pairs, merged in order after the bundled defaults",
         "// and before XDG-discovered configs — mirroring how the distro",
         "// package's `/etc/xdg/rpmlint/*.toml` layer upstream.",
-        "//",
-        "// SLFO entries byte-identical to openSUSE fall back to the openSUSE",
-        "// copy (see data/distro/PROVENANCE); absence from DISTRO_SLFO_FILES is",
-        "// meaningful (SLFO deleted varlink-whitelist.toml).",
         "",
-        '/// Vendored openSUSE distro configs (upstream `opensuse` branch).',
-        '/// Selected by default (`Flavor = "opensuse"`).',
+        '/// Vendored distro configs (upstream `opensuse` branch): the SUSE flavor.',
+        '/// Selected by default (`Flavor = "opensuse"`) and for every other',
+        "/// `Flavor` value the flavour key takes.",
         "const DISTRO_OPENSUSE_FILES: &[(&str, &str)] = &[",
     ]
-    for filename in FILES["opensuse"]:
+    for filename in files:
         lines.extend(
             [
                 "    (",
@@ -2224,30 +2356,11 @@ def emit_rs(deduped):
                 "    ),",
             ]
         )
-    lines.extend(
-        [
-            "];",
-            "",
-            "/// Vendored SLFO distro configs (upstream `opensuse-slfo-main` branch).",
-            '/// Selected when `Flavor = "slfo"`.',
-            "const DISTRO_SLFO_FILES: &[(&str, &str)] = &[",
-        ]
-    )
-    for filename in FILES["slfo"]:
-        src = "opensuse" if filename in deduped else "slfo"
-        lines.extend(
-            [
-                "    (",
-                f'        "{filename}",',
-                f'        include_str!("../data/distro/{src}/{filename}"),',
-                "    ),",
-            ]
-        )
     lines.append("];")
     return "\n".join(lines) + "\n"
 
 
-def write_all(result, provenance, deduped):
+def write_all(result, provenance, files):
     for flavor, data in result.items():
         flavor_dir = DISTRO_DIR / flavor
         flavor_dir.mkdir(parents=True, exist_ok=True)
@@ -2257,8 +2370,16 @@ def write_all(result, provenance, deduped):
                 existing.unlink()
         for filename, text in data["files"].items():
             (flavor_dir / filename).write_text(text, encoding="utf-8")
+    # Remove flavor directories that are no longer vendored (stale).
+    for existing in DISTRO_DIR.iterdir():
+        if (
+            existing.is_dir()
+            and existing.name not in result
+            and not (existing / "PROVENANCE").exists()
+        ):
+            shutil.rmtree(existing)
     (DISTRO_DIR / "PROVENANCE").write_text(provenance, encoding="utf-8")
-    GENERATED_RS.write_text(emit_rs(deduped), encoding="utf-8")
+    GENERATED_RS.write_text(emit_rs(files), encoding="utf-8")
 
 
 DIFF_MAX_LINES = 50
@@ -2343,7 +2464,7 @@ def main():
         rewrite_pins(Path(__file__).resolve(), pins)
 
     ref_dir = Path(args.ref_dir) if args.ref_dir else None
-    result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, deduped, dropped_log, retargeted_log, scoped_log, deduped_filters_log, flavoured_pruned_log, threshold_log = generate(
+    result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, files_out, dropped_log, retargeted_log, scoped_log, deduped_filters_log, threshold_log, added_log, adjudicated_log = generate(
         ref_dir=ref_dir, pins=pins
     )
 
@@ -2357,7 +2478,7 @@ def main():
                     (tmpdir / flavor).mkdir(exist_ok=True)
                     (tmpdir / flavor / filename).write_text(text, encoding="utf-8")
             (tmpdir / "PROVENANCE").write_text(provenance, encoding="utf-8")
-            want_rs = emit_rs(check_rs_deduped(deduped, DISTRO_DIR))
+            want_rs = emit_rs(check_rs_files(files_out))
             have_rs = (
                 GENERATED_RS.read_text(encoding="utf-8")
                 if GENERATED_RS.exists()
@@ -2384,10 +2505,8 @@ def main():
                         # Owned by the daily sync-upstream-whitelists job
                         # (advanced at branch TIPs between monthly refreshes);
                         # comparing them against the monthly PINS would flag
-                        # every successful daily sync as drift. Slfo files may
-                        # additionally be absent by dedup; opensuse files must
-                        # always exist.
-                        if flavor == "opensuse" and not have.exists():
+                        # every successful daily sync as drift.
+                        if not have.exists():
                             failures.append(
                                 f"missing vendored file: {flavor}/{filename}"
                             )
@@ -2444,11 +2563,15 @@ def main():
         print("distro configs match the pinned upstream (plus documented prunes).")
         return 0
 
-    write_all(result, provenance, deduped)
+    write_all(result, provenance, files_out)
     for entry in pruned_log + pkg_pruned_log + pie_pruned_log + dropped_log:
         print(f"pruned: {entry}")
     for entry in retargeted_log:
         print(f"retargeted: {entry}")
+    for entry in added_log:
+        print(f"added: {entry}")
+    for entry in adjudicated_log:
+        print(f"adjudicated: {entry}")
     for entry in deduped_filters_log:
         print(f"deduped: {entry}")
     for entry in threshold_log:

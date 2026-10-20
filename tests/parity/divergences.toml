@@ -150,8 +150,15 @@ since = "0.1.0"
 case = "global"
 check = "specfile-error"
 kind = "detail"
-reason = "When the spec parser fails in _check_invalid_url, rpmcrab reports 'specfile-error' with only the spec path as detail. The reference also includes librpm's error text, which librpm 0.6's Spec::parse does not surface (it returns Option)."
+reason = "When the spec parser fails in _check_invalid_url and the rpm child query has not already reported that fatal failure (a non-zero child exit or its 'can't parse' summary) with a specfile-error finding that survived the filter, rpmcrab reports 'specfile-error' with only the spec path as detail; a surviving non-fatal child finding does not suppress the fallback (the specfile-error behaviour entry states the full condition). The reference also includes librpm's error text, which librpm 0.6's Spec::parse does not surface (it returns Option)."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "specfile-error"
+kind = "behaviour"
+reason = "A spec parse failure is reported once: when the rpm child query in _check_specfile_error has already reported that fatal failure (a non-zero child exit or its 'can't parse' summary) with a specfile-error finding that survived the filter, the parse failure in _check_invalid_url does not add its fallback finding, whose detail is only the bare spec path. One exception: an undecodable child stderr is an encoding failure of the child's output, not a report of the parse failure: _check_specfile_error reports it as its own specfile-error finding (the decode error as detail) and returns as unreported, so the fallback fires alongside it. The reference reports both. In the #702 census of the 20261018 Factory sweep, this path produced 13,839 specfile-error findings: 6,920 bare-path fallbacks against 6,919 child summaries. The fallback fires at most once per spec parse, and the counts reconcile per spec: the fallbacks sit on 6,920 distinct specs. The 6,919 in the parseable outputs span 6,815 source packages, 13 of which carry more than one failing spec (gcc14, gcc15 and gcc16 with 27-28 each, kernel-source with 16, nine more with 2-3; 104 fallbacks beyond the first per package), and the remaining fallback is bash's, counted from one of the sweep's two JSON-polluted outputs, whose package sits outside the 6,815. All but one fallback pair with a child summary for the same spec, so 13,838 findings are one failure reported twice; the exception is antlr, whose child reported warnings only, so its fallback stands alone."
+since = "0.3.0"
 
 [[divergence]]
 case = "global"
@@ -277,7 +284,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/issues/439"
 case = "global"
 check = "missing-call-to-setgroups-before-setuid"
 kind = "behaviour"
-reason = "The reference reports this at Error when the binary is installed setuid and Warning otherwise (BinariesCheck.py: 'E' if is_uid else 'W'); rpmcrab reports Error unconditionally — the level does not split on the setuid bit (the severity recalibration is ledgered separately under plusky/rpmcrab#593)."
+reason = "The reference reports this at Error when the binary is installed setuid and Warning otherwise (BinariesCheck.py: 'E' if is_uid else 'W'); rpmcrab reports Warning unconditionally — the level does not split on the setuid bit. The symbol pattern cannot distinguish an identity switch that neglects setgroups from the safe idiom that drops the effective ids to the real ids, so the split would still leave an Error on proven-bogus findings (fix-and-diverge, plusky/rpmcrab#743)."
 since = "0.1.0"
 
 [[divergence]]
@@ -377,8 +384,24 @@ since = "0.1.0"
 case = "global"
 check = "FileDigestCheck"
 kind = "detail"
-reason = "File digest finding details are byte-identical to the reference except `{type}-file-parse-error`, which renders the Rust `std::io::Error` text where the reference interpolates its own OS-error wording; `whitelisted-file-missing` and `file-digest-mismatch` match the reference exactly."
+reason = "File digest finding details are byte-identical to the reference except `{type}-file-parse-error`, which renders the Rust `std::io::Error` text where the reference interpolates its own OS-error wording, and the `file-digest-mismatch` group-sibling case (issue #755), which has its own behaviour divergence entry; `whitelisted-file-missing` matches in detail (its severity is the FileDigestCheck severity divergence)."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "behaviour"
+reason = "Once one entry of a digest group mismatches, the reference reports a `{type}-file-digest-mismatch` line for every group entry with a recorded digest, including entries whose recorded digest equals the file's own digest. The port reports only entries whose recorded digest differs from the file's digest, so every mismatch line names a file whose content differs from its record (issue #755)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/755"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#760, decision D10 of the single-flavour programme in plusky/rpmcrab#714): the port reports E where the reference reports W for `{type}-whitelisted-file-missing`. The finding prints only when the rest of the package's digest group verifies, so it names a package that ships a whitelisted restricted location's sibling files while omitting a recorded one; measured over the Factory corpus under the unified data set it fires 9 times."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/760"
 
 [[divergence]]
 case = "global"
@@ -495,16 +518,18 @@ upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
 [[divergence]]
 case = "global"
 check = "SignatureCheck"
-kind = "detail"
-reason = "SignatureCheck runs `rpm -Kv` under `LC_ALL=C` instead of the reference's `en_US.UTF-8`/`LANGUAGE=en_US` environment. stderr is merged into the captured output like the reference."
-since = "0.1.0"
+kind = "behaviour"
+reason = "Signature verification runs in-process through librpm (a verified `PackageHeader::from_file` read against the rpmdb keyring, with the verification flags masking the digest checks \u2014 a deliberate flag difference from `rpm -Kv`, whose default flag set verifies the digests as well) where the reference shells out to `rpm -Kv` and scrapes its output (SignatureCheck.py; pkg.py). Verdicts come from the structured result; the `unknown-key` key ID is read from the signature packet's issuer subpacket, falling back to the issuer-fingerprint subpacket when the packet carries no issuer subpacket (the key ID is that fingerprint's low 64 bits), and is formatted as the low 32 bits, as `rpm -Kv` prints it; a verification failure is reported as `invalid-signature` only when a signature packet is itself unparsable \u2014 a parseable signature that fails verification, and digest failures, stay silent, matching the reference's text patterns. The library and keyring configuration are the same ones `rpm -Kv` uses, so findings agree; parity is pinned by the fixture pin matrix (the unsigned, signed, corrupt-packet, bad-math, broken-payload and bad-digest fixture RPMs, each generation-checked against empty and key-holding rpmdb states) and a Factory-corpus before/after diff (plusky/rpmcrab#704)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/704"
 
 [[divergence]]
 case = "global"
 check = "SignatureCheck"
 kind = "behaviour"
-reason = "The any-signature regex is widened to `[Ss]ignature|\\(sha1\\) dsa|\\(sha1\\) rsa` (the reference only matches `[Ss]ignature, key ID`), so `no-signature` fires less often on old-style `rpm -Kv` output lines."
-since = "0.1.0"
+reason = "Signature packets are parsed with sequoia-openpgp's packet parser, whose reading of three non-conformant encodings is stricter than the in-crate parser it replaced: a signature packet relabeled to version 5, an old-format packet carrying the indeterminate length form, and an MPI whose declared bit length exceeds the value's actual bit length all classify as unparsable, and so does an issuer-fingerprint subpacket whose fingerprint is shortened below the full fingerprint \u2014 the fingerprint fallback reads the key ID from the fingerprint's low 64 bits, so a shortened fingerprint carries no complete key ID to fall back to. A package whose verified read reports NoKey or Fail and whose signature packet uses one of these encodings therefore reports invalid-signature, where the replaced parser extracted the issuer and reported unknown-key (NoKey) or stayed silent (Fail). No signer emits these encodings; the stricter parse is the correct reading, adopted as a deliberate tightening (plusky/rpmcrab#779, finding D5)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/779"
 
 [[divergence]]
 case = "global"
@@ -603,13 +628,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "SignatureCheck"
-kind = "behaviour"
-reason = "The any-signature regex is widened to `[Ss]ignature|\\(sha1\\) dsa|\\(sha1\\) rsa` (the reference only matches `[Ss]ignature, key ID`), so `no-signature` fires less often on old-style `rpm -Kv` output lines. As a consequence the reference's `no-signature` + `invalid-signature` pair is unreachable here: any output matching `invalid OpenPGP signature` also matches the widened regex, so `no-signature` never fires alongside it."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "FileDigestCheck"
 kind = "behaviour"
 reason = "The `xml` digester (plusky/rpmcrab#75) only accepts UTF-8, with an optional BOM stripped: a file in another encoding fails with `{type}-file-parse-error`, where the reference's expat-based `ET.canonicalize` would decode and digest it. All 156 `digester = \"xml\"` entries in dbus-services.toml are UTF-8."
@@ -679,7 +697,7 @@ since = "0.1.0"
 case = "global"
 check = "BuildRootAndDateCheck"
 kind = "behaviour"
-reason = "today_string() derives the date from UTC, while the reference's time.strftime('%b %e %Y') is local time. On hosts east of UTC the two disagree for 22:00-24:00 UTC, which moves which files trigger file-contains-current-date and file-contains-date-and-time. W-level today, but a real byte-level difference. Fixing it needs a timezone database or libc localtime; the workspace forbids unsafe_code, so this stays ledgered."
+reason = "today_string() derives the date from UTC, while the reference's time.strftime('%b %e %Y') is local time. On hosts east of UTC the two disagree for 22:00-24:00 UTC, which moves which files trigger file-contains-current-date and file-contains-date-and-time. E-level today, but a real byte-level difference. Fixing it needs a timezone database or libc localtime; the workspace forbids unsafe_code, so this stays ledgered."
 since = "0.1.0"
 
 [[divergence]]
@@ -1088,7 +1106,7 @@ upstream = "https://github.com/plusky/rpmcrab/issues/712"
 case = "global"
 check = "AtomicUpdateCheck"
 kind = "behaviour"
-reason = "New `scriptlet-service-restart` warning with no reference counterpart: a scriptlet body (every kind except %verifyscript) that carries no TRANSACTIONAL_UPDATE guard and invokes systemctl with a restart, try-restart, reload-or-restart, try-reload-or-restart or start verb at command position — or the legacy service/rc* forms with restart, start, try-restart or condrestart — fires, with the scriptlet label and the offending line as detail. The reference's AtomicUpdateCheck docstring states that (re)starting daemons is not possible during a transactional update, but the reference implements no such rule (its AtomicUpdateCheck.py covers file placement only). On a transactional-update system scriptlets run inside the new snapshot with systemd offline, so a direct (re)start silently does nothing; the distribution macros stay silent because systemd-update-helper defers their service actions to the booted system. The scan is lexical and decidable: command position only (segment start, after shell keywords or assignments), comment lines and trailing comments ignored, and systemctl options plus their values are stepped over to reach the verb. Warning, not Error: on a classic system the restart works — only the transactional case no-ops. Where PostCheck's `daemon-activation` Error also applies (sh/bash/perl scriptlets under the general install-time activation policy), this warning adds the transactional-specific explanation rather than restating the policy error, and it is interpreter-agnostic, so macro-free bodies outside that scope are covered too. Pinned by unit tests in atomic_update.rs. Its staged `--explain` description lives in `crates/rpmcrab-core/data/descriptions/AtomicUpdateCheck.toml`."
+reason = "New `scriptlet-service-restart` warning with no reference counterpart: a scriptlet body (every kind except %verifyscript) that carries no TRANSACTIONAL_UPDATE guard and invokes systemctl with a restart, try-restart, reload-or-restart, try-reload-or-restart or start verb at command position — or the legacy service/rc* forms with restart, start, try-restart or condrestart — fires, with the scriptlet label and the offending line as detail. The reference's AtomicUpdateCheck docstring states that (re)starting daemons is not possible during a transactional update, but the reference implements no such rule (its AtomicUpdateCheck.py covers file placement only). On a transactional-update system scriptlets run inside the new snapshot with systemd offline, so a direct (re)start silently does nothing; the distribution macros stay silent because systemd-update-helper defers their service actions to the booted system. The scan is lexical and decidable: command position only (segment start, after shell keywords or assignments), comment lines and trailing comments ignored, and systemctl options plus their values are stepped over to reach the verb. The tokenisation is the line walker shared with the rc-link scan (issue #731): a command substitution's opener starts no segment and no substitution depth is tracked, so an interior command after a separator is a segment of its own, and the $(...) and backtick forms are judged identically (issue #783). Warning, not Error: on a classic system the restart works — only the transactional case no-ops. Where PostCheck's `daemon-activation` Error also applies (sh/bash/perl scriptlets under the general install-time activation policy), this warning adds the transactional-specific explanation rather than restating the policy error, and it is interpreter-agnostic, so macro-free bodies outside that scope are covered too. Pinned by unit tests in atomic_update.rs. Its staged `--explain` description lives in `crates/rpmcrab-core/data/descriptions/AtomicUpdateCheck.toml`."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/709"
 
@@ -1901,10 +1919,26 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "hidden-file-or-dir"
+kind = "behaviour"
+reason = "Deliberate config fix (plusky/rpmcrab#739): the vendored openSUSE/SLFO configs add a Filters line upstream does not ship, '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.cache' (see ADD_FILTERS in scripts/generate-distro-configs.py). Upstream's config filters the sibling skeleton dotdirs .config/.local/.fonts (the vendored copies retarget them to /usr/etc/skel, #538) but carries no .cache line, so the one member of filesystem's deliberate 0700 XDG skeleton set that upstream's list predates fired while its siblings stayed quiet. Measured on the Factory filesystem package: the vendored flavours emitted exactly one hidden-file-or-dir line before this fix — the .cache warning — and none after."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/739"
+
+[[divergence]]
+case = "global"
 check = "explicit-lib-dependency"
 kind = "behaviour"
 reason = "The reference lib-package regex's unanchored `libs?[\\d-]*` alternative matches any dependency name ending in \"lib\" (e.g. `appstream-glib`), which is not a library at all. Per openSUSE naming policy library packages are named `lib*`, which is what this check targets here; rpmcrab anchors both alternatives to the start of the name, so genuine `libfoo` findings still fire while suffix false positives stay silent. This knowingly silences non-`lib*` true positives like `Requires: zlib`, where the reference is right. Concrete case: rpmcrab's own package requires `appstream-glib` for its `appstream-util` binary (a runtime subprocess invocation rpm's autodeps can never see); the reference flags it, rpmcrab does not."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "explicit-lib-dependency"
+kind = "behaviour"
+reason = "Capability names are not library package names (#753): symbol capabilities in the SUSE lib<name>__<symbol> namespace — provided by a library package so individual symbol ABIs can be pinned; libuuid1 provides libuuid__uuid_generate_time_cont, which uuidd requires to restart against the new libuuid after an update — and qualified capabilities such as libzypp(econf) or libclc(llvm23) stay silent. The separators are decidable: plain library package names contain neither \"__\" nor \"(\". The reference's lib-package regex matches the lib prefix and fires E on both forms. Measured over the full Factory corpus (17,242 source packages, 2026-10-19): 625 findings before — 1 symbol capability, 5 qualified capabilities, 619 plain unversioned lib package names; after the fix the 6 capability findings are gone and the 619 plain-name findings are unchanged."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/753"
 
 [[divergence]]
 case = "global"
@@ -2354,9 +2388,17 @@ upstream = "https://github.com/plusky/rpmcrab/issues/593"
 case = "global"
 check = "missing-call-to-setgroups-before-setuid"
 kind = "severity"
-reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports E unconditionally; the reference splits the level on the setuid bit (E when the binary is installed setuid, W otherwise). Privilege-drop correctness is security-critical when real and the check is high-precision, so the level does not split (pcp audit: the 2 W lines there are genuine)."
+reason = "Deliberate false-positive fix (plusky/rpmcrab#743): the port reports W unconditionally; the reference splits the level on the setuid bit (E when the binary is installed setuid, W otherwise) and #593 previously recalibrated the port to E unconditionally. The util-linux adjudication showed every finding there traces to the drop_permissions() idiom — the effective ids dropped to the real ids, the invoking user's own groups throughout — and the symbol pattern cannot separate that idiom from an identity switch that neglects setgroups, so an Error at either split breaks builds on bogus findings. The check keeps firing at W as a human-review signal."
 since = "0.3.0"
-upstream = "https://github.com/plusky/rpmcrab/issues/593"
+upstream = "https://github.com/plusky/rpmcrab/issues/743"
+
+[[divergence]]
+case = "global"
+check = "install-file-in-docs"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#781): the port reports I where the reference reports W. The class is cosmetic by its own detail text: a file whose name suggests it contains installation instructions is shipped in the documentation, and the stated harm is only that such instructions are often not relevant for already installed packages — nothing is broken, misbuilt or non-functional, and the file is one a packager may optionally drop. Comparable tidiness classes already sit at Info (no-manual-page-for-binary, no-%check-section, dangling-relative-symlink), and at W the class only adds to the background warning mass. Measured on the Factory corpus (main 547fa55, both flavours): 108 findings in 42 binary packages out of 51,586 checked, the firing set identical under opensuse and slfo."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/781"
 
 [[divergence]]
 case = "global"
@@ -2504,7 +2546,7 @@ since = "0.3.0"
 case = "global"
 check = "specfile-error"
 kind = "severity"
-reason = "TEMPORARY levelling pending plusky/rpmcrab#702 (issue #699 Factory-corpus fallout pass): the port emits specfile-error at W, the reference at E. In the 20261018 Factory sweep the check produced 22,528 E findings carried by 6,876 of 17,241 srcpkgs; at E, under the #699 exit doctrine, that population alone fails about 40% of Factory. The mass is a parse-environment defect, not broken specs: the sweep parses specs without the distro macro context an OBS build root carries (Factory prjconf and the macro-providing packages), and the #702 census classified the population as overwhelmingly missing-context artefacts -- 13,839 findings are one parse failure reported twice (the rpm -q stderr line and the Spec::parse failure in check_invalid_url), 4,756 are unknown-tag errors led by %python_subpackages (3,667); sampled firers are uniformly of this class, none a genuinely broken spec. #702 installs the stolen prjconf and the macro packages into the parse environment and re-measures the residue; genuinely unparsable specs return to E there. This entry and the W level are removed when #702 lands."
+reason = "TEMPORARY levelling pending plusky/rpmcrab#702 (issue #699 Factory-corpus fallout pass): the port emits specfile-error at W, the reference at E. In the 20261018 Factory sweep the check produced 22,528 E findings carried by 6,876 of 17,241 srcpkgs; at E, under the #699 exit doctrine, that population alone fails about 40% of Factory. The mass is a parse-environment defect, not broken specs: the sweep parses specs without the distro macro context an OBS build root carries (Factory prjconf and the macro-providing packages), and the #702 census classified the population as overwhelmingly missing-context artefacts -- 13,839 findings are the double-report population (the rpm -q child summary and the Spec::parse fallback in check_invalid_url; the specfile-error behaviour entry gives the exact split), 4,756 are unknown-tag errors led by %python_subpackages (3,667); sampled firers are uniformly of this class, none a genuinely broken spec. #702 installs the stolen prjconf and the macro packages into the parse environment and re-measures the residue; genuinely unparsable specs return to E there. This entry and the W level are removed when #702 lands."
 since = "0.3.0"
 
 [[divergence]]
@@ -2522,3 +2564,75 @@ kind = "behaviour"
 reason = "New `scriptlet-writes-outside-snapshot` warning with no reference counterpart (issue #708): the reference check inspects the payload only, so a scriptlet that writes outside the snapshot at install time (a literal-path redirect or a write command -- mkdir/touch/rm/rmdir/tee with path arguments, cp/mv/ln with an outside destination, install, dd of= -- in %pre/%post/%preun/%postun/%pretrans/%posttrans) is invisible to it. On a transactional-update system such a write lands outside the snapshot being installed, takes effect immediately, and vanishes or turns inconsistent on rollback; the openSUSE packaging guidelines for transactional updates require the change to be deferred to first boot. The port scans shell scriptlet bodies with a deliberately narrow, decidable predicate: literal absolute targets only (no variables, macros or command substitution), runtime filesystems and their legacy spellings (/run, /var/run, /var/lock, /var/tmp, /tmp, /dev, /proc, /sys) are transient state and never fire, non-shell scriptlets are skipped, and trigger/verify scriptlets are out of scope. Measured with the shipped code over 8,605 Factory RPMs (the locally available corpus subsets; the full 51,589-RPM corpus was unreachable from the build host during the measurement): 30 raw findings, 22 across 15 packages after the sanctioned-spool refinement, every remaining firer eyeballed as a genuine literal write to persistent state outside the snapshot (state, log and cache directories, a generated ssh authorized_keys, dbus's machine-id, cyrus-sasl's update-scripts scratch). The finding is a warning because whether the write is lost depends on the target system's subvolume layout, which the package cannot know. The finding runs wherever AtomicUpdateCheck runs (the bundled defaults and both flavours). Its staged `--explain` description lives in `crates/rpmcrab-core/data/descriptions/AtomicUpdateCheck.toml`."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/708"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "behaviour"
+reason = "New `symlink-loop` error with no reference counterpart (issue #723): a shipped symlink whose resolution chain, followed within its own package, revisits a path -- the link points at itself, or a set of links point at each other in a cycle -- fires at E, and so does a link whose chain runs into such a cycle. The reference has no finding for the shape: its chain walk (pkg.py readlink) loops forever on a cyclic package, and the port's dangling findings are presence-based, so a loop's target -- present in the file list, being the link itself or another link in the cycle -- never fires them. The cycle is fully decidable from the payload and is always damage at runtime (every open fails with ELOOP), so the finding is an error. Chains that resolve to a shipped non-link entry, and chains that leave the package (the dangling family's existing business), stay silent. Measured over the Factory corpus (51,589 RPMs; the 3 unreadable entries are .nosrc.rpm placeholders with no payload): 434,286 symlinks walked, 12,372 in-package link-to-link hops, longest chain 4, zero loops -- the finding guards a class the reference cannot scan for at all. The header walk used for the count was validated against the built binary on a synthetic package carrying an absolute self-loop and a 2-cycle (both report exactly the same three links) and on a 250-RPM paired slice. openSUSE's brp-25-symlink rejects a self-pointing link at build time; this is the RPM-level counterpart. Its staged `--explain` description lives in `crates/rpmcrab-core/data/descriptions/FilesCheck.toml`."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/723"
+
+[[divergence]]
+case = "global"
+check = "SpecCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge (issues #751, #762): `deprecated-grep` fires only where `egrep`/`fgrep` stands in command position — at line start, or behind whitespace, a path slash, a quote, `(`, a backtick, a backslash, or one of `;`, `|`, `&` — and the name ends the token, so no word character, `.` or `-` follows it. The reference (`SpecCheck.py::_checkline_deprecated_grep`) matches the bare token `\\b[ef]grep\\b`, so it also fires on text that invokes no grep command at all: the findutils regex dialect name in `find -regextype posix-egrep` (util-linux %install, the case that surfaced this), a dotted data file like `foo.egrep`, a hyphenated helper like `my-egrep-helper`, a longer name like `egrep-helper` or `egrep.foo` at command position, and an assignment value like `FOO=egrep` or `--with-grep=fgrep`. The check's description targets direct use of grep as egrep or fgrep; genuine invocations — including the backslash-escaped alias-bypass spelling `\\egrep` — fire at the same W level with the identical detail rendering."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/751"
+
+[[divergence]]
+case = "global"
+check = "file-contains-date-and-time"
+kind = "severity"
+reason = "Deliberate severity recalibration (issue #759, decision D11 of #714): the port reports E where the reference reports W. An embedded build date stamps image content with the build moment and makes the image non-reproducible byte-for-byte, a significant defect on an image-based OS. Solidity was measured before the flip by build-time emulation over the Factory corpus (51,589 RPMs; every payload scanned for its own BUILDTIME date under the check's exact rule, the check itself matching the linter's run date): file-contains-date-and-time fires 443 times in 240 binary packages (208 srcpkgs). The matching rule is unchanged; only the level moves."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/759"
+
+[[divergence]]
+case = "global"
+check = "file-contains-current-date"
+kind = "severity"
+reason = "Deliberate severity recalibration (issue #759, decision D11 of #714): the port reports E where the reference reports W, on the file-contains-date-and-time reasoning. The build-time emulation over the Factory corpus (51,589 RPMs) fires it 135 times in 71 binary packages (59 srcpkgs); 25 hand-read firings across both date findings carried 23 genuine embedded build dates (ELF __DATE__/__TIME__ stamps, doxygen generation stamps, firmware build stamps, configure-stamped configuration). The 2 remaining firings of the 578 are upstream release-history files whose newest entry's date equals the build date on a release-day build (liberation-fonts ChangeLog, perl-Unicode-LineBreak Changes): the file genuinely contains the build date, the class is bounded and self-limiting, and the matching rule stays unchanged."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/759"
+
+[[divergence]]
+case = "global"
+check = "scriptlet-useradd-in"
+kind = "behaviour"
+reason = "New crab-only Warning with no reference counterpart (issue #640): a scriptlet run by sh, bash or perl \u2014 or by the default shell when the scriptlet carries no -p flag \u2014 invoking useradd or groupadd at command position emits W scriptlet-useradd-in-<scriptlet> / scriptlet-groupadd-in-<scriptlet> with the offending line as detail, one finding per line occurrence and tool. PostCheck scans %pre, %post, %preun, %postun, %pretrans, %posttrans and %verifyscript plus the trigger, filetrigger and transfiletrigger scriptlets, and this finding runs in every one of those kinds under the prog gate above. The normative source is the openSUSE packaging guidelines (Users and Groups: users and groups are created declaratively with sysusers.d), confirmed for all packages, old and new, by the assignee and the security team in boo#1285892: useradd is not part of container images and cannot create accounts on image-based installations, where scriptlets run on the build host without access to the target /etc/passwd, and the sanctioned scriptlet form is the sysusers RPM macros, whose expansion invokes systemd-sysusers. The predicate reuses the lexical tokenisation pinned for scriptlet-service-restart (shared helpers in atomic_update.rs): heredoc-blanked, quote-blanked text, command position only (segment start after case-arm patterns, shell keywords and environment assignments), basename useradd/groupadd invoked bare or by path from any directory, so systemd-sysusers invocations (including the sysusers-macro expansion shape), the lifecycle tools (usermod, userdel, groupmod, groupdel), comments, quoted text, heredoc bodies, shell function definitions (useradd() { ...; } names the tool without invoking it: the definition's header segment stays silent as a whole, so an invocation inside a one-line body (useradd() { useradd -r foo; }) stays silent with it; only an invocation after a separator or on a later line of the body is a segment of its own and fires) and operand positions (echo useradd, test -x /usr/sbin/useradd) stay silent. Scope disclosures: the tokenisation is shell-shaped, so the perl prog in the gate \u2014 shared with PostCheck's sibling lexical scans \u2014 covers shell-shaped lines in perl bodies, and perl-native invocation forms (system(), qx()) are outside this predicate; an invocation that reaches execution only through an interpreter reading text (eval, sh -c, a heredoc fed to a shell) is outside this predicate; and only a command substitution's opener ($(...) or backticks) starts no segment in this tokenisation: the splitter tracks no substitution depth, so an interior command after a separator is a segment of its own and is judged by this predicate (echo $(echo hi; useradd -r foo) fires), while an interior without a separator stays inside the outer segment and outside it; the Debian adduser tool is outside the ruling, which names useradd/groupadd. Corpus gate (Factory corpus: 51,589 binary RPMs, all 17,242 source packages, PostCheck-only pass with the shipped code): 187 findings \u2014 94 scriptlet-useradd-in-%pre and 93 scriptlet-groupadd-in-%pre \u2014 in 110 binary RPMs across 99 source packages, every finding in %pre. 26 firers hand-read across the population (3proxy, amanda, ceph, corosync-qdevice, freeradius-server, gitolite, icinga2, openSUSE-release-tools, pcp among them) are all genuine direct creations of daemon or service accounts, in the getent-guarded fallback form or bare, with zero false positives. Warning, not Error: the invocation is the superseded pattern rather than a broken package \u2014 useradd still creates the account on classic installations and cannot work on image-based ones, and the move to sysusers.d is a per-package packaging change, so an Error would fail 99 source packages' Factory builds for a policy migration the distribution rolls out package by package. Pinned by unit tests in atomic_update.rs and post.rs; the -v descriptions are registered in PostCheck's register_error_details."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/640"
+
+[[divergence]]
+case = "global"
+check = "scriptlet-rc-link-invocation-in"
+kind = "behaviour"
+reason = "New crab-only Warning with no reference counterpart (issue #731): a scriptlet run by sh, bash or perl — or by the default shell when the scriptlet carries no -p flag — invoking an rc<service> link at command position emits W scriptlet-rc-link-invocation-in-<scriptlet> with the offending line as detail, one finding per offending line occurrence. PostCheck scans %pre, %post, %preun, %postun, %pretrans, %posttrans and %verifyscript plus the trigger, filetrigger and transfiletrigger scriptlets, and this finding runs in every one of those kinds under the prog gate above. The /usr/sbin/rc<name> symlinks to the service command are the pre-systemd service-control form; SLE 16 removed them in the general legacy cleanup, so a scriptlet still invoking one relies on a mechanism current SLE, Leap 16 and Tumbleweed no longer provide. The finding is verb-independent — the invocation itself is the obsolete part — where AtomicUpdateCheck's scriptlet-service-restart matches the same rc form only with a restart-class verb and only outside %verifyscript and bodies carrying a TRANSACTIONAL_UPDATE guard; an rcfoo restart line in a prog-gated scriptlet other than %verifyscript, in a body without that guard, fires both, deliberately, because the restart and the dead mechanism are separate facts reported by separate checks. The predicate reuses the tokenisation pinned for scriptlet-service-restart (shared helpers in atomic_update.rs, one line walker for both scans): heredoc-blanked, quote-blanked text, command position only (segment start after case-arm patterns, shell keywords and environment assignments), basename rc<name> with a path-qualified form counting only when its immediate parent directory is a sbin directory, so /usr/bin/rcfoo, /usr/sbin/myrc, the bare word rc and rc names in comments, quoted text, heredoc bodies and non-command positions stay silent. The basenames rclone, rcs and rcp are denylisted in every form, bare included: they name real binaries (the file-sync tool, the RCS command, the remote-copy command) that resolve through PATH, and a bare rclone sync fired under the sbin gate alone because that gate only judges path-qualified forms (review on PR #732). A shell function definition (rcfoo() { ...; }) names a command rather than invoking one: the definition's header segment stays silent in both scans as a whole, so an invocation inside a one-line body (rcfoo() { rcbar status; }) stays silent with it; only an invocation after a separator or on a later line of the body is a segment of its own and fires. Scope disclosures: the tokenisation is shell-shaped, so the perl prog in the gate — shared with PostCheck's sibling lexical scans — covers shell-shaped lines in perl bodies, and perl-native invocation forms (system(), qx()) are outside this predicate; quoted and heredoc text is treated as data, so an invocation that reaches execution only through an interpreter reading that text (eval, sh -c, a heredoc fed to a shell) is outside this predicate; and only a command substitution's opener ($(...) or backticks) starts no segment in this tokenisation: the splitter tracks no substitution depth, so an interior command after a separator is a segment of its own, judged by both this predicate and scriptlet-service-restart (echo $(echo hi; rcfoo restart) fires in both, and the backtick form echo `echo hi; rcfoo restart` identically \u2014 the closing backtick is trimmed off the interior's last word exactly as the closing parenthesis is, so both scans judge the same words in both forms (issue #783)), while an interior without a separator stays inside the outer segment and outside both. There is no TRANSACTIONAL_UPDATE exemption for this finding: the removal is distribution-wide, not transactional-specific. Corpus gate (Factory corpus: 51,589 binary RPMs; 361,685 non-empty scriptlets across all scriptlet tags; rc-shaped tokens occur in exactly 3 packages): exactly one package fires — uisp %post runs /usr/sbin/rcresmgr restart at command position — and the only other rc-shaped tokens in scriptlet bodies are near misses that stay silent: mariadb's rcmysql inside a heredoc update message, w3c-markup-validator's rcapache2 inside a quoted echo string and uisp's own test -x operand on the firing line; zero false positives. The PR #732 denylist and function-definition fixes remove classes that occur nowhere in that corpus split, so the corpus result stands. Warning, not Error: the invocation is obsolete rather than unconditionally broken — the same scriptlet still works wherever the links exist. Pinned by unit tests in post.rs and atomic_update.rs; the -v description is registered in PostCheck's register_error_details."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/731"
+
+[[divergence]]
+case = "global"
+check = "ZipCheck"
+kind = "behaviour"
+reason = "Entry inflation is capped at 64 MiB per entry (issue #771): an entry inflating past the cap is reported (bad-crc-in-zip from the CRC pass, unable-to-read-zip from the manifest read) instead of being inflated in full, where the reference reads every entry completely. A package must not be able to exhaust the linter's memory: a highly-compressible entry otherwise forces unbounded heap growth up to OOM. Entries at or under the cap are read and CRC-verified exactly as before."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/771"
+
+[[divergence]]
+case = "global"
+check = "SpecCheck"
+kind = "behaviour"
+reason = "`invalid-spec-name` judges a source RPM's payload spec file against two names: the source RPM's header name, and the names the spec's own preamble can produce — its `Name:` declarations expanded against the macro definitions in effect at each declaration. OBS names multibuild flavour source RPMs after the build job — util-linux-systemd, python-libmount and ImageMagick-config_open all carry the base package's spec file, a name the declarations produce — so the reference's header-name comparison alone (SpecCheck.py:176; its `pkg.name` is likewise the header tag) fires an Error on a self-consistent spec and fails the flavour build, where rpmcrab stays quiet. A file named after the header stays quiet, as under the reference; the finding fires only when the file matches neither name. A source carrying several spec files fires only when none of them is consistent on either ground, and the spec checks then run on the first readable file the header names, else the first readable one a declaration names, else the last readable one; a payload file that cannot be opened is judged on the header ground alone. The expansion reads the preamble the way rpm evaluates it: rpm itself evaluates the branch conditions when it builds, so a built package carries exactly one branch's name, while the lint evaluates no condition, so the declarations and definitions of every conditional branch count and the accepted set is the union over all branches. Within that reading a definition takes effect from its own line on and a definition below the `Name:` line is not in effect at it; a `%undefine` removes a macro's earlier definitions, and one inside a conditional branch removes them for that branch's reading only, so the defined and undefined readings both count. A macro counts as defined when a `%define` or `%global` before the declaration gives it a body — a parametric definition defines a function, not a value — and `%{nil}` expands to nothing; a macro with no such definition contributes an unconstrained segment. Only a wholly unconstrained pattern constrains nothing and is set aside: a declaration that still pins literal text constrains the name to that text, so `Name: foo%{undefined}` accepts `foo` and every name it anchors. The header-name comparison decides when no declaration constrains the name — a preamble declaring no `Name:` at all, every pattern set aside, an expansion past the pattern or depth cap — as it does for the declarations the scan cannot reach: the scan reads the main preamble and stops at the first section header, so `Name:` declarations in subpackage preambles behind a section header are outside the accepted set and the header ground judges those files."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/750"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "behaviour"
+reason = "Declared accounts credited for `non-standard-uid` / `non-standard-gid`, both findings at error (issue #756): the reference emits both findings as warnings from distro-registry membership alone, while rpmcrab treats an account as standard when the registry lists it or the checked source package's set declares it -- a shipped sysusers.d snippet whose `u`/`g` lines name the account (a `u` line declares its like-named primary group as well), an explicit `user(<name>)` / `group(<name>)` Provides on a package of the set, or the file-owning package's Requires on those capabilities (Requires crediting is per file-owning package: a sibling subpackage's Requires credits nothing, since the owning package installed standalone has no creator for the account), with `m` membership lines crediting nothing. The decision runs at the end of the run, grouped by SOURCERPM, the session shape the no-documentation and dangling-symlink findings use. Measured over the Factory corpus under the openSUSE data (51,589 RPMs): 1,492 warning lines (287 uid, 1,205 gid) across 99 source packages, every line's account declared by its own source package (1,414 lines) or a required capability (78 lines), so the tightened findings fire zero times over the corpus. An account owned by files in a package set that declares it nowhere remains an error: the account has no creator, so the files land owned by an unresolvable name or a recycled numeric id."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/756"

@@ -145,8 +145,8 @@ existing checks:
 case or an explicit ledger entry):
 
 - `BinariesCheck`: `missing-call-to-setgroups-before-setuid` severity
-  matches upstream (`E if is_uid else W`); rpmcrab's unconditional `E`
-  is the #593 severity recalibration, not a flavour patch.
+  is a uniform `W` in rpmcrab (fix-and-diverge #743); upstream splits
+  (`E if is_uid else W`). Not a flavour patch.
 - `BinariesCheck`: `binary-in-etc` also fires under `/usr/etc/`.
 - `DBusPolicyCheck`: new `E: dbus-policy-allow-wildcard` (bsc#1220215) and
   `W: dbus-policy-allow-receive`.
@@ -418,9 +418,8 @@ flag breaks `rpmlint-mini` outright.
 
 ### 4.11 Flavors
 
-The reference maintains separate git branches for distribution flavors
-(`opensuse`, `opensuse-slfo-1.2`, `opensuse-slfo-main`). rpmcrab controls
-flavor-specific behavior with a single config key.
+rpmcrab controls flavor-specific behavior with a single config key, and
+ships one vendored data set: the SUSE flavour's.
 
 - **Key:** `Flavor` (top-level TOML key, case-insensitive value).
 - **Values:** `"opensuse"` (default), `"slfo"`.
@@ -429,43 +428,50 @@ flavor-specific behavior with a single config key.
 - **No auto-detection.** rpmcrab lints arbitrary packages, often cross-distro
   (a Tumbleweed host linting SLFO packages). Flavor is a property of the
   *target*, not the host, so it is explicit config.
+- **Vendored data.** The shipped tree carries one vendored data set — the
+  openSUSE data (`crates/rpmcrab-core/data/distro/opensuse/`, vendored
+  from upstream's `opensuse` branch) — and every recognised `Flavor`
+  value selects it. The key, the pre-pass that reads it,
+  `Config::is_slfo()` and the divergence ledger's `flavor` gating form
+  the mechanism a future flavour plugs into with its own vendored set.
 
-Checks read `config.is_slfo()` at the decision point. Severity flips are
-expressed as a level variable, not duplicated emit calls.
+Flavor selects the vendored data set and the configured check list.
+Severity recalibrations are unconditional: a finding reports the same
+level under every flavor, and its ledger entry carries no flavor field.
 
-**Verified SLFO divergences.** Each candidate divergence from the SLFO
-branches was verified against upstream history before being accepted. Three
-of the four candidates turned out to be branch staleness or removed checks,
-not real flavor divergences:
+**The SLFO audit.** The reference maintains separate git branches for
+distribution flavors (`opensuse`, `opensuse-slfo-1.2`,
+`opensuse-slfo-main`). Each candidate divergence from the SLFO branches
+was verified against upstream history and Factory content (issue #714):
 
 | # | Candidate | Verdict | Reason |
 |---|-----------|---------|--------|
 | 1 | `post-without-tmpfile-creation` (new W finding) | **REJECTED** | Removed upstream in 2025-12-09 (issue #1374): the `%tmpfiles` macro is now a noop via systemd triggers; the check fires false positives on correct packages. SLFO branches are stale. Do not implement. |
 | 2 | `binary-in-etc` flags `/usr/etc/` | **REJECTED** | The `/usr/etc/` coverage was added to opensuse on 2025-06-06 (mgerstner PR #1357), after the SLFO branches forked (2025-02-04). SLFO is stale; the opensuse behavior is correct. Do not gate. |
-| 3 | `file-contains-date-and-time` / `file-contains-current-date` W→E | **QUESTIONABLE** | Plausible (immutable images need reproducibility) but undocumented: no upstream issue, no commit message justifying the severity flip. Held for Tom's decision. |
+| 3 | `file-contains-date-and-time` / `file-contains-current-date` W→E | **APPROVED** | Build dates embedded in shipped files break the reproducibility image-based installs rely on. Measured over the Factory corpus (issue #759): 578 firings in 259 srcpkgs; a 25-firing hand audit found 23 genuine build-date stamps and 2 bounded release-day cases (0.35% of firings). Both findings are Error under every flavour: the promotion is unconditional. |
 | 4 | LogrotateCheck drops `/usr/etc/logrotate.d/` | **REJECTED** | Same staleness as #2: `/usr/etc/` support added to opensuse after the SLFO fork. Do not gate. |
 
-`missing-call-to-setgroups-before-setuid` carries upstream's own level
-split (`E if is_uid else W`); rpmcrab's unconditional `E` is the #593
-severity recalibration with a ledger entry, not a flavor gate.
+`missing-call-to-setgroups-before-setuid` carries a uniform `W` in
+rpmcrab (fix-and-diverge #743 with a ledger entry); upstream's own
+level split (`E if is_uid else W`) is not carried, and it is not a
+flavor gate.
 
-If #3 is approved, the divergence matrix is:
-
-| Check | Finding | opensuse | slfo |
-|-------|---------|----------|------|
-| `checks::buildroot` (when ported) | `file-contains-date-and-time` | W | E |
-| `checks::buildroot` (when ported) | `file-contains-current-date` | W | E |
-
-Each gated divergence gets a `[[divergence]]` ledger entry (§6.2) recording
-`flavor = "slfo"`.
+**The unified data set (issue #760).** The one vendored set is the
+openSUSE branch's data with the generator's extras applied
+(`XinetdDepCheck` and `PAMModulesCheck` in `Checks`, the MinGW
+`Filters`, the 59 `BlockedFilters`): the security data covers the
+varlink locations and `/usr/etc/sudoers.d`, and the digest records
+carry the hash sets Factory ships, adjudicated from corpus content
+wherever the branches disagreed (decision D7 of issue #714).
 
 ### 4.12 Supported flavors
 
 rpmcrab supports distributions in priority order. The order decides which
 consumers a finding must serve to survive:
 
-1. **SUSE (P1).** openSUSE and SLFO/SLE — the primary family. Distro configs
-   are vendored in-tree and flavor-specific behavior is `Flavor`-gated (§4.11).
+1. **SUSE (P1).** The primary family: openSUSE, SLFO and SLE consume the
+   one vendored data set. Distro configs are vendored in-tree and
+   flavor-specific behavior is `Flavor`-gated (§4.11).
 2. **Fedora (P2).** Supported, nice to have. No vendored config yet; findings
    are kept when Fedora's own rpmlint config lets them fire.
 3. **Everything else — not considered.** No other flavor is currently
@@ -825,8 +831,9 @@ finding is an error only when it always implies the damage, so style
 and judgement findings moved down: `description-line-too-long` and
 `files-duplicated-waste` print as warnings, `no-%check-section` as
 info, the `systemd-service-without-service_*` family as warnings.
-`missing-call-to-setgroups-before-setuid` moved the other way and is
-now always an error. The vendored distro configs no longer bundle the
+`missing-call-to-setgroups-before-setuid` prints as a warning at
+every file mode: its symbol pattern cannot tell an identity switch
+from an effective-id drop, so it does not always imply the damage. The vendored distro configs no longer bundle the
 strict scoring layer by default; `invalid-license` keeps its badness
 of 100000 in the base scoring, and six `[Scoring]` promotions that
 printed warnings as errors are gone. Text output renders

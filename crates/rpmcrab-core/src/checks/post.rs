@@ -9,6 +9,8 @@ use std::process::Command;
 use fancy_regex::Regex;
 
 use crate::check::{Check, add_info};
+use crate::checks::atomic_update::direct_user_creation_in_body;
+use crate::checks::atomic_update::rc_link_invocations_in_body;
 use crate::checks::is_match;
 use crate::config::Config;
 use crate::filter::Filter;
@@ -1267,6 +1269,36 @@ impl PostCheck {
             }
         }
 
+        // The direct user/group creation scan runs under the same
+        // interpreter gate as the other lexical scans. Users and
+        // groups are created declaratively through sysusers.d, so
+        // a useradd/groupadd invocation is the finding in every
+        // scriptlet kind this check scans (issue #640,
+        // boo#1285892).
+        if prog.is_empty() || prog == "/bin/sh" || prog == "/bin/bash" || prog == "/usr/bin/perl" {
+            for (tool, line) in direct_user_creation_in_body(script) {
+                out.push((
+                    Level::Warning,
+                    finding(&format!("scriptlet-{tool}-in")),
+                    vec![line],
+                ));
+            }
+        }
+
+        // The rc<service> link scan runs under the same interpreter
+        // gate as the other lexical scans. The links were removed in
+        // the SLE 16 legacy cleanup, so an invocation is obsolete
+        // whatever the verb (issue #731).
+        if prog.is_empty() || prog == "/bin/sh" || prog == "/bin/bash" || prog == "/usr/bin/perl" {
+            for line in rc_link_invocations_in_body(script) {
+                out.push((
+                    Level::Warning,
+                    finding("scriptlet-rc-link-invocation-in"),
+                    vec![line],
+                ));
+            }
+        }
+
         if prog == "/bin/sh" || prog == "/bin/bash" {
             if let Some(ok) = Self::syntax_ok(prog, &["-n"], script)
                 && !ok
@@ -1327,6 +1359,12 @@ const FORBIDDEN_SELINUX_DETAIL: &str = "A command which requires intimate knowle
 const DAEMON_ACTIVATION_DETAIL: &str = "The scriptlet activates a daemon at installation time. Packages must not enable or start services on installation; enablement is governed by systemd presets, not by insserv, chkconfig or systemctl calls in scriptlets.";
 /// `deprecated-cache-updater-in-<scriptlet>`:
 const DEPRECATED_CACHE_UPDATER_DETAIL: &str = "The scriptlet runs a cache or database updater (update-desktop-database, gtk-update-icon-cache, update-mime-database, glib-compile-schemas or install-info) by hand, pointed at a directory the RPM file triggers own. The triggers already run the updater when the files it indexes change, so the manual call is redundant; remove it and rely on the file trigger.";
+/// `scriptlet-useradd-in-<scriptlet>`:
+const SCRIPTLET_USERADD_DETAIL: &str = "The scriptlet creates a user by invoking useradd directly. Users and groups are created declaratively: the package ships a sysusers.d configuration and the sysusers macros create the account during installation (openSUSE packaging guidelines, Users and Groups). A direct useradd invocation cannot create the account on image-based installations, where scriptlets run on the build host without access to the target /etc/passwd, and useradd is not part of container images.";
+/// `scriptlet-groupadd-in-<scriptlet>`:
+const SCRIPTLET_GROUPADD_DETAIL: &str = "The scriptlet creates a group by invoking groupadd directly. Users and groups are created declaratively: the package ships a sysusers.d configuration and the sysusers macros create the group during installation (openSUSE packaging guidelines, Users and Groups). A direct groupadd invocation cannot create the group on image-based installations, where scriptlets run on the build host without access to the target /etc/group, and groupadd is not part of container images.";
+/// `scriptlet-rc-link-invocation-in-<scriptlet>`:
+const RC_LINK_INVOCATION_DETAIL: &str = "The scriptlet invokes an rc<service> link (rc<name>, invoked bare or by path from a sbin directory; the same-shaped real binaries rclone, rcs and rcp are not rc links). The rc<service> symlinks to the service command are the pre-systemd service-control form, removed from the distribution in the SLE 16 legacy cleanup; drive the service through systemctl or the systemd service macros instead.";
 /// `non-empty-<scriptlet>`:
 const NON_EMPTY_DETAIL: &str = "Scriptlets for the interpreter mentioned in the message should be empty.\n        One common case where they are unintentionally not is when the specfile\n        contains comments after the scriptlet and before the next section. Review\n        and clean up the scriptlet contents if appropriate.";
 pub fn register_error_details(out: &mut Filter) {
@@ -1389,6 +1427,21 @@ pub fn register_error_details(out: &mut Filter) {
         out.set_error_detail(
             &format!("deprecated-cache-updater-in-{tag}"),
             DEPRECATED_CACHE_UPDATER_DETAIL.to_string(),
+        );
+        // `scriptlet-useradd-in-<scriptlet>`:
+        out.set_error_detail(
+            &format!("scriptlet-useradd-in-{tag}"),
+            SCRIPTLET_USERADD_DETAIL.to_string(),
+        );
+        // `scriptlet-groupadd-in-<scriptlet>`:
+        out.set_error_detail(
+            &format!("scriptlet-groupadd-in-{tag}"),
+            SCRIPTLET_GROUPADD_DETAIL.to_string(),
+        );
+        // `scriptlet-rc-link-invocation-in-<scriptlet>`:
+        out.set_error_detail(
+            &format!("scriptlet-rc-link-invocation-in-{tag}"),
+            RC_LINK_INVOCATION_DETAIL.to_string(),
         );
         // `non-empty-<scriptlet>`:
         out.set_error_detail(
@@ -3315,6 +3368,259 @@ mod tests {
                 .iter()
                 .any(|(_, f, _)| f == "daemon-activation-in-%post"),
             "must stay silent for unquoted substitution: {found2:?}"
+        );
+    }
+
+    #[test]
+    fn useradd_invocation_is_flagged() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "/usr/sbin/useradd -r -s /sbin/nologin foo",
+            "%pre",
+            &[],
+            &[],
+        );
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
+            && f == "scriptlet-useradd-in-%pre"
+            && d == &vec!["/usr/sbin/useradd -r -s /sbin/nologin foo".to_string()]));
+    }
+
+    #[test]
+    fn groupadd_invocation_is_flagged() {
+        let found = check().check_scriptlet("/bin/sh", "groupadd -r foo", "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
+            && f == "scriptlet-groupadd-in-%post"
+            && d == &vec!["groupadd -r foo".to_string()]));
+    }
+
+    #[test]
+    fn useradd_bare_and_full_path_are_flagged() {
+        for body in ["useradd foo", "/usr/sbin/useradd foo"] {
+            let found = check().check_scriptlet("/bin/sh", body, "%preun", &[], &[]);
+            assert!(
+                found
+                    .iter()
+                    .any(|(_, f, _)| f == "scriptlet-useradd-in-%preun"),
+                "must fire: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn useradd_near_misses_are_quiet() {
+        for body in [
+            "systemd-sysusers",
+            "/usr/bin/systemd-sysusers --replace=/usr/lib/sysusers.d/foo.conf -",
+            "usermod -a -G video foo",
+            "userdel foo",
+            "# useradd -r foo\ntrue",
+            "echo \"create the account with useradd -r foo\"",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", body, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f.starts_with("scriptlet-useradd-in")
+                        || f.starts_with("scriptlet-groupadd-in")),
+                "must stay silent: {body}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn useradd_in_heredoc_is_quiet() {
+        let body = "cat >> /var/adm/update-messages/foo << EOF\nCreate the account first:\n useradd -r foo\nEOF";
+        let found = check().check_scriptlet("/bin/sh", body, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "scriptlet-useradd-in-%post"),
+            "must stay silent for heredoc text: {found:?}"
+        );
+    }
+
+    #[test]
+    fn useradd_non_shell_prog_is_quiet() {
+        let found = check().check_scriptlet("<lua>", "useradd foo", "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "scriptlet-useradd-in-%post"),
+            "must stay silent for a lua scriptlet: {found:?}"
+        );
+    }
+
+    #[test]
+    fn rc_link_bare_invocation_is_flagged() {
+        let found = check().check_scriptlet("/bin/sh", "rcmysql start", "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
+            && f == "scriptlet-rc-link-invocation-in-%post"
+            && d == &vec!["rcmysql start".to_string()]));
+    }
+
+    #[test]
+    fn rc_link_any_verb_or_none_is_flagged() {
+        // Verb-independent: the invocation itself is the obsolete
+        // part, so verbs outside the restart family — and no verb at
+        // all — fire here while staying silent for
+        // scriptlet-service-restart.
+        for body in [
+            "rcapache2 status",
+            "rcapache2",
+            "/usr/sbin/rcfoo stop",
+            "FOO=bar rcapache2 status",
+            "if rcapache2 status; then true; fi",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", body, "%preun", &[], &[]);
+            assert!(
+                found
+                    .iter()
+                    .any(|(_, f, _)| f == "scriptlet-rc-link-invocation-in-%preun"),
+                "must fire: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn rc_link_in_case_arm_is_flagged() {
+        let body = "case $1 in\n  1) rcapache2 graceful ;;\nesac";
+        let found = check().check_scriptlet("/bin/sh", body, "%post", &[], &[]);
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "scriptlet-rc-link-invocation-in-%post"),
+            "must fire in a case arm: {found:?}"
+        );
+    }
+
+    #[test]
+    fn rc_link_after_separator_is_flagged_once() {
+        // The corpus firer (uisp %post): the test -x operand on the
+        // same line is not an invocation; the command after && is,
+        // and the line is reported once.
+        let body = "test -x /usr/sbin/rcresmgr && /usr/sbin/rcresmgr restart";
+        let found = check().check_scriptlet("/bin/sh", body, "%post", &[], &[]);
+        let hits: Vec<_> = found
+            .iter()
+            .filter(|(_, f, _)| f == "scriptlet-rc-link-invocation-in-%post")
+            .collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].2, vec![body.to_string()]);
+    }
+
+    #[test]
+    fn rc_link_lookalikes_are_quiet() {
+        // The pinned near misses: rc-shaped names that are not
+        // rc<service> link invocations — a real binary in a bin
+        // directory, a name whose rc is not a prefix, the bare word
+        // rc, an rc name under a non-sbin parent directory, and an
+        // rc name in argument position. The bare-name collisions
+        // (`rclone`, `rcs`, `rcp`) are real binaries that resolve
+        // through PATH, so the bare forms stay quiet for any
+        // arguments, exactly like the path-qualified forms.
+        for body in [
+            "/usr/bin/rclone sync a b",
+            "rclone sync a b",
+            "rclone restart",
+            "rcs -i somefile",
+            "rcp a b",
+            "/usr/sbin/myrc restart",
+            "rc start",
+            "/opt/rcfoo/bin/rcbar start",
+            "echo rcapp start",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", body, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "scriptlet-rc-link-invocation-in-%post"),
+                "must stay silent: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn rc_link_function_definition_is_quiet() {
+        // A shell function definition names a command, it does not
+        // invoke one: `rcfoo() { ...; }` stays quiet even though
+        // the bare name in command position would fire.
+        for body in [
+            "rcfoo() { echo hi; }",
+            "rcfoo () { echo hi; }",
+            "rcfoo()\n{\n echo hi\n}",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", body, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "scriptlet-rc-link-invocation-in-%post"),
+                "must stay silent for a function definition: {body}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rc_link_repeated_line_is_flagged_per_line() {
+        // Per-line reporting, matching the sibling
+        // scriptlet-service-restart scan: the same offending line
+        // twice in one body is two findings, not one.
+        let body = "rcfoo status\nrcfoo status";
+        let found = check().check_scriptlet("/bin/sh", body, "%post", &[], &[]);
+        let hits: Vec<_> = found
+            .iter()
+            .filter(|(_, f, _)| f == "scriptlet-rc-link-invocation-in-%post")
+            .collect();
+        assert_eq!(hits.len(), 2, "{found:?}");
+    }
+
+    #[test]
+    fn rc_link_in_quoted_text_is_quiet() {
+        // The corpus near miss (w3c-markup-validator %post): an rc
+        // name inside a quoted message is text, not an invocation.
+        let body = "echo \"\nFinally, restart the webserver with 'rcapache2 graceful'.\"";
+        let found = check().check_scriptlet("/bin/sh", body, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "scriptlet-rc-link-invocation-in-%post"),
+            "must stay silent for quoted text: {found:?}"
+        );
+    }
+
+    #[test]
+    fn rc_link_in_heredoc_is_quiet() {
+        // The corpus near miss (mariadb %post): the rc name is in a
+        // heredoc update message the scriptlet writes out.
+        let body = "cat >> /var/adm/update-messages/mariadb-something << EOF\nYou can start it via:\n rcmysql start\nEOF";
+        let found = check().check_scriptlet("/bin/sh", body, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "scriptlet-rc-link-invocation-in-%post"),
+            "must stay silent for heredoc text: {found:?}"
+        );
+    }
+
+    #[test]
+    fn rc_link_in_comment_is_quiet() {
+        let body = "# rcapache2 restart\ntrue";
+        let found = check().check_scriptlet("/bin/sh", body, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "scriptlet-rc-link-invocation-in-%post"),
+            "must stay silent for comments: {found:?}"
+        );
+    }
+
+    #[test]
+    fn rc_link_non_shell_prog_is_quiet() {
+        let found = check().check_scriptlet("<lua>", "rcapache2 restart", "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "scriptlet-rc-link-invocation-in-%post"),
+            "must stay silent for a lua scriptlet: {found:?}"
         );
     }
 }

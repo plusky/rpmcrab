@@ -22,24 +22,128 @@ const DICT_PATHS: &[&str] = &[
     "/opt/homebrew/share/hunspell",
 ];
 
-/// A spellchecker, or `None` if no dictionary was found.
-pub struct Spellchecker {
-    dict: spellbook::Dictionary<foldhash::fast::FixedState>,
+/// Environment variable that disables spellbook's ngram suggester when
+/// set (any value), mirroring the presence-based
+/// `CONFIG_DISABLE_AUTOLOADING` switch in config.rs. The ngram
+/// suggester's candidate set depends on per-process hash state, so
+/// suggestion membership is not reproducible across processes; the
+/// test harness sets this so spelling output is deterministic under
+/// test. Production runs leave it unset and keep the full ngram
+/// suggestions.
+const DISABLE_NGRAM_SUGGESTIONS_ENV: &str = "RPMCRAB_DISABLE_NGRAM_SUGGESTIONS";
+
+/// The production default for the ngram suggester: on, unless
+/// `DISABLE_NGRAM_SUGGESTIONS_ENV` is set.
+fn ngram_suggestions_enabled() -> bool {
+    std::env::var_os(DISABLE_NGRAM_SUGGESTIONS_ENV).is_none()
 }
 
-/// Build the dictionary with a fixed-seed hasher.
+/// A spellchecker, or `None` if no dictionary was found.
+pub struct Spellchecker {
+    dict: spellbook::Dictionary<DictionaryBuildHasher>,
+    /// Whether spellbook's ngram suggester contributes suggestions.
+    /// On unless disabled (see `DISABLE_NGRAM_SUGGESTIONS_ENV`); the
+    /// switch shapes suggestions only, never which words are flagged.
+    ngram_suggestions: bool,
+}
+
+/// `BuildHasher` for the spellbook dictionary: FNV-1a over 64-bit
+/// arithmetic only.
 ///
-/// spellbook's suggester scans the word list in hash order and cuts
-/// tied ngram candidates off in that order, so with the default
-/// randomly seeded hasher the kept suggestions depend on the process
-/// seed: two processes given identical dictionary bytes can keep
-/// different suggestions for the same word. A fixed seed makes the
-/// scan order a pure function of the dictionary bytes.
+/// spellbook's ngram suggester scans the word list in hash-bucket
+/// order and cuts tied candidates off in that order, so the kept
+/// suggestions are a function of the dictionary's hash values. Those
+/// values must be a pure function of the dictionary bytes on every
+/// target: a randomly seeded hasher makes them depend on the process
+/// seed, and `foldhash::fast`'s folded multiply computes a different
+/// function on 32-bit targets than on 64-bit ones. FNV-1a uses only
+/// XOR and wrapping `u64` multiplication, so its output — and with
+/// it the scan order — is identical on 32- and 64-bit targets.
+#[derive(Clone, Default)]
+struct DictionaryBuildHasher;
+
+/// FNV-1a hasher (see `DictionaryBuildHasher`).
+struct Fnv1aHasher(u64);
+
+impl std::hash::BuildHasher for DictionaryBuildHasher {
+    type Hasher = Fnv1aHasher;
+
+    fn build_hasher(&self) -> Fnv1aHasher {
+        Fnv1aHasher(0xcbf2_9ce4_8422_2325)
+    }
+}
+
+impl std::hash::Hasher for Fnv1aHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 ^= u64::from(byte);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    // The default integer writes serialise with the target's width
+    // and endianness; funnel them through fixed-width little-endian
+    // encodings so no hash input depends on the target.
+    fn write_u8(&mut self, n: u8) {
+        self.write(&[n]);
+    }
+
+    fn write_u16(&mut self, n: u16) {
+        self.write(&n.to_le_bytes());
+    }
+
+    fn write_u32(&mut self, n: u32) {
+        self.write(&n.to_le_bytes());
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.write(&n.to_le_bytes());
+    }
+
+    fn write_u128(&mut self, n: u128) {
+        self.write(&n.to_le_bytes());
+    }
+
+    fn write_usize(&mut self, n: usize) {
+        self.write_u64(n as u64);
+    }
+
+    fn write_i8(&mut self, n: i8) {
+        self.write_u8(n as u8);
+    }
+
+    fn write_i16(&mut self, n: i16) {
+        self.write(&n.to_le_bytes());
+    }
+
+    fn write_i32(&mut self, n: i32) {
+        self.write(&n.to_le_bytes());
+    }
+
+    fn write_i64(&mut self, n: i64) {
+        self.write(&n.to_le_bytes());
+    }
+
+    fn write_i128(&mut self, n: i128) {
+        self.write(&n.to_le_bytes());
+    }
+
+    fn write_isize(&mut self, n: isize) {
+        self.write_i64(n as i64);
+    }
+}
+
+/// Build the dictionary with `DictionaryBuildHasher`, so the
+/// suggester's scan order is a pure function of the dictionary bytes.
 fn build_dictionary(
     aff: &str,
     dic: &str,
-) -> Result<spellbook::Dictionary<foldhash::fast::FixedState>, spellbook::ParseDictionaryError> {
-    spellbook::Dictionary::new_with_hasher(aff, dic, foldhash::fast::FixedState::default())
+) -> Result<spellbook::Dictionary<DictionaryBuildHasher>, spellbook::ParseDictionaryError> {
+    spellbook::Dictionary::new_with_hasher(aff, dic, DictionaryBuildHasher)
 }
 
 impl Spellchecker {
@@ -55,16 +159,30 @@ impl Spellchecker {
                 continue;
             };
             if let Ok(dict) = build_dictionary(&aff_s, &dic_s) {
-                return Some(Self { dict });
+                return Some(Self {
+                    dict,
+                    ngram_suggestions: ngram_suggestions_enabled(),
+                });
             }
         }
         None
     }
 
-    /// Build from inline dictionary strings (for tests).
+    /// Build from inline dictionary strings (for tests). Defaults to
+    /// production behaviour (ngram suggester on).
     #[cfg(test)]
     pub(crate) fn from_strings(aff: &str, dic: &str) -> Option<Self> {
-        build_dictionary(aff, dic).ok().map(|dict| Self { dict })
+        build_dictionary(aff, dic).ok().map(|dict| Self {
+            dict,
+            ngram_suggestions: true,
+        })
+    }
+
+    /// Override the ngram-suggester switch (for tests).
+    #[cfg(test)]
+    pub(crate) fn with_ngram_suggestions(mut self, enabled: bool) -> Self {
+        self.ngram_suggestions = enabled;
+        self
     }
 
     /// Check text for misspellings, returning (word, suggestions) pairs.
@@ -132,7 +250,19 @@ impl Spellchecker {
             }
 
             let mut suggestions = Vec::new();
-            self.dict.suggest(word, &mut suggestions);
+            if self.ngram_suggestions {
+                // The production path, exactly as before the switch
+                // existed: spellbook's default suggester, ngram
+                // candidates included.
+                self.dict.suggest(word, &mut suggestions);
+            } else {
+                // Test-only path: drop the ngram candidates, whose
+                // set membership is not reproducible across processes.
+                self.dict
+                    .suggester()
+                    .with_ngram_suggestions(false)
+                    .suggest(word, &mut suggestions);
+            }
             // Sort before truncating so the kept suggestions are in a
             // canonical order.
             suggestions.sort();
@@ -262,16 +392,11 @@ mod tests {
         assert_eq!(result.len(), 1);
     }
 
-    #[test]
-    fn suggestions_are_identical_across_checker_instances() {
-        // The word list below concentrates stems in the probes' letter
-        // neighbourhood (every distinct permutation of "preun" and of
-        // "preun" with one doubled letter), so spellbook's ngram
-        // suggester faces large sets of tied candidates at its internal
-        // cut-offs. Checker instances built from identical dictionary
-        // bytes must still keep identical suggestions: with a randomly
-        // seeded dictionary hasher they do not, because the suggester
-        // scans the word list in per-process hash order.
+    /// The synthetic dictionary for the suggestion pins: every
+    /// distinct permutation of "preun" and of "preun" with one doubled
+    /// letter, plus "preen" — a dense neighbourhood of tied candidates
+    /// around the probes.
+    fn preun_neighbourhood_dic() -> String {
         fn next_permutation(v: &mut [char]) -> bool {
             let n = v.len();
             if n < 2 {
@@ -324,6 +449,19 @@ mod tests {
             dic.push_str(stem);
             dic.push('\n');
         }
+        dic
+    }
+
+    #[test]
+    fn suggestions_are_identical_across_checker_instances() {
+        // The word list in `preun_neighbourhood_dic` concentrates stems
+        // in the probes' letter neighbourhood, so spellbook's ngram
+        // suggester faces large sets of tied candidates at its internal
+        // cut-offs. Checker instances built from identical dictionary
+        // bytes must still keep identical suggestions: with a randomly
+        // seeded dictionary hasher they do not, because the suggester
+        // scans the word list in per-process hash order.
+        let dic = preun_neighbourhood_dic();
 
         let probes = ["preum", "prenux", "preunx", "prenuq", "preuq", "preunm"];
         let first = Spellchecker::from_strings(TEST_AFF, &dic).expect("synthetic dictionary");
@@ -339,7 +477,7 @@ mod tests {
         // degenerated would still agree with itself across instances.
         assert_eq!(
             expected[0],
-            vec![("preum".to_string(), vec!["preunu".to_string()])],
+            vec![("preum".to_string(), vec!["preune".to_string()])],
             "concrete suggestions for preum changed"
         );
         assert_eq!(
@@ -363,6 +501,90 @@ mod tests {
                     "suggestions for {probe} differ between checker instances"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn ngram_suggestions_are_on_by_default() {
+        // The production configuration: the ngram suggester
+        // contributes suggestions. Both constructors default to on;
+        // `Spellchecker::new` additionally honours
+        // RPMCRAB_DISABLE_NGRAM_SUGGESTIONS, pinned by
+        // `new_env_switch_tracks_the_disable_variable` below.
+        assert!(test_checker().ngram_suggestions);
+        let synthetic = Spellchecker::from_strings(TEST_AFF, &preun_neighbourhood_dic())
+            .expect("synthetic dictionary");
+        assert!(synthetic.ngram_suggestions);
+    }
+
+    #[test]
+    fn ngram_disabled_suggestions_are_the_deterministic_edit_set() {
+        let dic = preun_neighbourhood_dic();
+        let probes = ["preum", "prenux", "preunx", "prenuq", "preuq", "preunm"];
+        let checker = Spellchecker::from_strings(TEST_AFF, &dic)
+            .expect("synthetic dictionary")
+            .with_ngram_suggestions(false);
+        assert!(!checker.ngram_suggestions);
+        let expected: Vec<Vec<(String, Vec<String>)>> = probes
+            .iter()
+            .map(|probe| checker.check(probe, "testpkg", &[]))
+            .collect();
+        assert!(
+            expected.iter().any(|result| !result.is_empty()),
+            "probes must yield suggestions for the comparison to mean anything"
+        );
+        // Concrete pins for the edit-only sets. With the ngram
+        // suggester on, "preum" additionally gains "preune" and
+        // "preunx" gains "preeun"/"preuun" (the cross-instance test
+        // above pins those); off, only the candidates the edit
+        // generators reach remain, and that set is reproducible.
+        assert_eq!(
+            expected[0],
+            vec![("preum".to_string(), Vec::<String>::new())],
+            "ngram-disabled suggestions for preum changed"
+        );
+        assert_eq!(
+            expected[1],
+            vec![("prenux".to_string(), vec!["prenu".to_string()])],
+            "ngram-disabled suggestions for prenux changed"
+        );
+        assert_eq!(
+            expected[2],
+            vec![("preunx".to_string(), vec!["preun".to_string()])],
+            "ngram-disabled suggestions for preunx changed"
+        );
+        assert_eq!(
+            expected[3],
+            vec![("prenuq".to_string(), vec!["prenu".to_string()])],
+            "ngram-disabled suggestions for prenuq changed"
+        );
+        assert_eq!(
+            expected[4],
+            vec![("preuq".to_string(), Vec::<String>::new())],
+            "ngram-disabled suggestions for preuq changed"
+        );
+        assert_eq!(
+            expected[5],
+            vec![("preunm".to_string(), vec!["preun".to_string()])],
+            "ngram-disabled suggestions for preunm changed"
+        );
+        // Reproducibility of this edit set across processes is pinned
+        // by `ngram_disabled_suggestions_are_identical_across_processes`
+        // below: instances in one process share the per-process state
+        // issue #688 is about, so same-process agreement proves nothing.
+        // The switch shapes suggestions only: the flagged words are
+        // identical with the ngram suggester on or off.
+        let on = Spellchecker::from_strings(TEST_AFF, &dic)
+            .expect("synthetic dictionary")
+            .with_ngram_suggestions(true);
+        for (probe, off_result) in probes.iter().zip(&expected) {
+            let on_result = on.check(probe, "testpkg", &[]);
+            let on_words: Vec<&str> = on_result.iter().map(|(w, _)| w.as_str()).collect();
+            let off_words: Vec<&str> = off_result.iter().map(|(w, _)| w.as_str()).collect();
+            assert_eq!(
+                on_words, off_words,
+                "flagged words for {probe} must not depend on the ngram switch"
+            );
         }
     }
 
@@ -398,5 +620,177 @@ mod tests {
         let checker = test_checker();
         let result = checker.check("hello Wrld test", "testpkg", &[]);
         assert!(result.is_empty());
+    }
+
+    /// Render check results on one line: `word:sugg,sugg` entries
+    /// joined by spaces (an empty string when nothing was flagged).
+    fn format_check_results(results: &[(String, Vec<String>)]) -> String {
+        results
+            .iter()
+            .map(|(word, suggestions)| format!("{word}:{}", suggestions.join(",")))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Marker that turns `ngram_disabled_child_dump` from a no-op
+    /// (when the suite runs it directly) into the child half of the
+    /// cross-process determinism pin.
+    const NGRAM_DUMP_CHILD_ENV: &str = "RPMCRAB_TEST_NGRAM_DUMP_CHILD";
+
+    /// Child half of the cross-process pin: prints the ngram-disabled
+    /// probe results, one `PROBE` line per probe, for the parent test
+    /// to compare across two spawned processes. Does nothing unless
+    /// spawned by the parent with `NGRAM_DUMP_CHILD_ENV` set.
+    #[test]
+    fn ngram_disabled_child_dump() {
+        if std::env::var_os(NGRAM_DUMP_CHILD_ENV).is_none() {
+            return;
+        }
+        let checker = Spellchecker::from_strings(TEST_AFF, &preun_neighbourhood_dic())
+            .expect("synthetic dictionary")
+            .with_ngram_suggestions(false);
+        for probe in ["preum", "prenux", "preunx", "prenuq", "preuq", "preunm"] {
+            println!(
+                "PROBE {}",
+                format_check_results(&checker.check(probe, "testpkg", &[]))
+            );
+        }
+    }
+
+    #[test]
+    fn ngram_disabled_suggestions_are_identical_across_processes() {
+        // Issue #688 is per-process hash state: checker instances in
+        // one process can agree while separate processes diverge, so
+        // the in-process agreement loops cannot pin reproducibility.
+        // Run the ngram-disabled checker in two fresh processes and
+        // pin that their probe output is identical — and identical to
+        // the in-process edit set.
+        let probes = ["preum", "prenux", "preunx", "prenuq", "preuq", "preunm"];
+        let checker = Spellchecker::from_strings(TEST_AFF, &preun_neighbourhood_dic())
+            .expect("synthetic dictionary")
+            .with_ngram_suggestions(false);
+        let expected: Vec<String> = probes
+            .iter()
+            .map(|probe| format_check_results(&checker.check(probe, "testpkg", &[])))
+            .collect();
+
+        let exe = std::env::current_exe().expect("test binary path");
+        let dump = || -> Vec<String> {
+            let out = std::process::Command::new(&exe)
+                .args(["ngram_disabled_child_dump", "--nocapture"])
+                .env(NGRAM_DUMP_CHILD_ENV, "1")
+                .output()
+                .expect("spawn child test process");
+            assert!(
+                out.status.success(),
+                "child dump failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|line| line.strip_prefix("PROBE ").map(str::to_string))
+                .collect()
+        };
+        let first = dump();
+        assert_eq!(
+            first.len(),
+            probes.len(),
+            "child must dump every probe: {first:?}"
+        );
+        let second = dump();
+        assert_eq!(
+            first, second,
+            "ngram-disabled suggestions differ across processes"
+        );
+        assert_eq!(
+            first, expected,
+            "child processes disagree with the in-process edit set"
+        );
+    }
+
+    #[test]
+    fn dictionary_hasher_output_is_target_independent() {
+        // FNV-1a over fixed encodings: these constants hold on every
+        // target because the implementation uses only u64 wrapping
+        // arithmetic (see DictionaryBuildHasher). A hasher whose
+        // output depends on the target's pointer width — foldhash's
+        // folded multiply — cannot satisfy them on both widths.
+        use std::hash::BuildHasher;
+        assert_eq!(
+            DictionaryBuildHasher.hash_one("preun"),
+            0x60a9_adb5_d0dc_7fee
+        );
+        assert_eq!(
+            DictionaryBuildHasher.hash_one(42usize),
+            0xff3a_dd6b_3789_daef
+        );
+    }
+
+    /// Marker that turns `new_env_switch_child` from a no-op (when
+    /// the suite runs it directly) into the child half of the
+    /// env-switch pin.
+    const NEW_ENV_SWITCH_CHILD_ENV: &str = "RPMCRAB_TEST_NEW_ENV_SWITCH_CHILD";
+
+    /// Child half of the env-switch pin: asserts, in a fresh process,
+    /// that the ngram switch state tracks
+    /// `RPMCRAB_DISABLE_NGRAM_SUGGESTIONS`. The switch function is
+    /// asserted unconditionally; where a system dictionary is
+    /// installed (CI installs the pinned pair), `Spellchecker::new`'s
+    /// wiring of the switch into the checker is asserted as well.
+    /// Does nothing unless spawned by the parent with
+    /// `NEW_ENV_SWITCH_CHILD_ENV` set.
+    #[test]
+    fn new_env_switch_child() {
+        if std::env::var_os(NEW_ENV_SWITCH_CHILD_ENV).is_none() {
+            return;
+        }
+        // The literal name, not the constant: the name is the
+        // contract the binary harness sets, and reading it through
+        // the constant here would let a typo in the constant pass.
+        let disabled = std::env::var_os("RPMCRAB_DISABLE_NGRAM_SUGGESTIONS").is_some();
+        assert_eq!(
+            ngram_suggestions_enabled(),
+            !disabled,
+            "the ngram switch must track {DISABLE_NGRAM_SUGGESTIONS_ENV}"
+        );
+        if let Some(checker) = Spellchecker::new() {
+            assert_eq!(
+                checker.ngram_suggestions, !disabled,
+                "Spellchecker::new must carry the env switch into the checker"
+            );
+            println!("ENV_SWITCH=full");
+        } else {
+            println!("ENV_SWITCH=function-only");
+        }
+    }
+
+    #[test]
+    fn new_env_switch_tracks_the_disable_variable() {
+        // The env switch behind `Spellchecker::new` was untested: an
+        // inverted condition or a typo in the variable name would have
+        // passed silently. Mutating the variable in-process would race
+        // parallel tests, so both branches run in spawned child
+        // processes — variable removed, then variable set.
+        let exe = std::env::current_exe().expect("test binary path");
+        for disabled in [false, true] {
+            let mut cmd = std::process::Command::new(&exe);
+            cmd.args(["new_env_switch_child", "--nocapture"])
+                .env(NEW_ENV_SWITCH_CHILD_ENV, "1");
+            if disabled {
+                cmd.env("RPMCRAB_DISABLE_NGRAM_SUGGESTIONS", "1");
+            } else {
+                cmd.env_remove("RPMCRAB_DISABLE_NGRAM_SUGGESTIONS");
+            }
+            let out = cmd.output().expect("spawn child test process");
+            assert!(
+                out.status.success(),
+                "env-switch child (disabled={disabled}) failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&out.stdout).contains("ENV_SWITCH="),
+                "child must report its mode (disabled={disabled})"
+            );
+        }
     }
 }

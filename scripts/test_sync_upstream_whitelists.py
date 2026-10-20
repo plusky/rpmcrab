@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Fail-closed tests for scripts/sync-upstream-whitelists.py.
 
-Each test guards a failure mode from the #417 reviews: the slfo lxd data
-loss, the blocklist-bypassing regexes, silent upstream deletions, the
-deduped-file skip, and the PROVENANCE pin handling. Removing the loud
+Each test guards a failure mode from the #417 reviews: the blocklist-
+bypassing regexes, silent upstream deletions, and the PROVENANCE pin
+handling; the digest-adjudication tests guard the #760 mechanism that
+keeps Factory-adjudicated records stable across syncs. Removing the loud
 failure makes the test fail.
 
 Run:  python3 scripts/test_sync_upstream_whitelists.py
@@ -27,7 +28,7 @@ def _load(name, filename):
 sync = _load("sync_whitelists", "sync-upstream-whitelists.py")
 gen = _load("gen_distro_configs", "generate-distro-configs.py")
 
-_LEAP_ONLY, _MANAGED, _BY_FLAVOR = sync._load_generator_sets()
+_MANAGED, _BY_FLAVOR = sync._load_generator_sets()
 sync.WHITELIST_FILES = _MANAGED
 
 
@@ -50,21 +51,11 @@ def test_sync_sets_match_generator():
     assert set(sync.WHITELIST_FILES) == set(_MANAGED)
 
 
-def test_lxd_kept_for_slfo():
-    """lxd is still shipped in SLE 16: the slfo sync must not strip it."""
-    local = SYSCTL_HEADER + LXD
-    changed, new, added, updated, removed, skipped = sync.plan_merge(
-        local, SYSCTL_HEADER + LXD, {"lxd"}, "slfo", set())
-    assert not changed, (added, removed, skipped)
-    assert new is None
-    assert skipped == []
-
-
 def test_lxd_dropped_for_opensuse():
-    """lxd is gone from Factory: the opensuse sync still drops it."""
+    """lxd is gone from Factory: the sync drops its stanza."""
     local = SYSCTL_HEADER + LXD
     changed, new, added, updated, removed, skipped = sync.plan_merge(
-        local, SYSCTL_HEADER + SURVIVOR, {"lxd"}, "opensuse", set())
+        local, SYSCTL_HEADER + SURVIVOR, {"lxd"})
     assert changed
     assert "lxd" not in new
     assert removed == ["[[FileDigestGroup]] for lxd"]
@@ -81,7 +72,7 @@ def test_partial_blocklist_stanza_kept():
         'path = "/x"\n'
     )
     changed, new, added, updated, removed, skipped = sync.plan_merge(
-        SYSCTL_HEADER, SYSCTL_HEADER + stanza, {"snapd"}, "opensuse", set())
+        SYSCTL_HEADER, SYSCTL_HEADER + stanza, {"snapd"})
     assert changed
     assert added == 1
     assert '"live-pkg"' in new
@@ -96,14 +87,12 @@ def test_all_blocklisted_stanza_dropped_reports_only_blocklisted():
     )
     # Upstream-only blocklisted stanza: skipped, never (re)introduced.
     changed, new, added, updated, removed, skipped = sync.plan_merge(
-        SYSCTL_HEADER, SYSCTL_HEADER + stanza, {"snapd", "lxd"},
-        "opensuse", set())
+        SYSCTL_HEADER, SYSCTL_HEADER + stanza, {"snapd", "lxd"})
     assert not changed
     assert sorted(skipped) == ["lxd", "snapd"]
     # Local-only blocklisted stanza: a removal, not a skip.
     changed, new, added, updated, removed, skipped = sync.plan_merge(
-        SYSCTL_HEADER + stanza, SYSCTL_HEADER + SURVIVOR, {"snapd", "lxd"},
-        "opensuse", set())
+        SYSCTL_HEADER + stanza, SYSCTL_HEADER + SURVIVOR, {"snapd", "lxd"})
     assert changed
     assert removed == ["[[FileDigestGroup]] for snapd, lxd"]
     assert updated == []
@@ -132,7 +121,7 @@ def test_comment_attaches_to_following_stanza():
     )
     upstream = SYSCTL_HEADER + '[[G]]\npackage = "bbb"\npath = "/y"\n'
     changed, new, added, updated, removed, skipped = sync.plan_merge(
-        local, upstream, set(), "opensuse", set())
+        local, upstream, set())
     assert changed
     assert "# keep me with bbb" in new
     assert '"bbb"' in new
@@ -146,7 +135,7 @@ def test_upstream_deletions_reported():
     local = SYSCTL_HEADER + LXD
     survivor = '[[FileDigestGroup]]\npackage = "kept"\npath = "/y"\n'
     changed, new, added, updated, removed, skipped = sync.plan_merge(
-        local, SYSCTL_HEADER + survivor, set(), "opensuse", set())
+        local, SYSCTL_HEADER + survivor, set())
     assert changed
     assert removed == ["[[FileDigestGroup]] for lxd"]
     assert updated == []
@@ -161,8 +150,7 @@ def test_in_place_update_is_not_a_deletion():
     new_stanza = ("[[FileDigestGroup]]\npackage = \"foo\"\n"
                   "hash = \"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\"\n")
     changed, new, added, updated, removed, skipped = sync.plan_merge(
-        SYSCTL_HEADER + old, SYSCTL_HEADER + new_stanza,
-        set(), "opensuse", set())
+        SYSCTL_HEADER + old, SYSCTL_HEADER + new_stanza, set())
     assert changed
     assert added == 1
     assert removed == []
@@ -174,50 +162,22 @@ def test_packageless_stanza_added_is_counted():
     """A new stanza without package info still counts as added."""
     stanza = "[[FileDigestGroup]]\npath = \"/x\"\n"
     changed, new, added, updated, removed, skipped = sync.plan_merge(
-        SYSCTL_HEADER, SYSCTL_HEADER + stanza, set(), "opensuse", set())
+        SYSCTL_HEADER, SYSCTL_HEADER + stanza, set())
     assert changed
     assert added == 1
     assert 'path = "/x"' in new
     # ... and an identical one is not re-added.
     changed, new, added, updated, removed, skipped = sync.plan_merge(
-        SYSCTL_HEADER + stanza, SYSCTL_HEADER + stanza,
-        set(), "opensuse", set())
+        SYSCTL_HEADER + stanza, SYSCTL_HEADER + stanza, set())
     assert not changed
     assert added == 0
-
-
-def test_regenerate_rs_tracks_dedup():
-    """Materializing a slfo file must flip its manifest entry to slfo/."""
-    import pathlib
-    import tempfile
-    d = pathlib.Path(tempfile.mkdtemp())
-    (d / "opensuse").mkdir()
-    (d / "slfo").mkdir()
-    (d / "opensuse" / "cron-whitelist.toml").write_text("[[G]]\npackage = \"a\"\n")
-    rs_path = d / "distro_files_generated.rs"
-    rs_path.write_text("stale")
-    gen_mod = sync._load_generator_module()
-    old_rs, gen_mod.GENERATED_RS = gen_mod.GENERATED_RS, rs_path
-    try:
-        assert sync.regenerate_rs(gen_mod, d) is True  # stale -> rewritten
-        assert sync.regenerate_rs(gen_mod, d) is False  # absent == deduped
-        (d / "slfo" / "cron-whitelist.toml").write_text("[[G]]\npackage = \"b\"\n")
-        assert sync.regenerate_rs(gen_mod, d) is True
-        rs = rs_path.read_text()
-        assert '"../data/distro/slfo/cron-whitelist.toml"' in rs
-        (d / "slfo" / "cron-whitelist.toml").write_text("[[G]]\npackage = \"a\"\n")
-        assert sync.regenerate_rs(gen_mod, d) is True
-        rs = rs_path.read_text()
-        assert '"../data/distro/opensuse/cron-whitelist.toml"' in rs
-    finally:
-        gen_mod.GENERATED_RS = old_rs
 
 
 def test_empty_packages_list_is_not_blocklisted():
     """`packages = []` matches the generator: kept, never silently dropped."""
     stanza = "[[G]]\npackages = []\npath = \"/x\"\n"
     changed, new, added, updated, removed, skipped = sync.plan_merge(
-        SYSCTL_HEADER, SYSCTL_HEADER + stanza, set(), "opensuse", set())
+        SYSCTL_HEADER, SYSCTL_HEADER + stanza, set())
     assert changed
     assert added == 1
     assert removed == [] and skipped == []
@@ -226,8 +186,7 @@ def test_empty_packages_list_is_not_blocklisted():
 def test_header_only_upstream_raises():
     """Header/comment-only upstream must fail closed, not wipe the file."""
     try:
-        sync.plan_merge(SYSCTL_HEADER + LXD, SYSCTL_HEADER, set(),
-                        "opensuse", set())
+        sync.plan_merge(SYSCTL_HEADER + LXD, SYSCTL_HEADER, set())
     except RuntimeError as e:
         assert "no stanzas" in str(e), e
     else:
@@ -244,7 +203,7 @@ def test_rewrite_keeps_single_blank_line():
                 + '[[G]]\npackage = "bbb"\npath = "/y"\n'
                 + '[[G]]\npackage = "ccc"\npath = "/z"\n')
     changed, new, added, updated, removed, skipped = sync.plan_merge(
-        local, upstream, set(), "opensuse", set())
+        local, upstream, set())
     assert changed
     assert "\n\n\n" not in new, repr(new)
     assert "# keep me with bbb\n[[G]]\npackage = \"bbb\"" in new
@@ -272,19 +231,11 @@ def test_branch_override_validation():
 def test_empty_upstream_raises():
     """An empty upstream response must fail closed, not delete everything."""
     try:
-        sync.plan_merge(SYSCTL_HEADER + LXD, "\n", set(), "opensuse", set())
+        sync.plan_merge(SYSCTL_HEADER + LXD, "\n", set())
     except RuntimeError as e:
         assert "empty upstream" in str(e), e
     else:
         raise AssertionError("empty upstream did not raise")
-
-
-def test_missing_slfo_stays_deduped_when_identical():
-    """A deduped (absent) slfo file is materialized only on divergence."""
-    base = SYSCTL_HEADER + LXD
-    changed, new, added, updated, removed, skipped = sync.plan_merge(
-        base, SYSCTL_HEADER + LXD, set(), "slfo", set())
-    assert not changed
 
 
 def test_provenance_pin_update_replaces_and_appends():
@@ -299,14 +250,13 @@ def test_provenance_pin_update_replaces_and_appends():
     old, sync.PROVENANCE_FILE = sync.PROVENANCE_FILE, pathlib.Path(prov)
     try:
         sync.update_provenance_pins(
-            {"opensuse": ("opensuse", "NEW" + "0" * 37, "2026-10-11"),
-             "slfo": ("opensuse-slfo-main", "S" + "1" * 39, "2026-10-11")})
+            {"opensuse": ("opensuse", "NEW" + "0" * 37, "2026-10-11")})
         text = open(prov).read()
     finally:
         sync.PROVENANCE_FILE = old
     assert "OLD" not in text
-    assert text.count("-whitelists:") == 2
-    assert "# slfo-whitelists: opensuse-slfo-main @ " in text
+    assert text.count("-whitelists:") == 1
+    assert "# opensuse-whitelists: opensuse @ " in text
 
 
 def test_generator_rewrite_pins_roundtrip():
@@ -333,7 +283,6 @@ def test_generator_rewrite_pins_roundtrip():
 def test_provenance_strip_keeps_rest():
     text = ("# opensuse: opensuse @ AAA (2026-01-01)\n"
             "# opensuse-whitelists: opensuse @ BBB (2026-10-09)\n"
-            "# slfo-whitelists: opensuse-slfo-main @ CCC (2026-06-18)\n"
             "# Extra Filters appended\n")
     stripped = gen.strip_sync_owned_provenance(text)
     assert "-whitelists:" not in stripped
@@ -341,40 +290,51 @@ def test_provenance_strip_keeps_rest():
     assert "# Extra Filters appended" in stripped
 
 
-def test_provenance_strip_drops_dedup_section():
-    """The TIP-flavoured dedup section is sync-owned for --check purposes."""
-    text = ("# opensuse: opensuse @ AAA (2026-01-01)\n"
-            "#\n"
-            "# Pruned Filters entries:\n"
-            "#\n"
-            "# SLFO files byte-identical to openSUSE (not vendored twice;\n"
-            "# the generated Rust consts fall back to the openSUSE copy):\n"
-            "#   slfo/cron-whitelist.toml\n")
-    stripped = gen.strip_sync_owned_provenance(text)
-    assert "byte-identical" not in stripped
-    assert "slfo/cron-whitelist.toml" not in stripped
-    assert "# opensuse: opensuse @ AAA (2026-01-01)" in stripped
-    assert "# Pruned Filters entries:" in stripped
+def test_check_rs_files_returns_regen_set():
+    """--check compares the manifest against the regenerated file set."""
+    got = gen.check_rs_files(["a.toml", "b.toml"])
+    assert got == ["a.toml", "b.toml"]
 
 
-def test_check_rs_deduped_prefers_disk_for_managed():
-    """--check follows on-disk dedup for sync-managed files only."""
-    import pathlib
-    import tempfile
-    d = pathlib.Path(tempfile.mkdtemp())
-    (d / "opensuse").mkdir()
-    (d / "slfo").mkdir()
-    (d / "opensuse" / "cron-whitelist.toml").write_text("same")
-    (d / "opensuse" / "licenses.toml").write_text("same")
-    # Managed file materialized on disk (TIP divergence): stays slfo/.
-    (d / "slfo" / "cron-whitelist.toml").write_text("diverged")
-    got = gen.check_rs_deduped(["cron-whitelist.toml", "licenses.toml"], d)
-    assert "cron-whitelist.toml" not in got
-    assert "licenses.toml" in got
-    # Reconverged on disk: falls back even though PINS regen dedups nothing.
-    (d / "slfo" / "cron-whitelist.toml").write_text("same")
-    got = gen.check_rs_deduped([], d)
-    assert "cron-whitelist.toml" in got
+CUPS_STALE = (
+    '[[FileDigestGroup]]\n'
+    'package = "cups"\n'
+    'type = "dbus"\n'
+    '[[FileDigestGroup.digests]]\n'
+    'path = "/usr/share/dbus-1/system.d/cups.conf"\n'
+    'hash = "013f81b330170be3629bae66b26828beb6a6e7885c0f00e50c971acc1816a0d7"\n'
+    'digester = "xml"\n'
+)
+CUPS_ADJUDICATED = (
+    '[[FileDigestGroup]]\n'
+    'package = "cups"\n'
+    'type = "dbus"\n'
+    '[[FileDigestGroup.digests]]\n'
+    'path = "/usr/share/dbus-1/system.d/cups.conf"\n'
+    'hash = "1bbed8c1ecac00e546a3659235855aa2e88ec1142b3908b3d662e68ad4e664fe"\n'
+    'digester = "xml"\n'
+)
+DBUS_HEADER = "# dbus whitelist\n\n"
+
+
+def test_digest_adjudication_repairs_stale_local():
+    """A stale local record is rewritten to the adjudicated hash (#760)."""
+    changed, new, added, updated, removed, skipped = sync.plan_merge(
+        DBUS_HEADER + CUPS_STALE, DBUS_HEADER + CUPS_STALE, set(),
+        filename="dbus-services.toml", gen_mod=gen)
+    assert changed
+    assert "1bbed8c1ecac00e5" in new
+    assert "013f81b330170be3" not in new
+    assert added == 0 and updated == [] and removed == []
+
+
+def test_digest_adjudication_no_phantom_update():
+    """Adjudicated local vs stale upstream: no update, no change."""
+    changed, new, added, updated, removed, skipped = sync.plan_merge(
+        DBUS_HEADER + CUPS_ADJUDICATED, DBUS_HEADER + CUPS_STALE, set(),
+        filename="dbus-services.toml", gen_mod=gen)
+    assert not changed, (added, updated, removed)
+    assert new is None
 
 
 def main():

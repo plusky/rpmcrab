@@ -18,9 +18,11 @@ workspace = true
 # librpm FFI (the `rpm-software-management` binding). Covers the header, the
 # file list (rpmfiles), the rpmdb (Db), and EVR comparison (version). Needs
 # `rpm-devel` at build time (bindgen) and `librpm`/`librpmio` at runtime;
-# `sign` feature off; `build` on for `Spec::parse` (`SpecCheck`
-# `_check_invalid_url`, the same C parser the reference uses via
-# `TransactionSet().parseSpec`). Safe API only — `unsafe` stays inside
+# `build` on for `Spec::parse` (`SpecCheck` `_check_invalid_url`, the same
+# C parser the reference uses via `TransactionSet().parseSpec`). The `sign`
+# feature stays off: it adds package *signing* via librpmsign, while
+# signature *verification* (`SignatureCheck`) uses the base keyring and
+# verified-read API and needs no feature. Safe API only — `unsafe` stays inside
 # librpm/librpm-sys, so this crate keeps `unsafe_code = "forbid"`. Payload
 # extraction does NOT use the binding (its PackageReader returns no entries for
 # compressed payloads); the payload is extracted natively (see pkg/extract.rs).
@@ -72,10 +74,9 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 # the `spelling-error` check in TagsCheck; degrades gracefully when the
 # dictionary is absent.
 spellbook = "0.4.2"
-# Fixed-seed hasher for the spellbook dictionary (see spellcheck.rs):
-# spellbook's own foldhash version, pinned to the same release line so
-# the dictionary's hash order stays a function of the dictionary bytes.
-foldhash = "0.2"
+# The spellbook dictionary's hasher is the FNV-1a implementation in
+# spellcheck.rs: its hash values must be identical on 32- and 64-bit
+# targets, which foldhash::fast's folded multiply does not guarantee.
 # ELF parsing for BinariesCheck (replaces readelf/ldd). Pure Rust, MIT.
 goblin = "0.10"
 # Per-file parallelism for BinariesCheck ELF metadata parsing (rayon
@@ -106,6 +107,15 @@ sha2 = "0.11"
 # and adds only num_threads over the already-present libc; time itself pulls
 # in deranged, powerfmt, num-conv.
 time = { version = "0.3", default-features = false, features = ["local-offset"] }
+
+# OpenPGP signature packet parsing for SignatureCheck (sequoia-openpgp's
+# low-level packet parser). The RustCrypto backend keeps the crate free of
+# new system libraries; upstream gates that backend behind the
+# `allow-experimental-crypto` and `allow-variable-time-crypto` opt-ins,
+# recorded here as a deliberate choice: the crate verifies public
+# signatures over public data, so there is no secret material for
+# variable-time operations to leak.
+sequoia-openpgp = { version = "2.4.2", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto"] }
 
 [dev-dependencies]
 criterion = "0.8"

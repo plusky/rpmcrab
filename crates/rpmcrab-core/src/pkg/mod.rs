@@ -65,6 +65,16 @@ pub enum PkgError {
         path: PathBuf,
         source: librpm::RpmErrorKind,
     },
+    /// The file exists but librpm could not read a package header from it
+    /// (RPMRC_NOTFOUND): it holds no readable RPM package — corrupt,
+    /// emptied, or not an RPM at all. The original librpm kind rides
+    /// along as the error source.
+    #[error("failed to open {path}: not a readable RPM package")]
+    NotReadable {
+        path: PathBuf,
+        #[source]
+        source: librpm::RpmErrorKind,
+    },
     #[error(transparent)]
     Extract(#[from] extract::ExtractError),
     #[error("creating the extraction tempdir: {0}")]
@@ -307,9 +317,23 @@ const LIBMAGIC: &str = "libmagic";
 /// Read a package header, skipping signature checks as rpmlint does.
 fn read_header(path: &Path) -> Result<PackageHeader, PkgError> {
     PackageHeader::from_file(path, Some(&VerifyOptions::skip_verification())).map_err(|source| {
-        PkgError::Open {
-            path: path.to_path_buf(),
-            source,
+        // RPMRC_NOTFOUND means librpm could not read a package header
+        // from the file at all. For a file that exists, its "package not
+        // found" wording misdescribes the problem: the file was found, it
+        // holds no readable RPM package (an error page saved under an
+        // .rpm name by a corpus fetch is the observed shape).
+        // `Path::exists` reports false on any stat failure, not just
+        // absence; only a `try_exists` of `Ok(true)` proves presence.
+        if source == librpm::RpmErrorKind::NotFound && matches!(path.try_exists(), Ok(true)) {
+            PkgError::NotReadable {
+                path: path.to_path_buf(),
+                source,
+            }
+        } else {
+            PkgError::Open {
+                path: path.to_path_buf(),
+                source,
+            }
         }
     })
 }
@@ -1149,6 +1173,107 @@ mod tests {
             pkg.tag_i18n_str(Tag::DESCRIPTION, "de")
                 .starts_with("Testpaket fuer Pkg::tag_i18n_str")
         );
+    }
+
+    /// A genuine `.nosrc.rpm` opens and reads its header like any source
+    /// package: the header is complete, and the `NoSource` tarball is
+    /// absent from the payload by construction.
+    #[test]
+    fn open_nosrc_fixture_reads_its_header() {
+        use librpm::Tag;
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/nosrc-fixture-1.0-1.nosrc.rpm");
+        let pkg = Pkg::open_no_extract(&rpm).expect("nosrc fixture must open");
+        assert_eq!(pkg.tag_str(Tag::NAME).as_deref(), Some("nosrc-fixture"));
+        assert!(pkg.is_source, "a nosrc package is a source package");
+        // NAME + is_source hold for a regular .src.rpm too; the nosrc
+        // shape is the payload property — the tarball is in the header
+        // only as a ghost — so pin that, and the derived arch.
+        assert!(pkg.is_no_source(), "the tarball must be a ghost");
+        assert_eq!(pkg.arch, "nosrc");
+        assert_eq!(pkg.ghost_files, vec!["secret-sauce.tar.gz".to_string()]);
+    }
+
+    /// A file that exists but holds no RPM package — the corpus-fetch
+    /// shape is a download error page saved under a `.nosrc.rpm` name —
+    /// gets the dedicated diagnostic, not librpm's "package not found":
+    /// the file was found, it is not readable as a package.
+    #[test]
+    fn open_existing_unreadable_file_is_not_a_not_found() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("gone-1.0-1.nosrc.rpm");
+        std::fs::write(&path, b"<html><body>404 Not Found</body></html>").expect("write");
+        let Err(err) = Pkg::open_no_extract(&path) else {
+            panic!("an unreadable file must not open");
+        };
+        assert!(matches!(err, PkgError::NotReadable { .. }), "got: {err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("not a readable RPM package"), "got: {msg}");
+        assert!(!msg.contains("package not found"), "got: {msg}");
+        // The original librpm kind stays reachable as the error source.
+        let source = std::error::Error::source(&err).expect("source chain kept");
+        assert_eq!(
+            source.downcast_ref::<librpm::RpmErrorKind>(),
+            Some(&librpm::RpmErrorKind::NotFound)
+        );
+    }
+
+    /// The remap's second conjunct: a path that does not exist at all
+    /// keeps the generic open error — "package not found" is accurate
+    /// there, so this case must not drift into `NotReadable`.
+    #[test]
+    fn open_absent_path_keeps_the_generic_open_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("absent-1.0-1.nosrc.rpm");
+        let Err(err) = Pkg::open_no_extract(&path) else {
+            panic!("an absent path must not open");
+        };
+        assert!(matches!(err, PkgError::Open { .. }), "got: {err:?}");
+        assert!(
+            !err.to_string().contains("not a readable RPM package"),
+            "got: {err}"
+        );
+    }
+
+    /// End to end through `Pkg::open` (extraction included): the nosrc
+    /// payload property holds there too — the payload carries only the
+    /// spec, the tarball stays a ghost — not only in the header-only
+    /// open the other nosrc test uses.
+    #[test]
+    fn open_nosrc_fixture_end_to_end() {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/nosrc-fixture-1.0-1.nosrc.rpm");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pkg = Pkg::open(&rpm, dir.path(), true).expect("nosrc fixture must open");
+        assert!(pkg.is_no_source(), "the tarball must be a ghost");
+        assert_eq!(pkg.arch, "nosrc");
+        assert_eq!(pkg.ghost_files, vec!["secret-sauce.tar.gz".to_string()]);
+        let mut names: Vec<&str> = pkg.files.iter().map(|f| f.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["nosrc-fixture.spec", "secret-sauce.tar.gz"]);
+    }
+
+    /// Only the NOTFOUND kind is remapped: a file with a valid lead but a
+    /// corrupt header keeps the generic open error.
+    #[test]
+    fn open_truncated_rpm_keeps_the_generic_open_error() {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/nosrc-fixture-1.0-1.nosrc.rpm");
+        let bytes = std::fs::read(&rpm).expect("read fixture");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("truncated.rpm");
+        let keep = bytes.len().min(100);
+        std::fs::write(&path, &bytes[..keep]).expect("write");
+        let Err(err) = Pkg::open_no_extract(&path) else {
+            panic!("a truncated rpm must not open");
+        };
+        // Pin the wrapper's own properties — the generic variant, this
+        // path, rpmcrab's wording — not librpm's exact message text.
+        let PkgError::Open { path: err_path, .. } = &err else {
+            panic!("got: {err:?}");
+        };
+        assert_eq!(err_path, &path);
+        assert!(err.to_string().starts_with("failed to open"), "got: {err}");
     }
 }
 

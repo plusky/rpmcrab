@@ -24,7 +24,7 @@ use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::pkg::pkgfile::PkgFile;
-use crate::tools::{Tool, ToolSource, test_source};
+use crate::tools::{Tool, ToolSource, spawn_with_retry, test_source};
 use std::sync::OnceLock;
 
 static VALIDSO_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -1936,7 +1936,11 @@ impl StringsInfo {
         let Some(mut cmd) = tool.command() else {
             return info;
         };
-        let out = cmd.arg(path).env("LC_ALL", "C").output();
+        cmd.arg(path).env("LC_ALL", "C");
+        // The spawn retries transient fork/exec failures, like the
+        // probe's: one transient failure on a loaded runner must not
+        // read as a strings failure.
+        let out = spawn_with_retry(|| cmd.output());
         match out {
             Ok(o) if o.status.success() => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
@@ -1967,7 +1971,9 @@ impl ArInfo {
         let Some(mut cmd) = tool.command() else {
             return info;
         };
-        let out = cmd.args(["t", path]).env("LC_ALL", "C").output();
+        cmd.args(["t", path]).env("LC_ALL", "C");
+        // Same transient-spawn retry as `StringsInfo::parse`.
+        let out = spawn_with_retry(|| cmd.output());
         match out {
             Ok(o) if o.status.success() => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
@@ -3278,14 +3284,17 @@ impl BinariesCheck {
         let gethostbyname = info.has_function_matching(&self.gethostbyname_call_regex);
 
         if setgid && setuid && !setgroups {
-            // Deliberate divergence (#593): always an error. The
+            // Warning unconditionally (fix-and-diverge, #743). The
             // reference splits the level on the setuid bit (E when
-            // installed setuid, W otherwise); privilege-drop
-            // correctness is security-critical and the check is
-            // high-precision, so the level does not split.
+            // installed setuid, W otherwise). The symbol pattern
+            // cannot distinguish an identity switch that neglects
+            // setgroups from the safe idiom that drops the effective
+            // ids to the real ids (util-linux drop_permissions()),
+            // so an Error breaks builds on bogus findings; the
+            // finding stays as a human-review signal.
             add_info(
                 out,
-                Level::Error,
+                Level::Warning,
                 pkg,
                 "missing-call-to-setgroups-before-setuid",
                 &[&pkgfile.name],
@@ -4611,7 +4620,7 @@ mod tests {
             "binary-or-shlib-defines-rpath should fire for rpathbin: {results:?}"
         );
 
-        // setuidbin: setuid without setgroups, installed setuid -> Error
+        // setuidbin: setuid without setgroups, installed setuid -> Warning
         let setgroups_lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
         assert_eq!(
             setgroups_lines.len(),
@@ -4623,8 +4632,8 @@ mod tests {
             "setgroups finding should be for setuidbin: {results:?}"
         );
         assert!(
-            setgroups_lines[0].contains(" E: "),
-            "setgroups finding should be Error for setuid binary: {}",
+            setgroups_lines[0].contains(" W: "),
+            "setgroups finding should be Warning for setuid binary: {}",
             setgroups_lines[0]
         );
 
@@ -10227,8 +10236,8 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
         assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
 
-        // setuid+setgid without setgroups: Error with or without
-        // the setuid bit (#593).
+        // setuid+setgid without setgroups: Warning with or without
+        // the setuid bit (#743).
         let mut info = syn_info();
         info.functions = vec!["setuid".to_string(), "setgid".to_string()];
         let mut pkgfile = syn_file("/usr/bin/setuidbin", "ELF 64-bit LSB executable");
@@ -10238,7 +10247,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let results = out.results().to_vec();
         let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
-        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
 
         pkgfile.mode = 0o100755;
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
@@ -10246,7 +10255,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let results = out.results().to_vec();
         let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
-        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
 
         // Calling setgroups silences the finding.
         let mut info = syn_info();
@@ -10260,6 +10269,21 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(
             out.results().is_empty(),
             "setgroups present must be quiet: {:?}",
+            out.results()
+        );
+
+        // Calling initgroups silences the finding too.
+        let mut info = syn_info();
+        info.functions = vec![
+            "setuid".to_string(),
+            "setgid".to_string(),
+            "initgroups".to_string(),
+        ];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "initgroups present must be quiet: {:?}",
             out.results()
         );
     }
