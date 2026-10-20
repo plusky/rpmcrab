@@ -132,7 +132,7 @@
 #   whitelist: dropped [[DeviceFilesWhitelist]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'pam_userpass' (removed from Factory; legacy: not audited)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'pam-ssh-agent' (removed from Factory (bsc#1274633))
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'lxd' (removed from Factory after the Canonical license change (replaced by incus); still in SLE 16, kept there)
+#   whitelist: dropped [[FileDigestGroup]] stanza for 'lxd' (removed from Factory after the Canonical license change (replaced by incus); not in SLE 16)
 #   whitelist: dropped [[SystemdTmpfilesWhitelist]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
 #   whitelist: dropped [[SystemdTmpfilesWhitelist]] stanza for 'snapd' (removed from Factory (bsc#1256175, bsc#1248682, bsc#1261739))
 #   whitelist: dropped [[WorldWritableWhitelist]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)

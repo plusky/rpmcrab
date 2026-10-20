@@ -786,7 +786,7 @@ SCOPE_FILTERS = {
 PRUNE_PACKAGES = {
     # package: reason
     "snapd": "removed from Factory (bsc#1256175, bsc#1248682, bsc#1261739)",
-    "lxd": "removed from Factory after the Canonical license change (replaced by incus); still in SLE 16, kept there",
+    "lxd": "removed from Factory after the Canonical license change (replaced by incus); not in SLE 16",
     "nscd": "removed from Factory and SLE 16 (use the system resolver)",
     "foomuuri": "removed from Factory (bsc#1254385)",
     "foomuuri-firewalld": "removed from Factory (bsc#1254385)",
