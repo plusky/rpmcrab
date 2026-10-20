@@ -117,6 +117,11 @@ time = { version = "0.3", default-features = false, features = ["local-offset"] 
 # variable-time operations to leak.
 sequoia-openpgp = { version = "2.4.2", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto"] }
 
+# Base64 decoding of the v6 signature entry (`RPMSIGTAG_OPENPGP`):
+# its strings are base64-encoded signature packets. The crate is
+# already in the tree as sequoia-openpgp's armor dependency.
+base64 = "0.22"
+
 [dev-dependencies]
 criterion = "0.8"
 # Tests build a header directly (e.g. `Pkg::installed`); the crate already uses
