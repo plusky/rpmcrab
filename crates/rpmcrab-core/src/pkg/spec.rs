@@ -508,10 +508,14 @@ fn tokenise_value(value: &str, depth: usize) -> Vec<ValueItem> {
 /// `%{?:text}` and `%{}` pass through literally — so it counts as
 /// literal text.
 fn brace_item(inner: &str, literal: &str, depth: usize) -> ValueItem {
-    let (conditional, rest) = match inner.strip_prefix('?').or_else(|| inner.strip_prefix('!')) {
-        Some(rest) => (true, rest),
-        None => (false, inner),
-    };
+    // Conditional marks compose: `%{!?name}` and `%{?!name}` carry
+    // both, so every leading `?`/`!` comes off before the name.
+    let mut rest = inner;
+    let mut conditional = false;
+    while let Some(stripped) = rest.strip_prefix('?').or_else(|| rest.strip_prefix('!')) {
+        conditional = true;
+        rest = stripped;
+    }
     let name: String = rest
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
@@ -1068,6 +1072,34 @@ mod name_patterns_tests {
                     %define pname hdf5\n\
                     Name: %{pname}%{?mpi_flavor:-%{mpi_flavor}}\n";
         assert_matches(text, &["hdf5", "hdf5-openmpi4"], &["hdf5-openmpi"]);
+    }
+
+    #[test]
+    fn negated_conditional_text_form_expands_its_text() {
+        // The negated conditional-expansion form carries both
+        // conditional marks (`!?`, in either order): it contributes
+        // its text as one alternative, emptiness as the other.
+        let text = "%define mpi_flavor openmpi4\n\
+                    %define pname hdf5\n\
+                    Name: %{pname}%{!?mpi_flavor:-%{mpi_flavor}}\n";
+        assert_matches(text, &["hdf5", "hdf5-openmpi4"], &["hdf5-openmpi"]);
+        let text = "%define mpi_flavor openmpi4\n\
+                    %define pname hdf5\n\
+                    Name: %{pname}%{?!mpi_flavor:-%{mpi_flavor}}\n";
+        assert_matches(text, &["hdf5", "hdf5-openmpi4"], &["hdf5-openmpi"]);
+    }
+
+    #[test]
+    fn negated_conditional_reference_expands_conditionally() {
+        // `%{!?bar}` is the negated conditional reference to `bar`:
+        // the expansion of `bar`, or nothing -- the marks and the
+        // identifier are not literal text.
+        assert_matches(
+            "%define bar baz\nName: foo%{!?bar}\n",
+            &["foo", "foobaz"],
+            &["foox", "bar"],
+        );
+        assert_matches("Name: foo%{!?bar}\n", &["foo", "fooXYZ"], &["foe", "xfoo"]);
     }
 
     #[test]
