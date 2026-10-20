@@ -1,0 +1,88 @@
+---
+# Weekly watch for upstream rpmlint movement past the vendored
+# distro-config pins.
+#
+# scripts/watch-upstream-configs.py resolves the pinned upstream
+# branches' current tips, regenerates the vendored flavour at the tips
+# through the generator's own pipeline, and diffs against the shipped
+# tree. On drift this job opens (or updates) one tracking issue
+# carrying the upstream commits in the pin range and the files a
+# refresh rewrites, so the monthly distro-config-sync refresh lands as
+# a reviewed, mechanical step. A run that finds the pins current again
+# closes the tracking issue.
+#
+# The checked-in files stay the build's source of truth; this job only
+# reports.
+
+name: upstream-config-watch
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 5 * * 1' # Mondays 05:00 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-config-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The generator streams repo filelists through curl | zstd; declare
+      # them instead of relying on the runner image shipping both.
+      # The cache-apt-pkgs-action key is md5(packages + version + repos [+arch
+      # iff non-x86_64]) - no distro dimension. Fold the runner OS release into
+      # `version` so a floating `ubuntu-latest` image (24.04 -> 26.04) never
+      # restores stale .debs onto a new distro, and rotate on the ISO week so a
+      # cache hit never tests against weeks-old packages.
+      - name: Compute apt cache version
+        id: apt-cache-version
+        run: |
+          . /etc/os-release
+          echo "version=1.0-${VERSION_ID}-$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+      - name: Install generator dependencies
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
+        with:
+          packages: curl zstd
+          version: ${{ steps.apt-cache-version.outputs.version }}
+          execute_install_scripts: true
+      - name: Watch upstream distro configs
+        id: watch
+        run: |
+          set -euo pipefail
+          python3 scripts/watch-upstream-configs.py --report-file /tmp/upstream-watch-report.md 2>&1 | tee /tmp/watch.log
+          grep '^watch-summary: ' /tmp/watch.log > /tmp/watch-summary.txt || true
+      - name: Open or update the tracking issue
+        if: steps.watch.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          title='Vendored distro configs are stale: upstream rpmlint moved'
+          existing=$(gh issue list --search "$title in:title state:open" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$existing" ]; then
+            gh issue create --title "$title" --body-file /tmp/upstream-watch-report.md
+          else
+            gh issue comment "$existing" --body-file /tmp/upstream-watch-report.md
+          fi
+      - name: Close the tracking issue when the pins are current
+        if: steps.watch.outputs.changed != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          title='Vendored distro configs are stale: upstream rpmlint moved'
+          existing=$(gh issue list --search "$title in:title state:open" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue close "$existing" --comment 'The vendored pins match the upstream tips again; closing the drift watch.'
+          fi
