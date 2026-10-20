@@ -73,10 +73,12 @@ impl SpecPkg {
     /// `%undefine` removes a macro's earlier definitions, and one
     /// inside a conditional branch removes them for that branch
     /// only, so the defined and undefined readings both count,
-    /// until a definition at the branch's depth or outside it
-    /// re-establishes the macro — and the definitions of every
-    /// conditional branch count, since branch conditions are not
-    /// evaluated. `None` when the preamble declares no `Name:` at all.
+    /// until a definition outside the branch re-establishes the
+    /// macro — a definition at the branch's own depth may sit in
+    /// a sibling or `%else` branch whose readings never met the
+    /// undefine, so it leaves the undefined reading in place —
+    /// and the definitions of every conditional branch count,
+    /// since branch conditions are not evaluated. `None` when the preamble declares no `Name:` at all.
     pub fn declared_name_patterns(&self) -> Option<Vec<NamePattern>> {
         declared_name_patterns(&self.lines)
     }
@@ -188,8 +190,10 @@ type PreambleScan = (Vec<(usize, String)>, Vec<(usize, MacroEvent)>);
 /// `%global` definition or a `%undefine`, in declaration order.
 /// Both carry the conditional nesting depth of their line: a
 /// `%undefine` inside a branch removes the macro for that
-/// branch's reading only, and a definition at that depth or
-/// outside it re-establishes the macro from its line on.
+/// branch's reading only, and only a definition outside the
+/// branch, at a strictly shallower depth, re-establishes the
+/// macro from its line on: one at the branch's own depth may
+/// belong to a sibling or `%else` branch.
 enum MacroEvent {
     /// `%define name body` / `%global name body`, with the
     /// conditional nesting depth of the definition's line.
@@ -699,12 +703,17 @@ fn declared_name_patterns(lines: &[String]) -> Option<Vec<NamePattern>> {
         // outside any branch removes the definitions before it; one
         // inside a branch removes them for that branch's reading
         // only, so the macro counts as undefined there as well,
-        // until a definition at the branch's depth or outside it
-        // re-establishes the macro — a definition deeper inside a
-        // nested branch does not, since that branch's readings may
-        // not run where the undefine's did. The undefined map
-        // carries the shallowest depth at which an undefine of the
-        // macro is outstanding.
+        // until a definition outside the branch re-establishes
+        // the macro — a definition at the branch's own depth does
+        // not, since it may sit in a sibling or `%else` branch
+        // whose readings never met the undefine, and one deeper
+        // inside a nested branch does not, since that branch's
+        // readings may not run where the undefine's did. Only a
+        // definition at a strictly shallower depth runs on every
+        // reading the undefine's branch feeds into, so only it
+        // ends the undefined reading. The undefined map carries
+        // the shallowest depth at which an undefine of the macro
+        // is outstanding.
         let mut env: Vec<(String, String)> = Vec::new();
         let mut undefined: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
@@ -715,7 +724,7 @@ fn declared_name_patterns(lines: &[String]) -> Option<Vec<NamePattern>> {
             match event {
                 MacroEvent::Define(name, body, depth) => {
                     env.push((name.clone(), body.clone()));
-                    if undefined.get(name).is_some_and(|d| depth <= d) {
+                    if undefined.get(name).is_some_and(|d| depth < d) {
                         undefined.remove(name);
                     }
                 }
@@ -1339,18 +1348,53 @@ mod name_patterns_tests {
             &["foo-x", "foo-y"],
             &["foo", "foo-zzz"],
         );
-        // A redefinition at the branch's own depth, after the
-        // undefine, re-establishes the macro there too.
-        assert_matches(
-            "%define sfx -x\n%if 0\n%undefine sfx\n%define sfx -z\n%endif\nName: foo%{sfx}\n",
-            &["foo-x", "foo-z"],
-            &["foo", "foo-zzz"],
-        );
         // A redefinition deeper than the undefine does not end it:
         // the inner branch may not run where the undefine's did,
         // so the undefined reading counts alongside.
         assert_matches(
             "%define sfx -x\n%if 0\n%undefine sfx\n%if 1\n%define sfx -z\n%endif\n%endif\nName: foo%{sfx}\n",
+            &["foo-x", "foo-z", "foo", "foo-zzz"],
+            &["xfoo"],
+        );
+    }
+
+    #[test]
+    fn same_depth_redefinition_keeps_a_branch_undefine() {
+        // A definition at the undefine's own depth may sit in a
+        // sibling or `%else` branch whose readings never met the
+        // undefine, so it does not end the undefined reading: the
+        // defined bodies accumulate as alternatives alongside the
+        // unconstrained undefined segment, whichever order the two
+        // branches come in. (A definition in the same branch is
+        // indistinguishable from one in a sibling at this depth,
+        // so it keeps the reading too.)
+        // Same branch, define after the undefine:
+        assert_matches(
+            "%define sfx -x\n%if 0\n%undefine sfx\n%define sfx -z\n%endif\nName: foo%{sfx}\n",
+            &["foo-x", "foo-z", "foo", "foo-zzz"],
+            &["xfoo"],
+        );
+        // `%else` branch, undefine first:
+        assert_matches(
+            "%define sfx -x\n%if 0\n%undefine sfx\n%else\n%define sfx -z\n%endif\nName: foo%{sfx}\n",
+            &["foo-x", "foo-z", "foo", "foo-zzz"],
+            &["xfoo"],
+        );
+        // `%else` branch, define first:
+        assert_matches(
+            "%define sfx -x\n%if 0\n%define sfx -z\n%else\n%undefine sfx\n%endif\nName: foo%{sfx}\n",
+            &["foo-x", "foo-z", "foo", "foo-zzz"],
+            &["xfoo"],
+        );
+        // Sibling `%if` blocks, undefine first:
+        assert_matches(
+            "%define sfx -x\n%if 0\n%undefine sfx\n%endif\n%if 1\n%define sfx -z\n%endif\nName: foo%{sfx}\n",
+            &["foo-x", "foo-z", "foo", "foo-zzz"],
+            &["xfoo"],
+        );
+        // Sibling `%if` blocks, define first:
+        assert_matches(
+            "%define sfx -x\n%if 1\n%define sfx -z\n%endif\n%if 0\n%undefine sfx\n%endif\nName: foo%{sfx}\n",
             &["foo-x", "foo-z", "foo", "foo-zzz"],
             &["xfoo"],
         );
