@@ -312,8 +312,14 @@ enum ValueItem {
 
 /// Tokenise a `Name:` value or a macro definition body into items.
 /// `%%` is a literal percent; a `%` that opens nothing recognisable is
-/// opaque.
-fn tokenise_value(value: &str) -> Vec<ValueItem> {
+/// opaque. Nesting carries the expansion budget in `depth`: a value
+/// tokenised past [`MAX_EXPANSION_DEPTH`] widens to a single
+/// [`ValueItem::Opaque`], so deeply nested `%{...}` groups expand to
+/// an unconstrained segment.
+fn tokenise_value(value: &str, depth: usize) -> Vec<ValueItem> {
+    if depth > MAX_EXPANSION_DEPTH {
+        return vec![ValueItem::Opaque];
+    }
     let chars: Vec<char> = value.chars().collect();
     let mut items = Vec::new();
     let mut lit = String::new();
@@ -342,14 +348,14 @@ fn tokenise_value(value: &str) -> Vec<ValueItem> {
                     '(' => ')',
                     _ => ']',
                 };
-                let mut depth = 0usize;
+                let mut nest = 0usize;
                 let mut j = i + 1;
                 while j < chars.len() {
                     if chars[j] == next {
-                        depth += 1;
+                        nest += 1;
                     } else if chars[j] == close {
-                        depth -= 1;
-                        if depth == 0 {
+                        nest -= 1;
+                        if nest == 0 {
                             break;
                         }
                     }
@@ -363,7 +369,7 @@ fn tokenise_value(value: &str) -> Vec<ValueItem> {
                     i = chars.len();
                 } else if next == '{' {
                     let inner: String = chars[i + 2..j].iter().collect();
-                    items.push(brace_item(&inner));
+                    items.push(brace_item(&inner, depth));
                     i = j + 1;
                 } else {
                     items.push(ValueItem::Opaque);
@@ -390,14 +396,14 @@ fn tokenise_value(value: &str) -> Vec<ValueItem> {
                         i = j;
                     }
                     Some(&'{') => {
-                        let mut depth = 0usize;
+                        let mut nest = 0usize;
                         let mut j = i + 2;
                         while j < chars.len() {
                             if chars[j] == '{' {
-                                depth += 1;
+                                nest += 1;
                             } else if chars[j] == '}' {
-                                depth -= 1;
-                                if depth == 0 {
+                                nest -= 1;
+                                if nest == 0 {
                                     break;
                                 }
                             }
@@ -411,7 +417,7 @@ fn tokenise_value(value: &str) -> Vec<ValueItem> {
                             i = chars.len();
                         } else {
                             let inner: String = chars[i + 3..j].iter().collect();
-                            items.push(brace_item(&format!("{next}{inner}")));
+                            items.push(brace_item(&format!("{next}{inner}"), depth));
                             i = j + 1;
                         }
                     }
@@ -451,8 +457,9 @@ fn tokenise_value(value: &str) -> Vec<ValueItem> {
     items
 }
 
-/// The item for a `%{...}` group, from its inner text.
-fn brace_item(inner: &str) -> ValueItem {
+/// The item for a `%{...}` group, from its inner text. The group's
+/// nested text tokenises one budget step deeper than the group itself.
+fn brace_item(inner: &str, depth: usize) -> ValueItem {
     let (conditional, rest) = match inner.strip_prefix('?').or_else(|| inner.strip_prefix('!')) {
         Some(rest) => (true, rest),
         None => (false, inner),
@@ -471,10 +478,10 @@ fn brace_item(inner: &str) -> ValueItem {
     }
     if let Some(text) = after.strip_prefix(':') {
         if conditional {
-            return ValueItem::Choice(tokenise_value(text));
+            return ValueItem::Choice(tokenise_value(text, depth + 1));
         }
         if name == "expand" {
-            return ValueItem::Expand(tokenise_value(text));
+            return ValueItem::Expand(tokenise_value(text, depth + 1));
         }
         return ValueItem::Opaque;
     }
@@ -496,7 +503,7 @@ fn expand_value(
     depth: usize,
     visiting: &mut Vec<String>,
 ) -> Vec<NamePattern> {
-    expand_items(&tokenise_value(value), macros, depth, visiting)
+    expand_items(&tokenise_value(value, depth), macros, depth, visiting)
 }
 
 /// Collapse a completed pattern set that contains an unconstrained
@@ -532,11 +539,21 @@ fn expand_items(
                 alts
             }
             ValueItem::Choice(inner) => {
-                let mut alts = vec![NamePattern(Vec::new())];
-                alts.extend(expand_items(inner, macros, depth, visiting));
-                alts
+                if depth >= MAX_EXPANSION_DEPTH {
+                    vec![NamePattern(vec![NameSegment::Any])]
+                } else {
+                    let mut alts = vec![NamePattern(Vec::new())];
+                    alts.extend(expand_items(inner, macros, depth + 1, visiting));
+                    alts
+                }
             }
-            ValueItem::Expand(inner) => expand_items(inner, macros, depth, visiting),
+            ValueItem::Expand(inner) => {
+                if depth >= MAX_EXPANSION_DEPTH {
+                    vec![NamePattern(vec![NameSegment::Any])]
+                } else {
+                    expand_items(inner, macros, depth + 1, visiting)
+                }
+            }
             ValueItem::Opaque => vec![NamePattern(vec![NameSegment::Any])],
         };
         patterns = compose_patterns(&patterns, &alternatives);
@@ -574,7 +591,12 @@ fn macro_patterns(
     visiting.push(name.to_string());
     let mut out = std::collections::BTreeSet::new();
     for body in bodies {
-        for pattern in expand_items(&tokenise_value(body), macros, depth + 1, visiting) {
+        for pattern in expand_items(
+            &tokenise_value(body, depth + 1),
+            macros,
+            depth + 1,
+            visiting,
+        ) {
             out.insert(pattern);
         }
     }
@@ -1025,5 +1047,62 @@ mod name_patterns_tests {
         let pats = patterns(&text).expect("patterns declared");
         assert_eq!(pats.len(), 1);
         assert!(pats[0].is_unconstrained());
+    }
+
+    #[test]
+    fn deeply_nested_braces_widen_to_opaque() {
+        // Nesting past the expansion budget widens to a single
+        // unconstrained pattern, at a nesting depth whose unbounded
+        // recursion overflows the stack: the value nests one
+        // conditional group per ~5 input characters, twenty thousand
+        // levels deep.
+        let mut value = "%{?a:".repeat(20_000);
+        value.push('x');
+        value.push_str(&"}".repeat(20_000));
+        let text = format!("Name: {value}\n");
+        let pats = patterns(&text).expect("patterns declared");
+        assert_eq!(pats.len(), 1);
+        assert!(pats[0].is_unconstrained());
+    }
+
+    #[test]
+    fn choice_layers_count_toward_the_expansion_budget() {
+        // Each conditional layer spends one budget step on the way to
+        // the macro it wraps: a reference nested in as many layers as
+        // the budget holds resolves as unconstrained, while the same
+        // reference at the top resolves to its definition.
+        let layers = MAX_EXPANSION_DEPTH;
+        let mut wrapped = String::from("%{leaf}");
+        for _ in 0..layers {
+            wrapped = format!("%{{?q:{wrapped}}}");
+        }
+        let text = format!("%define leaf leafword\nName: prefix-{wrapped}\n");
+        assert_matches(
+            &text,
+            &["prefix-leafword", "prefix-anything"],
+            &["other-leafword"],
+        );
+        assert_matches(
+            "%define leaf leafword\nName: prefix-%{leaf}\n",
+            &["prefix-leafword"],
+            &["prefix-anything"],
+        );
+    }
+
+    #[test]
+    fn expand_layers_count_toward_the_expansion_budget() {
+        // Each `%{expand:}` layer spends one budget step on the way to
+        // the macro it wraps, exactly as the conditional layers do.
+        let layers = MAX_EXPANSION_DEPTH;
+        let mut wrapped = String::from("%{leaf}");
+        for _ in 0..layers {
+            wrapped = format!("%{{expand:{wrapped}}}");
+        }
+        let text = format!("%define leaf leafword\nName: prefix-{wrapped}\n");
+        assert_matches(
+            &text,
+            &["prefix-leafword", "prefix-anything"],
+            &["other-leafword"],
+        );
     }
 }
