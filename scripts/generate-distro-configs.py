@@ -288,7 +288,7 @@ def strip_sync_owned_provenance(text):
     return "\n".join(lines)
 
 
-def check_rs_files(regen_files, distro_dir):
+def check_rs_files(regen_files):
     """File set for the --check manifest comparison.
 
     The regenerated set is the manifest, so the comparison is direct.
@@ -2455,7 +2455,7 @@ def main():
                     (tmpdir / flavor).mkdir(exist_ok=True)
                     (tmpdir / flavor / filename).write_text(text, encoding="utf-8")
             (tmpdir / "PROVENANCE").write_text(provenance, encoding="utf-8")
-            want_rs = emit_rs(check_rs_files(files_out, DISTRO_DIR))
+            want_rs = emit_rs(check_rs_files(files_out))
             have_rs = (
                 GENERATED_RS.read_text(encoding="utf-8")
                 if GENERATED_RS.exists()
