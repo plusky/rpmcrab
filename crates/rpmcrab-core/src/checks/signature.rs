@@ -337,7 +337,9 @@ fn signature_blobs(path: &Path) -> SignatureBlobs {
 /// unreadable side, the same outcome an unreadable classic entry
 /// produces. The entry's span is charged to the span total as it
 /// is read; an entry whose span would carry that total past
-/// `MAX_CONTAINER_BYTES` counts as unreadable and is not read.
+/// `MAX_CONTAINER_BYTES` counts as unreadable and is not read. A
+/// zero-count entry counts as unreadable and is not read either,
+/// mirroring a zero-count classic entry.
 fn read_openpgp_entry(
     file: &mut File,
     store_start: u64,
@@ -348,6 +350,13 @@ fn read_openpgp_entry(
     result: &mut SignatureBlobs,
 ) {
     result.has_entries = true;
+    // A zero-count entry carries no strings: it counts toward the
+    // unreadable side and is not read, the outcome a zero-count
+    // classic entry produces.
+    if count == 0 {
+        result.has_unreadable = true;
+        return;
+    }
     if offset > store_size {
         result.has_unreadable = true;
         return;
@@ -1620,6 +1629,47 @@ mod tests {
         let packet = v4_packet(&[0, 2, 0, 0, 8, 8, 8, 8, 8, 8, 8, 8]);
         let len = packet.len() as u32;
         let (_dir, path) = write_signature_header(&[(1002, 0, 0), (268, 0, len)], &packet);
+        let blobs = signature_blobs(&path);
+        assert!(blobs.has_entries);
+        assert!(blobs.has_unreadable);
+        assert_eq!(blobs.blobs, [packet]);
+    }
+
+    #[test]
+    fn openpgp_zero_count_entry_is_unreadable() {
+        // A zero-count OPENPGP entry carries no strings: it counts
+        // as unreadable instead of being read, and the readable
+        // entry next to it is collected, the classic zero-count
+        // outcome on the container path.
+        let packet = v4_packet(&[0, 2, 0, 0, 11, 11, 11, 11, 11, 11, 11, 11]);
+        let mut store = base64_of(&packet);
+        store.push(0);
+        let (_dir, path) =
+            write_typed_signature_header(&[(OPENPGP_TAG, 8, 0, 0), (OPENPGP_TAG, 8, 0, 1)], &store);
+        let blobs = signature_blobs(&path);
+        assert!(blobs.has_entries);
+        assert!(blobs.has_unreadable);
+        assert_eq!(blobs.blobs, [packet]);
+
+        // A lone zero-count entry collects nothing.
+        let (_dir, path) = write_typed_signature_header(&[(OPENPGP_TAG, 8, 0, 0)], &store);
+        let blobs = signature_blobs(&path);
+        assert!(blobs.has_entries);
+        assert!(blobs.has_unreadable);
+        assert!(blobs.blobs.is_empty());
+
+        // A zero-count entry charges nothing against the container
+        // span bound either: the entry after it is read in full
+        // even when its own span reaches the bound, which a charge
+        // for the zero-count entry would already have exhausted.
+        let packet = v4_packet(&[0, 2, 0, 0, 11, 11, 11, 11, 11, 11, 11, 11]);
+        let mut store = base64_of(&packet);
+        store.push(0);
+        // Filler the second entry never scans (its count is one
+        // string): it only stretches that entry's span to the bound.
+        store.resize(MAX_CONTAINER_BYTES + 64, 0xaa);
+        let (_dir, path) =
+            write_typed_signature_header(&[(OPENPGP_TAG, 8, 0, 0), (OPENPGP_TAG, 8, 0, 1)], &store);
         let blobs = signature_blobs(&path);
         assert!(blobs.has_entries);
         assert!(blobs.has_unreadable);
