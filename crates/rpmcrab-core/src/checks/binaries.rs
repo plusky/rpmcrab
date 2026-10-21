@@ -3204,12 +3204,15 @@ impl BinariesCheck {
                             // membership for the consumer's own
                             // undefined symbols, so a defined symbol
                             // outside that set is never consulted.
-                            defined_symbols: ldd
-                                .defined_symbols
-                                .iter()
-                                .filter(|sym| ldd.undefined_symbols.contains(*sym))
-                                .cloned()
-                                .collect(),
+                            defined_symbols: {
+                                let undefined: HashSet<&str> =
+                                    ldd.undefined_symbols.iter().map(String::as_str).collect();
+                                ldd.defined_symbols
+                                    .iter()
+                                    .filter(|sym| undefined.contains(sym.as_str()))
+                                    .cloned()
+                                    .collect()
+                            },
                             dependencies: ldd.dependencies.clone(),
                             is_64: ldd.is_64,
                             rpath: ldd.rpath.clone(),
@@ -10374,6 +10377,44 @@ description = "explicit priority string bypasses the system crypto policy"
             "must be quiet: {:?}",
             out.results()
         );
+    }
+
+    #[test]
+    fn deferred_capture_keeps_only_the_defined_undefined_intersection() {
+        // Issue #799: the deferred capture keeps only the defined
+        // symbols that are also undefined -- `after_checks` tests
+        // membership for the consumer's own undefined symbols, so a
+        // defined symbol outside that set is never consulted. The
+        // intersection is computed at the capture site (set-based
+        // since issue #804); this pins its contents, so a widened,
+        // narrowed or inverted filter fails here.
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_dynamically_linked = true;
+        check.defer_undefined = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib64/libfoo.so.1", "ELF 64-bit LSB shared object");
+        let mut ldd = syn_ldd();
+        ldd.undefined_symbols = vec!["self_sym".to_string(), "missing_sym".to_string()];
+        ldd.defined_symbols = vec!["self_sym".to_string(), "other_sym".to_string()];
+        let mut info = syn_info();
+        info.is_shlib = true;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_dependency(&pkg, &pkgfile, &info, &ldd, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "deferred capture emits nothing yet: {results:?}"
+        );
+        let state = check.pending_state.as_ref().expect("capture recorded");
+        assert_eq!(state.packages.len(), 1);
+        let captured = &state.packages[0].files[0];
+        assert_eq!(
+            captured.undefined_symbols,
+            vec!["self_sym".to_string(), "missing_sym".to_string()]
+        );
+        let expected: HashSet<String> = ["self_sym".to_string()].into_iter().collect();
+        assert_eq!(captured.defined_symbols, expected);
     }
 
     #[test]

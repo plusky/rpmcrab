@@ -32,17 +32,23 @@ cp "$here/uidgid-session.spec" "$work/rpmbuild/SPECS/"
     "$image" \
     bash -c 'zypper -n in -y rpm-build >/dev/null && rpmbuild -bb --define "_topdir /rpmbuild" /rpmbuild/SPECS/uidgid-session.spec'
 
-rm -f "$here/uidgid-session-main-1.0-1.noarch.rpm" "$here/uidgid-session-sysusers-1.0-1.noarch.rpm"
-find "$work/rpmbuild/RPMS" -name '*.rpm' -exec cp {} "$here/" \;
+expected=(uidgid-session-main-1.0-1.noarch.rpm uidgid-session-sysusers-1.0-1.noarch.rpm)
 
-# Fail loudly on a zero or misnamed build (issue #797): `ls` inside
-# $(...) masks its own failure under `set -e` and would happily list
-# a previous run's files, so assert the two expected outputs of this
-# run exist (the stale copies were removed above).
-for expected in uidgid-session-main-1.0-1.noarch.rpm uidgid-session-sysusers-1.0-1.noarch.rpm; do
-    if [ ! -f "$here/$expected" ]; then
-        echo "error: expected fixture $expected was not built" >&2
+# Fail loudly on a zero or misnamed build (issue #797), validating
+# this run's outputs in the build tree before the committed fixtures
+# are touched (issue #804): a failed build leaves the previous
+# fixtures in place. `ls` inside $(...) masks its own failure under
+# `set -e` and would happily list a previous run's files, so the
+# build tree is probed with `find` per expected name.
+for name in "${expected[@]}"; do
+    if [ -z "$(find "$work/rpmbuild/RPMS" -name "$name" -print)" ]; then
+        echo "error: expected fixture $name was not built" >&2
         exit 1
     fi
 done
-echo "built: uidgid-session-main-1.0-1.noarch.rpm uidgid-session-sysusers-1.0-1.noarch.rpm"
+
+for name in "${expected[@]}"; do
+    rm -f "$here/$name"
+done
+find "$work/rpmbuild/RPMS" -name '*.rpm' -exec cp {} "$here/" \;
+echo "built: ${expected[*]}"

@@ -6468,11 +6468,14 @@ mod tests {
             ..Default::default()
         });
         let (mut declaring_pkg, _d2) = uidgid_fixture("uidgid-session-sysusers-1.0-1.noarch.rpm");
-        // Strip the shipped files so the sysusers snippet cannot
-        // credit: the only declaration left is the rich Provides.
+        // Route isolation (issue #766): clear both packages'
+        // dependency headers and strip the declaring package's
+        // shipped files, so the sysusers snippet cannot credit and
+        // no route but the rich Provides below can: the verdict
+        // pins the Provides route only.
+        clear_dep_headers(&mut main_pkg);
+        clear_dep_headers(&mut declaring_pkg);
         declaring_pkg.files = vec![];
-        declaring_pkg.requires = vec![];
-        declaring_pkg.prereq = vec![];
         declaring_pkg.provides = vec![DepInfo {
             name: "(user(svcfoo) or bash)".to_string(),
             flags: 0,
