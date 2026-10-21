@@ -87,7 +87,7 @@ EOF
 
 only_fingerprint() {
     local fprs
-    fprs="$(gpg --list-keys --with-colons | awk -F: '/^fingerprint/{print $10}')"
+    fprs="$(gpg --list-keys --with-colons | awk -F: '/^fpr/{print $10}')"
     [ "$(printf '%s\n' "$fprs" | grep -c .)" = "1" ] \
         || die "expected exactly one key in the keyring, found: $fprs"
     printf '%s' "$fprs"
@@ -98,7 +98,7 @@ gen_key "rpmcrab openpgp test key (DO NOT TRUST)" \
 FINGERPRINT1="$(only_fingerprint)"
 gen_key "rpmcrab openpgp test key 2 (DO NOT TRUST)" \
     "rpmcrab-openpgp-testkey2@example.invalid"
-FINGERPRINT2="$(gpg --list-keys --with-colons | awk -F: '/^fingerprint/{print $10}' | grep -v "^${FINGERPRINT1}$")"
+FINGERPRINT2="$(gpg --list-keys --with-colons | awk -F: '/^fpr/{print $10}' | grep -v "^${FINGERPRINT1}$")"
 [ -n "$FINGERPRINT2" ] && [ "$FINGERPRINT2" != "$FINGERPRINT1" ] || die "second key fingerprint not found"
 
 for fingerprint in "$FINGERPRINT1" "$FINGERPRINT2"; do
