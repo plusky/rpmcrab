@@ -829,6 +829,9 @@ fn name_carries_licence(name: &str) -> bool {
 /// (`COPY*`, `LICEN*`, `LICENSE-*`): the glob ships the licence file
 /// among its matches.
 fn glob_prefix_carries_licence(basename: &str) -> bool {
+    if !basename.contains(['*', '?', '[']) {
+        return false;
+    }
     let prefix: String = basename
         .chars()
         .take_while(|c| !matches!(c, '*' | '?' | '['))
