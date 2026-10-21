@@ -54,7 +54,7 @@ die() {
     exit 1
 }
 
-for tool in rpmbuild rpmsign gpg python3; do
+for tool in rpmbuild rpmsign gpg gpgconf python3; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool not found"
 done
 # The signing below uses --rpmv4 for the mixed fixture and the v6
@@ -71,6 +71,13 @@ done
 # socket inside GNUPGHOME (under the workdir), and socket paths are
 # length-limited -- the macOS per-user TMPDIR is too long.
 work="$(mktemp -d "/tmp/rpmbuild-openpgp-work.XXXXXX")"
+# GNUPGHOME is set up before the EXIT trap is installed: the trap's
+# agent shutdown then targets the scratch home from the start, and a
+# failure in between could otherwise shut down the caller's own
+# gpg agent.
+export GNUPGHOME="$work/gnupg"
+mkdir -p "$GNUPGHOME"
+chmod 700 "$GNUPGHOME"
 cleanup() {
     local rc=$?
     # The agent for the scratch GNUPGHOME must not outlive the
@@ -90,9 +97,6 @@ mkdir -p "$work/staged" "$work/tmp" "$work/logs"
 # resolve even when the failure precedes the first build or sign.
 touch "$work/logs/rpmbuild.log" "$work/logs/rpmsign.log"
 export TMPDIR="$work/tmp"
-export GNUPGHOME="$work/gnupg"
-mkdir -p "$GNUPGHOME"
-chmod 700 "$GNUPGHOME"
 
 gen_key() {
     # gen_key <real-name> <email>
@@ -177,7 +181,10 @@ build_variant() {
         echo "error: expected exactly one built rpm, found: ${built:-none}" >&2
         return 1
     fi
-    cp "$built" "$dest"
+    # The callers invoke build_variant under ||, a context where
+    # errexit is off inside the function: a cp failure must return
+    # explicitly instead of falling through to the printf.
+    cp "$built" "$dest" || return 1
     printf '%s' "$dest"
 }
 UNSIGNED_V4="$(build_variant "$work/unsigned-v4.rpm" --define "_rpmformat 4")" \
