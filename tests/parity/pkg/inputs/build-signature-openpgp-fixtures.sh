@@ -178,7 +178,8 @@ build_variant() {
         "$work/rpmbuild/SPECS/fixture.spec" >>"$work/logs/rpmbuild.log" 2>&1
     built="$(find "$work/rpmbuild/RPMS" -name '*.rpm')"
     if [ "$(printf '%s\n' "$built" | grep -c . || true)" != "1" ]; then
-        echo "error: expected exactly one built rpm, found: ${built:-none}" >&2
+        echo "error: expected exactly one built rpm, found: ${built:-none}" \
+            | tee -a "$work/logs/rpmbuild.log" >&2
         return 1
     fi
     # The callers invoke build_variant under ||, a context where
@@ -197,7 +198,7 @@ sign() {
     # Output goes to the rpmsign log, which a failed run preserves.
     local fingerprint="$1" file="$2"
     shift 2
-    echo "== rpmsign $file $*" >> "$work/logs/rpmsign.log"
+    echo "== rpmsign key $fingerprint $file $*" >> "$work/logs/rpmsign.log"
     rpmsign --define "__gpg $(command -v gpg)" \
         --define "_gpg_name $fingerprint" --addsign "$@" "$file" \
         >>"$work/logs/rpmsign.log" 2>&1
@@ -251,7 +252,9 @@ def container_packets(entries):
             pos = off
             for _ in range(cnt):
                 end = store.index(b"\x00", pos)
-                packets.append(base64.b64decode(store[pos:end], validate=True))
+                packet = base64.b64decode(store[pos:end], validate=True)
+                assert packet, "container packet decodes to zero bytes"
+                packets.append(packet)
                 pos = end + 1
     return packets
 
@@ -325,6 +328,13 @@ expect signature-openpgp-dual-1.0-1.noarch.rpm "$work/db-both" \
 expect signature-openpgp-dual-1.0-1.noarch.rpm "$work/db-both" \
     "key fingerprint: $FINGERPRINT2_LOWER: OK"
 expect_count signature-openpgp-dual-1.0-1.noarch.rpm "$work/db-both" "signature, key fingerprint:" 2
+expect signature-openpgp-dual-1.0-1.noarch.rpm "$work/db-key1" \
+    "key fingerprint: $FINGERPRINT1_LOWER: OK"
+expect signature-openpgp-dual-1.0-1.noarch.rpm "$work/db-key1" \
+    "key ID $KEYID2: NOKEY"
+expect_count signature-openpgp-dual-1.0-1.noarch.rpm "$work/db-key1" "NOKEY" 1
+expect_count signature-openpgp-dual-1.0-1.noarch.rpm "$work/db-key1" \
+    "signature, key fingerprint:" 1
 
 expected_outputs=(
     signature-openpgp-1.0-1.noarch.rpm
