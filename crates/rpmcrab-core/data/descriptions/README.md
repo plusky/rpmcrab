@@ -71,9 +71,10 @@ Provenance, verified against the pinned reference (`84848c0`):
   (entries byte-identical); the port merged the two reference checks into
   one, so a single file named after the port check keeps the check-name to
   TOML mapping total. Ledgered in `tests/parity/divergences.toml`.
-- `SpecCheck.toml` — the reference file, plus one port-only entry:
-  `translated-description` (upstream rpmlint#2). The reference has no
-  such finding, so `--explain` would print `Unknown message` for it;
+- `SpecCheck.toml` — the reference file, plus three port-only entries:
+  `translated-description` (upstream rpmlint#2), `license-file-as-doc`
+  and `no-license-file-in-spec` (#821). The reference has no such
+  findings, so `--explain` would print `Unknown message` for them;
   minus the seven entries dropped with their deliberately-removed findings
   (`no-buildroot-tag`, `hardcoded-path-in-buildroot-tag`,
   `%ifarch-applied-patch`, `unversioned-explicit-provides`,

@@ -409,6 +409,26 @@ fn suse_update_desktop_file_re() -> &'static Regex {
     })
 }
 
+static LICENSE_TOKEN_RE: OnceLock<Regex> = OnceLock::new();
+/// spec-cleaner's `re_doclicense` (`rpmregexp.py`): a token carrying
+/// `LICENSE`, `LICENCE` or `COPYING`, with an optional path prefix and
+/// an optional `*` or `.suffix`, ending at whitespace or end of line.
+fn license_token_re() -> &'static Regex {
+    LICENSE_TOKEN_RE.get_or_init(|| {
+        Regex::new(r"(?i)(\S+)?(LICEN(S|C)E|COPYING)(\*|\.(\*|\S+))?($|\s)").expect("static regex")
+    })
+}
+
+static FILE_QUALIFIER_RE: OnceLock<Regex> = OnceLock::new();
+/// spec-cleaner's `re_file_qualifier` (`rpmregexp.py`): the file
+/// qualifiers that apply to every file on a `%files` line.
+fn file_qualifier_re() -> &'static Regex {
+    FILE_QUALIFIER_RE.get_or_init(|| {
+        Regex::new(r"%(attr|caps|config|dir|ghost|lang|missingok|verify)(\s*\(|\s|$)")
+            .expect("static regex")
+    })
+}
+
 /// Non-breaking space (`UNICODE_NBSP`).
 const NBSP: char = '\u{a0}';
 
@@ -704,6 +724,189 @@ fn url_scheme_netloc(url: &str) -> (Option<&str>, Option<&str>) {
     (Some(scheme), (!netloc.is_empty()).then_some(netloc))
 }
 
+/// Per-`%files`-section state for the licence-marking scan (#821),
+/// collected line by line and judged once the whole spec has been
+/// walked (`flush_license_marking`).
+#[derive(Default)]
+struct FilesSectionScan {
+    /// The header carried `-f`: part of the entry text lives in a list
+    /// file the scan cannot see.
+    from_list_file: bool,
+    /// A bare macro line generates entries the text scan cannot see.
+    has_generator_macro: bool,
+    /// The section carries a `%license` line.
+    has_license_line: bool,
+    /// A `%doc` line (qualified or not) carries a licence token.
+    doc_license: bool,
+    /// The first licence token on an unqualified `%doc` line, with its
+    /// line number: the `license-file-as-doc` candidate.
+    doc_license_unqualified: Option<(String, u32)>,
+    /// An entry token's basename is a licence token: the licence file
+    /// is shipped, unmarked.
+    plain_license_entry: bool,
+    /// Count of explicit entries: glob-free entries that name a
+    /// dotted file or sit in an exec location.
+    explicit_entries: u32,
+    /// Count of explicit entries that are documentation: `%doc`-line
+    /// entries and entries under a documentation directory.
+    explicit_doc_entries: u32,
+    /// The section lists a build-metadata directory entry
+    /// (`*.dist-info`, `*.egg-info`, `*-info`): the build system
+    /// assembles the installed tree, licence files included.
+    has_info_entry: bool,
+}
+
+/// The `%files` entry directives that lead a line, by the shape their
+/// tokens take for the licence-marking scan.
+enum FilesDirective {
+    /// `%attr`/`%caps`/`%config`/`%lang`/`%verify`: the remaining
+    /// tokens are shipped entries.
+    Entry,
+    /// `%dir`: the remaining tokens are directories.
+    Dir,
+    /// `%ghost`: the remaining tokens carry no shipped content.
+    Ghost,
+}
+
+/// Classify a `%files` line's leading directive token for the
+/// licence-marking scan; `None` for entry lines and for directives
+/// whose lines carry no judgeable entries (`%docdir`, `%defattr`,
+/// `%exclude`, conditionals).
+fn files_directive(first: &str) -> Option<FilesDirective> {
+    let name: String = first
+        .strip_prefix('%')?
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect();
+    match name.as_str() {
+        "attr" | "caps" | "config" | "lang" | "verify" => Some(FilesDirective::Entry),
+        "dir" => Some(FilesDirective::Dir),
+        "ghost" => Some(FilesDirective::Ghost),
+        _ => None,
+    }
+}
+
+/// A token that is exactly one macro invocation (the closing brace is
+/// the token's last byte): in a `%files` body it generates entries the
+/// text scan cannot see.
+fn is_bare_macro(token: &str) -> bool {
+    token.starts_with("%{") && token.len() > 3 && token.find('}') == Some(token.len() - 1)
+}
+
+/// Presence test for the licence-marking scan: the name carries a
+/// licence stem (`LICENCE`, `LICENSE`, `COPYING`, `COPYRIGHT`, `GPL`,
+/// `LGPL`, `AGPL`) delimited by non-alphanumerics, so `LICENSE_GPL`,
+/// `licence-LGPL.txt`, `gpl-2.0.txt` and `{COPYING,README}` all count,
+/// while a stem buried in a longer word (`LICENSES`, `gplv3`) does not.
+fn name_carries_licence(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    let bytes = lower.as_bytes();
+    for stem in [
+        "licence",
+        "license",
+        "copying",
+        "copyright",
+        "agpl",
+        "lgpl",
+        "gpl",
+    ] {
+        let mut at = 0;
+        while let Some(pos) = lower[at..].find(stem) {
+            let start = at + pos;
+            let end = start + stem.len();
+            let before_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+            let after_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+            if before_ok && after_ok {
+                return true;
+            }
+            at = start + 1;
+        }
+    }
+    false
+}
+
+/// A globbed name whose literal prefix reaches into a licence stem
+/// (`COPY*`, `LICEN*`, `LICENSE-*`): the glob ships the licence file
+/// among its matches.
+fn glob_prefix_carries_licence(basename: &str) -> bool {
+    let prefix: String = basename
+        .chars()
+        .take_while(|c| !matches!(c, '*' | '?' | '['))
+        .collect();
+    if prefix.len() < 3 {
+        return false;
+    }
+    let upper = prefix.to_uppercase();
+    ["COPYING", "LICENCE", "LICENSE", "COPYRIGHT"]
+        .iter()
+        .any(|stem| stem.starts_with(upper.as_str()) || upper.starts_with(stem))
+}
+
+/// An entry path in an executable or library-exec location: its final
+/// component names a file even without an extension.
+fn in_exec_location(token: &str) -> bool {
+    [
+        "%{_bindir}/",
+        "%{_sbindir}/",
+        "%{_libexecdir}/",
+        "%{_prefix}/bin/",
+        "%{_prefix}/sbin/",
+        "%{_prefix}/libexec/",
+        "/usr/bin/",
+        "/usr/sbin/",
+        "/usr/libexec/",
+        "/bin/",
+        "/sbin/",
+    ]
+    .iter()
+    .any(|prefix| token.starts_with(prefix))
+}
+
+/// The entry is documentation: it sits under a documentation
+/// directory.
+fn in_doc_location(token: &str) -> bool {
+    token.contains("%{_docdir}") || token.contains("/doc/")
+}
+
+/// The entry names a build-metadata directory the build system
+/// assembles (`*.dist-info`, `*.egg-info`, `*-info`).
+fn is_info_entry(basename: &str) -> bool {
+    basename.contains("dist-info")
+        || basename.contains("egg-info")
+        || basename.ends_with("-info")
+        || basename.ends_with("*info")
+}
+
+/// The line is a `Source`/`SourceN` tag whose value names an archive.
+fn source_line_is_archive(line: &str) -> bool {
+    let Some((tag, value)) = line.split_once(':') else {
+        return false;
+    };
+    let tag = tag.trim().to_lowercase();
+    if !tag.starts_with("source") || !tag[6..].chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    [
+        ".tar", ".tgz", ".tbz", ".txz", ".zip", ".jar", ".7z", ".gem", ".whl", ".crate",
+    ]
+    .iter()
+    .any(|ext| value.contains(ext))
+}
+
+/// The line is a `Source`/`SourceN` tag whose value names a package
+/// format (gem, wheel) whose installer assembles the whole upstream
+/// tree, licence files included.
+fn source_line_is_packaged(line: &str) -> bool {
+    let Some((tag, value)) = line.split_once(':') else {
+        return false;
+    };
+    let tag = tag.trim().to_lowercase();
+    if !tag.starts_with("source") || !tag[6..].chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    value.contains(".gem") || value.contains(".whl")
+}
+
 /// `SpecCheck`, ported from rpmlint's `SpecCheck.py`.
 pub struct SpecCheck {
     hardcoded_lib_path_exceptions_re: Regex,
@@ -759,6 +962,8 @@ pub struct SpecCheck {
     python_sitelib_glob_re: Regex,
     shared_dir_glob_re: Regex,
     suse_update_desktop_file_re: Regex,
+    license_token_re: Regex,
+    file_qualifier_re: Regex,
     // Per-package state (`_default_state`).
     spec_file: Option<String>,
     spec_name: Option<String>,
@@ -779,6 +984,12 @@ pub struct SpecCheck {
     current_package: Option<String>,
     package_noarch: BTreeMap<Option<String>, bool>,
     spec_only: bool,
+    license_sections: Vec<FilesSectionScan>,
+    license_section: Option<FilesSectionScan>,
+    license_tag_seen: bool,
+    license_tags_public_domain: bool,
+    archive_source_seen: bool,
+    packaged_source_seen: bool,
 }
 
 impl SpecCheck {
@@ -862,6 +1073,8 @@ impl SpecCheck {
             python_sitelib_glob_re: python_sitelib_glob_re().clone(),
             shared_dir_glob_re: shared_dir_glob_re().clone(),
             suse_update_desktop_file_re: suse_update_desktop_file_re().clone(),
+            license_token_re: license_token_re().clone(),
+            file_qualifier_re: file_qualifier_re().clone(),
             spec_file: None,
             spec_name: None,
             patches: BTreeMap::new(),
@@ -881,6 +1094,12 @@ impl SpecCheck {
             current_package: None,
             package_noarch: BTreeMap::new(),
             spec_only: false,
+            license_sections: Vec::new(),
+            license_section: None,
+            license_tag_seen: false,
+            license_tags_public_domain: true,
+            archive_source_seen: false,
+            packaged_source_seen: false,
             rpm: Self::probe_rpm(&source),
         }
     }
@@ -1045,7 +1264,7 @@ impl Check for SpecCheck {
             self.check_line(pkg, out, line);
         }
         pkg.current_linenum.set(None);
-
+        self.flush_license_marking(pkg, out);
         if !self.declarative {
             for sec in ["prep", "build", "install", "check"] {
                 if self.section.get(sec).copied().unwrap_or(0) == 0 {
@@ -1148,6 +1367,12 @@ impl Check for SpecCheck {
         self.current_package = None;
         self.package_noarch.clear();
         self.spec_only = false;
+        self.license_sections.clear();
+        self.license_section = None;
+        self.license_tag_seen = false;
+        self.license_tags_public_domain = true;
+        self.archive_source_seen = false;
+        self.packaged_source_seen = false;
     }
 }
 
@@ -1287,6 +1512,7 @@ impl SpecCheck {
     fn check_line(&mut self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
         self.checkline_declarative(line);
         self.checkline_break_space(pkg, out, line);
+        self.checkline_license_marking(pkg, line);
         if self.checkline_section(pkg, out, line) {
             return;
         }
@@ -1891,6 +2117,212 @@ impl SpecCheck {
                 "libdir-macro-in-noarch-package",
                 &[&pkgname, detail],
             );
+        }
+    }
+
+    /// Licence-marking scan (#821): collect per-`%files`-section state
+    /// line by line. Runs before `checkline_section` so it sees the
+    /// header lines that call consumes; the boundary scan repeats its
+    /// header patterns, so the sections judged here are the walker's
+    /// sections. `flush_license_marking` emits the findings.
+    fn checkline_license_marking(&mut self, pkg: &SpecPkg, line: &str) {
+        if self.license_section.is_none() {
+            let trimmed = line.trim_start();
+            if let Some(value) = trimmed.strip_prefix("License:") {
+                self.license_tag_seen = true;
+                if !value.contains("Public-Domain") && !value.contains("PublicDomain") {
+                    self.license_tags_public_domain = false;
+                }
+            } else if source_line_is_archive(trimmed) {
+                self.archive_source_seen = true;
+            }
+            if source_line_is_packaged(trimmed) {
+                self.packaged_source_seen = true;
+            }
+        }
+        for (sec, re) in &self.section_res {
+            if let Ok(Some(_)) = re.find(line) {
+                if let Some(scan) = self.license_section.take() {
+                    self.license_sections.push(scan);
+                }
+                if sec == "files" {
+                    self.license_section = Some(FilesSectionScan {
+                        from_list_file: self.filelist_re.is_match(line).unwrap_or(false),
+                        ..Default::default()
+                    });
+                }
+                return;
+            }
+        }
+        let Some(mut scan) = self.license_section.take() else {
+            return;
+        };
+        self.scan_license_line(pkg, &mut scan, line);
+        self.license_section = Some(scan);
+    }
+
+    /// Fold one `%files` body line into the section's scan state.
+    fn scan_license_line(&self, pkg: &SpecPkg, scan: &mut FilesSectionScan, line: &str) {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return;
+        }
+        // A standalone `#` token opens a trailing comment; the tokens
+        // before it are the line's content.
+        let tokens: Vec<&str> = line
+            .split_whitespace()
+            .take_while(|t| !t.starts_with('#'))
+            .collect();
+        let Some(&first) = tokens.first() else {
+            return;
+        };
+        if first == "%doc" {
+            let content = tokens.join(" ");
+            if tokens[1..].iter().any(|t| {
+                let base = t.rsplit('/').next().unwrap_or(t);
+                name_carries_licence(base) || glob_prefix_carries_licence(base)
+            }) {
+                scan.doc_license = true;
+            }
+            let unqualified_hit = if scan.doc_license_unqualified.is_none()
+                && !self.file_qualifier_re.is_match(&content).unwrap_or(false)
+            {
+                self.license_token_re.find(&content).ok().flatten()
+            } else {
+                None
+            };
+            if let Some(m) = unqualified_hit {
+                let linenum = pkg.current_linenum.get().unwrap_or(0);
+                scan.doc_license_unqualified = Some((m.as_str().to_string(), linenum));
+            }
+            self.scan_license_entries(scan, &tokens[1..], false, true);
+            return;
+        }
+        if first == "%license" {
+            scan.has_license_line = true;
+            self.scan_license_entries(scan, &tokens[1..], false, false);
+            return;
+        }
+        match files_directive(first) {
+            Some(FilesDirective::Entry) => {
+                self.scan_license_entries(scan, &tokens[1..], false, false);
+            }
+            Some(FilesDirective::Dir) => {
+                self.scan_license_entries(scan, &tokens[1..], true, false);
+            }
+            // `%ghost` entries carry no shipped content.
+            Some(FilesDirective::Ghost) => {}
+            None => {
+                if !first.starts_with('%') || first.starts_with("%{") {
+                    self.scan_license_entries(scan, &tokens, false, false);
+                }
+                // Any other `%`-led line carries no entries the scan
+                // can judge.
+            }
+        }
+    }
+
+    /// Judge the entry tokens of one `%files` line for the
+    /// licence-marking scan: a licence basename establishes presence,
+    /// an explicit entry establishes that the shipped set is textually
+    /// visible, a bare macro token marks it opaque.
+    fn scan_license_entries(
+        &self,
+        scan: &mut FilesSectionScan,
+        tokens: &[&str],
+        force_dir: bool,
+        doc_line: bool,
+    ) {
+        let mut dir_next = force_dir;
+        for token in tokens {
+            if *token == "%dir" {
+                dir_next = true;
+                continue;
+            }
+            if token.starts_with('%') && !token.starts_with("%{") {
+                // A qualifier or directive word; its argument rides on
+                // the same token and the entries follow it.
+                continue;
+            }
+            if is_bare_macro(token) {
+                scan.has_generator_macro = true;
+                dir_next = false;
+                continue;
+            }
+            let is_dir = dir_next || token.ends_with('/');
+            dir_next = false;
+            if is_dir {
+                continue;
+            }
+            let basename = token.rsplit('/').next().unwrap_or(token);
+            if name_carries_licence(basename) || glob_prefix_carries_licence(basename) {
+                scan.plain_license_entry = true;
+            }
+            if is_info_entry(basename) {
+                scan.has_info_entry = true;
+            }
+            // An entry evidences a shipped file when it is glob-free
+            // and either names a dotted file or sits in an exec
+            // location; an extension-less entry elsewhere is a
+            // directory name as often as a file name.
+            let explicit = !token.contains(['*', '?', '['])
+                && (basename.contains('.') || in_exec_location(token));
+            if explicit {
+                scan.explicit_entries += 1;
+                if doc_line || in_doc_location(token) {
+                    scan.explicit_doc_entries += 1;
+                }
+            }
+        }
+    }
+
+    /// Emit the licence-marking findings (#821) from the collected
+    /// per-section state: `license-file-as-doc` per unconverted
+    /// section, and `no-license-file-in-spec` when no section marks a
+    /// licence file and every section is textually decidable.
+    fn flush_license_marking(&mut self, pkg: &SpecPkg, out: &mut Filter) {
+        if let Some(scan) = self.license_section.take() {
+            self.license_sections.push(scan);
+        }
+        let sections = std::mem::take(&mut self.license_sections);
+        for scan in &sections {
+            if scan.from_list_file || scan.has_generator_macro || scan.has_license_line {
+                continue;
+            }
+            if let Some((token, linenum)) = &scan.doc_license_unqualified {
+                pkg.current_linenum.set(Some(*linenum));
+                self.info(out, pkg, Level::Warning, "license-file-as-doc", &[token]);
+                pkg.current_linenum.set(None);
+            }
+        }
+        if sections.is_empty() {
+            return;
+        }
+        let presence = sections
+            .iter()
+            .any(|s| s.has_license_line || s.doc_license || s.plain_license_entry);
+        let decidable = sections
+            .iter()
+            .all(|s| !s.from_list_file && !s.has_generator_macro);
+        let explicit_entries: u32 = sections.iter().map(|s| s.explicit_entries).sum();
+        let explicit_doc_entries: u32 = sections.iter().map(|s| s.explicit_doc_entries).sum();
+        // Shapes whose shipped set the text scan cannot judge stay
+        // silent: build systems that assemble the tree (an info-dir
+        // entry rides in the sections), public-domain dedications
+        // (no licence file exists), specs assembled from local files
+        // (no archive source), and documentation-only packages.
+        let auto_assembled = sections.iter().any(|s| s.has_info_entry) || self.packaged_source_seen;
+        let public_domain_only = self.license_tag_seen && self.license_tags_public_domain;
+        let documentation_only = explicit_entries > 0 && explicit_doc_entries == explicit_entries;
+        if !presence
+            && decidable
+            && explicit_entries > 0
+            && !auto_assembled
+            && !public_domain_only
+            && self.archive_source_seen
+            && !documentation_only
+        {
+            self.info(out, pkg, Level::Error, "no-license-file-in-spec", &[]);
         }
     }
 
@@ -4372,6 +4804,245 @@ Patch0: foo.patch
             !has(&plain, "python-sitelib-glob-in-files"),
             "results: {plain:?}"
         );
+    }
+
+    #[test]
+    fn license_file_as_doc_fires_on_doc_license_821() {
+        let results = run_mini("Name: foo\n%files\n%doc COPYING\n");
+        let lines = lines_for(&results, "license-file-as-doc");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: license-file-as-doc"),
+            "line: {}",
+            lines[0]
+        );
+        assert!(lines[0].contains("COPYING"), "line: {}", lines[0]);
+        // A licence token under %doc is presence: the E stays silent.
+        assert!(
+            !has(&results, "no-license-file-in-spec"),
+            "results: {results:?}"
+        );
+    }
+
+    #[test]
+    fn license_file_as_doc_token_and_case_variants_821() {
+        // A path token is reported whole.
+        let path = run_mini("Name: foo\n%files\n%doc docs/LICENSE.txt\n");
+        let lines = lines_for(&path, "license-file-as-doc");
+        assert_eq!(lines.len(), 1, "results: {path:?}");
+        assert!(lines[0].contains("docs/LICENSE.txt"), "line: {}", lines[0]);
+        // One finding per section even with several licence tokens.
+        let multi = run_mini("Name: foo\n%files\n%doc README COPYING NEWS\n");
+        let lines = lines_for(&multi, "license-file-as-doc");
+        assert_eq!(lines.len(), 1, "results: {multi:?}");
+        assert!(lines[0].contains("COPYING"), "line: {}", lines[0]);
+        // The token match is case-insensitive.
+        let lower = run_mini("Name: foo\n%files\n%doc copying\n");
+        assert!(has(&lower, "license-file-as-doc"), "results: {lower:?}");
+    }
+
+    #[test]
+    fn license_file_as_doc_near_misses_821() {
+        // A section already carrying %license is converted.
+        let converted = run_mini("Name: foo\n%files\n%license LICENSE\n%doc COPYING\n");
+        assert!(
+            !has(&converted, "license-file-as-doc"),
+            "results: {converted:?}"
+        );
+        // A qualified %doc line is outside the conversion shape, and
+        // the licence token still counts as presence for the E.
+        for line in [
+            "%doc %attr(0644,root,root) COPYING",
+            "%doc %lang(en) COPYING",
+        ] {
+            let results = run_mini(&format!(
+                "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n%files\n{line}\n"
+            ));
+            assert!(
+                !has(&results, "license-file-as-doc"),
+                "line {line}: {results:?}"
+            );
+            assert!(
+                !has(&results, "no-license-file-in-spec"),
+                "line {line}: {results:?}"
+            );
+        }
+        // %docdir declares a directory; it ships no licence file.
+        let docdir = run_mini(
+            "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n%files\n%docdir %{_docdir}/licenses\n%{_bindir}/foo\n",
+        );
+        assert!(!has(&docdir, "license-file-as-doc"), "results: {docdir:?}");
+        assert!(
+            has(&docdir, "no-license-file-in-spec"),
+            "results: {docdir:?}"
+        );
+        // A licence-named directory is not a licence file.
+        let dir = run_mini(
+            "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n%files\n%doc LICENSES/\n",
+        );
+        assert!(!has(&dir, "license-file-as-doc"), "results: {dir:?}");
+        assert!(!has(&dir, "no-license-file-in-spec"), "results: {dir:?}");
+        // A list-file section's marking is not textually visible.
+        let list = run_mini("Name: foo\n%files -f files.list\n%doc COPYING\n");
+        assert!(!has(&list, "license-file-as-doc"), "results: {list:?}");
+    }
+
+    #[test]
+    fn license_file_as_doc_per_section_821() {
+        // The converted root stays silent; the unconverted subpackage
+        // section fires once.
+        let results = run_mini(
+            "Name: foo\n%files\n%license LICENSE\n%doc README\n%files bar\n%doc COPYING\n",
+        );
+        let lines = lines_for(&results, "license-file-as-doc");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(lines[0].contains("COPYING"), "line: {}", lines[0]);
+        assert!(
+            !has(&results, "no-license-file-in-spec"),
+            "results: {results:?}"
+        );
+    }
+
+    #[test]
+    fn no_license_file_in_spec_fires_821() {
+        let results = run_mini(
+            "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n%files\n%{_bindir}/foo\n",
+        );
+        let lines = lines_for(&results, "no-license-file-in-spec");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("E: no-license-file-in-spec"),
+            "line: {}",
+            lines[0]
+        );
+        // An empty sibling section does not rescue the spec.
+        let sibling = run_mini(
+            "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n%files\n%{_bindir}/foo\n%files doc\n",
+        );
+        assert!(
+            has(&sibling, "no-license-file-in-spec"),
+            "results: {sibling:?}"
+        );
+    }
+
+    #[test]
+    fn no_license_file_in_spec_presence_821() {
+        // A %license line in any section is presence.
+        let sub = run_mini(
+            "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n%files\n%{_bindir}/foo\n%files bar\n%license LICENSE\n",
+        );
+        assert!(!has(&sub, "no-license-file-in-spec"), "results: {sub:?}");
+        // A licence file shipped as a plain entry is presence.
+        let plain = run_mini(
+            "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n%files\n%{_datadir}/foo/COPYING\n%{_bindir}/foo\n",
+        );
+        assert!(
+            !has(&plain, "no-license-file-in-spec"),
+            "results: {plain:?}"
+        );
+        assert!(!has(&plain, "license-file-as-doc"), "results: {plain:?}");
+    }
+
+    #[test]
+    fn no_license_file_in_spec_undecidable_821() {
+        // List-file sections hide their marking.
+        let list = run_mini(
+            "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n%files -f files.list\n",
+        );
+        assert!(!has(&list, "no-license-file-in-spec"), "results: {list:?}");
+        let mixed = run_mini(
+            "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n%files\n%{_bindir}/foo\n%files -f x.list extra\n",
+        );
+        assert!(
+            !has(&mixed, "no-license-file-in-spec"),
+            "results: {mixed:?}"
+        );
+        // Directory/glob-only content: the shipped set is not visible.
+        let glob = run_mini(
+            "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n%files\n%dir %{_datadir}/foo\n%{_datadir}/foo/*\n",
+        );
+        assert!(!has(&glob, "no-license-file-in-spec"), "results: {glob:?}");
+        // A bare macro generates entries the scan cannot see.
+        let generator = run_mini(
+            "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n%files\n%{pyproject_files}\n%{_bindir}/foo\n",
+        );
+        assert!(
+            !has(&generator, "no-license-file-in-spec"),
+            "results: {generator:?}"
+        );
+        // Empty and absent %files sections stay silent.
+        let empty = run_mini("Name: foo\n%files\n");
+        assert!(
+            !has(&empty, "no-license-file-in-spec"),
+            "results: {empty:?}"
+        );
+        let absent = run_mini("Name: foo\n");
+        assert!(
+            !has(&absent, "no-license-file-in-spec"),
+            "results: {absent:?}"
+        );
+    }
+
+    #[test]
+    fn no_license_file_in_spec_scoping_821() {
+        let hdr = "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n";
+        let run = |body: &str| run_mini(&format!("{hdr}%files\n{body}"));
+        // A build-metadata directory entry: the build system assembles
+        // the installed tree, licence files included.
+        let info = run("%{_bindir}/foo\n%{python_sitelib}/foo-%{version}.dist-info\n");
+        assert!(!has(&info, "no-license-file-in-spec"), "results: {info:?}");
+        // A public-domain dedication has no licence file to mark.
+        let pd = run_mini(
+            "Name: foo\nLicense:        SUSE-Public-Domain\nSource:         foo-1.0.tar.gz\n%files\n%{_bindir}/foo\n",
+        );
+        assert!(!has(&pd, "no-license-file-in-spec"), "results: {pd:?}");
+        // No archive source: the package is assembled from local files.
+        let local = run_mini("Name: foo\nLicense:        MIT\n%files\n%{_bindir}/foo\n");
+        assert!(
+            !has(&local, "no-license-file-in-spec"),
+            "results: {local:?}"
+        );
+        // Documentation-only content.
+        let docs = run("%doc README\n%{_docdir}/foo/notes.txt\n");
+        assert!(!has(&docs, "no-license-file-in-spec"), "results: {docs:?}");
+        // An extension-less entry outside the exec locations is a
+        // directory name as often as a file name: not explicit.
+        let dir_entry = run("%{_datadir}/foo\n");
+        assert!(
+            !has(&dir_entry, "no-license-file-in-spec"),
+            "results: {dir_entry:?}"
+        );
+        // A licence glob on a %doc line ships the licence file among
+        // its matches.
+        let glob = run("%doc COPY* README*\n%{_bindir}/foo\n");
+        assert!(!has(&glob, "no-license-file-in-spec"), "results: {glob:?}");
+        assert!(!has(&glob, "license-file-as-doc"), "results: {glob:?}");
+        // A gem source: the installer assembles the whole tree.
+        let gem = run_mini(
+            "Name: foo\nLicense:        MIT\nSource:         foo-1.0.gem\n%files\n%{_bindir}/foo\n",
+        );
+        assert!(!has(&gem, "no-license-file-in-spec"), "results: {gem:?}");
+        // Licence names beyond the conversion predicate still count
+        // as shipped: suffixed, abbreviated and brace-grouped names,
+        // and the Debian copyright file. None of them is the
+        // spec-cleaner conversion shape, so the W stays silent too.
+        for body in [
+            "%doc LICENSE_GPL\n%{_bindir}/foo\n",
+            "%doc licence-LGPL.txt\n%{_bindir}/foo\n",
+            "%doc debian/copyright\n%{_bindir}/foo\n",
+            "%doc docs/{COPYING,README}\n%{_bindir}/foo\n",
+            "%{_datadir}/foo/gpl-2.0.txt\n%{_bindir}/foo\n",
+        ] {
+            let results = run(body);
+            assert!(
+                !has(&results, "no-license-file-in-spec"),
+                "body {body}: {results:?}"
+            );
+            assert!(
+                !has(&results, "license-file-as-doc"),
+                "body {body}: {results:?}"
+            );
+        }
     }
 
     #[test]
