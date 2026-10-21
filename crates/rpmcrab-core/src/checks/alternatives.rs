@@ -242,10 +242,14 @@ impl AlternativesCheck {
                             );
                             continue;
                         }
-                        bin_found = pkg
-                            .files
-                            .iter()
-                            .any(|f| f.name.contains("bin/") && f.name.ends_with(value));
+                        // A file at exactly the entry's path satisfies
+                        // the entry wherever it lives: libalternatives
+                        // targets commonly sit in /usr/libexec, outside
+                        // every bin/ path (issue #811). The reference's
+                        // bin/ suffix rule covers the remaining shapes.
+                        bin_found = pkg.files.iter().any(|f| {
+                            f.name == value || (f.name.contains("bin/") && f.name.ends_with(value))
+                        });
                         if !bin_found {
                             add_info(
                                 out,
@@ -1018,5 +1022,54 @@ mod tests {
             "error level: {}",
             line("wrong-entry-format")
         );
+    }
+
+    /// A `binary=` entry pointing at a file the package ships outside
+    /// every bin/ path (salt keeps its libalternatives targets in
+    /// /usr/libexec/salt/) satisfies the entry: neither
+    /// `binary-entry-value-not-found` nor `wrong-or-missed-binary-entry`
+    /// fires (issue #811).
+    #[test]
+    fn binary_entry_found_at_exact_libexec_path() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let mut pkg = libalternatives_pkg(
+            dir.path(),
+            &[("salt.conf", "binary=/usr/libexec/salt/salt-3.13\n")],
+        );
+        for f in pkg.files.iter_mut() {
+            if f.name == "/usr/bin/salt" {
+                f.name = "/usr/libexec/salt/salt-3.13".to_string();
+            }
+        }
+        let results = findings_for(&pkg);
+        for name in [
+            "binary-entry-value-not-found",
+            "wrong-or-missed-binary-entry",
+        ] {
+            assert!(
+                !has(&results, name),
+                "{name} must not fire when the entry target is shipped: {results:?}"
+            );
+        }
+    }
+
+    /// The exact-path acceptance does not silence genuine misses: a
+    /// `binary=` entry whose libexec target the package does not ship
+    /// still draws both findings (issue #811).
+    #[test]
+    fn binary_entry_missing_at_libexec_path_still_fires() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let pkg = libalternatives_pkg(
+            dir.path(),
+            &[("salt.conf", "binary=/usr/libexec/salt/absent-3.13\n")],
+        );
+        let results = findings_for(&pkg);
+        for name in [
+            "binary-entry-value-not-found",
+            "wrong-or-missed-binary-entry",
+        ] {
+            let count = results.iter().filter(|(n, _)| n == name).count();
+            assert_eq!(count, 1, "expected exactly one {name}: {results:?}");
+        }
     }
 }

@@ -2668,3 +2668,11 @@ kind = "behaviour"
 reason = "The untracked verdict requires privs data (issue #795): the port emits polkit-untracked-privilege only when at least one configured file was successfully read from the configured PolkitPrivsFiles. A read-but-empty file establishes an empty tracking set — a file that reads as empty or holds only comments and unusable lines still counts as read, so an action the data does not list draws the verdict. With no configured file successfully read — no configured file exists or is readable on the lint host — whether an action is tracked is a fact about the host's installed data rather than the package, so the port stays silent where the reference reports every action as untracked. The reference documents that it expects the polkit-default-privs package to be installed to work, and Factory's lint environment carries that data; OBS build roots and other hosts do not — the apparmor-utils actions (net.apparmor.pkexec.aa-notify.*) are tracked in the Factory profile yet fired in an OBS build root and on a bare macOS host. The polkit-user-privilege verdict is unaffected: it is decidable from the action's own defaults alone and fires with or without loaded data."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/795"
+
+[[divergence]]
+case = "global"
+check = "AlternativesCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #811): a libalternatives `binary=` entry is also satisfied by a package file at exactly the entry's path, wherever it lives. The reference only accepts a package path that contains `bin/` and ends with the value, so a package whose alternatives targets sit in /usr/libexec draws both `binary-entry-value-not-found` and `wrong-or-missed-binary-entry` for every config even though it ships every target: salt ships 12 such groups per python flavour with targets in /usr/libexec/salt/ (24 configs, 48 warnings in the Factory battle test, all false). libalternatives resolves any absolute target and /usr/libexec is a standard FHS location for internal binaries. Entries whose target the package does not ship keep firing both findings, pinned by `binary_entry_missing_at_libexec_path_still_fires`."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/811"
