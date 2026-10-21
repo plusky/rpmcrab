@@ -55,8 +55,13 @@ die() {
 for tool in rpmbuild rpmsign gpg python3; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool not found"
 done
-rpmsign --help 2>&1 | grep -q -- '--rpmv6' \
-    || die "rpmsign lacks --rpmv6: an rpm >= 6.0 toolchain is required"
+# The signing below uses --rpmv4 for the mixed fixture and the v6
+# form (rpmsign's default on an rpm >= 6.0 toolchain) for the rest;
+# gate on both flags.
+for flag in --rpmv4 --rpmv6; do
+    rpmsign --help 2>&1 | grep -q -- "$flag" \
+        || die "rpmsign lacks $flag: an rpm >= 6.0 toolchain is required"
+done
 [ -f "$here/signature-fixture.spec" ] \
     || die "missing fixture spec: $here/signature-fixture.spec"
 
@@ -198,7 +203,7 @@ def container_packets(entries):
             pos = off
             for _ in range(cnt):
                 end = store.index(b"\x00", pos)
-                packets.append(base64.b64decode(store[pos:end]))
+                packets.append(base64.b64decode(store[pos:end], validate=True))
                 pos = end + 1
     return packets
 
@@ -266,6 +271,11 @@ expect signature-openpgp-dual-1.0-1.noarch.rpm "$work/db-empty" \
     "key ID $KEYID1: NOKEY"
 expect signature-openpgp-dual-1.0-1.noarch.rpm "$work/db-empty" \
     "key ID $KEYID2: NOKEY"
+expect_count signature-openpgp-dual-1.0-1.noarch.rpm "$work/db-empty" "NOKEY" 2
+expect signature-openpgp-dual-1.0-1.noarch.rpm "$work/db-both" \
+    "key fingerprint: $FINGERPRINT1_LOWER: OK"
+expect signature-openpgp-dual-1.0-1.noarch.rpm "$work/db-both" \
+    "key fingerprint: $FINGERPRINT2_LOWER: OK"
 expect_count signature-openpgp-dual-1.0-1.noarch.rpm "$work/db-both" "signature, key fingerprint:" 2
 
 expected_outputs=(
