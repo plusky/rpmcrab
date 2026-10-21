@@ -25,6 +25,7 @@
 //! structurally invalid packet is the `invalid-signature` case —
 //! and yields the issuer the key ID is read from.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -208,12 +209,31 @@ const MAX_ENCODED_BLOB_BYTES: usize = 4 * MAX_BLOB_BYTES.div_ceil(3);
 struct SignatureBlobs {
     /// The readable signature blobs, in header index order.
     blobs: Vec<Vec<u8>>,
+    /// The membership index of `blobs`: the collected blobs as a
+    /// set, so testing a further blob against the collected ones
+    /// does not scan the vector.
+    seen: HashSet<Vec<u8>>,
     /// The header carries at least one OpenPGP signature entry.
     has_entries: bool,
     /// At least one signature entry stayed unreadable: its range
     /// falls outside the header store, its size exceeds a size cap
     /// or is zero, or its file read failed.
     has_unreadable: bool,
+}
+
+impl SignatureBlobs {
+    /// Whether the identical blob is already collected.
+    fn contains(&self, blob: &[u8]) -> bool {
+        self.seen.contains(blob)
+    }
+
+    /// Collect a blob the caller has found new and charged against
+    /// the totals: it joins `blobs` in header order and `seen`
+    /// alongside, keeping the two in step.
+    fn collect(&mut self, blob: Vec<u8>) {
+        self.seen.insert(blob.clone());
+        self.blobs.push(blob);
+    }
 }
 
 /// The running totals the size caps are charged against while a
@@ -314,7 +334,7 @@ fn signature_blobs(path: &Path) -> SignatureBlobs {
         // A packet already collected — from an earlier classic entry
         // or the OPENPGP entry — is not collected again and does not
         // count toward the total cap again.
-        if result.blobs.contains(&blob) {
+        if result.contains(&blob) {
             continue;
         }
         if totals.total_bytes.saturating_add(count) > MAX_TOTAL_BLOB_BYTES {
@@ -322,7 +342,7 @@ fn signature_blobs(path: &Path) -> SignatureBlobs {
             continue;
         }
         totals.total_bytes += count;
-        result.blobs.push(blob);
+        result.collect(blob);
     }
     result
 }
@@ -406,7 +426,7 @@ fn read_openpgp_entry(
         // A packet already collected — from an earlier string or a
         // classic entry — is not collected again and does not count
         // toward the total cap again.
-        if result.blobs.contains(&packet) {
+        if result.contains(&packet) {
             continue;
         }
         if totals.total_bytes.saturating_add(packet.len()) > MAX_TOTAL_BLOB_BYTES {
@@ -414,7 +434,7 @@ fn read_openpgp_entry(
             continue;
         }
         totals.total_bytes += packet.len();
-        result.blobs.push(packet);
+        result.collect(packet);
     }
 }
 
