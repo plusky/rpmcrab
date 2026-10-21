@@ -181,8 +181,16 @@ fn be_u32(bytes: &[u8]) -> u32 {
 /// count from the untrusted preamble can size.
 const MAX_BLOB_BYTES: usize = 65_536;
 
-/// The total size cap across all signature blobs in one header: the
-/// cap bounds the total read work for one package.
+/// The total size cap across the signature blobs collected from one
+/// header: one package collects at most this many decoded bytes.
+/// The read work behind the collected bytes is bounded separately:
+/// a classic entry whose count passes `MAX_BLOB_BYTES` is rejected
+/// unread, so one classic entry reads at most that many bytes, and
+/// an entry a crafted header repeats or lands past this total is
+/// read before it is skipped: at most the 1024-entry index bound
+/// times `MAX_BLOB_BYTES` of classic reads in all. The OPENPGP
+/// entries' span reads are charged against `MAX_CONTAINER_BYTES`
+/// instead.
 const MAX_TOTAL_BLOB_BYTES: usize = 1_048_576;
 
 /// The raw-text size cap for the `RPMSIGTAG_OPENPGP` entries of one
