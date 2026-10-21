@@ -2129,20 +2129,6 @@ impl SpecCheck {
     /// header patterns, so the sections judged here are the walker's
     /// sections. `flush_license_marking` emits the findings.
     fn checkline_license_marking(&mut self, pkg: &SpecPkg, line: &str) {
-        if self.license_section.is_none() {
-            let trimmed = line.trim_start();
-            if let Some(value) = trimmed.strip_prefix("License:") {
-                self.license_tag_seen = true;
-                if !value.contains("Public-Domain") && !value.contains("PublicDomain") {
-                    self.license_tags_public_domain = false;
-                }
-            } else if source_line_is_archive(trimmed) {
-                self.archive_source_seen = true;
-            }
-            if source_line_is_packaged(trimmed) {
-                self.packaged_source_seen = true;
-            }
-        }
         for (sec, re) in &self.section_res {
             if let Ok(Some(_)) = re.find(line) {
                 if let Some(scan) = self.license_section.take() {
@@ -2155,6 +2141,20 @@ impl SpecCheck {
                     });
                 }
                 return;
+            }
+        }
+        if self.license_section.is_none() {
+            let trimmed = line.trim_start();
+            if let Some(value) = trimmed.strip_prefix("License:") {
+                self.license_tag_seen = true;
+                if !value.contains("Public-Domain") && !value.contains("PublicDomain") {
+                    self.license_tags_public_domain = false;
+                }
+            } else if source_line_is_archive(trimmed) {
+                self.archive_source_seen = true;
+            }
+            if source_line_is_packaged(trimmed) {
+                self.packaged_source_seen = true;
             }
         }
         let Some(mut scan) = self.license_section.take() else {
