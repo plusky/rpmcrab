@@ -195,8 +195,13 @@ impl Lint {
     }
 
     /// `Filter.validate_filters`: every rpmlintrc `Filters` pattern that
-    /// never matched becomes an `unused-rpmlintrc-filter` error. Runs once
-    /// after all batches, on the last processed package (`_run`).
+    /// never matched becomes an `unused-rpmlintrc-filter` warning. Runs once
+    /// after all batches, on the last processed package (`_run`). The
+    /// reference reports the audit at E with the default badness 1 (it is in
+    /// no scoring table) and exits 0 on it in every non-strict run, so the
+    /// warning is the level that carries that build behaviour in the
+    /// severity-only exit model (#816; ledgered in
+    /// `tests/parity/divergences.toml`).
     pub fn audit_unused_filters(&mut self) {
         if !self.audit_rpmlintrc {
             return;
@@ -213,7 +218,7 @@ impl Lint {
         for pattern in unused {
             let detail = format!("\"{pattern}\"");
             self.filter.add_info(Finding {
-                level: Level::Error,
+                level: Level::Warning,
                 check: "unused-rpmlintrc-filter".to_string(),
                 details: vec![detail],
                 // `Path(package.name).name`, as for binary findings; specs

@@ -249,6 +249,10 @@ fn unused_rpmlintrc_filters_are_reported_once_on_the_last_package() {
     let count = out.matches("unused-rpmlintrc-filter").count();
     assert_eq!(count, 1, "audited once, on the last package: {out}");
     assert!(
+        out.contains("W: unused-rpmlintrc-filter"),
+        "the audit reports at warning level (#816): {out}"
+    );
+    assert!(
         out.contains("\"never-matches-anything\""),
         "pattern is quoted: {out}"
     );
