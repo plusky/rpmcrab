@@ -2,7 +2,7 @@
 # Upstream owns these configs until rpmlint is fully superseded;
 # the monthly distro-config-sync CI job refreshes them.
 # upstream_repo = https://github.com/rpm-software-management/rpmlint
-# opensuse: opensuse @ 041119a7e8d14da8834184084d343eb11d5577fa (2026-10-09)
+# opensuse: opensuse @ 513f17e8aad7d0bece1be4e46316dc8e97bd1d65 (2026-10-20)
 # opensuse-whitelists: opensuse @ 513f17e8aad7d0bece1be4e46316dc8e97bd1d65 (2026-10-20)
 #
 # Extra Filters appended (not from upstream; see EXTRA_FILTERS):
@@ -242,3 +242,7 @@
 # Removed BadnessThreshold lines (rpmcrab has no badness
 # threshold: severity decides the exit code; issue #699):
 #   BadnessThreshold: dropped 'BadnessThreshold = 999' from opensuse/opensuse.toml
+#
+# Adjudicated digest records (Factory content decides;
+# see DIGEST_ADJUDICATIONS):
+#   digest: adjudicated dbus-services.toml record for cups path /usr/share/dbus-1/system.d/cups.conf to the Factory-shipped hash set (issue #760)

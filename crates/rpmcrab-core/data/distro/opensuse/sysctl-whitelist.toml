@@ -145,3 +145,4 @@ type     = "sysctl"
 path     = "/usr/lib/sysctl.d/health-checker.conf"
 digester = "shell"
 hash     = "40838811f1f8ec4f4b19ce8f049f63ab616f92a1d0a8190e29d0bbf6fe43e66a"
+
