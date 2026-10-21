@@ -23,8 +23,10 @@
 #
 # The signing keys are throwaway test keys ("rpmcrab openpgp test key
 # (DO NOT TRUST)"); only their public halves are committed. The
-# private halves are generated inside the workdir and discarded with
-# it.
+# private halves are generated inside the workdir. A successful
+# run removes the workdir; a failed run preserves it and prints
+# its path, so the rpmbuild and rpmsign logs under its logs/
+# subdirectory survive for inspection.
 #
 # Unlike build-signature-fixtures.sh, this script does not run in a
 # container: producing the v6 signature form needs an rpm >= 6.0
@@ -69,8 +71,24 @@ done
 # socket inside GNUPGHOME (under the workdir), and socket paths are
 # length-limited -- the macOS per-user TMPDIR is too long.
 work="$(mktemp -d "/tmp/rpmbuild-openpgp-work.XXXXXX")"
-trap 'rm -rf "$work"' EXIT
-mkdir -p "$work/staged" "$work/tmp"
+cleanup() {
+    local rc=$?
+    # The agent for the scratch GNUPGHOME must not outlive the
+    # workdir it serves.
+    gpgconf --kill agent >/dev/null 2>&1 || true
+    if [ "$rc" -ne 0 ]; then
+        echo "failed run: workdir preserved for inspection: $work" >&2
+        echo "  rpmbuild log: $work/logs/rpmbuild.log" >&2
+        echo "  rpmsign log: $work/logs/rpmsign.log" >&2
+    else
+        rm -rf "$work"
+    fi
+}
+trap cleanup EXIT
+mkdir -p "$work/staged" "$work/tmp" "$work/logs"
+# The logs exist from the start, so the paths a failed run prints
+# resolve even when the failure precedes the first build or sign.
+touch "$work/logs/rpmbuild.log" "$work/logs/rpmsign.log"
 export TMPDIR="$work/tmp"
 export GNUPGHOME="$work/gnupg"
 mkdir -p "$GNUPGHOME"
@@ -90,9 +108,21 @@ EOF
     gpg --batch --gen-key "$work/keyparams"
 }
 
+primary_fingerprints() {
+    # One fingerprint per key in the keyring: the fingerprint
+    # record of each pub record. The fingerprint records of
+    # subkeys are skipped, so a key with subkeys still contributes
+    # exactly its primary fingerprint.
+    gpg --list-keys --with-colons | awk -F: '
+        /^pub/ { primary = 1; next }
+        /^sub/ { primary = 0; next }
+        /^fpr/ && primary { print $10; primary = 0 }
+    '
+}
+
 only_fingerprint() {
     local fprs
-    fprs="$(gpg --list-keys --with-colons | awk -F: '/^fpr/{print $10}')"
+    fprs="$(primary_fingerprints)"
     [ "$(printf '%s\n' "$fprs" | grep -c .)" = "1" ] \
         || die "expected exactly one key in the keyring, found: $fprs"
     printf '%s' "$fprs"
@@ -103,8 +133,10 @@ gen_key "rpmcrab openpgp test key (DO NOT TRUST)" \
 FINGERPRINT1="$(only_fingerprint)"
 gen_key "rpmcrab openpgp test key 2 (DO NOT TRUST)" \
     "rpmcrab-openpgp-testkey2@example.invalid"
-FINGERPRINT2="$(gpg --list-keys --with-colons | awk -F: '/^fpr/{print $10}' | grep -v "^${FINGERPRINT1}$")"
-[ -n "$FINGERPRINT2" ] && [ "$FINGERPRINT2" != "$FINGERPRINT1" ] || die "second key fingerprint not found"
+FINGERPRINT2="$(primary_fingerprints | grep -v "^${FINGERPRINT1}$")" \
+    || die "second key fingerprint not found"
+[ "$(printf '%s\n' "$FINGERPRINT2" | grep -c .)" = "1" ] \
+    || die "expected exactly one second key fingerprint, found: $FINGERPRINT2"
 
 for fingerprint in "$FINGERPRINT1" "$FINGERPRINT2"; do
     [[ "$fingerprint" =~ ^[0-9A-F]{40}$ ]] \
@@ -130,29 +162,38 @@ cp "$here/signature-fixture.spec" "$work/rpmbuild/SPECS/fixture.spec"
 build_variant() {
     # build_variant <dest> <extra rpmbuild defines...> -> path of the
     # built rpm, copied to <dest>: both variants share one filename
-    # under RPMS/, and the next build wipes that tree.
+    # under RPMS/, and the next build wipes that tree. The build
+    # must produce exactly one rpm; its output goes to the rpmbuild
+    # log, which a failed run preserves.
     local dest="$1" built
     shift
     rm -rf "$work/rpmbuild/BUILD"/* "$work/rpmbuild/RPMS"/*
+    echo "== rpmbuild $*" >> "$work/logs/rpmbuild.log"
     rpmbuild -bb --define "_topdir $work/rpmbuild" \
         --define "_tmppath $work/tmp" "$@" \
-        "$work/rpmbuild/SPECS/fixture.spec" >/dev/null 2>&1
-    built="$(find "$work/rpmbuild/RPMS" -name '*.rpm' | head -1)"
-    [ -n "$built" ] || return 1
+        "$work/rpmbuild/SPECS/fixture.spec" >>"$work/logs/rpmbuild.log" 2>&1
+    built="$(find "$work/rpmbuild/RPMS" -name '*.rpm')"
+    if [ "$(printf '%s\n' "$built" | grep -c . || true)" != "1" ]; then
+        echo "error: expected exactly one built rpm, found: ${built:-none}" >&2
+        return 1
+    fi
     cp "$built" "$dest"
     printf '%s' "$dest"
 }
-UNSIGNED_V4="$(build_variant "$work/unsigned-v4.rpm" --define "_rpmformat 4")"
-[ -n "$UNSIGNED_V4" ] || die "v4 build produced no rpm"
-UNSIGNED_V6="$(build_variant "$work/unsigned-v6.rpm")"
-[ -n "$UNSIGNED_V6" ] || die "v6 build produced no rpm"
+UNSIGNED_V4="$(build_variant "$work/unsigned-v4.rpm" --define "_rpmformat 4")" \
+    || die "v4 build produced no rpm"
+UNSIGNED_V6="$(build_variant "$work/unsigned-v6.rpm")" \
+    || die "v6 build produced no rpm"
 
 sign() {
     # sign <key-fingerprint> <file> [extra rpmsign options...]
+    # Output goes to the rpmsign log, which a failed run preserves.
     local fingerprint="$1" file="$2"
     shift 2
+    echo "== rpmsign $file $*" >> "$work/logs/rpmsign.log"
     rpmsign --define "__gpg $(command -v gpg)" \
-        --define "_gpg_name $fingerprint" --addsign "$@" "$file" >/dev/null 2>&1
+        --define "_gpg_name $fingerprint" --addsign "$@" "$file" \
+        >>"$work/logs/rpmsign.log" 2>&1
 }
 
 cp "$UNSIGNED_V4" "$work/staged/signature-openpgp-classic-1.0-1.noarch.rpm"
