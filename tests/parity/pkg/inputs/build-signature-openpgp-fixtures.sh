@@ -137,7 +137,7 @@ gen_key "rpmcrab openpgp test key (DO NOT TRUST)" \
 FINGERPRINT1="$(only_fingerprint)"
 gen_key "rpmcrab openpgp test key 2 (DO NOT TRUST)" \
     "rpmcrab-openpgp-testkey2@example.invalid"
-FINGERPRINT2="$(primary_fingerprints | grep -v "^${FINGERPRINT1}$")" \
+FINGERPRINT2="$(primary_fingerprints | grep -vFx "$FINGERPRINT1")" \
     || die "second key fingerprint not found"
 [ "$(printf '%s\n' "$FINGERPRINT2" | grep -c .)" = "1" ] \
     || die "expected exactly one second key fingerprint, found: $FINGERPRINT2"
