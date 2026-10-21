@@ -2676,3 +2676,11 @@ kind = "behaviour"
 reason = "Fix-and-diverge (issue #811): a libalternatives `binary=` entry is also satisfied by a package file at exactly the entry's path, wherever it lives. The reference only accepts a package path that contains `bin/` and ends with the value, so a package whose alternatives targets sit in /usr/libexec draws both `binary-entry-value-not-found` and `wrong-or-missed-binary-entry` for every config even though it ships every target: salt ships 12 such groups per python flavour with targets in /usr/libexec/salt/ (24 configs, 48 warnings in the Factory battle test, all false). libalternatives resolves any absolute target and /usr/libexec is a standard FHS location for internal binaries. Entries whose target the package does not ship keep firing both findings, pinned by `binary_entry_missing_at_libexec_path_still_fires`."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/811"
+
+[[divergence]]
+case = "global"
+check = "non-executable-script"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #813): a file inside a Python library tree (a path with a site-packages or dist-packages component) does not emit non-executable-script. The tree is consumed by import and by reading: its files are modules, templates and scripts the owning program reads, renders or streams elsewhere, so an interpreter line there does not mark a file executed in place and the missing exec bit is not a defect. In the salt battle test all 138 findings sit in such trees and every file is read, rendered or imported; corpus-wide (Factory sweep 2026-10-18) 1,575 of the class's 3,072 findings sit in these trees, uniformly module and package-data files on sampling. The reference fires there; it discards the interpreter of Perl module (.pm) files on the same principle and does not extend it to Python trees. The gate is confined to this one emission: executable files in Python trees still draw the interpreter findings, and non-executable scripts in every other location still fire, Python files under /usr/share included."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/813"

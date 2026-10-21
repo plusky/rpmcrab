@@ -363,6 +363,12 @@ fn python_regex() -> &'static Regex {
         .get_or_init(|| Regex::new(r"^/usr/lib(?:64)?/python([.0-9]+)/").expect("static regex"))
 }
 
+static PYTHON_LIB_TREE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn python_lib_tree_regex() -> &'static Regex {
+    PYTHON_LIB_TREE_REGEX
+        .get_or_init(|| Regex::new(r"/(?:site|dist)-packages(?:/|$)").expect("static regex"))
+}
+
 static PYTHON_BYTECODE_PEP3147_REGEX: OnceLock<Regex> = OnceLock::new();
 fn python_bytecode_pep3147_regex() -> &'static Regex {
     PYTHON_BYTECODE_PEP3147_REGEX.get_or_init(|| {
@@ -498,6 +504,7 @@ pub struct FilesCheck {
     tcl_re: Regex,
     perl_re: Regex,
     python_re: Regex,
+    python_lib_tree_re: Regex,
     python_bytecode_pep3147_re: Regex,
     python_bytecode_re: Regex,
     log_file_re: Regex,
@@ -635,6 +642,7 @@ impl FilesCheck {
             tcl_re: tcl_regex().clone(),
             perl_re: perl_regex().clone(),
             python_re: python_regex().clone(),
+            python_lib_tree_re: python_lib_tree_regex().clone(),
             python_bytecode_pep3147_re: python_bytecode_pep3147_regex().clone(),
             python_bytecode_re: python_bytecode_regex().clone(),
             log_file_re: log_file_regex().clone(),
@@ -3990,7 +3998,14 @@ impl FilesCheck {
             {
                 add_info(out, Level::Error, pkg, "script-without-shebang", &[fname]);
             }
-            if !mode_is_exec && !is_doc {
+            // Files inside a Python library tree (a site-packages or
+            // dist-packages component) are modules or package data: the
+            // tree is consumed by import and by reading, so an
+            // interpreter line there marks data the owning program
+            // reads, renders or imports, and the missing exec bit is
+            // not a defect (issue #813). Scripts in every other
+            // location keep the reference behaviour.
+            if !mode_is_exec && !is_doc && !is_match(&self.python_lib_tree_re, fname) {
                 if let Some(interpreter) = &fd.interpreter {
                     if interpreter.starts_with('/') {
                         add_info(
@@ -10486,5 +10501,160 @@ mod tests {
             sysconfig_findings(&pkg).is_empty(),
             "no sysconfig use, no finding"
         );
+    }
+
+    /// Build a package whose files carry real on-disk content and the
+    /// exact modes given, so the script text checks run for real
+    /// (mirrors the spurious_exec_pkg helper, with per-file modes).
+    fn script_mode_pkg(dir: &tempfile::TempDir, files: &[(&str, u32, &str, &[u8])]) -> Pkg {
+        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
+        let mut pkg =
+            Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        pkg.name = "nonexec-test".to_string();
+        pkg.files = files
+            .iter()
+            .map(|(name, mode, magic, content)| {
+                let path = dir.path().join(name.trim_start_matches('/'));
+                std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+                std::fs::write(&path, content).expect("write temp file");
+                PkgFile {
+                    name: name.to_string(),
+                    path: path.to_string_lossy().into_owned(),
+                    mode: *mode,
+                    magic: magic.to_string(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        pkg
+    }
+
+    fn script_finding_lines(pkg: &Pkg, config: &Config) -> Vec<(String, String)> {
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(config);
+        check.check(pkg, config, &mut out);
+        out.results().to_vec()
+    }
+
+    /// Files inside a Python library tree are modules or package data
+    /// consumed by import or by reading: a non-executable file there
+    /// with an interpreter line draws no `non-executable-script`
+    /// (issue #813). Covers the salt shapes: a vendored Python module,
+    /// a deploy script the owning program reads and streams elsewhere,
+    /// and a Jinja template whose rendered output is a script.
+    #[test]
+    fn non_executable_script_silent_inside_python_library_trees() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/lib/python3.13/site-packages/pkg/mod.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/lib64/python3.14/site-packages/pkg/deploy.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/lib/python3/dist-packages/pkg/tool.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/python3\n",
+                ),
+                (
+                    "/usr/lib/python3.13/site-packages/pkg/route.jinja",
+                    0o100644,
+                    "ASCII text",
+                    b"#!/bin/sh\n",
+                ),
+            ],
+        );
+        let lines = script_finding_lines(&pkg, &config);
+        let flagged: Vec<&str> = lines
+            .iter()
+            .filter(|(n, _)| n == "non-executable-script")
+            .map(|(_, line)| line.as_str())
+            .collect();
+        assert_eq!(
+            flagged,
+            Vec::<&str>::new(),
+            "no non-executable-script inside Python library trees: {lines:?}"
+        );
+    }
+
+    /// The Python-tree gate is confined to the tree itself: a
+    /// non-executable script with an interpreter line in any other
+    /// location still draws `non-executable-script` (issue #813),
+    /// including a directory whose name merely starts with the tree
+    /// component's name.
+    #[test]
+    fn non_executable_script_still_fires_outside_python_library_trees() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/myapp/helper.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/libexec/myapp/run.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/lib/python3.13/site-packages-other/mod.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+            ],
+        );
+        let lines = script_finding_lines(&pkg, &config);
+        for path in [
+            "/usr/share/myapp/helper.py",
+            "/usr/libexec/myapp/run.sh",
+            "/usr/lib/python3.13/site-packages-other/mod.py",
+        ] {
+            assert!(
+                lines
+                    .iter()
+                    .any(|(n, line)| n == "non-executable-script" && line.contains(path)),
+                "non-executable-script must fire for {path}: {lines:?}"
+            );
+        }
+    }
+
+    /// The gate covers the one emission only: an executable file
+    /// inside a Python library tree still draws the interpreter
+    /// findings, so `env-script-interpreter` keeps parity there
+    /// (issue #813).
+    #[test]
+    fn executable_script_in_python_tree_still_draws_interpreter_findings() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = script_mode_pkg(
+            &dir,
+            &[(
+                "/usr/lib/python3.13/site-packages/pkg/tool.py",
+                0o100755,
+                "Python script, ASCII text executable",
+                b"#!/usr/bin/env python3\n",
+            )],
+        );
+        let lines = script_finding_lines(&pkg, &config);
+        let names: Vec<String> = lines.iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "env-script-interpreter");
+        assert_lacks(&names, "non-executable-script");
     }
 }
