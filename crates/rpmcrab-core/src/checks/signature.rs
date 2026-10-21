@@ -184,11 +184,14 @@ const MAX_BLOB_BYTES: usize = 65_536;
 /// cap bounds the total read work for one package.
 const MAX_TOTAL_BLOB_BYTES: usize = 1_048_576;
 
-/// The raw-text size cap for one `RPMSIGTAG_OPENPGP` entry: base64
-/// text runs 4/3 the size of the packets it encodes, so an entry
-/// whose text exceeds twice the total blob cap would decode past
-/// that cap anyway; the bound keeps the entry's read in the same
-/// order as the decoded data it can yield.
+/// The raw-text size cap for the `RPMSIGTAG_OPENPGP` entries of one
+/// header: base64 text runs 4/3 the size of the packets it encodes,
+/// so text exceeding twice the total blob cap would decode past
+/// that cap anyway; the bound keeps the entries' reads in the same
+/// order as the decoded data they can yield. Each entry's span is
+/// charged against the bound as it is read, so the text read for
+/// one package stays within the bound however many entries the
+/// header carries.
 const MAX_CONTAINER_BYTES: usize = 2 * MAX_TOTAL_BLOB_BYTES;
 
 /// The encoded-length cap for one `RPMSIGTAG_OPENPGP` string:
@@ -208,9 +211,19 @@ struct SignatureBlobs {
     /// The header carries at least one OpenPGP signature entry.
     has_entries: bool,
     /// At least one signature entry stayed unreadable: its range
-    /// falls outside the header store, its size exceeds a size cap,
-    /// or its file read failed.
+    /// falls outside the header store, its size exceeds a size cap
+    /// or is zero, or its file read failed.
     has_unreadable: bool,
+}
+
+/// The running totals the size caps are charged against while a
+/// signature header is read: the decoded packet bytes (against
+/// `MAX_TOTAL_BLOB_BYTES`) and the OPENPGP entries' raw span bytes
+/// (against `MAX_CONTAINER_BYTES`).
+#[derive(Debug, Default)]
+struct SizeTotals {
+    total_bytes: usize,
+    span_bytes: usize,
 }
 
 /// Read the OpenPGP signature blobs out of the package's signature
@@ -242,7 +255,7 @@ fn signature_blobs(path: &Path) -> SignatureBlobs {
         return result;
     }
     let store_start = 96 + 16 + nindex as u64 * 16;
-    let mut total_bytes = 0usize;
+    let mut totals = SizeTotals::default();
     for entry in index.as_chunks::<16>().0 {
         let tag = be_u32(&entry[0..4]);
         let entry_type = be_u32(&entry[4..8]);
@@ -257,7 +270,7 @@ fn signature_blobs(path: &Path) -> SignatureBlobs {
                 store_size,
                 offset,
                 count,
-                &mut total_bytes,
+                &mut totals,
                 &mut result,
             );
             continue;
@@ -279,6 +292,13 @@ fn signature_blobs(path: &Path) -> SignatureBlobs {
             result.has_unreadable = true;
             continue;
         }
+        // A zero-count entry carries no packet bytes: it counts
+        // toward the unreadable side instead of collecting an
+        // empty blob.
+        if count == 0 {
+            result.has_unreadable = true;
+            continue;
+        }
         let mut blob = vec![0u8; count];
         if file
             .seek(SeekFrom::Start(store_start + offset as u64))
@@ -297,11 +317,11 @@ fn signature_blobs(path: &Path) -> SignatureBlobs {
         if result.blobs.contains(&blob) {
             continue;
         }
-        if total_bytes.saturating_add(count) > MAX_TOTAL_BLOB_BYTES {
+        if totals.total_bytes.saturating_add(count) > MAX_TOTAL_BLOB_BYTES {
             result.has_unreadable = true;
             continue;
         }
-        total_bytes += count;
+        totals.total_bytes += count;
         result.blobs.push(blob);
     }
     result
@@ -313,15 +333,18 @@ fn signature_blobs(path: &Path) -> SignatureBlobs {
 /// unless the identical packet is already there. A string that
 /// does not terminate within the entry's readable span, exceeds
 /// the encoded-length cap, is not valid base64, or decodes past a
-/// size cap counts toward the entry's unreadable side, the same
-/// outcome an unreadable classic entry produces.
+/// size cap or to an empty packet counts toward the entry's
+/// unreadable side, the same outcome an unreadable classic entry
+/// produces. The entry's span is charged to the span total as it
+/// is read; an entry whose span would carry that total past
+/// `MAX_CONTAINER_BYTES` counts as unreadable and is not read.
 fn read_openpgp_entry(
     file: &mut File,
     store_start: u64,
     store_size: usize,
     offset: usize,
     count: usize,
-    total_bytes: &mut usize,
+    totals: &mut SizeTotals,
     result: &mut SignatureBlobs,
 ) {
     result.has_entries = true;
@@ -330,6 +353,10 @@ fn read_openpgp_entry(
         return;
     }
     let span = (store_size - offset).min(MAX_CONTAINER_BYTES);
+    if totals.span_bytes.saturating_add(span) > MAX_CONTAINER_BYTES {
+        result.has_unreadable = true;
+        return;
+    }
     let mut raw = vec![0u8; span];
     if file
         .seek(SeekFrom::Start(store_start + offset as u64))
@@ -339,6 +366,7 @@ fn read_openpgp_entry(
         result.has_unreadable = true;
         return;
     }
+    totals.span_bytes += span;
     let mut pos = 0usize;
     for _ in 0..count {
         let Some(nul) = raw[pos..].iter().position(|&b| b == 0) else {
@@ -355,6 +383,13 @@ fn read_openpgp_entry(
             result.has_unreadable = true;
             continue;
         };
+        // An empty packet carries no signature: the string counts
+        // toward the unreadable side instead of collecting an
+        // empty blob.
+        if packet.is_empty() {
+            result.has_unreadable = true;
+            continue;
+        }
         if packet.len() > MAX_BLOB_BYTES {
             result.has_unreadable = true;
             continue;
@@ -365,11 +400,11 @@ fn read_openpgp_entry(
         if result.blobs.contains(&packet) {
             continue;
         }
-        if total_bytes.saturating_add(packet.len()) > MAX_TOTAL_BLOB_BYTES {
+        if totals.total_bytes.saturating_add(packet.len()) > MAX_TOTAL_BLOB_BYTES {
             result.has_unreadable = true;
             continue;
         }
-        *total_bytes += packet.len();
+        totals.total_bytes += packet.len();
         result.blobs.push(packet);
     }
 }
@@ -1519,9 +1554,10 @@ mod tests {
         // The classic path marks an entry past the total cap
         // unreadable and reads the entries after it; the container
         // path does the same with its strings. After the overflow
-        // the remaining strings are still read, so the trailing
-        // empty string is collected: it decodes to an empty packet,
-        // which the total cap cannot reject.
+        // the remaining strings are still read: the trailing empty
+        // string is read and counts as unreadable, because it
+        // decodes to an empty packet and an empty packet is
+        // rejected rather than collected.
         let mut store = Vec::new();
         for fill in 0..17u8 {
             store.extend_from_slice(&base64_of(&vec![fill; MAX_BLOB_BYTES]));
@@ -1532,8 +1568,8 @@ mod tests {
         let blobs = signature_blobs(&path);
         assert!(blobs.has_entries);
         assert!(blobs.has_unreadable);
-        assert_eq!(blobs.blobs.len(), 17);
-        assert!(blobs.blobs.last().expect("trailing blob").is_empty());
+        assert_eq!(blobs.blobs.len(), 16);
+        assert!(blobs.blobs.iter().all(|blob| !blob.is_empty()));
     }
 
     #[test]
@@ -1551,6 +1587,79 @@ mod tests {
         assert!(blobs.has_entries);
         assert!(blobs.has_unreadable);
         assert_eq!(blobs.blobs.len(), 16);
+    }
+
+    #[test]
+    fn openpgp_empty_string_is_unreadable() {
+        // An empty string next to a readable one: the packet is
+        // collected and the empty string counts as unreadable,
+        // because it decodes to an empty packet.
+        let packet = v4_packet(&[0, 2, 0, 0, 7, 7, 7, 7, 7, 7, 7, 7]);
+        let mut store = base64_of(&packet);
+        store.push(0);
+        store.push(0);
+        let (_dir, path) = write_typed_signature_header(&[(OPENPGP_TAG, 8, 0, 2)], &store);
+        let blobs = signature_blobs(&path);
+        assert!(blobs.has_entries);
+        assert!(blobs.has_unreadable);
+        assert_eq!(blobs.blobs, [packet]);
+
+        // An entry whose only string is empty collects nothing.
+        let (_dir, path) = write_typed_signature_header(&[(OPENPGP_TAG, 8, 0, 1)], &[0]);
+        let blobs = signature_blobs(&path);
+        assert!(blobs.has_entries);
+        assert!(blobs.has_unreadable);
+        assert!(blobs.blobs.is_empty());
+    }
+
+    #[test]
+    fn classic_zero_count_entry_is_unreadable() {
+        // A zero-count classic entry carries no packet bytes: it
+        // counts as unreadable instead of collecting an empty
+        // blob, and the readable entry next to it is collected.
+        let packet = v4_packet(&[0, 2, 0, 0, 8, 8, 8, 8, 8, 8, 8, 8]);
+        let len = packet.len() as u32;
+        let (_dir, path) = write_signature_header(&[(1002, 0, 0), (268, 0, len)], &packet);
+        let blobs = signature_blobs(&path);
+        assert!(blobs.has_entries);
+        assert!(blobs.has_unreadable);
+        assert_eq!(blobs.blobs, [packet]);
+    }
+
+    #[test]
+    fn openpgp_span_reads_share_one_container_bound() {
+        // Two OPENPGP entries: the first entry's span reaches the
+        // container bound (its store runs past it), so the second
+        // entry's span would carry the charged total past the
+        // bound — the second entry counts as unreadable and is
+        // not read, while the first entry's packet is collected.
+        let first = v4_packet(&[0, 2, 0, 0, 9, 9, 9, 9, 9, 9, 9, 9]);
+        let second = v4_packet(&[0, 2, 0, 0, 10, 10, 10, 10, 10, 10, 10, 10]);
+        let mut store = base64_of(&first);
+        store.push(0);
+        // Filler the first entry never scans (its count is one
+        // string): it only stretches the first entry's span.
+        store.resize(MAX_CONTAINER_BYTES + 64, 0xaa);
+        let second_offset = store.len() as u32;
+        store.extend_from_slice(&base64_of(&second));
+        store.push(0);
+        let (_dir, path) = write_typed_signature_header(
+            &[(OPENPGP_TAG, 8, 0, 1), (OPENPGP_TAG, 8, second_offset, 1)],
+            &store,
+        );
+        let blobs = signature_blobs(&path);
+        assert!(blobs.has_entries);
+        assert!(blobs.has_unreadable);
+        assert_eq!(blobs.blobs, [first]);
+
+        // The second entry on its own is read and collected.
+        let mut store = base64_of(&second);
+        store.push(0);
+        let (_dir, path) = write_typed_signature_header(&[(OPENPGP_TAG, 8, 0, 1)], &store);
+        let blobs = signature_blobs(&path);
+        assert!(blobs.has_entries);
+        assert!(!blobs.has_unreadable);
+        assert_eq!(blobs.blobs, [second]);
     }
 
     #[test]
