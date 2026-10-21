@@ -1961,6 +1961,46 @@ fn errors_only_unused_rpmlintrc_filter_names_skipped_check_finding() {
         "the skipped check's filter must audit as unused: {stdout}"
     );
 }
+
+/// The apparmor shape (#816): an rpmlintrc whose only unmatched pattern is
+/// reported by the audit while every error the package itself draws is
+/// filtered (the three matching patterns cover the fixture's own errors
+/// under the harness's hermetic configuration). A run whose only error
+/// would be the audit finding exits 0 in default mode — the reference
+/// exits 0 on it in every non-strict run — and the finding prints at W.
+/// `--strict` promotes it to E like every other finding and the run
+/// exits 64.
+#[test]
+fn unused_rpmlintrc_filter_alone_does_not_fail_the_run() {
+    let dir = std::env::temp_dir().join("rpmcrab-unused-filter-exit");
+    std::fs::create_dir_all(&dir).unwrap();
+    let rc = dir.join("test.rc");
+    std::fs::write(
+        &rc,
+        "addFilter(\"deprecated-init-script\")\naddFilter(\"daemon-activation-in-%post\")\naddFilter(\"invalid-license\")\naddFilter(\"hidden-file-or-dir /usr/share/apparmor/cache/[0-9a-f]*.0/.features\")\n",
+    )
+    .unwrap();
+    let rpm = "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm";
+
+    let out = rpmcrab(&["-r", rc.to_str().unwrap(), rpm]);
+    assert_eq!(out.status.code(), Some(0), "default run must exit 0");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(
+            "W: unused-rpmlintrc-filter \"hidden-file-or-dir /usr/share/apparmor/cache/[0-9a-f]*.0/.features\""
+        ),
+        "the audit reports the stale pattern at W: {stdout}"
+    );
+
+    let out = rpmcrab(&["-r", rc.to_str().unwrap(), "-s", rpm]);
+    assert_eq!(out.status.code(), Some(64), "strict run must exit 64");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("E: unused-rpmlintrc-filter"),
+        "strict promotion prints the audit at E: {stdout}"
+    );
+}
+
 /// `--explain`: staged `AlternativesCheck.toml` resolves `alternative-generic-name-not-symlink` instead of "Unknown message".
 #[test]
 fn explain_staged_alternatives_check() {
