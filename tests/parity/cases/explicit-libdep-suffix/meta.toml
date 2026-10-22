@@ -7,7 +7,7 @@ argv = ["explicit-libdep-probe-1.0-1.noarch.rpm"] # exactly what was passed (bas
 captured = "2026-10-09"
 
 [source]
-description = "Hand-built probe RPM (rpmbuild, noarch) for the explicit-lib-dependency suffix-narrowing (rpmcrab#365). Requires: appstream-glib is a suffix-only name (the reference fires, rpmcrab deliberately stays silent); Requires: zlib is a genuine library without the lib* prefix (a true positive the reference gets right and rpmcrab knowingly silences per openSUSE naming policy); Requires: libfoo is a genuine lib* library (both fire). expected/ is rpmcrab's hand-verified output, not a reference capture: it locks the suffix behavior, so only the libfoo finding may appear."
+description = "Hand-built probe RPM (rpmbuild, noarch) for the explicit-lib-dependency suffix-narrowing (rpmcrab#365). Requires: appstream-glib is a suffix-only name (the reference fires, rpmcrab deliberately stays silent); Requires: zlib is a genuine library without the lib* prefix (a true positive the reference gets right and rpmcrab knowingly silences per openSUSE naming policy); Requires: libfoo is a genuine lib* library (the reference fires). Since rpmcrab#851 the probe draws no explicit-lib-dependency finding at all: it has no binaries, so nothing in it generates a soname dependency for an explicit requirement to duplicate, and redundancy is the condition for firing. The case now pins the silence of all three names; its expected/ predates that change (and the badness removal) and is retained as the historical capture."
 
 [tools]
 present = ["rpmbuild"]       # external tools used to build the input

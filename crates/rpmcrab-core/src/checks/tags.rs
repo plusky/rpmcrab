@@ -23,7 +23,8 @@ use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::pkg::dep::{
-    DepInfo, RPMSENSE_EQUAL, RPMSENSE_GREATER, RPMSENSE_LESS, version_to_string,
+    DepInfo, RPMSENSE_EQUAL, RPMSENSE_FIND_REQUIRES, RPMSENSE_GREATER, RPMSENSE_LESS,
+    version_to_string,
 };
 use std::sync::OnceLock;
 
@@ -380,6 +381,7 @@ impl TagsCheck {
         // plusky/rpmcrab#283 (DevelNumberExceptions / word-boundary regex
         // for required names) stays open.
         let requirer_is_biarch_devel = is_match(devel_infix_regex(), &pkg.name);
+        let generated_lib_names = generated_soname_package_names(deps);
         for dep in deps {
             let value = format_require(dep);
             // Rich `(a or b)` expressions (RPM >= 4.13): run the name and
@@ -442,11 +444,29 @@ impl TagsCheck {
                     // in a rich expression is recognised the same way
                     // as a top-level one. The reference fires on both
                     // forms.
+                    // The harm the finding names is redundancy (#851):
+                    // an explicit requirement is only unneeded when the
+                    // package's own binaries already generate a soname
+                    // dependency on the same library. The generated
+                    // dependencies sit in the same header (marked
+                    // RPMSENSE_FIND_REQUIRES) and the library package
+                    // they belong to follows the shared-library naming
+                    // convention, so the duplication is decidable here:
+                    // the explicit name must be a conventional package
+                    // name for one of the generated sonames. Everything
+                    // else is load-bearing: ctypes-loaded libraries
+                    // generate no soname dependency at all, and tool,
+                    // data and flavour companion packages (-tools,
+                    // -data, libopenblas_pthreads0) are not the
+                    // conventional name of the library they accompany,
+                    // so they stay silent. The reference fires on all
+                    // of them.
                     if !requirer_is_biarch_devel
                         && leaf.flags == 0
                         && leaf.qualifier.is_none()
                         && !leaf.name.contains("__")
                         && !leaf.name.contains('(')
+                        && generated_lib_names.contains(leaf.name.as_str())
                         && let Ok(Some(caps)) = self.lib_package_re.captures(&leaf.name)
                         && caps.get(1).is_none()
                     {
@@ -472,6 +492,38 @@ impl TagsCheck {
             self.unexpanded_macro(out, pkg, &format!("dependency {value}"), &value);
         }
     }
+}
+
+/// The library package names this package's own generated (find-requires)
+/// dependencies already reach, under the openSUSE shared-library naming
+/// convention: a generated soname dependency `lib<stem>.so.<major>...` is
+/// provided by the package named `lib<stem><major>` or `lib<stem>-<major>`.
+/// Computed from the package's own header alone — generated dependencies
+/// carry `RPMSENSE_FIND_REQUIRES`, explicit ones do not — so no
+/// cross-package data is needed. The bare `lib<stem>` form is deliberately
+/// not a candidate: it names a different package in practice (the
+/// `libnbd` tools package vs the `libnbd0` library package), so it proves
+/// nothing about redundancy.
+fn generated_soname_package_names(deps: &[DepInfo]) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for dep in deps {
+        if dep.flags & RPMSENSE_FIND_REQUIRES == 0 {
+            continue;
+        }
+        let Some((stem, rest)) = dep.name.split_once(".so.") else {
+            continue;
+        };
+        if !stem.starts_with("lib") || stem == "lib" {
+            continue;
+        }
+        let major: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if major.is_empty() {
+            continue;
+        }
+        names.insert(format!("{stem}{major}"));
+        names.insert(format!("{stem}-{major}"));
+    }
+    names
 }
 
 /// `formatRequire`: `name [<|>|= version]`.
@@ -3046,6 +3098,16 @@ mod rich_dep_emission_tests {
         }
     }
 
+    fn generated_dep(name: &str) -> DepInfo {
+        DepInfo {
+            name: name.to_string(),
+            flags: RPMSENSE_FIND_REQUIRES,
+            epoch: None,
+            version: None,
+            release: None,
+        }
+    }
+
     fn versioned_dep(name: &str, version: &str) -> DepInfo {
         DepInfo {
             name: name.to_string(),
@@ -3131,8 +3193,11 @@ mod rich_dep_emission_tests {
 
     #[test]
     fn explicit_lib_dependency_emits() {
+        // #851: the explicit name is the conventional package name of a
+        // soname the package's own binaries already generate a dependency
+        // on, so the explicit requirement duplicates it and fires.
         let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
-        pkg.requires = vec![plain_dep("libexplicit")];
+        pkg.requires = vec![plain_dep("libfoo1"), generated_dep("libfoo.so.1()(64bit)")];
         let results = run(&pkg, &rich_test_config(&[], false));
         let hits = named(&results, "explicit-lib-dependency");
         assert_eq!(hits.len(), 1, "all: {results:?}");
@@ -3141,7 +3206,130 @@ mod rich_dep_emission_tests {
             "line: {}",
             hits[0].1
         );
-        assert!(hits[0].1.ends_with(" libexplicit"), "line: {}", hits[0].1);
+        assert!(hits[0].1.ends_with(" libfoo1"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn explicit_lib_dependency_dash_form_fires() {
+        // The `lib<stem>-<major>` spelling of the convention
+        // (libsqlite3-0 provides libsqlite3.so.0) is the same redundancy.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![
+            plain_dep("libsqlite3-0"),
+            generated_dep("libsqlite3.so.0()(64bit)"),
+        ];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "explicit-lib-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(hits[0].1.ends_with(" libsqlite3-0"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn explicit_lib_dependency_without_generated_soname_is_silent() {
+        // #851, the ctypes class: python-libnacl requires libsodium26
+        // precisely because no binary links libsodium — no generated
+        // soname dependency exists for it, so the explicit requirement
+        // is the only expression of a real dependency. A generated
+        // dependency on an unrelated library (libc) does not make it
+        // redundant either: the match is by library, not by presence.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![
+            plain_dep("libsodium26"),
+            generated_dep("libc.so.6()(64bit)"),
+        ];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "explicit-lib-dependency").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_lib_dependency_tools_package_is_silent() {
+        // #851: clevis-luks requires libpwquality-tools because it
+        // invokes the tools at runtime. Even with a generated soname
+        // dependency on the library itself, the -tools package is not
+        // the library package, so the requirement is not redundant.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![
+            plain_dep("libpwquality-tools"),
+            generated_dep("libpwquality.so.1()(64bit)"),
+        ];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "explicit-lib-dependency").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_lib_dependency_data_companion_is_silent() {
+        // #851: fcitx5-libthai requires libthai-data, the data companion
+        // of the library its binaries link. The companion carries no
+        // soname and is not the library package, so linking the library
+        // does not make the data requirement redundant.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![
+            plain_dep("libthai-data"),
+            generated_dep("libthai.so.0()(64bit)"),
+        ];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "explicit-lib-dependency").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_lib_dependency_flavoured_package_is_silent() {
+        // #851: the explicit name pins a flavour of the library
+        // (libopenblas_pthreads0, not libopenblas0): the generated
+        // soname dependency is satisfiable by any flavour, so the pin
+        // carries information the soname dependency does not.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![
+            plain_dep("libopenblas_pthreads0"),
+            generated_dep("libopenblas.so.0()(64bit)"),
+        ];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "explicit-lib-dependency").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_lib_dependency_bare_stem_package_is_silent() {
+        // #851: the bare lib<stem> name is a different package from the
+        // library package (the libnbd tools package vs libnbd0, which
+        // provides libnbd.so.0), so a generated soname dependency does
+        // not make a requirement on it redundant.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![plain_dep("libnbd"), generated_dep("libnbd.so.0()(64bit)")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "explicit-lib-dependency").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_lib_dependency_nss_module_is_silent() {
+        // #851: icmpinfo/ntpsec/uucp require libnss_usrfiles2, an NSS
+        // module package glibc loads at runtime. Their binaries link
+        // glibc only; nothing generates a dependency on the module's
+        // soname, so the explicit requirement stands alone.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![
+            plain_dep("libnss_usrfiles2"),
+            generated_dep("libc.so.6()(64bit)"),
+            generated_dep("ld-linux-x86-64.so.2()(64bit)"),
+        ];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "explicit-lib-dependency").is_empty(),
+            "all: {results:?}"
+        );
     }
 
     #[test]
@@ -3247,11 +3435,14 @@ mod rich_dep_emission_tests {
         // expression is still an explicit lib dependency: the leaves
         // are analysed individually, exactly like top-level names.
         let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
-        pkg.requires = vec![rich_dep("(libexplicit or foo)")];
+        pkg.requires = vec![
+            rich_dep("(libfoo1 or foo)"),
+            generated_dep("libfoo.so.1()(64bit)"),
+        ];
         let results = run(&pkg, &rich_test_config(&[], false));
         let hits = named(&results, "explicit-lib-dependency");
         assert_eq!(hits.len(), 1, "all: {results:?}");
-        assert!(hits[0].1.ends_with(" libexplicit"), "line: {}", hits[0].1);
+        assert!(hits[0].1.ends_with(" libfoo1"), "line: {}", hits[0].1);
     }
 
     #[test]
@@ -3387,7 +3578,10 @@ mod rich_dep_emission_tests {
         // requirement, so explicit-lib-dependency fires (ledgered divergence
         // from the reference, which is silent on the whole string).
         let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
-        pkg.requires = vec![plain_dep("(libfoo if bar)")];
+        pkg.requires = vec![
+            plain_dep("(libfoo1 if bar)"),
+            generated_dep("libfoo.so.1()(64bit)"),
+        ];
         let results = run(&pkg, &rich_test_config(&[], false));
         let hits = named(&results, "explicit-lib-dependency");
         assert_eq!(hits.len(), 1, "all: {results:?}");
