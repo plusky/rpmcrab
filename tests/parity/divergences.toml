@@ -2013,6 +2013,14 @@ upstream = "https://github.com/plusky/rpmcrab/issues/515"
 
 [[divergence]]
 case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
+reason = "Deliberate fix (plusky/rpmcrab#846): an ar archive member that does not present as an ELF object (no ELF magic) is not charged as readelf-failed, and the ELF checks produce no findings for an archive whose members are all in other object formats. The reference runs readelf over the whole archive; readelf reports each non-ELF member ('Not an ELF file - it has the wrong magic bytes at the start'), exits nonzero, and the reference emits E: readelf-failed for the archive. The swept members are not ELF objects an ELF reader could parse: COFF import objects (the wine and mingw families, 1,316 of the finding's 1,471 Factory sweep hits on main 857d5ece, run-20261022-857d5ece), GIMPLE offload text (cross-nvptx, 136), wasm objects (the rust wasi libc.a, 10), LLVM bitcode (llvm libc++experimental.a, 4), a PalmOS m68k object (fpc, 1) and a plain-text fixture member (afl, 1). A member with ELF magic that then fails to parse still fails the archive, and a mixed archive is still analysed over its ELF members."
+since = "0.3.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/846"
+
+[[divergence]]
+case = "global"
 check = "devel-file-in-non-devel-package"
 kind = "behaviour"
 reason = "Deliberate divergence (issue #511): a package named mingw32-* or mingw64-* does not emit this finding for files under the MinGW sys-root (/usr/<triplet>-w64-mingw32/sys-root/). A cross toolchain's sys-root is headers and import libraries by definition -- the devel files are the product, with no -devel split to move them into. The reference emits the findings, but the Factory lint session suppresses them wholesale via addFilter lines in mingw32.toml, a config the mingw32/64-filesystem packages install into the lint environment; it is not part of rpmlint's config tree, so the mirrored config set never contains it and the port reported the family live: 1,586 of the finding's 2,212 Factory sweep hits on main 782ac1d5 (mingw32-gcc and mingw64-gcc 786 each, the pkgconf twins 7 each). The same unloaded config also filters files-duplicate wholesale and *.dll.a spurious-executable-perm for these packages; that wider gap is recorded in issue #511 and is not covered by this entry."
