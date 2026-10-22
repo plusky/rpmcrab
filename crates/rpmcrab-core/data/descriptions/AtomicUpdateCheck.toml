@@ -1,6 +1,7 @@
 dir-or-file-outside-snapshot="""
 The package contains files outside the snapshot, e.g. outside /etc and /usr
-or inside /usr/local.
+or inside /usr/local. The finding fires once per directory carrying such
+files, and the detail names the directory and the number of files in it.
 """
 ghost-outside-snapshot="""
 The package contains ghosts outside the snapshot, e.g. outside /etc and /usr

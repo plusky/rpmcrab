@@ -309,7 +309,7 @@ mod tests {
             ),
             (
                 "AtomicUpdateCheck.toml",
-                "48e70698834e7e12da9ef045ea862dae07a7cbe4ce473b9af59e697d292cc670",
+                "62cae759e59fa71de7b927ed25c0facc005a621fb67956a757a21daac2d2dc48",
             ),
             (
                 "BashismsCheck.toml",
