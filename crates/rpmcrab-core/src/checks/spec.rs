@@ -834,9 +834,11 @@ fn is_bare_macro(token: &str) -> bool {
 /// `LGPL`, `AGPL`) delimited by non-alphanumerics, so `LICENSE_GPL`,
 /// `licence-LGPL.txt`, `gpl-2.0.txt`, `COPYING3` and `{COPYING,README}`
 /// all count, while a stem buried in a longer word (`LICENSES`,
-/// `gplv3`) does not. `COPYING` closed by a digit run counts: the
-/// digits are the licence version glued to the GNU licence file's
-/// name, where a letter suffix would make a longer word.
+/// `gplv3`) does not. `COPYING` closed by a digit run counts
+/// (`COPYING3`, `COPYING3.LIB`): the digits are the licence version
+/// glued to the GNU licence file's name, and the run closes on a
+/// non-alphanumeric boundary or the end of the name, where a letter
+/// glued to the digits would make a longer word.
 /// Every shape `license_token_re` accepts counts too — a stem joined
 /// to a prefix (`FOOCOPYING`) is the conversion predicate's shape, so
 /// a name the warning fires on always establishes presence.
@@ -861,11 +863,20 @@ fn name_carries_licence(name: &str) -> bool {
             let end = start + stem.len();
             let before_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
             let after_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
-            // `COPYING` closed by a digit run (`COPYING3`) carries
-            // the stem with the licence version glued on.
-            let digit_suffix = stem == "copying"
-                && end < bytes.len()
-                && bytes[end..].iter().all(|b| b.is_ascii_digit());
+            // `COPYING` closed by a digit run (`COPYING3`,
+            // `COPYING3.LIB`) carries the stem with the licence
+            // version glued on: the digit run closes on a
+            // non-alphanumeric boundary or at the end of the name,
+            // where a letter glued to the digits (`COPYING3X`)
+            // would make a longer word.
+            let digit_suffix = stem == "copying" && {
+                let digits = bytes[end..]
+                    .iter()
+                    .take_while(|b| b.is_ascii_digit())
+                    .count();
+                digits > 0
+                    && (end + digits == bytes.len() || !bytes[end + digits].is_ascii_alphanumeric())
+            };
             if before_ok && (after_ok || digit_suffix) {
                 return true;
             }
@@ -5791,11 +5802,17 @@ Patch0: foo.patch
         let run = |body: &str| run_mini(&format!("{hdr}%files\n{body}"));
         // `COPYING` closed by a digit run is the GNU licence file
         // with its version glued on (`COPYING3`): presence counts,
-        // under %doc and as a plain entry. The name is beyond the
+        // under %doc and as a plain entry. The digit run may close
+        // on a non-alphanumeric boundary too (`COPYING3.LIB`, the
+        // file GCC ships; `COPYING3.txt`). The name is beyond the
         // conversion predicate, so the W stays silent too.
         for body in [
             "%doc COPYING3\n%{_bindir}/foo\n",
             "%{_datadir}/foo/COPYING3\n%{_bindir}/foo\n",
+            "%doc COPYING3.LIB\n%{_bindir}/foo\n",
+            "%{_datadir}/foo/COPYING3.LIB\n%{_bindir}/foo\n",
+            "%doc COPYING3.txt\n%{_bindir}/foo\n",
+            "%{_datadir}/foo/COPYING3.txt\n%{_bindir}/foo\n",
         ] {
             let results = run(body);
             assert!(
@@ -5812,6 +5829,7 @@ Patch0: foo.patch
         for body in [
             "%doc COPYINGFOO\n%{_bindir}/foo\n",
             "%doc COPYING3X\n%{_bindir}/foo\n",
+            "%doc COPYING3X.txt\n%{_bindir}/foo\n",
         ] {
             let results = run(body);
             assert!(
