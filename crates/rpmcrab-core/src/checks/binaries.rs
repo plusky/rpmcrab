@@ -2494,7 +2494,6 @@ fn elf_machine_class_from_magic(magic: &str) -> ElfMachineClass {
         return ElfMachineClass::Host;
     }
     const FOREIGN_TOKENS: &[&str] = &[
-        "ARM aarch64",
         "ARM",
         "UCB RISC-V",
         "LoongArch",
