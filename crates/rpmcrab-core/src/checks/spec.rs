@@ -1074,8 +1074,8 @@ fn in_doc_location(token: &str) -> bool {
 
 /// The entry names a build-metadata directory the build system
 /// assembles: the dotted metadata suffixes (`*.dist-info`,
-/// `*.egg-info`), with a trailing glob marker allowed. A plain
-/// `*-info` data name is not build metadata.
+/// `*.egg-info`), with a trailing glob marker allowed. Data
+/// names ending in `-info` stay ordinary entries.
 fn is_info_entry(basename: &str) -> bool {
     let name = basename.strip_suffix('*').unwrap_or(basename);
     name.ends_with(".dist-info") || name.ends_with(".egg-info")
