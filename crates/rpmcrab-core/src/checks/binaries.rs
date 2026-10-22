@@ -146,6 +146,45 @@ struct ElfProgramHeader {
     flags: String,
 }
 
+/// The `e_machine` values that are the given package architecture's
+/// own. Debug info for these is extracted by the package arch's
+/// debuginfo pipeline; objects for any other machine in the package
+/// are cross content whose debuginfo belongs to the foreign target.
+/// An arch with no entry here maps to an empty slice, and callers
+/// treat that as "charge any code": an unmapped arch must not
+/// silence findings it cannot classify (plusky/rpmcrab#847).
+fn host_elf_machines(arch: &str) -> &'static [u16] {
+    use goblin::elf::header::{
+        EM_68K, EM_386, EM_AARCH64, EM_ARM, EM_AVR, EM_IA_64, EM_MIPS, EM_PARISC, EM_PPC, EM_PPC64,
+        EM_RISCV, EM_S390, EM_SH, EM_SPARC, EM_SPARCV9, EM_X86_64,
+    };
+    if arch.starts_with("arm") {
+        return &[EM_ARM];
+    }
+    if arch.starts_with("mips") {
+        return &[EM_MIPS];
+    }
+    match arch {
+        "x86_64" => &[EM_X86_64],
+        "i386" | "i486" | "i586" | "i686" => &[EM_386],
+        "aarch64" => &[EM_AARCH64],
+        "ppc" => &[EM_PPC],
+        "ppc64" | "ppc64le" => &[EM_PPC64],
+        "s390" | "s390x" => &[EM_S390],
+        "riscv64" => &[EM_RISCV],
+        "loongarch64" => &[258], // EM_LOONGARCH; goblin has no constant for it
+        "sparc" => &[EM_SPARC],
+        "sparc64" => &[EM_SPARCV9],
+        "alpha" => &[36902], // EM_ALPHA; goblin has no constant for it
+        "m68k" => &[EM_68K],
+        "sh4" => &[EM_SH],
+        "hppa" | "parisc" => &[EM_PARISC],
+        "ia64" => &[EM_IA_64],
+        "avr" => &[EM_AVR],
+        _ => &[],
+    }
+}
+
 /// Parse ELF bytes, tolerating a dangling DT_GNU_HASH: stripping hash
 /// sections with objcopy leaves the dynamic entry behind, which fails
 /// goblin's strict parse. The reference never inspects the hash table, so
@@ -322,6 +361,16 @@ struct ReadelfInfo {
     /// compiled with `-fcf-protection` is present, whatever the merged
     /// property note records.
     has_endbr64: bool,
+    /// `e_machine` of every parsed ELF (for an archive: every member)
+    /// that carries machine code: at least one `SHF_EXECINSTR`
+    /// `SHT_PROGBITS` section whose file bytes are not all zero. A
+    /// zero-filled executable section is a relocation-filled slot, not
+    /// code (the wine import-thunk shape: an 8-byte all-zero `.text`
+    /// holding one relocation against a `__wine$func$` pointer), and a
+    /// member with no executable section carries no code at all (the
+    /// compiler-rt preinit shape). Consumed by
+    /// `check_missing_debug_info_in_archive` (plusky/rpmcrab#847).
+    code_machines: Vec<u16>,
     failed: Option<String>,
     /// An ar archive with members, none of which is an ELF object:
     /// every member is in another object format (COFF, wasm, LLVM
@@ -362,6 +411,7 @@ impl ReadelfInfo {
             has_dynamic: false,
             x86_feature_1_and: X86Feature1And::Absent,
             has_endbr64: false,
+            code_machines: Vec::new(),
             failed: None,
             no_elf_members: false,
         }
@@ -452,6 +502,25 @@ impl ReadelfInfo {
     /// Archive members are merged by appending: each member's sections
     /// land in `sections` the same way readelf's per-member output does.
     fn fill_from_elf(&mut self, elf: &goblin::elf::Elf, data: &[u8]) {
+        // Machine code carried by this ELF (see `code_machines`): an
+        // executable PROGBITS section holding at least one non-zero
+        // byte. The scan short-circuits on the first non-zero byte, so
+        // real code costs a few byte reads; only an all-zero section
+        // is scanned in full.
+        let has_code = elf.section_headers.iter().any(|sh| {
+            sh.sh_flags & u64::from(goblin::elf::section_header::SHF_EXECINSTR) != 0
+                && sh.sh_type == goblin::elf::section_header::SHT_PROGBITS
+                && {
+                    let start = sh.sh_offset as usize;
+                    let end = start.saturating_add(sh.sh_size as usize).min(data.len());
+                    data.get(start..end)
+                        .is_some_and(|bytes| bytes.iter().any(|b| *b != 0))
+                }
+        });
+        if has_code {
+            self.code_machines.push(elf.header.e_machine);
+        }
+
         // Sections
         for sh in &elf.section_headers {
             let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("").to_string();
@@ -2757,6 +2826,26 @@ impl BinariesCheck {
                 }
             }
         }
+        // The finding is charged only when the archive carries host
+        // machine code that debuginfo could describe (plusky/rpmcrab#847).
+        // An archive with no code-carrying member at all -- an empty
+        // placeholder archive (glibc's post-2.34 linker stubs), an
+        // import library whose members are zero-filled relocation
+        // slots (the wine family), a stub archive whose members carry
+        // no executable section (compiler-rt preinit archives) -- has
+        // nothing that could hold DWARF. An archive whose code is all
+        // for a foreign machine (a cross archive, e.g. AVR objects in
+        // a package built for the host arch) belongs to the foreign
+        // target's debuginfo handling, not the host package's. An
+        // unmapped package arch charges any code, as before.
+        let host = host_elf_machines(&pkg.arch);
+        if !info
+            .code_machines
+            .iter()
+            .any(|m| host.is_empty() || host.contains(m))
+        {
+            return;
+        }
         add_info(
             out,
             Level::Error,
@@ -4763,6 +4852,7 @@ mod tests {
                 elf_machine: goblin::elf::header::EM_X86_64,
                 bind_now: false,
                 has_dynamic: false,
+                code_machines: Vec::new(),
                 failed: None,
                 no_elf_members: false,
             };
@@ -6962,6 +7052,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 elf_machine: goblin::elf::header::EM_X86_64,
                 bind_now: false,
                 has_dynamic: false,
+                code_machines: Vec::new(),
                 failed: None,
                 no_elf_members: false,
                 is_rust: false,
@@ -7101,6 +7192,7 @@ description = "explicit priority string bypasses the system crypto policy"
             elf_machine: goblin::elf::header::EM_X86_64,
             bind_now: false,
             has_dynamic: true,
+            code_machines: Vec::new(),
             failed: None,
             no_elf_members: false,
             is_rust: false,
@@ -8515,6 +8607,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let pkgfile = syn_file("/usr/lib64/libfoo.a", "current ar archive");
         let mut info = syn_info();
         info.sections = vec![vec![sec(".text"), sec(".symtab")]];
+        info.code_machines = vec![goblin::elf::header::EM_X86_64];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_missing_debug_info_in_archive(&pkg, &pkgfile, &info, &mut out);
         let results = out.results().to_vec();
@@ -8529,6 +8622,7 @@ description = "explicit priority string bypasses the system crypto policy"
 
         let mut info = syn_info();
         info.sections = vec![vec![sec(".text"), sec(".debug_info")]];
+        info.code_machines = vec![goblin::elf::header::EM_X86_64];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_missing_debug_info_in_archive(&pkg, &pkgfile, &info, &mut out);
         assert!(
@@ -8536,6 +8630,239 @@ description = "explicit priority string bypasses the system crypto policy"
             ".debug_info present must be quiet: {:?}",
             out.results()
         );
+    }
+
+    #[test]
+    fn static_library_without_debuginfo_needs_host_code() {
+        // #847: the finding charges only archives carrying host machine
+        // code. Each silent shape below is a swept Factory shape.
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkgfile = syn_file("/usr/lib64/libfoo.a", "current ar archive");
+        let run = |check: &mut BinariesCheck, arch: &str, code_machines: Vec<u16>| {
+            let pkg = synthetic_pkg("testpkg", arch, vec![]);
+            let mut info = syn_info();
+            info.sections = vec![vec![sec(".text"), sec(".symtab")]];
+            info.code_machines = code_machines;
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_missing_debug_info_in_archive(&pkg, &pkgfile, &info, &mut out);
+            out.results().to_vec()
+        };
+
+        // No code-carrying member at all: an empty placeholder archive
+        // (glibc), an import library of zero-filled relocation slots
+        // (wine) and a stub archive with no executable section
+        // (compiler-rt preinit) all parse to this shape.
+        let results = run(&mut check, "x86_64", vec![]);
+        assert!(
+            results.is_empty(),
+            "no host code must be quiet: {results:?}"
+        );
+
+        // Code only for a foreign machine: a cross archive (AVR
+        // objects in an x86_64 package).
+        let results = run(&mut check, "x86_64", vec![goblin::elf::header::EM_AVR]);
+        assert!(
+            results.is_empty(),
+            "foreign-only code must be quiet: {results:?}"
+        );
+
+        // A foreign member does not shield a host-code member: the
+        // archive still carries host code without debuginfo.
+        let results = run(
+            &mut check,
+            "x86_64",
+            vec![goblin::elf::header::EM_AVR, goblin::elf::header::EM_X86_64],
+        );
+        let lines = lines_for(&results, "static-library-without-debuginfo");
+        assert_eq!(lines.len(), 1, "host code member must fire: {results:?}");
+
+        // The host mapping follows the package arch, not a fixed
+        // machine: x86_64 code is foreign to an aarch64 package and
+        // aarch64 code is its own.
+        let results = run(&mut check, "aarch64", vec![goblin::elf::header::EM_X86_64]);
+        assert!(
+            results.is_empty(),
+            "x86_64 code in an aarch64 package must be quiet: {results:?}"
+        );
+        let results = run(&mut check, "aarch64", vec![goblin::elf::header::EM_AARCH64]);
+        let lines = lines_for(&results, "static-library-without-debuginfo");
+        assert_eq!(lines.len(), 1, "aarch64 host code must fire: {results:?}");
+
+        // An unmapped arch charges any code, as before this gate.
+        let results = run(&mut check, "e2k", vec![goblin::elf::header::EM_AVR]);
+        let lines = lines_for(&results, "static-library-without-debuginfo");
+        assert_eq!(
+            lines.len(),
+            1,
+            "unmapped arch must keep charging any code: {results:?}"
+        );
+    }
+
+    /// Minimal ET_REL ELF64 object whose `.text` (SHF_ALLOC |
+    /// SHF_EXECINSTR, SHT_PROGBITS) holds `text`, for the #847
+    /// code-carrying-member tests. `machine` is the ELF `e_machine`.
+    fn craft_code_object(machine: u16, text: &[u8]) -> Vec<u8> {
+        let mut shstrtab = vec![0u8];
+        let text_name_off = shstrtab.len() as u32;
+        shstrtab.extend_from_slice(b".text\0");
+        let shstrtab_name_off = shstrtab.len() as u32;
+        shstrtab.extend_from_slice(b".shstrtab\0");
+
+        let mut buf = vec![0u8; 64]; // ELF header placeholder
+        let text_off = buf.len() as u64;
+        buf.extend_from_slice(text);
+        let shstrtab_off = buf.len() as u64;
+        buf.extend_from_slice(&shstrtab);
+        while !buf.len().is_multiple_of(8) {
+            buf.push(0);
+        }
+        let shoff = buf.len() as u64;
+
+        // Section headers: NULL + .text + shstrtab.
+        let mut shdrs = vec![0u8; 64];
+        {
+            let mut h = vec![0u8; 64];
+            h[0..4].copy_from_slice(&text_name_off.to_le_bytes());
+            h[4..8].copy_from_slice(&1u32.to_le_bytes()); // SHT_PROGBITS
+            h[8..16].copy_from_slice(&0x6u64.to_le_bytes()); // SHF_ALLOC | SHF_EXECINSTR
+            h[24..32].copy_from_slice(&text_off.to_le_bytes());
+            h[32..40].copy_from_slice(&(text.len() as u64).to_le_bytes());
+            h[48..56].copy_from_slice(&1u64.to_le_bytes());
+            shdrs.extend(h);
+        }
+        {
+            let mut h = vec![0u8; 64];
+            h[0..4].copy_from_slice(&shstrtab_name_off.to_le_bytes());
+            h[4..8].copy_from_slice(&3u32.to_le_bytes()); // SHT_STRTAB
+            h[24..32].copy_from_slice(&shstrtab_off.to_le_bytes());
+            h[32..40].copy_from_slice(&(shstrtab.len() as u64).to_le_bytes());
+            h[48..56].copy_from_slice(&1u64.to_le_bytes());
+            shdrs.extend(h);
+        }
+        buf.extend(shdrs);
+
+        let mut ehdr = vec![0u8; 64];
+        ehdr[0..4].copy_from_slice(b"\x7fELF");
+        ehdr[4] = 2; // ELFCLASS64
+        ehdr[5] = 1; // ELFDATA2LSB
+        ehdr[6] = 1; // EV_CURRENT
+        ehdr[16..18].copy_from_slice(&1u16.to_le_bytes()); // ET_REL
+        ehdr[18..20].copy_from_slice(&machine.to_le_bytes());
+        ehdr[20..24].copy_from_slice(&1u32.to_le_bytes());
+        ehdr[40..48].copy_from_slice(&shoff.to_le_bytes());
+        ehdr[58..60].copy_from_slice(&64u16.to_le_bytes()); // shentsize
+        ehdr[60..62].copy_from_slice(&3u16.to_le_bytes()); // shnum
+        ehdr[62..64].copy_from_slice(&2u16.to_le_bytes()); // shstrndx
+        buf[0..64].copy_from_slice(&ehdr);
+        buf
+    }
+
+    #[test]
+    fn archive_code_machines_recorded_per_member() {
+        // #847 parse level: `code_machines` records exactly the
+        // members carrying machine code, with their machines.
+        let parse = |tag: &str, archive: &[u8]| {
+            let path = std::env::temp_dir().join(format!(
+                "rpmcrab-ar-code-{}-{}",
+                tag,
+                std::process::id()
+            ));
+            std::fs::write(&path, archive).unwrap();
+            let info = ReadelfInfo::parse(path.to_str().unwrap(), "/usr/lib64/libfoo.a");
+            std::fs::remove_file(&path).ok();
+            info
+        };
+
+        // A member with non-zero executable bytes records its machine.
+        let archive = craft_ar_archive(&[("a.o", &craft_code_object(62, &[0x90, 0xc3]))]);
+        let info = parse("host", &archive);
+        assert!(info.failed.is_none(), "must parse: {:?}", info.failed);
+        assert_eq!(info.code_machines, vec![62], "host code member recorded");
+
+        // The wine import-thunk shape: the only executable section is
+        // all zero bytes (a relocation-filled slot), so no code is
+        // recorded even though the section is non-empty.
+        let archive = craft_ar_archive(&[("a.o", &craft_code_object(62, &[0u8; 8]))]);
+        let info = parse("stub", &archive);
+        assert!(info.failed.is_none(), "must parse: {:?}", info.failed);
+        assert!(
+            info.code_machines.is_empty(),
+            "all-zero executable section is not code: {:?}",
+            info.code_machines
+        );
+
+        // A foreign member with real code records the foreign machine.
+        let archive = craft_ar_archive(&[("a.o", &craft_code_object(83, &[0x90, 0xc3]))]);
+        let info = parse("foreign", &archive);
+        assert_eq!(
+            info.code_machines,
+            vec![83],
+            "foreign code recorded as foreign"
+        );
+
+        // An empty archive (the glibc placeholder shape) parses with
+        // no members and records no code.
+        let info = parse("empty", b"!<arch>\n");
+        assert!(
+            info.failed.is_none(),
+            "empty archive must parse: {:?}",
+            info.failed
+        );
+        assert!(info.code_machines.is_empty());
+        assert!(info.sections.is_empty());
+    }
+
+    #[test]
+    fn archive_without_host_code_emits_no_debuginfo_finding() {
+        // #847 emission level, through run_elf_checks: the debuginfo
+        // finding fires only for an archive carrying host code.
+        let config = test_config();
+        let run = |tag: &str, archive: &[u8]| {
+            let path = std::env::temp_dir().join(format!(
+                "rpmcrab-ar-emit-{}-{}",
+                tag,
+                std::process::id()
+            ));
+            std::fs::write(&path, archive).unwrap();
+            let mut check = BinariesCheck::with_tool_dir(&config, None);
+            check.is_archive = true;
+            let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+            let pkgfile = PkgFile {
+                name: "/usr/lib64/libfoo.a".to_string(),
+                path: path.to_str().unwrap().to_string(),
+                magic: "current ar archive".to_string(),
+                mode: 0o100644,
+                ..Default::default()
+            };
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            let analysis =
+                ElfAnalysis::wants_analysis(&pkgfile, false).then(|| ElfAnalysis::parse(&pkgfile));
+            check.run_elf_checks(&pkg, &pkgfile, &config, &mut out, analysis.as_ref());
+            std::fs::remove_file(&path).ok();
+            out.results().to_vec()
+        };
+
+        // All members are zero-filled import slots: no debuginfo finding.
+        let stub = craft_code_object(62, &[0u8; 8]);
+        let archive = craft_ar_archive(&[("a.o", &stub), ("b.o", &stub)]);
+        let results = run("stub", &archive);
+        assert_lacks(&results, "static-library-without-debuginfo");
+
+        // All members carry foreign code: no debuginfo finding.
+        let foreign = craft_code_object(83, &[0x90, 0xc3]);
+        let archive = craft_ar_archive(&[("a.o", &foreign)]);
+        let results = run("foreign", &archive);
+        assert_lacks(&results, "static-library-without-debuginfo");
+
+        // A host-code member alongside a stub member: the finding
+        // fires exactly once (the stub does not shield it).
+        let real = craft_code_object(62, &[0x90, 0xc3]);
+        let archive = craft_ar_archive(&[("a.o", &stub), ("b.o", &real)]);
+        let results = run("mixed", &archive);
+        let lines = lines_for(&results, "static-library-without-debuginfo");
+        assert_eq!(lines.len(), 1, "host code must fire once: {results:?}");
     }
 
     #[test]
