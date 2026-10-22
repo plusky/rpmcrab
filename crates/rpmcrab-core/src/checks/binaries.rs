@@ -3069,6 +3069,7 @@ impl BinariesCheck {
         info: &ReadelfInfo,
         out: &mut Filter,
     ) {
+        use goblin::elf::header::{ET_DYN, ET_EXEC};
         if pkg.arch.is_empty()
             || !default_executable_stack_archs()
                 .is_match(&pkg.arch)
@@ -3097,13 +3098,31 @@ impl BinariesCheck {
             .filter(|h| h.name == "GNU_STACK")
             .collect();
         if stack_headers.is_empty() {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "missing-PT_GNU_STACK-section",
-                &[&pkgfile.name],
-            );
+            // PT_GNU_STACK is a programme header, and its absence is a
+            // statement about how a binary was linked only where the
+            // file is a linked image carrying a programme header table
+            // for the header to be absent from (plusky/rpmcrab#850): a
+            // relocatable object carries no programme headers by
+            // construction, and a linked-type file without a table is
+            // not a loadable image. Separate debuginfo is never loaded
+            // by the dynamic linker, so the absence states nothing
+            // there either: `is_debug` covers the `.debug` name suffix
+            // and the path covers the canonical debuginfo location --
+            // the treatment `check_hardening` already applies to its
+            // findings.
+            if (info.elf_type == ET_EXEC || info.elf_type == ET_DYN)
+                && !info.program_headers.is_empty()
+                && !info.is_debug
+                && !pkgfile.name.starts_with("/usr/lib/debug/")
+            {
+                add_info(
+                    out,
+                    Level::Error,
+                    pkg,
+                    "missing-PT_GNU_STACK-section",
+                    &[&pkgfile.name],
+                );
+            }
         } else if stack_headers[0].flags.contains('E') {
             add_info(out, Level::Error, pkg, "executable-stack", &[&pkgfile.name]);
         }
@@ -7503,6 +7522,189 @@ description = "explicit priority string bypasses the system crypto policy"
         elf.extend_from_slice(&120u64.to_le_bytes()); // p_memsz
         elf.extend_from_slice(&0x1000u64.to_le_bytes()); // p_align
         elf
+    }
+
+    /// A minimal ELF64 with the given `e_type` and programme header
+    /// types, parseable by goblin: the byte-level counterpart of the
+    /// synthetic `ReadelfInfo` shapes, so the executable-stack gate is
+    /// pinned against what the parser produces for each file shape.
+    fn elf_with_phdrs(e_type: u16, phdr_types: &[u32]) -> Vec<u8> {
+        let mut elf: Vec<u8> = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        elf.extend_from_slice(&e_type.to_le_bytes());
+        elf.extend_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+        elf.extend_from_slice(&1u32.to_le_bytes()); // version
+        elf.extend_from_slice(&0u64.to_le_bytes()); // entry
+        elf.extend_from_slice(&64u64.to_le_bytes()); // phoff
+        elf.extend_from_slice(&0u64.to_le_bytes()); // shoff
+        elf.extend_from_slice(&0u32.to_le_bytes()); // flags
+        elf.extend_from_slice(&64u16.to_le_bytes()); // ehsize
+        elf.extend_from_slice(&56u16.to_le_bytes()); // phentsize
+        elf.extend_from_slice(&(phdr_types.len() as u16).to_le_bytes()); // phnum
+        elf.extend_from_slice(&0u16.to_le_bytes()); // shentsize
+        elf.extend_from_slice(&0u16.to_le_bytes()); // shnum
+        elf.extend_from_slice(&0u16.to_le_bytes()); // shstrndx
+        for &p_type in phdr_types {
+            elf.extend_from_slice(&p_type.to_le_bytes());
+            elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags R+X
+            elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset
+            elf.extend_from_slice(&0u64.to_le_bytes()); // p_vaddr
+            elf.extend_from_slice(&0u64.to_le_bytes()); // p_paddr
+            elf.extend_from_slice(&0u64.to_le_bytes()); // p_filesz
+            elf.extend_from_slice(&0u64.to_le_bytes()); // p_memsz
+            elf.extend_from_slice(&0x1000u64.to_le_bytes()); // p_align
+        }
+        elf
+    }
+
+    /// Run `check_executable_stack` over a byte fixture parsed by the
+    /// real parser, under the given package file name.
+    fn executable_stack_results(name: &str, bytes: &[u8]) -> Vec<(String, String)> {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let path = dir.path().join("payload");
+        std::fs::write(&path, bytes).expect("write elf");
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = PkgFile {
+            name: name.to_string(),
+            path: path.to_string_lossy().into_owned(),
+            magic: "ELF 64-bit LSB executable, x86-64".to_string(),
+            mode: 0o100755,
+            ..Default::default()
+        };
+        let info = ReadelfInfo::parse(&pkgfile.path, &pkgfile.name);
+        assert!(
+            info.failed.is_none(),
+            "fixture must parse: {:?}",
+            info.failed
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_executable_stack(&pkg, &pkgfile, &info, &mut out);
+        out.results().to_vec()
+    }
+
+    #[test]
+    fn missing_gnu_stack_fires_for_linked_images_with_phdr_tables() {
+        use goblin::elf::header::{ET_DYN, ET_EXEC};
+        use goblin::elf::program_header::{PT_DYNAMIC, PT_LOAD};
+        // The population the finding addresses: executables and shared
+        // objects whose programme header table has no PT_GNU_STACK.
+        for (e_type, phdrs) in [
+            (ET_EXEC, &[PT_LOAD][..]),
+            (ET_DYN, &[PT_LOAD, PT_DYNAMIC][..]),
+        ] {
+            let results = executable_stack_results("/usr/bin/tool", &elf_with_phdrs(e_type, phdrs));
+            let lines = lines_for(&results, "missing-PT_GNU_STACK-section");
+            assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+            assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+            assert!(
+                lines[0].contains("/usr/bin/tool"),
+                "detail names the file: {}",
+                lines[0]
+            );
+        }
+    }
+
+    #[test]
+    fn missing_gnu_stack_silent_without_phdr_table() {
+        use goblin::elf::header::{ET_DYN, ET_EXEC};
+        // A linked-type file with no programme header table is not a
+        // loadable image (the firmware-blob shape): there is no header
+        // to be missing.
+        for e_type in [ET_EXEC, ET_DYN] {
+            let results =
+                executable_stack_results("/usr/share/fw/blob", &elf_with_phdrs(e_type, &[]));
+            assert_lacks(&results, "missing-PT_GNU_STACK-section");
+            assert_lacks(&results, "executable-stack");
+        }
+    }
+
+    #[test]
+    fn missing_gnu_stack_silent_for_relocatable_objects() {
+        use goblin::elf::header::ET_REL;
+        // Kernel modules outside the module paths, Go .syso objects
+        // and compiler .or files are ET_REL: no programme headers by
+        // construction.
+        let results =
+            executable_stack_results("/usr/share/blob/nsm.ko", &elf_with_phdrs(ET_REL, &[]));
+        assert_lacks(&results, "missing-PT_GNU_STACK-section");
+        assert_lacks(&results, "executable-stack");
+    }
+
+    #[test]
+    fn missing_gnu_stack_silent_for_debuginfo() {
+        use goblin::elf::header::ET_EXEC;
+        use goblin::elf::program_header::{PT_DYNAMIC, PT_LOAD};
+        // The ovmf shape (plusky/rpmcrab#850): EDK2 GdbSyms companions
+        // are ET_EXEC with a real programme header table, stored as
+        // debuginfo the dynamic linker never loads. The `.debug` name
+        // and the canonical debuginfo location each suffice.
+        let bytes = elf_with_phdrs(ET_EXEC, &[PT_LOAD, PT_LOAD, PT_DYNAMIC]);
+        for name in [
+            "/usr/lib/debug/ovmf-x86_64-4m/DebugPkg/GdbSyms/GdbSyms/DEBUG/GdbSyms.debug",
+            "/usr/lib/debug/ovmf-x86_64-4m/DebugPkg/GdbSyms/GdbSyms/DEBUG/GdbSyms.dll",
+        ] {
+            let results = executable_stack_results(name, &bytes);
+            assert_lacks(&results, "missing-PT_GNU_STACK-section");
+        }
+    }
+
+    fn executable_stack_syn(
+        elf_type: u16,
+        headers: Vec<ElfProgramHeader>,
+    ) -> Vec<(String, String)> {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/bin/tool", "ELF 64-bit LSB executable, x86-64");
+        let mut info = syn_info();
+        info.elf_type = elf_type;
+        info.program_headers = headers;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_executable_stack(&pkg, &pkgfile, &info, &mut out);
+        out.results().to_vec()
+    }
+
+    fn phdr(name: &str, flags: &str) -> ElfProgramHeader {
+        ElfProgramHeader {
+            name: name.to_string(),
+            flags: flags.to_string(),
+        }
+    }
+
+    #[test]
+    fn missing_gnu_stack_gate_keys_on_elf_type() {
+        use goblin::elf::header::{ET_CORE, ET_DYN, ET_NONE, ET_REL};
+        // The type arm of the gate does its own work: even with a
+        // programme header present, a non-linked type stays silent,
+        // while ET_DYN with a table fires.
+        for elf_type in [ET_REL, ET_CORE, ET_NONE] {
+            let results = executable_stack_syn(elf_type, vec![phdr("LOAD", "R E")]);
+            assert_lacks(&results, "missing-PT_GNU_STACK-section");
+        }
+        let results = executable_stack_syn(ET_DYN, vec![phdr("LOAD", "R E")]);
+        assert_eq!(
+            lines_for(&results, "missing-PT_GNU_STACK-section").len(),
+            1,
+            "ET_DYN with a table fires: {results:?}"
+        );
+    }
+
+    #[test]
+    fn gnu_stack_present_arms_unchanged() {
+        use goblin::elf::header::ET_EXEC;
+        // A non-executable GNU_STACK silences both findings; an
+        // executable one keeps firing executable-stack.
+        let results = executable_stack_syn(ET_EXEC, vec![phdr("GNU_STACK", "RW ")]);
+        assert_lacks(&results, "missing-PT_GNU_STACK-section");
+        assert_lacks(&results, "executable-stack");
+        let results = executable_stack_syn(ET_EXEC, vec![phdr("GNU_STACK", "RWE")]);
+        assert_lacks(&results, "missing-PT_GNU_STACK-section");
+        assert_eq!(
+            lines_for(&results, "executable-stack").len(),
+            1,
+            "executable-stack fires: {results:?}"
+        );
     }
 
     #[test]
