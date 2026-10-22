@@ -817,7 +817,7 @@ neither the set of findings nor the *output contract*. **0.2.0** was
 the parity milestone — the frozen surface (§4) matched rpmlint
 2.10.0 (openSUSE flavour) — and since then the project deliberately
 diverges wherever rpmlint is wrong, with every departure recorded in
-the ledger (§6). The current release is **0.3.0**. A minor bump may
+the ledger (§6). The current release is **0.3.1**. A minor bump may
 change behaviour substantially, including a deliberate change to the
 frozen output contract. A major bump is reserved for an utter breaking
 change, such as dropping rpmlint compatibility entirely. **1.0** is an
