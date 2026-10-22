@@ -24,7 +24,7 @@ use std::time::Instant;
 use librpm::verify::VerifyOptions;
 use librpm::{OwnedTagData, PackageHeader, Tag};
 
-use dep::{DepInfo, parse_dep_infos, string_to_version};
+use dep::{DepInfo, leaf_account_capability, parse_dep_infos, string_to_version};
 use pkgfile::PkgFile;
 use spec::SpecPkg;
 
@@ -32,6 +32,15 @@ use spec::SpecPkg;
 /// SCRIPT_{PRE,POST,PREUN,POSTUN}` — the legacy prereq bit plus the four
 /// script-sense bits (`rpmds.h`).
 const PREREQ_FLAG: u32 = (1 << 6) | (1 << 9) | (1 << 10) | (1 << 11) | (1 << 12);
+
+/// The sense mask of the account Requires rpm's user/group dependency
+/// generator derives from a package's file ownership: `SCRIPT_PRE |
+/// SCRIPT_POSTUN` (bits 9 and 12) — the account is needed before the
+/// package's scriptlets run and remains needed until its files are
+/// removed. A packager-written `Requires(pre): user(<name>)` carries
+/// `SCRIPT_PRE` alone, so the two shapes stay distinguishable in the
+/// raw header flags.
+const ACCOUNT_GENERATOR_FLAG: u32 = (1 << 9) | (1 << 12);
 
 /// The scriptlet tags (rpmlint `SCRIPT_TAGS`), `(body, prog, label)`.
 pub const SCRIPT_TAGS: &[(Tag, Tag, &str)] = &[
@@ -758,7 +767,10 @@ impl Pkg {
 
 /// Split `REQUIRENAME`/`REQUIREFLAGS`/`REQUIREVERSION` into `(requires,
 /// prereq)`, moving entries whose flags carry `PREREQ_FLAG` (with the prereq
-/// bits stripped) into `prereq` (rpmlint `_gather_aux`).
+/// bits stripped) into `prereq` (rpmlint `_gather_aux`). Account-capability
+/// entries carrying `ACCOUNT_GENERATOR_FLAG` are dropped instead of moved:
+/// the generator derived them from this package's file ownership, so as
+/// declarations of the account they restate the ownership itself.
 fn gather_requires(header: &PackageHeader) -> (Vec<DepInfo>, Vec<DepInfo>) {
     let names = tags::str_array(header, Tag::REQUIRENAME);
     let flags = tags::int32_array(header, Tag::REQUIREFLAGS);
@@ -772,13 +784,26 @@ fn gather_requires(header: &PackageHeader) -> (Vec<DepInfo>, Vec<DepInfo>) {
         let flag = flags[i] as u32;
         let (epoch, version, release) = string_to_version(&versions[i]);
         if flag & PREREQ_FLAG != 0 {
-            prereq.push(DepInfo {
+            let dep = DepInfo {
                 name,
                 flags: flag & !PREREQ_FLAG,
                 epoch,
                 version,
                 release,
-            });
+            };
+            // The generator's account stamp is dropped here, the one
+            // place the raw header flags are still visible (the split
+            // strips the scriptlet bits from the stored entry).
+            // Packager-written account Requires reach `prereq` intact.
+            if flag & ACCOUNT_GENERATOR_FLAG == ACCOUNT_GENERATOR_FLAG
+                && dep
+                    .leaves()
+                    .iter()
+                    .any(|leaf| leaf_account_capability(leaf).is_some())
+            {
+                continue;
+            }
+            prereq.push(dep);
         } else {
             requires.push(DepInfo {
                 name,
