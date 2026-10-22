@@ -765,12 +765,31 @@ impl Pkg {
     }
 }
 
+/// Whether a raw header entry is rpm's user/group dependency
+/// generator stamp: it carries `ACCOUNT_GENERATOR_FLAG` and every
+/// dependency leaf it expands to is an account capability. The
+/// generator only emits simple account entries, so a rich entry
+/// carrying the stamp flags but also naming a non-account leaf is a
+/// packager-written entry and survives whole -- dropping it would
+/// lose that leaf for every downstream check.
+fn is_generator_account_stamp(flag: u32, dep: &DepInfo) -> bool {
+    if flag & ACCOUNT_GENERATOR_FLAG != ACCOUNT_GENERATOR_FLAG {
+        return false;
+    }
+    let leaves = dep.leaves();
+    !leaves.is_empty()
+        && leaves
+            .iter()
+            .all(|leaf| leaf_account_capability(leaf).is_some())
+}
+
 /// Split `REQUIRENAME`/`REQUIREFLAGS`/`REQUIREVERSION` into `(requires,
 /// prereq)`, moving entries whose flags carry `PREREQ_FLAG` (with the prereq
-/// bits stripped) into `prereq` (rpmlint `_gather_aux`). Account-capability
-/// entries carrying `ACCOUNT_GENERATOR_FLAG` are dropped instead of moved:
-/// the generator derived them from this package's file ownership, so as
-/// declarations of the account they restate the ownership itself.
+/// bits stripped) into `prereq` (rpmlint `_gather_aux`). Entries that are
+/// the generator's account stamp (see `is_generator_account_stamp`) are
+/// dropped instead of moved: the generator derived them from this
+/// package's file ownership, so as declarations of the account they
+/// restate the ownership itself.
 fn gather_requires(header: &PackageHeader) -> (Vec<DepInfo>, Vec<DepInfo>) {
     let names = tags::str_array(header, Tag::REQUIRENAME);
     let flags = tags::int32_array(header, Tag::REQUIREFLAGS);
@@ -795,12 +814,7 @@ fn gather_requires(header: &PackageHeader) -> (Vec<DepInfo>, Vec<DepInfo>) {
             // place the raw header flags are still visible (the split
             // strips the scriptlet bits from the stored entry).
             // Packager-written account Requires reach `prereq` intact.
-            if flag & ACCOUNT_GENERATOR_FLAG == ACCOUNT_GENERATOR_FLAG
-                && dep
-                    .leaves()
-                    .iter()
-                    .any(|leaf| leaf_account_capability(leaf).is_some())
-            {
+            if is_generator_account_stamp(flag, &dep) {
                 continue;
             }
             prereq.push(dep);
@@ -1299,6 +1313,49 @@ mod tests {
         };
         assert_eq!(err_path, &path);
         assert!(err.to_string().starts_with("failed to open"), "got: {err}");
+    }
+
+    fn stamp_dep(name: &str) -> DepInfo {
+        DepInfo {
+            name: name.to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        }
+    }
+
+    #[test]
+    fn generator_account_stamp_requires_all_leaves_to_be_accounts() {
+        // The generator's own shapes: a plain account capability and a
+        // rich entry whose leaves are all account capabilities.
+        assert!(is_generator_account_stamp(
+            ACCOUNT_GENERATOR_FLAG,
+            &stamp_dep("user(svcfoo)")
+        ));
+        assert!(is_generator_account_stamp(
+            ACCOUNT_GENERATOR_FLAG,
+            &stamp_dep("(user(svcfoo) or group(svcfoo))")
+        ));
+        // A rich entry that also names a non-account leaf is not a pure
+        // stamp: it survives whole, so `bar` stays visible to every
+        // downstream check.
+        assert!(!is_generator_account_stamp(
+            ACCOUNT_GENERATOR_FLAG,
+            &stamp_dep("(user(svcfoo) or bar)")
+        ));
+        // A non-account entry carrying the stamp flags is not a stamp.
+        assert!(!is_generator_account_stamp(
+            ACCOUNT_GENERATOR_FLAG,
+            &stamp_dep("bar")
+        ));
+        // A packager-written Requires(pre) carries SCRIPT_PRE alone, not
+        // the generator's full sense mask, so it is not a stamp either.
+        assert!(!is_generator_account_stamp(
+            1 << 9,
+            &stamp_dep("user(svcfoo)")
+        ));
+        assert!(!is_generator_account_stamp(0, &stamp_dep("user(svcfoo)")));
     }
 }
 
