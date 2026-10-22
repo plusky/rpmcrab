@@ -596,8 +596,8 @@ pub fn run() -> ExitCode {
     }
 
     // rpmlintrc: explicit `-r` files win outright; with none, auto-discovery
-    // looks in the configured `RpmlintrcSearchPaths` and then beside a
-    // single positional argument (`lint.py:198-224`, rpmlint#1592).
+    // looks in the configured `RpmlintrcSearchPaths` and then beside every
+    // positional argument (rpmlint#1592; issue #830).
     let rc_files = discover_rpmlintrc_files(&cli.rpmlintrc, &cfg.rpmlintrc_search_paths, &files);
     if rc_files.len() > 1 {
         warn!(
@@ -823,8 +823,13 @@ pub fn run() -> ExitCode {
 /// `fnmatch` and `Path.glob` reduce to.
 /// Auto-discover rpmlintrc files: explicit `-r` files win outright; with
 /// none, look in each configured `RpmlintrcSearchPaths` directory
-/// (rpmlint#1592), then beside a lone positional argument
-/// (`lint.py:198-224`).
+/// (rpmlint#1592), then beside every positional argument: a file argument
+/// contributes its directory, a directory argument contributes itself.
+/// The beside-argument lookup runs only when the search paths found
+/// nothing, and its results are deduplicated by path, so an rpmlintrc
+/// shared by several arguments loads once. Looking beside every argument
+/// diverges from the reference's lone-argument lookup (`lint.py:198-224`);
+/// the divergence is recorded in `tests/parity/divergences.toml` (#830).
 fn discover_rpmlintrc_files(
     explicit: &[PathBuf],
     search_paths: &[String],
@@ -835,14 +840,21 @@ fn discover_rpmlintrc_files(
         for dir in search_paths {
             rc_files.extend(find_rpmlintrc_files(Path::new(dir)));
         }
-        // A lone positional argument also looks next to itself, so that
-        // `rpmlint foo.spec` picks up `foo.rpmlintrc`.
-        if rc_files.is_empty() && positional.len() == 1 {
-            let mut arg = positional[0].clone();
-            if arg.is_file() {
-                arg.pop();
+        // Every positional argument also looks next to itself, so that
+        // `rpmlint foo.spec bar.spec` picks up both `foo.rpmlintrc` and
+        // `bar.rpmlintrc`.
+        if rc_files.is_empty() {
+            for arg in positional {
+                let mut dir = arg.clone();
+                if dir.is_file() {
+                    dir.pop();
+                }
+                for rc in find_rpmlintrc_files(&dir) {
+                    if !rc_files.contains(&rc) {
+                        rc_files.push(rc);
+                    }
+                }
             }
-            rc_files.extend(find_rpmlintrc_files(&arg));
         }
     }
     rc_files
@@ -945,7 +957,7 @@ mod tests {
 
     #[test]
     fn discover_rpmlintrc_falls_back_to_positional_dir() {
-        // No explicit files and empty search paths: look beside the lone
+        // No explicit files and empty search paths: look beside the
         // positional argument.
         let dir = tempfile::tempdir().unwrap();
         let pkg = dir.path().join("foo.spec");
@@ -954,6 +966,71 @@ mod tests {
         std::fs::write(&rc, "addFilter('x')\n").unwrap();
         let found = discover_rpmlintrc_files(&[], &[], &[pkg]);
         assert_eq!(found, vec![rc]);
+    }
+
+    #[test]
+    fn discover_rpmlintrc_looks_beside_every_positional() {
+        // Issue #830: with several positional arguments, each one's
+        // directory is consulted, in argument order.
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let pkg_a = dir_a.path().join("aaa.spec");
+        let pkg_b = dir_b.path().join("bbb.spec");
+        std::fs::write(&pkg_a, "Name: aaa\n").unwrap();
+        std::fs::write(&pkg_b, "Name: bbb\n").unwrap();
+        let rc_a = dir_a.path().join("aaa.rpmlintrc");
+        let rc_b = dir_b.path().join("bbb-rpmlintrc");
+        std::fs::write(&rc_a, "addFilter('x')\n").unwrap();
+        std::fs::write(&rc_b, "addFilter('y')\n").unwrap();
+        let found = discover_rpmlintrc_files(&[], &[], &[pkg_b, pkg_a]);
+        assert_eq!(found, vec![rc_b, rc_a]);
+    }
+
+    #[test]
+    fn discover_rpmlintrc_deduplicates_a_shared_rc() {
+        // Two arguments in one directory share its rpmlintrc files: each
+        // discovered file is returned once, so it loads once.
+        let dir = tempfile::tempdir().unwrap();
+        let pkg_a = dir.path().join("aaa.spec");
+        let pkg_b = dir.path().join("bbb.spec");
+        std::fs::write(&pkg_a, "Name: aaa\n").unwrap();
+        std::fs::write(&pkg_b, "Name: bbb\n").unwrap();
+        let rc = dir.path().join("shared.rpmlintrc");
+        std::fs::write(&rc, "addFilter('x')\n").unwrap();
+        let found = discover_rpmlintrc_files(&[], &[], &[pkg_a, pkg_b]);
+        assert_eq!(found, vec![rc]);
+    }
+
+    #[test]
+    fn discover_rpmlintrc_beside_a_directory_argument_reads_inside_it() {
+        // A directory argument contributes itself: the rpmlintrc files
+        // inside it are discovered, for any number of arguments.
+        let dir = tempfile::tempdir().unwrap();
+        let inner = dir.path().join("tree");
+        std::fs::create_dir(&inner).unwrap();
+        let rc = inner.join("tree.rpmlintrc");
+        std::fs::write(&rc, "addFilter('x')\n").unwrap();
+        let other = dir.path().join("other.spec");
+        std::fs::write(&other, "Name: other\n").unwrap();
+        let found = discover_rpmlintrc_files(&[], &[], &[other, inner]);
+        assert_eq!(found, vec![rc]);
+    }
+
+    #[test]
+    fn discover_rpmlintrc_search_paths_win_over_positional_dirs() {
+        // A search-path hit suppresses the beside-argument lookup
+        // entirely, however many positional arguments there are.
+        let search = tempfile::tempdir().unwrap();
+        let search_rc = search.path().join("search.rpmlintrc");
+        std::fs::write(&search_rc, "addFilter('x')\n").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("foo.spec");
+        std::fs::write(&pkg, "Name: foo\n").unwrap();
+        let beside_rc = dir.path().join("foo.rpmlintrc");
+        std::fs::write(&beside_rc, "addFilter('y')\n").unwrap();
+        let found =
+            discover_rpmlintrc_files(&[], &[search.path().to_string_lossy().into_owned()], &[pkg]);
+        assert_eq!(found, vec![search_rc]);
     }
 
     #[test]
