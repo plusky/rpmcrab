@@ -755,6 +755,10 @@ struct FilesSectionScan {
     /// (`*.dist-info`, `*.egg-info`, `*-info`): the build system
     /// assembles the installed tree, licence files included.
     has_info_entry: bool,
+    /// A `%doc` directory argument: it ships whatever `%install`
+    /// left in the named directory, which may be a licence file the
+    /// spec text does not name (#831).
+    has_indeterminate_doc: bool,
 }
 
 /// The `%files` entry directives that lead a line, by the shape their
@@ -2356,10 +2360,27 @@ impl SpecCheck {
             }
             let is_dir = dir_next || token.ends_with('/');
             dir_next = false;
+            if doc_line && is_dir {
+                // A `%doc` directory argument ships the directory's
+                // contents, none of which the spec text names.
+                scan.has_indeterminate_doc = true;
+            }
             if is_dir {
                 continue;
             }
             let basename = token.rsplit('/').next().unwrap_or(token);
+            if doc_line
+                && !basename.contains('.')
+                && token.contains('/')
+                && !token.contains(['*', '?', '['])
+                && !in_exec_location(token)
+            {
+                // A `%doc` path whose final component carries no
+                // extension names a directory as often as a file;
+                // the directory's contents are fixed by `%install`,
+                // not by the spec text.
+                scan.has_indeterminate_doc = true;
+            }
             if name_carries_licence(basename) || glob_prefix_carries_licence(basename) {
                 scan.plain_license_entry = true;
             }
@@ -2408,7 +2429,7 @@ impl SpecCheck {
             .any(|s| s.has_license_line || s.doc_license || s.plain_license_entry);
         let decidable = sections
             .iter()
-            .all(|s| !s.from_list_file && !s.has_generator_macro);
+            .all(|s| !s.from_list_file && !s.has_generator_macro && !s.has_indeterminate_doc);
         let explicit_entries: u32 = sections.iter().map(|s| s.explicit_entries).sum();
         let explicit_doc_entries: u32 = sections.iter().map(|s| s.explicit_doc_entries).sum();
         // Shapes whose shipped set the text scan cannot judge stay
@@ -5267,6 +5288,46 @@ Patch0: foo.patch
             has(&buried, "no-license-file-in-spec"),
             "results: {buried:?}"
         );
+    }
+
+    #[test]
+    fn no_license_file_doc_directory_indeterminate_831() {
+        let hdr = "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n";
+        let run = |body: &str| run_mini(&format!("{hdr}%files\n{body}"));
+        // A bare-directory %doc argument ships whatever %install left
+        // in it, licence file or not: the E stays silent (dbench).
+        let dir = run("%{_bindir}/foo\n%doc %{_docdir}/foo\n");
+        assert!(!has(&dir, "no-license-file-in-spec"), "results: {dir:?}");
+        assert!(!has(&dir, "license-file-as-doc"), "results: {dir:?}");
+        // The trailing-slash form names the same shape.
+        let slash = run("%{_bindir}/foo\n%doc docs/\n");
+        assert!(
+            !has(&slash, "no-license-file-in-spec"),
+            "results: {slash:?}"
+        );
+        // The E is spec-level: an indeterminate entry in a sibling
+        // section silences it for the whole spec.
+        let sibling = run_mini(&format!(
+            "{hdr}%files\n%{{_bindir}}/foo\n%doc README.md\n%files doc\n%doc %{{_docdir}}/foo\n"
+        ));
+        assert!(
+            !has(&sibling, "no-license-file-in-spec"),
+            "results: {sibling:?}"
+        );
+        // Plain %doc files stay decidable: the E fires.
+        let dotted = run("%{_bindir}/foo\n%doc README.md NEWS.txt\n");
+        assert!(
+            has(&dotted, "no-license-file-in-spec"),
+            "results: {dotted:?}"
+        );
+        // A bare %doc name is a file the packager names individually;
+        // its basename is the evidence, and it carries no stem.
+        let bare = run("%{_bindir}/foo\n%doc README ChangeLog\n");
+        assert!(has(&bare, "no-license-file-in-spec"), "results: {bare:?}");
+        // An extension-less %doc path in an exec location names a
+        // file, as elsewhere in the scan.
+        let exec = run("%{_bindir}/foo\n%doc %{_bindir}/foodoc\n");
+        assert!(has(&exec, "no-license-file-in-spec"), "results: {exec:?}");
     }
 
     #[test]
