@@ -323,10 +323,18 @@ struct ReadelfInfo {
     /// property note records.
     has_endbr64: bool,
     failed: Option<String>,
+    /// An ar archive with members, none of which is an ELF object:
+    /// every member is in another object format (COFF, wasm, LLVM
+    /// bitcode, GIMPLE offload text, plain data), so the archive is
+    /// outside the ELF checks' remit. Set by `parse_archive`.
+    no_elf_members: bool,
 }
 
 /// ar archive magic: `!<arch>` followed by a newline.
 const AR_MAGIC: &[u8; 8] = b"!<arch>\n";
+
+/// ELF identification magic: `0x7f` followed by `ELF`.
+const ELF_MAGIC: &[u8; 4] = b"\x7fELF";
 
 impl ReadelfInfo {
     fn empty(name: &str) -> Self {
@@ -355,6 +363,7 @@ impl ReadelfInfo {
             x86_feature_1_and: X86Feature1And::Absent,
             has_endbr64: false,
             failed: None,
+            no_elf_members: false,
         }
     }
 
@@ -392,8 +401,13 @@ impl ReadelfInfo {
     }
 
     /// Parse an ar archive member by member, mirroring readelf run over
-    /// the archive. A member that is not a parseable ELF fails the whole
-    /// file, exactly like readelf's nonzero exit does for the reference.
+    /// the archive. A member that presents as an ELF object (ELF magic)
+    /// and then fails to parse fails the whole file, exactly like
+    /// readelf's nonzero exit does for the reference. A member in
+    /// another object format (COFF, wasm, LLVM bitcode, GIMPLE offload
+    /// text, plain data) is outside the ELF checks' remit: it is
+    /// skipped, and an archive whose members are all in other formats
+    /// is marked `no_elf_members` so the ELF checks stay silent on it.
     fn parse_archive(data: &[u8], name: &str) -> Self {
         let mut info = Self::empty(name);
         let archive = match goblin::archive::Archive::parse(data) {
@@ -403,6 +417,8 @@ impl ReadelfInfo {
                 return info;
             }
         };
+        let mut members = 0usize;
+        let mut elf_members = 0usize;
         for i in 0..archive.len() {
             let Some(member) = archive.get_at(i) else {
                 continue;
@@ -415,6 +431,11 @@ impl ReadelfInfo {
                     return info;
                 }
             };
+            members += 1;
+            if !bytes.starts_with(ELF_MAGIC) {
+                continue;
+            }
+            elf_members += 1;
             match parse_elf(bytes) {
                 Ok(elf) => info.fill_from_elf(&elf, bytes),
                 Err(e) => {
@@ -423,6 +444,7 @@ impl ReadelfInfo {
                 }
             }
         }
+        info.no_elf_members = members > 0 && elf_members == 0;
         info
     }
 
@@ -3625,6 +3647,11 @@ impl BinariesCheck {
             }
         };
         let info = &analysis.info;
+        // An archive whose members are all in other object formats has
+        // no ELF content for any of these checks to read.
+        if info.no_elf_members {
+            return;
+        }
         if let Some(reason) = &info.failed {
             add_info(
                 out,
@@ -4737,6 +4764,7 @@ mod tests {
                 bind_now: false,
                 has_dynamic: false,
                 failed: None,
+                no_elf_members: false,
             };
             let pkgfile = PkgFile {
                 name: name.to_string(),
@@ -6935,6 +6963,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 bind_now: false,
                 has_dynamic: false,
                 failed: None,
+                no_elf_members: false,
                 is_rust: false,
                 is_zig: false,
             };
@@ -7073,6 +7102,7 @@ description = "explicit priority string bypasses the system crypto policy"
             bind_now: false,
             has_dynamic: true,
             failed: None,
+            no_elf_members: false,
             is_rust: false,
             is_zig: false,
         }
@@ -8132,22 +8162,131 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
-    fn archive_with_non_elf_member_fails_like_readelf() {
-        // The reference's readelf exits nonzero when any member is not an
-        // ELF object, failing the whole file.
+    fn archive_with_non_elf_member_skips_that_member() {
+        // #846: a member in another object format is outside the ELF
+        // checks' remit. The member is named like an object file: the
+        // skip is by content (no ELF magic), never by name.
         let m1 = craft_shlib_elf(false, None, None, &[]);
-        let archive = craft_ar_archive(&[("a.o", &m1), ("note.txt", b"hello\n")]);
-        let path = std::env::temp_dir().join(format!("rpmcrab-ar-mixed-{}", std::process::id()));
+        let archive = craft_ar_archive(&[("a.o", &m1), ("data.o", b"hello\n")]);
+        let path = std::env::temp_dir().join(format!("rpmcrab-ar-nonelf-{}", std::process::id()));
         std::fs::write(&path, &archive).unwrap();
 
         let info = ReadelfInfo::parse(path.to_str().unwrap(), "/usr/lib64/libfoo.a");
         assert!(
-            info.failed.is_some(),
-            "non-ELF member must fail the whole archive"
+            info.failed.is_none(),
+            "non-ELF member must not fail the archive: {:?}",
+            info.failed
+        );
+        assert!(
+            !info.no_elf_members,
+            "the ELF member keeps the archive in the ELF checks' remit"
+        );
+        // The ELF member's metadata is still merged.
+        let names: Vec<&str> = info
+            .sections
+            .iter()
+            .flatten()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&".shstrtab"),
+            "ELF member sections merged: {names:?}"
         );
 
-        // Drive the emission path: run_elf_checks must surface the failure
-        // as E: readelf-failed, not just record it on the struct.
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn archive_with_only_non_elf_members_stays_silent() {
+        // #846: the swept foreign formats in one archive -- a COFF
+        // object, a wasm object, an LLVM bitcode object, a GIMPLE
+        // offload text member and a plain-text member, each named like
+        // an object file. No member presents as an ELF object, so the
+        // archive is outside the ELF checks' remit and run_elf_checks
+        // emits nothing for it: the archive findings that read the
+        // merged sections (lto-no-text-in-archive,
+        // static-library-without-symtab, static-library-without-debuginfo)
+        // stay silent on it too.
+        let coff: &[u8] = b"\x64\x86\x06\x00\x00\x00\x00\x00\x36\x01\x00\x00\x0e\x00\x00\x00";
+        let wasm: &[u8] = b"\x00asm\x01\x00\x00\x00";
+        let bitcode: &[u8] = b"BC\xc0\xde\x35\x14\x00\x00";
+        let gimple: &[u8] = b"// BEGIN PREAMBLE\n.version\n";
+        let archive = craft_ar_archive(&[
+            ("coff.o", coff),
+            ("wasm.o", wasm),
+            ("bitcode.o", bitcode),
+            ("gimple.o", gimple),
+            ("note.o", b"hello\n"),
+        ]);
+        let path = std::env::temp_dir().join(format!("rpmcrab-ar-foreign-{}", std::process::id()));
+        std::fs::write(&path, &archive).unwrap();
+
+        let info = ReadelfInfo::parse(path.to_str().unwrap(), "/usr/lib64/libfoo.a");
+        assert!(
+            info.failed.is_none(),
+            "foreign members must not fail the archive: {:?}",
+            info.failed
+        );
+        assert!(
+            info.no_elf_members,
+            "an archive with members but no ELF member is marked"
+        );
+
+        // Drive the emission path: no finding of any kind.
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = PkgFile {
+            name: "/usr/lib64/libfoo.a".to_string(),
+            path: path.to_str().unwrap().to_string(),
+            magic: "current ar archive".to_string(),
+            mode: 0o100644,
+            ..Default::default()
+        };
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let analysis =
+            ElfAnalysis::wants_analysis(&pkgfile, false).then(|| ElfAnalysis::parse(&pkgfile));
+        check.run_elf_checks(&pkg, &pkgfile, &config, &mut out, analysis.as_ref());
+        let results = out.results().to_vec();
+        assert!(
+            results.is_empty(),
+            "foreign archive must produce no findings: {results:?}"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn archive_with_corrupt_elf_member_fails() {
+        // #846 firing control: a member that presents as an ELF object
+        // (ELF magic) and then fails to parse still fails the whole
+        // archive, even when an earlier member is in another format
+        // and is skipped.
+        let good = craft_shlib_elf(false, None, None, &[]);
+        let mut corrupt = good.clone();
+        corrupt.truncate(32);
+        let archive =
+            craft_ar_archive(&[("note.o", b"hello\n"), ("a.o", &good), ("bad.o", &corrupt)]);
+        let path = std::env::temp_dir().join(format!("rpmcrab-ar-corrupt-{}", std::process::id()));
+        std::fs::write(&path, &archive).unwrap();
+
+        let info = ReadelfInfo::parse(path.to_str().unwrap(), "/usr/lib64/libfoo.a");
+        let failed = info
+            .failed
+            .clone()
+            .expect("corrupt ELF member must fail the archive");
+        assert!(
+            failed.contains("bad.o"),
+            "failure names the corrupt member: {failed}"
+        );
+        assert!(
+            !info.no_elf_members,
+            "an archive with ELF members is in the ELF checks' remit"
+        );
+
+        // Drive the emission path: run_elf_checks must surface the
+        // failure as E: readelf-failed, exactly once.
         let config = test_config();
         let mut check = BinariesCheck::with_tool_dir(&config, None);
         check.is_archive = true;
