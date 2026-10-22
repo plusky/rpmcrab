@@ -318,6 +318,13 @@ struct ReadelfInfo {
     /// it is the binary's imports, complete across symbol types, with no
     /// defined exports mixed in.
     undefined_functions: Vec<String>,
+    /// Undefined FUNC-type symbol names from both `.symtab` and `.dynsym`:
+    /// functions the object references but does not define. A definition
+    /// site carries a real section index instead of `SHN_UNDEF`, so the
+    /// library that implements a function never lands in this set; the
+    /// mktemp call check reads it for archives, where the definition
+    /// site is a separate member object and not a call site.
+    undefined_function_refs: Vec<String>,
     is_shlib: bool,
     is_debug: bool,
     /// True when the binary was produced by the Rust toolchain.
@@ -392,6 +399,7 @@ impl ReadelfInfo {
             program_headers: Vec::new(),
             functions: Vec::new(),
             undefined_functions: Vec::new(),
+            undefined_function_refs: Vec::new(),
             // The reference derives is_shlib and is_debug from the file name,
             // not the ELF content (readelfparser.py). A PIE executable or Go
             // binary is ET_DYN but is not a shared library for these checks.
@@ -599,6 +607,9 @@ impl ReadelfInfo {
                 if let Some(name) = elf.strtab.get_at(sym.st_name) {
                     if !name.is_empty() {
                         self.functions.push(name.to_string());
+                        if sym.st_shndx == goblin::elf::section_header::SHN_UNDEF as usize {
+                            self.undefined_function_refs.push(name.to_string());
+                        }
                     }
                 }
             }
@@ -622,6 +633,9 @@ impl ReadelfInfo {
                     }
                     if sym.st_shndx == goblin::elf::section_header::SHN_UNDEF as usize {
                         self.undefined_functions.push(name.to_string());
+                        if ty == goblin::elf::sym::STT_FUNC {
+                            self.undefined_function_refs.push(name.to_string());
+                        }
                     }
                 }
             }
@@ -691,6 +705,15 @@ impl ReadelfInfo {
     }
     fn has_function_matching(&self, regex: &fancy_regex::Regex) -> bool {
         self.functions
+            .iter()
+            .any(|s| regex.is_match(s).unwrap_or(false))
+    }
+
+    /// The archive-member view of `has_function_matching`: only symbols
+    /// the object references but does not define match, so a definition
+    /// site (the archive member implementing the function) stays silent.
+    fn has_undefined_function_matching(&self, regex: &fancy_regex::Regex) -> bool {
+        self.undefined_function_refs
             .iter()
             .any(|s| regex.is_match(s).unwrap_or(false))
     }
@@ -3620,7 +3643,20 @@ impl BinariesCheck {
         let setgid = info.has_function_matching(&self.setgid_call_regex);
         let setuid = info.has_function_matching(&self.setuid_call_regex);
         let setgroups = info.has_function_matching(&self.setgroups_call_regex);
-        let mktemp = info.has_function_matching(&self.mktemp_call_regex);
+        // An archive charges only a reference: its members are separate
+        // objects, so the member that defines mktemp (newlib's libc.a
+        // carries the definition in libc_a-mktemp.o) makes no call and
+        // stays silent. A linked object — an executable or a shared
+        // library — charges any match, defined or not: a statically
+        // linked executable bundling mktemp and a wrapper library that
+        // defines and calls its own variant both carry the definition
+        // with no undefined reference, and the reference counts every
+        // FUNC symbol there (fix-and-diverge scoped to archives, #852).
+        let mktemp = if self.is_archive {
+            info.has_undefined_function_matching(&self.mktemp_call_regex)
+        } else {
+            info.has_function_matching(&self.mktemp_call_regex)
+        };
         let gethostbyname = info.has_function_matching(&self.gethostbyname_call_regex);
 
         if setgid && setuid && !setgroups {
@@ -5047,6 +5083,7 @@ mod tests {
                 program_headers: Vec::new(),
                 functions: Vec::new(),
                 undefined_functions: Vec::new(),
+                undefined_function_refs: Vec::new(),
                 is_shlib: false,
                 is_debug: false,
                 is_rust: false,
@@ -7249,6 +7286,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 program_headers: Vec::new(),
                 functions: Vec::new(),
                 undefined_functions: Vec::new(),
+                undefined_function_refs: Vec::new(),
                 is_shlib: true,
                 is_debug: false,
                 soname: None,
@@ -7389,6 +7427,7 @@ description = "explicit priority string bypasses the system crypto policy"
             program_headers: Vec::new(),
             functions: Vec::new(),
             undefined_functions: Vec::new(),
+            undefined_function_refs: Vec::new(),
             is_shlib: false,
             is_debug: false,
             soname: None,
@@ -11745,14 +11784,284 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn mktemp_definition_site_is_not_a_call_in_an_archive() {
+        // #852: in an archive, call-to-mktemp charges a call, and a call
+        // is an undefined reference. The member that defines mktemp
+        // (newlib's libc.a carries the definition) makes no call and
+        // stays silent.
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib64/libc.a", "current ar archive");
+        let count = |info: &ReadelfInfo| {
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(&pkg, &pkgfile, info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "call-to-mktemp").len()
+        };
+        let with = |functions: &[&str], refs: &[&str]| {
+            let mut info = syn_info();
+            info.functions = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs = refs.iter().map(|s| s.to_string()).collect();
+            info
+        };
+
+        // An import (the stripped-executable shape) is a call: fires.
+        assert_eq!(count(&with(&["mktemp"], &["mktemp"])), 1);
+        // A versioned import is a call: fires.
+        assert_eq!(count(&with(&["mktemp"], &["mktemp@GLIBC_2.2.5"])), 1);
+        // The definition alone (the newlib shape) is not a call: silent.
+        assert_eq!(count(&with(&["mktemp"], &[])), 0);
+        // Near-miss names in the reference set stay silent.
+        assert_eq!(count(&with(&["mkstemp"], &["mkstemp"])), 0);
+        assert_eq!(count(&with(&["mktemp64"], &["mktemp64"])), 0);
+    }
+
+    #[test]
+    fn mktemp_defined_only_fires_in_a_linked_object() {
+        // #852: a linked object — an executable or a shared library —
+        // charges a defined match too. A statically linked executable
+        // bundling mktemp and a wrapper library that defines and calls
+        // its own variant both carry the definition with no undefined
+        // reference, and they fire, as they do in the reference.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        assert!(!check.is_archive);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        let count = |info: &ReadelfInfo| {
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(&pkg, &pkgfile, info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "call-to-mktemp").len()
+        };
+        let with = |functions: &[&str], refs: &[&str]| {
+            let mut info = syn_info();
+            info.functions = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs = refs.iter().map(|s| s.to_string()).collect();
+            info
+        };
+
+        // The definition alone (the statically linked shape) fires.
+        assert_eq!(count(&with(&["mktemp"], &[])), 1);
+        // A versioned definition fires.
+        assert_eq!(count(&with(&["mktemp@GLIBC_2.2.5"], &[])), 1);
+        // An import fires too, as before.
+        assert_eq!(count(&with(&["mktemp"], &["mktemp"])), 1);
+        // Near-miss defined names stay silent.
+        assert_eq!(count(&with(&["mkstemp"], &[])), 0);
+        assert_eq!(count(&with(&["mktemp64"], &[])), 0);
+    }
+
+    /// Minimal ET_REL ELF64 object carrying a `.symtab`, for the #852
+    /// parse tests. Each sym is (name, bind, type, shndx); shndx 0 is
+    /// SHN_UNDEF (a reference), 1 is the `.text` section (a definition).
+    fn craft_symtab_object(syms: &[(&str, u8, u8, u16)]) -> Vec<u8> {
+        let mut strtab = vec![0u8];
+        let mut name_offs = Vec::new();
+        for (name, _, _, _) in syms {
+            name_offs.push(strtab.len() as u32);
+            strtab.extend_from_slice(name.as_bytes());
+            strtab.push(0);
+        }
+        let mut symtab = vec![0u8; 24];
+        for (i, (_, bind, typ, shndx)) in syms.iter().enumerate() {
+            let mut e = vec![0u8; 24];
+            e[0..4].copy_from_slice(&name_offs[i].to_le_bytes());
+            e[4] = (bind << 4) | typ;
+            e[6..8].copy_from_slice(&shndx.to_le_bytes());
+            symtab.extend(e);
+        }
+        let mut shstrtab = vec![0u8];
+        let text_name = shstrtab.len() as u32;
+        shstrtab.extend_from_slice(b".text\0");
+        let symtab_name = shstrtab.len() as u32;
+        shstrtab.extend_from_slice(b".symtab\0");
+        let strtab_name = shstrtab.len() as u32;
+        shstrtab.extend_from_slice(b".strtab\0");
+        let shstrtab_name = shstrtab.len() as u32;
+        shstrtab.extend_from_slice(b".shstrtab\0");
+
+        let mut buf = vec![0u8; 64];
+        let text_off = buf.len() as u64;
+        buf.push(0xc3);
+        let symtab_off = buf.len() as u64;
+        buf.extend_from_slice(&symtab);
+        let strtab_off = buf.len() as u64;
+        buf.extend_from_slice(&strtab);
+        let shstrtab_off = buf.len() as u64;
+        buf.extend_from_slice(&shstrtab);
+        while !buf.len().is_multiple_of(8) {
+            buf.push(0);
+        }
+        let shoff = buf.len() as u64;
+
+        // Section headers: NULL, .text, .symtab, .strtab, .shstrtab.
+        let mut shdrs = vec![0u8; 64];
+        let mut push_sh = |name: u32,
+                           stype: u32,
+                           flags: u64,
+                           off: u64,
+                           size: u64,
+                           link: u32,
+                           info: u32,
+                           entsize: u64| {
+            let mut h = vec![0u8; 64];
+            h[0..4].copy_from_slice(&name.to_le_bytes());
+            h[4..8].copy_from_slice(&stype.to_le_bytes());
+            h[8..16].copy_from_slice(&flags.to_le_bytes());
+            h[24..32].copy_from_slice(&off.to_le_bytes());
+            h[32..40].copy_from_slice(&size.to_le_bytes());
+            h[40..44].copy_from_slice(&link.to_le_bytes());
+            h[44..48].copy_from_slice(&info.to_le_bytes());
+            h[48..56].copy_from_slice(&1u64.to_le_bytes());
+            h[56..64].copy_from_slice(&entsize.to_le_bytes());
+            shdrs.extend(h);
+        };
+        push_sh(text_name, 1, 0x6, text_off, 1, 0, 0, 0);
+        push_sh(symtab_name, 2, 0, symtab_off, symtab.len() as u64, 3, 1, 24);
+        push_sh(strtab_name, 3, 0, strtab_off, strtab.len() as u64, 0, 0, 0);
+        push_sh(
+            shstrtab_name,
+            3,
+            0,
+            shstrtab_off,
+            shstrtab.len() as u64,
+            0,
+            0,
+            0,
+        );
+        buf.extend(shdrs);
+
+        let mut ehdr = vec![0u8; 64];
+        ehdr[0..4].copy_from_slice(b"\x7fELF");
+        ehdr[4] = 2;
+        ehdr[5] = 1;
+        ehdr[6] = 1;
+        ehdr[16..18].copy_from_slice(&1u16.to_le_bytes());
+        ehdr[18..20].copy_from_slice(&62u16.to_le_bytes());
+        ehdr[20..24].copy_from_slice(&1u32.to_le_bytes());
+        ehdr[40..48].copy_from_slice(&shoff.to_le_bytes());
+        ehdr[58..60].copy_from_slice(&64u16.to_le_bytes());
+        ehdr[60..62].copy_from_slice(&5u16.to_le_bytes());
+        ehdr[62..64].copy_from_slice(&4u16.to_le_bytes());
+        buf[0..64].copy_from_slice(&ehdr);
+        buf
+    }
+
+    #[test]
+    fn mktemp_refs_come_from_undefined_func_symbols_only() {
+        // #852 parse level: `undefined_function_refs` collects exactly
+        // the undefined STT_FUNC symbols of both symbol tables.
+        // (name, bind, type, shndx); STB_GLOBAL = 1, STT_NOTYPE = 0,
+        // STT_FUNC = 2, SHN_UNDEF = 0.
+        let parse = |tag: &str, bytes: &[u8], name: &str| {
+            let path = std::env::temp_dir()
+                .join(format!("rpmcrab-mktemp-parse-{tag}-{}", std::process::id()));
+            std::fs::write(&path, bytes).unwrap();
+            let info = ReadelfInfo::parse(path.to_str().unwrap(), name);
+            std::fs::remove_file(&path).ok();
+            assert!(
+                info.failed.is_none(),
+                "crafted ELF must parse: {:?}",
+                info.failed
+            );
+            info
+        };
+        let has = |v: &[String], n: &str| v.iter().any(|s| s == n);
+
+        // .dynsym import: a reference, and a function.
+        let info = parse(
+            "dyn-import",
+            &craft_shlib_elf(false, None, None, &[("mktemp", 1, 2, 0)]),
+            "/usr/lib64/libprobe.so",
+        );
+        assert!(
+            has(&info.undefined_function_refs, "mktemp"),
+            "refs: {:?}",
+            info.undefined_function_refs
+        );
+        assert!(has(&info.functions, "mktemp"));
+
+        // .dynsym definition: a function, but no reference.
+        let info = parse(
+            "dyn-def",
+            &craft_shlib_elf(false, None, None, &[("mktemp", 1, 2, 1)]),
+            "/usr/lib64/libprobe.so",
+        );
+        assert!(has(&info.functions, "mktemp"));
+        assert!(
+            !has(&info.undefined_function_refs, "mktemp"),
+            "refs: {:?}",
+            info.undefined_function_refs
+        );
+
+        // .dynsym NOTYPE import: an import for the import set, but not
+        // a function reference, mirroring `functions`.
+        let info = parse(
+            "dyn-notype",
+            &craft_shlib_elf(false, None, None, &[("mktemp", 1, 0, 0)]),
+            "/usr/lib64/libprobe.so",
+        );
+        assert!(has(&info.undefined_functions, "mktemp"));
+        assert!(!has(&info.functions, "mktemp"));
+        assert!(
+            !has(&info.undefined_function_refs, "mktemp"),
+            "refs: {:?}",
+            info.undefined_function_refs
+        );
+
+        // .symtab reference (an archive member): a reference. The bare
+        // ET_REL object is wrapped in an ar archive so the case covers
+        // the member merging a real archive parse performs.
+        let member = craft_symtab_object(&[("mktemp", 1, 2, 0)]);
+        let archive = craft_ar_archive(&[("mktemp_ref.o", &member)]);
+        let info = parse("sym-ref", &archive, "/usr/lib64/libprobe.a");
+        assert!(
+            has(&info.undefined_function_refs, "mktemp"),
+            "refs: {:?}",
+            info.undefined_function_refs
+        );
+        assert!(has(&info.functions, "mktemp"));
+
+        // .symtab definition (the newlib shape): no reference.
+        let member = craft_symtab_object(&[("mktemp", 1, 2, 1)]);
+        let archive = craft_ar_archive(&[("libc_a-mktemp.o", &member)]);
+        let info = parse("sym-def", &archive, "/usr/lib64/libprobe.a");
+        assert!(has(&info.functions, "mktemp"));
+        assert!(
+            !has(&info.undefined_function_refs, "mktemp"),
+            "refs: {:?}",
+            info.undefined_function_refs
+        );
+
+        // Merged members: one member defines mktemp, another references
+        // it — the merged archive carries the reference, so the archive
+        // gate fires on the referencing member's call.
+        let defining = craft_symtab_object(&[("mktemp", 1, 2, 1)]);
+        let referencing = craft_symtab_object(&[("mktemp", 1, 2, 0)]);
+        let archive =
+            craft_ar_archive(&[("libc_a-mktemp.o", &defining), ("caller.o", &referencing)]);
+        let info = parse("sym-merged", &archive, "/usr/lib64/libprobe.a");
+        assert!(has(&info.functions, "mktemp"));
+        assert!(
+            has(&info.undefined_function_refs, "mktemp"),
+            "refs: {:?}",
+            info.undefined_function_refs
+        );
+    }
+
+    #[test]
     fn security_function_findings() {
         let config = test_config();
         let check = BinariesCheck::with_tool_dir(&config, None);
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
 
-        // mktemp -> Error.
+        // mktemp referenced (an undefined import) -> Error.
         let mut info = syn_info();
         info.functions = vec!["mktemp".to_string()];
+        info.undefined_function_refs = vec!["mktemp".to_string()];
         let pkgfile = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
