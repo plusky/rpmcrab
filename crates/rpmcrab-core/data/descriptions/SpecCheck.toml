@@ -232,8 +232,9 @@ converts this shape automatically, moving the licence token from the
 %doc line to a %license line in the same section.
 """
 no-license-file-in-spec="""
-No %files section in the spec file marks a licence file with %license
-or lists one under %doc. Shipping the licence text with the package
-and marking it with %license installs it into the package's licence
-directory and records it as a licence file in the package metadata.
+No %files section in the spec file marks a licence file with %license,
+lists one under %doc, or ships one as a plain entry. Shipping the
+licence text with the package and marking it with %license installs
+it into the package's licence directory and records it as a licence
+file in the package metadata.
 """

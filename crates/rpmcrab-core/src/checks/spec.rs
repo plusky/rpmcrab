@@ -732,7 +732,8 @@ struct FilesSectionScan {
     /// The header carried `-f`: part of the entry text lives in a list
     /// file the scan cannot see.
     from_list_file: bool,
-    /// A bare macro line generates entries the text scan cannot see.
+    /// A generator macro line, braced or unbraced, generates entries
+    /// the text scan cannot see.
     has_generator_macro: bool,
     /// The section carries a `%license` line.
     has_license_line: bool,
@@ -759,8 +760,8 @@ struct FilesSectionScan {
 /// The `%files` entry directives that lead a line, by the shape their
 /// tokens take for the licence-marking scan.
 enum FilesDirective {
-    /// `%attr`/`%caps`/`%config`/`%lang`/`%verify`: the remaining
-    /// tokens are shipped entries.
+    /// `%attr`/`%caps`/`%config`/`%lang`/`%missingok`/`%verify`:
+    /// the remaining tokens are shipped entries.
     Entry,
     /// `%dir`: the remaining tokens are directories.
     Dir,
@@ -779,7 +780,7 @@ fn files_directive(first: &str) -> Option<FilesDirective> {
         .take_while(|c| c.is_ascii_alphabetic())
         .collect();
     match name.as_str() {
-        "attr" | "caps" | "config" | "lang" | "verify" => Some(FilesDirective::Entry),
+        "attr" | "caps" | "config" | "lang" | "missingok" | "verify" => Some(FilesDirective::Entry),
         "dir" => Some(FilesDirective::Dir),
         "ghost" => Some(FilesDirective::Ghost),
         _ => None,
@@ -798,7 +799,13 @@ fn is_bare_macro(token: &str) -> bool {
 /// `LGPL`, `AGPL`) delimited by non-alphanumerics, so `LICENSE_GPL`,
 /// `licence-LGPL.txt`, `gpl-2.0.txt` and `{COPYING,README}` all count,
 /// while a stem buried in a longer word (`LICENSES`, `gplv3`) does not.
+/// Every shape `license_token_re` accepts counts too — a stem joined
+/// to a prefix (`FOOCOPYING`) is the conversion predicate's shape, so
+/// a name the warning fires on always establishes presence.
 fn name_carries_licence(name: &str) -> bool {
+    if license_token_re().find(name).ok().flatten().is_some() {
+        return true;
+    }
     let lower = name.to_lowercase();
     let bytes = lower.as_bytes();
     for stem in [
@@ -866,9 +873,10 @@ fn in_exec_location(token: &str) -> bool {
 }
 
 /// The entry is documentation: it sits under a documentation
-/// directory.
+/// directory. `%{_defaultdocdir}` is the canonical documentation
+/// directory macro; `%{_docdir}` appears in specs in the wild too.
 fn in_doc_location(token: &str) -> bool {
-    token.contains("%{_docdir}") || token.contains("/doc/")
+    token.contains("%{_defaultdocdir}") || token.contains("%{_docdir}") || token.contains("/doc/")
 }
 
 /// The entry names a build-metadata directory the build system
@@ -879,6 +887,84 @@ fn is_info_entry(basename: &str) -> bool {
         || basename.ends_with("-info")
         || basename.ends_with("*info")
 }
+
+/// The value of a `License:` tag line; the tag name matches
+/// case-insensitively (`rpmspec` accepts `license:` too).
+fn license_tag_value(line: &str) -> Option<&str> {
+    let (tag, value) = line.split_once(':')?;
+    tag.trim().eq_ignore_ascii_case("license").then_some(value)
+}
+
+/// A `License:` value naming only public-domain dedications: every
+/// licence identifier in the SPDX expression is a public-domain
+/// identifier, so `MIT AND SUSE-Public-Domain` does not qualify —
+/// the expression as a whole is not a dedication.
+fn license_value_is_public_domain_only(value: &str) -> bool {
+    let mut any = false;
+    let mut skip_exception = false;
+    for token in value.split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | ',')) {
+        let token = token.trim_end_matches('+');
+        if token.is_empty() {
+            continue;
+        }
+        if skip_exception {
+            skip_exception = false;
+            continue;
+        }
+        if token.eq_ignore_ascii_case("WITH") {
+            skip_exception = true;
+            continue;
+        }
+        if ["AND", "OR"]
+            .iter()
+            .any(|op| token.eq_ignore_ascii_case(op))
+        {
+            continue;
+        }
+        any = true;
+        if !["public-domain", "suse-public-domain", "publicdomain"]
+            .iter()
+            .any(|pd| token.eq_ignore_ascii_case(pd))
+        {
+            return false;
+        }
+    }
+    any
+}
+
+/// The macro name of a token that is exactly one unbraced macro
+/// invocation (`%pyproject_files` -> `pyproject_files`); `None` for
+/// any other token shape.
+fn unbraced_macro_name(token: &str) -> Option<&str> {
+    let name = token.strip_prefix('%')?;
+    (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        .then_some(name)
+}
+
+/// `%files` directive, qualifier and conditional words: a line led
+/// by one of these carries entries (or nothing) under rules of its
+/// own, so the word never marks its section opaque as a generator
+/// macro.
+const FILES_DIRECTIVE_WORDS: &[&str] = &[
+    "attr",
+    "caps",
+    "config",
+    "defattr",
+    "dir",
+    "doc",
+    "docdir",
+    "else",
+    "endif",
+    "exclude",
+    "ghost",
+    "if",
+    "ifarch",
+    "ifnarch",
+    "lang",
+    "license",
+    "missingok",
+    "verify",
+];
 
 /// The line is a `Source`/`SourceN` tag whose value names an archive.
 fn source_line_is_archive(line: &str) -> bool {
@@ -2145,9 +2231,9 @@ impl SpecCheck {
         }
         if self.license_section.is_none() {
             let trimmed = line.trim_start();
-            if let Some(value) = trimmed.strip_prefix("License:") {
+            if let Some(value) = license_tag_value(trimmed) {
                 self.license_tag_seen = true;
-                if !value.contains("Public-Domain") && !value.contains("PublicDomain") {
+                if !license_value_is_public_domain_only(value) {
                     self.license_tags_public_domain = false;
                 }
             } else if source_line_is_archive(trimmed) {
@@ -2216,7 +2302,13 @@ impl SpecCheck {
             // `%ghost` entries carry no shipped content.
             Some(FilesDirective::Ghost) => {}
             None => {
-                if !first.starts_with('%') || first.starts_with("%{") {
+                if unbraced_macro_name(first)
+                    .is_some_and(|name| !FILES_DIRECTIVE_WORDS.contains(&name))
+                {
+                    // An unbraced generator macro (`%pyproject_files`)
+                    // expands to entries the text scan cannot see.
+                    scan.has_generator_macro = true;
+                } else if !first.starts_with('%') || first.starts_with("%{") {
                     self.scan_license_entries(scan, &tokens, false, false);
                 }
                 // Any other `%`-led line carries no entries the scan
@@ -2240,6 +2332,16 @@ impl SpecCheck {
         for token in tokens {
             if *token == "%dir" {
                 dir_next = true;
+                continue;
+            }
+            if let Some(name) = unbraced_macro_name(token) {
+                // A generator macro expands to entries the text scan
+                // cannot see; a directive or qualifier word is skipped
+                // (its argument rides on the same token for the
+                // parenthesised forms, handled below).
+                if !FILES_DIRECTIVE_WORDS.contains(&name) {
+                    scan.has_generator_macro = true;
+                }
                 continue;
             }
             if token.starts_with('%') && !token.starts_with("%{") {
@@ -5046,6 +5148,125 @@ Patch0: foo.patch
                 "body {body}: {results:?}"
             );
         }
+    }
+
+    #[test]
+    fn no_license_file_defaultdocdir_is_doc_location_822() {
+        let hdr = "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n";
+        let run = |body: &str| run_mini(&format!("{hdr}%files\n{body}"));
+        // Documentation under the canonical doc macro alone is a
+        // documentation-only package: the E stays silent.
+        let docs = run("%{_defaultdocdir}/%{name}/manual.pdf\n");
+        assert!(!has(&docs, "no-license-file-in-spec"), "results: {docs:?}");
+        // A doc entry does not rescue a package that also ships a
+        // binary with no licence file marked.
+        let mixed = run("%{_defaultdocdir}/%{name}/manual.pdf\n%{_bindir}/foo\n");
+        assert!(has(&mixed, "no-license-file-in-spec"), "results: {mixed:?}");
+    }
+
+    #[test]
+    fn no_license_file_missingok_licence_line_822() {
+        let hdr = "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n";
+        let run = |body: &str| run_mini(&format!("{hdr}%files\n{body}"));
+        // A leading %missingok qualifier does not hide the licence
+        // entry behind it.
+        let marked = run("%missingok %{_datadir}/foo/COPYING\n%{_bindir}/foo\n");
+        assert!(
+            !has(&marked, "no-license-file-in-spec"),
+            "results: {marked:?}"
+        );
+        // %missingok on a non-licence entry is not presence.
+        let other = run("%missingok %{_sysconfdir}/foo.conf\n%{_bindir}/foo\n");
+        assert!(has(&other, "no-license-file-in-spec"), "results: {other:?}");
+    }
+
+    #[test]
+    fn no_license_file_license_tag_case_and_spdx_822() {
+        let run = |license: &str| {
+            run_mini(&format!(
+                "Name: foo\n{license}\nSource:         foo-1.0.tar.gz\n%files\n%{{_bindir}}/foo\n"
+            ))
+        };
+        // rpmspec accepts a lowercase tag; a public-domain-only value
+        // still exempts, in either case.
+        for tag in [
+            "License:        SUSE-Public-Domain",
+            "license:        SUSE-Public-Domain",
+            "LICENSE:        (SUSE-Public-Domain)",
+        ] {
+            let results = run(tag);
+            assert!(
+                !has(&results, "no-license-file-in-spec"),
+                "tag {tag}: {results:?}"
+            );
+        }
+        // A public-domain identifier inside a larger SPDX expression
+        // is not a dedication: the E fires.
+        for tag in [
+            "License:        MIT AND SUSE-Public-Domain",
+            "license:        MIT AND SUSE-Public-Domain",
+        ] {
+            let results = run(tag);
+            assert!(
+                has(&results, "no-license-file-in-spec"),
+                "tag {tag}: {results:?}"
+            );
+        }
+        // An expression naming only public-domain identifiers, joined
+        // by an SPDX operator, stays exempt.
+        let both = run("License:        SUSE-Public-Domain AND Public-Domain");
+        assert!(!has(&both, "no-license-file-in-spec"), "results: {both:?}");
+    }
+
+    #[test]
+    fn no_license_file_unbraced_generator_macro_822() {
+        let hdr = "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n";
+        let run = |body: &str| run_mini(&format!("{hdr}%files\n{body}"));
+        // The unbraced generator form is as opaque to the text scan
+        // as the braced form: the E stays silent.
+        for body in [
+            "%pyproject_files\n%{_bindir}/foo\n",
+            "%{_bindir}/foo\n%pyproject_files\n",
+        ] {
+            let results = run(body);
+            assert!(
+                !has(&results, "no-license-file-in-spec"),
+                "body {body}: {results:?}"
+            );
+        }
+        // A directive word does not mark the section opaque.
+        let directive = run("%docdir %{_defaultdocdir}/foo\n%{_bindir}/foo\n");
+        assert!(
+            has(&directive, "no-license-file-in-spec"),
+            "results: {directive:?}"
+        );
+    }
+
+    #[test]
+    fn license_marking_joined_stem_presence_822() {
+        let hdr = "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n";
+        let run = |body: &str| run_mini(&format!("{hdr}%files\n{body}"));
+        // The conversion predicate fires the W on a prefix-joined
+        // stem, so the same line establishes presence: the E stays
+        // silent and the two findings never contradict.
+        let doc = run("%doc FOOCOPYING\n%{_bindir}/foo\n");
+        assert!(has(&doc, "license-file-as-doc"), "results: {doc:?}");
+        assert!(!has(&doc, "no-license-file-in-spec"), "results: {doc:?}");
+        // A plain entry with a prefix-joined stem is presence too.
+        let plain = run("%{_datadir}/foo/FOOCOPYING\n%{_bindir}/foo\n");
+        assert!(
+            !has(&plain, "no-license-file-in-spec"),
+            "results: {plain:?}"
+        );
+        assert!(!has(&plain, "license-file-as-doc"), "results: {plain:?}");
+        // A stem buried in a longer word is neither shape: no W, and
+        // the E fires.
+        let buried = run("%doc LICENSES\n%{_bindir}/foo\n");
+        assert!(!has(&buried, "license-file-as-doc"), "results: {buried:?}");
+        assert!(
+            has(&buried, "no-license-file-in-spec"),
+            "results: {buried:?}"
+        );
     }
 
     #[test]
