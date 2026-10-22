@@ -2451,6 +2451,194 @@ fn is_stack_protector_symbol(name: &str) -> bool {
     name.split('@').next().unwrap_or(name) == "__stack_chk_fail"
 }
 
+/// The host ELF machines: `EM_386` and `EM_X86_64`. An x86-64 host
+/// executes both natively, so a binary for either in a noarch package
+/// is host code wherever it sits in the package.
+fn is_host_elf_machine(machine: u16) -> bool {
+    machine == goblin::elf::header::EM_386 || machine == goblin::elf::header::EM_X86_64
+}
+
+/// Classification of a binary's ELF machine against the host family.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ElfMachineClass {
+    Host,
+    Foreign,
+    Unknown,
+}
+
+/// Classify the `e_machine` in an ELF header's first 20 bytes. `None`
+/// when the bytes carry no ELF header to read.
+fn elf_machine_class_from_bytes(data: &[u8]) -> Option<ElfMachineClass> {
+    if !data.starts_with(ELF_MAGIC) || data.len() < 20 {
+        return None;
+    }
+    let machine = match data[5] {
+        1 => u16::from_le_bytes([data[18], data[19]]),
+        2 => u16::from_be_bytes([data[18], data[19]]),
+        _ => return Some(ElfMachineClass::Unknown),
+    };
+    Some(if is_host_elf_machine(machine) {
+        ElfMachineClass::Host
+    } else if machine == goblin::elf::header::EM_NONE {
+        ElfMachineClass::Unknown
+    } else {
+        ElfMachineClass::Foreign
+    })
+}
+
+/// Classify an ELF by the machine the magic string names, in the
+/// spellings libmagic uses. The magic carries no machine for some
+/// files; those stay `Unknown`.
+fn elf_machine_class_from_magic(magic: &str) -> ElfMachineClass {
+    if magic.contains("x86-64") || magic.contains("Intel 80386") {
+        return ElfMachineClass::Host;
+    }
+    const FOREIGN_TOKENS: &[&str] = &[
+        "ARM aarch64",
+        "ARM",
+        "UCB RISC-V",
+        "LoongArch",
+        "PA-RISC",
+        "IBM S/390",
+        "PowerPC",
+        "MIPS",
+        "SPARC",
+        "IA-64",
+        "MC68000",
+        "Alpha",
+        "Hitachi SH",
+        "AMDGPU",
+        "Nios II",
+        "MicroBlaze",
+        "Xtensa",
+        "OpenRISC",
+        "Blackfin",
+        "TILE",
+        "ARC ",
+        "CSKY",
+        "VAX",
+        "XCore",
+        "AArch64",
+    ];
+    if FOREIGN_TOKENS.iter().any(|t| magic.contains(t)) {
+        ElfMachineClass::Foreign
+    } else {
+        ElfMachineClass::Unknown
+    }
+}
+
+/// Classify a file's ELF machine: the extracted payload's header
+/// bytes first (the payload is on disk in real runs), the magic
+/// string second (it is the only evidence for a file that cannot be
+/// opened, and it names the machine for the ar archives libmagic
+/// reports by their first ELF member).
+fn elf_machine_class(pkgfile: &PkgFile) -> ElfMachineClass {
+    use std::io::Read;
+    if let Ok(mut f) = std::fs::File::open(&pkgfile.path) {
+        let mut head = [0u8; 20];
+        if f.read_exact(&mut head).is_ok()
+            && let Some(class) = elf_machine_class_from_bytes(&head)
+        {
+            return class;
+        }
+    }
+    elf_machine_class_from_magic(&pkgfile.magic)
+}
+
+/// How the ELF members of an ar archive classify as a whole.
+enum ArchiveElfClass {
+    /// Members exist and none presents as an ELF object: every member
+    /// is in another object format (COFF, wasm, LLVM bitcode) or is
+    /// plain data, so the archive carries no ELF code at all.
+    NoElfMembers,
+    /// Every ELF member is for a foreign machine.
+    AllForeign,
+    /// An ELF member is for the host family or names no machine.
+    HasHostOrUnknown,
+    /// The archive bytes cannot be read or parsed.
+    Unreadable,
+}
+
+fn archive_elf_class(pkgfile: &PkgFile) -> ArchiveElfClass {
+    let Ok(data) = std::fs::read(&pkgfile.path) else {
+        return ArchiveElfClass::Unreadable;
+    };
+    if !data.starts_with(AR_MAGIC) {
+        return ArchiveElfClass::Unreadable;
+    }
+    let Ok(archive) = goblin::archive::Archive::parse(&data) else {
+        return ArchiveElfClass::Unreadable;
+    };
+    let mut members = 0usize;
+    let mut elf_members = 0usize;
+    for i in 0..archive.len() {
+        let Some(member) = archive.get_at(i) else {
+            continue;
+        };
+        let end = member.offset.saturating_add(member.size() as u64) as usize;
+        let Some(bytes) = data.get(member.offset as usize..end) else {
+            return ArchiveElfClass::Unreadable;
+        };
+        members += 1;
+        if !bytes.starts_with(ELF_MAGIC) {
+            continue;
+        }
+        elf_members += 1;
+        if elf_machine_class_from_bytes(bytes) != Some(ElfMachineClass::Foreign) {
+            return ArchiveElfClass::HasHostOrUnknown;
+        }
+    }
+    if members == 0 {
+        ArchiveElfClass::Unreadable
+    } else if elf_members == 0 {
+        ArchiveElfClass::NoElfMembers
+    } else {
+        ArchiveElfClass::AllForeign
+    }
+}
+
+/// Whether `fname` sits in a location that holds target payload by
+/// layout: a cross sys-root (`/usr/<triplet>/sys-root/...`, the layout
+/// the MinGW sys-root predicate in FilesCheck also recognises, with
+/// any target triplet) or a firmware directory, whose files the
+/// device executes and the host only stores.
+fn in_target_payload_location(fname: &str) -> bool {
+    if fname.starts_with("/usr/lib/firmware/") || fname.starts_with("/lib/firmware/") {
+        return true;
+    }
+    let mut segments = fname.split('/');
+    matches!(segments.next(), Some(""))
+        && matches!(segments.next(), Some("usr"))
+        && segments.next().is_some_and(|triplet| triplet.contains('-'))
+        && matches!(segments.next(), Some("sys-root"))
+}
+
+/// Whether a binary-class file in a noarch package is foreign-target
+/// payload (issue #848): an archive carrying no ELF members at all
+/// holds only foreign-format objects or data, and an ELF (or an
+/// archive of ELFs) for a foreign machine in a target-payload
+/// location is the target's code, stored as data for a cross
+/// toolchain or a device. A host-machine ELF keeps firing in every
+/// location, a foreign ELF outside the target locations keeps
+/// firing, and a file whose machine cannot be determined keeps
+/// firing: the exemption takes positive evidence.
+fn noarch_binary_is_foreign_target(pkgfile: &PkgFile) -> bool {
+    if pkgfile.magic.contains("current ar archive") {
+        match archive_elf_class(pkgfile) {
+            ArchiveElfClass::NoElfMembers => true,
+            ArchiveElfClass::AllForeign => in_target_payload_location(&pkgfile.name),
+            ArchiveElfClass::HasHostOrUnknown | ArchiveElfClass::Unreadable => false,
+        }
+    } else if elf_regex().is_match(&pkgfile.magic).unwrap_or(false) {
+        elf_machine_class(pkgfile) == ElfMachineClass::Foreign
+            && in_target_payload_location(&pkgfile.name)
+    } else {
+        // OCaml native code and Lua bytecode carry no ELF machine to
+        // classify; the finding keeps firing for them.
+        false
+    }
+}
+
 impl BinariesCheck {
     pub fn new(config: &Config) -> Self {
         Self::with_tool_source(config, ToolSource::Path)
@@ -2588,14 +2776,14 @@ impl BinariesCheck {
         }
     }
 
-    fn check_binary_in_noarch(&self, pkg: &Pkg, bin_name: &str, out: &mut Filter) {
-        if pkg.arch == "noarch" {
+    fn check_binary_in_noarch(&self, pkg: &Pkg, pkgfile: &PkgFile, out: &mut Filter) {
+        if pkg.arch == "noarch" && !noarch_binary_is_foreign_target(pkgfile) {
             add_info(
                 out,
                 Level::Error,
                 pkg,
                 "arch-independent-package-contains-binary-or-object",
-                &[bin_name],
+                &[&pkgfile.name],
             );
         }
     }
@@ -3895,7 +4083,7 @@ impl Check for BinariesCheck {
             self.checked_files += 1;
             pkg_has_binary = true;
 
-            self.check_binary_in_noarch(pkg, fname, out);
+            self.check_binary_in_noarch(pkg, pkgfile, out);
             if pkg.arch == "noarch" {
                 continue;
             }
@@ -7364,6 +7552,376 @@ description = "explicit priority string bypasses the system crypto policy"
             "detail names the object: {}",
             lines[0]
         );
+    }
+
+    /// A crafted ELF with its `e_machine` rewritten: the header is
+    /// the part the noarch foreign-target classification reads.
+    fn elf_with_machine(machine: u16) -> Vec<u8> {
+        let mut elf = craft_shlib_elf(false, None, None, &[]);
+        elf[18..20].copy_from_slice(&machine.to_le_bytes());
+        elf
+    }
+
+    /// A `PkgFile` backed by a real temp file holding `bytes`, so the
+    /// classification reads the payload header and archive members
+    /// instead of the magic string.
+    fn real_file_pkgfile(
+        dir: &tempfile::TempDir,
+        file_name: &str,
+        name: &str,
+        magic: &str,
+        bytes: &[u8],
+    ) -> PkgFile {
+        let path = dir.path().join(file_name);
+        std::fs::write(&path, bytes).expect("write fixture");
+        PkgFile {
+            name: name.to_string(),
+            path: path.to_str().unwrap().to_string(),
+            magic: magic.to_string(),
+            mode: 0o100644,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn target_payload_location_shapes() {
+        // Issue #848: a cross sys-root with any target triplet, and the
+        // firmware directories, are target-payload locations.
+        assert!(in_target_payload_location(
+            "/usr/riscv64-suse-linux/sys-root/lib64/libc.so.6"
+        ));
+        assert!(in_target_payload_location(
+            "/usr/x86_64-w64-mingw32/sys-root/mingw/lib/libfoo.a"
+        ));
+        assert!(in_target_payload_location("/usr/lib/firmware/miXart8.elf"));
+        assert!(in_target_payload_location("/lib/firmware/miXart8.elf"));
+        // The segment after /usr must be a triplet: a bare `sys-root`
+        // component further down does not make a location a sys-root.
+        assert!(!in_target_payload_location("/usr/lib/sys-root/libfoo.so"));
+        assert!(!in_target_payload_location("/usr/share/sys-root/libfoo.so"));
+        // A triplet directory without the sys-root level is host layout.
+        assert!(!in_target_payload_location(
+            "/usr/riscv64-suse-linux/lib/libc.so.6"
+        ));
+        assert!(!in_target_payload_location("/usr/bin/foo"));
+        assert!(!in_target_payload_location("/usr/lib/firmware2/foo.elf"));
+    }
+
+    #[test]
+    fn noarch_sysroot_foreign_elf_is_quiet() {
+        // Issue #848: a cross sys-root's payload is the target's C
+        // library. No file backs this fixture, so the magic string's
+        // machine carries the classification.
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "cross-riscv64-glibc-devel",
+            "noarch",
+            vec![syn_file(
+                "/usr/riscv64-suse-linux/sys-root/lib64/libc.so.6",
+                "ELF 64-bit LSB shared object, UCB RISC-V, RVC, double-float ABI, \
+                 version 1 (SYSV), dynamically linked, not stripped",
+            )],
+        );
+        let results = driver_results(&pkg, &config);
+        assert_lacks(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+    }
+
+    #[test]
+    fn noarch_sysroot_foreign_elf_bytes_are_quiet() {
+        // The same shape with a real payload: the header bytes
+        // (EM_RISCV) classify, in a sys-root location.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let file = real_file_pkgfile(
+            &dir,
+            "libc.so.6",
+            "/usr/riscv64-suse-linux/sys-root/lib64/libc.so.6",
+            "ELF 64-bit LSB shared object, UCB RISC-V, version 1 (SYSV)",
+            &elf_with_machine(goblin::elf::header::EM_RISCV),
+        );
+        let pkg = synthetic_pkg("cross-riscv64-glibc-devel", "noarch", vec![file]);
+        let results = driver_results(&pkg, &config);
+        assert_lacks(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+    }
+
+    #[test]
+    fn noarch_firmware_foreign_elf_is_quiet() {
+        // Issue #848: DSP firmware in ELF form (a PowerPC image the
+        // sound card executes) under the firmware directory.
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "alsa-firmware",
+            "noarch",
+            vec![syn_file(
+                "/usr/lib/firmware/mixart/miXart8.elf",
+                "ELF 32-bit MSB shared object, PowerPC or cisco 4500, version 1 (SYSV), \
+                 statically linked, not stripped",
+            )],
+        );
+        let results = driver_results(&pkg, &config);
+        assert_lacks(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+    }
+
+    #[test]
+    fn noarch_sysroot_foreign_archive_is_quiet() {
+        // Issue #848: a sys-root static library whose ELF members are
+        // all for the target machine (a data member does not change
+        // the classification).
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let riscv = elf_with_machine(goblin::elf::header::EM_RISCV);
+        let archive = craft_ar_archive(&[("a.o", &riscv), ("note.o", b"data\n")]);
+        let file = real_file_pkgfile(
+            &dir,
+            "libfoo.a",
+            "/usr/riscv64-suse-linux/sys-root/usr/lib64/libfoo.a",
+            "current ar archive",
+            &archive,
+        );
+        let pkg = synthetic_pkg("cross-riscv64-glibc-devel", "noarch", vec![file]);
+        let results = driver_results(&pkg, &config);
+        assert_lacks(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+    }
+
+    #[test]
+    fn noarch_archive_without_elf_members_is_quiet() {
+        // Issue #848: archives whose members are all in foreign
+        // object formats (a COFF object, a wasm object) carry no ELF
+        // code; the exemption is by member content, at any location.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let coff: &[u8] = b"\x64\x86\x06\x00\x00\x00\x00\x00\x36\x01\x00\x00\x0e\x00\x00\x00";
+        let wasm: &[u8] = b"\x00asm\x01\x00\x00\x00";
+        let coff_archive = craft_ar_archive(&[("coff.o", coff)]);
+        let wasm_archive = craft_ar_archive(&[("wasm.o", wasm)]);
+        let pkg = synthetic_pkg(
+            "noarchpkg",
+            "noarch",
+            vec![
+                real_file_pkgfile(
+                    &dir,
+                    "libcoff.a",
+                    "/usr/lib/libcoff.a",
+                    "current ar archive",
+                    &coff_archive,
+                ),
+                real_file_pkgfile(
+                    &dir,
+                    "libwasm.a",
+                    "/usr/lib/rustlib/src/libwasm.a",
+                    "current ar archive",
+                    &wasm_archive,
+                ),
+            ],
+        );
+        let results = driver_results(&pkg, &config);
+        assert_lacks(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+    }
+
+    #[test]
+    fn noarch_host_elf_in_sysroot_still_fires() {
+        // Near-miss: the sys-root location saves foreign payload, not
+        // a host binary that strayed into it.
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "noarchpkg",
+            "noarch",
+            vec![syn_file(
+                "/usr/riscv64-suse-linux/sys-root/lib64/libfoo.so.1",
+                "ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), \
+                 dynamically linked, not stripped",
+            )],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(lines.len(), 1, "host ELF in a sys-root fires: {results:?}");
+    }
+
+    #[test]
+    fn noarch_host_elf_in_firmware_still_fires() {
+        // Near-miss: a host ELF fires regardless of directory,
+        // including the firmware directory.
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "noarchpkg",
+            "noarch",
+            vec![syn_file(
+                "/usr/lib/firmware/helper.elf",
+                "ELF 64-bit LSB executable, x86-64, version 1 (SYSV), \
+                 statically linked, not stripped",
+            )],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(lines.len(), 1, "host ELF in firmware fires: {results:?}");
+    }
+
+    #[test]
+    fn noarch_foreign_elf_outside_target_locations_still_fires() {
+        // Near-miss: a foreign ELF in ordinary host layout (a program
+        // directory) is a binary in a noarch package; only the
+        // target-payload locations exempt it.
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "noarchpkg",
+            "noarch",
+            vec![syn_file(
+                "/usr/bin/foo",
+                "ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), \
+                 dynamically linked, not stripped",
+            )],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(
+            lines.len(),
+            1,
+            "foreign ELF outside target locations fires: {results:?}"
+        );
+    }
+
+    #[test]
+    fn noarch_archive_with_host_member_in_sysroot_still_fires() {
+        // Near-miss: one host-machine ELF member is enough; the
+        // archive is not all-foreign.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let riscv = elf_with_machine(goblin::elf::header::EM_RISCV);
+        let host = elf_with_machine(goblin::elf::header::EM_X86_64);
+        let archive = craft_ar_archive(&[("a.o", &riscv), ("b.o", &host)]);
+        let file = real_file_pkgfile(
+            &dir,
+            "libfoo.a",
+            "/usr/riscv64-suse-linux/sys-root/usr/lib64/libfoo.a",
+            "current ar archive",
+            &archive,
+        );
+        let pkg = synthetic_pkg("noarchpkg", "noarch", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(
+            lines.len(),
+            1,
+            "archive with a host member fires: {results:?}"
+        );
+    }
+
+    #[test]
+    fn noarch_foreign_archive_outside_target_locations_still_fires() {
+        // Near-miss: all-foreign ELF members still fire outside the
+        // target-payload locations.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let riscv = elf_with_machine(goblin::elf::header::EM_RISCV);
+        let archive = craft_ar_archive(&[("a.o", &riscv)]);
+        let file = real_file_pkgfile(
+            &dir,
+            "libfoo.a",
+            "/usr/lib/libfoo.a",
+            "current ar archive",
+            &archive,
+        );
+        let pkg = synthetic_pkg("noarchpkg", "noarch", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(
+            lines.len(),
+            1,
+            "foreign archive in the host libdir fires: {results:?}"
+        );
+    }
+
+    #[test]
+    fn noarch_unknown_machine_elf_in_sysroot_still_fires() {
+        // The exemption takes positive evidence: a magic naming no
+        // machine at all (and no file to read) stays a finding.
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "noarchpkg",
+            "noarch",
+            vec![syn_file(
+                "/usr/riscv64-suse-linux/sys-root/lib64/libfoo.so.1",
+                "ELF 64-bit LSB shared object, version 1 (SYSV), dynamically linked",
+            )],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(lines.len(), 1, "unclassified ELF fires: {results:?}");
+    }
+
+    #[test]
+    fn noarch_unreadable_archive_in_sysroot_still_fires() {
+        // An archive whose members cannot be read (no payload file)
+        // gives no evidence of foreign content and stays a finding.
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "noarchpkg",
+            "noarch",
+            vec![syn_file(
+                "/usr/riscv64-suse-linux/sys-root/usr/lib64/libfoo.a",
+                "current ar archive",
+            )],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(lines.len(), 1, "unreadable archive fires: {results:?}");
+    }
+
+    #[test]
+    fn noarch_lua_bytecode_still_fires() {
+        // Lua bytecode carries no ELF machine to classify, so the
+        // foreign-target exemption does not reach it.
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "noarchpkg",
+            "noarch",
+            vec![syn_file(
+                "/usr/share/wesnoth/data/test/bytecode.bin",
+                "Lua bytecode, version 5.3",
+            )],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(lines.len(), 1, "Lua bytecode fires: {results:?}");
     }
 
     #[test]
