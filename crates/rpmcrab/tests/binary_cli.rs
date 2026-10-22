@@ -139,6 +139,61 @@ fn corpus_rpm() -> std::path::PathBuf {
         .expect("corpus rpm is committed")
 }
 
+/// A committed fixture RPM from the parity pkg inputs, by file name.
+fn pkg_input_fixture(name: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/parity/pkg/inputs")
+        .join(name)
+        .canonicalize()
+        .expect("pkg fixture is committed")
+}
+
+/// The uid/gid decision through the shipped binary on a real header
+/// (issue #827): the fixture's payload is owned by hdruser/hdrgroup
+/// and its header declares the accounts through no route -- the only
+/// account Requires present are the ones rpm's generator derived
+/// from the file ownership. Both findings render at E and the run
+/// exits 64.
+#[test]
+fn non_standard_uid_gid_fire_on_uncredited_real_header() {
+    let rpm = pkg_input_fixture("uidgid-realhdr-main-1.0-1.noarch.rpm");
+    let out = rpmcrab(&[rpm.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(64));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("E: non-standard-uid"),
+        "non-standard-uid must render at E: stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("E: non-standard-gid"),
+        "non-standard-gid must render at E: stdout: {stdout}"
+    );
+}
+
+/// The credited real-header fixtures stay quiet through the shipped
+/// binary (issue #827): one declares both owners with
+/// packager-written `Requires(pre)` capabilities, the other ships a
+/// sysusers.d snippet declaring them.
+#[test]
+fn non_standard_uid_gid_quiet_on_credited_real_headers() {
+    for name in [
+        "uidgid-realhdr-handwritten-1.0-1.noarch.rpm",
+        "uidgid-realhdr-control-1.0-1.noarch.rpm",
+    ] {
+        let rpm = pkg_input_fixture(name);
+        let out = rpmcrab(&[rpm.to_str().unwrap()]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !stdout.contains("non-standard-uid"),
+            "{name} must not draw non-standard-uid: stdout: {stdout}"
+        );
+        assert!(
+            !stdout.contains("non-standard-gid"),
+            "{name} must not draw non-standard-gid: stdout: {stdout}"
+        );
+    }
+}
+
 /// An unreadable package is fatal: exit 3 with the reference's message
 /// (`lint.py:293-297`).
 #[test]
