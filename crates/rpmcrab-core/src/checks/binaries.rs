@@ -7584,6 +7584,42 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn elf_machine_class_from_bytes_reads_both_endians() {
+        // The header's data-encoding byte decides the e_machine byte
+        // order: the corpus carries MSB files (S/390, PowerPC,
+        // PA-RISC) alongside the LSB ones.
+        let mut le = [0u8; 20];
+        le[0..4].copy_from_slice(ELF_MAGIC);
+        le[5] = 1;
+        le[18..20].copy_from_slice(&62u16.to_le_bytes());
+        assert_eq!(
+            elf_machine_class_from_bytes(&le),
+            Some(ElfMachineClass::Host)
+        );
+        let mut be = [0u8; 20];
+        be[0..4].copy_from_slice(ELF_MAGIC);
+        be[5] = 2;
+        be[18..20].copy_from_slice(&62u16.to_be_bytes());
+        assert_eq!(
+            elf_machine_class_from_bytes(&be),
+            Some(ElfMachineClass::Host)
+        );
+        be[18..20].copy_from_slice(&22u16.to_be_bytes()); // EM_S390
+        assert_eq!(
+            elf_machine_class_from_bytes(&be),
+            Some(ElfMachineClass::Foreign)
+        );
+        be[18..20].copy_from_slice(&0u16.to_be_bytes()); // EM_NONE
+        assert_eq!(
+            elf_machine_class_from_bytes(&be),
+            Some(ElfMachineClass::Unknown)
+        );
+        // No ELF header to read.
+        assert_eq!(elf_machine_class_from_bytes(b"!<arch>\n......."), None);
+        assert_eq!(elf_machine_class_from_bytes(&le[..12]), None);
+    }
+
+    #[test]
     fn target_payload_location_shapes() {
         // Issue #848: a cross sys-root with any target triplet, and the
         // firmware directories, are target-payload locations.
