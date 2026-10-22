@@ -115,6 +115,12 @@ impl Check for PkgConfigCheck {
             if !is_match(re, &file.name) || !is_reg(file.mode) {
                 continue;
             }
+            // AbstractCheck.py:45 filters ghosts out of the dispatch list,
+            // so check_file never runs for one and a ghost `.pc` file draws
+            // no finding.
+            if pkg.ghost_files.iter().any(|g| g == &file.name) {
+                continue;
+            }
             let emit = |out: &mut Filter, check: &str, line: &Option<String>| match line {
                 Some(l) => add_info(out, Level::Error, pkg, check, &[&file.name, l]),
                 None => add_info(out, Level::Error, pkg, check, &[&file.name]),
@@ -134,17 +140,15 @@ impl Check for PkgConfigCheck {
                         &[&file.name, &e],
                     ),
                 },
-                // The extractor leaves entries it cannot materialise out
-                // of the tree and reports each skip itself: entries whose
-                // path collides with an incompatible existing object
-                // (extract.rs `warn_skip_collision`) and files the payload
-                // does not carry (%ghost entries). A read failing because
-                // the file is absent (NotFound) or because a component of
-                // its path is the non-directory that won such a collision
-                // (NotADirectory) draws no finding; read failures on
-                // materialised files report as exceptions, as do decode
+                // The extractor leaves entries it skipped after a path
+                // collision out of the tree and reports each skip itself
+                // (extract.rs `warn_skip_collision`); a read through the
+                // object that won the collision fails with NotADirectory,
+                // and that failure alone draws no finding. Every other
+                // read failure reports as an exception -- a header-listed
+                // file missing from the tree included -- as do decode
                 // failures above.
-                Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {}
+                Err(e) if e.kind() == ErrorKind::NotADirectory => {}
                 Err(e) => add_info(
                     out,
                     Level::Error,
@@ -161,7 +165,7 @@ impl Check for PkgConfigCheck {
 mod tests {
     use super::*;
     use crate::color::Color;
-    use crate::pkg::pkgfile::PkgFile;
+    use crate::pkg::pkgfile::{PkgFile, RPMFILE_GHOST};
 
     fn check(line: &str, is_64bit: bool) -> Vec<(&'static str, Option<String>)> {
         PkgConfigCheck::check_line(
@@ -399,33 +403,66 @@ mod tests {
     fn pc_file_behind_a_colliding_file_is_quiet() {
         // The grpc-source shape (#826): the payload carries the regular
         // file `usr/src/grpc/BUILD` and the directory
-        // `usr/src/grpc/build`. On a case-insensitive filesystem the two
-        // collide; the extractor materialises the file, skips the
-        // entries beneath the directory and warns about the skips
-        // itself. The `.pc` path then runs through a non-directory, so
-        // the read fails with NotADirectory -- on any filesystem, since
-        // the fixture builds the same layout directly. The file was
-        // never materialised, so the package draws no finding.
+        // `usr/src/grpc/build`. On the case-insensitive tree the two are
+        // one entry: the extractor materialises the file, skips the
+        // entries beneath the directory and reports the skips itself.
+        // The fixture builds the resulting layout directly -- a regular
+        // file at `build`, the exact component the `.pc` path traverses
+        // -- so the read runs through a non-directory and fails with
+        // NotADirectory on any filesystem. The error kind is asserted
+        // here so the pin cannot silently degrade to an absent-path
+        // (NotFound) read. The file was never materialised, so the
+        // package draws no finding.
         let dir = tempfile::tempdir().expect("tmpdir");
         let root = dir.path().join("usr/src/grpc");
         std::fs::create_dir_all(&root).expect("mkdir fixture tree");
-        std::fs::write(root.join("BUILD"), "bazel build file\n").expect("write BUILD file");
+        std::fs::write(root.join("build"), "regular file that won the collision\n")
+            .expect("write colliding file");
         let pc_path = root.join("build/libs/opt/pkgconfig/gpr.pc");
+        let err = std::fs::read(&pc_path).expect_err("read through a regular file must fail");
+        assert_eq!(err.kind(), ErrorKind::NotADirectory);
         let pkg = pkg_with_pc_path(&pc_path, "/usr/src/grpc/build/libs/opt/pkgconfig/gpr.pc");
         let results = run_pkg_config_check(&pkg);
         assert!(results.is_empty(), "unexpected results: {results:?}");
     }
 
     #[test]
-    fn pc_file_absent_from_the_tree_is_quiet() {
-        // A `.pc` entry the payload does not carry (%ghost) is in the
-        // header's file list but never materialised; its read fails
-        // with NotFound and draws no finding.
+    fn ghost_pc_file_absent_from_the_tree_is_quiet() {
+        // A %ghost `.pc` entry is in the header's file list but the
+        // payload carries no content for it, so it never materialises.
+        // The dispatch skips ghosts before any read, so the absence
+        // draws no finding; the same absence on a non-ghost entry
+        // reports an exception (next test), so this pin fails if the
+        // up-front skip goes away.
         let dir = tempfile::tempdir().expect("tmpdir");
         let pc_path = dir.path().join("usr/lib64/pkgconfig/ghost.pc");
-        let pkg = pkg_with_pc_path(&pc_path, "/usr/lib64/pkgconfig/ghost.pc");
+        let mut pkg = pkg_with_pc_path(&pc_path, "/usr/lib64/pkgconfig/ghost.pc");
+        pkg.files[0].flags = RPMFILE_GHOST;
+        pkg.ghost_files = vec!["/usr/lib64/pkgconfig/ghost.pc".to_string()];
         let results = run_pkg_config_check(&pkg);
         assert!(results.is_empty(), "unexpected results: {results:?}");
+    }
+
+    #[test]
+    fn missing_pc_file_reports_an_exception() {
+        // A header-listed `.pc` file missing from the tree is a read
+        // failure like any other: the reference charges it as
+        // `pkgconfig-exception` through the `except Exception` around
+        // its `open()`. Only the collision failure (NotADirectory,
+        // above) stays silent.
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let pc_path = dir.path().join("usr/lib64/pkgconfig/missing.pc");
+        let pkg = pkg_with_pc_path(&pc_path, "/usr/lib64/pkgconfig/missing.pc");
+        let results = run_pkg_config_check(&pkg);
+        assert_eq!(results.len(), 1, "unexpected results: {results:?}");
+        assert_eq!(results[0].0, "pkgconfig-exception");
+        assert!(
+            results[0]
+                .1
+                .contains("E: pkgconfig-exception /usr/lib64/pkgconfig/missing.pc"),
+            "unexpected line: {}",
+            results[0].1
+        );
     }
 
     #[test]
