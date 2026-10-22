@@ -144,11 +144,7 @@ impl Check for PkgConfigCheck {
                 // (NotADirectory) draws no finding; read failures on
                 // materialised files report as exceptions, as do decode
                 // failures above.
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        ErrorKind::NotFound | ErrorKind::NotADirectory
-                    ) => {}
+                Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {}
                 Err(e) => add_info(
                     out,
                     Level::Error,
@@ -415,10 +411,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("mkdir fixture tree");
         std::fs::write(root.join("BUILD"), "bazel build file\n").expect("write BUILD file");
         let pc_path = root.join("build/libs/opt/pkgconfig/gpr.pc");
-        let pkg = pkg_with_pc_path(
-            &pc_path,
-            "/usr/src/grpc/build/libs/opt/pkgconfig/gpr.pc",
-        );
+        let pkg = pkg_with_pc_path(&pc_path, "/usr/src/grpc/build/libs/opt/pkgconfig/gpr.pc");
         let results = run_pkg_config_check(&pkg);
         assert!(results.is_empty(), "unexpected results: {results:?}");
     }
@@ -450,7 +443,9 @@ mod tests {
         assert_eq!(results.len(), 1, "unexpected results: {results:?}");
         assert_eq!(results[0].0, "pkgconfig-exception");
         assert!(
-            results[0].1.contains("E: pkgconfig-exception /usr/lib64/pkgconfig/bad.pc"),
+            results[0]
+                .1
+                .contains("E: pkgconfig-exception /usr/lib64/pkgconfig/bad.pc"),
             "unexpected line: {}",
             results[0].1
         );
