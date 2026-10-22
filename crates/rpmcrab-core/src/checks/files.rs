@@ -4055,6 +4055,47 @@ impl FilesCheck {
         }
     }
 
+    /// Whether `wrong-script-end-of-line-encoding` applies to a text
+    /// file (issue #849): the file is a script when it carries a kernel
+    /// interpreter line, when its name carries a Unix shell-script
+    /// extension, or when it is an executable file in a script location
+    /// (the `script_re` paths). A kernel interpreter line names an
+    /// absolute interpreter path; a leading `#!` followed by anything
+    /// else is source syntax (a Rust `#![...]` inner attribute), not an
+    /// interpreter line. Shell-script extensions name scripts on their
+    /// own because shell scripts are routinely sourced and carry no
+    /// interpreter line; language source extensions (.py, .pl, .rb,
+    /// ...) name modules as readily as scripts, so they make a file a
+    /// script only through its interpreter line; `.ps1` behaves the
+    /// same way, because the PowerShell interpreter accepts CRLF. A
+    /// `.bat`/`.cmd` name
+    /// suppresses the name- and location-based arms — CRLF is the
+    /// correct end-of-line encoding for a Windows batch file — while an
+    /// interpreter line still applies, because a file starting with
+    /// `#!` is executed by that interpreter. Matching of both
+    /// extension sets is case-insensitive.
+    fn script_eol_applies(
+        fname: &str,
+        interpreter: Option<&str>,
+        mode_is_exec: bool,
+        in_script_path: bool,
+    ) -> bool {
+        if interpreter.is_some_and(|i| i.starts_with('/')) {
+            return true;
+        }
+        let lower = fname.to_lowercase();
+        if lower.ends_with(".bat") || lower.ends_with(".cmd") {
+            return false;
+        }
+        const SHELL_SCRIPT_EXTS: [&str; 8] = [
+            ".sh", ".bash", ".zsh", ".ksh", ".csh", ".tcsh", ".fish", ".bsh",
+        ];
+        if SHELL_SCRIPT_EXTS.iter().any(|e| lower.ends_with(e)) {
+            return true;
+        }
+        in_script_path && mode_is_exec
+    }
+
     fn check_normal_text(
         &self,
         pkg: &Pkg,
@@ -4159,7 +4200,14 @@ impl FilesCheck {
                     }
                 }
             }
-            if fd.chunk.contains(&b'\r') {
+            if fd.chunk.contains(&b'\r')
+                && Self::script_eol_applies(
+                    fname,
+                    fd.interpreter.as_deref(),
+                    mode_is_exec,
+                    is_match(&self.script_re, fname),
+                )
+            {
                 add_info(
                     out,
                     Level::Error,
@@ -11205,5 +11253,193 @@ mod tests {
         let names: Vec<String> = lines.iter().map(|(n, _)| n.clone()).collect();
         assert_has(&names, "env-script-interpreter");
         assert_lacks(&names, "non-executable-script");
+    }
+
+    fn eol_flagged(lines: &[(String, String)], path: &str) -> bool {
+        lines
+            .iter()
+            .any(|(n, line)| n == "wrong-script-end-of-line-encoding" && line.contains(path))
+    }
+
+    /// Scripts with CRLF keep drawing `wrong-script-end-of-line-encoding`
+    /// (issue #849): a file with a kernel interpreter line, a file with
+    /// a Unix shell-script extension (shell scripts are routinely
+    /// sourced and carry no interpreter line), and an executable file
+    /// in a script location. An interpreter line also wins over a
+    /// `.bat` name: that file is executed by its interpreter, not by
+    /// cmd.exe.
+    #[test]
+    fn script_eol_still_fires_for_scripts() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/bin/file-rename",
+                    0o100555,
+                    "Perl script text executable",
+                    b"#!/usr/bin/perl\r\nuse strict;\r\n",
+                ),
+                (
+                    "/usr/share/myapp/helper.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\r\nprint(1)\r\n",
+                ),
+                (
+                    "/usr/share/vtcl/demo.tcl",
+                    0o100755,
+                    "ASCII text executable",
+                    b"#!/bin/sh\r\n# restarts using wish\r\n",
+                ),
+                (
+                    "/usr/share/myapp/run.sh",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"echo hi\r\n",
+                ),
+                (
+                    "/usr/share/myapp/env.zsh",
+                    0o100755,
+                    "ASCII text",
+                    b"export X=1\r\n",
+                ),
+                (
+                    "/usr/share/bsh2/tests/testnullinvocation.bsh",
+                    0o100755,
+                    "ASCII text",
+                    b"\r\n#!/usr/bin/bsh2\r\nsource(\"x\");\r\n",
+                ),
+                (
+                    "/usr/bin/plain-tool",
+                    0o100755,
+                    "ASCII text",
+                    b"echo hi\r\n",
+                ),
+                (
+                    "/usr/share/myapp/SETUP.BAT",
+                    0o100755,
+                    "ASCII text executable",
+                    b"#!/bin/sh\r\necho hi\r\n",
+                ),
+            ],
+        );
+        let lines = script_finding_lines(&pkg, &config);
+        for path in [
+            "/usr/bin/file-rename",
+            "/usr/share/myapp/helper.py",
+            "/usr/share/vtcl/demo.tcl",
+            "/usr/share/myapp/run.sh",
+            "/usr/share/myapp/env.zsh",
+            "/usr/share/bsh2/tests/testnullinvocation.bsh",
+            "/usr/bin/plain-tool",
+            "/usr/share/myapp/SETUP.BAT",
+        ] {
+            assert!(
+                eol_flagged(&lines, path),
+                "wrong-script-end-of-line-encoding must fire for {path}: {lines:?}"
+            );
+        }
+    }
+
+    /// Files that are not scripts stay silent on
+    /// `wrong-script-end-of-line-encoding` (issue #849), however they
+    /// entered the script branch of the reference-shaped check — in
+    /// the Factory corpus every one of these shapes is installed
+    /// executable, which alone used to draw the error. Windows batch
+    /// files stay silent because CRLF is their correct encoding.
+    #[test]
+    fn script_eol_silent_for_non_scripts_and_batch_files() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/lib/python3.13/site-packages/pkg/CHANGELOG.md",
+                    0o100755,
+                    "ASCII text",
+                    b"# Changes\r\n",
+                ),
+                (
+                    "/usr/lib/python3.13/site-packages/pkg/playbook.yml",
+                    0o100755,
+                    "ASCII text",
+                    b"---\r\n- hosts: all\r\n",
+                ),
+                (
+                    "/usr/lib/python3.13/site-packages/pkg/module.py",
+                    0o100755,
+                    "Python script, ASCII text",
+                    b"import os\r\n",
+                ),
+                (
+                    "/usr/share/licenses/pkg/LICENSE",
+                    0o100755,
+                    "ASCII text",
+                    b"License\r\n",
+                ),
+                (
+                    "/usr/lib64/crates/vendor/src/lib.rs",
+                    0o100644,
+                    "ASCII text",
+                    b"#![no_std]\r\n//! crate docs\r\n",
+                ),
+                (
+                    "/usr/share/myapp/data.txt",
+                    0o100755,
+                    "ASCII text",
+                    b"hello\r\n",
+                ),
+                (
+                    "/usr/share/myapp/install.ps1",
+                    0o100755,
+                    "ASCII text",
+                    b"Write-Host hi\r\n",
+                ),
+                (
+                    "/usr/share/tetra/gradle-5.1/bin/gradle.bat",
+                    0o100755,
+                    "DOS batch file, ASCII text",
+                    b"@if \"%DEBUG%\" == \"\" @echo off\r\n",
+                ),
+                (
+                    "/usr/lib64/node_modules/corepack/shims/npm.cmd",
+                    0o100755,
+                    "DOS batch file, ASCII text",
+                    b"@SETLOCAL\r\n@IF EXIST node.exe (\r\n",
+                ),
+                (
+                    "/usr/share/myapp/RUN.BAT",
+                    0o100755,
+                    "DOS batch file, ASCII text",
+                    b"@echo off\r\n",
+                ),
+                (
+                    "/usr/bin/helper.bat",
+                    0o100755,
+                    "DOS batch file, ASCII text",
+                    b"@echo off\r\n",
+                ),
+                (
+                    "/usr/bin/helper.cmd",
+                    0o100755,
+                    "DOS batch file, ASCII text",
+                    b"@echo off\r\n",
+                ),
+            ],
+        );
+        let lines = script_finding_lines(&pkg, &config);
+        let flagged: Vec<&str> = lines
+            .iter()
+            .filter(|(n, _)| n == "wrong-script-end-of-line-encoding")
+            .map(|(_, line)| line.as_str())
+            .collect();
+        assert_eq!(
+            flagged,
+            Vec::<&str>::new(),
+            "no wrong-script-end-of-line-encoding for non-scripts or batch files: {lines:?}"
+        );
     }
 }
