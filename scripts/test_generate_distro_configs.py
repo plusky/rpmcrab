@@ -135,7 +135,7 @@ def test_curl_failure_raises():
             popen_patch, run_patch:
         try:
             _filelist_hits(["/usr/bin/foo"], {})
-        except RuntimeError as e:
+        except gen.FetchExhausted as e:
             assert "curl rc=28" in str(e), str(e)
             assert "timed out" in str(e), str(e)
         else:
@@ -151,7 +151,7 @@ def test_zstd_failure_raises_with_stderr():
             popen_patch, run_patch:
         try:
             _filelist_hits(["/usr/bin/foo"], {})
-        except RuntimeError as e:
+        except gen.FetchExhausted as e:
             assert "zstd rc=1" in str(e), str(e)
             assert "not in zstd format" in str(e), str(e)
         else:
@@ -228,7 +228,7 @@ def test_repomd_no_sleep_after_final_attempt():
                               side_effect=lambda s: sleeps.append(s)):
         try:
             _filelist_hits(["/usr/bin/foo"], {})
-        except RuntimeError as e:
+        except gen.FetchExhausted as e:
             assert (
                 str(e)
                 == "repomd.xml fetch failed for Tumbleweed after retries: HTTP Error 503: err"
@@ -435,7 +435,7 @@ def test_primary_sha512_corrupt_raises():
     """A tampered download must raise, never silently verify."""
     try:
         _primary_run(_primary_repomd('0' * 128), _PRIMARY_PAYLOAD)
-    except RuntimeError as e:
+    except gen.FetchExhausted as e:
         assert 'sha512 mismatch' in str(e), str(e)
     else:
         raise AssertionError('corrupt download did not raise')
@@ -543,7 +543,7 @@ def test_filelist_stale_mirror_exhausts_cycles_then_raises():
                               side_effect=lambda s: sleeps.append(s)):
         try:
             _filelist_hits(["/usr/bin/foo"], {})
-        except RuntimeError as e:
+        except gen.FetchExhausted as e:
             msg = str(e)
             assert "after %d attempts" % gen._FILELIST_CYCLES in msg, msg
             assert "curl rc=22" in msg, msg
@@ -657,7 +657,7 @@ def test_filelist_fallback_mirror_failure_still_raises():
             mock.patch.object(gen.time, "sleep"):
         try:
             _doso_filelist_hits(["/usr/bin/foo"], {})
-        except RuntimeError as e:
+        except gen.FetchExhausted as e:
             msg = str(e)
             # the fallback counts as an attempt too
             assert "after %d attempts" % (gen._FILELIST_CYCLES + 1) in msg, msg
@@ -691,7 +691,7 @@ def test_filelist_no_fallback_for_unknown_base():
         try:
             gen._filelist_hits(["/usr/bin/foo"], "http://r/repomd.xml",
                                "http://r/", {}, "Tumbleweed")
-        except RuntimeError as e:
+        except gen.FetchExhausted as e:
             assert "after %d attempts" % gen._FILELIST_CYCLES in str(e), e
         else:
             raise AssertionError("did not raise")
@@ -818,7 +818,7 @@ def test_primary_stale_mirror_exhausts_cycles_and_fallback_then_raises():
 
     names, _, sleeps, error = _tw_run(primary)
     assert names is None, names
-    assert isinstance(error, RuntimeError), error
+    assert isinstance(error, gen.FetchExhausted), error
     msg = str(error)
     # the fallback mirror counts as an attempt too
     assert "after %d attempts" % (gen._PRIMARY_CYCLES + 1) in msg, msg
@@ -1833,6 +1833,141 @@ def test_apply_digest_adjudications_rewrites_cups_record():
     assert out2 == out and log2 == [], (out2, log2)
     out3, log3 = gen.apply_digest_adjudications(text, "sysctl-whitelist.toml")
     assert out3 == text and log3 == [], (out3, log3)
+
+
+# ---------------------------------------------------------------------------
+# fetch exhaustion: a dedicated exit code, never confused with drift
+# ---------------------------------------------------------------------------
+
+def test_fetch_github_5xx_raises_fetch_exhausted():
+    """A GitHub 5xx is an upstream outage: FetchExhausted, so --check
+    reports it as infrastructure instead of failing."""
+    with mock.patch.object(gen.urllib.request, "urlopen",
+                           side_effect=_http_error(503)):
+        try:
+            gen.fetch_github("0" * 40, "opensuse.toml")
+        except gen.FetchExhausted as e:
+            assert "503" in str(e), str(e)
+        else:
+            raise AssertionError("GitHub 503 did not raise FetchExhausted")
+
+
+def test_fetch_github_urlerror_raises_fetch_exhausted():
+    with mock.patch.object(gen.urllib.request, "urlopen",
+                           side_effect=urllib.error.URLError("no route")):
+        try:
+            gen.fetch_github("0" * 40, "opensuse.toml")
+        except gen.FetchExhausted:
+            pass
+        else:
+            raise AssertionError("GitHub URLError did not raise FetchExhausted")
+
+
+def test_fetch_github_4xx_raises_http_error():
+    """A 404 for a pinned file is deterministic (the pin is wrong): the
+    raw HTTPError propagates, never FetchExhausted."""
+    with mock.patch.object(gen.urllib.request, "urlopen",
+                           side_effect=_http_error(404)):
+        try:
+            gen.fetch_github("0" * 40, "opensuse.toml")
+        except urllib.error.HTTPError as e:
+            assert e.code == 404, e.code
+        else:
+            raise AssertionError("GitHub 404 did not raise")
+
+
+def test_package_present_obs_5xx_raises_fetch_exhausted():
+    """An OBS source API 503 leaves presence unverifiable: FetchExhausted
+    instead of a raw traceback or a silent 'absent'."""
+    with mock.patch.object(gen.urllib.request, "urlopen",
+                           side_effect=_http_error(503)):
+        try:
+            gen.package_present("fetch-exhausted-probe")
+        except gen.FetchExhausted as e:
+            assert "503" in str(e), str(e)
+        else:
+            raise AssertionError("OBS 503 did not raise FetchExhausted")
+
+
+def test_package_present_obs_404_uses_repodata():
+    """A 404 from the source API still means 'check the binary repodata':
+    presence there counts, absence everywhere is a plain False."""
+    with mock.patch.object(gen.urllib.request, "urlopen",
+                           side_effect=_http_error(404)), \
+            mock.patch.object(gen, "_tw_binary_names",
+                              return_value={"present-in-repodata-probe"}):
+        assert gen.package_present("present-in-repodata-probe") is True
+        assert gen.package_present("absent-everywhere-probe") is False
+
+
+def _run_main_check(side_effect=None, return_value=None):
+    """Run main() --check with generate() stubbed; return (rc, stderr)."""
+    import contextlib
+    import io
+
+    err = io.StringIO()
+    with mock.patch.object(sys, "argv",
+                           ["generate-distro-configs.py", "--check"]), \
+            mock.patch.object(gen, "generate", side_effect=side_effect,
+                              return_value=return_value), \
+            contextlib.redirect_stderr(err), \
+            contextlib.redirect_stdout(io.StringIO()):
+        rc = gen.main()
+    return rc, err.getvalue()
+
+
+def test_main_fetch_exhausted_returns_dedicated_code():
+    """An exhausted upstream fetch exits EXIT_FETCH_EXHAUSTED with the
+    fetch-exhausted marker on stderr, so the drift job can map the run
+    to neutral."""
+    rc, err = _run_main_check(
+        side_effect=gen.FetchExhausted("upstream is down"))
+    assert rc == gen.EXIT_FETCH_EXHAUSTED, rc
+    assert rc not in (0, 1, 2), rc
+    assert "fetch-exhausted:" in err, err
+    assert "upstream is down" in err, err
+
+
+def test_main_other_errors_are_not_neutral():
+    """Only FetchExhausted takes the neutral path: a RuntimeError (local
+    error, malformed data) or a GrepError (deterministic pipeline
+    failure) inside generate() propagates and fails as before."""
+    for boom in (RuntimeError("local boom"), gen.GrepError("grep rc=2")):
+        try:
+            _run_main_check(side_effect=boom)
+        except type(boom) as e:
+            assert e is boom, e
+        else:
+            raise AssertionError("%r did not propagate" % (boom,))
+
+
+def _generate_return(provenance):
+    empty = []
+    return (
+        {},
+        provenance,
+        empty, empty, empty,
+        list(gen.FILES["opensuse"]),
+        empty, empty, empty, empty, empty, empty, empty,
+    )
+
+
+def test_main_check_clean_returns_zero():
+    """A generation matching the vendored files exits 0."""
+    provenance = (gen.DISTRO_DIR / "PROVENANCE").read_text(encoding="utf-8")
+    rc, err = _run_main_check(return_value=_generate_return(provenance))
+    assert rc == 0, (rc, err)
+
+
+def test_main_check_drift_returns_one():
+    """A generation differing from the vendored files exits 1 - drift,
+    never the fetch-exhausted code."""
+    provenance = (gen.DISTRO_DIR / "PROVENANCE").read_text(encoding="utf-8")
+    ret = list(_generate_return(provenance))
+    ret[1] = provenance + "\n# tampered provenance\n"
+    rc, err = _run_main_check(return_value=tuple(ret))
+    assert rc == 1, (rc, err)
+    assert "drift: PROVENANCE" in err, err
 
 
 if __name__ == "__main__":

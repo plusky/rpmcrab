@@ -305,7 +305,23 @@ jobs:
       - run: python3 scripts/test_generate_distro_configs.py
       - run: python3 scripts/test_sync_upstream_whitelists.py
       - run: python3 scripts/test_watch_upstream_configs.py
-      - run: python3 scripts/generate-distro-configs.py --check
+      # Exit 3 is the generator's fetch-exhausted code (EXIT_FETCH_EXHAUSTED
+      # in scripts/generate-distro-configs.py): a live upstream fetch died
+      # beyond retries, so this run verified nothing. Map it to a warning
+      # so the job stays green - an upstream outage must not mail failure
+      # noise - while drift (exit 1) and every other failure keep failing.
+      - name: Check vendored distro configs against the pins
+        run: |
+          rc=0
+          python3 scripts/generate-distro-configs.py --check > /tmp/drift-check.log 2>&1 || rc=$?
+          cat /tmp/drift-check.log
+          if [ "$rc" -eq 3 ]; then
+            marker=$(grep '^fetch-exhausted:' /tmp/drift-check.log | head -n 1 || true)
+            echo "::warning title=Distro config drift not verified::$marker"
+            echo "Distro config drift check neutral: $marker" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          exit "$rc"
 
   reference-coverage-audit:
     runs-on: ubuntu-latest
