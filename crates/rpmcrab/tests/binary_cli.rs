@@ -2004,6 +2004,358 @@ fn unused_rpmlintrc_filter_alone_does_not_fail_the_run() {
     );
 }
 
+/// A spec that draws `no-license-file-in-spec` (issue #821): an archive
+/// source, a `License:` tag that is not public-domain-only, and a
+/// `%files` section whose only entry ships a program, so no section
+/// marks a licence file.
+fn write_unlicensed_spec(dir: &Path, name: &str) -> std::path::PathBuf {
+    let spec = dir.join(format!("{name}.spec"));
+    std::fs::write(
+        &spec,
+        format!(
+            "Name: {name}\n\
+             Version: 1.0\n\
+             Release: 1\n\
+             Summary: probe\n\
+             License: MIT\n\
+             Source: {name}-1.0.tar.gz\n\
+             \n\
+             %description\n\
+             probe\n\
+             \n\
+             %files\n\
+             %{{_bindir}}/{name}\n"
+        ),
+    )
+    .unwrap();
+    spec
+}
+
+/// The session header's `rpmlintrc:` block: the loaded files, in load
+/// order, one per line, indented four spaces. No block prints when
+/// nothing was loaded.
+fn loaded_rpmlintrcs(stdout: &str) -> Vec<&str> {
+    let mut lines = stdout.lines();
+    if lines.by_ref().find(|l| *l == "rpmlintrc:").is_none() {
+        return Vec::new();
+    }
+    lines
+        .take_while(|l| l.starts_with("    "))
+        .map(|l| l.trim())
+        .collect()
+}
+
+/// The run summary's filtered count (the `N filtered` field).
+fn filtered_count(stdout: &str) -> u64 {
+    let idx = stdout.find(" filtered;").expect("summary line present");
+    let digits: String = stdout[..idx]
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    digits.parse().expect("filtered count is numeric")
+}
+
+/// Issue #830: an rpmlintrc beside a spec is discovered however many
+/// positional arguments the run has, so its name-scoped filters apply
+/// identically standalone and in a multi-spec run, in either order.
+/// (The reference discovers beside a lone argument only, so the
+/// filtered spec's error surfaces there in every multi-spec run.)
+#[test]
+fn rpmlintrc_discovery_beside_every_argument_830() {
+    let dir = tempfile::tempdir().unwrap();
+    let eagle_dir = dir.path().join("a");
+    let partner_dir = dir.path().join("b");
+    std::fs::create_dir(&eagle_dir).unwrap();
+    std::fs::create_dir(&partner_dir).unwrap();
+    let eagle = write_unlicensed_spec(&eagle_dir, "eagleprobe");
+    std::fs::write(
+        eagle_dir.join("eagleprobe-rpmlintrc"),
+        "addFilter(\"eagleprobe.* *.*\")\n",
+    )
+    .unwrap();
+    let partner = write_unlicensed_spec(&partner_dir, "partnerprobe");
+    let rc_display = eagle_dir.join("eagleprobe-rpmlintrc").display().to_string();
+    let eagle_arg = eagle.to_str().unwrap();
+    let partner_arg = partner.to_str().unwrap();
+
+    // Standalone: the rc is discovered and the blanket filter applies.
+    let out = rpmcrab(&[eagle_arg]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        loaded_rpmlintrcs(&stdout),
+        vec![rc_display.as_str()],
+        "stdout: {stdout}"
+    );
+    assert_eq!(
+        stdout.matches("no-license-file-in-spec").count(),
+        0,
+        "stdout: {stdout}"
+    );
+    let standalone_filtered = filtered_count(&stdout);
+    assert!(standalone_filtered > 0, "stdout: {stdout}");
+
+    // In a pair, either order: the same file loads, the filtered spec
+    // stays filtered (the identical filtered count), and the partner's
+    // own error surfaces.
+    for args in [[eagle_arg, partner_arg], [partner_arg, eagle_arg]] {
+        let out = rpmcrab(&args);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            loaded_rpmlintrcs(&stdout),
+            vec![rc_display.as_str()],
+            "stdout: {stdout}"
+        );
+        assert_eq!(
+            stdout.matches("no-license-file-in-spec").count(),
+            1,
+            "stdout: {stdout}"
+        );
+        assert!(
+            stdout.contains("partnerprobe.spec: E: no-license-file-in-spec"),
+            "stdout: {stdout}"
+        );
+        assert_eq!(
+            filtered_count(&stdout),
+            standalone_filtered,
+            "stdout: {stdout}"
+        );
+    }
+}
+
+/// Issue #830: two arguments in different directories each contribute
+/// their own beside rpmlintrc; both load, so both specs' name-scoped
+/// filters apply.
+#[test]
+fn rpmlintrc_discovery_loads_each_arguments_rc_830() {
+    let dir = tempfile::tempdir().unwrap();
+    let a_dir = dir.path().join("adir");
+    let b_dir = dir.path().join("bdir");
+    std::fs::create_dir(&a_dir).unwrap();
+    std::fs::create_dir(&b_dir).unwrap();
+    let aaa = write_unlicensed_spec(&a_dir, "aaaprobe");
+    std::fs::write(
+        a_dir.join("aaaprobe-rpmlintrc"),
+        "addFilter(\"aaaprobe.* *.*\")\n",
+    )
+    .unwrap();
+    let bbb = write_unlicensed_spec(&b_dir, "bbbprobe");
+    std::fs::write(
+        b_dir.join("bbbprobe-rpmlintrc"),
+        "addFilter(\"bbbprobe.* *.*\")\n",
+    )
+    .unwrap();
+
+    let out = rpmcrab(&[aaa.to_str().unwrap(), bbb.to_str().unwrap()]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        loaded_rpmlintrcs(&stdout),
+        vec![
+            a_dir
+                .join("aaaprobe-rpmlintrc")
+                .display()
+                .to_string()
+                .as_str(),
+            b_dir
+                .join("bbbprobe-rpmlintrc")
+                .display()
+                .to_string()
+                .as_str(),
+        ],
+        "stdout: {stdout}"
+    );
+    // Both filters apply: nothing either spec drew is printed, so the
+    // run exits 0. Loading only one rc would leave the other spec's
+    // error standing and exit 64.
+    assert_eq!(out.status.code(), Some(0), "stdout: {stdout}");
+    assert_eq!(
+        stdout.matches("no-license-file-in-spec").count(),
+        0,
+        "stdout: {stdout}"
+    );
+}
+
+/// Issue #830: explicit `-r` files still win outright in a multi-spec
+/// run — no auto-discovery happens beside any argument, and the
+/// explicit file's patterns are the ones the audit accounts.
+#[test]
+fn rpmlintrc_discovery_explicit_r_still_wins_830() {
+    let dir = tempfile::tempdir().unwrap();
+    let eagle = write_unlicensed_spec(dir.path(), "eagleprobe");
+    std::fs::write(
+        dir.path().join("eagleprobe-rpmlintrc"),
+        "addFilter(\"eagleprobe.* *.*\")\n",
+    )
+    .unwrap();
+    let partner = write_unlicensed_spec(dir.path(), "partnerprobe");
+    let explicit = dir.path().join("explicit.rc");
+    std::fs::write(&explicit, "addFilter(\"explicit-only-pattern-830\")\n").unwrap();
+
+    let out = rpmcrab(&[
+        "-r",
+        explicit.to_str().unwrap(),
+        eagle.to_str().unwrap(),
+        partner.to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        loaded_rpmlintrcs(&stdout),
+        vec![explicit.display().to_string().as_str()],
+        "stdout: {stdout}"
+    );
+    // The beside file never loaded, so the error it would have filtered
+    // surfaces.
+    assert!(
+        stdout.contains("eagleprobe.spec: E: no-license-file-in-spec"),
+        "stdout: {stdout}"
+    );
+    // The explicit file's unmatched pattern is audited, once.
+    assert_eq!(
+        stdout.matches("unused-rpmlintrc-filter").count(),
+        1,
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("unused-rpmlintrc-filter \"explicit-only-pattern-830\""),
+        "stdout: {stdout}"
+    );
+}
+
+/// Issue #830: a hit in the configured `RpmlintrcSearchPaths` still
+/// suppresses the beside-argument lookup, however many arguments the
+/// run has.
+#[test]
+fn rpmlintrc_discovery_search_paths_still_win_830() {
+    let dir = tempfile::tempdir().unwrap();
+    let search_dir = dir.path().join("search");
+    std::fs::create_dir(&search_dir).unwrap();
+    std::fs::write(
+        search_dir.join("search.rpmlintrc"),
+        "addFilter(\"search-path-only-pattern-830\")\n",
+    )
+    .unwrap();
+    let config = dir.path().join("probe.toml");
+    std::fs::write(
+        &config,
+        format!("RpmlintrcSearchPaths = ['{}']\n", search_dir.display()),
+    )
+    .unwrap();
+    let eagle = write_unlicensed_spec(dir.path(), "eagleprobe");
+    std::fs::write(
+        dir.path().join("eagleprobe-rpmlintrc"),
+        "addFilter(\"eagleprobe.* *.*\")\n",
+    )
+    .unwrap();
+    let partner = write_unlicensed_spec(dir.path(), "partnerprobe");
+
+    let out = rpmcrab(&[
+        "-c",
+        config.to_str().unwrap(),
+        eagle.to_str().unwrap(),
+        partner.to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        loaded_rpmlintrcs(&stdout),
+        vec![
+            search_dir
+                .join("search.rpmlintrc")
+                .display()
+                .to_string()
+                .as_str()
+        ],
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("eagleprobe.spec: E: no-license-file-in-spec"),
+        "stdout: {stdout}"
+    );
+    assert_eq!(
+        stdout.matches("unused-rpmlintrc-filter").count(),
+        1,
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("unused-rpmlintrc-filter \"search-path-only-pattern-830\""),
+        "stdout: {stdout}"
+    );
+}
+
+/// Issue #830: two specs sharing one directory share its rpmlintrc —
+/// the file loads once, and the audit reports its unmatched pattern
+/// once, not once per argument that discovered it.
+#[test]
+fn rpmlintrc_discovery_shared_rc_loads_and_audits_once_830() {
+    let dir = tempfile::tempdir().unwrap();
+    let ccc = write_unlicensed_spec(dir.path(), "cccprobe");
+    let ddd = write_unlicensed_spec(dir.path(), "dddprobe");
+    let shared = dir.path().join("shared.rpmlintrc");
+    std::fs::write(
+        &shared,
+        "addFilter(\"cccprobe.* *.*\")\naddFilter(\"never-matches-830\")\n",
+    )
+    .unwrap();
+
+    let out = rpmcrab(&[ccc.to_str().unwrap(), ddd.to_str().unwrap()]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        loaded_rpmlintrcs(&stdout),
+        vec![shared.display().to_string().as_str()],
+        "stdout: {stdout}"
+    );
+    // The used pattern filtered its spec; the other spec's error
+    // surfaces; the unused pattern is reported exactly once.
+    assert!(
+        !stdout.contains("cccprobe.spec: E: no-license-file-in-spec"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("dddprobe.spec: E: no-license-file-in-spec"),
+        "stdout: {stdout}"
+    );
+    assert_eq!(
+        stdout.matches("unused-rpmlintrc-filter").count(),
+        1,
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("unused-rpmlintrc-filter \"never-matches-830\""),
+        "stdout: {stdout}"
+    );
+}
+
+/// Issue #830 control: with no rpmlintrc beside any argument, a
+/// multi-spec run loads none and every spec's error surfaces — the
+/// fixture specs the discovery pins rely on do fire unfiltered.
+#[test]
+fn rpmlintrc_discovery_without_any_rc_is_a_no_op_830() {
+    let dir = tempfile::tempdir().unwrap();
+    let eagle = write_unlicensed_spec(dir.path(), "eagleprobe");
+    let partner = write_unlicensed_spec(dir.path(), "partnerprobe");
+
+    let out = rpmcrab(&[eagle.to_str().unwrap()]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(loaded_rpmlintrcs(&stdout).is_empty(), "stdout: {stdout}");
+    assert_eq!(
+        stdout.matches("no-license-file-in-spec").count(),
+        1,
+        "stdout: {stdout}"
+    );
+
+    let out = rpmcrab(&[eagle.to_str().unwrap(), partner.to_str().unwrap()]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(loaded_rpmlintrcs(&stdout).is_empty(), "stdout: {stdout}");
+    assert_eq!(
+        stdout.matches("no-license-file-in-spec").count(),
+        2,
+        "stdout: {stdout}"
+    );
+    assert_eq!(out.status.code(), Some(64), "stdout: {stdout}");
+}
+
 /// `--explain`: staged `AlternativesCheck.toml` resolves `alternative-generic-name-not-symlink` instead of "Unknown message".
 #[test]
 fn explain_staged_alternatives_check() {

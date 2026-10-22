@@ -339,9 +339,12 @@ When no `-r/--rpmlintrc` is given, and unless `PYTEST_XDIST_TESTRUNUID` is set:
    and `/usr/src/packages/SOURCES/`, each globbed for `*.rpmlintrc` then
    `*-rpmlintrc`, sorted. This is why OBS builds pick up
    `$SOURCES/<pkg>-rpmlintrc`.
-2. Only if that found nothing **and** exactly one positional file/dir was given,
-   that argument's directory is globbed (`*.rpmlintrc` then `*-rpmlintrc`,
-   sorted).
+2. Only if that found nothing, every positional argument is consulted in
+   turn: a file argument contributes its directory, a directory argument
+   contributes itself, each globbed (`*.rpmlintrc` then `*-rpmlintrc`,
+   sorted), and the combined results are deduplicated by path, so an
+   rpmlintrc shared by several arguments loads once. (Upstream consults a
+   lone positional argument only, `lint.py:198-224`; issue #830.)
 3. **Multiple rpmlintrc files are all loaded**, with a stderr warning
    `There are multiple items to be loaded: …`. (Upstream instead refuses and
    prints `…ignoring them…` — a real message-text difference.)
