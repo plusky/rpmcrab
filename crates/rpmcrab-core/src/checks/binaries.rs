@@ -2547,9 +2547,11 @@ fn elf_machine_class(pkgfile: &PkgFile) -> ElfMachineClass {
 
 /// How the ELF members of an ar archive classify as a whole.
 enum ArchiveElfClass {
-    /// Members exist and none presents as an ELF object: every member
-    /// is in another object format (COFF, wasm, LLVM bitcode) or is
-    /// plain data, so the archive carries no ELF code at all.
+    /// No member presents as an ELF object: every member is in
+    /// another object format (COFF, wasm, LLVM bitcode) or is plain
+    /// data, and an empty archive (the glibc placeholder archives are
+    /// the bare ar header) is the limiting case, so the archive
+    /// carries no ELF code at all.
     NoElfMembers,
     /// Every ELF member is for a foreign machine.
     AllForeign,
@@ -2588,7 +2590,8 @@ fn archive_elf_class(pkgfile: &PkgFile) -> ArchiveElfClass {
             return ArchiveElfClass::HasHostOrUnknown;
         }
     }
-    if members == 0 {
+    if members == 0 && archive.len() > 0 {
+        // The archive declares members but none could be read.
         ArchiveElfClass::Unreadable
     } else if elf_members == 0 {
         ArchiveElfClass::NoElfMembers
@@ -7759,6 +7762,13 @@ description = "explicit priority string bypasses the system crypto policy"
                     "/usr/lib/rustlib/src/libwasm.a",
                     "current ar archive",
                     &wasm_archive,
+                ),
+                real_file_pkgfile(
+                    &dir,
+                    "libempty.a",
+                    "/usr/lib/libempty.a",
+                    "current ar archive",
+                    b"!<arch>\n",
                 ),
             ],
         );
