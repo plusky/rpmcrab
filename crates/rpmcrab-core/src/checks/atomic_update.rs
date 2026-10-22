@@ -26,6 +26,16 @@
 //! exemption is a ledgered fix-and-diverge (issue #711). Symlinks are
 //! not directories and still fire.
 //!
+//! The error fires once per directory, not once per file: the detail
+//! is the directory carrying payload outside the snapshot plus the
+//! number of files it carries there. A web application installs
+//! thousands of files under one root, and enumerating them drowns the
+//! signal the finding exists to give; the directory is the unit a
+//! packager acts on, and the count keeps its mass visible. Which
+//! entries fire is unchanged -- the same entries, judged by the same
+//! predicate. The reference fires per file, so the aggregation is a
+//! ledgered fix-and-diverge (issue #835).
+//!
 //! This file hosts the transactional-update family's predicates. It also
 //! carries `usr_etc_conffile`, the predicate behind the crab-only
 //! `usr-etc-file-marked-as-conffile` warning emitted by
@@ -114,6 +124,15 @@ impl AtomicUpdateCheck {
         let allowed = self.allowed_dirs.iter().any(|d| under(d));
         let disallowed = self.disallowed_subdirs.iter().any(|d| under(d));
         !(allowed && !disallowed)
+    }
+}
+
+/// The folder carrying `path`: everything before the final `/`.
+/// A path directly under the root (`/file`) is carried by `/` itself.
+fn parent_dir(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(0) | None => "/",
+        Some(i) => &path[..i],
     }
 }
 
@@ -609,6 +628,13 @@ impl Check for AtomicUpdateCheck {
         if pkg.is_source {
             return;
         }
+        // The error aggregates per folder: one finding per directory
+        // carrying payload outside the snapshot, its detail the folder
+        // and the number of files it carries there (issue #835).
+        // Folders appear in the order their first firing entry does.
+        let mut folders: Vec<(&str, usize)> = Vec::new();
+        let mut folder_slots: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
         for pkgfile in &pkg.files {
             let name = pkgfile.name.as_str();
             if pkgfile.is_ghost() {
@@ -620,15 +646,28 @@ impl Check for AtomicUpdateCheck {
             if is_dir(pkgfile.mode) {
                 continue;
             }
-            if !self.path_allowed(name) {
-                add_info(
-                    out,
-                    Level::Error,
-                    pkg,
-                    "dir-or-file-outside-snapshot",
-                    &[name],
-                );
+            if self.path_allowed(name) {
+                continue;
             }
+            let folder = parent_dir(name);
+            match folder_slots.get(folder) {
+                Some(&slot) => folders[slot].1 += 1,
+                None => {
+                    folder_slots.insert(folder, folders.len());
+                    folders.push((folder, 1));
+                }
+            }
+        }
+        for (folder, count) in folders {
+            let noun = if count == 1 { "file" } else { "files" };
+            let detail = format!("{folder} ({count} {noun})");
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "dir-or-file-outside-snapshot",
+                &[detail.as_str()],
+            );
         }
         if self.check_ghosts {
             for ghost in &pkg.ghost_files {
@@ -1707,15 +1746,104 @@ fi
             assert_eq!(name, "dir-or-file-outside-snapshot");
             assert!(line.contains(": E: "), "level: {line}");
         }
+        // Each firing file sits alone in its folder, so each finding
+        // names the folder with a count of one (issue #835).
         assert!(
-            results[0].1.contains("/var/lib/outside"),
+            results[0].1.contains("/var/lib (1 file)"),
             "{}",
             results[0].1
         );
         assert!(
-            results[1].1.contains("/usr/local/bin/disallowed"),
+            results[1].1.contains("/usr/local/bin (1 file)"),
             "{}",
             results[1].1
+        );
+    }
+
+    #[test]
+    fn files_in_one_folder_collapse_to_one_finding_with_count() {
+        // One finding per folder, however many files it carries; the
+        // detail is the folder and its file count (issue #835).
+        // Directory and %ghost entries in the folder are not payload
+        // and do not inflate the count.
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![
+            regular("/srv/www/app/index.php"),
+            regular("/srv/www/app/style.css"),
+            regular("/srv/www/app/app.js"),
+            dir_entry("/srv/www/app"),
+            ghost("/srv/www/app/state"),
+            regular("/usr/bin/ok"),
+        ];
+        let mut check = check_with(&["/usr", "/etc"], &[], false);
+        let results = run(&mut check, &pkg);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "dir-or-file-outside-snapshot");
+        assert!(results[0].1.contains(": E: "), "level: {}", results[0].1);
+        assert!(
+            results[0].1.contains("/srv/www/app (3 files)"),
+            "detail: {}",
+            results[0].1
+        );
+    }
+
+    #[test]
+    fn files_across_folders_fire_once_per_folder() {
+        // Folders appear in the order their first firing entry does.
+        // A folder carrying one file reports its count in the same
+        // shape as any other, and a file directly under the root is
+        // carried by the root folder (issue #835).
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![
+            regular("/var/lib/app/a.db"),
+            regular("/srv/www/index.php"),
+            regular("/var/lib/app/b.db"),
+            regular("/topfile"),
+            regular("/var/log/app/today.log"),
+        ];
+        let mut check = check_with(&["/usr", "/etc"], &[], false);
+        let results = run(&mut check, &pkg);
+        assert_eq!(results.len(), 4);
+        for (name, line) in &results {
+            assert_eq!(name, "dir-or-file-outside-snapshot");
+            assert!(line.contains(": E: "), "level: {line}");
+        }
+        assert!(
+            results[0].1.contains("/var/lib/app (2 files)"),
+            "{}",
+            results[0].1
+        );
+        assert!(
+            results[1].1.contains("/srv/www (1 file)"),
+            "{}",
+            results[1].1
+        );
+        assert!(results[2].1.contains("/ (1 file)"), "{}", results[2].1);
+        assert!(
+            results[3].1.contains("/var/log/app (1 file)"),
+            "{}",
+            results[3].1
+        );
+    }
+
+    #[test]
+    fn symlink_counts_toward_its_folder() {
+        // A symlink is payload in the folder carrying it (it still
+        // fires, issue #711), so it counts toward that folder's total
+        // like a regular file (issue #835).
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![
+            symlink("/var/lib/current", "/var/lib/daemon"),
+            regular("/var/lib/state.db"),
+        ];
+        let mut check = check_with(&["/usr", "/etc"], &[], false);
+        let results = run(&mut check, &pkg);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "dir-or-file-outside-snapshot");
+        assert!(
+            results[0].1.contains("/var/lib (2 files)"),
+            "detail: {}",
+            results[0].1
         );
     }
 
@@ -1750,7 +1878,7 @@ fi
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "dir-or-file-outside-snapshot");
         assert!(
-            results[0].1.contains("/var/lib/daemon/state.db"),
+            results[0].1.contains("/var/lib/daemon (1 file)"),
             "{}",
             results[0].1
         );
@@ -1772,7 +1900,7 @@ fi
         assert_eq!(results[0].0, "dir-or-file-outside-snapshot");
         assert!(results[0].1.contains(": E: "), "level: {}", results[0].1);
         assert!(
-            results[0].1.contains("/var/lib/current"),
+            results[0].1.contains("/var/lib (1 file)"),
             "{}",
             results[0].1
         );
