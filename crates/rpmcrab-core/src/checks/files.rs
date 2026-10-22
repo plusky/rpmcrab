@@ -374,25 +374,44 @@ fn python_lib_tree_regex() -> &'static Regex {
 /// sourcing or rendering, so the interpreter line marks data rather
 /// than a script executed in place and the missing exec bit is not a
 /// defect (issues #813, #845). Every shape is decidable from the
-/// file's path and interpreter alone:
+/// file's path and interpreter alone, and two guards bound the
+/// shapes:
+///
+/// - a file installed directly in a script directory (`/bin`,
+///   `/sbin`, `/usr/bin`, `/usr/sbin`, `/usr/local/bin` or
+///   `/usr/local/sbin`) is an entry point and never counts as data;
+/// - the directory-component shapes count only inside the data and
+///   library trees (`/usr/src/`, `/usr/share/`, `/usr/lib/`,
+///   `/usr/lib64/`, `/usr/etc/`, `/etc/`): a component name alone
+///   does not distinguish a module tree from an entry point, so the
+///   same components in an entry-point tree (under `/usr/libexec/`,
+///   say) keep firing.
+///
+/// The shapes:
 ///
 /// - a library tree: a `site-packages`, `dist-packages`,
 ///   `node_modules` or `gems` path component, or a file under the
 ///   Ruby (`/usr/lib/ruby/`, `/usr/lib64/ruby/`) or Perl
-///   (`/usr/lib/perl5/`, `/usr/lib64/perl5/`) library roots;
-/// - a language directory: a `python` or `python3[.x]` component, a
-///   nested `lib` component (past the `/usr/<tree>/` prefix) holding
-///   a script-language file, a `bash` component holding a shell
-///   file, or a Python file in a host-loaded plugin directory
-///   (`extensions`, `plugins`) or gdb's `auto-load` directory;
-/// - a source tree: a `src` component (the `/usr/src/` trees
-///   included);
-/// - test and example material: a `test`, `tests`, `selftests`,
-///   `example`, `examples`, `sample` or `samples` component;
+///   (`/usr/lib/perl5/`, `/usr/lib64/perl5/`) library roots — a
+///   dependency tree is consumed by import wherever it is rooted;
+/// - a language directory (inside the data and library trees): a
+///   `python` or `python3[.x]` component, a nested `lib` component
+///   (past the first two path components) holding a script-language
+///   file (`.py`, `.rb`, `.pl`, `.pm`, `.lua`, `.php`, `.sh` or
+///   `.bash`), a `bash` component holding a shell file, or a
+///   Python file in a host-loaded plugin directory (`extensions`,
+///   `plugins`) or gdb's `auto-load` directory;
+/// - a source tree (inside the data and library trees): a `src`
+///   component (the `/usr/src/` trees included);
+/// - test and example material (inside the data and library
+///   trees): a `test`, `tests`, `selftests`, `example`, `examples`,
+///   `sample` or `samples` component;
 /// - a sourced fragment: a file under `/usr/share/bash-completion/`,
-///   a `profile` or `rc` basename, a basename with a `bashrc` name
-///   segment, or an interpreter naming `false`, which declares the
-///   file is never executed;
+///   a `profile` or `rc` basename or a basename with a `bashrc`
+///   name segment in a sourced location (`/etc/`, `/usr/etc/`,
+///   `/usr/lib/`, `/usr/lib64/` or `/usr/share/`), or an
+///   interpreter whose basename is exactly `false`, which declares
+///   the file is never executed;
 /// - a template: a basename ending in `.in`, `.sample`, `.tmpl`,
 ///   `.tpl`, `.template`, `.skel` or `.j2` — the installed name is
 ///   the name an instantiation step rewrites, so the shipped file
@@ -402,6 +421,15 @@ fn non_executable_script_is_data(
     interpreter: &str,
     python_lib_tree_re: &Regex,
 ) -> bool {
+    // Script directories hold entry points: no shape exempts a
+    // file installed directly in one.
+    let parent = fname.rsplit_once('/').map_or("", |(parent, _)| parent);
+    if matches!(
+        parent,
+        "/bin" | "/sbin" | "/usr/bin" | "/usr/sbin" | "/usr/local/bin" | "/usr/local/sbin"
+    ) {
+        return false;
+    }
     if interpreter.rsplit('/').next() == Some("false") {
         return true;
     }
@@ -419,7 +447,18 @@ fn non_executable_script_is_data(
         return true;
     }
     let base = fname.rsplit('/').next().unwrap_or("");
-    if base == "profile" || base == "rc" || base.split(['.', '_', '-']).any(|seg| seg == "bashrc") {
+    // Sourced-fragment basenames count only in sourced locations:
+    // the config, library and data trees.
+    let sourced_tree = fname.starts_with("/etc/")
+        || fname.starts_with("/usr/etc/")
+        || fname.starts_with("/usr/lib/")
+        || fname.starts_with("/usr/lib64/")
+        || fname.starts_with("/usr/share/");
+    if sourced_tree
+        && (base == "profile"
+            || base == "rc"
+            || base.split(['.', '_', '-']).any(|seg| seg == "bashrc"))
+    {
         return true;
     }
     if [
@@ -436,29 +475,30 @@ fn non_executable_script_is_data(
     {
         return true;
     }
-    let ext = base
-        .rsplit('.')
-        .next()
-        .filter(|_| base.contains('.'))
-        .unwrap_or("");
     let comps: Vec<&str> = fname.split('/').filter(|c| !c.is_empty()).collect();
     if comps.len() < 2 {
         return false;
     }
     let dirs = &comps[..comps.len() - 1];
+    if dirs.iter().any(|c| matches!(*c, "node_modules" | "gems")) {
+        return true;
+    }
+    // The remaining shapes are bare directory components, whose
+    // names also occur on entry points; they count only inside
+    // the data and library trees.
+    let data_tree = fname.starts_with("/usr/src/")
+        || fname.starts_with("/usr/share/")
+        || fname.starts_with("/usr/lib/")
+        || fname.starts_with("/usr/lib64/")
+        || fname.starts_with("/usr/etc/")
+        || fname.starts_with("/etc/");
+    if !data_tree {
+        return false;
+    }
     if dirs.iter().any(|c| {
         matches!(
             *c,
-            "node_modules"
-                | "gems"
-                | "src"
-                | "test"
-                | "tests"
-                | "selftests"
-                | "example"
-                | "examples"
-                | "sample"
-                | "samples"
+            "src" | "test" | "tests" | "selftests" | "example" | "examples" | "sample" | "samples"
         )
     }) {
         return true;
@@ -470,6 +510,11 @@ fn non_executable_script_is_data(
     }) {
         return true;
     }
+    let ext = base
+        .rsplit('.')
+        .next()
+        .filter(|_| base.contains('.'))
+        .unwrap_or("");
     if ext == "py"
         && dirs
             .iter()
@@ -4087,9 +4132,9 @@ impl FilesCheck {
             // interpreter line there marks content rather than a
             // script executed in place and the missing exec bit is
             // not a defect (issues #813, #845):
-            // `non_executable_script_is_data` carries the shapes.
-            // Scripts in every other location keep the reference
-            // behaviour.
+            // `non_executable_script_is_data` carries the shapes
+            // and their guards. Scripts the shapes do not cover
+            // keep the reference behaviour.
             if !mode_is_exec && !is_doc {
                 if let Some(interpreter) = &fd.interpreter {
                     if interpreter.starts_with('/')
@@ -10767,7 +10812,10 @@ mod tests {
     /// draws `non-executable-script` (issues #813, #845), including a
     /// directory whose name merely starts with an exempt component's
     /// name, an exempt word carried by a file name rather than a
-    /// directory, and a template word that is not the final suffix.
+    /// directory, a template word that is not the final suffix, a
+    /// shape matched inside a script directory, an exempt component
+    /// in an entry-point tree or outside the data and library
+    /// trees, and a sourced basename outside the sourced locations.
     #[test]
     fn non_executable_script_still_fires_outside_data_shapes() {
         let config = test_config();
@@ -10841,6 +10889,60 @@ mod tests {
                     "Bourne-Again shell script, ASCII text executable",
                     b"#!/bin/falsehood\n",
                 ),
+                (
+                    "/usr/bin/gen.py.in",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/python3\n",
+                ),
+                (
+                    "/usr/bin/never.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/false\n",
+                ),
+                (
+                    "/usr/sbin/rc",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/sh\n",
+                ),
+                (
+                    "/usr/libexec/myapp/src/run.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/libexec/myapp/tests/run.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/libexec/myapp/extensions/tool.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/python3\n",
+                ),
+                (
+                    "/usr/libexec/myapp/bash/run.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/libexec/myapp/profile",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/sh\n",
+                ),
+                (
+                    "/opt/myapp/tests/run.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
             ],
         );
         let lines = script_finding_lines(&pkg, &config);
@@ -10856,6 +10958,15 @@ mod tests {
             "/usr/share/myapp/profile.sh",
             "/usr/share/myapp/extensions/tool.sh",
             "/usr/share/myapp/sleeper.sh",
+            "/usr/bin/gen.py.in",
+            "/usr/bin/never.sh",
+            "/usr/sbin/rc",
+            "/usr/libexec/myapp/src/run.sh",
+            "/usr/libexec/myapp/tests/run.py",
+            "/usr/libexec/myapp/extensions/tool.py",
+            "/usr/libexec/myapp/bash/run.sh",
+            "/usr/libexec/myapp/profile",
+            "/opt/myapp/tests/run.py",
         ] {
             assert!(
                 lines
@@ -10873,9 +10984,10 @@ mod tests {
     /// test fixture inside it, a language directory outside the
     /// Python library trees, gdb's auto-load directory, host-loaded
     /// Python plugin directories, the Node and Ruby library trees,
-    /// the Perl library root, a nested `lib` directory holding shell
-    /// and Ruby library files, an application `src` layout, sample
-    /// material, a sourced bashrc fragment, a profile file, a plugin
+    /// the Perl library root, a nested `lib` directory holding shell,
+    /// Ruby and Perl library files, an application `src` layout,
+    /// sample material, a sourced bashrc fragment, a profile file,
+    /// an rc fragment in a library tree, a plugin
     /// whose interpreter line names `false`, a bash-completion file,
     /// a shell library directory named for its language, and
     /// template files.
@@ -11021,6 +11133,19 @@ mod tests {
                     0o100644,
                     rb,
                     b"#!/usr/bin/ruby\n",
+                ),
+                ("/usr/lib/myapp/common/rc", 0o100644, sh, b"#!/bin/bash\n"),
+                (
+                    "/usr/share/myapp/lib/helper.pl",
+                    0o100644,
+                    "Perl script text executable",
+                    b"#!/usr/bin/perl\n",
+                ),
+                (
+                    "/usr/share/myapp/never.py",
+                    0o100644,
+                    py,
+                    b"#!/usr/bin/false\n",
                 ),
             ],
         );
