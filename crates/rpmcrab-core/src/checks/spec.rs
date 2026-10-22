@@ -1093,7 +1093,10 @@ fn license_tag_value(line: &str) -> Option<&str> {
 /// A `License:` value naming only public-domain dedications: every
 /// licence identifier in the SPDX expression is a public-domain
 /// identifier, so `MIT AND SUSE-Public-Domain` does not qualify —
-/// the expression as a whole is not a dedication.
+/// the expression as a whole is not a dedication. A `LicenseRef-`
+/// identifier counts by the identifier it references, so
+/// `LicenseRef-SUSE-Public-Domain` qualifies while
+/// `LicenseRef-Apache-2.0` does not.
 fn license_value_is_public_domain_only(value: &str) -> bool {
     let mut any = false;
     let mut skip_exception = false;
@@ -1117,9 +1120,18 @@ fn license_value_is_public_domain_only(value: &str) -> bool {
             continue;
         }
         any = true;
+        // A `LicenseRef-` identifier names the licence it references
+        // after the prefix.
+        let id = if token.len() > "licenseref-".len()
+            && token.as_bytes()[.."licenseref-".len()].eq_ignore_ascii_case(b"licenseref-")
+        {
+            &token["licenseref-".len()..]
+        } else {
+            token
+        };
         if !["public-domain", "suse-public-domain", "publicdomain"]
             .iter()
-            .any(|pd| token.eq_ignore_ascii_case(pd))
+            .any(|pd| id.eq_ignore_ascii_case(pd))
         {
             return false;
         }
@@ -5541,6 +5553,44 @@ Patch0: foo.patch
         // by an SPDX operator, stays exempt.
         let both = run("License:        SUSE-Public-Domain AND Public-Domain");
         assert!(!has(&both, "no-license-file-in-spec"), "results: {both:?}");
+    }
+
+    #[test]
+    fn no_license_file_license_ref_public_domain_825() {
+        let run = |license: &str| {
+            run_mini(&format!(
+                "Name: foo\n{license}\nSource:         foo-1.0.tar.gz\n%files\n%{{_bindir}}/foo\n"
+            ))
+        };
+        // A `LicenseRef-` identifier counts by the identifier it
+        // references: a public-domain ref is a public-domain-only
+        // tag, in either tag case and parenthesised.
+        for tag in [
+            "License:        LicenseRef-SUSE-Public-Domain",
+            "License:        LicenseRef-Public-Domain",
+            "license:        LicenseRef-SUSE-Public-Domain",
+            "LICENSE:        (LicenseRef-SUSE-Public-Domain)",
+        ] {
+            let results = run(tag);
+            assert!(
+                !has(&results, "no-license-file-in-spec"),
+                "tag {tag}: {results:?}"
+            );
+        }
+        // A ref to a real licence is not a dedication, and a
+        // public-domain ref inside a larger expression does not
+        // make the expression one either: the E fires.
+        for tag in [
+            "License:        LicenseRef-Apache-2.0",
+            "License:        LicenseRef-SUSE-Public-Domain AND MIT",
+            "License:        MIT AND LicenseRef-SUSE-Public-Domain",
+        ] {
+            let results = run(tag);
+            assert!(
+                has(&results, "no-license-file-in-spec"),
+                "tag {tag}: {results:?}"
+            );
+        }
     }
 
     #[test]
