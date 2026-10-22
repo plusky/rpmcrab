@@ -1182,11 +1182,12 @@ fn source_line_is_archive(line: &str) -> bool {
         return false;
     }
     [
-        ".tar", ".tgz", ".tbz", ".txz", ".zip", ".jar", ".7z", ".whl", ".crate",
+        ".tar", ".tgz", ".tbz", ".txz", ".zip", ".jar", ".7z", ".crate",
     ]
     .iter()
     .any(|ext| value.contains(ext))
         || value_names_extension(value, ".gem")
+        || value_names_extension(value, ".whl")
 }
 
 /// The line is a `Source`/`SourceN` tag whose value names a package
@@ -5740,6 +5741,38 @@ Patch0: foo.patch
             "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\nSource1:        foo-1.0.gem\n%files\n%{_bindir}/foo\n",
         );
         assert!(!has(&gem, "no-license-file-in-spec"), "results: {gem:?}");
+    }
+
+    #[test]
+    fn no_license_file_wheel_suffix_shapes_823() {
+        // A `.whl2` name is not a wheel: it is neither an assembled
+        // package nor, on its own, an archive source, so with no
+        // other source the E stays silent.
+        let suffixed = run_mini(
+            "Name: foo\nLicense:        MIT\nSource:         foo-1.0.whl2\n%files\n%{_bindir}/foo\n",
+        );
+        assert!(
+            !has(&suffixed, "no-license-file-in-spec"),
+            "results: {suffixed:?}"
+        );
+        // A real wheel source assembles the tree (control): the E
+        // stays silent even though no licence file is marked.
+        let wheel = run_mini(
+            "Name: foo\nLicense:        MIT\nSource:         foo-1.0.whl\n%files\n%{_bindir}/foo\n",
+        );
+        assert!(
+            !has(&wheel, "no-license-file-in-spec"),
+            "results: {wheel:?}"
+        );
+        // A tarball beside the suffixed name is an archive source:
+        // the E fires (control for the archive gate itself).
+        let tarball = run_mini(
+            "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\nSource1:        foo-1.0.whl2\n%files\n%{_bindir}/foo\n",
+        );
+        assert!(
+            has(&tarball, "no-license-file-in-spec"),
+            "results: {tarball:?}"
+        );
     }
 
     #[test]
