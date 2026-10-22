@@ -752,8 +752,9 @@ struct FilesSectionScan {
     /// entries and entries under a documentation directory.
     explicit_doc_entries: u32,
     /// The section lists a build-metadata directory entry
-    /// (`*.dist-info`, `*.egg-info`, `*-info`): the build system
-    /// assembles the installed tree, licence files included.
+    /// (`*.dist-info`, `*.egg-info`), or a file under one: the
+    /// build system assembles the installed tree, licence files
+    /// included.
     has_info_entry: bool,
     /// A `%doc` entry whose contents the spec text does not name:
     /// a directory argument, or a glob whose literal prefix reaches
@@ -792,11 +793,40 @@ fn files_directive(first: &str) -> Option<FilesDirective> {
     }
 }
 
-/// A token that is exactly one macro invocation (the closing brace is
-/// the token's last byte): in a `%files` body it generates entries the
-/// text scan cannot see.
+/// A token that consists solely of braced macro invocations,
+/// nested (`%{expand:%{...}}`) or concatenated (`%{...}%{...}`):
+/// in a `%files` body it generates entries the text scan cannot
+/// see. A token carrying any literal text - a macro-composed path
+/// such as `%{_bindir}/%{name}` - is an entry, not a generator.
 fn is_bare_macro(token: &str) -> bool {
-    token.starts_with("%{") && token.len() > 3 && token.find('}') == Some(token.len() - 1)
+    let bytes = token.as_bytes();
+    let mut at = 0;
+    let mut spans = 0;
+    while at < bytes.len() {
+        if !token[at..].starts_with("%{") {
+            return false;
+        }
+        // Find the brace matching the span's opening brace.
+        let mut depth = 0;
+        let mut end = None;
+        for (i, &b) in bytes.iter().enumerate().skip(at + 1) {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else { return false };
+        spans += 1;
+        at = end + 1;
+    }
+    spans > 0
 }
 
 /// Presence test for the licence-marking scan: the name carries a
@@ -854,7 +884,42 @@ fn glob_prefix_carries_licence(basename: &str) -> bool {
     let upper = prefix.to_uppercase();
     ["COPYING", "LICENCE", "LICENSE", "COPYRIGHT"]
         .iter()
-        .any(|stem| stem.starts_with(upper.as_str()) || upper.starts_with(stem))
+        .any(|stem| {
+            // The literal prefix is a stem prefix (`COPY*`, `LICEN*`),
+            // the whole stem (`COPYING*`), or the stem closed by a
+            // non-alphanumeric boundary (`LICENSE-*`, `COPYING.txt*`).
+            // A stem running into a longer word (`COPYINGFOO*`) is the
+            // buried-stem shape the plain name test rejects.
+            stem.starts_with(upper.as_str())
+                || upper == *stem
+                || (upper.starts_with(stem)
+                    && !upper.as_bytes()[stem.len()].is_ascii_alphanumeric())
+        })
+}
+
+/// A globbed name whose literal prefix runs a licence stem into a
+/// longer word (`COPYINGFOO*`): the prefix itself shows the stem
+/// buried, the shape the plain name test rejects, so the glob's
+/// matches are judged on the names they can carry rather than
+/// treated as unknowable. A digit continuation does not bury the
+/// stem: `COPYING3*` still runs into the digit-suffixed licence
+/// name the plain test accepts.
+fn glob_prefix_buries_licence_stem(basename: &str) -> bool {
+    if !basename.contains(['*', '?', '[']) {
+        return false;
+    }
+    let prefix: String = basename
+        .chars()
+        .take_while(|c| !matches!(c, '*' | '?' | '['))
+        .collect();
+    let upper = prefix.to_uppercase();
+    ["COPYING", "LICENCE", "LICENSE", "COPYRIGHT"]
+        .iter()
+        .any(|stem| {
+            upper.len() > stem.len()
+                && upper.starts_with(stem)
+                && upper.as_bytes()[stem.len()].is_ascii_alphabetic()
+        })
 }
 
 /// The normalised docdir destination of the licence copy a literal
@@ -1008,12 +1073,12 @@ fn in_doc_location(token: &str) -> bool {
 }
 
 /// The entry names a build-metadata directory the build system
-/// assembles (`*.dist-info`, `*.egg-info`, `*-info`).
+/// assembles: the dotted metadata suffixes (`*.dist-info`,
+/// `*.egg-info`), with a trailing glob marker allowed. A plain
+/// `*-info` data name is not build metadata.
 fn is_info_entry(basename: &str) -> bool {
-    basename.contains("dist-info")
-        || basename.contains("egg-info")
-        || basename.ends_with("-info")
-        || basename.ends_with("*info")
+    let name = basename.strip_suffix('*').unwrap_or(basename);
+    name.ends_with(".dist-info") || name.ends_with(".egg-info")
 }
 
 /// The value of a `License:` tag line; the tag name matches
@@ -1094,6 +1159,19 @@ const FILES_DIRECTIVE_WORDS: &[&str] = &[
     "verify",
 ];
 
+/// The value names a file carrying extension `ext`: the extension
+/// is closed by the end of the value or by a character that cannot
+/// continue an extension name, so `.gem` does not match inside
+/// `.gemspec`.
+fn value_names_extension(value: &str, ext: &str) -> bool {
+    value.match_indices(ext).any(|(at, _)| {
+        value[at + ext.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+    })
+}
+
 /// The line is a `Source`/`SourceN` tag whose value names an archive.
 fn source_line_is_archive(line: &str) -> bool {
     let Some((tag, value)) = line.split_once(':') else {
@@ -1104,10 +1182,11 @@ fn source_line_is_archive(line: &str) -> bool {
         return false;
     }
     [
-        ".tar", ".tgz", ".tbz", ".txz", ".zip", ".jar", ".7z", ".gem", ".whl", ".crate",
+        ".tar", ".tgz", ".tbz", ".txz", ".zip", ".jar", ".7z", ".whl", ".crate",
     ]
     .iter()
     .any(|ext| value.contains(ext))
+        || value_names_extension(value, ".gem")
 }
 
 /// The line is a `Source`/`SourceN` tag whose value names a package
@@ -1121,7 +1200,7 @@ fn source_line_is_packaged(line: &str) -> bool {
     if !tag.starts_with("source") || !tag[6..].chars().all(|c| c.is_ascii_digit()) {
         return false;
     }
-    value.contains(".gem") || value.contains(".whl")
+    value_names_extension(value, ".gem") || value_names_extension(value, ".whl")
 }
 
 /// `SpecCheck`, ported from rpmlint's `SpecCheck.py`.
@@ -1203,6 +1282,10 @@ pub struct SpecCheck {
     spec_only: bool,
     license_sections: Vec<FilesSectionScan>,
     license_section: Option<FilesSectionScan>,
+    /// The walker is in a preamble region (the main preamble, or a
+    /// `%package` preamble): the only regions whose `License:` and
+    /// `Source` lines are tags rather than body text.
+    license_preamble: bool,
     license_tag_seen: bool,
     license_tags_public_domain: bool,
     license_in_install: bool,
@@ -1315,6 +1398,7 @@ impl SpecCheck {
             spec_only: false,
             license_sections: Vec::new(),
             license_section: None,
+            license_preamble: true,
             license_tag_seen: false,
             license_tags_public_domain: true,
             license_in_install: false,
@@ -1590,6 +1674,7 @@ impl Check for SpecCheck {
         self.spec_only = false;
         self.license_sections.clear();
         self.license_section = None;
+        self.license_preamble = true;
         self.license_tag_seen = false;
         self.license_tags_public_domain = true;
         self.license_in_install = false;
@@ -2347,10 +2432,17 @@ impl SpecCheck {
     /// line by line. Runs before `checkline_section` so it sees the
     /// header lines that call consumes; the boundary scan repeats its
     /// header patterns, so the sections judged here are the walker's
-    /// sections. `flush_license_marking` emits the findings.
+    /// sections. `License:`/`Source` collection runs in preamble
+    /// regions only - in body sections the same text is prose, a
+    /// changelog entry or a shell line, not a tag. `flush_license_marking`
+    /// emits the findings.
     fn checkline_license_marking(&mut self, pkg: &SpecPkg, line: &str) {
         for (sec, re) in &self.section_res {
             if let Ok(Some(_)) = re.find(line) {
+                // Tag collection is a preamble activity: a section
+                // header ends it, a `%package` header opens the
+                // next package's preamble.
+                self.license_preamble = sec == "package";
                 if let Some(scan) = self.license_section.take() {
                     self.license_sections.push(scan);
                 }
@@ -2369,7 +2461,7 @@ impl SpecCheck {
         {
             self.license_install_dests.push(dest);
         }
-        if self.license_section.is_none() {
+        if self.license_section.is_none() && self.license_preamble {
             let trimmed = line.trim_start();
             if let Some(value) = license_tag_value(trimmed) {
                 self.license_tag_seen = true;
@@ -2422,13 +2514,19 @@ impl SpecCheck {
             };
             if let Some(m) = unqualified_hit {
                 let linenum = pkg.current_linenum.get().unwrap_or(0);
-                scan.doc_license_unqualified = Some((m.as_str().to_string(), linenum));
+                // The match runs through the whitespace that ends
+                // it; the finding's detail is the token alone.
+                scan.doc_license_unqualified = Some((m.as_str().trim_end().to_string(), linenum));
             }
             self.scan_license_entries(scan, &tokens[1..], false, true);
             return;
         }
         if first == "%license" {
-            scan.has_license_line = true;
+            // Presence requires the line to carry at least one
+            // entry token: a bare `%license` line marks no file.
+            if tokens.len() > 1 {
+                scan.has_license_line = true;
+            }
             self.scan_license_entries(scan, &tokens[1..], false, false);
             return;
         }
@@ -2491,11 +2589,17 @@ impl SpecCheck {
             }
             if is_bare_macro(token) {
                 scan.has_generator_macro = true;
-                dir_next = false;
+                if !force_dir {
+                    dir_next = false;
+                }
                 continue;
             }
             let is_dir = dir_next || token.ends_with('/');
-            dir_next = false;
+            // A line led by `%dir` marks every token on it a
+            // directory; the flag is the line's, not one token's.
+            if !force_dir {
+                dir_next = false;
+            }
             if doc_line && is_dir {
                 // A `%doc` directory argument ships the directory's
                 // contents, none of which the spec text names.
@@ -2520,17 +2624,24 @@ impl SpecCheck {
             if doc_line
                 && basename.contains(['*', '?', '['])
                 && !glob_prefix_carries_licence(basename)
+                && !glob_prefix_buries_licence_stem(basename)
             {
                 // A `%doc` glob whose literal prefix reaches no
                 // licence stem guarantees nothing about its matches:
                 // the match set is what `%install` left behind, and
-                // a licence file may be among it.
+                // a licence file may be among it. A prefix that runs
+                // a stem into a longer word is the buried-stem shape
+                // instead: it shows the stem the names carry, so the
+                // section stays decidable.
                 scan.has_indeterminate_doc = true;
             }
             if name_carries_licence(basename) || glob_prefix_carries_licence(basename) {
                 scan.plain_license_entry = true;
             }
-            if is_info_entry(basename) {
+            // An entry under a build-metadata directory (a file
+            // inside a `*.dist-info` directory) marks the section
+            // too: the build system assembled that tree.
+            if token.split('/').any(is_info_entry) {
                 scan.has_info_entry = true;
             }
             // An entry evidences a shipped file when it is glob-free
@@ -5478,6 +5589,188 @@ Patch0: foo.patch
             has(&buried, "no-license-file-in-spec"),
             "results: {buried:?}"
         );
+    }
+
+    #[test]
+    fn license_file_as_doc_detail_is_the_token_alone_823() {
+        // The token match runs through the whitespace that ends
+        // it; the reported detail is the token alone.
+        let results = run_mini("Name: foo\n%files\n%doc README COPYING NEWS\n");
+        let lines = lines_for(&results, "license-file-as-doc");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(lines[0].ends_with("COPYING"), "line: {}", lines[0]);
+    }
+
+    #[test]
+    fn no_license_file_bare_license_line_marks_nothing_823() {
+        let hdr = "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n";
+        let run = |body: &str| run_mini(&format!("{hdr}%files\n{body}"));
+        // A bare `%license` line carries no entry token: it marks
+        // no licence file, so the E fires.
+        let bare = run("%license\n%{_bindir}/foo\n");
+        assert!(has(&bare, "no-license-file-in-spec"), "results: {bare:?}");
+        // ...and it does not convert a `%doc` licence line either.
+        let doc = run("%license\n%doc COPYING\n%{_bindir}/foo\n");
+        assert!(has(&doc, "license-file-as-doc"), "results: {doc:?}");
+        // A `%license` line carrying a file is presence (control).
+        let marked = run("%license LICENSE\n%{_bindir}/foo\n");
+        assert!(
+            !has(&marked, "no-license-file-in-spec"),
+            "results: {marked:?}"
+        );
+    }
+
+    #[test]
+    fn no_license_file_dir_line_marks_all_tokens_directories_823() {
+        let hdr = "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n";
+        let run = |body: &str| run_mini(&format!("{hdr}%files\n{body}"));
+        // Every token on a `%dir` line is a directory: the second
+        // directory's licence name is a directory name, not a
+        // shipped licence file, so the E fires.
+        let dirs = run("%dir %{_datadir}/foo %{_datadir}/COPYING\n%{_bindir}/foo\n");
+        assert!(has(&dirs, "no-license-file-in-spec"), "results: {dirs:?}");
+        // The flag is the line's: a licence file on the next entry
+        // line is still presence.
+        let after =
+            run("%dir %{_datadir}/foo %{_datadir}/bar\n%{_datadir}/foo/COPYING\n%{_bindir}/foo\n");
+        assert!(
+            !has(&after, "no-license-file-in-spec"),
+            "results: {after:?}"
+        );
+    }
+
+    #[test]
+    fn no_license_file_pure_macro_tokens_are_generators_823() {
+        let hdr = "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n";
+        let run = |body: &str| run_mini(&format!("{hdr}%files\n{body}"));
+        // Concatenated and nested braced macros are pure macro
+        // text: the entries they generate are invisible to the
+        // scan, so the section is undecidable and the E stays
+        // silent.
+        for body in [
+            "%{foo}%{bar}\n%{_bindir}/foo\n",
+            "%{expand:%{foo}}\n%{_bindir}/foo\n",
+        ] {
+            let results = run(body);
+            assert!(
+                !has(&results, "no-license-file-in-spec"),
+                "body {body}: {results:?}"
+            );
+        }
+        // A macro-composed path carries literal text and stays a
+        // judged entry: the E fires.
+        let path = run("%{_bindir}/%{name}\n");
+        assert!(has(&path, "no-license-file-in-spec"), "results: {path:?}");
+    }
+
+    #[test]
+    fn no_license_file_info_entry_shapes_823() {
+        let hdr = "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n";
+        let run = |body: &str| run_mini(&format!("{hdr}%files\n{body}"));
+        // A file under a build-metadata directory marks the
+        // section: the build system assembled that tree. A glob
+        // naming the metadata directory itself does too.
+        for body in [
+            "%{python3_sitelib}/foo-1.0.dist-info/METADATA\n%{_bindir}/foo\n",
+            "%{python3_sitelib}/foo.egg-info/PKG-INFO\n%{_bindir}/foo\n",
+            "%{python3_sitelib}/*.egg-info\n%{_bindir}/foo\n",
+        ] {
+            let results = run(body);
+            assert!(
+                !has(&results, "no-license-file-in-spec"),
+                "body {body}: {results:?}"
+            );
+        }
+        // A plain `*-info` data name is not build metadata, and
+        // neither is an `*info` glob: the E fires.
+        for body in [
+            "%{_datadir}/foo-info\n%{_bindir}/foo\n",
+            "%{_datadir}/foo*info\n%{_bindir}/foo\n",
+        ] {
+            let results = run(body);
+            assert!(
+                has(&results, "no-license-file-in-spec"),
+                "body {body}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_license_file_glob_prefix_boundary_823() {
+        let hdr = "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n";
+        let run = |body: &str| run_mini(&format!("{hdr}%files\n{body}"));
+        // A glob whose literal prefix runs the stem into a longer
+        // word is the buried-stem shape, exactly like the plain
+        // name: the E fires, and the W does not fire either.
+        let buried = run("%doc COPYINGFOO*\n%{_bindir}/foo\n");
+        assert!(
+            has(&buried, "no-license-file-in-spec"),
+            "results: {buried:?}"
+        );
+        assert!(!has(&buried, "license-file-as-doc"), "results: {buried:?}");
+        // A stem prefix, or the stem closed by a boundary, still
+        // counts: the glob ships the licence file among its
+        // matches.
+        for body in [
+            "%doc LICEN*\n%{_bindir}/foo\n",
+            "%doc LICENSE-*\n%{_bindir}/foo\n",
+        ] {
+            let results = run(body);
+            assert!(
+                !has(&results, "no-license-file-in-spec"),
+                "body {body}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_license_file_gemspec_source_is_not_an_assembled_package_823() {
+        // A `.gemspec` is a recipe text, not a gem: next to the
+        // tarball it does not make the tree installer-assembled,
+        // so the E fires.
+        let gemspec = run_mini(
+            "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\nSource1:        foo.gemspec\n%files\n%{_bindir}/foo\n",
+        );
+        assert!(
+            has(&gemspec, "no-license-file-in-spec"),
+            "results: {gemspec:?}"
+        );
+        // A `.gem` source still assembles the whole tree (control).
+        let gem = run_mini(
+            "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\nSource1:        foo-1.0.gem\n%files\n%{_bindir}/foo\n",
+        );
+        assert!(!has(&gem, "no-license-file-in-spec"), "results: {gem:?}");
+    }
+
+    #[test]
+    fn no_license_file_tags_collect_in_preambles_only_823() {
+        // A `License:` line inside %description is prose, not a
+        // tag: the public-domain exemption does not apply.
+        let desc = run_mini(
+            "Name: foo\nSource:         foo-1.0.tar.gz\n%description\nLicense: SUSE-Public-Domain\n%files\n%{_bindir}/foo\n",
+        );
+        assert!(has(&desc, "no-license-file-in-spec"), "results: {desc:?}");
+        // A `Source` line inside %changelog is an entry, not a
+        // tag: it does not make the source an assembled package.
+        let chlog = run_mini(
+            "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n%files\n%{_bindir}/foo\n%changelog\n* Tue Jan 01 2026 Foo <foo@example.com>\nSource: foo-1.0.gem\n",
+        );
+        assert!(has(&chlog, "no-license-file-in-spec"), "results: {chlog:?}");
+        // A `Source` line inside %description does not create an
+        // archive source either: without one the E stays silent.
+        let desc_source = run_mini(
+            "Name: foo\nLicense:        MIT\n%description\nSource: foo-1.0.tar.gz\n%files\n%{_bindir}/foo\n",
+        );
+        assert!(
+            !has(&desc_source, "no-license-file-in-spec"),
+            "results: {desc_source:?}"
+        );
+        // A subpackage preamble is a preamble: its `License:` tag
+        // still collects (control).
+        let sub = run_mini(
+            "Name: foo\nSource:         foo-1.0.tar.gz\n%files\n%{_bindir}/foo\n%package doc\nLicense:        SUSE-Public-Domain\n%files doc\n%doc README\n",
+        );
+        assert!(!has(&sub, "no-license-file-in-spec"), "results: {sub:?}");
     }
 
     #[test]
