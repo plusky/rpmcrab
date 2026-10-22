@@ -33,6 +33,10 @@ Usage:
                  exit 1 with a unified diff on any divergence.
                  Sync-managed whitelist files and their PROVENANCE pins
                  are owned by the daily sync job and skipped here.
+                 A run that cannot regenerate because a live upstream
+                 fetch was exhausted (FetchExhausted) exits 3 instead
+                 (EXIT_FETCH_EXHAUSTED), so CI reports an upstream outage
+                 as infrastructure rather than drift.
     --refresh    resolve PINS to the latest upstream commits, persist them
                  into the PINS constant above, and regenerate (monthly job).
     --ref-dir    use a local rpmlint checkout instead of fetching from
@@ -964,8 +968,24 @@ def fetch_github(sha, filename):
         f"https://raw.githubusercontent.com/{UPSTREAM_REPO}/{sha}"
         f"/configs/openSUSE/{filename}"
     )
-    with urllib.request.urlopen(url, timeout=60) as resp:
-        return resp.read().decode("utf-8")
+    try:
+        with urllib.request.urlopen(url, timeout=60) as resp:
+            return resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        if e.code < 500:
+            raise
+        raise FetchExhausted(
+            "GitHub fetch failed for %s:%s: %s" % (sha, filename, e)
+        ) from e
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        http.client.IncompleteRead,
+        ConnectionResetError,
+    ) as e:
+        raise FetchExhausted(
+            "GitHub fetch failed for %s:%s: %s" % (sha, filename, e)
+        ) from e
 
 
 def fetch_local(ref_dir, sha, filename):
@@ -1487,9 +1507,9 @@ def _binary_names(repomd_url, repo_base, label):
     archive it references (not synced yet). Each cycle re-fetches
     repomd.xml, so a fresh MirrorBrain redirect can land on a synced
     mirror; if every cycle fails, one final cycle runs against the
-    fallback mirror. Raises RuntimeError once every attempt is
-    exhausted: an unverifiable repo must fail loudly, never prune
-    against partial data.
+    fallback mirror. Raises FetchExhausted once every attempt is
+    exhausted: an unverifiable repo raises, never prunes against
+    partial data.
     """
     zstd = shutil.which("zstd")
     if zstd is None:
@@ -1528,7 +1548,7 @@ def _binary_names(repomd_url, repo_base, label):
             except RuntimeError as e:
                 last_err = e
     if names is None:
-        raise RuntimeError(
+        raise FetchExhausted(
             "primary.xml download failed for %s after %d attempts: %s"
             % (label, attempts, last_err)
         )
@@ -1575,8 +1595,24 @@ def package_present(pkg):
                         present = True
                         break
             except urllib.error.HTTPError as e:
-                if e.code != 404:
-                    raise
+                if e.code == 404:
+                    continue
+                if e.code >= 500:
+                    raise FetchExhausted(
+                        "OBS source API fetch failed for %s/%s: %s"
+                        % (project, pkg, e)
+                    ) from e
+                raise
+            except (
+                urllib.error.URLError,
+                TimeoutError,
+                http.client.IncompleteRead,
+                ConnectionResetError,
+            ) as e:
+                raise FetchExhausted(
+                    "OBS source API fetch failed for %s/%s: %s"
+                    % (project, pkg, e)
+                ) from e
         if not present:
             # Binary-only name (subpackage of another source): the
             # source API 404s, so check the published binary repodata.
@@ -1645,7 +1681,7 @@ def _fetch_repomd_xml(repomd_url, label):
     briefly down. The backoff sleeps only between attempts - the last
     attempt raises immediately instead of sleeping pointlessly before the
     error. Client errors (4xx) raise immediately: the URL itself is wrong
-    and retrying cannot help. Raises RuntimeError when the attempts are
+    and retrying cannot help. Raises FetchExhausted when the attempts are
     exhausted.
     """
     req = urllib.request.Request(
@@ -1672,10 +1708,26 @@ def _fetch_repomd_xml(repomd_url, label):
         if attempt + 1 < _REPOMD_ATTEMPTS:
             time.sleep(_REPOMD_BACKOFF[attempt])
     if repomd is None:
-        raise RuntimeError(
+        raise FetchExhausted(
             "repomd.xml fetch failed for %s after retries: %s" % (label, last_err)
         )
     return repomd
+
+
+class FetchExhausted(Exception):
+    """A live upstream fetch failed beyond what retries can repair.
+
+    Raised only where the fetch layer gives up: a retry budget spent
+    (the repomd, primary and filelist downloads), or an upstream
+    answering 5xx / unreachable on a path that has no retries of its own
+    (the pinned GitHub files, the OBS source API). Deliberately not a
+    RuntimeError, like GrepError: the retry loops key on RuntimeError
+    for per-attempt failures, and main() maps FetchExhausted - only
+    FetchExhausted - to EXIT_FETCH_EXHAUSTED so CI can report an
+    upstream outage as infrastructure instead of drift. Deterministic
+    failures never raise it (4xx responses, malformed repodata, local
+    tool errors): they keep failing loudly as before.
+    """
 
 
 class GrepError(Exception):
@@ -1776,10 +1828,10 @@ def _filelist_hits(paths, repomd_url, repo_base, cache, label):
     fetches, each with its own MirrorBrain redirect that may land on a
     healthy mirror. If every cycle still fails, one final cycle runs
     against a hardcoded fallback mirror, since retries cannot help when
-    MirrorBrain keeps redirecting to the same broken host. Only raises
-    once the fallback is exhausted too. A deterministic grep failure
-    (GrepError) is not retried: it raises through immediately, since
-    backoff cannot fix it.
+    MirrorBrain keeps redirecting to the same broken host. Raises
+    FetchExhausted once the fallback is exhausted too. A deterministic
+    grep failure (GrepError) is not retried: it raises through
+    immediately, since backoff cannot fix it.
     """
     paths = sorted(set(paths))
     missing = [p for p in paths if p not in cache]
@@ -1816,7 +1868,7 @@ def _filelist_hits(paths, repomd_url, repo_base, cache, label):
                 except RuntimeError as e:
                     last_err = e
         if hits is None:
-            raise RuntimeError(
+            raise FetchExhausted(
                 "filelist download failed for %s after %d attempts: %s"
                 % (label, attempts, last_err)
             )
@@ -2427,6 +2479,14 @@ def rewrite_pins(script_path, pins):
     script_path.write_text(text, encoding="utf-8")
 
 
+# Dedicated exit code for a run that could not generate because a live
+# upstream fetch was exhausted (FetchExhausted): distinct from 0 (clean),
+# 1 (drift, and every other failure) and 2 (argparse misuse), so the
+# distro-config-drift CI job can map it to a neutral outcome - an
+# upstream outage is infrastructure noise, not drift.
+EXIT_FETCH_EXHAUSTED = 3
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--check", action="store_true", help="diff against the repo")
@@ -2464,9 +2524,17 @@ def main():
         rewrite_pins(Path(__file__).resolve(), pins)
 
     ref_dir = Path(args.ref_dir) if args.ref_dir else None
-    result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, files_out, dropped_log, retargeted_log, scoped_log, deduped_filters_log, threshold_log, added_log, adjudicated_log = generate(
-        ref_dir=ref_dir, pins=pins
-    )
+    try:
+        result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, files_out, dropped_log, retargeted_log, scoped_log, deduped_filters_log, threshold_log, added_log, adjudicated_log = generate(
+            ref_dir=ref_dir, pins=pins
+        )
+    except FetchExhausted as e:
+        print(
+            "fetch-exhausted: distro config generation not performed "
+            f"({e}); the vendored configs were not verified in this run.",
+            file=sys.stderr,
+        )
+        return EXIT_FETCH_EXHAUSTED
 
     if args.check:
         failures = []
