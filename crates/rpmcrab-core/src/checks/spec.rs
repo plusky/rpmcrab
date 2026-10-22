@@ -1074,11 +1074,13 @@ fn in_doc_location(token: &str) -> bool {
 
 /// The entry names a build-metadata directory the build system
 /// assembles: the dotted metadata suffixes (`*.dist-info`,
-/// `*.egg-info`), with a trailing glob marker allowed. Data
-/// names ending in `-info` stay ordinary entries.
+/// `*.egg-info`), with a trailing glob marker allowed, or the
+/// historical glob spelling `*-info`, whose literal ending
+/// names the same directories. Data names ending in `-info`
+/// stay ordinary entries.
 fn is_info_entry(basename: &str) -> bool {
     let name = basename.strip_suffix('*').unwrap_or(basename);
-    name.ends_with(".dist-info") || name.ends_with(".egg-info")
+    name.ends_with(".dist-info") || name.ends_with(".egg-info") || name.ends_with("*-info")
 }
 
 /// The value of a `License:` tag line; the tag name matches
@@ -5675,6 +5677,7 @@ Patch0: foo.patch
             "%{python3_sitelib}/foo-1.0.dist-info/METADATA\n%{_bindir}/foo\n",
             "%{python3_sitelib}/foo.egg-info/PKG-INFO\n%{_bindir}/foo\n",
             "%{python3_sitelib}/*.egg-info\n%{_bindir}/foo\n",
+            "%{python3_sitelib}/foo-%{version}*-info\n%{_bindir}/foo\n",
         ] {
             let results = run(body);
             assert!(
