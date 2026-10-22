@@ -765,7 +765,7 @@ since = "0.3.0"
 case = "global"
 check = "pkgconfig-exception"
 kind = "behaviour"
-reason = "A `.pc` file the extractor did not materialise draws no `pkgconfig-exception`: reads failing with NotFound or NotADirectory are skipped. The extractor owns those gaps -- it skips entries whose path collides with an incompatible existing object (grpc-source's file `usr/src/grpc/BUILD` against its directory `usr/src/grpc/build` on a case-insensitive filesystem) and payloads carry no content for %ghost entries -- and it reports each skip itself. The reference (PkgConfigCheck.py) wraps its `open()` in the same `except Exception` that produces this finding, so it charges the package for the extraction gap; here the gap is the extractor's, and read or decode failures on materialised files report exactly as the reference's do."
+reason = "A `.pc` read failing with NotADirectory draws no `pkgconfig-exception`. That failure is the extractor's collision gap: it leaves entries whose path collides with an incompatible existing object out of the tree and reports each skip itself (grpc-source's file `usr/src/grpc/BUILD` against its directory `usr/src/grpc/build` on a case-insensitive filesystem), so the read runs through the object that won the collision. The reference (PkgConfigCheck.py) turns the same failed `open()` into the finding through its `except Exception`. Everything else matches the reference: %ghost entries are dropped from the dispatch before any read, as AbstractFilesCheck (AbstractCheck.py:45) drops `pkg.ghost_files`, and the remaining read failures -- a header-listed file missing from the tree -- plus decode failures on materialised files report as exceptions exactly as the reference charges them."
 since = "0.3.1"
 [[divergence]]
 case = "global"
