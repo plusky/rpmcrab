@@ -369,6 +369,124 @@ fn python_lib_tree_regex() -> &'static Regex {
         .get_or_init(|| Regex::new(r"/(?:site|dist)-packages(?:/|$)").expect("static regex"))
 }
 
+/// Whether a non-executable file carrying an interpreter line is
+/// content the owning program consumes by reading, importing,
+/// sourcing or rendering, so the interpreter line marks data rather
+/// than a script executed in place and the missing exec bit is not a
+/// defect (issues #813, #845). Every shape is decidable from the
+/// file's path and interpreter alone:
+///
+/// - a library tree: a `site-packages`, `dist-packages`,
+///   `node_modules` or `gems` path component, or a file under the
+///   Ruby (`/usr/lib/ruby/`, `/usr/lib64/ruby/`) or Perl
+///   (`/usr/lib/perl5/`, `/usr/lib64/perl5/`) library roots;
+/// - a language directory: a `python` or `python3[.x]` component, a
+///   nested `lib` component (past the `/usr/<tree>/` prefix) holding
+///   a script-language file, a `bash` component holding a shell
+///   file, or a Python file in a host-loaded plugin directory
+///   (`extensions`, `plugins`) or gdb's `auto-load` directory;
+/// - a source tree: a `src` component (the `/usr/src/` trees
+///   included);
+/// - test and example material: a `test`, `tests`, `selftests`,
+///   `example`, `examples`, `sample` or `samples` component;
+/// - a sourced fragment: a file under `/usr/share/bash-completion/`,
+///   a `profile` or `rc` basename, a basename with a `bashrc` name
+///   segment, or an interpreter naming `false`, which declares the
+///   file is never executed;
+/// - a template: a basename ending in `.in`, `.sample`, `.tmpl`,
+///   `.tpl`, `.template`, `.skel` or `.j2` — the installed name is
+///   the name an instantiation step rewrites, so the shipped file
+///   is the template's content, not an entry point.
+fn non_executable_script_is_data(
+    fname: &str,
+    interpreter: &str,
+    python_lib_tree_re: &Regex,
+) -> bool {
+    if interpreter.rsplit('/').next() == Some("false") {
+        return true;
+    }
+    if is_match(python_lib_tree_re, fname) {
+        return true;
+    }
+    if fname.starts_with("/usr/share/bash-completion/") {
+        return true;
+    }
+    if fname.starts_with("/usr/lib/ruby/")
+        || fname.starts_with("/usr/lib64/ruby/")
+        || fname.starts_with("/usr/lib/perl5/")
+        || fname.starts_with("/usr/lib64/perl5/")
+    {
+        return true;
+    }
+    let base = fname.rsplit('/').next().unwrap_or("");
+    if base == "profile" || base == "rc" || base.split(['.', '_', '-']).any(|seg| seg == "bashrc") {
+        return true;
+    }
+    if [
+        ".in",
+        ".sample",
+        ".tmpl",
+        ".tpl",
+        ".template",
+        ".skel",
+        ".j2",
+    ]
+    .iter()
+    .any(|suffix| base.ends_with(suffix))
+    {
+        return true;
+    }
+    let ext = base
+        .rsplit('.')
+        .next()
+        .filter(|_| base.contains('.'))
+        .unwrap_or("");
+    let comps: Vec<&str> = fname.split('/').filter(|c| !c.is_empty()).collect();
+    if comps.len() < 2 {
+        return false;
+    }
+    let dirs = &comps[..comps.len() - 1];
+    if dirs.iter().any(|c| {
+        matches!(
+            *c,
+            "node_modules"
+                | "gems"
+                | "src"
+                | "test"
+                | "tests"
+                | "selftests"
+                | "example"
+                | "examples"
+                | "sample"
+                | "samples"
+        )
+    }) {
+        return true;
+    }
+    if dirs.iter().any(|c| {
+        *c == "python"
+            || c.strip_prefix("python3")
+                .is_some_and(|rest| rest.chars().all(|ch| ch.is_ascii_digit() || ch == '.'))
+    }) {
+        return true;
+    }
+    if ext == "py"
+        && dirs
+            .iter()
+            .any(|c| matches!(*c, "extensions" | "plugins" | "auto-load"))
+    {
+        return true;
+    }
+    if matches!(ext, "sh" | "bash") && dirs.contains(&"bash") {
+        return true;
+    }
+    matches!(
+        ext,
+        "py" | "rb" | "pl" | "pm" | "lua" | "php" | "sh" | "bash"
+    ) && dirs.len() > 2
+        && dirs[2..].contains(&"lib")
+}
+
 static PYTHON_BYTECODE_PEP3147_REGEX: OnceLock<Regex> = OnceLock::new();
 fn python_bytecode_pep3147_regex() -> &'static Regex {
     PYTHON_BYTECODE_PEP3147_REGEX.get_or_init(|| {
@@ -3964,16 +4082,23 @@ impl FilesCheck {
             {
                 add_info(out, Level::Error, pkg, "script-without-shebang", &[fname]);
             }
-            // Files inside a Python library tree (a site-packages or
-            // dist-packages component) are modules or package data: the
-            // tree is consumed by import and by reading, so an
-            // interpreter line there marks data the owning program
-            // reads, renders or imports, and the missing exec bit is
-            // not a defect (issue #813). Scripts in every other
-            // location keep the reference behaviour.
-            if !mode_is_exec && !is_doc && !is_match(&self.python_lib_tree_re, fname) {
+            // Files the owning program consumes by reading,
+            // importing, sourcing or rendering are data, so an
+            // interpreter line there marks content rather than a
+            // script executed in place and the missing exec bit is
+            // not a defect (issues #813, #845):
+            // `non_executable_script_is_data` carries the shapes.
+            // Scripts in every other location keep the reference
+            // behaviour.
+            if !mode_is_exec && !is_doc {
                 if let Some(interpreter) = &fd.interpreter {
-                    if interpreter.starts_with('/') {
+                    if interpreter.starts_with('/')
+                        && !non_executable_script_is_data(
+                            fname,
+                            interpreter,
+                            &self.python_lib_tree_re,
+                        )
+                    {
                         add_info(
                             out,
                             Level::Error,
@@ -10637,13 +10762,14 @@ mod tests {
         );
     }
 
-    /// The Python-tree gate is confined to the tree itself: a
-    /// non-executable script with an interpreter line in any other
-    /// location still draws `non-executable-script` (issue #813),
-    /// including a directory whose name merely starts with the tree
-    /// component's name.
+    /// The gate is confined to the shapes it names: a non-executable
+    /// script with an interpreter line in any other location still
+    /// draws `non-executable-script` (issues #813, #845), including a
+    /// directory whose name merely starts with an exempt component's
+    /// name, an exempt word carried by a file name rather than a
+    /// directory, and a template word that is not the final suffix.
     #[test]
-    fn non_executable_script_still_fires_outside_python_library_trees() {
+    fn non_executable_script_still_fires_outside_data_shapes() {
         let config = test_config();
         let dir = tempfile::TempDir::new().expect("tmpdir");
         let pkg = script_mode_pkg(
@@ -10662,10 +10788,58 @@ mod tests {
                     b"#!/bin/bash\n",
                 ),
                 (
-                    "/usr/lib/python3.13/site-packages-other/mod.py",
+                    "/usr/share/myapp/site-packages-other/mod.py",
                     0o100644,
                     "Python script, ASCII text executable",
                     b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/srcfoo/scripts/run.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/bin/tool.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/python3\n",
+                ),
+                (
+                    "/usr/share/myapp/tests.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/share/myapp/lib.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/share/myapp/run.sample.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/myapp/profile.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/myapp/extensions/tool.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/myapp/sleeper.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/falsehood\n",
                 ),
             ],
         );
@@ -10673,7 +10847,15 @@ mod tests {
         for path in [
             "/usr/share/myapp/helper.py",
             "/usr/libexec/myapp/run.sh",
-            "/usr/lib/python3.13/site-packages-other/mod.py",
+            "/usr/share/myapp/site-packages-other/mod.py",
+            "/usr/srcfoo/scripts/run.sh",
+            "/usr/bin/tool.py",
+            "/usr/share/myapp/tests.py",
+            "/usr/share/myapp/lib.py",
+            "/usr/share/myapp/run.sample.sh",
+            "/usr/share/myapp/profile.sh",
+            "/usr/share/myapp/extensions/tool.sh",
+            "/usr/share/myapp/sleeper.sh",
         ] {
             assert!(
                 lines
@@ -10682,6 +10864,199 @@ mod tests {
                 "non-executable-script must fire for {path}: {lines:?}"
             );
         }
+    }
+
+    /// The shapes from issue #845: a non-executable file with an
+    /// interpreter line that the owning program consumes by reading,
+    /// importing, sourcing or rendering draws no
+    /// `non-executable-script`. Covers a shipped source tree and a
+    /// test fixture inside it, a language directory outside the
+    /// Python library trees, gdb's auto-load directory, host-loaded
+    /// Python plugin directories, the Node and Ruby library trees,
+    /// the Perl library root, a nested `lib` directory holding shell
+    /// and Ruby library files, an application `src` layout, sample
+    /// material, a sourced bashrc fragment, a profile file, a plugin
+    /// whose interpreter line names `false`, a bash-completion file,
+    /// a shell library directory named for its language, and
+    /// template files.
+    #[test]
+    fn non_executable_script_silent_for_data_shapes() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let sh = "Bourne-Again shell script, ASCII text executable";
+        let py = "Python script, ASCII text executable";
+        let rb = "Ruby script, ASCII text executable";
+        let pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/src/linux-9.9/scripts/build.sh",
+                    0o100644,
+                    sh,
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/src/skylib/tests/copy_file/a.txt",
+                    0o100644,
+                    "ASCII text",
+                    b"#!/bin/sh\n",
+                ),
+                (
+                    "/usr/lib64/dirsrv/python/failedbinds.py",
+                    0o100644,
+                    py,
+                    b"#!/usr/bin/python3\n",
+                ),
+                (
+                    "/usr/lib/python3.13/tools/tool.py",
+                    0o100644,
+                    py,
+                    b"#!/usr/bin/python3\n",
+                ),
+                (
+                    "/usr/share/gdb/auto-load/usr/sbin/ns-slapd-gdb.py",
+                    0o100644,
+                    py,
+                    b"#!/usr/bin/python3\n",
+                ),
+                (
+                    "/usr/share/inkscape/extensions/addnodes.py",
+                    0o100644,
+                    py,
+                    b"#!/usr/bin/python3\n",
+                ),
+                (
+                    "/usr/share/myapp/plugins/hook.py",
+                    0o100644,
+                    py,
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/lib64/node_modules/pkg/cli.js",
+                    0o100644,
+                    "ASCII text",
+                    b"#!/usr/bin/env node\n",
+                ),
+                (
+                    "/usr/libexec/hawk/vendor/gems/builder-3.3.0/lib/builder.rb",
+                    0o100644,
+                    rb,
+                    b"#!/usr/bin/ruby\n",
+                ),
+                (
+                    "/usr/lib64/ruby/english.rb",
+                    0o100644,
+                    rb,
+                    b"#!/usr/bin/ruby\n",
+                ),
+                (
+                    "/usr/lib/perl5/vendor_perl/5.44.0/Helper.pl",
+                    0o100644,
+                    "Perl script text executable",
+                    b"#!/usr/bin/perl\n",
+                ),
+                (
+                    "/usr/share/cockpit/devel/lib/credentials-test.sh",
+                    0o100644,
+                    sh,
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/cadence/src/cadence.py",
+                    0o100644,
+                    py,
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/share/scribus/samples/Sample1.py",
+                    0o100644,
+                    py,
+                    b"#!/usr/bin/python3\n",
+                ),
+                (
+                    "/usr/lib/blktests/tests/block/001",
+                    0o100644,
+                    sh,
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/hxtools/hxtools_bashrc.bash",
+                    0o100644,
+                    sh,
+                    b"#!/bin/bash\n",
+                ),
+                ("/usr/etc/profile", 0o100644, sh, b"#!/bin/sh\n"),
+                (
+                    "/usr/share/uwsm/plugins/sway.sh",
+                    0o100644,
+                    sh,
+                    b"#!/bin/false\n",
+                ),
+                (
+                    "/usr/share/bash-completion/completions/myapp",
+                    0o100644,
+                    sh,
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/scap-security-guide/bash/sle-script-standard.sh",
+                    0o100644,
+                    sh,
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/myapp/templates/deploy.tmpl",
+                    0o100644,
+                    sh,
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/myapp/gen.py.in",
+                    0o100644,
+                    py,
+                    b"#!/usr/bin/python3\n",
+                ),
+                (
+                    "/usr/share/myapp/gems/tool.rb",
+                    0o100644,
+                    rb,
+                    b"#!/usr/bin/ruby\n",
+                ),
+            ],
+        );
+        let lines = script_finding_lines(&pkg, &config);
+        let flagged: Vec<&str> = lines
+            .iter()
+            .filter(|(n, _)| n == "non-executable-script")
+            .map(|(_, line)| line.as_str())
+            .collect();
+        assert_eq!(
+            flagged,
+            Vec::<&str>::new(),
+            "no non-executable-script for data shapes: {lines:?}"
+        );
+    }
+
+    /// The gate covers the one emission only: an executable file
+    /// inside a source tree still draws the interpreter findings, so
+    /// `env-script-interpreter` keeps parity there (issue #845).
+    #[test]
+    fn executable_script_in_source_tree_still_draws_interpreter_findings() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = script_mode_pkg(
+            &dir,
+            &[(
+                "/usr/src/linux-9.9/scripts/tool.py",
+                0o100755,
+                "Python script, ASCII text executable",
+                b"#!/usr/bin/env python3\n",
+            )],
+        );
+        let lines = script_finding_lines(&pkg, &config);
+        let names: Vec<String> = lines.iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "env-script-interpreter");
+        assert_lacks(&names, "non-executable-script");
     }
 
     /// The gate covers the one emission only: an executable file
