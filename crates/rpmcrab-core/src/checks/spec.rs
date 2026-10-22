@@ -832,8 +832,11 @@ fn is_bare_macro(token: &str) -> bool {
 /// Presence test for the licence-marking scan: the name carries a
 /// licence stem (`LICENCE`, `LICENSE`, `COPYING`, `COPYRIGHT`, `GPL`,
 /// `LGPL`, `AGPL`) delimited by non-alphanumerics, so `LICENSE_GPL`,
-/// `licence-LGPL.txt`, `gpl-2.0.txt` and `{COPYING,README}` all count,
-/// while a stem buried in a longer word (`LICENSES`, `gplv3`) does not.
+/// `licence-LGPL.txt`, `gpl-2.0.txt`, `COPYING3` and `{COPYING,README}`
+/// all count, while a stem buried in a longer word (`LICENSES`,
+/// `gplv3`) does not. `COPYING` closed by a digit run counts: the
+/// digits are the licence version glued to the GNU licence file's
+/// name, where a letter suffix would make a longer word.
 /// Every shape `license_token_re` accepts counts too — a stem joined
 /// to a prefix (`FOOCOPYING`) is the conversion predicate's shape, so
 /// a name the warning fires on always establishes presence.
@@ -858,7 +861,12 @@ fn name_carries_licence(name: &str) -> bool {
             let end = start + stem.len();
             let before_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
             let after_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
-            if before_ok && after_ok {
+            // `COPYING` closed by a digit run (`COPYING3`) carries
+            // the stem with the licence version glued on.
+            let digit_suffix = stem == "copying"
+                && end < bytes.len()
+                && bytes[end..].iter().all(|b| b.is_ascii_digit());
+            if before_ok && (after_ok || digit_suffix) {
                 return true;
             }
             at = start + 1;
@@ -5772,6 +5780,42 @@ Patch0: foo.patch
             let results = run(body);
             assert!(
                 !has(&results, "no-license-file-in-spec"),
+                "body {body}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_license_file_copying_digit_suffix_825() {
+        let hdr = "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n";
+        let run = |body: &str| run_mini(&format!("{hdr}%files\n{body}"));
+        // `COPYING` closed by a digit run is the GNU licence file
+        // with its version glued on (`COPYING3`): presence counts,
+        // under %doc and as a plain entry. The name is beyond the
+        // conversion predicate, so the W stays silent too.
+        for body in [
+            "%doc COPYING3\n%{_bindir}/foo\n",
+            "%{_datadir}/foo/COPYING3\n%{_bindir}/foo\n",
+        ] {
+            let results = run(body);
+            assert!(
+                !has(&results, "no-license-file-in-spec"),
+                "body {body}: {results:?}"
+            );
+            assert!(
+                !has(&results, "license-file-as-doc"),
+                "body {body}: {results:?}"
+            );
+        }
+        // A stem running into letters — or digits followed by more
+        // word — is a longer word, not the licence file: the E fires.
+        for body in [
+            "%doc COPYINGFOO\n%{_bindir}/foo\n",
+            "%doc COPYING3X\n%{_bindir}/foo\n",
+        ] {
+            let results = run(body);
+            assert!(
+                has(&results, "no-license-file-in-spec"),
                 "body {body}: {results:?}"
             );
         }
