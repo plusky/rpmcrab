@@ -755,9 +755,10 @@ struct FilesSectionScan {
     /// (`*.dist-info`, `*.egg-info`, `*-info`): the build system
     /// assembles the installed tree, licence files included.
     has_info_entry: bool,
-    /// A `%doc` directory argument: it ships whatever `%install`
-    /// left in the named directory, which may be a licence file the
-    /// spec text does not name (#831).
+    /// A `%doc` entry whose contents the spec text does not name:
+    /// a directory argument, or a glob whose literal prefix reaches
+    /// no licence stem. What `%install` left in the directory, or
+    /// among the glob's matches, may be a licence file (#831, #832).
     has_indeterminate_doc: bool,
 }
 
@@ -2379,6 +2380,16 @@ impl SpecCheck {
                 // extension names a directory as often as a file;
                 // the directory's contents are fixed by `%install`,
                 // not by the spec text.
+                scan.has_indeterminate_doc = true;
+            }
+            if doc_line
+                && basename.contains(['*', '?', '['])
+                && !glob_prefix_carries_licence(basename)
+            {
+                // A `%doc` glob whose literal prefix reaches no
+                // licence stem guarantees nothing about its matches:
+                // the match set is what `%install` left behind, and
+                // a licence file may be among it.
                 scan.has_indeterminate_doc = true;
             }
             if name_carries_licence(basename) || glob_prefix_carries_licence(basename) {
@@ -5328,6 +5339,42 @@ Patch0: foo.patch
         // file, as elsewhere in the scan.
         let exec = run("%{_bindir}/foo\n%doc %{_bindir}/foodoc\n");
         assert!(has(&exec, "no-license-file-in-spec"), "results: {exec:?}");
+    }
+
+    #[test]
+    fn no_license_file_doc_glob_indeterminate_832() {
+        let hdr = "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n";
+        let run = |body: &str| run_mini(&format!("{hdr}%files\n{body}"));
+        // A %doc glob constrains nothing about its matches: the E
+        // stays silent (viruskiller).
+        let glob = run("%{_bindir}/foo\n%doc doc/*\n");
+        assert!(!has(&glob, "no-license-file-in-spec"), "results: {glob:?}");
+        assert!(!has(&glob, "license-file-as-doc"), "results: {glob:?}");
+        // A bare wildcard and a non-licence prefix are the same shape.
+        for body in ["%{_bindir}/foo\n%doc *\n", "%{_bindir}/foo\n%doc README*\n"] {
+            let results = run(body);
+            assert!(
+                !has(&results, "no-license-file-in-spec"),
+                "body {body}: {results:?}"
+            );
+        }
+        // The E is spec-level: a glob in a sibling section silences
+        // it for the whole spec.
+        let sibling = run_mini(&format!(
+            "{hdr}%files\n%{{_bindir}}/foo\n%doc README.md\n%files doc\n%doc doc/*\n"
+        ));
+        assert!(
+            !has(&sibling, "no-license-file-in-spec"),
+            "results: {sibling:?}"
+        );
+        // A glob whose prefix reaches a licence stem is affirmative
+        // presence, as before: silent through presence, not opacity.
+        let stem = run("%{_bindir}/foo\n%doc LICENSE-*\n");
+        assert!(!has(&stem, "no-license-file-in-spec"), "results: {stem:?}");
+        // A glob on a plain entry is not this shape: the section
+        // stays decidable on its explicit entries and the E fires.
+        let plain = run("%{_datadir}/foo/*\n%{_bindir}/foo\n%doc README.md\n");
+        assert!(has(&plain, "no-license-file-in-spec"), "results: {plain:?}");
     }
 
     #[test]
