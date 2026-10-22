@@ -32,7 +32,7 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
-use crate::pkg::dep::DepLeaf;
+use crate::pkg::dep::leaf_account_capability;
 use crate::pkg::pkgfile::{self, PkgFile, is_reg};
 use crate::tools::{Tool, ToolSource, test_source};
 use std::sync::OnceLock;
@@ -996,55 +996,19 @@ fn sysusers_declared(text: &str) -> (HashSet<String>, HashSet<String>) {
     (users, groups)
 }
 
-/// The account a `user(<name>)` / `group(<name>)` dependency capability
-/// declares, as `(is_group, name)`. Any other dependency name declares
-/// no account.
-fn account_capability(dep_name: &str) -> Option<(bool, &str)> {
-    if let Some(name) = dep_name
-        .strip_prefix("user(")
-        .and_then(|rest| rest.strip_suffix(')'))
-    {
-        (!name.is_empty()).then_some((false, name))
-    } else if let Some(name) = dep_name
-        .strip_prefix("group(")
-        .and_then(|rest| rest.strip_suffix(')'))
-    {
-        (!name.is_empty()).then_some((true, name))
-    } else {
-        None
-    }
-}
-
-/// The account capability a single dependency leaf names, when it
-/// names one. A plain header entry carries the capability whole in
-/// the leaf name (`user(svcfoo)`); inside a rich expression the
-/// dependency grammar splits the same spelling into name `user` /
-/// `group` plus qualifier `svcfoo` (see `DepInfo::leaves`), so both
-/// shapes are matched. A capability's version constraint rides on
-/// the leaf's flags and EVR, never on the name, so versioned
-/// capabilities credit by account name exactly like unversioned
-/// ones.
-fn leaf_account_capability(leaf: &DepLeaf) -> Option<(bool, &str)> {
-    if let Some(cap) = account_capability(&leaf.name) {
-        return Some(cap);
-    }
-    let qualifier = leaf.qualifier.as_deref().filter(|q| !q.is_empty())?;
-    match leaf.name.as_str() {
-        "user" => Some((false, qualifier)),
-        "group" => Some((true, qualifier)),
-        _ => None,
-    }
-}
-
 /// Whether `pkg`'s own Requires -- plain, or the scriptlet-context
-/// split into `prereq` (`Requires(pre): user(<name>)`, the form account
-/// Requires take in real headers) -- name the `user(<name>)` /
-/// `group(<name>)` capability for `name`. This is the per-package
-/// Requires route of the `non-standard-uid` / `non-standard-gid`
-/// crediting (issue #756): only the file-owning package's own Requires
-/// count, never a sibling's. Every leaf of each entry is matched (see
+/// split into `prereq` (a packager-written `Requires(pre):
+/// user(<name>)`) -- name the `user(<name>)` / `group(<name>)`
+/// capability for `name`. This is the per-package Requires route of
+/// the `non-standard-uid` / `non-standard-gid` crediting (issue
+/// #756): only the file-owning package's own Requires count, never a
+/// sibling's. Every leaf of each entry is matched (see
 /// `leaf_account_capability`), so plain, versioned and rich-wrapped
-/// capability spellings all credit.
+/// capability spellings all credit. The account Requires rpm's
+/// dependency generator derives from the package's own file ownership
+/// are absent from both splits: the header loader drops them (see
+/// `gather_requires` in `crate::pkg`), because an entry generated
+/// from the ownership under decision declares nothing.
 fn own_requires_account(pkg: &Pkg, group: bool, name: &str) -> bool {
     pkg.requires.iter().chain(pkg.prereq.iter()).any(|dep| {
         dep.leaves()
@@ -1188,7 +1152,9 @@ struct OwnerCandidate {
     group: bool,
     /// `true` when the file-owning package itself Requires the
     /// `user(<owner>)` / `group(<owner>)` capability, in plain or
-    /// scriptlet-context (`prereq`) form. Requires crediting is
+    /// scriptlet-context (`prereq`) form, as written by the packager
+    /// (the header loader drops the account Requires rpm's generator
+    /// derives from file ownership). Requires crediting is
     /// per-package, unlike the sysusers-snippet and Provides routes,
     /// which credit the whole source set: a sibling's Requires does
     /// not create the account for a standalone install of the owning
@@ -4221,7 +4187,7 @@ impl FilesCheck {
 mod tests {
     use super::*;
     use crate::color::Color;
-    use crate::pkg::dep::DepInfo;
+    use crate::pkg::dep::{DepInfo, account_capability};
     use crate::pkg::pkgfile::RPMFILE_GHOST;
 
     fn test_config() -> Config {
@@ -6308,11 +6274,94 @@ mod tests {
     }
 
     #[test]
+    fn non_standard_realdhdr_uncredited_fires() {
+        // End-to-end through a real header (issue #827): the fixture's
+        // payload files are owned by hdruser/hdrgroup in the header
+        // itself, and the only account Requires the header carries
+        // are the ones rpm's generator derived from that ownership,
+        // which the header loader drops. Both findings fire at E.
+        let (pkg, _d) = uidgid_fixture("uidgid-realhdr-main-1.0-1.noarch.rpm");
+        assert!(
+            pkg.prereq
+                .iter()
+                .all(|d| !d.name.starts_with("user(") && !d.name.starts_with("group(")),
+            "generator stamps must not reach prereq: {:?}",
+            pkg.prereq.iter().map(|d| &d.name).collect::<Vec<_>>()
+        );
+        let config = test_config();
+        let (results, levels) = run_files_check_pkgs(&[pkg], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "non-standard-uid");
+        assert_has(&names, "non-standard-gid");
+        assert_eq!(
+            level_of(&results, &levels, "non-standard-uid"),
+            Some(Level::Error)
+        );
+        assert_eq!(
+            level_of(&results, &levels, "non-standard-gid"),
+            Some(Level::Error)
+        );
+    }
+
+    #[test]
+    fn non_standard_realdhdr_handwritten_prereq_quiet() {
+        // The gromox shape in a real header (issue #827): the same
+        // generator stamps, plus packager-written Requires(pre)
+        // capabilities for both accounts. The packager-written entries
+        // survive the header loader and credit both accounts.
+        let (pkg, _d) = uidgid_fixture("uidgid-realhdr-handwritten-1.0-1.noarch.rpm");
+        assert!(
+            pkg.prereq.iter().any(|d| d.name == "user(hdruser)"),
+            "packager-written Requires(pre) must reach prereq: {:?}",
+            pkg.prereq.iter().map(|d| &d.name).collect::<Vec<_>>()
+        );
+        let config = test_config();
+        let (results, _levels) = run_files_check_pkgs(&[pkg], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        assert_lacks(&names, "non-standard-uid");
+        assert_lacks(&names, "non-standard-gid");
+    }
+
+    #[test]
+    fn non_standard_realdhdr_snippet_control_quiet() {
+        // Real-header control (issue #827): the package ships a
+        // sysusers.d snippet declaring both owners, so both findings
+        // stay quiet even though its header carries the same
+        // generator stamps as the uncredited fixture.
+        let (pkg, _d) = uidgid_fixture("uidgid-realhdr-control-1.0-1.noarch.rpm");
+        let config = test_config();
+        let (results, _levels) = run_files_check_pkgs(&[pkg], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        assert_lacks(&names, "non-standard-uid");
+        assert_lacks(&names, "non-standard-gid");
+    }
+
+    #[test]
+    fn non_standard_realdhdr_declaration_does_not_leak_across_sources() {
+        // The control's snippet belongs to a different source: linted
+        // in one run, the uncredited fixture still fires both
+        // findings (issue #827, on the session grouping of issue
+        // #756).
+        let (main_pkg, _d1) = uidgid_fixture("uidgid-realhdr-main-1.0-1.noarch.rpm");
+        let (control_pkg, _d2) = uidgid_fixture("uidgid-realhdr-control-1.0-1.noarch.rpm");
+        let config = test_config();
+        let (results, _levels) = run_files_check_pkgs(&[main_pkg, control_pkg], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "non-standard-uid");
+        assert_has(&names, "non-standard-gid");
+    }
+
+    #[test]
     fn non_standard_quiet_with_prereq_capability() {
         // Declaration route (c) in its real-world form: the account
         // capabilities sit in the scriptlet-context Requires split
         // (`Requires(pre): user(<name>)`), which the header loader
         // stores in `prereq` (the grommunio-web / gromox corpus shape).
+        // Entries injected here model the packager-written form: the
+        // loader drops rpm's generator stamps before `prereq` is
+        // populated, so a stored entry is a declaration by
+        // construction (issue #827; the real-header pins are the
+        // `non_standard_realdhdr_*` tests).
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
         let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");

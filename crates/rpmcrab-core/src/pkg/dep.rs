@@ -83,6 +83,46 @@ impl DepInfo {
     }
 }
 
+/// The account a `user(<name>)` / `group(<name>)` dependency capability
+/// declares, as `(is_group, name)`. Any other dependency name declares
+/// no account.
+pub fn account_capability(dep_name: &str) -> Option<(bool, &str)> {
+    if let Some(name) = dep_name
+        .strip_prefix("user(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        (!name.is_empty()).then_some((false, name))
+    } else if let Some(name) = dep_name
+        .strip_prefix("group(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        (!name.is_empty()).then_some((true, name))
+    } else {
+        None
+    }
+}
+
+/// The account capability a single dependency leaf names, when it
+/// names one. A plain header entry carries the capability whole in
+/// the leaf name (`user(svcfoo)`); inside a rich expression the
+/// dependency grammar splits the same spelling into name `user` /
+/// `group` plus qualifier `svcfoo` (see `DepInfo::leaves`), so both
+/// shapes are matched. A capability's version constraint rides on
+/// the leaf's flags and EVR, never on the name, so versioned
+/// capabilities credit by account name exactly like unversioned
+/// ones.
+pub fn leaf_account_capability(leaf: &DepLeaf) -> Option<(bool, &str)> {
+    if let Some(cap) = account_capability(&leaf.name) {
+        return Some(cap);
+    }
+    let qualifier = leaf.qualifier.as_deref().filter(|q| !q.is_empty())?;
+    match leaf.name.as_str() {
+        "user" => Some((false, qualifier)),
+        "group" => Some((true, qualifier)),
+        _ => None,
+    }
+}
+
 /// rpmlint's `stringToVersion`: parse `[epoch:]version[-release]`.
 /// A non-numeric epoch is ignored; an empty version part becomes `None`.
 pub fn string_to_version(s: &str) -> (Option<i64>, Option<String>, Option<String>) {
