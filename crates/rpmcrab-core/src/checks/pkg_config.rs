@@ -5,6 +5,7 @@
 //! `double-slash-in-pkgconfig-path`, `pkgconfig-exception`.
 
 use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
 
 use fancy_regex::Regex;
@@ -133,6 +134,21 @@ impl Check for PkgConfigCheck {
                         &[&file.name, &e],
                     ),
                 },
+                // The extractor leaves entries it cannot materialise out
+                // of the tree and reports each skip itself: entries whose
+                // path collides with an incompatible existing object
+                // (extract.rs `warn_skip_collision`) and files the payload
+                // does not carry (%ghost entries). A read failing because
+                // the file is absent (NotFound) or because a component of
+                // its path is the non-directory that won such a collision
+                // (NotADirectory) draws no finding; read failures on
+                // materialised files report as exceptions, as do decode
+                // failures above.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        ErrorKind::NotFound | ErrorKind::NotADirectory
+                    ) => {}
                 Err(e) => add_info(
                     out,
                     Level::Error,
@@ -353,6 +369,90 @@ mod tests {
         assert_eq!(
             results[0].1,
             "pkgconfig-test.x86_64: E: invalid-pkgconfig-file /usr/lib64/pkgconfig/foo.pc"
+        );
+    }
+
+    /// Build a `Pkg` carrying one `.pc` entry with the given on-disk
+    /// `path`, in the shape of `hyphenated_build_dir_...` above.
+    fn pkg_with_pc_path(path: &Path, name: &str) -> Pkg {
+        let mut pkg = Pkg::open_no_extract(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm"),
+        )
+        .expect("open fixture pkg header");
+        pkg.name = "pkgconfig-test".to_string();
+        pkg.arch = "x86_64".to_string();
+        pkg.files = vec![PkgFile {
+            name: name.to_string(),
+            path: path.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            ..Default::default()
+        }];
+        pkg
+    }
+
+    fn run_pkg_config_check(pkg: &Pkg) -> Vec<(String, String)> {
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).expect("filter");
+        let mut check = PkgConfigCheck::new(&config);
+        check.check_binary(pkg, &config, &mut out);
+        out.results().to_vec()
+    }
+
+    #[test]
+    fn pc_file_behind_a_colliding_file_is_quiet() {
+        // The grpc-source shape (#826): the payload carries the regular
+        // file `usr/src/grpc/BUILD` and the directory
+        // `usr/src/grpc/build`. On a case-insensitive filesystem the two
+        // collide; the extractor materialises the file, skips the
+        // entries beneath the directory and warns about the skips
+        // itself. The `.pc` path then runs through a non-directory, so
+        // the read fails with NotADirectory -- on any filesystem, since
+        // the fixture builds the same layout directly. The file was
+        // never materialised, so the package draws no finding.
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let root = dir.path().join("usr/src/grpc");
+        std::fs::create_dir_all(&root).expect("mkdir fixture tree");
+        std::fs::write(root.join("BUILD"), "bazel build file\n").expect("write BUILD file");
+        let pc_path = root.join("build/libs/opt/pkgconfig/gpr.pc");
+        let pkg = pkg_with_pc_path(
+            &pc_path,
+            "/usr/src/grpc/build/libs/opt/pkgconfig/gpr.pc",
+        );
+        let results = run_pkg_config_check(&pkg);
+        assert!(results.is_empty(), "unexpected results: {results:?}");
+    }
+
+    #[test]
+    fn pc_file_absent_from_the_tree_is_quiet() {
+        // A `.pc` entry the payload does not carry (%ghost) is in the
+        // header's file list but never materialised; its read fails
+        // with NotFound and draws no finding.
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let pc_path = dir.path().join("usr/lib64/pkgconfig/ghost.pc");
+        let pkg = pkg_with_pc_path(&pc_path, "/usr/lib64/pkgconfig/ghost.pc");
+        let results = run_pkg_config_check(&pkg);
+        assert!(results.is_empty(), "unexpected results: {results:?}");
+    }
+
+    #[test]
+    fn undecodable_pc_file_still_reports_an_exception() {
+        // A materialised `.pc` file whose bytes are not valid UTF-8
+        // keeps the `pkgconfig-exception` finding: the skip above
+        // covers only files the extractor left out of the tree.
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let pc_dir = dir.path().join("usr/lib64/pkgconfig");
+        std::fs::create_dir_all(&pc_dir).expect("mkdir fixture tree");
+        let pc_path = pc_dir.join("bad.pc");
+        std::fs::write(&pc_path, b"prefix=/usr\n\xff\xfe\n").expect("write fixture pc file");
+        let pkg = pkg_with_pc_path(&pc_path, "/usr/lib64/pkgconfig/bad.pc");
+        let results = run_pkg_config_check(&pkg);
+        assert_eq!(results.len(), 1, "unexpected results: {results:?}");
+        assert_eq!(results[0].0, "pkgconfig-exception");
+        assert!(
+            results[0].1.contains("E: pkgconfig-exception /usr/lib64/pkgconfig/bad.pc"),
+            "unexpected line: {}",
+            results[0].1
         );
     }
 }
