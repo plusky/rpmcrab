@@ -305,6 +305,7 @@ jobs:
       - run: python3 scripts/test_generate_distro_configs.py
       - run: python3 scripts/test_sync_upstream_whitelists.py
       - run: python3 scripts/test_watch_upstream_configs.py
+      - run: python3 scripts/test_leap16_name_scan.py
       # Exit 3 is the generator's fetch-exhausted code (EXIT_FETCH_EXHAUSTED
       # in scripts/generate-distro-configs.py): a live upstream fetch died
       # beyond retries, so this run verified nothing. Map it to a warning
