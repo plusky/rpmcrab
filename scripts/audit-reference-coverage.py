@@ -22,9 +22,10 @@ name is *covered* when a port pattern matches it, where ``*`` on either
 side is a wildcard for a dynamic part.
 
 Output is exactly "reference names absent from the port AND unledgered":
-a finding counts as ledgered when its check module has a ``kind =
-"missing"`` entry in ``tests/parity/divergences.toml``, or its name
-appears in a divergence entry's reason text.
+a finding counts as ledgered when a ``kind = "missing"`` entry in
+``tests/parity/divergences.toml`` names it directly: the entry's
+``check`` value is either the finding's check module (the whole check
+is unported) or the finding name itself.
 
 Two traps are encoded, both found the hard way:
 
@@ -2343,14 +2344,11 @@ def load_ledger(path):
 
 
 def is_ledgered(module, name, entries):
-    """The #51/#57 contract: ledgered if the name appears in a divergence
-    entry's reason text, or the check module has a kind = "missing" entry."""
+    """Ledgered if a kind = "missing" entry names the check module (the
+    whole check is unported) or the finding itself."""
     for e in entries:
         kind, check = e.get("kind"), e.get("check", "")
         if kind == "missing" and (check == module or check == name):
-            return True
-        reason = e.get("reason", "")
-        if reason and template_regex(name).search(reason):
             return True
     return False
 
