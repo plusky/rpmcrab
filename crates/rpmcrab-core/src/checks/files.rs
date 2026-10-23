@@ -180,9 +180,16 @@ fn info_regex() -> &'static Regex {
 }
 
 static SCM_REGEX: OnceLock<Regex> = OnceLock::new();
+
+/// The paths `version-control-internal-file` charges (issue #858):
+/// files inside a version-control metadata tree (a `.git`, `.svn`,
+/// `.hg` or `.bzr` directory, an arch `.arch-ids` or `{arch}`
+/// directory), files directly inside a `CVS` or `RCS` directory,
+/// RCS `,v` revision files. The divergence from the reference is
+/// ledgered in tests/parity/divergences.toml.
 fn scm_regex() -> &'static Regex {
     SCM_REGEX.get_or_init(|| {
-        Regex::new(r"/(?:RCS|CVS)/[^/]+$|/\.(?:bzr|cvs|git|hg|svn)ignore$|,v$|/\.hgtags$|/\.(?:bzr|git|hg|svn)/|/(?:\.arch-ids|{arch})/")
+        Regex::new(r"/(?:RCS|CVS)/[^/]+$|,v$|/\.(?:bzr|git|hg|svn)/|/(?:\.arch-ids|{arch})/")
             .expect("static regex")
     })
 }
@@ -9119,19 +9126,22 @@ mod tests {
     }
 
     #[test]
-    fn scm_regex_matches_reference_cases() {
-        // Port of the reference's test_scm_regex cases plus the
-        // test_invalid_package `/.gitignore` case.
+    fn scm_regex_charges_vcs_internals() {
+        // The scoped pattern of issue #858: version-control metadata
+        // trees and RCS ,v files charge. The second list
+        // pins the working-tree dotfiles the reference's pattern
+        // charges and this one leaves silent.
         for path in [
             "/foo/CVS/bar",
             "/foo/RCS/bar",
             "/bar/foo,v",
-            "bar/.svnignore",
             "bar/.git/refs",
-            "/.gitignore",
             "/usr/src/foo/.git/HEAD",
             "/opt/bar/.hg/store",
             "/x/.bzr/branch",
+            "/x/.svn/entries",
+            "/x/.arch-ids/=id",
+            "/foo/{arch}/bar",
         ] {
             assert!(is_match(scm_regex(), path), "scm_regex must match {path}");
         }
@@ -9140,6 +9150,19 @@ mod tests {
             "/etc/gitconfig",
             "bar/.gitignore.bak",
             "/home/user/.github/workflows",
+            "/.gitignore",
+            "bar/.svnignore",
+            "/usr/share/foo/.gitignore",
+            "/usr/share/foo/.cvsignore",
+            "/usr/share/foo/.gitattributes",
+            "/usr/share/foo/.hgignore",
+            "/usr/share/foo/.hgtags",
+            "/usr/share/foo/.bzrignore",
+            "/.gitmodules",
+            "/usr/share/foo/.gitmodules",
+            "/usr/share/doc/git/HEAD",
+            "/usr/share/foo/x.gitmodules",
+            "/usr/share/foo/.gitmodules.bak",
         ] {
             assert!(
                 !is_match(scm_regex(), path),
@@ -9149,7 +9172,7 @@ mod tests {
     }
 
     #[test]
-    fn version_control_internal_file_fires_on_scm_paths() {
+    fn version_control_internal_file_charges_internals_not_dotfiles() {
         let config = test_config();
         let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
         let mut pkg = Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture");
@@ -9160,8 +9183,23 @@ mod tests {
                 ..Default::default()
             },
             PkgFile {
+                name: "/usr/src/foo/.git/HEAD".to_string(),
+                path: "/usr/src/foo/.git/HEAD".to_string(),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/share/foo/.gitmodules".to_string(),
+                path: "/usr/share/foo/.gitmodules".to_string(),
+                ..Default::default()
+            },
+            PkgFile {
                 name: "/.gitignore".to_string(),
                 path: "/.gitignore".to_string(),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/share/foo/.cvsignore".to_string(),
+                path: "/usr/share/foo/.cvsignore".to_string(),
                 ..Default::default()
             },
             PkgFile {
@@ -9181,7 +9219,7 @@ mod tests {
             .collect();
         assert_eq!(hits.len(), 2, "expected 2 findings, got: {hits:?}");
         assert!(hits.iter().any(|d| d.contains("/bar/foo,v")));
-        assert!(hits.iter().any(|d| d.contains("/.gitignore")));
+        assert!(hits.iter().any(|d| d.contains("/usr/src/foo/.git/HEAD")));
     }
 
     #[test]
