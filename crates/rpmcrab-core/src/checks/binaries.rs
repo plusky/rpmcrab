@@ -5509,8 +5509,10 @@ mod tests {
         // missing-relro lines) are unactionable noise. `is_debug` is what
         // `ReadelfInfo::parse` derives from the `.debug` name suffix; the
         // /usr/lib/debug path covers the rest (e.g. ovmf's GdbSyms.dll).
+        // Each case below isolates one disjunct of the skip gate, so a
+        // regression in either one alone fails this test.
         for (name, is_debug) in [
-            ("/usr/lib/debug/usr/bin/probe.debug", true),
+            ("/usr/bin/probe.debug", true),
             ("/usr/lib/debug/ovmf-x86_64/DEBUG/GdbSyms.dll", false),
         ] {
             let config = test_config();
