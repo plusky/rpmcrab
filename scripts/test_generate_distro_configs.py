@@ -952,6 +952,57 @@ def test_retarget_filters_byte_exact_only():
     assert retargeted == [], retargeted
 
 
+def test_prune_stale_filters_drops_orphaned_group_comment():
+    """A comment heading only dropped entries is dropped with them.
+
+    The comment headed exactly the pruned entry; leaving it behind
+    would strand it over the next group. One adjacent blank separator
+    goes with it, so the surviving groups keep the file's spacing.
+    """
+    text = (
+        'Filters = [\n'
+        "    'kept-entry',\n"
+        '\n'
+        '# Doomed group\n'
+        "    'no-buildroot-tag',\n"
+        '\n'
+        '# Kept group\n'
+        "    ' dangerous-command.*',\n"
+        ']\n'
+    )
+    pruned, dropped, retargeted = [], [], []
+    out = gen.prune_stale_filters(text, set(), pruned, dropped, retargeted)
+    assert out == (
+        'Filters = [\n'
+        "    'kept-entry',\n"
+        '\n'
+        '# Kept group\n'
+        "    ' dangerous-command.*',\n"
+        ']\n'
+    ), out
+    assert len(pruned) == 1, pruned
+
+
+def test_prune_stale_filters_keeps_shared_group_comment():
+    """A comment heading a retained entry stays when a sibling drops."""
+    text = (
+        'Filters = [\n'
+        '# Shared group\n'
+        "    'no-buildroot-tag',\n"
+        "    ' dangerous-command.*',\n"
+        ']\n'
+    )
+    pruned, dropped, retargeted = [], [], []
+    out = gen.prune_stale_filters(text, set(), pruned, dropped, retargeted)
+    assert out == (
+        'Filters = [\n'
+        '# Shared group\n'
+        "    ' dangerous-command.*',\n"
+        ']\n'
+    ), out
+    assert len(pruned) == 1, pruned
+
+
 def test_add_filters_inserts_after_anchor():
     """ADD_FILTERS entries land immediately after their anchor line.
 
