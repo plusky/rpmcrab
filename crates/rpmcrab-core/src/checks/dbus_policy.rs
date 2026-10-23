@@ -6,6 +6,8 @@
 //! `dbus-policy-allow-without-destination`, `dbus-policy-allow-receive`,
 //! `dbus-policy-allow-wildcard`, `dbus-policy-deny-without-destination`.
 
+use std::collections::HashSet;
+
 use quick_xml::Reader;
 use quick_xml::events::Event;
 
@@ -57,10 +59,7 @@ fn escape_xml_attr(s: &str) -> String {
 }
 
 /// Record an `<allow>` or `<deny>` element into the current `<policy>`.
-fn push_element(
-    e: &quick_xml::events::BytesStart<'_>,
-    current: &mut Option<Vec<(&'static str, PolicyElement)>>,
-) {
+fn push_element(e: &quick_xml::events::BytesStart<'_>, current: &mut Option<PolicyBlock>) {
     let name = e.name();
     let kind: &'static str = if name.as_ref() == "allow" {
         "allow"
@@ -88,9 +87,25 @@ fn push_element(
             .map(|(k, v)| format!(" {k}=\"{}\"", escape_xml_attr(v)))
             .collect::<String>()
     );
-    if let Some(elems) = current {
-        elems.push((kind, PolicyElement { attrs, xml }));
+    if let Some(block) = current {
+        block.elems.push((kind, PolicyElement { attrs, xml }));
     }
+}
+
+/// One `<policy>` element: whether it is scoped to named subjects (a
+/// `user`, `group` or `at_console` attribute, as opposed to
+/// `context="default"` or no attribute) and its `<allow>`/`<deny>`
+/// elements in document order.
+struct PolicyBlock {
+    subject_scoped: bool,
+    elems: Vec<(&'static str, PolicyElement)>,
+}
+
+/// True when a `<policy>` element names the subjects it governs.
+fn policy_subject_scoped(e: &quick_xml::events::BytesStart<'_>) -> bool {
+    e.attributes()
+        .filter_map(|a| a.ok())
+        .any(|a| matches!(a.key.as_ref(), "user" | "group" | "at_console"))
 }
 
 /// The findings for one policy file's content: `(level, finding, detail)`.
@@ -99,8 +114,8 @@ fn check_content(content: &str) -> Result<Vec<(Level, &'static str, String)>, St
     reader.config_mut().trim_text(true);
 
     // Collect <allow>/<deny> elements grouped by their enclosing <policy>.
-    let mut policies: Vec<Vec<(&'static str, PolicyElement)>> = Vec::new();
-    let mut current: Option<Vec<(&'static str, PolicyElement)>> = None;
+    let mut policies: Vec<PolicyBlock> = Vec::new();
+    let mut current: Option<PolicyBlock> = None;
     let mut buf = Vec::new();
     // Track open elements so unclosed tags are a parse error, like minidom.
     let mut open: Vec<String> = Vec::new();
@@ -110,7 +125,10 @@ fn check_content(content: &str) -> Result<Vec<(Level, &'static str, String)>, St
             Ok(Event::Start(ref e)) => {
                 open.push(e.name().as_ref().to_owned());
                 if e.name().as_ref() == "policy" {
-                    current = Some(Vec::new());
+                    current = Some(PolicyBlock {
+                        subject_scoped: policy_subject_scoped(e),
+                        elems: Vec::new(),
+                    });
                 } else {
                     push_element(e, &mut current);
                 }
@@ -118,7 +136,10 @@ fn check_content(content: &str) -> Result<Vec<(Level, &'static str, String)>, St
             Ok(Event::Empty(ref e)) => {
                 if e.name().as_ref() == "policy" {
                     // An empty <policy/> contributes no elements.
-                    policies.push(Vec::new());
+                    policies.push(PolicyBlock {
+                        subject_scoped: policy_subject_scoped(e),
+                        elems: Vec::new(),
+                    });
                 } else {
                     push_element(e, &mut current);
                 }
@@ -129,9 +150,9 @@ fn check_content(content: &str) -> Result<Vec<(Level, &'static str, String)>, St
                     _ => return Err("mismatched closing tag".to_string()),
                 }
                 if e.name().as_ref() == "policy"
-                    && let Some(elems) = current.take()
+                    && let Some(block) = current.take()
                 {
-                    policies.push(elems);
+                    policies.push(block);
                 }
             }
             Ok(Event::Eof) => {
@@ -146,14 +167,49 @@ fn check_content(content: &str) -> Result<Vec<(Level, &'static str, String)>, St
         buf.clear();
     }
 
+    // The names this file itself pins down: every `own`, `own_prefix`
+    // and `send_destination` value on its <allow>/<deny> elements. A
+    // destination for one of these names can always be written, so an
+    // interface rule naming one of them is not the agent idiom below.
+    let mut pinned: HashSet<&str> = HashSet::new();
+    let mut file_has_own = false;
+    for block in &policies {
+        for (kind, elem) in &block.elems {
+            for (key, val) in &elem.attrs {
+                match key.as_str() {
+                    "own" | "own_prefix" => {
+                        // Only a concrete <allow> own declares that the
+                        // service owns a name: a <deny own> forbids owning
+                        // (the common <deny own="*"/> included), and an
+                        // empty or wildcard value names nothing concrete.
+                        if *kind == "allow" && !val.is_empty() && !val.contains('*') {
+                            file_has_own = true;
+                        }
+                        pinned.insert(val.as_str());
+                    }
+                    "send_destination" => {
+                        pinned.insert(val.as_str());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     // The reference scopes send_policy_seen per file, not per policy:
     // one flag for the whole file, one finding naming the file.
     let mut findings = Vec::new();
     let mut send_policy_seen = false;
-    for elems in &policies {
-        for (kind, elem) in elems {
+    for block in &policies {
+        for (kind, elem) in &block.elems {
             if *kind == "allow" {
-                send_policy_seen |= check_allow(elem, &mut findings);
+                send_policy_seen |= check_allow(
+                    elem,
+                    block.subject_scoped,
+                    &pinned,
+                    file_has_own,
+                    &mut findings,
+                );
             } else {
                 check_deny(elem, &mut findings);
             }
@@ -165,9 +221,62 @@ fn check_content(content: &str) -> Result<Vec<(Level, &'static str, String)>, St
     Ok(findings)
 }
 
+/// True when the leaf (final dotted component) of an interface name
+/// denotes an agent role: `Agent`, a name ending in `Agent`, or either
+/// with a trailing version number (`Agent1`). Agent interfaces are
+/// implemented by whichever process registers as the agent, under a
+/// per-session unique bus name.
+fn is_agent_interface(name: &str) -> bool {
+    let leaf = name.rsplit('.').next().unwrap_or(name);
+    let base = leaf.trim_end_matches(|c: char| c.is_ascii_digit());
+    base == "Agent" || base.ends_with("Agent")
+}
+
+/// True when an interface-scoped `<allow>` without `send_destination`
+/// is the agent idiom: the rule grants a named subject (the daemon or
+/// a privileged user) the use of an interface whose implementer
+/// registers at runtime, so no static `send_destination` can name the
+/// recipient and the rule is complete as written. The idiom applies
+/// only where the file gives the rule its service-policy context:
+/// the interface must not be one of the names the file itself pins
+/// (a destination for those can always be written), and the file
+/// must either declare, via a concrete `<allow>` own, the names
+/// its service owns, scope the rule to an object path, or name an
+/// agent interface outright.
+fn is_agent_idiom(
+    elem: &PolicyElement,
+    subject_scoped: bool,
+    pinned: &HashSet<&str>,
+    file_has_own: bool,
+) -> bool {
+    if !subject_scoped {
+        return false;
+    }
+    let attrs = &elem.attrs;
+    let get = |k: &str| {
+        attrs
+            .iter()
+            .find(|(key, _)| key == k)
+            .map(|(_, v)| v.as_str())
+    };
+    let Some(iface) = get("send_interface") else {
+        return false;
+    };
+    if pinned.contains(iface) {
+        return false;
+    }
+    file_has_own || get("send_path").is_some() || is_agent_interface(iface)
+}
+
 /// Check one `<allow>` element, returning true when it counts as a send
 /// policy (sets `send_policy_seen`).
-fn check_allow(elem: &PolicyElement, findings: &mut Vec<(Level, &'static str, String)>) -> bool {
+fn check_allow(
+    elem: &PolicyElement,
+    subject_scoped: bool,
+    pinned: &HashSet<&str>,
+    file_has_own: bool,
+    findings: &mut Vec<(Level, &'static str, String)>,
+) -> bool {
     let attrs = &elem.attrs;
     let has = |k: &str| attrs.iter().any(|(key, _)| key == k);
     let mut seen = false;
@@ -175,11 +284,13 @@ fn check_allow(elem: &PolicyElement, findings: &mut Vec<(Level, &'static str, St
     if (has("send_interface") || has("send_member") || has("send_path")) && !has("send_destination")
     {
         seen = true;
-        findings.push((
-            Level::Error,
-            "dbus-policy-allow-without-destination",
-            elem.xml.clone(),
-        ));
+        if !is_agent_idiom(elem, subject_scoped, pinned, file_has_own) {
+            findings.push((
+                Level::Error,
+                "dbus-policy-allow-without-destination",
+                elem.xml.clone(),
+            ));
+        }
     } else if has("send_destination") {
         seen = true;
     }
@@ -368,8 +479,9 @@ mod tests {
     fn attribute_detail_uses_document_order() {
         // The rebuilt element detail must be byte-identical to minidom's
         // `toxml()`: attributes in document order, XML-escaped values, and
-        // no space before `/>`.
-        let xml = r#"<busconfig><policy user="root">
+        // no space before `/>`. (A default policy, so the rule is not the
+        // agent idiom and the finding fires.)
+        let xml = r#"<busconfig><policy context="default">
 <allow send_path="/org/foo" send_interface="org.foo.Bar"/>
 </policy></busconfig>"#;
         let findings = check_content(xml).expect("parses");
@@ -458,6 +570,242 @@ mod tests {
     #[test]
     fn malformed_xml_is_an_error() {
         assert!(check_content("<busconfig><policy>").is_err());
+    }
+
+    #[test]
+    fn agent_allows_in_service_policy_are_quiet() {
+        // The bluez/ofono shape: the daemon's own policy pins its name
+        // and owns it; the destinationless interface rules name the
+        // peer interfaces the daemon calls back into (an agent and a
+        // registered-object interface alike).
+        let xml = r#"<busconfig><policy user="root">
+<allow own="org.foo"/>
+<allow send_destination="org.foo"/>
+<allow send_interface="org.foo.Agent1"/>
+<allow send_interface="org.foo.GattThing1"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn deny_own_wildcard_does_not_grant_agent_credit() {
+        // A <deny own="*"/> forbids owning any name; it declares no
+        // ownership, so a destinationless non-agent interface rule in
+        // the same file still fires -- file_has_own stays unset and no
+        // other credit arm applies (no send_path, no agent leaf).
+        let xml = r#"<busconfig><policy user="root">
+<deny own="*"/>
+<allow send_interface="org.foo.GattThing1"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn deny_own_concrete_does_not_grant_agent_credit() {
+        // A <deny own> naming a concrete name still forbids owning it;
+        // it must not declare ownership either.
+        let xml = r#"<busconfig><policy user="root">
+<deny own="org.foo"/>
+<allow send_interface="org.foo.GattThing1"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn concrete_allow_own_grants_agent_credit() {
+        // The positive pin for the ownership arm in isolation: a
+        // concrete <allow own> credits a destinationless non-agent
+        // interface rule (no send_path, no agent leaf).
+        let xml = r#"<busconfig><policy user="root">
+<allow own="org.foo"/>
+<allow send_interface="org.foo.GattThing1"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn wildcard_allow_own_does_not_grant_agent_credit() {
+        // An <allow own> carrying a wildcard names nothing concrete,
+        // so it declares no ownership for the credit.
+        let xml = r#"<busconfig><policy user="root">
+<allow own="*"/>
+<allow send_interface="org.foo.GattThing1"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn empty_allow_own_does_not_grant_agent_credit() {
+        // An empty <allow own> value names nothing at all.
+        let xml = r#"<busconfig><policy user="root">
+<allow own=""/>
+<allow send_interface="org.foo.GattThing1"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn agent_allow_alone_still_counts_as_send_policy() {
+        // A credited agent rule is still a send policy: no
+        // dbus-policy-missing-allow may follow from crediting it.
+        let xml = r#"<busconfig><policy user="root">
+<allow send_interface="org.foo.Agent"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn agent_allow_in_pinless_file_is_quiet() {
+        // The geoclue shape: no names are pinned anywhere in the file;
+        // the agent leaf (and the object path) carry the idiom.
+        let xml = r#"<busconfig><policy user="srvfoo">
+<allow send_interface="org.foo.Agent" send_path="/org/foo/Agent"/>
+<allow send_interface="org.freedesktop.DBus.Properties" send_path="/org/foo/Agent"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn service_interface_named_like_its_destination_still_fires() {
+        // The wpa_supplicant shape: the interface value is the very
+        // name the same policy pins as a destination -- a destination
+        // can always be written for it, so the rule is no idiom.
+        let xml = r#"<busconfig><policy user="root">
+<allow own="org.foo.Bar"/>
+<allow send_destination="org.foo.Bar"/>
+<allow send_interface="org.foo.Bar"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn agent_allow_in_default_policy_still_fires() {
+        // The kauth shape: a default policy grants everyone the
+        // interface; that breadth is the finding's target even when
+        // the leaf names an agent.
+        let xml = r#"<busconfig><policy context="default">
+<allow send_interface="org.foo.Agent"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn foreign_interface_in_pinless_file_still_fires() {
+        // The cups shape: the file pins nothing, the rule carries no
+        // object path and the leaf names no agent -- no service-policy
+        // context credits it.
+        let xml = r#"<busconfig><policy user="root">
+<allow send_interface="com.foo.PrinterSpooler"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn agent_manager_leaf_still_fires() {
+        // AgentManager is a service interface (the manager API on the
+        // daemon itself), not an agent leaf: the name-shape boundary
+        // is a leaf that is or ends in Agent, not one that starts so.
+        let xml = r#"<busconfig><policy user="root">
+<allow send_interface="org.foo.AgentManager"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn member_only_allow_in_service_policy_still_fires() {
+        // The credit is interface-scoped: a member-only rule in the
+        // daemon's own policy still fires.
+        let xml = r#"<busconfig><policy user="root">
+<allow own="org.foo"/>
+<allow send_destination="org.foo"/>
+<allow send_member="SomeMember"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn deny_with_agent_interface_still_fires() {
+        // Deny rules are untouched by the credit, agent leaf or not.
+        let xml = r#"<busconfig><policy user="root">
+<allow send_destination="org.foo.Bar"/>
+<deny send_interface="org.foo.Agent"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-deny-without-destination"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn agent_allow_with_destination_is_unaffected() {
+        // A destination-pinned agent rule was never charged and is
+        // still a plain send policy.
+        let xml = r#"<busconfig><policy user="root">
+<allow send_destination="org.foo.Bar" send_interface="org.foo.Agent"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(findings.is_empty(), "{findings:?}");
     }
 
     #[test]
