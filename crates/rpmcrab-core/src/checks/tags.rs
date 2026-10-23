@@ -638,10 +638,19 @@ fn mingw_family(name: &str) -> Option<&str> {
 ///   `cross-<target>-<libc>-devel` with libc `glibc` or `newlib`.
 ///   The bare-metal families spell the target with a trailing `-elf`
 ///   component the sys-root packages drop (riscv64-elf pairs with
-///   riscv64); that spelling is the newlib toolchain, so the stripped
-///   form credits only a newlib leaf — the libc is part of the pair,
-///   and `cross-riscv64-elf-gcc13` on `cross-riscv64-glibc-devel`
-///   keeps firing.
+///   riscv64); that spelling is the newlib toolchain, so for `-elf`
+///   requirers the libc is part of the pair: the stripped form
+///   credits only a newlib leaf, and `cross-riscv64-elf-gcc13` on
+///   `cross-riscv64-glibc-devel` keeps firing. A requirer name
+///   without the `-elf` spelling carries no libc component, so its
+///   matching is on the target alone and either libc leaf on that
+///   target credits: `cross-riscv64-gcc13` on
+///   `cross-riscv64-newlib-devel` stays silent alongside its glibc
+///   leaf. Both libc spellings occur among the non-`-elf` families
+///   (glibc for the Linux targets, newlib for amdgcn, arm-none,
+///   nvptx and rx), so the target alone is the decidable predicate
+///   there; the collision is pinned by
+///   `devel_dependency_cross_family_non_elf_libc_collision_is_silent`.
 /// - MinGW requirers (`mingw32-*`, `mingw64-*`) pair only with the
 ///   same bitness family's sys-root leaves: `<bitness>-headers` and
 ///   `<bitness>-winpthreads-devel`.
@@ -649,10 +658,10 @@ fn mingw_family(name: &str) -> Option<&str> {
 /// Everything else keeps firing: any other same-target devel match
 /// (a library's `-devel`/`-static`, binutils-devel, the compiler's
 /// own devel package), a runtime package requiring its own devel
-/// package, a different target's or different libc's sys-root devel
-/// package, a host devel package required by a cross package, a
-/// cross devel package required by a host package, and the other
-/// MinGW bitness.
+/// package, a different target's sys-root devel package, the wrong
+/// libc's sys-root package for an `-elf` requirer, a host devel
+/// package required by a cross package, a cross devel package
+/// required by a host package, and the other MinGW bitness.
 fn cross_family_pair(requirer: &str, leaf: &str) -> bool {
     if requirer.starts_with("cross-") || leaf.starts_with("cross-") {
         let Some((leaf_target, leaf_libc)) = cross_sysroot_leaf(leaf) else {
@@ -3183,6 +3192,36 @@ mod rich_dep_emission_tests {
             ("mingw64-cross-gcc", "mingw64-headers"),
             ("mingw64-runtime", "mingw64-headers"),
             ("mingw64-gcc", "mingw64-winpthreads-devel"),
+        ] {
+            let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+            pkg.name = requirer.to_string();
+            pkg.requires = vec![plain_dep(dep)];
+            let results = run(&pkg, &config);
+            assert!(
+                named(&results, "devel-dependency").is_empty(),
+                "requirer {requirer} dep {dep}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn devel_dependency_cross_family_non_elf_libc_collision_is_silent() {
+        // A requirer name without the `-elf` spelling carries no
+        // libc component, so its matching is on the target alone and
+        // either libc leaf on that target credits. This pins the
+        // collision explicitly: cross-riscv64-gcc13's measured pair
+        // is the glibc leaf, and the newlib leaf on the same target
+        // stays silent too (likewise in the other direction, a
+        // newlib-family target crediting its glibc leaf). The `-elf`
+        // spelling is the only name form that encodes a libc, and
+        // there the libc is part of the pair — see the near-miss
+        // pin for cross-riscv64-elf-gcc13 on the glibc leaf.
+        let config = rich_test_config(&[], false);
+        for (requirer, dep) in [
+            ("cross-riscv64-gcc13", "cross-riscv64-newlib-devel"),
+            ("cross-aarch64-gcc13", "cross-aarch64-newlib-devel"),
+            ("cross-arm-none-gcc14", "cross-arm-none-glibc-devel"),
+            ("cross-rx-gcc15", "cross-rx-glibc-devel"),
         ] {
             let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
             pkg.name = requirer.to_string();
