@@ -43,8 +43,9 @@ const FHS_USR_SUBDIRS: &[&str] = &[
 /// names the standard directories in the generated description, while
 /// this set is the measured Factory population (issue #582), not a
 /// pattern - any other first component still fires. FilelistCheck
-/// consults the same set through `cross_sysroot_matches`, so a sysroot
-/// one check treats as standard is standard for both.
+/// and FilesCheck consult the same set through
+/// `cross_sysroot_matches`, so a sysroot one check treats as standard
+/// is standard for all of them.
 pub(crate) const FHS_USR_CROSS_SYSROOTS: &[&str] = &[
     "aarch64-suse-linux",
     "amdgcn-amdhsa",
