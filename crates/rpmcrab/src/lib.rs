@@ -824,12 +824,14 @@ pub fn run() -> ExitCode {
 /// Auto-discover rpmlintrc files: explicit `-r` files win outright; with
 /// none, look in each configured `RpmlintrcSearchPaths` directory
 /// (rpmlint#1592), then beside every positional argument: a file argument
-/// contributes its directory, a directory argument contributes itself.
-/// The beside-argument lookup runs only when the search paths found
-/// nothing, and its results are deduplicated by path, so an rpmlintrc
-/// shared by several arguments loads once. Looking beside every argument
-/// diverges from the reference's lone-argument lookup (`lint.py:198-224`);
-/// the divergence is recorded in `tests/parity/divergences.toml` (#830).
+/// contributes its directory (a bare file name the current directory), a
+/// directory argument contributes itself. The beside-argument lookup runs
+/// only when the search paths found nothing; each directory is listed
+/// once, however many arguments name it and however it is spelled, and
+/// the results are deduplicated by path, so an rpmlintrc shared by
+/// several arguments loads once. Looking beside every argument diverges
+/// from the reference's lone-argument lookup (`lint.py:198-224`); the
+/// divergence is recorded in `tests/parity/divergences.toml` (#830).
 fn discover_rpmlintrc_files(
     explicit: &[PathBuf],
     search_paths: &[String],
@@ -844,11 +846,24 @@ fn discover_rpmlintrc_files(
         // `rpmlint foo.spec bar.spec` picks up both `foo.rpmlintrc` and
         // `bar.rpmlintrc`.
         if rc_files.is_empty() {
+            let mut visited: Vec<PathBuf> = Vec::new();
             for arg in positional {
                 let mut dir = arg.clone();
-                if dir.is_file() {
+                if !dir.is_dir() {
                     dir.pop();
                 }
+                if dir.as_os_str().is_empty() {
+                    dir = PathBuf::from(".");
+                }
+                // Equivalent spellings of a directory (a bare name
+                // beside `./name`, a path through a symlink)
+                // canonicalise to the same visited key, so the
+                // directory is listed once.
+                let key = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+                if visited.contains(&key) {
+                    continue;
+                }
+                visited.push(key);
                 for rc in find_rpmlintrc_files(&dir) {
                     if !rc_files.contains(&rc) {
                         rc_files.push(rc);
@@ -984,6 +999,22 @@ mod tests {
         std::fs::write(&rc_b, "addFilter('y')\n").unwrap();
         let found = discover_rpmlintrc_files(&[], &[], &[pkg_b, pkg_a]);
         assert_eq!(found, vec![rc_b, rc_a]);
+    }
+
+    #[test]
+    fn discover_rpmlintrc_deduplicates_equivalent_dir_spellings() {
+        // The same directory spelled two ways -- a plain argument path
+        // and the `./`-spelled path of a sibling argument -- is listed
+        // once: the shared rpmlintrc comes back once, so it loads once.
+        let dir = tempfile::tempdir().unwrap();
+        let pkg_a = dir.path().join("aaa.spec");
+        let pkg_b = dir.path().join("./bbb.spec");
+        std::fs::write(&pkg_a, "Name: aaa\n").unwrap();
+        std::fs::write(dir.path().join("bbb.spec"), "Name: bbb\n").unwrap();
+        let rc = dir.path().join("shared.rpmlintrc");
+        std::fs::write(&rc, "addFilter('x')\n").unwrap();
+        let found = discover_rpmlintrc_files(&[], &[], &[pkg_a, pkg_b]);
+        assert_eq!(found, vec![rc]);
     }
 
     #[test]

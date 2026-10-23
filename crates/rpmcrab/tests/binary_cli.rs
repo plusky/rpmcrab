@@ -2181,6 +2181,38 @@ fn rpmlintrc_discovery_beside_every_argument_830() {
     }
 }
 
+/// Issue #874: a bare file name argument (`rpmcrab foo.spec` from
+/// inside its directory) still discovers the rpmlintrc beside it --
+/// the name's directory is the current directory.
+#[test]
+fn rpmlintrc_discovery_beside_a_bare_filename_874() {
+    let dir = tempfile::tempdir().unwrap();
+    write_unlicensed_spec(dir.path(), "bareprobe");
+    std::fs::write(
+        dir.path().join("bareprobe-rpmlintrc"),
+        "addFilter(\"bareprobe.* *.*\")\n",
+    )
+    .unwrap();
+    let mut cmd = rpmcrab_command();
+    cmd.args(["bareprobe.spec"])
+        .current_dir(dir.path())
+        .env("CONFIG_DISABLE_AUTOLOADING", "1")
+        .env("RPMCRAB_DISABLE_NGRAM_SUGGESTIONS", "1");
+    let out = cmd.output().expect("spawn rpmcrab");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        loaded_rpmlintrcs(&stdout),
+        vec!["./bareprobe-rpmlintrc"],
+        "stdout: {stdout}"
+    );
+    assert_eq!(
+        stdout.matches("no-license-file-in-spec").count(),
+        0,
+        "stdout: {stdout}"
+    );
+    assert!(filtered_count(&stdout) > 0, "stdout: {stdout}");
+}
+
 /// Issue #830: two arguments in different directories each contribute
 /// their own beside rpmlintrc; both load, so both specs' name-scoped
 /// filters apply.
