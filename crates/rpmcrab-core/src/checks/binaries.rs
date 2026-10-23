@@ -150,14 +150,17 @@ struct ElfProgramHeader {
 /// own. Debug info for these is extracted by the package arch's
 /// debuginfo pipeline; objects for any other machine in the package
 /// are cross content whose debuginfo belongs to the foreign target.
-/// An arch with no entry here maps to an empty slice, and callers
-/// treat that as "charge any code": an unmapped arch must not
-/// silence findings it cannot classify (plusky/rpmcrab#847).
+/// A hwcaps subarch resolves through `base_arch` (`x86_64_v3` is an
+/// x86-64 package), like every other arch consumer. An arch with no
+/// entry here maps to an empty slice, and callers treat that as
+/// "charge any code": an unmapped arch must not silence findings it
+/// cannot classify (plusky/rpmcrab#847).
 fn host_elf_machines(arch: &str) -> &'static [u16] {
     use goblin::elf::header::{
         EM_68K, EM_386, EM_AARCH64, EM_ARM, EM_AVR, EM_IA_64, EM_MIPS, EM_PARISC, EM_PPC, EM_PPC64,
         EM_RISCV, EM_S390, EM_SH, EM_SPARC, EM_SPARCV9, EM_X86_64,
     };
+    let arch = base_arch(arch);
     if arch.starts_with("arm") {
         return &[EM_ARM];
     }
@@ -370,13 +373,15 @@ struct ReadelfInfo {
     has_endbr64: bool,
     /// `e_machine` of every parsed ELF (for an archive: every member)
     /// that carries machine code: at least one `SHF_EXECINSTR`
-    /// `SHT_PROGBITS` section whose file bytes are not all zero. A
-    /// zero-filled executable section is a relocation-filled slot, not
-    /// code (the wine import-thunk shape: an 8-byte all-zero `.text`
-    /// holding one relocation against a `__wine$func$` pointer), and a
-    /// member with no executable section carries no code at all (the
-    /// compiler-rt preinit shape). Consumed by
-    /// `check_missing_debug_info_in_archive` (plusky/rpmcrab#847).
+    /// `SHT_PROGBITS` section whose file bytes are not all zero, or
+    /// whose bytes the file data does not fully hold (an out-of-range
+    /// offset, a truncated tail), so the section cannot be shown to be
+    /// zero-filled. A zero-filled executable section is a
+    /// relocation-filled slot, not code (the wine import-thunk shape:
+    /// an 8-byte all-zero `.text` holding one relocation against a
+    /// `__wine$func$` pointer), and a member with no executable section
+    /// carries no code at all (the compiler-rt preinit shape). Consumed
+    /// by `check_missing_debug_info_in_archive` (plusky/rpmcrab#847).
     code_machines: Vec<u16>,
     failed: Option<String>,
     /// An ar archive with members, none of which is an ELF object:
@@ -520,9 +525,16 @@ impl ReadelfInfo {
                 && sh.sh_type == goblin::elf::section_header::SHT_PROGBITS
                 && {
                     let start = sh.sh_offset as usize;
-                    let end = start.saturating_add(sh.sh_size as usize).min(data.len());
-                    data.get(start..end)
-                        .is_some_and(|bytes| bytes.iter().any(|b| *b != 0))
+                    let end = start.saturating_add(sh.sh_size as usize);
+                    // A range the data does not fully hold -- an
+                    // out-of-range offset or a truncated tail -- cannot
+                    // be shown to be all zero, so it counts as code:
+                    // fail open, the unmapped-arch principle applied to
+                    // section bytes.
+                    match data.get(start..end) {
+                        Some(bytes) => bytes.iter().any(|b| *b != 0),
+                        None => true,
+                    }
                 }
         });
         if has_code {
@@ -9534,6 +9546,26 @@ description = "explicit priority string bypasses the system crypto policy"
         let lines = lines_for(&results, "static-library-without-debuginfo");
         assert_eq!(lines.len(), 1, "aarch64 host code must fire: {results:?}");
 
+        // A hwcaps subarch takes its base arch's machines: x86-64 code
+        // in an x86_64_v3 package is host code (fires), AVR code stays
+        // foreign (quiet).
+        let results = run(
+            &mut check,
+            "x86_64_v3",
+            vec![goblin::elf::header::EM_X86_64],
+        );
+        let lines = lines_for(&results, "static-library-without-debuginfo");
+        assert_eq!(
+            lines.len(),
+            1,
+            "x86-64 code in an x86_64_v3 package is host code: {results:?}"
+        );
+        let results = run(&mut check, "x86_64_v3", vec![goblin::elf::header::EM_AVR]);
+        assert!(
+            results.is_empty(),
+            "foreign code in an x86_64_v3 package must be quiet: {results:?}"
+        );
+
         // An unmapped arch charges any code, as before this gate.
         let results = run(&mut check, "e2k", vec![goblin::elf::header::EM_AVR]);
         let lines = lines_for(&results, "static-library-without-debuginfo");
@@ -9644,6 +9676,44 @@ description = "explicit priority string bypasses the system crypto policy"
             info.code_machines,
             vec![83],
             "foreign code recorded as foreign"
+        );
+
+        // An executable section whose offset points past the end of
+        // the member cannot be shown to be zero-filled: it records
+        // code (fail open).
+        let mut obj = craft_code_object(62, &[0u8; 8]);
+        let shoff = u64::from_le_bytes(obj[40..48].try_into().unwrap()) as usize;
+        let text_shdr = shoff + 64; // section header 1 is .text
+        let past_end = obj.len() as u64 + 0x1000;
+        obj[text_shdr + 24..text_shdr + 32].copy_from_slice(&past_end.to_le_bytes());
+        let archive = craft_ar_archive(&[("a.o", &obj)]);
+        let info = parse("outofrange", &archive);
+        assert!(info.failed.is_none(), "must parse: {:?}", info.failed);
+        assert_eq!(
+            info.code_machines,
+            vec![62],
+            "out-of-range executable section counts as code"
+        );
+
+        // An executable section whose declared size runs past the end
+        // of the member, with an all-zero readable prefix, records code
+        // the same way: the unreadable tail may hold anything.
+        let mut obj = craft_code_object(62, &[0u8; 8]);
+        let shoff = u64::from_le_bytes(obj[40..48].try_into().unwrap()) as usize;
+        let text_shdr = shoff + 64;
+        // .text offset: the member's last 8 bytes (the trailing zeros
+        // of the final section header); declared size 64, so 56 bytes
+        // of the section sit past the end of the data.
+        let tail_start = obj.len() as u64 - 8;
+        obj[text_shdr + 24..text_shdr + 32].copy_from_slice(&tail_start.to_le_bytes());
+        obj[text_shdr + 32..text_shdr + 40].copy_from_slice(&64u64.to_le_bytes());
+        let archive = craft_ar_archive(&[("a.o", &obj)]);
+        let info = parse("truncated", &archive);
+        assert!(info.failed.is_none(), "must parse: {:?}", info.failed);
+        assert_eq!(
+            info.code_machines,
+            vec![62],
+            "truncated executable section counts as code"
         );
 
         // An empty archive (the glibc placeholder shape) parses with
