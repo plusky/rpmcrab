@@ -1876,6 +1876,86 @@ def test_fetch_github_4xx_raises_http_error():
             raise AssertionError("GitHub 404 did not raise")
 
 
+def test_fetch_github_429_and_408_raise_fetch_exhausted():
+    """GitHub rate limiting (429) and a server-side request timeout
+    (408) are transient upstream conditions, like a 5xx: FetchExhausted,
+    never a raw HTTPError that would fail the run as drift."""
+    for code in (429, 408):
+        with mock.patch.object(gen.urllib.request, "urlopen",
+                               side_effect=_http_error(code)):
+            try:
+                gen.fetch_github("0" * 40, "opensuse.toml")
+            except gen.FetchExhausted as e:
+                assert str(code) in str(e), str(e)
+            else:
+                raise AssertionError(
+                    "GitHub %d did not raise FetchExhausted" % code)
+
+
+def test_fetch_github_transient_errors_raise_fetch_exhausted():
+    """Every type in the shared transient tuple maps to FetchExhausted
+    on the GitHub path, including the ones raised mid-response
+    (SSLError, BadStatusLine) and at connect time (refused/aborted,
+    broken pipe)."""
+    import http.client
+    import ssl
+    transient = [
+        ConnectionRefusedError("refused"),
+        ConnectionAbortedError("aborted"),
+        BrokenPipeError("broken pipe"),
+        ssl.SSLError("ssl error"),
+        http.client.BadStatusLine("bad status line"),
+    ]
+    for err in transient:
+        with mock.patch.object(gen.urllib.request, "urlopen",
+                               side_effect=err):
+            try:
+                gen.fetch_github("0" * 40, "opensuse.toml")
+            except gen.FetchExhausted:
+                pass
+            else:
+                raise AssertionError(
+                    "GitHub %r did not raise FetchExhausted" % (err,))
+
+
+def test_package_present_obs_429_raises_fetch_exhausted():
+    """A rate-limited OBS source API leaves presence unverifiable:
+    FetchExhausted, like a 5xx."""
+    with mock.patch.object(gen.urllib.request, "urlopen",
+                           side_effect=_http_error(429)):
+        try:
+            gen.package_present("rate-limited-probe")
+        except gen.FetchExhausted as e:
+            assert "429" in str(e), str(e)
+        else:
+            raise AssertionError("OBS 429 did not raise FetchExhausted")
+
+
+def test_repomd_429_is_retried_then_succeeds():
+    """A 429 from a mirror is transient for the repomd loop too: the
+    attempt is recorded and retried, not raised as a client error."""
+    with mock.patch.object(gen.urllib.request, "urlopen",
+                           side_effect=[_http_error(429),
+                                        _repomd_response()]), \
+            mock.patch.object(gen.time, "sleep"):
+        assert "repomd" in gen._fetch_repomd_xml(
+            "http://r/repomd.xml", "probe")
+
+
+def test_repomd_429_exhausts_to_fetch_exhausted():
+    """A mirror that keeps answering 429 spends the retry budget and
+    ends at FetchExhausted."""
+    with mock.patch.object(gen.urllib.request, "urlopen",
+                           side_effect=_http_error(429)), \
+            mock.patch.object(gen.time, "sleep"):
+        try:
+            gen._fetch_repomd_xml("http://r/repomd.xml", "probe")
+        except gen.FetchExhausted as e:
+            assert "429" in str(e), str(e)
+        else:
+            raise AssertionError("repomd 429 did not raise FetchExhausted")
+
+
 def test_package_present_obs_5xx_raises_fetch_exhausted():
     """An OBS source API 503 leaves presence unverifiable: FetchExhausted
     instead of a raw traceback or a silent 'absent'."""
