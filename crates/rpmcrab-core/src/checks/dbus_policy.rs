@@ -174,11 +174,17 @@ fn check_content(content: &str) -> Result<Vec<(Level, &'static str, String)>, St
     let mut pinned: HashSet<&str> = HashSet::new();
     let mut file_has_own = false;
     for block in &policies {
-        for (_, elem) in &block.elems {
+        for (kind, elem) in &block.elems {
             for (key, val) in &elem.attrs {
                 match key.as_str() {
                     "own" | "own_prefix" => {
-                        file_has_own = true;
+                        // Only a concrete <allow> own declares that the
+                        // service owns a name: a <deny own> forbids owning
+                        // (the common <deny own="*"/> included), and an
+                        // empty or wildcard value names nothing concrete.
+                        if *kind == "allow" && !val.is_empty() && !val.contains('*') {
+                            file_has_own = true;
+                        }
                         pinned.insert(val.as_str());
                     }
                     "send_destination" => {
@@ -234,8 +240,9 @@ fn is_agent_interface(name: &str) -> bool {
 /// only where the file gives the rule its service-policy context:
 /// the interface must not be one of the names the file itself pins
 /// (a destination for those can always be written), and the file
-/// must either declare the names its service owns, scope the rule
-/// to an object path, or name an agent interface outright.
+/// must either declare, via a concrete `<allow>` own, the names
+/// its service owns, scope the rule to an object path, or name an
+/// agent interface outright.
 fn is_agent_idiom(
     elem: &PolicyElement,
     subject_scoped: bool,
@@ -579,6 +586,88 @@ mod tests {
 </policy></busconfig>"#;
         let findings = check_content(xml).expect("parses");
         assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn deny_own_wildcard_does_not_grant_agent_credit() {
+        // A <deny own="*"/> forbids owning any name; it declares no
+        // ownership, so a destinationless non-agent interface rule in
+        // the same file still fires -- file_has_own stays unset and no
+        // other credit arm applies (no send_path, no agent leaf).
+        let xml = r#"<busconfig><policy user="root">
+<deny own="*"/>
+<allow send_interface="org.foo.GattThing1"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn deny_own_concrete_does_not_grant_agent_credit() {
+        // A <deny own> naming a concrete name still forbids owning it;
+        // it must not declare ownership either.
+        let xml = r#"<busconfig><policy user="root">
+<deny own="org.foo"/>
+<allow send_interface="org.foo.GattThing1"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn concrete_allow_own_grants_agent_credit() {
+        // The positive pin for the ownership arm in isolation: a
+        // concrete <allow own> credits a destinationless non-agent
+        // interface rule (no send_path, no agent leaf).
+        let xml = r#"<busconfig><policy user="root">
+<allow own="org.foo"/>
+<allow send_interface="org.foo.GattThing1"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn wildcard_allow_own_does_not_grant_agent_credit() {
+        // An <allow own> carrying a wildcard names nothing concrete,
+        // so it declares no ownership for the credit.
+        let xml = r#"<busconfig><policy user="root">
+<allow own="*"/>
+<allow send_interface="org.foo.GattThing1"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn empty_allow_own_does_not_grant_agent_credit() {
+        // An empty <allow own> value names nothing at all.
+        let xml = r#"<busconfig><policy user="root">
+<allow own=""/>
+<allow send_interface="org.foo.GattThing1"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "{findings:?}"
+        );
     }
 
     #[test]
