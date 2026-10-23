@@ -2968,6 +2968,23 @@ impl BinariesCheck {
         {
             return;
         }
+        // The finding charges an archive built with LTO but without
+        // -ffat-lto-objects, so candidacy requires LTO content among
+        // the members: a `.gnu.lto_` section (GCC) or an `.llvmbc`
+        // embedded-bitcode section (LLVM) in an ELF member. An archive
+        // whose ELF members carry no LTO content -- a plain library of
+        // data-only objects, such as the GUID libraries wine ships for
+        // its Unix side -- has no text to miss. Members in other object
+        // formats neither confer nor block candidacy (see
+        // `parse_archive`): the ELF members decide.
+        let has_lto_content = info
+            .sections
+            .iter()
+            .flatten()
+            .any(|s| s.name.contains(".gnu.lto_.") || s.name == ".llvmbc");
+        if !has_lto_content {
+            return;
+        }
         for elf_file in &info.sections {
             for section in elf_file {
                 let sn = section.name.as_str();
@@ -9065,7 +9082,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
         let pkgfile = syn_file("/usr/lib64/libfoo.a", "current ar archive");
         let mut info = syn_info();
-        info.sections = vec![vec![sec(".comment")]];
+        info.sections = vec![vec![sec(".gnu.lto_.opts"), sec(".comment")]];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_no_text_in_archive(&pkg, &pkgfile, &info, &mut out);
         let results = out.results().to_vec();
@@ -9080,7 +9097,7 @@ description = "explicit priority string bypasses the system crypto policy"
 
         // A .text section means the archive carries real code.
         let mut info = syn_info();
-        info.sections = vec![vec![sec(".comment"), sec(".text")]];
+        info.sections = vec![vec![sec(".gnu.lto_.opts"), sec(".comment"), sec(".text")]];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_no_text_in_archive(&pkg, &pkgfile, &info, &mut out);
         assert!(
@@ -9093,7 +9110,7 @@ description = "explicit priority string bypasses the system crypto policy"
         for name in ["/usr/lib64/libdl.a", "/usr/lib64/libdl_p.a"] {
             let pkgfile = syn_file(name, "current ar archive");
             let mut info = syn_info();
-            info.sections = vec![vec![sec(".comment")]];
+            info.sections = vec![vec![sec(".gnu.lto_.opts"), sec(".comment")]];
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
             check.check_no_text_in_archive(&pkg, &pkgfile, &info, &mut out);
             assert!(
@@ -9102,6 +9119,118 @@ description = "explicit priority string bypasses the system crypto policy"
                 out.results()
             );
         }
+    }
+
+    #[test]
+    fn lto_no_text_in_archive_needs_lto_content() {
+        // #869: candidacy turns on LTO content among the members. A
+        // data-only member set -- the wine shape: ELF objects whose
+        // .text and .data are empty and whose content sits in .rodata --
+        // is not an LTO archive and stays silent, as does an archive
+        // with no ELF member sections at all.
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib64/libuuid.a", "current ar archive");
+        let zsec = |name: &str| ElfSection {
+            name: name.to_string(),
+            size: 0,
+        };
+
+        let mut info = syn_info();
+        info.sections = vec![vec![
+            zsec(".text"),
+            zsec(".data"),
+            sec(".rodata"),
+            sec(".debug_info"),
+        ]];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_no_text_in_archive(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "data-only members must be quiet: {:?}",
+            out.results()
+        );
+
+        let info = syn_info();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_no_text_in_archive(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "no member sections must be quiet: {:?}",
+            out.results()
+        );
+
+        // A slim LTO member (LTO sections, no non-empty text) is the
+        // canonical positive: the finding fires.
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".gnu.lto_.symtab.0123abcd"), zsec(".text")]];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_no_text_in_archive(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(
+            lines_for(&results, "lto-no-text-in-archive").len(),
+            1,
+            "slim LTO member must fire: {results:?}"
+        );
+
+        // An embedded-bitcode member is LTO content too.
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".llvmbc")]];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_no_text_in_archive(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(
+            lines_for(&results, "lto-no-text-in-archive").len(),
+            1,
+            "embedded bitcode member must fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn lto_no_text_in_archive_member_formats() {
+        // #869 at the parse level: candidacy is decided by the ELF
+        // members. A COFF import member alone contributes no sections
+        // and stays silent; mixed with a data-only ELF member it still
+        // stays silent (the foreign member neither confers nor blocks
+        // candidacy); mixed with an LTO ELF member the finding fires.
+        let config = test_config();
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let coff: &[u8] = b"\x64\x86\x06\x00\x00\x00\x00\x00\x36\x01\x00\x00\x0e\x00\x00\x00";
+        let data_only = craft_elf_sections(&[(".rodata", b"guid-guid-guid!!")]);
+        let lto = craft_elf_sections(&[(".gnu.lto_.opts", b"\x01\x02")]);
+        let run = |tag: &str, members: &[(&str, &[u8])]| {
+            let archive = craft_ar_archive(members);
+            let path = std::env::temp_dir()
+                .join(format!("rpmcrab-ar-lto869-{tag}-{}", std::process::id()));
+            std::fs::write(&path, &archive).unwrap();
+            let info = ReadelfInfo::parse(path.to_str().unwrap(), "/usr/lib64/libfoo.a");
+            assert!(
+                info.failed.is_none(),
+                "{tag}: parse must not fail: {:?}",
+                info.failed
+            );
+            let mut check = BinariesCheck::with_tool_dir(&config, None);
+            check.is_archive = true;
+            let pkgfile = syn_file("/usr/lib64/libfoo.a", "current ar archive");
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_no_text_in_archive(&pkg, &pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            std::fs::remove_file(&path).ok();
+            lines_for(&results, "lto-no-text-in-archive").len()
+        };
+        assert_eq!(run("coff", &[("import.o", coff)]), 0, "COFF-only archive");
+        assert_eq!(
+            run("mixed-data", &[("import.o", coff), ("uuid.o", &data_only)]),
+            0,
+            "COFF + data-only ELF members"
+        );
+        assert_eq!(
+            run("mixed-lto", &[("import.o", coff), ("lto.o", &lto)]),
+            1,
+            "COFF + LTO ELF member"
+        );
     }
 
     /// Build a minimal SysV ar archive from (name, bytes) members.
@@ -9164,19 +9293,29 @@ description = "explicit priority string bypasses the system crypto policy"
         );
 
         // The archive checks now see real member data instead of being
-        // skipped: the members carry no .text.
+        // skipped: the members carry no .symtab, so the symtab finding
+        // fires on the merged sections.
         let config = test_config();
         let mut check = BinariesCheck::with_tool_dir(&config, None);
         check.is_archive = true;
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
         let pkgfile = syn_file("/usr/lib64/libfoo.a", "current ar archive");
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_no_text_in_archive(&pkg, &pkgfile, &info, &mut out);
+        check.check_missing_symtab_in_archive(&pkg, &pkgfile, &info, &mut out);
         let results = out.results().to_vec();
         assert_eq!(
-            lines_for(&results, "lto-no-text-in-archive").len(),
+            lines_for(&results, "static-library-without-symtab").len(),
             1,
             "archive checks run on parsed members: {results:?}"
+        );
+        // The members carry no LTO content, so the LTO finding stays
+        // silent on the same merged sections (plusky/rpmcrab#869).
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_no_text_in_archive(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "no LTO content must be quiet: {:?}",
+            out.results()
         );
 
         std::fs::remove_file(&path).ok();
