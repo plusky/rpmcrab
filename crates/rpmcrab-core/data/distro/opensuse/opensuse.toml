@@ -139,7 +139,6 @@ Filters = [
     'hardcoded-library-path',
 
 # Doesn't seem to make sense
-    'invalid-soname',
 
 # We want these files
     ' perl-temp-file ',
