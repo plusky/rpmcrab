@@ -496,13 +496,18 @@ impl TagsCheck {
 
 /// The library package names this package's own generated (find-requires)
 /// dependencies already reach, under the openSUSE shared-library naming
-/// convention: a generated soname dependency `lib<stem>.so.<major>...` is
-/// provided by the package named `lib<stem><major>` or `lib<stem>-<major>`.
-/// Computed from the package's own header alone — generated dependencies
-/// carry `RPMSENSE_FIND_REQUIRES`, explicit ones do not — so no
-/// cross-package data is needed. The bare `lib<stem>` form is deliberately
-/// not a candidate: it names a different package in practice (the
-/// `libnbd` tools package vs the `libnbd0` library package), so it proves
+/// convention — the full-version mapping BinariesCheck's shlib-policy
+/// guard uses: stem and version dots fold to underscores, so
+/// `libfoo.so.10.0.0` is provided by `libfoo10_0_0` (or `libfoo-10_0_0`),
+/// `libgame2-1.9.so.10.0.0` by `libgame2-1_9-10_0_0`, and a version
+/// carried in the stem alone (`libdb-4.8.so`) by `libdb-4_8`. The
+/// major-only form is not a candidate: `libfoo10` is not a name the
+/// mapping derives from `libfoo.so.10.0.0`. Computed from the package's
+/// own header alone — generated dependencies carry
+/// `RPMSENSE_FIND_REQUIRES`, explicit ones do not — so no cross-package
+/// data is needed. The bare `lib<stem>` form is deliberately not a
+/// candidate: it names a different package in practice (the `libnbd`
+/// tools package vs the `libnbd0` library package), so it proves
 /// nothing about redundancy.
 fn generated_soname_package_names(deps: &[DepInfo]) -> std::collections::HashSet<String> {
     let mut names = std::collections::HashSet::new();
@@ -510,18 +515,55 @@ fn generated_soname_package_names(deps: &[DepInfo]) -> std::collections::HashSet
         if dep.flags & RPMSENSE_FIND_REQUIRES == 0 {
             continue;
         }
-        let Some((stem, rest)) = dep.name.split_once(".so.") else {
+        // A generated soname dependency carries its arch qualifier in
+        // the name (`libfoo.so.1()(64bit)`); the soname ends before it.
+        let soname = dep.name.split('(').next().unwrap_or("");
+        let Some((head, tail)) = soname.split_once(".so") else {
             continue;
         };
-        if !stem.starts_with("lib") || stem == "lib" {
+        if !head.starts_with("lib") || head == "lib" {
             continue;
         }
-        let major: String = rest.chars().take_while(char::is_ascii_digit).collect();
-        if major.is_empty() {
-            continue;
+        let stem = head.replace('.', "_");
+        // A trailing `-<version>` segment of the head is the package
+        // version the SLPP construction folds into the stem
+        // (`libdb-4.8`, `libgame2-1.9`); a trailing segment that does
+        // not start with a digit is part of the stem's own name.
+        let pkgversion = head.rsplit_once('-').and_then(|(_, segment)| {
+            (segment.starts_with(|c: char| c.is_ascii_digit())
+                && segment.chars().all(|c| c.is_ascii_digit() || c == '.'))
+            .then_some(segment)
+        });
+        // The soversion after `.so`, when present, is a dotted digit
+        // run; its package form folds the dots to underscores.
+        let soversion = tail.strip_prefix('.').and_then(|rest| {
+            let version: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect::<String>()
+                .trim_end_matches('.')
+                .to_string();
+            (!version.is_empty()).then(|| version.replace('.', "_"))
+        });
+        match (pkgversion, soversion) {
+            // `libfoo.so.10.0.0` -> `libfoo10_0_0`, `libfoo-10_0_0`.
+            (None, Some(version)) => {
+                names.insert(format!("{stem}{version}"));
+                names.insert(format!("{stem}-{version}"));
+            }
+            // `libgame2-1.9.so.10.0.0` -> `libgame2-1_9-10_0_0`: with a
+            // package version in the stem the SLPP form is the dash one.
+            (Some(_), Some(version)) => {
+                names.insert(format!("{stem}-{version}"));
+            }
+            // `libdb-4.8.so` -> `libdb-4_8`: the stem already carries
+            // the whole version.
+            (Some(_), None) => {
+                names.insert(stem);
+            }
+            // A version-less soname (`libfoo.so`) names no package.
+            (None, None) => {}
         }
-        names.insert(format!("{stem}{major}"));
-        names.insert(format!("{stem}-{major}"));
     }
     names
 }
@@ -3222,6 +3264,72 @@ mod rich_dep_emission_tests {
         let hits = named(&results, "explicit-lib-dependency");
         assert_eq!(hits.len(), 1, "all: {results:?}");
         assert!(hits[0].1.ends_with(" libsqlite3-0"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn explicit_lib_dependency_dotted_soversion_fires() {
+        // #885 review: a dotted soversion maps by the full version,
+        // dots to underscores — libfoo.so.10.0.0 is provided by
+        // libfoo10_0_0 (the SLPP construction BinariesCheck uses), so
+        // an explicit requirement on that name duplicates the
+        // dependency the package's own binaries already generate.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![
+            plain_dep("libfoo10_0_0"),
+            generated_dep("libfoo.so.10.0.0()(64bit)"),
+        ];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "explicit-lib-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(hits[0].1.ends_with(" libfoo10_0_0"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn explicit_lib_dependency_dotted_soversion_dash_form_fires() {
+        // The dash spelling of the same full-version name.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![
+            plain_dep("libfoo-10_0_0"),
+            generated_dep("libfoo.so.10.0.0()(64bit)"),
+        ];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "explicit-lib-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(hits[0].1.ends_with(" libfoo-10_0_0"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn explicit_lib_dependency_major_only_name_for_dotted_soversion_is_silent() {
+        // #885 review: libfoo10 is the name the major-only extraction
+        // derives from libfoo.so.10.0.0, but no SLPP package carries
+        // it — the full-version mapping derives libfoo10_0_0 — so the
+        // requirement proves no redundancy and stays silent.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![
+            plain_dep("libfoo10"),
+            generated_dep("libfoo.so.10.0.0()(64bit)"),
+        ];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "explicit-lib-dependency").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_lib_dependency_stem_version_package_fires() {
+        // #885 review, the libdb shape: the version sits in the stem
+        // and the soname carries no soversion of its own — libdb-4.8.so
+        // is provided by libdb-4_8, dots folded to underscores.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![
+            plain_dep("libdb-4_8"),
+            generated_dep("libdb-4.8.so()(64bit)"),
+        ];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "explicit-lib-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(hits[0].1.ends_with(" libdb-4_8"), "line: {}", hits[0].1);
     }
 
     #[test]
