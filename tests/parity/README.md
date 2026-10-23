@@ -77,8 +77,9 @@ degraded capture is not automatically detected.
 Inputs are committed only when small (rule of thumb: under ~1 MB) — the corpus
 must not bloat the git history with large binary RPMs. A case whose input is
 larger records the input's `sha256` and a fetchable source in `meta.toml` and
-does **not** commit the bytes; the runner (M1+) fetches it on demand. Prefer
-small packages that still exercise the path under test (e.g. `liblto21`, 64 K,
+does **not** commit the bytes. The runner runs the cases whose inputs are
+committed. Prefer small packages that still exercise the path under test
+(e.g. `liblto21`, 64 K,
 covers the exit-66 badness abort).
 
 ## The overlay trap
@@ -116,8 +117,8 @@ overlay loads from `.parity-ref/xdg` exactly once.
 ## Normalization
 
 Expected output is normalized so it is stable across hosts and runs. The
-capture script applies these rules at capture time; the parity runner (M1+)
-applies the identical rules to rpmcrab's actual output before diffing:
+capture script applies these rules at capture time; the parity runner
+applies the identical rules to both outputs before diffing:
 
 | Non-deterministic bytes | Normalized to |
 |---|---|
@@ -168,6 +169,47 @@ implemented" — file those as `behaviour`.
 
 An empty ledger means rpmcrab is byte-identical to the reference on every case.
 Every non-empty entry is a reviewed, deliberate decision.
+
+## Running the corpus
+
+`scripts/parity-runner.py` executes the contract. For every case in
+`manifest.toml` it verifies the inputs against the sha256 pins in
+`meta.toml`, runs the pinned reference under the capture environment
+(`scripts/setup-rpmlint-ref.sh`), and requires the normalized reference
+output to reproduce the frozen `expected/` triple byte-for-byte. It then
+runs rpmcrab with the case's recorded argv under the reproduction
+invocation — empty `XDG_CONFIG_HOME`, so the vendored distro layer loads
+every distro config exactly once; `RUST_LOG=off`; `--no-time-report
+--jobs 1` — and diffs rpmcrab's output against the live reference output.
+
+The differ attributes each difference to a `divergences.toml` entry. An
+entry naming the finding, its family stem (for templated findings such
+as `daemon-activation-in-%post`), or its emitting check module — or a
+check-module entry whose reason names the finding — accounts for a presence
+difference when its kind is `missing`, `behaviour` or `limitation`;
+severity differences take a `severity` entry, and detail differences a
+`detail` or `behaviour` entry. The session header is accounted by the
+`session-header` and `config` entries, the footer and the exit code by
+`report` and `time-report`, and a multi-package run's stderr progress
+lines by `worker/report`. rpmcrab's own output contract is checked at
+the same time: the exit code is 64 exactly when the session emitted an
+error, the footer counts the emitted findings, and the session header
+loads each config once. A difference with no accounting entry fails the
+case and prints with a unified diff of the two sessions.
+`scripts/test_parity_runner.py` pins the differ's attribution rules.
+
+```sh
+scripts/setup-rpmlint-ref.sh            # build the reference env (once)
+cargo build --release                    # the rpmcrab under test
+python3 scripts/parity-runner.py         # or --case <name>, -v
+```
+
+Cases whose payloads carry device nodes run where the environment can
+create device nodes: the reference extracts payloads with `rpm2archive`,
+which calls `mknod`. Where the runner's `mknod` probe fails, such a case
+reports SKIPPED with that cause; where the probe succeeds, the case runs
+in full. CI runs the corpus as the `parity` job in
+`.github/workflows/ci.yml`.
 
 ## Capturing a new case
 
