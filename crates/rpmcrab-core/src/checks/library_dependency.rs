@@ -16,6 +16,17 @@
 //! not just `.so` links), and joined targets are lexically normalised
 //! (`.`/`..` resolved); the reference keeps the unnormalised one-hop
 //! target.
+//!
+//! The dependency verdict also credits the anchor chain inside the
+//! scanned set (plusky/rpmcrab#863): when a devel package requires a
+//! package built from the same source for its own arch — a `noarch`
+//! sibling stands in when no same-arch build is in the run — pinned
+//! with `=` to that sibling's own version, and the sibling's own
+//! requirements name the
+//! library package or one of its provides, the dependency on the
+//! library exists through the sibling — installing the devel package
+//! guarantees the library. The reference credits only a direct
+//! requirement on the library package itself.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -29,7 +40,15 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
+use crate::pkg::dep::DepInfo;
+use crate::pkg::dep::DepLeaf;
+use crate::pkg::dep::RPMSENSE_EQUAL;
+use crate::pkg::dep::RPMSENSE_GREATER;
+use crate::pkg::dep::RPMSENSE_LESS;
+use crate::pkg::dep::version_to_string;
 use crate::pkg::pkgfile::is_symlink;
+
+use librpm::Tag;
 
 /// The reference reads `%{_isa}` from the running rpm's macros at
 /// construction time (`LibraryDependencyCheck.py:17`); derive it the same
@@ -71,6 +90,97 @@ fn join_link_target(parent: &Path, linkto: &str) -> String {
     out
 }
 
+/// The key two packages of one build share: the `SOURCERPM` header
+/// value, falling back to the package name when it is absent (the
+/// spelling `FilesCheck` uses for the same notion).
+fn source_key(pkg: &Pkg) -> String {
+    match pkg.tag_str(Tag::SOURCERPM) {
+        Some(srpm) if !srpm.is_empty() => srpm,
+        _ => pkg.name.clone(),
+    }
+}
+
+/// The stem of an isa-qualified name: `foo(x86-64)` -> `foo`. The
+/// qualifier is the `%{_isa}` shape — a name and a bit width joined by
+/// `-` inside parentheses; any other parenthesised suffix is part of
+/// the name (a soname's `()(64bit)`, a capability's argument).
+fn isa_stem(name: &str) -> Option<&str> {
+    let (stem, inner) = name.strip_suffix(')').and_then(|n| n.split_once('('))?;
+    let (isa_name, bits) = inner.split_once('-')?;
+    let isa_shape = !isa_name.is_empty()
+        && isa_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !bits.is_empty()
+        && bits.chars().all(|c| c.is_ascii_digit());
+    isa_shape.then_some(stem)
+}
+
+/// The package names a requirement can anchor on: the name itself,
+/// plus the stem when it carries an isa qualifier — `akonadi(x86-64)`
+/// anchors on the `akonadi` package, the way the direct credit's
+/// `definition + isa` arm names the library package.
+fn anchor_names(name: &str) -> Vec<&str> {
+    let mut names = vec![name];
+    if let Some(stem) = isa_stem(name) {
+        names.push(stem);
+    }
+    names
+}
+
+/// Whether a requirement leaf pins its target to the sibling's own
+/// version: an `=` relation whose EVR is the sibling's version, its
+/// version-release, or its full epoch:version-release — the spellings
+/// the distro's exact-version anchor convention takes (measured on
+/// the Factory corpus for plusky/rpmcrab#863: 77 pins to the version,
+/// 12 to the version-release, of 89 credited chains).
+fn pin_matches(leaf: &DepLeaf, sib: &PkgSnapshot) -> bool {
+    // The exact pin only: a floor or ceiling whose bound happens to
+    // equal the sibling's version is a range, not the anchor
+    // convention.
+    if leaf.flags & (RPMSENSE_LESS | RPMSENSE_GREATER | RPMSENSE_EQUAL) != RPMSENSE_EQUAL
+        || leaf.version.is_none()
+    {
+        return false;
+    }
+    let evr = version_to_string(leaf.epoch, leaf.version.as_deref(), leaf.release.as_deref());
+    evr == sib.version || evr == sib.version_release || evr == sib.evr
+}
+
+/// What the anchor-chain credit needs of one package of the run
+/// (plusky/rpmcrab#863): the source it was built from, its own EVR in
+/// the spellings a pin can take, its requirement list and its provide
+/// names.
+struct PkgSnapshot {
+    source: String,
+    version: String,
+    version_release: String,
+    evr: String,
+    requires: Vec<DepInfo>,
+    provides: Vec<String>,
+}
+
+impl PkgSnapshot {
+    fn snapshot(pkg: &Pkg) -> Self {
+        let version = pkg.tag_str(Tag::VERSION).unwrap_or_default();
+        let release = pkg.tag_str(Tag::RELEASE).unwrap_or_default();
+        let epoch = pkg.tag_i64(Tag::EPOCH);
+        Self {
+            source: source_key(pkg),
+            version_release: version_to_string(None, Some(&version), Some(&release)),
+            evr: version_to_string(epoch, Some(&version), Some(&release)),
+            version,
+            requires: pkg
+                .requires
+                .iter()
+                .chain(pkg.prereq.iter())
+                .cloned()
+                .collect(),
+            provides: pkg.provides.iter().flat_map(|d| d.leaf_names()).collect(),
+        }
+    }
+}
+
 pub struct LibraryDependencyCheck {
     package_requires: HashMap<(String, String), Vec<String>>,
     package_so_symlinks: HashMap<(String, String), Vec<String>>,
@@ -81,7 +191,10 @@ pub struct LibraryDependencyCheck {
     /// same package together silently drops all but the last arch. The port
     /// deliberately checks each arch (plusky/rpmcrab#74).
     devel_order: Vec<(String, String)>,
-    package_so_files: HashMap<String, String>,
+    package_so_files: HashMap<String, (String, String)>,
+    /// Per-package snapshots for the anchor-chain credit
+    /// (plusky/rpmcrab#863), keyed like the devel maps.
+    package_snapshots: HashMap<(String, String), PkgSnapshot>,
     isa: String,
 }
 
@@ -92,7 +205,8 @@ pub struct LibraryDependencyCheck {
 struct LibDepState {
     package_requires: HashMap<(String, String), Vec<String>>,
     package_so_symlinks: HashMap<(String, String), Vec<String>>,
-    package_so_files: HashMap<String, String>,
+    package_so_files: HashMap<String, (String, String)>,
+    package_snapshots: HashMap<(String, String), PkgSnapshot>,
     devel_order: Vec<(String, String)>,
 }
 
@@ -103,12 +217,74 @@ impl LibraryDependencyCheck {
             package_so_symlinks: HashMap::new(),
             devel_order: Vec::new(),
             package_so_files: HashMap::new(),
+            package_snapshots: HashMap::new(),
             isa: expand_isa(),
         }
     }
 
     fn is_devel_pkg(name: &str) -> bool {
         is_match(devel_regex(), name)
+    }
+
+    /// Whether the anchor chain credits the devel package `devel`
+    /// with a dependency on the library package `definition`
+    /// (plusky/rpmcrab#863): one of the devel package's requirements
+    /// names a package of the run built from the devel's source
+    /// for the devel's own arch, pinned with `=` to that sibling's
+    /// own version, and the sibling's own requirements name the
+    /// library package or one of
+    /// its provides. The credit is exactly one hop: a requirement on
+    /// the devel package itself or on the library package is the
+    /// direct credit's business, an unpinned or differently pinned
+    /// requirement guarantees no particular sibling build, and a
+    /// sibling whose requirements reach nothing of the library's
+    /// leaves the chain broken, which is the finding's real target.
+    /// The lookup is keyed on `(name, arch)` like the devel maps
+    /// (plusky/rpmcrab#74): a sibling built for another arch credits
+    /// nothing — its requires are not the ones the devel package's
+    /// installation pulls in — and a `noarch` sibling stands in only
+    /// when the run carries no same-arch build of the anchor name.
+    /// The library's provides are read from the build that ships
+    /// the linked file — the build `definition` and its arch name.
+    fn chain_credits(
+        &self,
+        devel: &(String, String),
+        definition: &str,
+        definition_arch: &str,
+        snapshots_by_key: &HashMap<(&str, &str), &PkgSnapshot>,
+    ) -> bool {
+        let Some(dev) = self.package_snapshots.get(devel) else {
+            return false;
+        };
+        let Some(lib) = snapshots_by_key.get(&(definition, definition_arch)) else {
+            return false;
+        };
+        let mut lib_names: Vec<&str> = vec![definition];
+        lib_names.extend(lib.provides.iter().map(String::as_str));
+        // The sibling is the anchor name's build for the devel
+        // package's own arch; a `noarch` build stands in when the
+        // run carries no same-arch build of the name.
+        let sibling = |target: &str| -> Option<&PkgSnapshot> {
+            snapshots_by_key
+                .get(&(target, devel.1.as_str()))
+                .copied()
+                .or_else(|| snapshots_by_key.get(&(target, "noarch")).copied())
+        };
+        dev.requires.iter().flat_map(|d| d.leaves()).any(|leaf| {
+            anchor_names(&leaf.name).iter().any(|target| {
+                *target != devel.0
+                    && *target != definition
+                    && sibling(target).is_some_and(|sib| {
+                        sib.source == dev.source
+                            && pin_matches(&leaf, sib)
+                            && sib
+                                .requires
+                                .iter()
+                                .flat_map(|d| d.leaves())
+                                .any(|sib_leaf| lib_names.contains(&sib_leaf.name.as_str()))
+                    })
+            })
+        })
     }
 }
 
@@ -122,6 +298,7 @@ impl Check for LibraryDependencyCheck {
         self.package_so_symlinks.clear();
         self.devel_order.clear();
         self.package_so_files.clear();
+        self.package_snapshots.clear();
         self.isa = expand_isa();
     }
 
@@ -130,6 +307,7 @@ impl Check for LibraryDependencyCheck {
             package_requires: std::mem::take(&mut self.package_requires),
             package_so_symlinks: std::mem::take(&mut self.package_so_symlinks),
             package_so_files: std::mem::take(&mut self.package_so_files),
+            package_snapshots: std::mem::take(&mut self.package_snapshots),
             devel_order: std::mem::take(&mut self.devel_order),
         };
         self.isa = expand_isa();
@@ -143,6 +321,7 @@ impl Check for LibraryDependencyCheck {
             self.package_requires.extend(state.package_requires);
             self.package_so_symlinks.extend(state.package_so_symlinks);
             self.package_so_files.extend(state.package_so_files);
+            self.package_snapshots.extend(state.package_snapshots);
             for name in state.devel_order {
                 if !self.devel_order.contains(&name) {
                     self.devel_order.push(name);
@@ -155,6 +334,16 @@ impl Check for LibraryDependencyCheck {
         if pkg.is_source {
             return;
         }
+
+        // Every package of the run is snapshotted: the anchor-chain
+        // credit (plusky/rpmcrab#863) reads the devel package's
+        // siblings and the library package's provides in
+        // `after_checks`, whichever side of the devel split a package
+        // falls on.
+        self.package_snapshots.insert(
+            (pkg.name.clone(), pkg.arch.clone()),
+            PkgSnapshot::snapshot(pkg),
+        );
 
         if Self::is_devel_pkg(&pkg.name) {
             let requires: Vec<String> = pkg
@@ -213,13 +402,21 @@ impl Check for LibraryDependencyCheck {
             for pkgfile in &pkg.files {
                 if pkgfile.name.contains(".so") {
                     self.package_so_files
-                        .insert(pkgfile.name.clone(), pkg.name.clone());
+                        .insert(pkgfile.name.clone(), (pkg.name.clone(), pkg.arch.clone()));
                 }
             }
         }
     }
 
     fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
+        // The run's snapshots by (name, arch), for the anchor-chain
+        // credit: the devel maps are keyed the same way
+        // (plusky/rpmcrab#74), so a build of another arch — whose
+        // requires and provides differ — never credits this arch.
+        let mut snapshots_by_key: HashMap<(&str, &str), &PkgSnapshot> = HashMap::new();
+        for ((name, arch), snap) in &self.package_snapshots {
+            snapshots_by_key.insert((name.as_str(), arch.as_str()), snap);
+        }
         // Insertion order, not `HashMap` order: the reference iterates a
         // plain dict (`LibraryDependencyCheck.py:52`), i.e. package lint
         // order, which is what the frozen sort-order contract pins.
@@ -233,13 +430,15 @@ impl Check for LibraryDependencyCheck {
                 .unwrap_or_default();
             let requires = self.package_requires.get(&key).cloned().unwrap_or_default();
             for link in &so_symlinks {
-                if let Some(definition) = self.package_so_files.get(link) {
+                if let Some((definition, definition_arch)) = self.package_so_files.get(link) {
                     // `definition` is the *package* name, not a soname
                     // (`LibraryDependencyCheck.py:49`), so `definition + isa`
                     // matches nothing rpm generates; dead in the reference
                     // as well, kept faithful.
                     let with_isa = format!("{definition}{}", self.isa);
-                    if !requires.iter().any(|r| r == definition || r == &with_isa) {
+                    if !requires.iter().any(|r| r == definition || r == &with_isa)
+                        && !self.chain_credits(&key, definition, definition_arch, &snapshots_by_key)
+                    {
                         out.add_info(make_finding(
                             &pkgname,
                             &arch,
@@ -290,6 +489,29 @@ mod tests {
             epoch: None,
             version: None,
             release: None,
+        }
+    }
+
+    /// A requirement pinned with `=` to `version` (the anchor
+    /// convention of plusky/rpmcrab#863).
+    fn require_pinned(name: &str, version: &str) -> DepInfo {
+        DepInfo {
+            name: name.to_string(),
+            flags: RPMSENSE_EQUAL,
+            epoch: None,
+            version: Some(version.to_string()),
+            release: None,
+        }
+    }
+
+    /// A requirement pinned with `=` to a full version-release.
+    fn require_pinned_release(name: &str, version: &str, release: &str) -> DepInfo {
+        DepInfo {
+            name: name.to_string(),
+            flags: RPMSENSE_EQUAL,
+            epoch: None,
+            version: Some(version.to_string()),
+            release: Some(release.to_string()),
         }
     }
 
@@ -694,5 +916,297 @@ mod tests {
         main.after_checks(&config, &mut main_out);
         assert_eq!(main_out.results().len(), 1, "{:?}", main_out.results());
         assert_eq!(main_out.results()[0].0, "no-library-dependency-on");
+    }
+
+    /// The trio of plusky/rpmcrab#863: the library package `libfoo`
+    /// shipping the real library and providing its soname, the anchor
+    /// sibling `foo`, and `foo-devel` shipping the `.so` symlink. All
+    /// three are built from the one fixture, so they share a
+    /// `SOURCERPM`; the fixture's version is `1`, its release `1`.
+    fn anchor_trio(anchor_requires: &[DepInfo], devel_requires: &[DepInfo]) -> (Pkg, Pkg, Pkg) {
+        anchor_trio_arches(anchor_requires, devel_requires, "x86_64", "x86_64")
+    }
+
+    /// The anchor trio with the anchor's arch chosen by the caller
+    /// and the library built for the devel package's arch: the
+    /// anchor-chain credit is keyed on `(name, arch)`, so which arch
+    /// the anchor carries is part of what the pins pin.
+    fn anchor_trio_arches(
+        anchor_requires: &[DepInfo],
+        devel_requires: &[DepInfo],
+        anchor_arch: &str,
+        devel_arch: &str,
+    ) -> (Pkg, Pkg, Pkg) {
+        let mut lib = fixture_pkg();
+        lib.name = "libfoo".to_string();
+        lib.arch = devel_arch.to_string();
+        lib.files = vec![regular("/usr/lib64/libfoo.so.1")];
+        lib.provides = vec![require("libfoo.so.1()(64bit)")];
+
+        let mut anchor = fixture_pkg();
+        anchor.name = "foo".to_string();
+        anchor.arch = anchor_arch.to_string();
+        anchor.requires = anchor_requires.to_vec();
+        anchor.prereq = vec![];
+        anchor.files = vec![];
+
+        let mut devel = fixture_pkg();
+        devel.name = "foo-devel".to_string();
+        devel.arch = devel_arch.to_string();
+        devel.requires = devel_requires.to_vec();
+        devel.prereq = vec![];
+        devel.files = vec![symlink("/usr/lib64/libfoo.so", "libfoo.so.1")];
+        (lib, anchor, devel)
+    }
+
+    fn run_trio(lib: &Pkg, anchor: &Pkg, devel: &Pkg) -> Vec<(String, String)> {
+        run_pkgs(&[lib, anchor, devel])
+    }
+
+    #[test]
+    fn anchor_chain_credits_devel_package() {
+        // akonadi's shape: the devel anchors on the main package at
+        // its exact version, and the main package's own requirements
+        // name the library's soname — the dependency on the library
+        // exists through the anchor.
+        let (lib, anchor, devel) = anchor_trio(
+            &[require("libfoo.so.1()(64bit)")],
+            &[require_pinned("foo", "1")],
+        );
+        assert!(run_trio(&lib, &anchor, &devel).is_empty());
+    }
+
+    #[test]
+    fn anchor_chain_version_release_pin_credits() {
+        // The pin's other measured spelling: `=` to the sibling's
+        // full version-release.
+        let (lib, anchor, devel) = anchor_trio(
+            &[require("libfoo.so.1()(64bit)")],
+            &[require_pinned_release("foo", "1", "1")],
+        );
+        assert!(run_trio(&lib, &anchor, &devel).is_empty());
+    }
+
+    #[test]
+    fn anchor_chain_isa_qualified_anchor_credits() {
+        // The anchor named with its isa qualifier, the spelling a
+        // handful of the measured chains take (rocm-clang-devel and
+        // rocm-llvm-devel on their sibling libs packages).
+        let (lib, anchor, devel) = anchor_trio(
+            &[require("libfoo.so.1()(64bit)")],
+            &[require_pinned("foo(x86-64)", "1")],
+        );
+        assert!(run_trio(&lib, &anchor, &devel).is_empty());
+    }
+
+    #[test]
+    fn anchor_chain_library_name_reach_credits() {
+        // The sibling can equally reach the library by the library
+        // package's own name rather than its soname provide.
+        let (lib, anchor, devel) = anchor_trio(&[require("libfoo")], &[require_pinned("foo", "1")]);
+        assert!(run_trio(&lib, &anchor, &devel).is_empty());
+    }
+
+    #[test]
+    fn anchor_without_reach_still_fires() {
+        // The anchor's requirements reach a different library, not
+        // this one: the chain is broken and the finding is the point.
+        // (liburing-devel on liburing-ffi in the corpus: the anchor
+        // reaches the main library, the FFI library nothing reaches.)
+        let (lib, anchor, devel) = anchor_trio(
+            &[require("libother.so.9()(64bit)")],
+            &[require_pinned("foo", "1")],
+        );
+        let results = run_trio(&lib, &anchor, &devel);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "no-library-dependency-on");
+        assert_eq!(
+            results[0].1,
+            "foo-devel.x86_64: E: no-library-dependency-on libfoo /usr/lib64/libfoo.so.1"
+        );
+    }
+
+    #[test]
+    fn anchor_unversioned_still_fires() {
+        // An unpinned requirement on the sibling guarantees no
+        // particular build of it, so it is not the anchor convention
+        // and credits nothing (the toluapp and libaom shapes in the
+        // corpus stay charged).
+        let (lib, anchor, devel) =
+            anchor_trio(&[require("libfoo.so.1()(64bit)")], &[require("foo")]);
+        let results = run_trio(&lib, &anchor, &devel);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "no-library-dependency-on");
+    }
+
+    #[test]
+    fn anchor_wrong_version_still_fires() {
+        // A pin to a version the sibling does not carry is not a pin
+        // to the co-built sibling.
+        let (lib, anchor, devel) = anchor_trio(
+            &[require("libfoo.so.1()(64bit)")],
+            &[require_pinned("foo", "2")],
+        );
+        let results = run_trio(&lib, &anchor, &devel);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "no-library-dependency-on");
+    }
+
+    #[test]
+    fn anchor_floor_pin_still_fires() {
+        // A `>=` floor at the sibling's version is a range, not the
+        // exact pin: it admits other builds of the sibling.
+        let floor = DepInfo {
+            name: "foo".to_string(),
+            flags: RPMSENSE_EQUAL | RPMSENSE_GREATER,
+            epoch: None,
+            version: Some("1".to_string()),
+            release: None,
+        };
+        let (lib, anchor, devel) = anchor_trio(&[require("libfoo.so.1()(64bit)")], &[floor]);
+        let results = run_trio(&lib, &anchor, &devel);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "no-library-dependency-on");
+    }
+
+    #[test]
+    fn anchor_other_source_still_fires() {
+        // The anchor must be a sibling: a requirement on a package of
+        // another source that reaches the library credits nothing,
+        // or transitive credit would gut the check.
+        let (lib, _, devel) = anchor_trio(
+            &[require("libfoo.so.1()(64bit)")],
+            &[require_pinned("foo", "1.0")],
+        );
+        // A fixture built from a different spec: its SOURCERPM
+        // differs from the shared fixture's, so it is another source.
+        // Its version is 1.0, which the devel's pin matches — only
+        // the source condition rejects the credit.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/nodoc-lone-1.0-1.noarch.rpm");
+        let mut anchor = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
+        anchor.name = "foo".to_string();
+        anchor.arch = "x86_64".to_string();
+        anchor.requires = vec![require("libfoo.so.1()(64bit)")];
+        anchor.prereq = vec![];
+        anchor.files = vec![];
+        let results = run_trio(&lib, &anchor, &devel);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "no-library-dependency-on");
+    }
+
+    #[test]
+    fn self_anchor_still_fires() {
+        // A requirement on the devel package itself is no anchor,
+        // even with a reaching sibling standing next to it.
+        let (lib, anchor, devel) = anchor_trio(
+            &[require("libfoo.so.1()(64bit)")],
+            &[require_pinned("foo-devel", "1")],
+        );
+        let results = run_trio(&lib, &anchor, &devel);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "no-library-dependency-on");
+    }
+
+    #[test]
+    fn anchor_matching_arch_credits() {
+        // The same chain on a non-default arch pair: the credit
+        // follows arch equality, not one hardcoded arch.
+        let (lib, anchor, devel) = anchor_trio_arches(
+            &[require("libfoo.so.1()(64bit)")],
+            &[require_pinned("foo", "1")],
+            "aarch64",
+            "aarch64",
+        );
+        assert!(run_trio(&lib, &anchor, &devel).is_empty());
+    }
+
+    #[test]
+    fn anchor_cross_arch_still_fires() {
+        // A sibling built for another arch credits nothing: the
+        // `foo.i586` build's requirements are not what installing
+        // `foo-devel.x86_64` pulls in, however exactly the devel
+        // package pins the name.
+        let (lib, anchor, devel) = anchor_trio_arches(
+            &[require("libfoo.so.1()(64bit)")],
+            &[require_pinned("foo", "1")],
+            "i586",
+            "x86_64",
+        );
+        let results = run_trio(&lib, &anchor, &devel);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "no-library-dependency-on");
+        assert_eq!(
+            results[0].1,
+            "foo-devel.x86_64: E: no-library-dependency-on libfoo /usr/lib64/libfoo.so.1"
+        );
+    }
+
+    #[test]
+    fn anchor_noarch_fallback_credits() {
+        // A `noarch` sibling stands in for the arch build: it is
+        // the build the devel package's installation pulls in on
+        // any arch.
+        let (lib, anchor, devel) = anchor_trio_arches(
+            &[require("libfoo.so.1()(64bit)")],
+            &[require_pinned("foo", "1")],
+            "noarch",
+            "x86_64",
+        );
+        assert!(run_trio(&lib, &anchor, &devel).is_empty());
+    }
+
+    #[test]
+    fn anchor_reach_via_other_arch_lib_provides_still_fires() {
+        // The library's provides are read from the build that ships
+        // the linked file: a same-named build for another arch
+        // providing the soname the anchor requires credits nothing —
+        // that build is not the library package of this run's link.
+        let (mut lib, anchor, devel) = anchor_trio(
+            &[require("libfoo.so.1()(64bit)")],
+            &[require_pinned("foo", "1")],
+        );
+        lib.provides = vec![];
+        let mut lib_other_arch = fixture_pkg();
+        lib_other_arch.name = "libfoo".to_string();
+        lib_other_arch.arch = "i586".to_string();
+        lib_other_arch.files = vec![];
+        lib_other_arch.provides = vec![require("libfoo.so.1()(64bit)")];
+        let results = run_pkgs(&[&lib, &lib_other_arch, &anchor, &devel]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "no-library-dependency-on");
+    }
+
+    #[test]
+    fn anchor_chain_survives_export_import() {
+        // The snapshots travel with the exported state: a worker that
+        // saw the library and the anchor and a worker that saw the
+        // devel package merge into a run that credits the chain.
+        let config = Config::default();
+        let (lib, anchor, devel) = anchor_trio(
+            &[require("libfoo.so.1()(64bit)")],
+            &[require_pinned("foo", "1")],
+        );
+        let mut w0 = LibraryDependencyCheck::new(&config);
+        let mut w0_out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        for pkg in [&lib, &anchor] {
+            w0.check_binary(pkg, &config, &mut w0_out);
+        }
+        let s0 = w0.export_state().expect("worker 0 exports");
+        let mut w1 = LibraryDependencyCheck::new(&config);
+        let mut w1_out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        w1.check_binary(&devel, &config, &mut w1_out);
+        let s1 = w1.export_state().expect("worker 1 exports");
+
+        let mut main = LibraryDependencyCheck::new(&config);
+        main.import_state(s0);
+        main.import_state(s1);
+        let mut main_out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        main.after_checks(&config, &mut main_out);
+        assert!(
+            main_out.results().is_empty(),
+            "chain lost across export/import: {:?}",
+            main_out.results()
+        );
     }
 }
