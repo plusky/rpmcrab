@@ -25,6 +25,7 @@ const RPMSENSE_EQUAL: u32 = 8;
 pub struct BrandingPolicyCheck {
     re_branding: Regex,
     re_branding_generic: Regex,
+    re_icon_theme: Regex,
 }
 
 impl BrandingPolicyCheck {
@@ -33,8 +34,12 @@ impl BrandingPolicyCheck {
             // `\A`-anchored: the reference uses `re.match`.
             re_branding: Regex::new(r"\A(?P<name>\S+)-(?P<type>branding|theme)-(?P<flavor>\S+)")
                 .expect("static regex"),
-            re_branding_generic: Regex::new(r"\A(?P<name>\S+)-(?P<type>branding|theme)")
+            // End-anchored: the generic branding name in full, so names
+            // that merely contain the pattern (gnome-themes,
+            // ocean-sound-theme6, config(yast2-theme)) do not match.
+            re_branding_generic: Regex::new(r"\A(?P<name>\S+)-(?P<type>branding|theme)\z")
                 .expect("static regex"),
+            re_icon_theme: Regex::new(r"\A(?P<name>\S+)-icon-theme\z").expect("static regex"),
         }
     }
 
@@ -73,7 +78,12 @@ impl Check for BrandingPolicyCheck {
                     );
                     continue;
                 }
+                // Icon themes are concrete data packages, not flavour
+                // virtuals: a version on the require pins no flavour, so
+                // they stay silent (the reference's re_icon_theme draws
+                // the same line).
                 if is_match(&self.re_branding_generic, &require.name)
+                    && !is_match(&self.re_icon_theme, &require.name)
                     && require.flags != RPMSENSE_EQUAL
                     && require.flags != RPMSENSE_GREATER
                     && require.flags != RPMSENSE_GREATER + RPMSENSE_EQUAL
@@ -295,6 +305,45 @@ mod tests {
             unversioned[0]
         );
         assert!(unversioned[0].ends_with("testingpackage-branding"));
+    }
+
+    // #857: the unversioned finding is scoped to the generic branding
+    // name itself. Generic names in full are charged on both arms;
+    // concrete data packages and non-name require forms stay silent.
+    #[test]
+    fn unversioned_requires_scoped_to_generic_branding_names() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "brandingdep-testpackage".to_string();
+        pkg.requires = vec![
+            dep("testingpackage-branding", 0),
+            dep("testingpackage-theme", 0),
+            dep("hicolor-icon-theme", 0),
+            dep("gnome-themes", 0),
+            dep("kalpa-themes-sddm", 0),
+            dep("ocean-sound-theme6", 0),
+            dep("lib-theme.so()(64bit)", 0),
+            dep("config(yast2-theme)", 0),
+        ];
+        let results = run(&pkg);
+
+        let unversioned = has(&results, "branding-requires-unversioned");
+        assert_eq!(unversioned.len(), 2, "{results:?}");
+        assert!(
+            unversioned
+                .iter()
+                .any(|line| line.ends_with("testingpackage-branding")),
+            "{results:?}"
+        );
+        assert!(
+            unversioned
+                .iter()
+                .any(|line| line.ends_with("testingpackage-theme")),
+            "{results:?}"
+        );
+        assert!(
+            has(&results, "branding-requires-specific-flavor").is_empty(),
+            "{results:?}"
+        );
     }
 
     // Mirrors test_branding.py::test_branding_pkg1. The provide carries `=`
