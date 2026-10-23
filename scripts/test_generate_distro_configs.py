@@ -920,7 +920,7 @@ def test_retarget_filters_rewrites_moved_targets():
         "    '.* statically-linked-binary /sbin/ldconfig',\n"
         "    '.* statically-linked-binary /sbin/init',\n"
         "    'glibc\\.\\S+: \\w: statically-linked-binary /usr/sbin/glibc_post_upgrade',\n"
-        "    ' dangerous-command.*',\n"
+        "    'incoherent-version-in-changelog',\n"
         ']\n'
     )
     pruned, dropped, retargeted = [], [], []
@@ -930,7 +930,7 @@ def test_retarget_filters_rewrites_moved_targets():
     assert "'.* statically-linked-binary /usr/sbin/ldconfig'," in out, out
     assert '/sbin/init' not in out, out
     assert 'glibc_post_upgrade' not in out, out
-    assert "    ' dangerous-command.*',\n" in out, out
+    assert "    'incoherent-version-in-changelog',\n" in out, out
     assert len(retargeted) == 2, retargeted
     assert len(pruned) == 2, pruned
     assert dropped == [], dropped
@@ -967,7 +967,7 @@ def test_prune_stale_filters_drops_orphaned_group_comment():
         "    'no-buildroot-tag',\n"
         '\n'
         '# Kept group\n'
-        "    ' dangerous-command.*',\n"
+        "    'incoherent-version-in-changelog',\n"
         ']\n'
     )
     pruned, dropped, retargeted = [], [], []
@@ -977,7 +977,7 @@ def test_prune_stale_filters_drops_orphaned_group_comment():
         "    'kept-entry',\n"
         '\n'
         '# Kept group\n'
-        "    ' dangerous-command.*',\n"
+        "    'incoherent-version-in-changelog',\n"
         ']\n'
     ), out
     assert len(pruned) == 1, pruned
@@ -989,7 +989,7 @@ def test_prune_stale_filters_keeps_shared_group_comment():
         'Filters = [\n'
         '# Shared group\n'
         "    'no-buildroot-tag',\n"
-        "    ' dangerous-command.*',\n"
+        "    'incoherent-version-in-changelog',\n"
         ']\n'
     )
     pruned, dropped, retargeted = [], [], []
@@ -997,7 +997,7 @@ def test_prune_stale_filters_keeps_shared_group_comment():
     assert out == (
         'Filters = [\n'
         '# Shared group\n'
-        "    ' dangerous-command.*',\n"
+        "    'incoherent-version-in-changelog',\n"
         ']\n'
     ), out
     assert len(pruned) == 1, pruned
@@ -1099,14 +1099,14 @@ def test_drop_live_filters_drops_kernel_modules_line():
     text = (
         'Filters = [\n'
         "    'kernel-modules-not-in-kernel-packages',\n"
-        "    ' dangerous-command.*',\n"
+        "    'incoherent-version-in-changelog',\n"
         ']\n'
     )
     pruned, dropped, retargeted = [], [], []
     out = gen.prune_stale_filters(
         text, {"kernel-modules-not-in-kernel-packages"}, pruned, dropped, retargeted)
     assert 'kernel-modules-not-in-kernel-packages' not in out, out
-    assert "    ' dangerous-command.*',\n" in out, out
+    assert "    'incoherent-version-in-changelog',\n" in out, out
     assert len(dropped) == 1, dropped
     assert 'kernel-modules-not-in-kernel-packages' in dropped[0], dropped
     assert pruned == [] and retargeted == [], (pruned, retargeted)
@@ -1631,14 +1631,14 @@ def test_drop_live_filters_drops_executable_config_line():
     text = (
         'Filters = [\n'
         "    ' executable-marked-as-config-file',\n"
-        "    ' dangerous-command.*',\n"
+        "    'incoherent-version-in-changelog',\n"
         ']\n'
     )
     pruned, dropped, retargeted = [], [], []
     out = gen.prune_stale_filters(
         text, {"executable-marked-as-config-file"}, pruned, dropped, retargeted)
     assert 'executable-marked-as-config-file' not in out, out
-    assert "    ' dangerous-command.*',\n" in out, out
+    assert "    'incoherent-version-in-changelog',\n" in out, out
     assert len(dropped) == 1, dropped
     assert 'executable-marked-as-config-file' in dropped[0], dropped
     assert pruned == [] and retargeted == [], (pruned, retargeted)
@@ -1656,14 +1656,14 @@ def test_drop_live_filters_drops_description_line_too_long_line():
     text = (
         'Filters = [\n'
         "    'description-line-too-long',\n"
-        "    ' dangerous-command.*',\n"
+        "    'incoherent-version-in-changelog',\n"
         ']\n'
     )
     pruned, dropped, retargeted = [], [], []
     out = gen.prune_stale_filters(
         text, {"description-line-too-long"}, pruned, dropped, retargeted)
     assert 'description-line-too-long' not in out, out
-    assert "    ' dangerous-command.*',\n" in out, out
+    assert "    'incoherent-version-in-changelog',\n" in out, out
     assert len(dropped) == 1, dropped
     assert 'description-line-too-long' in dropped[0], dropped
     assert pruned == [] and retargeted == [], (pruned, retargeted)
@@ -1687,14 +1687,14 @@ def test_drop_live_filters_drops_usr_local_line():
     text = (
         'Filters = [\n'
         "    ' dir-or-file-in-usr-local ',  # handled by CheckFilelist.py\n"
-        "    ' dangerous-command.*',\n"
+        "    'incoherent-version-in-changelog',\n"
         ']\n'
     )
     pruned, dropped, retargeted = [], [], []
     out = gen.prune_stale_filters(
         text, {"dir-or-file-in-usr-local"}, pruned, dropped, retargeted)
     assert 'dir-or-file-in-usr-local' not in out, out
-    assert "    ' dangerous-command.*',\n" in out, out
+    assert "    'incoherent-version-in-changelog',\n" in out, out
     assert len(dropped) == 1, dropped
     assert 'dir-or-file-in-usr-local' in dropped[0], dropped
     assert pruned == [] and retargeted == [], (pruned, retargeted)
@@ -1743,6 +1743,62 @@ def test_drop_live_filters_drops_non_standard_dir_in_usr_line():
 # ---------------------------------------------------------------------------
 # strip_badness_threshold / no vendored scoring (issue #699)
 # ---------------------------------------------------------------------------
+
+def test_drop_live_filters_drops_fsf_address_line():
+    """The incorrect-fsf-address blanket filter is dropped via
+    DROP_LIVE_FILTERS (ruling in issue #883).
+
+    The vendored line is space-anchored on both sides
+    (' incorrect-fsf-address '): pure_finding_pattern strips the
+    padding, and the drop is unconditional. The scoped sibling under
+    the same upstream comment is a compound pattern and stays, so
+    the comment block heading both stays too.
+    """
+    text = (
+        'Filters = [\n'
+        "# Too noisy, and usually not something downstream packagers can fix\n"
+        "    ' incorrect-fsf-address ',\n"
+        "    ' static-library-without-debuginfo /usr/lib(?:64)?/ghc-[\\d.]+/',\n"
+        ']\n'
+    )
+    pruned, dropped, retargeted = [], [], []
+    out = gen.prune_stale_filters(
+        text, {"incorrect-fsf-address"}, pruned, dropped, retargeted)
+    assert 'incorrect-fsf-address' not in out, out
+    assert 'static-library-without-debuginfo' in out, out
+    assert '# Too noisy' in out, out
+    assert len(dropped) == 1, dropped
+    assert 'incorrect-fsf-address' in dropped[0], dropped
+    assert pruned == [] and retargeted == [], (pruned, retargeted)
+
+
+def test_drop_live_filters_drops_dangerous_command_family_line():
+    """The dangerous-command family filter is dropped via
+    DROP_LIVE_FILTERS (ruling in issue #883).
+
+    The vendored line is a pattern, not a name: ' dangerous-command.*'
+    hides the whole dangerous-command-in-%<section> family.
+    pure_finding_pattern strips the trailing '.*' and returns the
+    stem 'dangerous-command', which is the DROP key. A compound line
+    naming one section stays: the drop takes the blanket only.
+    """
+    text = (
+        'Filters = [\n'
+        "    ' dangerous-command.*',\n"
+        "    'somepkg\\..*: dangerous-command-in-%post /bin/rm',\n"
+        "    'incoherent-version-in-changelog',\n"
+        ']\n'
+    )
+    pruned, dropped, retargeted = [], [], []
+    out = gen.prune_stale_filters(
+        text, {"dangerous-command"}, pruned, dropped, retargeted)
+    assert ' dangerous-command.*' not in out, out
+    assert 'dangerous-command-in-%post' in out, out
+    assert 'incoherent-version-in-changelog' in out, out
+    assert len(dropped) == 1, dropped
+    assert 'dangerous-command' in dropped[0], dropped
+    assert pruned == [] and retargeted == [], (pruned, retargeted)
+
 
 def test_strip_badness_threshold_drops_only_the_key_line():
     """The BadnessThreshold line goes; every other line survives
