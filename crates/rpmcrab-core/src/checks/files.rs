@@ -380,12 +380,12 @@ fn python_lib_tree_regex() -> &'static Regex {
 /// - a file installed directly in a script directory (`/bin`,
 ///   `/sbin`, `/usr/bin`, `/usr/sbin`, `/usr/local/bin` or
 ///   `/usr/local/sbin`) is an entry point and never counts as data;
-/// - the directory-component shapes count only inside the data and
-///   library trees (`/usr/src/`, `/usr/share/`, `/usr/lib/`,
-///   `/usr/lib64/`, `/usr/etc/`, `/etc/`): a component name alone
-///   does not distinguish a module tree from an entry point, so the
-///   same components in an entry-point tree (under `/usr/libexec/`,
-///   say) keep firing.
+/// - the remaining directory-component shapes count only inside
+///   the data and library trees (`/usr/src/`, `/usr/share/`,
+///   `/usr/lib/`, `/usr/lib64/`, `/usr/etc/`, `/etc/`): a component
+///   name alone does not distinguish a module tree from an entry
+///   point, so the same components in an entry-point tree (under
+///   `/usr/libexec/`, say) keep firing.
 ///
 /// The shapes:
 ///
@@ -398,9 +398,9 @@ fn python_lib_tree_regex() -> &'static Regex {
 ///   `python` or `python3[.x]` component, a nested `lib` component
 ///   (past the first two path components) holding a script-language
 ///   file (`.py`, `.rb`, `.pl`, `.pm`, `.lua`, `.php`, `.sh` or
-///   `.bash`), a `bash` component holding a shell file, or a
-///   Python file in a host-loaded plugin directory (`extensions`,
-///   `plugins`) or gdb's `auto-load` directory;
+///   `.bash`), a `bash` component holding a `.sh` or `.bash` file,
+///   or a `.py` file in a host-loaded plugin directory
+///   (`extensions`, `plugins`) or an `auto-load` directory;
 /// - a source tree (inside the data and library trees): a `src`
 ///   component (the `/usr/src/` trees included);
 /// - test and example material (inside the data and library
