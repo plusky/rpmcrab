@@ -4,7 +4,7 @@ reference_sha = "84848c05c5571c22274a55ff9afdfe6d88c67dc9"
 flavour = "openSUSE"
 checks = 43
 argv = ["w6-alternatives-1.0-1.noarch.rpm"]
-captured = "2026-10-02"
+captured = "2026-10-23"
 
 [source]
 description = "Hand-built fixture: /usr/bin/w6alt registered via update-alternatives in %post/%postun. Reference emits E update-alternatives-requirement-missing, E alternative-link-missing, E alternative-generic-name-missing. Exit 0."
@@ -15,3 +15,4 @@ present = ["checkbashisms","dash","desktop-file-validate","readelf","objdump","l
 [[input]]
 file = "w6-alternatives-1.0-1.noarch.rpm"
 sha256 = "65e0fa937827dd1883d20f7fb2a17b99c38cfab84ef04e245294276b6712f328"
+

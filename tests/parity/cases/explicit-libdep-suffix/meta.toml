@@ -1,17 +1,18 @@
-kind = "synthetic"            # hand-built input AND hand-written expected/
-rpmlint = "2.10.0"           # reference version the divergence is measured against
-reference_sha = "84848c05c5571c22274a55ff9afdfe6d88c67dc9"   # the pinned rpmlint commit (see setup-rpmlint-ref.sh)
-flavour = "openSUSE"         # config flavour; see "The overlay trap" in README.md
-checks = 43                  # reference check count under the openSUSE overlay
-argv = ["--no-time-report", "explicit-libdep-probe-1.0-1.x86_64.rpm"] # exactly what was passed; no config arg (see README.md). --no-time-report keeps the snapshot free of the timing-dependent report section.
+kind = "captured"
+rpmlint = "2.10.0"
+reference_sha = "84848c05c5571c22274a55ff9afdfe6d88c67dc9"
+flavour = "openSUSE"
+checks = 43
+argv = ["explicit-libdep-probe-1.0-1.x86_64.rpm"]
 captured = "2026-10-23"
 
 [source]
-description = "Hand-built probe RPM (rpmbuild, x86_64) for explicit-lib-dependency. The package ships a binary linking libfoo.so.1, so its header carries the generated dependency libfoo.so.1()(64bit), and four explicit requirements. libfoo1 is the conventional package name of that generated soname dependency, and it is the one name rpmcrab fires on. appstream-glib is a suffix-only name and zlib a genuine library without the lib* prefix: the reference fires on both, rpmcrab stays silent — neither duplicates a generated dependency, and the anchored lib-package regex (#365) matches neither. libfoo is the bare lib<stem> form: it names a different package than the library package libfoo1 (the libnbd tools package vs libnbd0), so it duplicates nothing and stays silent (#851). Redundancy is not the sole condition: the requirement must also be unversioned and unqualified, a plain package name rather than a capability, and pass the anchored regex with no .so capture. expected/ is a hand-written synthetic snapshot of rpmcrab's own output on this input — not a reference capture — regenerated for the binary-carrying probe; the run exits 64, the one error failing the run (#699)."
+description = "Hand-built probe RPM (rpmbuild, x86_64) for explicit-lib-dependency. The package ships a binary linking libfoo.so.1, so its header carries the generated dependency libfoo.so.1()(64bit), and four explicit requirements: appstream-glib, libfoo, libfoo1 and zlib. The reference fires explicit-lib-dependency on all four names; the port's behaviour on these names is ledgered in divergences.toml."
 
 [tools]
-present = ["rpmbuild", "gcc"]       # external tools used to build the input
+present = ["checkbashisms","dash","desktop-file-validate","readelf","objdump","ldd","file"]
 
 [[input]]
 file = "explicit-libdep-probe-1.0-1.x86_64.rpm"
 sha256 = "aba715f3778cea0a9125a0fdead53f60ad20895e053fe6642a31e1a4f732b69b"
+

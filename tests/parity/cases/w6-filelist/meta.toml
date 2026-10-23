@@ -4,7 +4,7 @@ reference_sha = "84848c05c5571c22274a55ff9afdfe6d88c67dc9"
 flavour = "openSUSE"
 checks = 43
 argv = ["w6-filelist-1.0-1.noarch.rpm"]
-captured = "2026-10-02"
+captured = "2026-10-23"
 
 [source]
 description = "Hand-built fixture: setuid /usr/bin/w6suid, %config /etc/w6test/w6test.conf, hidden /usr/bin/.w6hidden. Reference emits E permissions-file-setuid-bit and related permissions findings. Exit 0."
@@ -15,3 +15,4 @@ present = ["checkbashisms","dash","desktop-file-validate","readelf","objdump","l
 [[input]]
 file = "w6-filelist-1.0-1.noarch.rpm"
 sha256 = "3efbce3fa362d2a9b71e5e9f38f98c4d76962a5c97ea3e0aba56bb50067c07f0"
+
