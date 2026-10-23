@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 use fancy_regex::Regex;
 
 use crate::check::{Check, add_info};
+use crate::checks::fhs::cross_sysroot_matches;
 use crate::checks::is_match;
 use crate::config::Config;
 use crate::filter::Filter;
@@ -243,6 +244,20 @@ impl FilelistCheck {
         found.into_iter().collect()
     }
 
+    /// Whether `path` sits under a prefix the FHS walk treats as
+    /// good: a bundled GoodPrefix, a cross-toolchain target sysroot
+    /// (the measured set FHSCheck sanctions, shared through
+    /// `cross_sysroot_matches`) or, in a package whose name ends in
+    /// `-source`, the `/usr/src` tree - the canonical location of the
+    /// sources such a package ships.
+    fn fhs_good_prefix(&self, pkg: &Pkg, path: &str) -> bool {
+        self.good_prefixes
+            .iter()
+            .any(|p| path.starts_with(p.as_str()))
+            || cross_sysroot_matches(path)
+            || (pkg.name.ends_with("-source") && path.starts_with("/usr/src/"))
+    }
+
     /// The FHS-prefix violations, deduplicated to one report per directory.
     fn fhs_violations(&self, pkg: &Pkg) -> (Vec<String>, Vec<String>) {
         let mut invalid_fhs = std::collections::BTreeSet::new();
@@ -268,12 +283,12 @@ impl FilelistCheck {
 
         for f in &paths {
             let f: &str = f;
-            if !self.good_prefixes.iter().any(|p| f.starts_with(p)) {
+            if !self.fhs_good_prefix(pkg, f) {
                 // Find the first invalid path component.
                 let mut base = f.rsplit_once('/').map(|(b, _)| b).unwrap_or("");
                 let mut pfx: Option<&str> = None;
                 while !base.is_empty()
-                    && !self.good_prefixes.iter().any(|p| base.starts_with(p))
+                    && !self.fhs_good_prefix(pkg, base)
                     && !self.restricted_dirs.iter().any(|d| d == base)
                 {
                     pfx = Some(base);
@@ -607,6 +622,169 @@ mod tests {
             lines[0].contains("E: filelist-forbidden-fhs23 /usr/foobar"),
             "name, level and detail: {}",
             lines[0]
+        );
+    }
+
+    // Issue #859: the GCC cross-toolchain prefixes are the measured
+    // target sysroots FHSCheck sanctions (issue #582); the reference's
+    // GoodPrefixes sanction none of them, so it reports every one.
+    #[test]
+    fn cross_toolchain_sysroots_are_good_fhs_prefixes() {
+        let mut pkg = pkg_with_files(&[
+            "/usr/aarch64-suse-linux/bin/ld",
+            "/usr/arm-suse-linux-gnueabi/lib/libc.so",
+            "/usr/bpf-none/bin/bpf-none-clang",
+            "/usr/rx-elf/bin/rx-elf-gcc",
+            "/usr/amdgcn-amdhsa/lib/libclang_rt.builtins.a",
+        ]);
+        // The sysroot directory entries themselves, as the real
+        // packages list them.
+        for sysroot in ["/usr/avr", "/usr/pru"] {
+            pkg.files.push(PkgFile {
+                name: sysroot.to_string(),
+                path: sysroot.to_string(),
+                mode: 0o040755,
+                ..Default::default()
+            });
+        }
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        assert!(
+            lines_for(&results, "filelist-forbidden-fhs23").is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn every_measured_cross_sysroot_is_quiet_for_fhs23() {
+        // Pin the whole measured set against this check too: a sysroot
+        // dropped from the shared set fails here as well as in
+        // FHSCheck's own pin on the set.
+        let config = Config::default();
+        for sysroot in crate::checks::fhs::FHS_USR_CROSS_SYSROOTS {
+            let path = format!("/usr/{sysroot}/bin/tool");
+            let pkg = pkg_with_files(&[&path]);
+            let results = run(&config, &pkg);
+            assert!(
+                lines_for(&results, "filelist-forbidden-fhs23").is_empty(),
+                "{sysroot}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unmeasured_usr_dirs_still_fire_fhs23() {
+        // The sanction is the measured set, not the triplet shape:
+        // a novel component of exactly that shape still fires, as
+        // does a measured name extended by a suffix.
+        let config = Config::default();
+        for (path, detail) in [
+            (
+                "/usr/frobnicate-suse-linux/bin/tool",
+                "/usr/frobnicate-suse-linux",
+            ),
+            (
+                "/usr/aarch64-suse-linux2/bin/tool",
+                "/usr/aarch64-suse-linux2",
+            ),
+        ] {
+            let pkg = pkg_with_files(&[path]);
+            let lines = lines_for(&run(&config, &pkg), "filelist-forbidden-fhs23");
+            assert_eq!(lines.len(), 1, "{path}");
+            assert!(
+                lines[0].contains(&format!("E: filelist-forbidden-fhs23 {detail}")),
+                "{path}: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cross_sysroot_name_below_another_component_still_fires() {
+        // Only the leading component sanctions: a sysroot name deeper
+        // in the tree leaves the leading directory reported.
+        let pkg = pkg_with_files(&["/usr/local/aarch64-suse-linux/tool"]);
+        let config = Config::default();
+        let lines = lines_for(&run(&config, &pkg), "filelist-forbidden-fhs23");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("E: filelist-forbidden-fhs23 /usr/local"),
+            "{lines:?}"
+        );
+    }
+
+    // Issue #859: /usr/src/<package> is the canonical location of a
+    // -source package's payload; the same tree in a package not named
+    // as one still fires.
+    #[test]
+    fn source_package_usr_src_payload_is_quiet() {
+        let mut pkg = pkg_with_files(&[
+            "/usr/src/nginx/src/core/nginx.c",
+            "/usr/src/nginx/configure",
+        ]);
+        pkg.name = "nginx-source".to_string();
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        assert!(
+            lines_for(&results, "filelist-forbidden-fhs23").is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn usr_src_payload_of_other_packages_still_fires() {
+        let config = Config::default();
+        // The identical tree in a package not named as a source
+        // package.
+        let mut pkg = pkg_with_files(&["/usr/src/nginx/src/core/nginx.c"]);
+        pkg.name = "nginx".to_string();
+        let lines = lines_for(&run(&config, &pkg), "filelist-forbidden-fhs23");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("E: filelist-forbidden-fhs23 /usr/src/nginx"),
+            "{lines:?}"
+        );
+        // A -source package name sanctions nothing outside /usr/src
+        // itself: a lookalike tree still fires.
+        let mut pkg = pkg_with_files(&["/usr/srcx/nginx/nginx.c", "/usr/frobnicate/tool"]);
+        pkg.name = "nginx-source".to_string();
+        let lines = lines_for(&run(&config, &pkg), "filelist-forbidden-fhs23");
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("E: filelist-forbidden-fhs23 /usr/srcx")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("E: filelist-forbidden-fhs23 /usr/frobnicate")),
+            "{lines:?}"
+        );
+    }
+
+    // Issue #859: /usr/src/kernel-modules is the tree kernel-module
+    // source packages install into, sanctioned like the neighbouring
+    // /usr/src/debug and /usr/src/packages trees.
+    #[test]
+    fn kernel_modules_tree_is_quiet() {
+        let pkg = pkg_with_files(&[
+            "/usr/src/kernel-modules/nvidia-570.86/Makefile",
+            "/usr/src/kernel-modules/nvidia-570.86/nv.c",
+        ]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        assert!(
+            lines_for(&results, "filelist-forbidden-fhs23").is_empty(),
+            "unexpected: {results:?}"
+        );
+        // A sibling name is not the reserved tree.
+        let pkg = pkg_with_files(&["/usr/src/kernel-modulesx/pkg/file.c"]);
+        let lines = lines_for(&run(&config, &pkg), "filelist-forbidden-fhs23");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("E: filelist-forbidden-fhs23 /usr/src/kernel-modulesx"),
+            "{lines:?}"
         );
     }
 

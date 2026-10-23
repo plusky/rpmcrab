@@ -29,6 +29,8 @@ GoodPrefixes = [
     "/usr/src/linux",
     "/usr/src/debug/",
     "/usr/src/packages/",
+    # the tree kernel-module source packages install into
+    "/usr/src/kernel-modules/",
     "/var/account/",
     "/var/cache/",
     "/var/crash/",
