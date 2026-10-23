@@ -465,9 +465,12 @@ const NBSP: char = '\u{a0}';
 /// The position of the first `#` that starts a shell comment, or `None`.
 ///
 /// `#` inside single- or double-quoted shell strings does not start a
-/// comment. A backslash escapes the next character unless inside single
-/// quotes (shell semantics); the caller still decides whether a `#`
-/// candidate counts as a comment start. Fixed behaviour per `#1601`.
+/// comment, and neither does a `#` glued to a word (`${var#pattern}`,
+/// `a#b`): a `#` opens a comment only at the start of a word -- at the
+/// line start or after whitespace or a command separator. A backslash
+/// escapes the next character unless inside single quotes (shell
+/// semantics); the caller still decides whether a `#` candidate counts
+/// as a comment start. Fixed behaviour per `#1601`.
 fn comment_start_pos(line: &str) -> Option<usize> {
     let bytes = line.as_bytes();
     let mut in_single = false;
@@ -476,7 +479,11 @@ fn comment_start_pos(line: &str) -> Option<usize> {
     while pos < bytes.len() {
         let c = bytes[pos];
         if c == b'#' && !in_single && !in_double {
-            return Some(pos);
+            let at_word_start =
+                pos == 0 || matches!(bytes[pos - 1], b' ' | b'\t' | b';' | b'&' | b'|' | b'(');
+            if at_word_start {
+                return Some(pos);
+            }
         }
         if c == b'\\' && !in_single && pos + 1 < bytes.len() {
             pos += 2;
@@ -1011,24 +1018,27 @@ fn glob_prefix_buries_licence_stem(basename: &str) -> bool {
         })
 }
 
-/// The normalised docdir destination of the licence copy a literal
-/// `install`/`cp` command on this `%install` line performs (#833):
-/// the destination path as written, with any buildroot prefix and
-/// trailing slash removed. `None` when the line performs no such
-/// copy. A command qualifies at command position (the start of the
-/// line or of a `;`/`&&`/`||` segment), spelled `install`, `cp`,
-/// `%{__install}` or `%{__cp}`; flags are skipped, with the
-/// value-taking flags (`-m`, `-o`, `-g`, `-t`, `--mode`, `--owner`,
-/// `--group`, `--target-directory`) consuming the following token,
-/// so the destination is the final positional argument and every
-/// earlier positional argument is a source. The copy qualifies when
-/// a source's basename carries a licence stem
+/// The normalised docdir destinations of the licence copies literal
+/// `install`/`cp` commands on this `%install` line perform (#833):
+/// each destination path as written, with any buildroot prefix and
+/// trailing slash removed. A command qualifies at command position
+/// (the start of the line or of a `;`/`&&`/`||`/`|` segment, after
+/// any environment assignments), spelled `install`, `cp`,
+/// `%{__install}` or `%{__cp}` -- an absolute tool path qualifies by
+/// its basename. Quoted tokens are unquoted, and a redirection and
+/// its target are not arguments. Flags are skipped: the value-taking
+/// flags (`-m`, `-o`, `-g`, `--mode`, `--owner`, `--group`) consume
+/// the following token or the rest of their bundle, while
+/// `-t`/`--target-directory` names the destination itself, so with
+/// no target directory the destination is the final positional
+/// argument and every earlier positional argument is a source. The
+/// copy qualifies when a source's basename carries a licence stem
 /// (`name_carries_licence`) or is a glob whose prefix does
 /// (`glob_prefix_carries_licence`), and the destination names the
 /// docdir or a path under it (`docdir_destination`). An
 /// `install -d` line creates directories and copies nothing, so it
 /// never qualifies.
-fn install_copy_docdir(line: &str) -> Option<String> {
+fn install_copy_docdirs(line: &str) -> Vec<String> {
     let line = match comment_start_pos(line) {
         Some(pos) => &line[..pos],
         None => line,
@@ -1036,45 +1046,91 @@ fn install_copy_docdir(line: &str) -> Option<String> {
     line.split(';')
         .flat_map(|segment| segment.split("&&"))
         .flat_map(|segment| segment.split("||"))
-        .find_map(segment_copy_docdir)
+        .flat_map(|segment| segment.split('|'))
+        .filter_map(segment_copy_docdir)
+        .collect()
 }
 
 /// The normalised docdir destination of the copy a single command
-/// segment performs; see `install_copy_docdir`.
+/// segment performs; see `install_copy_docdirs`.
 fn segment_copy_docdir(segment: &str) -> Option<String> {
-    let tokens: Vec<&str> = segment.split_whitespace().collect();
-    let command = *tokens.first()?;
-    let is_install = matches!(command, "install" | "%{__install}");
-    if !is_install && !matches!(command, "cp" | "%{__cp}") {
+    let tokens: Vec<&str> = segment.split_whitespace().map(strip_token_quotes).collect();
+    // Environment assignments precede the command proper.
+    let start = tokens
+        .iter()
+        .position(|t| !is_env_assignment(t))
+        .unwrap_or(tokens.len());
+    let command = *tokens.get(start)?;
+    let base = command.rsplit('/').next().unwrap_or(command);
+    let is_install = base == "install" || command == "%{__install}";
+    if !is_install && base != "cp" && command != "%{__cp}" {
         return None;
     }
-    if is_install && tokens[1..].iter().any(|t| install_token_creates_dir(t)) {
+    let args = &tokens[start + 1..];
+    if is_install && install_creates_dir(args) {
         return None;
     }
-    let args = &tokens[1..];
     let mut positional: Vec<&str> = Vec::new();
+    let mut target_dir: Option<&str> = None;
     let mut options_done = false;
     let mut i = 0;
     while i < args.len() {
         let token = args[i];
-        if !options_done && token == "--" {
+        if let Some(skip) = redirect_skip(token) {
+            i += skip;
+        } else if !options_done && token == "--" {
             options_done = true;
             i += 1;
-        } else if !options_done
-            && matches!(
-                token,
-                "-m" | "-o" | "-g" | "-t" | "--mode" | "--owner" | "--group" | "--target-directory"
-            )
-        {
-            i += 2;
+        } else if !options_done && token.starts_with("--") {
+            if token == "--target-directory" {
+                target_dir = args.get(i + 1).copied();
+                i += 2;
+            } else if let Some(value) = token.strip_prefix("--target-directory=") {
+                target_dir = Some(value);
+                i += 1;
+            } else if matches!(token, "--mode" | "--owner" | "--group") {
+                i += 2;
+            } else {
+                i += 1;
+            }
         } else if !options_done && token.len() > 1 && token.starts_with('-') {
-            i += 1;
+            // A short-flag bundle: a value-taking letter consumes
+            // the rest of the bundle as its value, or the following
+            // token when it ends the bundle. The `-t` value is the
+            // target directory -- the copy's destination.
+            let body = &token[1..];
+            match body
+                .char_indices()
+                .find(|(_, c)| matches!(c, 'm' | 'o' | 'g' | 't'))
+            {
+                Some((at, kind)) => {
+                    let glued = &body[at + kind.len_utf8()..];
+                    if kind == 't' {
+                        if glued.is_empty() {
+                            target_dir = args.get(i + 1).copied();
+                            i += 2;
+                        } else {
+                            target_dir = Some(glued);
+                            i += 1;
+                        }
+                    } else {
+                        i += if glued.is_empty() { 2 } else { 1 };
+                    }
+                }
+                None => i += 1,
+            }
         } else {
             positional.push(token);
             i += 1;
         }
     }
-    let (dest, sources) = positional.split_last()?;
+    let (dest, sources): (&str, &[&str]) = match target_dir {
+        Some(dir) => (dir, &positional),
+        None => {
+            let (dest, sources) = positional.split_last()?;
+            (*dest, sources)
+        }
+    };
     if sources.is_empty() {
         return None;
     }
@@ -1086,6 +1142,64 @@ fn segment_copy_docdir(segment: &str) -> Option<String> {
             name_carries_licence(base) || glob_prefix_carries_licence(base)
         })
         .then_some(dest)
+}
+
+/// A token with one layer of matching surrounding quotes removed:
+/// shell quoting groups a word; it is not part of the word.
+fn strip_token_quotes(token: &str) -> &str {
+    let bytes = token.as_bytes();
+    if token.len() >= 2 {
+        let (first, last) = (bytes[0], bytes[token.len() - 1]);
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &token[1..token.len() - 1];
+        }
+    }
+    token
+}
+
+/// A leading `NAME=value` environment assignment token: the name is
+/// a shell identifier and the value carries no command substitution
+/// (a substitution executes, so such a token is no plain assignment).
+fn is_env_assignment(token: &str) -> bool {
+    let Some((name, value)) = token.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .bytes()
+            .enumerate()
+            .all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit()))
+        && !value.contains("$(")
+        && !value.contains('`')
+}
+
+/// The tokens a redirection at this position consumes: the operator
+/// plus its target -- one token when the target is glued to the
+/// operator (`2>/dev/null`, `>log`), two when it stands alone
+/// (`> log`). `None` for a non-redirection token.
+fn redirect_skip(token: &str) -> Option<usize> {
+    let digits = token.bytes().take_while(|b| b.is_ascii_digit()).count();
+    let rest = &token[digits..];
+    let rest = rest.strip_prefix('&').unwrap_or(rest);
+    if !rest.starts_with('>') && !rest.starts_with('<') {
+        return None;
+    }
+    let op_len = if rest.starts_with(">>") || rest.starts_with("<<") {
+        2
+    } else {
+        1
+    };
+    Some(if rest.len() > op_len { 1 } else { 2 })
+}
+
+/// An `install` argument list creates directories rather than
+/// copying when a flag token before the `--` terminator says so
+/// (`install_token_creates_dir`): tokens after `--` are operands,
+/// never flags.
+fn install_creates_dir(args: &[&str]) -> bool {
+    args.iter()
+        .take_while(|t| **t != "--")
+        .any(|t| install_token_creates_dir(t))
 }
 
 /// An `install` flag token creates directories rather than copying:
@@ -1111,25 +1225,42 @@ fn install_token_creates_dir(token: &str) -> bool {
 }
 
 /// The docdir path a copy destination names, as written in the
-/// spec: an optional buildroot prefix (`%{buildroot}`,
-/// `$RPM_BUILD_ROOT`, `${RPM_BUILD_ROOT}`) and a trailing slash are
-/// removed, so the result compares against `%files` entry text. The
-/// destination names the docdir when it is `%{_docdir}` or
-/// `%{_defaultdocdir}`, or a path under either; anything else
-/// returns `None`.
+/// spec: the buildroot prefix and a trailing slash are removed, so
+/// the result compares against `%files` entry text. The destination
+/// must carry the buildroot prefix (`%{buildroot}`, `%buildroot`,
+/// `$RPM_BUILD_ROOT` or `${RPM_BUILD_ROOT}`) -- a bare docdir path
+/// names the build host's docdir, not the packaged copy. The
+/// destination names the docdir when it is `%{_docdir}`,
+/// `%{_defaultdocdir}` or the literal `usr/share/doc`, or a path
+/// under any of them; anything else returns `None`.
 fn docdir_destination(dest: &str) -> Option<String> {
     let mut rest = dest;
-    for prefix in ["%{buildroot}", "${RPM_BUILD_ROOT}", "$RPM_BUILD_ROOT"] {
+    let mut in_buildroot = false;
+    for prefix in [
+        "%{buildroot}",
+        "%buildroot",
+        "${RPM_BUILD_ROOT}",
+        "$RPM_BUILD_ROOT",
+    ] {
         if let Some(stripped) = rest.strip_prefix(prefix) {
             rest = stripped;
+            in_buildroot = true;
             break;
         }
+    }
+    if !in_buildroot {
+        return None;
     }
     let rest = rest.trim_start_matches('/');
     for docdir in ["%{_docdir}", "%{_defaultdocdir}"] {
         if rest == docdir || rest.starts_with(&format!("{docdir}/")) {
             return Some(rest.trim_end_matches('/').to_string());
         }
+    }
+    // The literal docdir path keeps its leading slash: `%files`
+    // entries spell it that way, unlike the macro spellings.
+    if rest == "usr/share/doc" || rest.starts_with("usr/share/doc/") {
+        return Some(format!("/{}", rest.trim_end_matches('/')));
     }
     None
 }
@@ -1394,6 +1525,9 @@ pub struct SpecCheck {
     license_tags_public_domain: bool,
     license_in_install: bool,
     license_install_dests: Vec<String>,
+    /// A `%install` line continued with a trailing backslash: the
+    /// partial logical line, scanned once its continuation arrives.
+    license_install_join: String,
     archive_source_seen: bool,
     packaged_source_seen: bool,
 }
@@ -1507,6 +1641,7 @@ impl SpecCheck {
             license_tags_public_domain: true,
             license_in_install: false,
             license_install_dests: Vec::new(),
+            license_install_join: String::new(),
             archive_source_seen: false,
             packaged_source_seen: false,
             rpm: Self::probe_rpm(&source),
@@ -1783,6 +1918,7 @@ impl Check for SpecCheck {
         self.license_tags_public_domain = true;
         self.license_in_install = false;
         self.license_install_dests.clear();
+        self.license_install_join.clear();
         self.archive_source_seen = false;
         self.packaged_source_seen = false;
     }
@@ -2555,6 +2691,13 @@ impl SpecCheck {
     fn checkline_license_marking(&mut self, pkg: &SpecPkg, line: &str) {
         for (sec, re) in &self.section_res {
             if let Ok(Some(_)) = re.find(line) {
+                if !self.license_install_join.is_empty() {
+                    // A continuation left open at the section end:
+                    // scan what was collected rather than drop it.
+                    let pending = std::mem::take(&mut self.license_install_join);
+                    self.license_install_dests
+                        .extend(install_copy_docdirs(&pending));
+                }
                 // Tag collection is a preamble activity: a section
                 // header ends it, a `%package` header opens the
                 // next package's preamble.
@@ -2572,10 +2715,22 @@ impl SpecCheck {
                 return;
             }
         }
-        if self.license_in_install
-            && let Some(dest) = install_copy_docdir(line)
-        {
-            self.license_install_dests.push(dest);
+        if self.license_in_install {
+            // A trailing backslash joins the next physical line
+            // into this command; scan the logical line once it is
+            // complete.
+            let mut logical = std::mem::take(&mut self.license_install_join);
+            let line = line.strip_suffix('\n').unwrap_or(line);
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            logical.push_str(line);
+            let trailing = logical.bytes().rev().take_while(|b| *b == b'\\').count();
+            if trailing % 2 == 1 {
+                logical.pop();
+                self.license_install_join = logical;
+            } else {
+                self.license_install_dests
+                    .extend(install_copy_docdirs(&logical));
+            }
         }
         if self.license_section.is_none() && self.license_preamble {
             let trimmed = line.trim_start();
@@ -2777,11 +2932,15 @@ impl SpecCheck {
 
     /// The anchor for the `%install` licence-copy route (#833): a
     /// recorded destination counts when the destination directory
-    /// (the destination itself or its parent) appears as an
-    /// entry in some `%files` section of the spec, so the directory
-    /// the licence file was copied into is actually shipped.
-    /// `%exclude` and `%ghost` lines carry no shipped content and
-    /// contribute no entries.
+    /// (the destination itself or one of its ancestors) appears as
+    /// an entry in some `%files` section of the spec, so the
+    /// directory the licence file was copied into is actually
+    /// shipped. Lines that carry no shipped entries contribute no
+    /// anchor: `%exclude` and `%ghost` lines carry no shipped
+    /// content, a `%dir` line ships the directory alone and not the
+    /// files copied into it, and `%docdir`, `%defattr` and
+    /// conditional lines declare or guard entries rather than
+    /// shipping any.
     fn install_dest_shipped(&self, pkg: &SpecPkg) -> bool {
         if self.license_install_dests.is_empty() {
             return false;
@@ -2803,17 +2962,51 @@ impl SpecCheck {
             if !in_files {
                 continue;
             }
-            let first = line.split_whitespace().next();
-            if matches!(first, Some("%exclude") | Some("%ghost")) {
+            // A standalone `#` token opens a trailing comment; the
+            // tokens before it are the line's content.
+            let tokens: Vec<&str> = line
+                .split_whitespace()
+                .take_while(|t| !t.starts_with('#'))
+                .collect();
+            let Some(&first) = tokens.first() else {
+                continue;
+            };
+            let directive: String = first
+                .strip_prefix('%')
+                .unwrap_or(first)
+                .chars()
+                .take_while(|c| c.is_ascii_alphabetic())
+                .collect();
+            if matches!(
+                directive.as_str(),
+                "exclude"
+                    | "ghost"
+                    | "dir"
+                    | "docdir"
+                    | "defattr"
+                    | "if"
+                    | "ifarch"
+                    | "ifnarch"
+                    | "ifos"
+                    | "ifnos"
+                    | "else"
+                    | "endif"
+            ) {
                 continue;
             }
-            shipped.extend(line.split_whitespace().map(|t| t.trim_end_matches('/')));
+            shipped.extend(tokens.iter().map(|t| t.trim_end_matches('/')));
         }
         self.license_install_dests.iter().any(|dest| {
-            shipped.contains(&dest.as_str())
-                || dest
-                    .rsplit_once('/')
-                    .is_some_and(|(parent, _)| shipped.contains(&parent))
+            let mut at = dest.as_str();
+            loop {
+                if shipped.contains(&at) {
+                    return true;
+                }
+                match at.rsplit_once('/') {
+                    Some((parent, _)) if !parent.is_empty() => at = parent,
+                    _ => return false,
+                }
+            }
         })
     }
 
@@ -6125,6 +6318,13 @@ Patch0: foo.patch
             !has(&filed, "no-license-file-in-spec"),
             "results: {filed:?}"
         );
+        // The `-t` value is the destination: the copy lands in the
+        // target directory and every positional argument is a source.
+        let target = run("install -t %{buildroot}%{_docdir}/%{name} COPYING");
+        assert!(
+            !has(&target, "no-license-file-in-spec"),
+            "results: {target:?}"
+        );
     }
 
     #[test]
@@ -6184,14 +6384,6 @@ Patch0: foo.patch
         // when a directory argument carries a licence stem.
         let mkdir = run("install -d COPYING %{buildroot}%{_docdir}/%{name}/");
         assert!(has(&mkdir, "no-license-file-in-spec"), "results: {mkdir:?}");
-        // The `-t` value is the flag's value, not the destination:
-        // the destination stays the final positional argument, so a
-        // lone source remains.
-        let target = run("install -t %{buildroot}%{_docdir}/%{name} COPYING");
-        assert!(
-            has(&target, "no-license-file-in-spec"),
-            "results: {target:?}"
-        );
         // A flag value carrying a licence stem is the flag's value,
         // not a source.
         let flag_value = run("install -m COPYING README %{buildroot}%{_docdir}/%{name}/");
@@ -6199,6 +6391,107 @@ Patch0: foo.patch
             has(&flag_value, "no-license-file-in-spec"),
             "results: {flag_value:?}"
         );
+    }
+
+    #[test]
+    fn no_license_file_install_copy_hardening_873() {
+        let hdr = "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n";
+        let files = "%files\n%{_bindir}/foo\n%{_docdir}/%{name}/\n";
+        let run = |install: &str| run_mini(&format!("{hdr}%install\n{install}\n{files}"));
+        for line in [
+            // Every qualifying copy on the line is recorded: the
+            // shipped second destination anchors even though the
+            // first copy names an unshipped docdir.
+            "cp COPYING %{buildroot}%{_docdir}/other/; cp COPYING %{buildroot}%{_docdir}/%{name}/",
+            // A command after a pipe is at command position.
+            "echo done | cp COPYING %{buildroot}%{_docdir}/%{name}/",
+            // A redirection and its target are not arguments.
+            "cp COPYING %{buildroot}%{_docdir}/%{name}/ > /dev/null 2>&1",
+            // Quoted tokens name the same paths.
+            "cp \"COPYING\" \"%{buildroot}%{_docdir}/%{name}/\"",
+            // An environment assignment precedes the command.
+            "LC_ALL=C install -m 644 COPYING %{buildroot}%{_docdir}/%{name}",
+            // An absolute tool path qualifies by its basename.
+            "/usr/bin/install -m 644 COPYING %{buildroot}%{_docdir}/%{name}",
+            // The unbraced buildroot spelling.
+            "cp COPYING %buildroot%{_docdir}/%{name}/",
+            // The glued target-directory form names the destination.
+            "install --target-directory=%{buildroot}%{_docdir}/%{name} COPYING",
+            // A bundled flag's value is the following token: `644`
+            // is the mode, `COPYING` a source.
+            "install -pm 644 COPYING %{buildroot}%{_docdir}/%{name}",
+            // A `#` glued to a word is no comment: the line after a
+            // `${var#pattern}` expansion still counts in full.
+            "D=${DOCROOT#prefix} cp COPYING %{buildroot}%{_docdir}/%{name}/",
+            // A `-d` operand after `--` is a file operand, not the
+            // directory-creation flag.
+            "install -- -d COPYING %{buildroot}%{_docdir}/%{name}",
+        ] {
+            let results = run(line);
+            assert!(
+                !has(&results, "no-license-file-in-spec"),
+                "line {line}: {results:?}"
+            );
+        }
+        // A backslash continuation joins the command's lines.
+        let joined = run("install -m 644 COPYING \\\n        %{buildroot}%{_docdir}/%{name}");
+        assert!(
+            !has(&joined, "no-license-file-in-spec"),
+            "results: {joined:?}"
+        );
+        // The anchor walks every ancestor of the destination.
+        let deep = run_mini(
+            "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n%install\ncp COPYING %{buildroot}%{_docdir}/%{name}/deep/\n%files\n%{_bindir}/foo\n%{_docdir}/\n",
+        );
+        assert!(!has(&deep, "no-license-file-in-spec"), "results: {deep:?}");
+        // The literal docdir path names the docdir too.
+        let literal = run_mini(
+            "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n%install\ncp COPYING %{buildroot}/usr/share/doc/%{name}/\n%files\n%{_bindir}/foo\n/usr/share/doc/%{name}/\n",
+        );
+        assert!(
+            !has(&literal, "no-license-file-in-spec"),
+            "results: {literal:?}"
+        );
+        for line in [
+            // A destination without the buildroot names the build
+            // host's docdir, not the packaged copy.
+            "cp COPYING %{_docdir}/%{name}/",
+            // A bundled flag ending the bundle takes the next token
+            // as its value: `COPYING` here is the mode, no source
+            // remains.
+            "install -pm COPYING %{buildroot}%{_docdir}/%{name}",
+        ] {
+            let results = run(line);
+            assert!(
+                has(&results, "no-license-file-in-spec"),
+                "line {line}: {results:?}"
+            );
+        }
+        // The destination named only by lines that ship nothing does
+        // not anchor the copy.
+        for files_section in [
+            // A `%dir` entry ships the directory alone, not the
+            // files copied into it.
+            "%files\n%{_bindir}/foo\n%dir %{_docdir}/%{name}\n",
+            // A trailing comment names nothing shipped.
+            "%files\n%{_bindir}/foo # %{_docdir}/%{name}\n",
+            // `%docdir` declares the directory; it ships nothing.
+            "%files\n%{_bindir}/foo\n%docdir %{_docdir}/%{name}\n",
+            // `%defattr` sets attributes for the entries that
+            // follow; its own tokens ship nothing.
+            "%files\n%{_bindir}/foo\n%defattr(-,root,root,-) %{_docdir}/%{name}\n",
+            // A conditional guards entries; its own tokens ship
+            // nothing.
+            "%files\n%{_bindir}/foo\n%if %{_docdir}/%{name}\n%endif\n",
+        ] {
+            let results = run_mini(&format!(
+                "{hdr}%install\ncp COPYING %{{buildroot}}%{{_docdir}}/%{{name}}/\n{files_section}"
+            ));
+            assert!(
+                has(&results, "no-license-file-in-spec"),
+                "files {files_section}: {results:?}"
+            );
+        }
     }
 
     #[test]
