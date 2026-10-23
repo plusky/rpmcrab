@@ -96,6 +96,7 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ),
     ("icon_sizes.rs", "info_size_re", "ctor-once"),
     ("branding_policy.rs", "re_branding_generic", "ctor-once"),
+    ("branding_policy.rs", "re_icon_theme", "ctor-once"),
     // Config-driven with format!.
     ("tags.rs", "invalid_url", "config"),
     ("tags.rs", "forbidden_words", "config"),
