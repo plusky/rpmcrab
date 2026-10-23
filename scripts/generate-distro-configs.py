@@ -532,6 +532,8 @@ PRUNE_CANDIDATES = {
     "service-default-enabled": "killed: InitScriptCheck deleted (issue #214)",
     # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/BinariesCheck.py
     "invalid-ldconfig-symlink": "killed: openSUSE config says 'Doesn't seem to make sense'",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/BinariesCheck.py
+    "invalid-soname": "killed: openSUSE config says 'Doesn't seem to make sense'",
     # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py
     "only-non-binary-in-usr-lib": "killed: openSUSE config says 'Doesn't seem to make sense'",
     # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py
