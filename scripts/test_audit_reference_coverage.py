@@ -963,6 +963,7 @@ def test_stale_check_catches_name_keyed_entry():
         "info-files-without-install-info-postun",
         "invalid-build-requires",
         "invalid-ldconfig-symlink",
+        "invalid-soname",
         "jar-not-indexed",
         "lengthy-symlink",
         "lib-package-without-%mklibname",

@@ -1593,6 +1593,14 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 
 [[divergence]]
 case = "global"
+check = "invalid-soname"
+kind = "missing"
+reason = "Deliberate removal (issue #883): openSUSE's own rpmlint config says 'Doesn't seem to make sense' about this finding and filters it, so it reaches no shipped-config user. The port does not emit it; the three findings carrying the same config verdict (invalid-ldconfig-symlink, only-non-binary-in-usr-lib, outside-libdir-files) are recorded removals on the same ground. A malformed SONAME still fails the validity gate that guards the symlink and shlib-policy checks. The reference still emits it."
+since = "0.3.1"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/BinariesCheck.py"
+
+[[divergence]]
+case = "global"
 check = "only-non-binary-in-usr-lib"
 kind = "missing"
 reason = "Deliberate removal per triage: openSUSE's own rpmlint config says 'Doesn't seem to make sense' about this finding. The port does not emit it. The reference still emits it."
