@@ -963,9 +963,22 @@ fn name_carries_licence(name: &str) -> bool {
     false
 }
 
+/// The digit run glued to a `COPYING` stem in an uppercased glob
+/// prefix, with the byte that closes it (`None` at the end of the
+/// prefix); `None` when the prefix carries no `COPYING` stem.
+/// The digits are the licence version glued to the GNU licence
+/// file's name, the shape the plain name test accepts for
+/// `COPYING3` and `COPYING3.LIB`.
+fn copying_digit_run(upper: &str) -> Option<(usize, Option<u8>)> {
+    let rest = upper.strip_prefix("COPYING")?;
+    let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+    Some((digits, rest.as_bytes().get(digits).copied()))
+}
+
 /// A globbed name whose literal prefix reaches into a licence stem
 /// (`COPY*`, `LICEN*`, `LICENSE-*`): the glob ships the licence file
-/// among its matches.
+/// among its matches. A `COPYING` prefix closed by a digit run
+/// counts too (`COPYING3*`), mirroring the plain name test.
 fn glob_prefix_carries_licence(basename: &str) -> bool {
     if !basename.contains(['*', '?', '[']) {
         return false;
@@ -990,6 +1003,10 @@ fn glob_prefix_carries_licence(basename: &str) -> bool {
                 || upper == *stem
                 || (upper.starts_with(stem)
                     && !upper.as_bytes()[stem.len()].is_ascii_alphanumeric())
+                || (*stem == "COPYING"
+                    && copying_digit_run(&upper).is_some_and(|(digits, next)| {
+                        digits > 0 && next.is_none_or(|b| !b.is_ascii_alphanumeric())
+                    }))
         })
 }
 
@@ -999,7 +1016,9 @@ fn glob_prefix_carries_licence(basename: &str) -> bool {
 /// matches are judged on the names they can carry rather than
 /// treated as unknowable. A digit continuation does not bury the
 /// stem: `COPYING3*` still runs into the digit-suffixed licence
-/// name the plain test accepts.
+/// name the plain test accepts. A digit run running into a letter
+/// (`COPYING3X*`) is the longer word again, exactly as the plain
+/// test rejects `COPYING3X`.
 fn glob_prefix_buries_licence_stem(basename: &str) -> bool {
     if !basename.contains(['*', '?', '[']) {
         return false;
@@ -1014,7 +1033,11 @@ fn glob_prefix_buries_licence_stem(basename: &str) -> bool {
         .any(|stem| {
             upper.len() > stem.len()
                 && upper.starts_with(stem)
-                && upper.as_bytes()[stem.len()].is_ascii_alphabetic()
+                && (upper.as_bytes()[stem.len()].is_ascii_alphabetic()
+                    || (*stem == "COPYING"
+                        && copying_digit_run(&upper).is_some_and(|(digits, next)| {
+                            digits > 0 && next.is_some_and(|b| b.is_ascii_alphabetic())
+                        })))
         })
 }
 
@@ -1416,12 +1439,10 @@ fn source_line_is_archive(line: &str) -> bool {
         return false;
     }
     [
-        ".tar", ".tgz", ".tbz", ".txz", ".zip", ".jar", ".7z", ".crate",
+        ".tar", ".tgz", ".tbz", ".txz", ".zip", ".jar", ".7z", ".crate", ".gem", ".whl",
     ]
     .iter()
-    .any(|ext| value.contains(ext))
-        || value_names_extension(value, ".gem")
-        || value_names_extension(value, ".whl")
+    .any(|ext| value_names_extension(value, ext))
 }
 
 /// The line is a `Source`/`SourceN` tag whose value names a package
@@ -2859,10 +2880,11 @@ impl SpecCheck {
                 continue;
             }
             if is_bare_macro(token) {
+                // A generator token is not a judged entry, so it does
+                // not consume a pending `%dir` flag: the flag belongs
+                // to the next judged entry, as it does across the
+                // unbraced generator and qualifier tokens.
                 scan.has_generator_macro = true;
-                if !force_dir {
-                    dir_next = false;
-                }
                 continue;
             }
             let is_dir = dir_next || token.ends_with('/');
@@ -6112,6 +6134,102 @@ Patch0: foo.patch
                 "body {body}: {results:?}"
             );
         }
+    }
+
+    #[test]
+    fn glob_prefix_copying_digit_suffix_840() {
+        // The glob prefix tests mirror the plain name test's
+        // `COPYING`+digits rule: a digit run closed by the end of the
+        // prefix or a non-alphanumeric boundary carries the stem, and
+        // a digit run running into a letter buries it, exactly as the
+        // plain test accepts `COPYING3` and rejects `COPYING3X`.
+        for name in ["COPYING3*", "COPYING30*", "COPYING3.LIB*", "COPYING3-*"] {
+            assert!(glob_prefix_carries_licence(name), "{name}");
+            assert!(!glob_prefix_buries_licence_stem(name), "{name}");
+        }
+        for name in ["COPYING3X*", "COPYING3X.txt*"] {
+            assert!(!glob_prefix_carries_licence(name), "{name}");
+            assert!(glob_prefix_buries_licence_stem(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn no_license_file_doc_glob_copying_digit_letter_suffix_840() {
+        let hdr = "Name: foo\nLicense:        MIT\nSource:         foo-1.0.tar.gz\n";
+        let run = |body: &str| run_mini(&format!("{hdr}%files\n{body}"));
+        // A `%doc` glob running `COPYING` into digits and then a
+        // letter names only longer words (the buried-stem shape), so
+        // the section stays decidable and the E fires, as it does for
+        // the plain name `COPYING3X`.
+        let buried = run("%doc COPYING3X*\n%{_bindir}/foo\n");
+        assert!(
+            has(&buried, "no-license-file-in-spec"),
+            "results: {buried:?}"
+        );
+        // The digit-suffixed glob ships the licence file among its
+        // matches: presence, and the E stays silent.
+        let digit = run("%doc COPYING3*\n%{_bindir}/foo\n");
+        assert!(
+            !has(&digit, "no-license-file-in-spec"),
+            "results: {digit:?}"
+        );
+    }
+
+    #[test]
+    fn archive_source_extension_boundary_840() {
+        // Every archive extension goes through the boundary-aware
+        // test: an extension running into a longer word names no
+        // archive, so with no other source the package counts as
+        // assembled from local files and the E stays silent.
+        for source in ["foo-1.0.tarball", "foo-1.0.zippo", "foo-1.0.crates"] {
+            let results = run_mini(&format!(
+                "Name: foo\nLicense:        MIT\nSource:         {source}\n%files\n%{{_bindir}}/foo\n"
+            ));
+            assert!(
+                !has(&results, "no-license-file-in-spec"),
+                "source {source}: {results:?}"
+            );
+        }
+        // The same extensions closed by a boundary or the end of the
+        // value still name an archive (controls): the E fires.
+        for source in ["foo-1.0.tar.gz", "foo-1.0.zip", "foo-1.0.crate"] {
+            let results = run_mini(&format!(
+                "Name: foo\nLicense:        MIT\nSource:         {source}\n%files\n%{{_bindir}}/foo\n"
+            ));
+            assert!(
+                has(&results, "no-license-file-in-spec"),
+                "source {source}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn license_scan_dir_flag_passes_generator_tokens_840() {
+        // A mid-line `%dir` flag belongs to the next judged entry:
+        // generator tokens of either spelling pass it through, so the
+        // licence name after `%dir <generator>` is judged a directory
+        // in both spellings and establishes no presence.
+        let config = config_mini();
+        let check = SpecCheck::new(&config);
+        for generator in ["%{expand:%{foo}}", "%pyproject_files"] {
+            let mut scan = FilesSectionScan::default();
+            check.scan_license_entries(
+                &mut scan,
+                &["/x/foo", "%dir", generator, "/y/COPYING"],
+                false,
+                false,
+            );
+            assert!(scan.has_generator_macro, "generator {generator}");
+            assert!(!scan.plain_license_entry, "generator {generator}");
+        }
+        // The flag still applies to the next judged entry (control),
+        // and a licence entry with no flag is presence (control).
+        let mut scan = FilesSectionScan::default();
+        check.scan_license_entries(&mut scan, &["/x/foo", "%dir", "/y/COPYING"], false, false);
+        assert!(!scan.plain_license_entry);
+        let mut scan = FilesSectionScan::default();
+        check.scan_license_entries(&mut scan, &["/y/COPYING"], false, false);
+        assert!(scan.plain_license_entry);
     }
 
     #[test]

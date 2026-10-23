@@ -381,6 +381,10 @@ impl TagsCheck {
         // plusky/rpmcrab#283 (DevelNumberExceptions / word-boundary regex
         // for required names) stays open.
         let requirer_is_biarch_devel = is_match(devel_infix_regex(), &pkg.name);
+        // The requirer-side half of the cross-family credit (#861),
+        // classified once per package: the per-leaf test then only
+        // parses the leaf.
+        let family_requirer = family_requirer(&pkg.name);
         // The generated-soname package-name set is consulted only by
         // the explicit-lib-dependency predicate, and only for a leaf
         // that passes that predicate's decidable guards; it is built on
@@ -426,7 +430,7 @@ impl TagsCheck {
                     if !devel_depend
                         && !requirer_is_biarch_devel
                         && is_match(&self.devel_re, &leaf.name)
-                        && !cross_family_pair(&pkg.name, &leaf.name)
+                        && !family_requirer.credits(&leaf.name)
                     {
                         add_info(out, Level::Error, pkg, "devel-dependency", &[&leaf.name]);
                         devel_depend = true;
@@ -624,63 +628,110 @@ fn mingw_family(name: &str) -> Option<&str> {
     (name.contains('-') && (first == "mingw32" || first == "mingw64")).then_some(first)
 }
 
-/// Whether `leaf` is the target sys-root devel package of the cross
-/// toolchain family `requirer` belongs to (issue #861). The
-/// `devel-dependency` harm model is a runtime package dragging host
-/// development files onto end systems; within one cross toolchain
-/// family the direction is reversed, because the target sys-root
-/// devel package is the compiler's runtime data.
-///
-/// The credit is narrow — a genuine sys-root leaf only:
-/// - Cross requirers are compiler packages, `cross-<target>-gcc...`
-///   (the tool may carry further components, `gcc13-bootstrap`), and
-///   the leaf is that target's sys-root package,
-///   `cross-<target>-<libc>-devel` with libc `glibc` or `newlib`.
-///   The bare-metal families spell the target with a trailing `-elf`
-///   component the sys-root packages drop (riscv64-elf pairs with
-///   riscv64); that spelling is the newlib toolchain, so for `-elf`
-///   requirers the libc is part of the pair: the stripped form
-///   credits only a newlib leaf, and `cross-riscv64-elf-gcc13` on
-///   `cross-riscv64-glibc-devel` keeps firing. A requirer name
-///   without the `-elf` spelling carries no libc component, so its
-///   matching is on the target alone and either libc leaf on that
-///   target credits: `cross-riscv64-gcc13` on
-///   `cross-riscv64-newlib-devel` stays silent alongside its glibc
-///   leaf. Both libc spellings occur among the non-`-elf` families
-///   (glibc for the Linux targets, newlib for amdgcn, arm-none,
-///   nvptx and rx), so the target alone is the decidable predicate
-///   there; the collision is pinned by
-///   `devel_dependency_cross_family_non_elf_libc_collision_is_silent`.
-/// - MinGW requirers (`mingw32-*`, `mingw64-*`) pair only with the
-///   same bitness family's sys-root leaves: `<bitness>-headers` and
-///   `<bitness>-winpthreads-devel`.
-///
-/// Everything else keeps firing: any other same-target devel match
-/// (a library's `-devel`/`-static`, binutils-devel, the compiler's
-/// own devel package), a runtime package requiring its own devel
-/// package, a different target's sys-root devel package, the wrong
-/// libc's sys-root package for an `-elf` requirer, a host devel
-/// package required by a cross package, a cross devel package
-/// required by a host package, and the other MinGW bitness.
-fn cross_family_pair(requirer: &str, leaf: &str) -> bool {
-    if requirer.starts_with("cross-") || leaf.starts_with("cross-") {
-        let Some((leaf_target, leaf_libc)) = cross_sysroot_leaf(leaf) else {
-            return false;
+/// The requirer-side half of the cross-family credit (issue #861),
+/// classified once per package, so the per-leaf test only parses
+/// the leaf.
+enum FamilyRequirer {
+    /// A cross compiler package: the target it builds for, with any
+    /// trailing `-elf` component stripped, and the libc the pair
+    /// carries — `Some` only for the `-elf` spelling, which is
+    /// the newlib toolchain.
+    Cross {
+        target: String,
+        libc: Option<&'static str>,
+    },
+    /// A MinGW package: its bitness family (`mingw32` or `mingw64`).
+    Mingw(String),
+    /// A package of neither family.
+    Neither,
+}
+
+/// Classify a package name as a cross-family requirer: a cross
+/// compiler (`cross-<target>-gcc...`, the tool may carry further
+/// components, `gcc13-bootstrap`) or a MinGW package.
+fn family_requirer(name: &str) -> FamilyRequirer {
+    if name.starts_with("cross-") {
+        return match cross_compiler_target(name) {
+            Some(target) => {
+                let elf_base = target.strip_suffix("-elf").map(str::to_string);
+                match elf_base {
+                    Some(base) => FamilyRequirer::Cross {
+                        target: base,
+                        libc: Some("newlib"),
+                    },
+                    None => FamilyRequirer::Cross { target, libc: None },
+                }
+            }
+            None => FamilyRequirer::Neither,
         };
-        let Some(req_target) = cross_compiler_target(requirer) else {
-            return false;
-        };
-        let (req_base, req_libc) = match req_target.strip_suffix("-elf") {
-            Some(base) => (base, Some("newlib")),
-            None => (req_target.as_str(), None),
-        };
-        return req_base == leaf_target && req_libc.is_none_or(|libc| libc == leaf_libc);
     }
-    match (mingw_family(requirer), mingw_family(leaf)) {
-        (Some(req), Some(dep)) if req == dep => {
-            leaf == format!("{dep}-headers") || leaf == format!("{dep}-winpthreads-devel")
+    match mingw_family(name) {
+        Some(family) => FamilyRequirer::Mingw(family.to_string()),
+        None => FamilyRequirer::Neither,
+    }
+}
+
+impl FamilyRequirer {
+    /// Whether `leaf` is this requirer's target sys-root devel
+    /// package (issue #861). The `devel-dependency` harm model is a
+    /// runtime package dragging host development files onto end
+    /// systems; within one cross toolchain family the direction is
+    /// reversed, because the target sys-root devel package is the
+    /// compiler's runtime data.
+    ///
+    /// The credit is narrow — a genuine sys-root leaf only:
+    /// - For a cross requirer the leaf is that target's sys-root
+    ///   package, `cross-<target>-<libc>-devel` with libc `glibc` or
+    ///   `newlib`. The bare-metal `-elf` spelling (the measured
+    ///   family is riscv64-elf) spells the target with a trailing
+    ///   `-elf` component the sys-root packages drop (riscv64-elf
+    ///   pairs with riscv64); the strip mirrors that leaf-side
+    ///   spelling, so it applies by spelling, not by measured
+    ///   family, and `-none` is never stripped — the sys-root
+    ///   packages keep it in the target
+    ///   (`cross-arm-none-newlib-devel`), so an `arm` leaf never
+    ///   pairs with an `arm-none` requirer. The `-elf` spelling is
+    ///   the newlib toolchain, so for `-elf` requirers the libc is
+    ///   part of the pair: the stripped form credits only a newlib
+    ///   leaf, and `cross-riscv64-elf-gcc13` on
+    ///   `cross-riscv64-glibc-devel` keeps firing. A requirer name
+    ///   without the `-elf` spelling carries no libc component, so
+    ///   its matching is on the target alone and either libc leaf
+    ///   on that target credits: `cross-riscv64-gcc13` on
+    ///   `cross-riscv64-newlib-devel` stays silent alongside its
+    ///   glibc leaf. Both libc spellings occur among the
+    ///   non-`-elf` families (glibc for the Linux targets, newlib
+    ///   for amdgcn, arm-none, nvptx and rx), so the target alone
+    ///   is the decidable predicate there; the collision is pinned
+    ///   by `devel_dependency_cross_family_non_elf_libc_collision_is_silent`.
+    /// - MinGW requirers pair only with the same bitness family's
+    ///   sys-root leaves: `<bitness>-headers` and
+    ///   `<bitness>-winpthreads-devel`.
+    ///
+    /// Everything else keeps firing: any other same-target devel
+    /// match (a library's `-devel`/`-static`, binutils-devel, the
+    /// compiler's own devel package), a runtime package requiring
+    /// its own devel package, a different target's sys-root devel
+    /// package, the wrong libc's sys-root package for an `-elf`
+    /// requirer, a host devel package required by a cross package, a
+    /// cross devel package required by a host package, a cross
+    /// requirer on a MinGW leaf, a MinGW requirer on a cross leaf,
+    /// and the other MinGW bitness.
+    fn credits(&self, leaf: &str) -> bool {
+        match self {
+            FamilyRequirer::Cross { target, libc } => {
+                let Some((leaf_target, leaf_libc)) = cross_sysroot_leaf(leaf) else {
+                    return false;
+                };
+                target.as_str() == leaf_target && libc.is_none_or(|l| l == leaf_libc)
+            }
+            FamilyRequirer::Mingw(family) => {
+                mingw_family(leaf) == Some(family.as_str())
+                    && (leaf == format!("{family}-headers")
+                        || leaf == format!("{family}-winpthreads-devel"))
+            }
+            FamilyRequirer::Neither => false,
         }
-        _ => false,
     }
 }
 
@@ -3213,6 +3264,11 @@ mod rich_dep_emission_tests {
         // are the measured Factory population (sweep
         // run-20261022-857d5ece), plus the multi-component tool
         // spelling (gcc13-bootstrap) from plusky's review probes.
+        // The winpthreads pairs are pinned without a measured
+        // instance: no winpthreads pair occurs in the sweep
+        // population (its MinGW packages require headers only); the
+        // credit covers them because the leaf set is the bitness
+        // family's sys-root pair by construction.
         let config = rich_test_config(&[], false);
         for (requirer, dep) in [
             ("cross-aarch64-gcc13", "cross-aarch64-glibc-devel"),
@@ -3236,6 +3292,7 @@ mod rich_dep_emission_tests {
             ("mingw32-runtime", "mingw32-headers"),
             ("mingw32-gcc", "mingw32-winpthreads-devel"),
             ("mingw64-cross-gcc", "mingw64-headers"),
+            ("mingw64-cross-gcc-bootstrap", "mingw64-headers"),
             ("mingw64-runtime", "mingw64-headers"),
             ("mingw64-gcc", "mingw64-winpthreads-devel"),
         ] {
@@ -3302,11 +3359,12 @@ mod rich_dep_emission_tests {
         // or the compiler's own -devel), a runtime package requiring
         // its own devel package, the wrong libc's sys-root package
         // for an -elf (newlib) toolchain, a MinGW library devel
-        // package, a target that is only a prefix of the requirer's
-        // target, a host devel package required by a cross package, a
-        // cross devel package required by a host package, the other
-        // MinGW bitness and the other cross naming scheme all keep
-        // firing.
+        // package, a target that is only a prefix of the other
+        // side's target (in either direction), a host devel package
+        // required by a cross package, a cross devel package required
+        // by a host package, a cross requirer on a MinGW leaf, a
+        // MinGW requirer on a cross leaf, and the other MinGW
+        // bitness all keep firing.
         let config = rich_test_config(&[], false);
         for (requirer, dep) in [
             ("cross-aarch64-gcc13", "cross-s390x-glibc-devel"),
@@ -3368,6 +3426,38 @@ mod rich_dep_emission_tests {
                 hits[0].1
             );
         }
+    }
+
+    #[test]
+    fn cross_family_spelling_rules_900() {
+        // The pair predicate's spelling rules, pinned directly. The
+        // `-elf` strip is by spelling — any `-elf` target, not
+        // only the measured riscv64-elf family — and the `-elf`
+        // pair carries its newlib libc; a requirer without the
+        // `-elf` spelling credits either libc on its target; `-none`
+        // is never stripped, because the sys-root packages keep it
+        // in the target.
+        let credits = |requirer: &str, leaf: &str| family_requirer(requirer).credits(leaf);
+        assert!(credits(
+            "cross-riscv64-elf-gcc13",
+            "cross-riscv64-newlib-devel"
+        ));
+        assert!(credits("cross-mips-elf-gcc12", "cross-mips-newlib-devel"));
+        assert!(!credits("cross-mips-elf-gcc12", "cross-mips-glibc-devel"));
+        assert!(credits("cross-riscv64-gcc13", "cross-riscv64-newlib-devel"));
+        assert!(credits("cross-riscv64-gcc13", "cross-riscv64-glibc-devel"));
+        assert!(!credits("cross-arm-none-gcc14", "cross-arm-newlib-devel"));
+        assert!(credits(
+            "cross-arm-none-gcc14",
+            "cross-arm-none-newlib-devel"
+        ));
+        // The two families never credit across, and the MinGW leaf
+        // set is bitness-exact.
+        assert!(credits("mingw64-gcc", "mingw64-winpthreads-devel"));
+        assert!(!credits("mingw64-gcc", "mingw32-winpthreads-devel"));
+        assert!(!credits("cross-aarch64-gcc13", "mingw64-headers"));
+        assert!(!credits("mingw64-cross-gcc", "cross-aarch64-glibc-devel"));
+        assert!(!credits("someapp", "cross-aarch64-glibc-devel"));
     }
 
     #[test]
