@@ -33,7 +33,7 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
-use crate::pkg::dep::leaf_account_capability;
+use crate::pkg::dep::{DepInfo, leaf_account_capability};
 use crate::pkg::pkgfile::{self, PkgFile, is_reg};
 use crate::tools::{Tool, ToolSource, test_source};
 use std::sync::OnceLock;
@@ -721,6 +721,14 @@ pub struct FilesCheck {
     owner_candidates: Vec<OwnerCandidate>,
     declared_users: HashMap<String, HashSet<String>>,
     declared_groups: HashMap<String, HashSet<String>>,
+    /// Session state for the `no-dependency-on` perl/python rules
+    /// (issue #862): the candidates whose own lists carry no credited
+    /// base dependency, and every checked package's dependency lists
+    /// by package name, so `after_checks` can credit an anchor
+    /// requirement on a same-source sibling that itself carries the
+    /// base dependency.
+    nodep_candidates: Vec<NodepCandidate>,
+    pkg_deps: HashMap<String, Vec<PkgDeps>>,
     /// Decompressed bytes per file path, shared between `is_utf8_file`
     /// and `manpage_text` (see `decompressed_bytes`); `None` entries
     /// record outputs that could not be obtained or exceeded the text
@@ -841,6 +849,8 @@ impl FilesCheck {
             owner_candidates: Vec::new(),
             declared_users: HashMap::new(),
             declared_groups: HashMap::new(),
+            nodep_candidates: Vec::new(),
+            pkg_deps: HashMap::new(),
             decompressed_cache: std::cell::RefCell::new(HashMap::new()),
         }
     }
@@ -865,6 +875,9 @@ struct PkgState {
     lib_package: bool,
     perl_dep_error: bool,
     python_dep_error: bool,
+    /// `no-dependency-on` candidates this package recorded (issue
+    /// #862), drained into the check's session state by `check_binary`.
+    nodep_candidates: Vec<NodepCandidate>,
     log_files: Vec<String>,
     logrotate_file: bool,
     debuginfo_srcs: bool,
@@ -944,6 +957,10 @@ impl Check for FilesCheck {
         self.session_files
             .extend(pkg.files.iter().map(|f| f.name.clone()));
         self.note_declared_owners(pkg);
+        self.pkg_deps
+            .entry(pkg.name.clone())
+            .or_default()
+            .push(PkgDeps::snapshot(pkg));
         self.check_nodoc(pkg, &st);
         self.check_meta_package(pkg, &st, out);
         self.check_empty_debuginfo(pkg, &st, out);
@@ -956,6 +973,7 @@ impl Check for FilesCheck {
         self.check_debuginfo_without_sources(pkg, &st, out);
         self.check_bindir_exes(pkg, &st, out);
         self.check_sysconfig_fillup_usage(pkg, out);
+        self.nodep_candidates.append(&mut st.nodep_candidates);
     }
 
     fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
@@ -1039,6 +1057,26 @@ impl Check for FilesCheck {
                 None,
             ));
         }
+        // The session-aware `no-dependency-on` decision (issue #862):
+        // a candidate stays quiet when one of its anchor requirements
+        // names a package of the run built from the same source whose
+        // own lists carry the base dependency — the `-lang`/`-devel`
+        // subpackage anchored on its main package. The credit is one
+        // hop: the sibling must carry the dependency itself, a
+        // requirement on a package of another source credits nothing,
+        // and an anchor whose sibling carries nothing credits nothing.
+        for cand in &self.nodep_candidates {
+            if !self.anchor_credits(cand) {
+                out.add_info(make_finding(
+                    &cand.name,
+                    &cand.arch,
+                    Level::Error,
+                    "no-dependency-on",
+                    vec![cand.base.to_string(), cand.version.clone()],
+                    None,
+                ));
+            }
+        }
     }
 
     fn reset(&mut self) {
@@ -1049,6 +1087,8 @@ impl Check for FilesCheck {
         self.owner_candidates.clear();
         self.declared_users.clear();
         self.declared_groups.clear();
+        self.nodep_candidates.clear();
+        self.pkg_deps.clear();
         self.decompressed_cache.borrow_mut().clear();
     }
 
@@ -1060,6 +1100,8 @@ impl Check for FilesCheck {
             && self.owner_candidates.is_empty()
             && self.declared_users.is_empty()
             && self.declared_groups.is_empty()
+            && self.nodep_candidates.is_empty()
+            && self.pkg_deps.is_empty()
         {
             return None;
         }
@@ -1071,6 +1113,8 @@ impl Check for FilesCheck {
             owner_candidates: std::mem::take(&mut self.owner_candidates),
             declared_users: std::mem::take(&mut self.declared_users),
             declared_groups: std::mem::take(&mut self.declared_groups),
+            nodep_candidates: std::mem::take(&mut self.nodep_candidates),
+            pkg_deps: std::mem::take(&mut self.pkg_deps),
         }))
     }
 
@@ -1090,6 +1134,10 @@ impl Check for FilesCheck {
                     .or_default()
                     .extend(names);
             }
+            self.nodep_candidates.extend(state.nodep_candidates);
+            for (name, deps) in state.pkg_deps {
+                self.pkg_deps.entry(name).or_default().extend(deps);
+            }
         }
     }
 }
@@ -1097,8 +1145,8 @@ impl Check for FilesCheck {
 /// Cross-package `FilesCheck` state, exported per package and merged
 /// before `after_checks` (`rpmlint#1595`): the session-aware
 /// `no-documentation` (issue #539), `dangling-relative-symlink`
-/// (issue #547) and `non-standard-uid` / `non-standard-gid`
-/// (issue #756) decisions.
+/// (issue #547), `non-standard-uid` / `non-standard-gid`
+/// (issue #756) and `no-dependency-on` (issue #862) decisions.
 struct FilesSessionState {
     nodoc_candidates: Vec<(String, String, String)>,
     documented_sources: HashSet<String>,
@@ -1107,6 +1155,26 @@ struct FilesSessionState {
     owner_candidates: Vec<OwnerCandidate>,
     declared_users: HashMap<String, HashSet<String>>,
     declared_groups: HashMap<String, HashSet<String>>,
+    nodep_candidates: Vec<NodepCandidate>,
+    pkg_deps: HashMap<String, Vec<PkgDeps>>,
+}
+
+/// One `no-dependency-on` candidate from the perl/python base rules
+/// (issue #862): a package shipping interpreter-tree files whose own
+/// dependency lists carry no credited base dependency, held until
+/// `after_checks` knows every package of the run.
+struct NodepCandidate {
+    name: String,
+    arch: String,
+    source: String,
+    /// The finding's first detail: `perl-base` or `python-base`.
+    base: &'static str,
+    /// The finding's second detail: the interpreter version the
+    /// package's files name.
+    version: String,
+    /// The names the package's `Requires`/`PreReq` name: the possible
+    /// anchors.
+    anchors: Vec<String>,
 }
 
 /// The key grouping binary packages built from one source: the
@@ -1637,6 +1705,24 @@ impl FilesCheck {
         }
     }
 
+    /// Whether an anchor requirement credits `cand` (issue #862):
+    /// one of the candidate's `Requires`/`PreReq` names, other than
+    /// its own name, belongs to a package of the run built from the
+    /// candidate's source whose own lists carry the candidate's base
+    /// dependency. The sibling's credit is judged by the same
+    /// own-package predicate, so the anchor is exactly one hop.
+    fn anchor_credits(&self, cand: &NodepCandidate) -> bool {
+        cand.anchors.iter().any(|anchor| {
+            anchor != &cand.name
+                && self.pkg_deps.get(anchor).is_some_and(|pkgs| {
+                    pkgs.iter().any(|sib| {
+                        sib.source == cand.source
+                            && base_credited(&sib.lists(), cand.base, &cand.version)
+                    })
+                })
+        })
+    }
+
     /// Credit the user and group names this package declares through
     /// the source-wide routes, under the package's source key, for the
     /// `after_checks` `non-standard-uid` / `non-standard-gid` decision
@@ -2131,11 +2217,69 @@ fn script_interpreter(chunk: &[u8]) -> (Option<String>, String) {
     (Some(interpreter), args)
 }
 
+/// The dependency lists the `no-dependency-on` base-dependency rules
+/// read: the tested package's own, or a session sibling's snapshot.
+struct DepLists<'a> {
+    requires: &'a [DepInfo],
+    prereq: &'a [DepInfo],
+    recommends: &'a [DepInfo],
+    suggests: &'a [DepInfo],
+}
+
+impl<'a> DepLists<'a> {
+    fn of_pkg(pkg: &'a Pkg) -> Self {
+        Self {
+            requires: &pkg.requires,
+            prereq: &pkg.prereq,
+            recommends: &pkg.recommends,
+            suggests: &pkg.suggests,
+        }
+    }
+
+    /// The `Requires`/`PreReq` union the versioned and path forms read.
+    fn hard(&self) -> impl Iterator<Item = &DepInfo> {
+        self.requires.iter().chain(self.prereq)
+    }
+}
+
+/// One package's dependency lists, snapshotted into the session state
+/// when the package is checked, so `after_checks` can judge whether a
+/// sibling carries a base dependency (issue #862).
+#[derive(Clone)]
+struct PkgDeps {
+    source: String,
+    requires: Vec<DepInfo>,
+    prereq: Vec<DepInfo>,
+    recommends: Vec<DepInfo>,
+    suggests: Vec<DepInfo>,
+}
+
+impl PkgDeps {
+    fn snapshot(pkg: &Pkg) -> Self {
+        Self {
+            source: source_key(pkg),
+            requires: pkg.requires.clone(),
+            prereq: pkg.prereq.clone(),
+            recommends: pkg.recommends.clone(),
+            suggests: pkg.suggests.clone(),
+        }
+    }
+
+    fn lists(&self) -> DepLists<'_> {
+        DepLists {
+            requires: &self.requires,
+            prereq: &self.prereq,
+            recommends: &self.recommends,
+            suggests: &self.suggests,
+        }
+    }
+}
+
 /// rpmlint's `check_versioned_dep`: a `Requires`/`PreReq` on `name` (with an
 /// optional `(arch-bits)` suffix) pinned with `=` to `version`.
-fn check_versioned_dep(pkg: &Pkg, name: &str, version: &str) -> bool {
+fn versioned_dep_in(lists: &DepLists, name: &str, version: &str) -> bool {
     const RPMSENSE_EQUAL: u32 = 8;
-    for d in pkg.requires.iter().chain(&pkg.prereq) {
+    for d in lists.hard() {
         if !dep_name_matches(&d.name, name) {
             continue;
         }
@@ -2148,6 +2292,74 @@ fn check_versioned_dep(pkg: &Pkg, name: &str, version: &str) -> bool {
         return true;
     }
     false
+}
+
+/// Whether the lists carry the perl base dependency for `vers`: the
+/// `=`-pinned `perl-base` / `perl` names and the
+/// `perl(:MODULE_COMPAT_<vers>)` token the reference credits, plus the
+/// interpreter expressed as the unversioned `/usr/bin/perl` path or
+/// the `libperl` soname (issue #862) — the forms a linked perl module
+/// or a perl consumer carries.
+fn perl_base_credited(lists: &DepLists, vers: &str) -> bool {
+    if versioned_dep_in(lists, "perl-base", vers) || versioned_dep_in(lists, "perl", vers) {
+        return true;
+    }
+    let compat = format!("perl(:MODULE_COMPAT_{vers})");
+    if lists
+        .requires
+        .iter()
+        .chain(lists.recommends)
+        .chain(lists.suggests)
+        .any(|d| d.name == compat)
+    {
+        return true;
+    }
+    lists
+        .hard()
+        .any(|d| d.name == "/usr/bin/perl" || d.name.starts_with("libperl.so"))
+}
+
+/// Whether the lists carry the python base dependency for `ver`: the
+/// `=`-pinned `python` / `python-base` / `python(abi)` names the
+/// reference credits, the SUSE base name `python3-base` in any
+/// relation and the versioned interpreter path `/usr/bin/python<ver>`
+/// (issue #568), plus the interpreter expressed as the unversioned
+/// `/usr/bin/python3` path or the `libpython<ver>` soname (issue
+/// #862).
+fn python_base_credited(lists: &DepLists, ver: &str) -> bool {
+    let interpreter = format!("/usr/bin/python{ver}");
+    let soname = format!("libpython{ver}.so");
+    if lists.hard().any(|d| {
+        dep_name_matches(&d.name, "python3-base")
+            || d.name == interpreter
+            || d.name == "/usr/bin/python3"
+            || d.name.starts_with(&soname)
+    }) {
+        return true;
+    }
+    ["python", "python-base", "python(abi)"]
+        .iter()
+        .any(|dep| versioned_dep_in(lists, dep, ver))
+}
+
+/// Whether the lists carry the base dependency a `no-dependency-on`
+/// candidate names.
+fn base_credited(lists: &DepLists, base: &str, version: &str) -> bool {
+    if base == "perl-base" {
+        perl_base_credited(lists, version)
+    } else {
+        python_base_credited(lists, version)
+    }
+}
+
+/// The names a package's `Requires`/`PreReq` name: a
+/// `no-dependency-on` candidate's possible anchors (issue #862).
+fn anchor_names(pkg: &Pkg) -> Vec<String> {
+    pkg.requires
+        .iter()
+        .chain(&pkg.prereq)
+        .map(|d| d.name.clone())
+        .collect()
 }
 
 /// The reference's `^name(\(\w+-\d+\))?$` name match (e.g. `perl-base`,
@@ -3321,8 +3533,8 @@ impl FilesCheck {
         self.check_normal_devel(pkg, fname, st, &fd, out);
         self.check_normal_non_readable(pkg, fname, pkgfile, out);
         self.check_normal_world_w(pkg, fname, pkgfile, out);
-        self.check_normal_perl_dep(pkg, fname, st, out);
-        self.check_normal_python_dep(pkg, fname, st, out);
+        self.check_normal_perl_dep(pkg, fname, st);
+        self.check_normal_python_dep(pkg, fname, st);
         self.check_normal_python_source(pkg, fname, &fd, out);
         self.check_normal_exec(pkg, fname, pkgfile, &mut fd, out);
         self.check_normal_non_conf_in_etc(pkg, fname, pkgfile, out);
@@ -3611,7 +3823,7 @@ impl FilesCheck {
         }
     }
 
-    fn check_normal_perl_dep(&self, pkg: &Pkg, fname: &str, st: &mut PkgState, out: &mut Filter) {
+    fn check_normal_perl_dep(&self, pkg: &Pkg, fname: &str, st: &mut PkgState) {
         if st.perl_dep_error {
             return;
         }
@@ -3636,29 +3848,23 @@ impl FilesCheck {
                 caps.get(2).map(|m| m.as_str()).unwrap_or("")
             )
         };
-        let compat = format!("perl(:MODULE_COMPAT_{vers})");
-        let has_compat = pkg
-            .requires
-            .iter()
-            .chain(&pkg.recommends)
-            .chain(&pkg.suggests)
-            .any(|d| d.name == compat);
-        if !(check_versioned_dep(pkg, "perl-base", &vers)
-            || check_versioned_dep(pkg, "perl", &vers)
-            || has_compat)
-        {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "no-dependency-on",
-                &["perl-base", &vers],
-            );
+        if !perl_base_credited(&DepLists::of_pkg(pkg), &vers) {
+            // No credited form of its own: the decision moves to
+            // `after_checks`, where an anchor sibling can still
+            // credit it (issue #862).
+            st.nodep_candidates.push(NodepCandidate {
+                name: pkg.name.clone(),
+                arch: pkg.arch.clone(),
+                source: source_key(pkg),
+                base: "perl-base",
+                version: vers,
+                anchors: anchor_names(pkg),
+            });
             st.perl_dep_error = true;
         }
     }
 
-    fn check_normal_python_dep(&self, pkg: &Pkg, fname: &str, st: &mut PkgState, out: &mut Filter) {
+    fn check_normal_python_dep(&self, pkg: &Pkg, fname: &str, st: &mut PkgState) {
         if st.python_dep_error {
             return;
         }
@@ -3671,28 +3877,18 @@ impl FilesCheck {
             _ => return,
         };
         let ver = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-        // SUSE names the base package `python3-base`; a dependency on it
-        // carries the base role whatever its version relation, and an
-        // interpreter-path dependency (`/usr/bin/python3.13`) pins the
-        // version in the path itself.
-        let interpreter = format!("/usr/bin/python{ver}");
-        let base_named = pkg
-            .requires
-            .iter()
-            .chain(&pkg.prereq)
-            .any(|d| dep_name_matches(&d.name, "python3-base") || d.name == interpreter);
-        if !base_named
-            && !["python", "python-base", "python(abi)"]
-                .iter()
-                .any(|dep| check_versioned_dep(pkg, dep, ver))
-        {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "no-dependency-on",
-                &["python-base", ver],
-            );
+        if !python_base_credited(&DepLists::of_pkg(pkg), ver) {
+            // No credited form of its own: the decision moves to
+            // `after_checks`, where an anchor sibling can still
+            // credit it (issue #862).
+            st.nodep_candidates.push(NodepCandidate {
+                name: pkg.name.clone(),
+                arch: pkg.arch.clone(),
+                source: source_key(pkg),
+                base: "python-base",
+                version: ver.to_string(),
+                anchors: anchor_names(pkg),
+            });
             st.python_dep_error = true;
         }
     }
@@ -5814,10 +6010,8 @@ mod tests {
             magic: "ASCII text".to_string(),
             ..Default::default()
         }];
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let mut check = FilesCheck::new(&config);
-        check.check(&pkg, &config, &mut out);
-        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        let (results, _levels) = run_files_check_pkgs(&[pkg], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
         assert_has(&names, "no-dependency-on");
     }
 
@@ -5846,10 +6040,8 @@ mod tests {
             magic: "ASCII text".to_string(),
             ..Default::default()
         }];
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let mut check = FilesCheck::new(&config);
-        check.check(&pkg, &config, &mut out);
-        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        let (results, _levels) = run_files_check_pkgs(&[pkg], &config);
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
         assert_has(&names, "no-dependency-on");
     }
 
@@ -5864,7 +6056,9 @@ mod tests {
     }
 
     /// Run FilesCheck over a package named `pkg_name` shipping one real
-    /// file `fname` with the given Requires; return the finding names.
+    /// file `fname` with the given Requires, through the batch
+    /// lifecycle (issue #862: findings the base rules defer to
+    /// `after_checks` must be visible here); return the finding names.
     fn run_dep_check(
         pkg_name: &str,
         requires: Vec<crate::pkg::dep::DepInfo>,
@@ -5892,10 +6086,50 @@ mod tests {
             magic: "ASCII text".to_string(),
             ..Default::default()
         }];
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let mut check = FilesCheck::new(&config);
-        check.check(&pkg, &config, &mut out);
-        out.results().iter().map(|(n, _)| n.clone()).collect()
+        let (results, _levels) = run_files_check_pkgs(&[pkg], &config);
+        results.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    /// Fabricate a package over the shared fixture the way
+    /// `run_dep_check` does: named `pkg_name`, with the given Requires
+    /// and — when `file` is given — one real file (name, contents)
+    /// written under a per-package subdirectory of `dir`, so several
+    /// fabricated packages can share one TempDir (issue #862 session
+    /// tests).
+    fn dep_test_pkg(
+        dir: &tempfile::TempDir,
+        pkg_name: &str,
+        requires: Vec<crate::pkg::dep::DepInfo>,
+        file: Option<(&str, &[u8])>,
+    ) -> Pkg {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.name = pkg_name.to_string();
+        pkg.requires = requires;
+        pkg.prereq = vec![];
+        pkg.recommends = vec![];
+        pkg.suggests = vec![];
+        pkg.doc_files = vec![];
+        pkg.files = match file {
+            Some((fname, contents)) => {
+                let path = dir
+                    .path()
+                    .join(pkg_name)
+                    .join(fname.trim_start_matches('/'));
+                std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+                std::fs::write(&path, contents).expect("write temp file");
+                vec![PkgFile {
+                    name: fname.to_string(),
+                    path: path.to_string_lossy().into_owned(),
+                    mode: 0o100644,
+                    magic: "ASCII text".to_string(),
+                    ..Default::default()
+                }]
+            }
+            None => vec![],
+        };
+        pkg
     }
 
     #[test]
@@ -5982,6 +6216,334 @@ mod tests {
             b"package Foo::Bar;\n1;\n",
         );
         assert_lacks(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_perl_dep_interpreter_path_satisfies() {
+        // Issue #862: the unversioned interpreter path is the perl
+        // dependency expressed as a file dependency (collectd,
+        // perl-Net-IPv4Addr, remind in the corpus).
+        let names = run_dep_check(
+            "foo",
+            vec![dep_flagged("/usr/bin/perl", 16384, None)],
+            "/usr/lib/perl5/vendor_perl/5.44.0/Foo/Bar.pm",
+            b"package Foo::Bar;\n1;\n",
+        );
+        assert_lacks(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_perl_dep_libperl_soname_satisfies() {
+        // Issue #862: a module linked against libperl carries the
+        // interpreter dependency as the soname (perl-libdnf5,
+        // perl-mapscript in the corpus).
+        let names = run_dep_check(
+            "foo",
+            vec![dep_flagged("libperl.so()(64bit)", 16384, None)],
+            "/usr/lib/perl5/vendor_perl/5.44.0/Foo/Bar.pm",
+            b"package Foo::Bar;\n1;\n",
+        );
+        assert_lacks(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_perl_dep_unpinned_perl_name_fires() {
+        // A bare `perl` requirement expresses no version at all: the
+        // `=` pin / MODULE_COMPAT semantics are deliberate (perl-NKF
+        // in the corpus), so the finding stands.
+        let names = run_dep_check(
+            "foo",
+            vec![dep_named("perl")],
+            "/usr/lib/perl5/vendor_perl/5.44.0/Foo/Bar.pm",
+            b"package Foo::Bar;\n1;\n",
+        );
+        assert_has(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_python_dep_unversioned_interpreter_path_satisfies() {
+        // Issue #862: the unversioned interpreter path is the python
+        // dependency expressed as a file dependency.
+        let names = run_dep_check(
+            "foo",
+            vec![dep_flagged("/usr/bin/python3", 16384, None)],
+            "/usr/lib/python3.13/site-packages/foo.py",
+            b"x = 1\n",
+        );
+        assert_lacks(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_python_dep_libpython_soname_satisfies() {
+        // Issue #862: a consumer linked against libpython carries the
+        // interpreter dependency as the versioned soname (the dnf5
+        // plugins loader in the corpus).
+        let names = run_dep_check(
+            "foo",
+            vec![dep_flagged("libpython3.13.so.1.0()(64bit)", 16384, None)],
+            "/usr/lib/python3.13/site-packages/foo.py",
+            b"x = 1\n",
+        );
+        assert_lacks(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_python_dep_libpython_soname_other_version_fires() {
+        // The soname pins its own version: libpython for 3.14 is not
+        // the dependency 3.13 files owe.
+        let names = run_dep_check(
+            "foo",
+            vec![dep_flagged("libpython3.14.so.1.0()(64bit)", 16384, None)],
+            "/usr/lib/python3.13/site-packages/foo.py",
+            b"x = 1\n",
+        );
+        assert_has(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_python_dep_non_interpreter_deps_fire() {
+        // File and soname dependencies on anything but the
+        // interpreter credit nothing.
+        let names = run_dep_check(
+            "foo",
+            vec![
+                dep_flagged("libc.so.6()(64bit)", 16384, None),
+                dep_flagged("/usr/bin/make", 16384, None),
+            ],
+            "/usr/lib/python3.13/site-packages/foo.py",
+            b"x = 1\n",
+        );
+        assert_has(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_python_dep_flavour_base_name_fires() {
+        // The flavour-named base form (`python313-base`, even with a
+        // floor) is not one of the credited forms: #568 already left
+        // it firing, and #862 does not widen the name forms.
+        let names = run_dep_check(
+            "foo",
+            vec![dep_flagged("python313-base", 12, Some("3.9"))],
+            "/usr/lib/python3.13/site-packages/foo.py",
+            b"x = 1\n",
+        );
+        assert_has(&names, "no-dependency-on");
+    }
+
+    /// The `no-dependency-on` lines of a session run, rendered.
+    fn nodep_lines(results: &[(String, String)]) -> Vec<&str> {
+        results
+            .iter()
+            .filter(|(n, _)| n == "no-dependency-on")
+            .map(|(_, line)| line.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn normal_python_dep_anchor_sibling_carries_base() {
+        // Issue #862: the -lang subpackage requires its main package
+        // (WTForms-lang in the corpus), and the main package carries
+        // the base dependency — the subpackage stays quiet, in either
+        // lint order.
+        let config = test_config();
+        for order in [0, 1] {
+            let dir = tempfile::TempDir::new().expect("tmpdir");
+            let lang = dep_test_pkg(
+                &dir,
+                "foo-lang",
+                vec![dep_flagged("foo", 8, Some("1.0"))],
+                Some(("/usr/lib/python3.13/site-packages/foo.py", b"x = 1\n")),
+            );
+            let main = dep_test_pkg(
+                &dir,
+                "foo",
+                vec![dep_flagged("python(abi)", 8, Some("3.13"))],
+                None,
+            );
+            let pkgs = if order == 0 {
+                vec![lang, main]
+            } else {
+                vec![main, lang]
+            };
+            let (results, _levels) = run_files_check_pkgs(&pkgs, &config);
+            assert!(
+                nodep_lines(&results).is_empty(),
+                "order {order}: got {:?}",
+                nodep_lines(&results)
+            );
+        }
+    }
+
+    #[test]
+    fn normal_python_dep_anchor_sibling_without_base_fires() {
+        // The anchor sibling must itself carry the base dependency:
+        // folder-color-common in the corpus is required by its
+        // extension siblings and carries no python dependency, so
+        // anchoring on it credits nothing.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let lang = dep_test_pkg(
+            &dir,
+            "foo-lang",
+            vec![dep_flagged("foo-common", 8, Some("1.0"))],
+            Some(("/usr/lib/python3.13/site-packages/foo.py", b"x = 1\n")),
+        );
+        let common = dep_test_pkg(&dir, "foo-common", vec![dep_named("gtk3-tools")], None);
+        let (results, _levels) = run_files_check_pkgs(&[lang, common], &config);
+        let lines = nodep_lines(&results);
+        assert_eq!(lines.len(), 1, "got: {lines:?}");
+        assert!(lines[0].starts_with("foo-lang.noarch"), "got: {}", lines[0]);
+    }
+
+    #[test]
+    fn normal_python_dep_anchor_other_source_fires() {
+        // A requirement on a package of another source that carries
+        // the base dependency credits nothing: transitive credit
+        // would gut the check (the azure leaves' cross-source
+        // requirements in the corpus).
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let lang = dep_test_pkg(
+            &dir,
+            "foo-lang",
+            vec![dep_flagged("ext-main", 8, Some("1.0"))],
+            Some(("/usr/lib/python3.13/site-packages/foo.py", b"x = 1\n")),
+        );
+        // A fixture built from a different spec: its SOURCERPM
+        // differs from the shared fixture's, so it is another source.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/nodoc-lone-1.0-1.noarch.rpm");
+        let mut ext = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        ext.name = "ext-main".to_string();
+        ext.requires = vec![dep_flagged("python(abi)", 8, Some("3.13"))];
+        ext.prereq = vec![];
+        ext.recommends = vec![];
+        ext.suggests = vec![];
+        ext.doc_files = vec![];
+        ext.files = vec![];
+        let (results, _levels) = run_files_check_pkgs(&[lang, ext], &config);
+        let lines = nodep_lines(&results);
+        assert_eq!(lines.len(), 1, "got: {lines:?}");
+        assert!(lines[0].starts_with("foo-lang.noarch"), "got: {}", lines[0]);
+    }
+
+    #[test]
+    fn normal_python_dep_anchor_chain_does_not_credit() {
+        // One hop only: the mid package is itself anchored on the
+        // main package, but that does not make the mid package carry
+        // the dependency for the subpackage anchored on the mid.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let lang = dep_test_pkg(
+            &dir,
+            "foo-lang",
+            vec![dep_flagged("foo-mid", 8, Some("1.0"))],
+            Some(("/usr/lib/python3.13/site-packages/foo.py", b"x = 1\n")),
+        );
+        let mid = dep_test_pkg(
+            &dir,
+            "foo-mid",
+            vec![dep_flagged("foo", 8, Some("1.0"))],
+            None,
+        );
+        let main = dep_test_pkg(
+            &dir,
+            "foo",
+            vec![dep_flagged("python(abi)", 8, Some("3.13"))],
+            None,
+        );
+        let (results, _levels) = run_files_check_pkgs(&[lang, mid, main], &config);
+        let lines = nodep_lines(&results);
+        assert_eq!(lines.len(), 1, "got: {lines:?}");
+        assert!(lines[0].starts_with("foo-lang.noarch"), "got: {}", lines[0]);
+    }
+
+    #[test]
+    fn normal_python_dep_anchor_wrong_version_fires() {
+        // The sibling must carry the base dependency for the version
+        // the candidate's files name, not any version.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let lang = dep_test_pkg(
+            &dir,
+            "foo-lang",
+            vec![dep_flagged("foo", 8, Some("1.0"))],
+            Some(("/usr/lib/python3.13/site-packages/foo.py", b"x = 1\n")),
+        );
+        let main = dep_test_pkg(
+            &dir,
+            "foo",
+            vec![dep_flagged("python(abi)", 8, Some("3.14"))],
+            None,
+        );
+        let (results, _levels) = run_files_check_pkgs(&[lang, main], &config);
+        let lines = nodep_lines(&results);
+        assert_eq!(lines.len(), 1, "got: {lines:?}");
+        assert!(lines[0].starts_with("foo-lang.noarch"), "got: {}", lines[0]);
+    }
+
+    #[test]
+    fn normal_perl_dep_anchor_sibling_carries_compat() {
+        // Issue #862: the devel subpackage anchored on a main package
+        // carrying the MODULE_COMPAT token stays quiet (perl-Tk-devel
+        // in the corpus).
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let sub = dep_test_pkg(
+            &dir,
+            "perl-foo-devel",
+            vec![dep_flagged("perl-foo", 8, Some("1.0"))],
+            Some((
+                "/usr/lib/perl5/vendor_perl/5.44.0/Foo/Bar.pm",
+                b"package Foo::Bar;\n1;\n",
+            )),
+        );
+        let main = dep_test_pkg(
+            &dir,
+            "perl-foo",
+            vec![dep_named("perl(:MODULE_COMPAT_5.44.0)")],
+            None,
+        );
+        let (results, _levels) = run_files_check_pkgs(&[sub, main], &config);
+        assert!(
+            nodep_lines(&results).is_empty(),
+            "got: {:?}",
+            nodep_lines(&results)
+        );
+    }
+
+    #[test]
+    fn normal_perl_dep_anchor_sibling_carries_via_interpreter_path() {
+        // The sibling's own credit may come from the file/soname
+        // forms: collectd-spamassassin anchors on collectd, whose
+        // perl dependency is the /usr/bin/perl path plus the libperl
+        // soname.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let sub = dep_test_pkg(
+            &dir,
+            "foo-spam",
+            vec![dep_flagged("foo", 8, Some("1.0"))],
+            Some((
+                "/usr/lib/perl5/vendor_perl/5.44.0/Foo/Bar.pm",
+                b"package Foo::Bar;\n1;\n",
+            )),
+        );
+        let main = dep_test_pkg(
+            &dir,
+            "foo",
+            vec![
+                dep_flagged("/usr/bin/perl", 16384, None),
+                dep_flagged("libperl.so()(64bit)", 16384, None),
+            ],
+            None,
+        );
+        let (results, _levels) = run_files_check_pkgs(&[sub, main], &config);
+        assert!(
+            nodep_lines(&results).is_empty(),
+            "got: {:?}",
+            nodep_lines(&results)
+        );
     }
 
     #[test]
