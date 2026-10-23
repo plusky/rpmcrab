@@ -187,7 +187,7 @@ bindings.
 python3 scripts/audit-reference-coverage.py [REF_PATH]
 ```
 
-A finding counts as ledgered when its check module has a `kind = "missing"`
-entry (unported checks), or its name appears in a divergence entry's reason
-text. Sites the resolver cannot handle are reported as UNRESOLVED, never
-silently dropped.
+A finding counts as ledgered when a `kind = "missing"` entry names it
+directly: the entry's `check` value is the finding's check module (the whole
+check is unported) or the finding name itself. Sites the resolver cannot
+handle are reported as UNRESOLVED, never silently dropped.
