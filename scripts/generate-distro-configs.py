@@ -5,7 +5,9 @@ Copies ``configs/openSUSE/*.toml`` from the pinned upstream rpmlint commit
 into ``crates/rpmcrab-core/data/distro/opensuse/``, prunes ``Filters`` /
 ``BlockedFilters`` entries that reference findings rpmcrab no longer emits,
 drops ``Filters`` entries for live findings rpmcrab deliberately surfaces
-(see DROP_LIVE_FILTERS), drops duplicate ``Filters`` lines and lines
+(see DROP_LIVE_FILTERS), asserts the whole-finding ``Filters`` entries
+rpmcrab keeps as its own recorded decision survive regeneration
+(see KEEP_FILTERS), drops duplicate ``Filters`` lines and lines
 subsumed by a broader line for the same finding (see dedupe_filters),
 drops whitelist stanzas for packages gone from
 Tumbleweed and stale pie-executables paths, retargets ``Filters``
@@ -687,6 +689,47 @@ PRUNE_RAW = {
     # package ships only iconvconfig and ldconfig in /usr/sbin, and the
     # Factory sweep contains zero mentions of the name.
     r"glibc\.\S+: \w: statically-linked-binary /usr/sbin/glibc_post_upgrade": "dead pattern: glibc 2.44 no longer ships glibc_post_upgrade; zero emissions in the Factory sweep (issue #538)",
+}
+
+# Whole-finding Filters entries rpmcrab deliberately keeps: upstream's
+# distro config hides these findings entirely, and the port keeps the
+# suppression as its own recorded decision (issue #883, from the
+# suppressed-checks audit) rather than as silent inheritance.
+# generate() asserts every pattern survives regeneration — a pattern
+# survives when an emitted Filters or FilterErrorTitles entry contains
+# it as a substring — and logs the set in PROVENANCE, so an upstream
+# refresh that drops or rewrites one of these lines fails the drift
+# check until the decision is revisited here. The keys are the emitted
+# patterns verbatim (whitespace included: several are anchored by the
+# spaces around the finding name).
+KEEP_FILTERS = {
+    # pattern: reason
+    ".*invalid-version.*": "autobuild redundancy: OBS stamps the version (upstream: 'Stuff autobuild takes care about')",
+    ".*invalid-packager.*": "autobuild redundancy: OBS stamps the packager (upstream: 'Stuff autobuild takes care about')",
+    ".*invalid-buildhost.*": "autobuild redundancy: OBS stamps the build host (upstream: 'Stuff autobuild takes care about')",
+    " dir-or-file-in-opt ": "superseded: FilelistCheck's filelist-forbidden-opt fires on the same content, unsuppressed at E (upstream: 'handled by CheckFilelist.py')",
+    "incoherent-version-in-changelog": "recorded decision (issue #883): upstream openSUSE's shipped suppression stands; no case for surfacing it has been made",
+    " symlink-crontab-file": "recorded decision: upstream suppresses it citing bnc#591431",
+    " setuid-binary.*": "the dedicated permissions machinery carries the genuine cases \u2014 its findings are shielded in BlockedFilters \u2014 not this generic one",
+    " setgid-binary ": "the dedicated permissions machinery carries the genuine cases; upstream: 'An issue with OBS, works with autobuild'",
+    " non-readable ": "the dedicated permissions machinery carries the genuine cases; upstream: 'An issue with OBS, works with autobuild'",
+    " non-standard-dir-perm ": "the dedicated permissions machinery carries the genuine cases; upstream: 'An issue with OBS, works with autobuild'",
+    " non-standard-executable-perm ": "the dedicated permissions machinery carries the genuine cases; upstream: 'An issue with OBS, works with autobuild'",
+    "configure-without-libdir-spec": "recorded decision (issue #883): the line sits in upstream's bnc#456048 kernel-module block; the suppression is upstream's shipped behaviour",
+    "use-of-RPM_SOURCE_DIR": "recorded decision (issue #883): the line sits in upstream's bnc#456048 kernel-module block; the suppression is upstream's shipped behaviour",
+    "hardcoded-library-path": "recorded decision (issue #883): the line sits in upstream's bnc#456048 kernel-module block; the suppression is upstream's shipped behaviour",
+    " perl-temp-file ": "deliberate content decision (upstream: 'We want these files')",
+    " requires-on-release": "upstream: 'We check for that already'",
+    " prereq-use": "upstream: 'currently too noisy, but might become relevant in the future'",
+    " file-not-utf8": "upstream: 'currently too noisy, but might become relevant in the future'",
+    " mixed-use-of-spaces-and-tabs ": "upstream: 'currently too noisy, but might become relevant in the future'",
+    " log-files-without-logrotate": "upstream: 'An issue with OBS, works with autobuild'",
+    " no-documentation": "measured: the finding is a structural property of -devel/-doc package splits \u2014 128 of the 300 audit-sample packages, one line each",
+    " multiple-specfiles": "upstream: 'An issue with OBS, works with autobuild'",
+    " non-coherent-filename ": "upstream: 'Many places have shorter paths'",
+    "cross-directory-hard-link": "measured concentration: 3,420 lines in 18 audit-sample packages that hard-link deliberately (documentation and Python byte-code farms)",
+    r"^qa\S+: [EWI]:": "blanket package-class filter: OBS QA-script packages are build-service internals, not shipped product",
+    r"^\S*(?:INTERNAL|internal)\.\S+: [EWI]:": "blanket package-class filter: OBS-internal packages are build-service internals, not shipped product",
 }
 
 # Filters lines whose exemption is still wanted but whose target moved:
@@ -2181,6 +2224,56 @@ def strip_badness_threshold(text, flavor, threshold_log):
     return "".join(out)
 
 
+def assert_kept_filters(text):
+    """Verify every KEEP_FILTERS pattern survives in a generated config.
+
+    Scans the Filters and FilterErrorTitles lists of one generated
+    opensuse.toml: a kept pattern survives when an emitted entry in
+    either list contains it as a substring. Returns the PROVENANCE log
+    lines for the survivors, in table order; raises AssertionError
+    naming every pattern that did not survive.
+    """
+    emitted = {"Filters": [], "FilterErrorTitles": []}
+    in_list = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        m = re.match(r"^(Filters|FilterErrorTitles)\s*=\s*\[", stripped)
+        if m:
+            in_list = m.group(1)
+            tail = stripped[stripped.index("[") + 1:]
+            # A single-line list carries its entries on the opener line.
+            for single, double in re.findall(r"'([^']*)'|\"([^\"]*)\"", tail):
+                emitted[in_list].append(single or double)
+            if "]" in tail:
+                in_list = None
+            continue
+        if in_list and stripped.startswith("]"):
+            in_list = None
+            continue
+        if in_list:
+            raw = raw_filter_pattern(line)
+            if raw is not None:
+                emitted[in_list].append(raw)
+    kept_log = []
+    missing = []
+    for pattern, reason in KEEP_FILTERS.items():
+        home = None
+        for list_name, entries in emitted.items():
+            if any(pattern in entry for entry in entries):
+                home = list_name
+                break
+        if home is None:
+            missing.append(pattern)
+        else:
+            kept_log.append(f"{home}: kept {pattern!r} ({reason})")
+    if missing:
+        raise AssertionError(
+            "KEEP_FILTERS patterns missing from the generated config: "
+            + ", ".join(sorted(missing))
+        )
+    return kept_log
+
+
 def generate(ref_dir=None, pins=None):
     """Return {flavor: {filename: text}} and the provenance text."""
     pins = pins or {}
@@ -2236,6 +2329,8 @@ def generate(ref_dir=None, pins=None):
             text, adj_log = apply_digest_adjudications(text, filename)
             adjudicated_log.extend(adj_log)
             data["files"][filename] = text
+
+    kept_log = assert_kept_filters(result["opensuse"]["files"]["opensuse.toml"])
 
     files_out = list(FILES["opensuse"])
 
@@ -2376,6 +2471,11 @@ def generate(ref_dir=None, pins=None):
             if entry not in seen_adjudicated:
                 seen_adjudicated.add(entry)
                 provenance.append(f"#   {entry}")
+    provenance.append("#")
+    provenance.append("# Kept Filters entries (whole-finding suppressions kept")
+    provenance.append("# as rpmcrab's recorded decision; see KEEP_FILTERS):")
+    for entry in kept_log:
+        provenance.append(f"#   {entry}")
     provenance.append("")
     return (
         result,
