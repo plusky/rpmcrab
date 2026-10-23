@@ -524,14 +524,20 @@ impl ReadelfInfo {
             sh.sh_flags & u64::from(goblin::elf::section_header::SHF_EXECINSTR) != 0
                 && sh.sh_type == goblin::elf::section_header::SHT_PROGBITS
                 && {
-                    let start = sh.sh_offset as usize;
-                    let end = start.saturating_add(sh.sh_size as usize);
+                    // The offsets convert with `try_from`, not `as`: a
+                    // 64-bit range on a 32-bit build must not truncate
+                    // into an in-range, all-zero one.
+                    let range = usize::try_from(sh.sh_offset).ok().and_then(|start| {
+                        usize::try_from(sh.sh_size)
+                            .ok()
+                            .map(|size| (start, start.saturating_add(size)))
+                    });
                     // A range the data does not fully hold -- an
-                    // out-of-range offset or a truncated tail -- cannot
-                    // be shown to be all zero, so it counts as code:
-                    // fail open, the unmapped-arch principle applied to
-                    // section bytes.
-                    match data.get(start..end) {
+                    // out-of-range offset, a truncated tail, or a range
+                    // `usize` cannot represent -- cannot be shown to be
+                    // all zero, so it counts as code: fail open, the
+                    // unmapped-arch principle applied to section bytes.
+                    match range.and_then(|(start, end)| data.get(start..end)) {
                         Some(bytes) => bytes.iter().any(|b| *b != 0),
                         None => true,
                     }
