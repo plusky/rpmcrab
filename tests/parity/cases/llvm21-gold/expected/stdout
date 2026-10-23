@@ -1,7 +1,7 @@
 ============================ rpmlint session starts ============================
 rpmlint: 2.10.0
 configuration:
-    <VENV>/lib64/python3.13/site-packages/rpmlint/configdefaults.toml
+    <VENV>/lib/python3.12/site-packages/rpmlint/configdefaults.toml
     <XDG>/rpmlint/cron-whitelist.toml
     <XDG>/rpmlint/dbus-services.toml
     <XDG>/rpmlint/device-files-whitelist.toml
@@ -22,7 +22,8 @@ configuration:
     <XDG>/rpmlint/zypper-plugins.toml
 checks: 43, packages: 1
 
+llvm21-gold.aarch64: E: unknown-key 29b700a4
 llvm21-gold.aarch64: E: suse-zypp-packageand packageand(clang21:binutils)
 llvm21-gold.aarch64: E: suse-zypp-packageand packageand(clang21:binutils-gold)
 llvm21-gold.aarch64: W: no-soname /usr/lib64/LLVMgold.so
- 1 packages and 0 specfiles checked; 2 errors, 1 warnings, 1 filtered, 2 badness; has taken <DURATION> s 
+ 1 packages and 0 specfiles checked; 3 errors, 1 warnings, 1 filtered, 3 badness; has taken <DURATION> s 

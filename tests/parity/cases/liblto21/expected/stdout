@@ -1,7 +1,7 @@
 ============================ rpmlint session starts ============================
 rpmlint: 2.10.0
 configuration:
-    <VENV>/lib64/python3.13/site-packages/rpmlint/configdefaults.toml
+    <VENV>/lib/python3.12/site-packages/rpmlint/configdefaults.toml
     <XDG>/rpmlint/cron-whitelist.toml
     <XDG>/rpmlint/dbus-services.toml
     <XDG>/rpmlint/device-files-whitelist.toml
@@ -22,6 +22,7 @@ configuration:
     <XDG>/rpmlint/zypper-plugins.toml
 checks: 43, packages: 1
 
+libLTO21.aarch64: E: unknown-key 29b700a4
 libLTO21.aarch64: E: shlib-policy-name-error (Badness: 10000) SONAME: libLTO.so.21.1 (/usr/lib64/libLTO.so.21.1), expected package suffix: 21_1
----------------- Badness 10000 exceeds threshold 999, aborting. ----------------
- 1 packages and 0 specfiles checked; 1 errors, 0 warnings, 1 filtered, 10000 badness; has taken <DURATION> s 
+---------------- Badness 10001 exceeds threshold 999, aborting. ----------------
+ 1 packages and 0 specfiles checked; 2 errors, 0 warnings, 1 filtered, 10001 badness; has taken <DURATION> s 

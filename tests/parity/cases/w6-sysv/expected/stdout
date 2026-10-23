@@ -1,7 +1,7 @@
 ============================ rpmlint session starts ============================
 rpmlint: 2.10.0
 configuration:
-    <VENV>/lib64/python3.13/site-packages/rpmlint/configdefaults.toml
+    <VENV>/lib/python3.12/site-packages/rpmlint/configdefaults.toml
     <XDG>/rpmlint/cron-whitelist.toml
     <XDG>/rpmlint/dbus-services.toml
     <XDG>/rpmlint/device-files-whitelist.toml
