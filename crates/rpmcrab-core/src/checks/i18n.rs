@@ -69,9 +69,14 @@ fn locale_regex() -> &'static Regex {
 }
 
 static CORRECT_SUBDIR_REGEX: OnceLock<Regex> = OnceLock::new();
+/// The shape of a correct locale subdir: a language code, optionally
+/// followed by one further component — a territory (`de_DE`) or an
+/// ISO 15924 script (`zh_Hans`, `sr_Latn`) — plus an optional
+/// `.charset`/`@modifier` suffix.
 fn correct_subdir_regex() -> &'static Regex {
     CORRECT_SUBDIR_REGEX.get_or_init(|| {
-        Regex::new(r"^(([a-z][a-z]([a-z])?(_[A-Z][A-Z])?)([.@].*$)?)$").expect("static regex")
+        Regex::new(r"^(([a-z][a-z]([a-z])?(_[A-Z][A-Z]|_[A-Z][a-z][a-z][a-z])?)([.@].*$)?)$")
+            .expect("static regex")
     })
 }
 
@@ -356,6 +361,53 @@ mod tests {
     fn sane_locale_subdir_is_quiet() {
         let findings = I18NCheck::collect(&[("/usr/share/locale/de/LC_MESSAGES/a.mo", "de")], &[]);
         assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn script_locale_subdirs_are_quiet() {
+        // Script locales (ISO 15924) are the locale names the modern
+        // gettext/GNOME/KDE stack uses: `zh_Hans`/`zh_Hant` ship across
+        // the corpus, and the `filesystem` package’s own locale tree
+        // carries both (#865). The `.charset`/`@modifier` suffix
+        // discipline is unchanged.
+        for dir in [
+            "zh_Hans",
+            "zh_Hant",
+            "sr_Latn",
+            "pa_Arab",
+            "zh_Hans.UTF-8",
+            "sr_Latn@latin",
+        ] {
+            let path = format!("/usr/share/locale/{dir}/LC_MESSAGES/a.mo");
+            let findings = I18NCheck::collect(&[(path.as_str(), dir)], &[]);
+            assert!(findings.is_empty(), "{dir}: {findings:?}");
+        }
+    }
+
+    #[test]
+    fn misshapen_script_locale_subdirs_still_fire() {
+        // The script component is exactly a capital and three lowercase
+        // letters: shorter, longer and wrongly cased forms keep firing,
+        // as do a lowercase territory and a bad base under a `.charset`
+        // suffix.
+        for dir in [
+            "zh_Han",
+            "zh_Hanss",
+            "zh_hans",
+            "zh_HANS",
+            "de_de",
+            "en_Gb",
+            "en_GBXX",
+            "zh_Han.UTF-8",
+        ] {
+            let path = format!("/usr/share/locale/{dir}/LC_MESSAGES/a.mo");
+            let findings = I18NCheck::collect(&[(path.as_str(), dir)], &[]);
+            let subdir: Vec<_> = findings
+                .iter()
+                .filter(|(_, n, _)| n == "incorrect-locale-subdir")
+                .collect();
+            assert_eq!(subdir.len(), 1, "{dir}: {findings:?}");
+        }
     }
 
     #[test]
