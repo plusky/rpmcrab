@@ -74,6 +74,7 @@ import hashlib
 import json
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -962,6 +963,34 @@ PRUNE_PIE_PATHS = {
 
 LIST_KEYS = ("Filters", "BlockedFilters")
 
+# HTTP statuses that mark a transient upstream condition rather than a
+# deterministic answer: rate limiting (429) and a server-side request
+# timeout (408) join the 5xx family. Every fetch path maps them to
+# FetchExhausted, directly or after its own retries.
+_TRANSIENT_HTTP_CODES = frozenset({408, 429})
+
+
+def _transient_http_status(code):
+    """Whether an HTTP status is a transient upstream condition."""
+    return code >= 500 or code in _TRANSIENT_HTTP_CODES
+
+
+# Exception types a fetch attempt can fail with transiently: the server
+# or the path to it hiccuped, at connect time or mid-response, and a
+# later attempt may succeed. Every urllib fetch path in this module
+# classifies with this one tuple.
+_TRANSIENT_FETCH_ERRORS = (
+    urllib.error.URLError,
+    TimeoutError,
+    http.client.IncompleteRead,
+    http.client.BadStatusLine,
+    ConnectionResetError,
+    ConnectionRefusedError,
+    ConnectionAbortedError,
+    BrokenPipeError,
+    ssl.SSLError,
+)
+
 
 def fetch_github(sha, filename):
     url = (
@@ -972,17 +1001,12 @@ def fetch_github(sha, filename):
         with urllib.request.urlopen(url, timeout=60) as resp:
             return resp.read().decode("utf-8")
     except urllib.error.HTTPError as e:
-        if e.code < 500:
+        if not _transient_http_status(e.code):
             raise
         raise FetchExhausted(
             "GitHub fetch failed for %s:%s: %s" % (sha, filename, e)
         ) from e
-    except (
-        urllib.error.URLError,
-        TimeoutError,
-        http.client.IncompleteRead,
-        ConnectionResetError,
-    ) as e:
+    except _TRANSIENT_FETCH_ERRORS as e:
         raise FetchExhausted(
             "GitHub fetch failed for %s:%s: %s" % (sha, filename, e)
         ) from e
@@ -1467,12 +1491,7 @@ def _download_primary_names(primary_url, expected_sha512, zstd, label):
         try:
             with urllib.request.urlopen(req, timeout=600) as resp:
                 shutil.copyfileobj(resp, tmp)
-        except (
-            urllib.error.URLError,
-            TimeoutError,
-            http.client.IncompleteRead,
-            ConnectionResetError,
-        ) as e:
+        except _TRANSIENT_FETCH_ERRORS as e:
             raise RuntimeError(
                 "primary.xml download failed for %s: %s" % (label, e)
             ) from e
@@ -1597,18 +1616,13 @@ def package_present(pkg):
             except urllib.error.HTTPError as e:
                 if e.code == 404:
                     continue
-                if e.code >= 500:
+                if _transient_http_status(e.code):
                     raise FetchExhausted(
                         "OBS source API fetch failed for %s/%s: %s"
                         % (project, pkg, e)
                     ) from e
                 raise
-            except (
-                urllib.error.URLError,
-                TimeoutError,
-                http.client.IncompleteRead,
-                ConnectionResetError,
-            ) as e:
+            except _TRANSIENT_FETCH_ERRORS as e:
                 raise FetchExhausted(
                     "OBS source API fetch failed for %s/%s: %s"
                     % (project, pkg, e)
@@ -1676,13 +1690,13 @@ def _filelist_url(repomd, repo_base, label):
 def _fetch_repomd_xml(repomd_url, label):
     """Fetch and return a repo's repomd.xml as text.
 
-    Transient mirror failures (5xx, network errors, timeouts) are retried:
-    a single failed fetch must not fail the whole run when the mirror is
-    briefly down. The backoff sleeps only between attempts - the last
-    attempt raises immediately instead of sleeping pointlessly before the
-    error. Client errors (4xx) raise immediately: the URL itself is wrong
-    and retrying cannot help. Raises FetchExhausted when the attempts are
-    exhausted.
+    Transient mirror failures (5xx, 408/429, network errors, timeouts)
+    are retried: a single failed fetch must not fail the whole run when
+    the mirror is briefly down. The backoff sleeps only between attempts
+    - the last attempt raises immediately instead of sleeping pointlessly
+    before the error. Other client errors (4xx) raise immediately: the
+    URL itself is wrong and retrying cannot help. Raises FetchExhausted
+    when the attempts are exhausted.
     """
     req = urllib.request.Request(
         repomd_url, headers={"User-Agent": "rpmcrab-distro-config-sync"}
@@ -1695,15 +1709,10 @@ def _fetch_repomd_xml(repomd_url, label):
                 repomd = resp.read().decode("utf-8")
             break
         except urllib.error.HTTPError as e:
-            if e.code < 500:
+            if not _transient_http_status(e.code):
                 raise
             last_err = e
-        except (
-            urllib.error.URLError,
-            TimeoutError,
-            http.client.IncompleteRead,
-            ConnectionResetError,
-        ) as e:
+        except _TRANSIENT_FETCH_ERRORS as e:
             last_err = e
         if attempt + 1 < _REPOMD_ATTEMPTS:
             time.sleep(_REPOMD_BACKOFF[attempt])
@@ -1719,14 +1728,15 @@ class FetchExhausted(Exception):
 
     Raised only where the fetch layer gives up: a retry budget spent
     (the repomd, primary and filelist downloads), or an upstream
-    answering 5xx / unreachable on a path that has no retries of its own
-    (the pinned GitHub files, the OBS source API). Deliberately not a
-    RuntimeError, like GrepError: the retry loops key on RuntimeError
+    answering a transient status (5xx, 408, 429) or unreachable on a
+    path that has no retries of its own (the pinned GitHub files, the
+    OBS source API). Deliberately not a RuntimeError, like GrepError:
+    the retry loops key on RuntimeError
     for per-attempt failures, and main() maps FetchExhausted - only
     FetchExhausted - to EXIT_FETCH_EXHAUSTED so CI can report an
     upstream outage as infrastructure instead of drift. Deterministic
-    failures never raise it (4xx responses, malformed repodata, local
-    tool errors): they keep failing loudly as before.
+    failures never raise it (other 4xx responses, malformed repodata,
+    local tool errors): they keep failing loudly as before.
     """
 
 

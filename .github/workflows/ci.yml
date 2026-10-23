@@ -310,6 +310,9 @@ jobs:
       # beyond retries, so this run verified nothing. Map it to a warning
       # so the job stays green - an upstream outage must not mail failure
       # noise - while drift (exit 1) and every other failure keep failing.
+      # The neutral mapping requires the generator's fetch-exhausted:
+      # marker line in the log: exit 3 without it fails closed, so only a
+      # genuine fetch exhaustion goes neutral.
       - name: Check vendored distro configs against the pins
         run: |
           rc=0
@@ -317,7 +320,16 @@ jobs:
           cat /tmp/drift-check.log
           if [ "$rc" -eq 3 ]; then
             marker=$(grep '^fetch-exhausted:' /tmp/drift-check.log | head -n 1 || true)
-            echo "::warning title=Distro config drift not verified::$marker"
+            if [ -z "$marker" ]; then
+              echo "::error title=Distro config drift check::exit 3 without the fetch-exhausted marker; failing closed"
+              exit 3
+            fi
+            # The marker embeds upstream error text; escape it for the
+            # workflow command (% first, then CR and LF).
+            escaped=${marker//\%/%25}
+            escaped=${escaped//$'\r'/%0D}
+            escaped=${escaped//$'\n'/%0A}
+            echo "::warning title=Distro config drift not verified::$escaped"
             echo "Distro config drift check neutral: $marker" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
