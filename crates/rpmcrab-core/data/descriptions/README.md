@@ -11,7 +11,7 @@ Provenance, verified against the pinned reference (`84848c0`):
 
 - `BinariesCheck.toml` — the pinned reference file, minus the
   `shared-library-not-executable` entry dropped with the check in #267 and
-  the `invalid-ldconfig-symlink`,
+  the `invalid-ldconfig-symlink`, `invalid-soname`,
   `only-non-binary-in-usr-lib` entries dropped with the findings
   (openSUSE: "Doesn't seem to make sense") and the
   `missing-mandatory-optflags` entry dropped with the finding in #645, plus

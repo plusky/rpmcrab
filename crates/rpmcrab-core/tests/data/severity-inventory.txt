@@ -127,7 +127,6 @@ invalid-menu-icon-type = W
 invalid-menu-section = E
 invalid-packager = W
 invalid-signature = E
-invalid-soname = E
 invalid-spec-name = E
 invalid-suse-version-check = E
 invalid-title = E
