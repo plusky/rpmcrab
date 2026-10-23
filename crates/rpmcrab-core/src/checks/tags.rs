@@ -417,9 +417,16 @@ impl TagsCheck {
                     add_info(out, Level::Error, pkg, "invalid-dependency", &[&leaf.name]);
                 }
                 if !is_source && !is_devel {
+                    // Same-family cross pairs are credited (issue #861):
+                    // a cross toolchain's own target sys-root devel
+                    // package is the toolchain's runtime data, not a
+                    // host devel dependency. The credit is per leaf, so
+                    // a credited leaf does not consume the latch: a
+                    // later uncredited devel requirement still fires.
                     if !devel_depend
                         && !requirer_is_biarch_devel
                         && is_match(&self.devel_re, &leaf.name)
+                        && !cross_family_pair(&pkg.name, &leaf.name)
                     {
                         add_info(out, Level::Error, pkg, "devel-dependency", &[&leaf.name]);
                         devel_depend = true;
@@ -574,6 +581,98 @@ fn generated_soname_package_names(deps: &[DepInfo]) -> std::collections::HashSet
         }
     }
     names
+}
+
+/// The sys-root leaf of a `cross-...` package name: the target and
+/// libc of a `cross-<target>-<libc>-devel` package, where the libc
+/// component is `glibc` or `newlib` — the target C libraries whose
+/// devel package is a cross toolchain's sys-root. Any other
+/// `cross-...` devel-matching name (`-foo-devel`, `-foo-static`,
+/// `-binutils-devel`, the compiler's own `-devel`) is an ordinary
+/// devel requirement, not a sys-root leaf.
+fn cross_sysroot_leaf(name: &str) -> Option<(&str, &str)> {
+    let rest = name.strip_prefix("cross-")?;
+    for libc in ["glibc", "newlib"] {
+        if let Some(target) = rest.strip_suffix(&format!("-{libc}-devel")) {
+            return (!target.is_empty()).then_some((target, libc));
+        }
+    }
+    None
+}
+
+/// The target of a `cross-<target>-<tool...>` compiler package name:
+/// the components before the tool component, where the tool is the
+/// first `gcc` / `gcc<version>` component. Tool names may carry
+/// further components (`gcc13-bootstrap`), so the target is what
+/// precedes the tool, not all but the last component. A cross
+/// package with no gcc tool component (a target runtime package,
+/// binutils, ...) is not a compiler requirer here.
+fn cross_compiler_target(name: &str) -> Option<String> {
+    let rest = name.strip_prefix("cross-")?;
+    let components: Vec<&str> = rest.split('-').collect();
+    let tool = components.iter().position(|c| {
+        c.strip_prefix("gcc")
+            .is_some_and(|v| v.is_empty() || v.bytes().all(|b| b.is_ascii_digit()))
+    })?;
+    (tool > 0).then(|| components[..tool].join("-"))
+}
+
+/// The MinGW family of a package name: `mingw32` or `mingw64`, the
+/// bitness component both sides of a MinGW pair carry first.
+fn mingw_family(name: &str) -> Option<&str> {
+    let first = name.split('-').next()?;
+    (name.contains('-') && (first == "mingw32" || first == "mingw64")).then_some(first)
+}
+
+/// Whether `leaf` is the target sys-root devel package of the cross
+/// toolchain family `requirer` belongs to (issue #861). The
+/// `devel-dependency` harm model is a runtime package dragging host
+/// development files onto end systems; within one cross toolchain
+/// family the direction is reversed, because the target sys-root
+/// devel package is the compiler's runtime data.
+///
+/// The credit is narrow — a genuine sys-root leaf only:
+/// - Cross requirers are compiler packages, `cross-<target>-gcc...`
+///   (the tool may carry further components, `gcc13-bootstrap`), and
+///   the leaf is that target's sys-root package,
+///   `cross-<target>-<libc>-devel` with libc `glibc` or `newlib`.
+///   The bare-metal families spell the target with a trailing `-elf`
+///   component the sys-root packages drop (riscv64-elf pairs with
+///   riscv64); that spelling is the newlib toolchain, so the stripped
+///   form credits only a newlib leaf — the libc is part of the pair,
+///   and `cross-riscv64-elf-gcc13` on `cross-riscv64-glibc-devel`
+///   keeps firing.
+/// - MinGW requirers (`mingw32-*`, `mingw64-*`) pair only with the
+///   same bitness family's sys-root leaves: `<bitness>-headers` and
+///   `<bitness>-winpthreads-devel`.
+///
+/// Everything else keeps firing: any other same-target devel match
+/// (a library's `-devel`/`-static`, binutils-devel, the compiler's
+/// own devel package), a runtime package requiring its own devel
+/// package, a different target's or different libc's sys-root devel
+/// package, a host devel package required by a cross package, a
+/// cross devel package required by a host package, and the other
+/// MinGW bitness.
+fn cross_family_pair(requirer: &str, leaf: &str) -> bool {
+    if requirer.starts_with("cross-") || leaf.starts_with("cross-") {
+        let Some((leaf_target, leaf_libc)) = cross_sysroot_leaf(leaf) else {
+            return false;
+        };
+        let Some(req_target) = cross_compiler_target(requirer) else {
+            return false;
+        };
+        let (req_base, req_libc) = match req_target.strip_suffix("-elf") {
+            Some(base) => (base, Some("newlib")),
+            None => (req_target.as_str(), None),
+        };
+        return req_base == leaf_target && req_libc.is_none_or(|libc| libc == leaf_libc);
+    }
+    match (mingw_family(requirer), mingw_family(leaf)) {
+        (Some(req), Some(dep)) if req == dep => {
+            leaf == format!("{dep}-headers") || leaf == format!("{dep}-winpthreads-devel")
+        }
+        _ => false,
+    }
 }
 
 /// `formatRequire`: `name [<|>|= version]`.
@@ -3049,6 +3148,141 @@ mod rich_dep_emission_tests {
             hits[0].1
         );
         assert!(hits[0].1.ends_with(" somelib-devel"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn devel_dependency_cross_family_pairs_are_silent() {
+        // Issue #861: within one cross toolchain family the target
+        // sys-root devel package is the compiler's runtime data, so a
+        // same-family pair must not trip devel-dependency. The pairs
+        // are the measured Factory population (sweep
+        // run-20261022-857d5ece), plus the multi-component tool
+        // spelling (gcc13-bootstrap) from plusky's review probes.
+        let config = rich_test_config(&[], false);
+        for (requirer, dep) in [
+            ("cross-aarch64-gcc13", "cross-aarch64-glibc-devel"),
+            ("cross-aarch64-gcc13-bootstrap", "cross-aarch64-glibc-devel"),
+            (
+                "cross-riscv64-elf-gcc13-bootstrap",
+                "cross-riscv64-newlib-devel",
+            ),
+            ("cross-amdgcn-gcc13", "cross-amdgcn-newlib-devel"),
+            ("cross-arm-none-gcc14", "cross-arm-none-newlib-devel"),
+            ("cross-hppa-gcc14", "cross-hppa-glibc-devel"),
+            ("cross-loongarch64-gcc14", "cross-loongarch64-glibc-devel"),
+            ("cross-nvptx-gcc7", "cross-nvptx-newlib-devel"),
+            ("cross-ppc64le-gcc13", "cross-ppc64le-glibc-devel"),
+            ("cross-riscv64-elf-gcc13", "cross-riscv64-newlib-devel"),
+            ("cross-riscv64-gcc13", "cross-riscv64-glibc-devel"),
+            ("cross-rx-gcc15", "cross-rx-newlib-devel"),
+            ("cross-s390x-gcc16", "cross-s390x-glibc-devel"),
+            ("mingw32-cross-gcc", "mingw32-headers"),
+            ("mingw32-cross-gcc-bootstrap", "mingw32-headers"),
+            ("mingw32-runtime", "mingw32-headers"),
+            ("mingw32-gcc", "mingw32-winpthreads-devel"),
+            ("mingw64-cross-gcc", "mingw64-headers"),
+            ("mingw64-runtime", "mingw64-headers"),
+            ("mingw64-gcc", "mingw64-winpthreads-devel"),
+        ] {
+            let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+            pkg.name = requirer.to_string();
+            pkg.requires = vec![plain_dep(dep)];
+            let results = run(&pkg, &config);
+            assert!(
+                named(&results, "devel-dependency").is_empty(),
+                "requirer {requirer} dep {dep}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn devel_dependency_cross_family_rich_leaf_is_silent() {
+        // The credit applies per rich-dep leaf, like the finding.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.name = "cross-aarch64-gcc13".to_string();
+        pkg.requires = vec![rich_dep("(cross-aarch64-glibc-devel or plainx)")];
+        let config = rich_test_config(&[], false);
+        let results = run(&pkg, &config);
+        assert!(
+            named(&results, "devel-dependency").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn devel_dependency_cross_family_near_misses_still_fire() {
+        // The credit is a genuine sys-root leaf only: a different
+        // target's sys-root devel package, a same-target devel match
+        // that is not a sys-root leaf (a library's -static, binutils'
+        // or the compiler's own -devel), a runtime package requiring
+        // its own devel package, the wrong libc's sys-root package
+        // for an -elf (newlib) toolchain, a MinGW library devel
+        // package, a target that is only a prefix of the requirer's
+        // target, a host devel package required by a cross package, a
+        // cross devel package required by a host package, the other
+        // MinGW bitness and the other cross naming scheme all keep
+        // firing.
+        let config = rich_test_config(&[], false);
+        for (requirer, dep) in [
+            ("cross-aarch64-gcc13", "cross-s390x-glibc-devel"),
+            ("cross-aarch64-gcc13", "cross-aarch64-foo-static"),
+            ("cross-aarch64-gcc13", "cross-aarch64-binutils-devel"),
+            ("cross-aarch64-gcc13", "cross-aarch64-gcc13-devel"),
+            ("cross-aarch64-glibc", "cross-aarch64-glibc-devel"),
+            ("cross-riscv64-elf-gcc13", "cross-riscv64-glibc-devel"),
+            ("mingw64-gcc", "mingw64-foo-devel"),
+            ("mingw32-runtime", "mingw32-foo-devel"),
+            ("cross-arm-none-gcc14", "cross-arm-glibc-devel"),
+            ("cross-arm-gcc13", "cross-arm-none-newlib-devel"),
+            ("cross-riscv64-elf-gcc13", "cross-aarch64-glibc-devel"),
+            ("cross-aarch64-gcc13", "glibc-devel"),
+            ("cross-aarch64-gcc13", "mingw64-headers"),
+            ("someapp", "cross-aarch64-glibc-devel"),
+            ("someapp", "mingw64-headers"),
+            ("mingw32-cross-gcc", "mingw64-headers"),
+            ("mingw64-gcc", "zlib-devel"),
+            ("mingw64-cross-gcc", "cross-aarch64-glibc-devel"),
+        ] {
+            let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+            pkg.name = requirer.to_string();
+            pkg.requires = vec![plain_dep(dep)];
+            let results = run(&pkg, &config);
+            let hits = named(&results, "devel-dependency");
+            assert_eq!(hits.len(), 1, "requirer {requirer} dep {dep}: {results:?}");
+            assert!(
+                hits[0].1.ends_with(&format!(" {dep}")),
+                "requirer {requirer}: line: {}",
+                hits[0].1
+            );
+        }
+    }
+
+    #[test]
+    fn devel_dependency_credited_leaf_does_not_consume_the_latch() {
+        // The credit is per leaf: a same-family sys-root devel
+        // requirement followed by a host devel requirement still
+        // fires, on the host leaf.
+        let config = rich_test_config(&[], false);
+        for (requirer, credited, host) in [
+            (
+                "cross-aarch64-gcc13",
+                "cross-aarch64-glibc-devel",
+                "somelib-devel",
+            ),
+            ("mingw64-runtime", "mingw64-headers", "zlib-devel"),
+        ] {
+            let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+            pkg.name = requirer.to_string();
+            pkg.requires = vec![plain_dep(credited), plain_dep(host)];
+            let results = run(&pkg, &config);
+            let hits = named(&results, "devel-dependency");
+            assert_eq!(hits.len(), 1, "requirer {requirer}: {results:?}");
+            assert!(
+                hits[0].1.ends_with(&format!(" {host}")),
+                "requirer {requirer}: line: {}",
+                hits[0].1
+            );
+        }
     }
 
     #[test]
