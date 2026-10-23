@@ -84,22 +84,29 @@ impl DepInfo {
 }
 
 /// The account a `user(<name>)` / `group(<name>)` dependency capability
-/// declares, as `(is_group, name)`. Any other dependency name declares
-/// no account.
-pub fn account_capability(dep_name: &str) -> Option<(bool, &str)> {
+/// declares, as `(is_group, name)`. The inner name is non-empty and
+/// carries no parenthesis: a spelling like `user(foo))` is malformed
+/// and declares no account, as does any other dependency name.
+pub(crate) fn account_capability(dep_name: &str) -> Option<(bool, &str)> {
     if let Some(name) = dep_name
         .strip_prefix("user(")
         .and_then(|rest| rest.strip_suffix(')'))
     {
-        (!name.is_empty()).then_some((false, name))
+        valid_inner(name).then_some((false, name))
     } else if let Some(name) = dep_name
         .strip_prefix("group(")
         .and_then(|rest| rest.strip_suffix(')'))
     {
-        (!name.is_empty()).then_some((true, name))
+        valid_inner(name).then_some((true, name))
     } else {
         None
     }
+}
+
+/// Whether `name` can be the inner name of an account capability:
+/// non-empty and free of parentheses.
+fn valid_inner(name: &str) -> bool {
+    !name.is_empty() && !name.contains(['(', ')'])
 }
 
 /// The account capability a single dependency leaf names, when it
@@ -111,7 +118,7 @@ pub fn account_capability(dep_name: &str) -> Option<(bool, &str)> {
 /// the leaf's flags and EVR, never on the name, so versioned
 /// capabilities credit by account name exactly like unversioned
 /// ones.
-pub fn leaf_account_capability(leaf: &DepLeaf) -> Option<(bool, &str)> {
+pub(crate) fn leaf_account_capability(leaf: &DepLeaf) -> Option<(bool, &str)> {
     if let Some(cap) = account_capability(&leaf.name) {
         return Some(cap);
     }
