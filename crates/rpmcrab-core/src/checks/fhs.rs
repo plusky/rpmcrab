@@ -42,8 +42,10 @@ const FHS_USR_SUBDIRS: &[&str] = &[
 /// standard in practice. They stay out of `FHS_USR_SUBDIRS`: that list
 /// names the standard directories in the generated description, while
 /// this set is the measured Factory population (issue #582), not a
-/// pattern - any other first component still fires.
-const FHS_USR_CROSS_SYSROOTS: &[&str] = &[
+/// pattern - any other first component still fires. FilelistCheck
+/// consults the same set through `cross_sysroot_matches`, so a sysroot
+/// one check treats as standard is standard for both.
+pub(crate) const FHS_USR_CROSS_SYSROOTS: &[&str] = &[
     "aarch64-suse-linux",
     "amdgcn-amdhsa",
     "arm-none-eabi",
@@ -74,6 +76,16 @@ const FHS_USR_CROSS_SYSROOTS: &[&str] = &[
     "x86_64-suse-linux",
     "xtensa-suse-linux",
 ];
+
+/// Whether `path` lies under a cross-toolchain target sysroot: its
+/// first component under `/usr` is one of the measured target sysroots
+/// in `FHS_USR_CROSS_SYSROOTS`. The sysroot name must lead the path -
+/// the same name deeper in the tree sanctions nothing.
+pub(crate) fn cross_sysroot_matches(path: &str) -> bool {
+    path.strip_prefix("/usr/")
+        .map(|rest| rest.split('/').next().unwrap_or(""))
+        .is_some_and(|first| FHS_USR_CROSS_SYSROOTS.contains(&first))
+}
 
 /// Allowed subdirectories of `/var` (FHS 3.0, chapters 5.2 and 5.3).
 const FHS_VAR_SUBDIRS: &[&str] = &[
@@ -265,6 +277,18 @@ mod tests {
             ["/usr/weird/a", "/usr/weird/b", "/var/custom/c"].into_iter(),
         );
         assert_eq!(dirs.len(), 2);
+    }
+
+    #[test]
+    fn cross_sysroot_matches_needs_the_leading_component() {
+        assert!(cross_sysroot_matches("/usr/avr"));
+        assert!(cross_sysroot_matches("/usr/avr/"));
+        assert!(cross_sysroot_matches("/usr/aarch64-suse-linux/bin/ld"));
+        assert!(!cross_sysroot_matches("/usr"));
+        assert!(!cross_sysroot_matches("/usr/"));
+        assert!(!cross_sysroot_matches("/usr/avr2/bin/tool"));
+        assert!(!cross_sysroot_matches("/usr/share/avr/bin/tool"));
+        assert!(!cross_sysroot_matches("/opt/avr/bin/tool"));
     }
 
     #[test]
