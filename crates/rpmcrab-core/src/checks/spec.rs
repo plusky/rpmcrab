@@ -145,6 +145,36 @@ fn rpm_buildroot_re() -> &'static Regex {
     })
 }
 
+/// One buildroot token, unanchored: the token arm of `RPM_BUILDROOT_RE`
+/// with the same capture groups (1 = escaping backslashes, 2 = escaping
+/// `%`s), for walking every token on a line.
+static BUILDROOT_TOKEN_RE: OnceLock<Regex> = OnceLock::new();
+fn buildroot_token_re() -> &'static Regex {
+    BUILDROOT_TOKEN_RE.get_or_init(|| {
+        Regex::new(r"(\\*)\${?RPM_BUILD_ROOT}?|(%+){?buildroot}?").expect("static regex")
+    })
+}
+
+/// An assignment a buildroot reference can lead the value of: a `name=`
+/// pair at a token boundary (line start, whitespace or a shell
+/// separator), the name optionally carrying a configure-style `--`
+/// prefix. The pattern anchors at the end of the examined prefix, so
+/// the `=` directly precedes the reference.
+static BUILDROOT_ASSIGN_EQ_RE: OnceLock<Regex> = OnceLock::new();
+fn buildroot_assign_eq_re() -> &'static Regex {
+    BUILDROOT_ASSIGN_EQ_RE.get_or_init(|| {
+        Regex::new(r"(?:^|[\s;(])(?:--)?[A-Za-z_][A-Za-z0-9_-]*=$").expect("static regex")
+    })
+}
+
+/// The space-separated configure form: a `--name` option followed only
+/// by whitespace up to the reference (`--prefix $RPM_BUILD_ROOT/usr`).
+static BUILDROOT_ASSIGN_SPACE_RE: OnceLock<Regex> = OnceLock::new();
+fn buildroot_assign_space_re() -> &'static Regex {
+    BUILDROOT_ASSIGN_SPACE_RE
+        .get_or_init(|| Regex::new(r"(?:^|\s)--[A-Za-z][A-Za-z0-9_-]*\s+$").expect("static regex"))
+}
+
 static CONFIGURE_LIBDIR_SPEC_RE: OnceLock<Regex> = OnceLock::new();
 fn configure_libdir_spec_re() -> &'static Regex {
     CONFIGURE_LIBDIR_SPEC_RE.get_or_init(|| {
@@ -705,6 +735,46 @@ fn contains_buildroot(line: &str, re: &Regex) -> bool {
     } else {
         false
     }
+}
+
+/// True when every buildroot reference on the line leads the value of an
+/// assignment: a `name=` pair (`DESTDIR=`, `destdir=`, any variable or
+/// macro-definition payload name) or a configure-style `--name` option in
+/// its `=` or space-separated form. In %build and %prep the buildroot is
+/// the install destination, and a reference in that position hands it to
+/// the build system as a path parameter the build consumes; a reference
+/// in any other position (a command's path or plain argument, a value
+/// the reference does not lead, text a compiler flag carries) is not the
+/// assignment idiom. Only the text before the first `#` is walked --
+/// `RPM_BUILDROOT_RE` cannot see past one, so neither can this. Tokens
+/// failing the `contains_buildroot` escaping-parity rule are literals,
+/// not references, and are skipped.
+fn buildroot_refs_are_install_assignments(line: &str) -> bool {
+    let segment = line.split('#').next().unwrap_or("");
+    let mut any = false;
+    for caps in buildroot_token_re()
+        .captures_iter(segment)
+        .filter_map(|r| r.ok())
+    {
+        let backslashes = caps.get(1).map(|m| m.as_str());
+        let percents = caps.get(2).map(|m| m.as_str());
+        let effective = backslashes.is_none_or(|s| s.len() % 2 == 0)
+            && percents.is_none_or(|s| s.len() % 2 != 0);
+        if !effective {
+            continue;
+        }
+        any = true;
+        let token = caps.get(0).expect("token match");
+        let prefix = segment[..token.start()].trim_end_matches(['"', '\'']);
+        if !buildroot_assign_eq_re().is_match(prefix).unwrap_or(false)
+            && !buildroot_assign_space_re()
+                .is_match(prefix)
+                .unwrap_or(false)
+        {
+            return false;
+        }
+    }
+    any
 }
 
 /// The `(scheme, netloc)` pair `urllib.parse.urlparse(url)[0:2]` yields, for
@@ -1959,6 +2029,18 @@ impl SpecCheck {
             || self.current_section == "prep"
             || self.current_section == "build";
         if in_scriptlet && contains_buildroot(line, &self.rpm_buildroot_re) {
+            // In %build and %prep, a line whose buildroot references all
+            // lead assignment values (`DESTDIR=%{buildroot}`,
+            // `--prefix=$RPM_BUILD_ROOT/usr`, ...) states the install
+            // destination for the build system -- the working idiom of
+            // those sections -- and is not charged. Scriptlet sections
+            // keep the charge in every form: a scriptlet runs on the
+            // installed system, where the buildroot does not exist.
+            if (self.current_section == "build" || self.current_section == "prep")
+                && buildroot_refs_are_install_assignments(line)
+            {
+                return;
+            }
             let section = format!("%{}", self.current_section);
             let detail = without_newline(line).trim();
             self.info(
@@ -6294,6 +6376,63 @@ Patch0: foo.patch
         assert!(
             lines.iter().all(|l| l.contains("%build")),
             "lines: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn rpm_buildroot_usage_install_assignment_idiom_is_quiet() {
+        // In %build and %prep the buildroot is the install destination:
+        // a reference that leads the value of an assignment (a `name=`
+        // pair or a configure-style `--name` option, `=` or space form)
+        // hands it to the build system as a path parameter.
+        for spec in [
+            "Name: foo\n%build\nmake DESTDIR=%{buildroot}\n",
+            "Name: foo\n%build\nmake DESTDIR=$RPM_BUILD_ROOT\n",
+            "Name: foo\n%build\n./configure --prefix=%{buildroot}%{_prefix}\n",
+            "Name: foo\n%build\n./configure --temproot=%{buildroot}\n",
+            "Name: foo\n%build\nperl Build.PL destdir=%{buildroot} installdirs=vendor\n",
+            "Name: foo\n%build\nperl Build.PL --prefix $RPM_BUILD_ROOT/usr --installdirs vendor\n",
+            "Name: foo\n%build\n%global _make_args DESTDIR=%{buildroot} DOC_INSTALL_DIR=%{buildroot}/%{_docdir}\n",
+            "Name: foo\n%prep\n%define env export DESTDIR=%{buildroot}\n",
+        ] {
+            let results = run_mini(spec);
+            assert!(
+                !has(&results, "rpm-buildroot-usage"),
+                "spec {spec:?}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rpm_buildroot_usage_non_assignment_forms_still_fire() {
+        // The assignment form in a scriptlet, and %build/%prep
+        // references that lead no assignment value, keep the finding:
+        // a command's path or plain argument, a define a compiler flag
+        // carries, a value the reference does not lead, and a credited
+        // reference sharing its line with an uncredited one.
+        for spec in [
+            "Name: foo\n%post\nmake DESTDIR=%{buildroot}\n",
+            "Name: foo\n%build\necho %{buildroot}\n",
+            "Name: foo\n%build\nmkdir -p %{buildroot}%{_datadir}\n",
+            "Name: foo\n%build\n%{buildroot}%{_bindir}/fipshmac %{buildroot}%{_bindir}/fipscheck\n",
+            "Name: foo\n%build\nexport CFLAGS=\"%optflags -DCMAKE_INSTALL_DATADIR=%{buildroot}/usr/lib64/pkgconfig/\"\n",
+            "Name: foo\n%build\nPATH=\"$PATH:%buildroot/%{_bindir}\" make\n",
+            "Name: foo\n%build\nmake DESTDIR=%{buildroot} && rm -rf %{buildroot}\n",
+        ] {
+            let results = run_mini(spec);
+            let lines = lines_for(&results, "rpm-buildroot-usage");
+            assert_eq!(lines.len(), 1, "spec {spec:?}: {results:?}");
+        }
+    }
+
+    #[test]
+    fn rpm_buildroot_usage_install_section_is_quiet() {
+        // %install sits outside the finding's sections and stays quiet
+        // in every form.
+        let results = run_mini("Name: foo\n%install\ninstall -m 644 x %{buildroot}%{_datadir}/\n");
+        assert!(
+            !has(&results, "rpm-buildroot-usage"),
+            "results: {results:?}"
         );
     }
 
