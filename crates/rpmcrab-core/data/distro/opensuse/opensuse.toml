@@ -70,8 +70,6 @@ Filters = [
     '.*invalid-packager.*',
     '.*invalid-buildhost.*',
 
-# Do not validate package rpm groups
-
 # Output filters
     ' dir-or-file-in-opt ',  # handled by CheckFilelist.py
     'incoherent-version-in-changelog',
@@ -138,8 +136,6 @@ Filters = [
     'aaa_base\.\S+: \w: use-of-home-in-%post',
     'hardcoded-library-path',
 
-# Doesn't seem to make sense
-
 # We want these files
     ' perl-temp-file ',
     ' hidden-file-or-dir .*/\.packlist',
@@ -190,12 +186,8 @@ Filters = [
 # Many places have shorter paths
     ' non-coherent-filename ',
 
-# Mandriva specific stuff that we don't want
-
 # Bash completion files are not scripts, do not require them marked as %config
     'W: non-conffile-in-etc /etc/bash_completion.d/',
-
-# Info uses file triggers now (boo#1152169)
 
     # Extra: *.dll.a and *.a files are permitted arch-independent objects.
     # From mingw{32,64}-filesystem's mingw{32,64}-rpmlintrc (shipped as

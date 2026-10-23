@@ -1116,10 +1116,38 @@ def raw_filter_pattern(entry):
 
 def prune_stale_filters(text, known, pruned_log, dropped_log, retargeted_log):
     """Drop Filters/BlockedFilters lines referencing killed findings or dead
-    scopes, and rewrite lines whose target path moved (RETARGET_FILTERS)."""
+    scopes, and rewrite lines whose target path moved (RETARGET_FILTERS).
+
+    A comment block inside a list heads the entries that follow it, up to
+    the next comment block or the list end. When every entry a block
+    heads is dropped here, the block is dropped too \u2014 it would
+    otherwise be left describing entries that no longer exist \u2014
+    together with one adjacent blank line, so the surviving groups keep
+    the file's spacing. A block that still heads a retained entry stays.
+    """
     lines = text.splitlines(keepends=True)
     out = []
     in_list = None
+    # The comment block currently heading entries in this list: the
+    # out-indices of its comment lines, and how its entries fared.
+    block = None
+
+    def finish_block():
+        nonlocal block
+        if block is not None and block["dropped"] and not block["retained"]:
+            for idx in block["lines"]:
+                out[idx] = None
+            # Tidy one blank separator: the blank after the block when
+            # there is one, else the blank before it (list-end blocks).
+            nxt = block["lines"][-1] + 1
+            if nxt < len(out) and out[nxt] is not None and not out[nxt].strip():
+                out[nxt] = None
+            else:
+                prv = block["lines"][0] - 1
+                if prv >= 0 and out[prv] is not None and not out[prv].strip():
+                    out[prv] = None
+        block = None
+
     for line in lines:
         stripped = line.strip()
         m = re.match(r"^(Filters|BlockedFilters)\s*=\s*\[", stripped)
@@ -1128,7 +1156,16 @@ def prune_stale_filters(text, known, pruned_log, dropped_log, retargeted_log):
             out.append(line)
             continue
         if in_list and stripped.startswith("]"):
+            finish_block()
             in_list = None
+            out.append(line)
+            continue
+        if in_list and stripped.startswith("#"):
+            if block is None or block["entries_seen"]:
+                finish_block()
+                block = {"lines": [], "dropped": 0, "retained": False,
+                         "entries_seen": False}
+            block["lines"].append(len(out))
             out.append(line)
             continue
         if in_list:
@@ -1141,6 +1178,9 @@ def prune_stale_filters(text, known, pruned_log, dropped_log, retargeted_log):
                 pruned_log.append(
                     f"{in_list}: dropped {finding!r} ({PRUNE_CANDIDATES[finding]})"
                 )
+                if block is not None:
+                    block["dropped"] += 1
+                    block["entries_seen"] = True
                 continue
             scoped = scoped_entry(line)
             if scoped is not None and scoped in PRUNE_SCOPED:
@@ -1148,12 +1188,18 @@ def prune_stale_filters(text, known, pruned_log, dropped_log, retargeted_log):
                     f"{in_list}: dropped {scoped[0]!r} scoped to {scoped[1]!r} "
                     f"({PRUNE_SCOPED[scoped]})"
                 )
+                if block is not None:
+                    block["dropped"] += 1
+                    block["entries_seen"] = True
                 continue
             raw = raw_filter_pattern(line)
             if raw is not None and raw in PRUNE_RAW:
                 pruned_log.append(
                     f"{in_list}: dropped {raw!r} ({PRUNE_RAW[raw]})"
                 )
+                if block is not None:
+                    block["dropped"] += 1
+                    block["entries_seen"] = True
                 continue
             if raw is not None and raw in RETARGET_FILTERS:
                 new_pattern, reason = RETARGET_FILTERS[raw]
@@ -1161,14 +1207,23 @@ def prune_stale_filters(text, known, pruned_log, dropped_log, retargeted_log):
                     f"{in_list}: retargeted {raw!r} to {new_pattern!r} ({reason})"
                 )
                 out.append(line.replace(raw, new_pattern, 1))
+                if block is not None:
+                    block["retained"] = True
+                    block["entries_seen"] = True
                 continue
             if finding is not None and finding in DROP_LIVE_FILTERS:
                 dropped_log.append(
                     f"{in_list}: dropped {finding!r} ({DROP_LIVE_FILTERS[finding]})"
                 )
+                if block is not None:
+                    block["dropped"] += 1
+                    block["entries_seen"] = True
                 continue
+            if block is not None and stripped:
+                block["retained"] = True
+                block["entries_seen"] = True
         out.append(line)
-    return "".join(out)
+    return "".join(line for line in out if line is not None)
 
 
 def scope_filters(text, scoped_log):
