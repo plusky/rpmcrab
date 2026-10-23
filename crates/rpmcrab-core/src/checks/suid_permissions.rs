@@ -294,6 +294,17 @@ impl SUIDPermissionsCheck {
         mode & (0o4000 | 0o2000) != 0
     }
 
+    /// The finding name for unlisted privileged bits on a packaged
+    /// file with this mode, split by kind: a directory carries the
+    /// directory finding, everything else the file finding.
+    fn diag_for(mode: u32) -> &'static str {
+        if is_dir(mode) {
+            "permissions-directory-setuid-bit"
+        } else {
+            "permissions-file-setuid-bit"
+        }
+    }
+
     /// Check whether `permctl -n {path}` (or `chkstat`) is called in `script`.
     fn lookup_permctl_call(path: &str, script: Option<&str>) -> bool {
         let Some(script) = script else {
@@ -406,12 +417,7 @@ impl SUIDPermissionsCheck {
         let Some(caps) = &pkgfile.filecaps else {
             return;
         };
-        // The finding name for unlisted privileged bits, split by kind.
-        let diag = if is_dir(pkgfile.mode) {
-            "permissions-directory-setuid-bit"
-        } else {
-            "permissions-file-setuid-bit"
-        };
+        let diag = Self::diag_for(pkgfile.mode);
         add_info(
             out,
             Level::Error,
@@ -422,18 +428,24 @@ impl SUIDPermissionsCheck {
     }
 
     /// Complain about setuid/setgid bits with no permissions-profile
-    /// whitelisting. The verdict is a claim about the registration set,
-    /// so callers emit it only when profile data was read
-    /// (`profiles_read`): with no profile read, whether the bits are
-    /// registered is a fact about the lint host's installed data, not
-    /// about the package.
-    fn complain_setuid_bit(pkg: &Pkg, path: &str, pkgfile: &PkgFile, out: &mut Filter) {
-        // The finding name for unlisted privileged bits, split by kind.
-        let diag = if is_dir(pkgfile.mode) {
-            "permissions-directory-setuid-bit"
-        } else {
-            "permissions-file-setuid-bit"
-        };
+    /// whitelisting, returning whether the complaint was emitted.
+    /// The helper guards itself: the verdict is a claim about the
+    /// registration set, so it is emitted only for a file carrying
+    /// the bits when profile data was read (`profiles_read`) —
+    /// with no profile read, whether the bits are registered is a
+    /// fact about the lint host's installed data, not about the
+    /// package.
+    fn complain_setuid_bit(
+        &self,
+        pkg: &Pkg,
+        path: &str,
+        pkgfile: &PkgFile,
+        out: &mut Filter,
+    ) -> bool {
+        if !self.profiles_read || !Self::is_suid(pkgfile.mode) {
+            return false;
+        }
+        let diag = Self::diag_for(pkgfile.mode);
         add_info(
             out,
             Level::Error,
@@ -444,6 +456,7 @@ impl SUIDPermissionsCheck {
                 pkgfile.mode & 0o7777
             )],
         );
+        true
     }
 
     /// Check whether a call to `permctl -n {path}` is found in the `%post`
@@ -606,8 +619,7 @@ impl Check for SUIDPermissionsCheck {
                         Self::complain_capabilities(pkg, path, pkgfile, out);
                         complained = true;
                     }
-                    if Self::is_suid(mode) && self.profiles_read {
-                        Self::complain_setuid_bit(pkg, path, pkgfile, out);
+                    if self.complain_setuid_bit(pkg, path, pkgfile, out) {
                         complained = true;
                     }
                     if complained {
@@ -937,9 +949,8 @@ mod tests {
         // A central profile that is read establishes the registration
         // set even when it carries no entries (the polkit file-read
         // rule): an unlisted setuid file still fires.
-        let dir = std::env::temp_dir().join("rpmcrab-suid-empty-profile");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
         std::fs::write(dir.join("permissions"), "# no entries yet\n").expect("write profile");
         let base = dir.to_str().unwrap().to_string();
         let mut check =
@@ -955,7 +966,6 @@ mod tests {
             names.contains(&"permissions-file-setuid-bit"),
             "unlisted file fires against an empty read set: {results:?}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -968,9 +978,8 @@ mod tests {
         // corpus shape: its own drop-in plus a setuid binary the central
         // profiles register; a drop-in-established set would report the
         // binary as unregistered on any host without the central data.)
-        let dir = std::env::temp_dir().join("rpmcrab-suid-dropin-gate");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
         let profile = dir.join("otherpkg");
         std::fs::write(&profile, "/usr/bin/other root:root 4755\n").expect("write profile");
 
@@ -1002,7 +1011,6 @@ mod tests {
             !names.contains(&"permissions-incorrect"),
             "the drop-in-registered file verifies clean: {results:?}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1046,9 +1054,8 @@ mod tests {
 
     #[test]
     fn dropin_profile_takes_priority() {
-        let dir = std::env::temp_dir().join("rpmcrab-suid-dropin");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
         let profile = dir.join("mypkg");
         let mut f = std::fs::File::create(&profile).expect("create profile");
         writeln!(f, "/usr/bin/dropbin root:root 4750").expect("write profile");
@@ -1091,7 +1098,6 @@ mod tests {
             line.contains("caused a parsing error:"),
             "parse-error detail: {line}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1175,11 +1181,9 @@ mod tests {
     fn variables_conf_unreadable_panics() {
         // A directory at the variables.conf path is a non-NotFound I/O
         // error, which the reference lets propagate.
-        let dir = std::env::temp_dir().join("rpmcrab-suid-vars-dir");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
         let _ = VariablesHandler::new(dir.to_str().unwrap());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1187,13 +1191,11 @@ mod tests {
     fn variables_conf_malformed_line_panics() {
         // The reference raises on a line without `=` (`permissions.py`
         // `_parse`).
-        let dir = std::env::temp_dir().join("rpmcrab-suid-vars-bad");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
         let path = dir.join("variables.conf");
         std::fs::write(&path, "BIN=bin\nthis line has no equals\n").expect("write");
         let _ = VariablesHandler::new(path.to_str().unwrap());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1201,23 +1203,20 @@ mod tests {
     fn bare_package_line_panics() {
         // The reference does `line.split(None, 1)` then `parts[1]`, raising
         // `IndexError` on a bare `:package:` line.
-        let dir = std::env::temp_dir().join("rpmcrab-suid-bare-package");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
         let path = dir.join("permissions");
         std::fs::write(&path, ":package:\n").expect("write");
         let handler = VariablesHandler {
             variables: HashMap::new(),
         };
         let _ = parse_profile(&handler, path.to_str().unwrap());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn new_with_loads_profiles_and_variables() {
-        let dir = std::env::temp_dir().join("rpmcrab-suid-new-with");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
         let vars = dir.join("variables.conf");
         std::fs::write(&vars, "BIN=bin sbin\n").expect("write vars");
         let profile = dir.join("permissions");
@@ -1227,22 +1226,19 @@ mod tests {
         assert!(check.perms.contains_key("/usr/bin/runme"));
         assert!(check.perms.contains_key("/usr/sbin/runme"));
         assert!(check.profiles_read, "a parsed profile was read");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn new_with_no_profiles_reads_no_data() {
         // Bases carrying neither `permissions` nor `permissions.secure`
         // leave the check in the no-data state.
-        let dir = std::env::temp_dir().join("rpmcrab-suid-new-nodata");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
         let base = dir.to_str().unwrap().to_string();
         let check =
             SUIDPermissionsCheck::new_with("/nonexistent/rpmcrab-variables.conf", &[base.as_str()]);
         assert!(!check.profiles_read);
         assert!(check.perms.is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1251,33 +1247,25 @@ mod tests {
         // The reference raises from the constructor, aborting the run
         // (`SUIDPermissionsCheck.__init__` -> `_parse_profile`, uncaught in
         // `lint.py` `load_checks`).
-        let dir = std::env::temp_dir().join("rpmcrab-suid-new-bad");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
         let profile = dir.join("permissions");
         std::fs::write(&profile, "this is not a valid profile line\n").expect("write");
         let base = dir.to_str().unwrap().to_string();
         let _ =
             SUIDPermissionsCheck::new_with("/nonexistent/rpmcrab-variables.conf", &[base.as_str()]);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Parse `content` as a permissions profile. Scratch dirs are unique per
-    /// call because tests run in parallel.
+    /// Parse `content` as a permissions profile in a fresh scratch
+    /// dir (unique per call: tests run in parallel).
     fn parse_profile_str(content: &str) -> Result<HashMap<String, Vec<PermissionsEntry>>, String> {
-        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("rpmcrab-suid-parse-str-{n}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tmpdir");
-        let path = dir.join("permissions");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("permissions");
         std::fs::write(&path, content).expect("write");
         let handler = VariablesHandler {
             variables: HashMap::new(),
         };
-        let result = parse_profile(&handler, path.to_str().unwrap());
-        let _ = std::fs::remove_dir_all(&dir);
-        result
+        parse_profile(&handler, path.to_str().unwrap())
     }
 
     #[test]
@@ -1303,9 +1291,8 @@ mod tests {
     fn later_profile_replaces_earlier_for_same_path() {
         // The reference does `self.perms.update(parser.entries)`: a later
         // profile's entry list REPLACES the earlier one for the same path.
-        let dir = std::env::temp_dir().join("rpmcrab-suid-replace");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
         std::fs::write(dir.join("permissions"), "/usr/bin/dup root:root 4755\n").expect("write");
         std::fs::write(
             dir.join("permissions.secure"),
@@ -1318,7 +1305,6 @@ mod tests {
         let entries = &check.perms["/usr/bin/dup"];
         assert_eq!(entries.len(), 1, "replace, not extend: {entries:?}");
         assert_eq!(entries[0].mode, 0o4750);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1326,8 +1312,8 @@ mod tests {
         // The reference parses via `_paths_to('permissions',
         // 'permissions.secure')`: every `permissions` file before every
         // `permissions.secure` file, regardless of base directory.
-        let dir = std::env::temp_dir().join("rpmcrab-suid-merge-order");
-        let _ = std::fs::remove_dir_all(&dir);
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
         let base1 = dir.join("share");
         let base2 = dir.join("etc");
         std::fs::create_dir_all(&base1).expect("tmpdir");
@@ -1348,7 +1334,6 @@ mod tests {
             check.perms["/usr/bin/dup"][0].mode, 0o4750,
             "the secure profile wins across bases"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
