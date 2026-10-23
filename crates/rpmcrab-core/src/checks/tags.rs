@@ -3359,11 +3359,12 @@ mod rich_dep_emission_tests {
         // or the compiler's own -devel), a runtime package requiring
         // its own devel package, the wrong libc's sys-root package
         // for an -elf (newlib) toolchain, a MinGW library devel
-        // package, a target that is only a prefix of the requirer's
-        // target, a host devel package required by a cross package, a
-        // cross devel package required by a host package, the other
-        // MinGW bitness and the other cross naming scheme all keep
-        // firing.
+        // package, a target that is only a prefix of the other
+        // side's target (in either direction), a host devel package
+        // required by a cross package, a cross devel package required
+        // by a host package, a cross requirer on a MinGW leaf, a
+        // MinGW requirer on a cross leaf, and the other MinGW
+        // bitness all keep firing.
         let config = rich_test_config(&[], false);
         for (requirer, dep) in [
             ("cross-aarch64-gcc13", "cross-s390x-glibc-devel"),
