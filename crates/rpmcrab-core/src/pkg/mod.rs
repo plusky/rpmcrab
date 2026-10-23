@@ -766,14 +766,19 @@ impl Pkg {
 }
 
 /// Whether a raw header entry is rpm's user/group dependency
-/// generator stamp: it carries `ACCOUNT_GENERATOR_FLAG` and every
-/// dependency leaf it expands to is an account capability. The
-/// generator only emits simple account entries, so a rich entry
-/// carrying the stamp flags but also naming a non-account leaf is a
-/// packager-written entry and survives whole -- dropping it would
-/// lose that leaf for every downstream check.
+/// generator stamp: its prereq sense bits are exactly
+/// `ACCOUNT_GENERATOR_FLAG` (masked with `PREREQ_FLAG`, so sense bits
+/// outside the prereq family do not take part) and every dependency
+/// leaf it expands to is an account capability. The generator only
+/// emits simple account entries, so a rich entry carrying the stamp
+/// flags but also naming a non-account leaf is a packager-written
+/// entry and survives whole -- dropping it would lose that leaf for
+/// every downstream check. A packager entry whose prereq bits add to
+/// the generator's shape -- `Requires(pre,post,postun)`, a legacy
+/// prereq entry carrying further bits -- survives the same way: its
+/// masked flags differ from the generator's exact mask.
 fn is_generator_account_stamp(flag: u32, dep: &DepInfo) -> bool {
-    if flag & ACCOUNT_GENERATOR_FLAG != ACCOUNT_GENERATOR_FLAG {
+    if flag & PREREQ_FLAG != ACCOUNT_GENERATOR_FLAG {
         return false;
     }
     let leaves = dep.leaves();
@@ -1356,6 +1361,26 @@ mod tests {
             &stamp_dep("user(svcfoo)")
         ));
         assert!(!is_generator_account_stamp(0, &stamp_dep("user(svcfoo)")));
+        // Packager entries whose prereq bits add to the generator's
+        // shape are not stamps either: Requires(pre,post,postun) adds
+        // SCRIPT_POST, a legacy prereq entry adds RPMSENSE_PREREQ, and
+        // a four-context entry adds SCRIPT_PREUN. The masked flags
+        // must equal the generator's mask exactly.
+        for extra in [1 << 10, 1 << 6, 1 << 11] {
+            assert!(
+                !is_generator_account_stamp(
+                    ACCOUNT_GENERATOR_FLAG | extra,
+                    &stamp_dep("user(svcfoo)")
+                ),
+                "extra prereq bit {extra:#x} must defeat the stamp shape"
+            );
+        }
+        // A sense bit outside the prereq family (RPMSENSE_GREATER)
+        // takes no part in the masked comparison.
+        assert!(is_generator_account_stamp(
+            ACCOUNT_GENERATOR_FLAG | (1 << 2),
+            &stamp_dep("user(svcfoo)")
+        ));
     }
 }
 

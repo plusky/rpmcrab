@@ -6803,6 +6803,17 @@ mod tests {
     }
 
     #[test]
+    fn account_capability_rejects_parenthesised_inner_names() {
+        // A malformed spelling whose inner text carries a parenthesis
+        // names no account: the stray-paren forms would otherwise read
+        // as the accounts `foo)` / `a)b`.
+        assert_eq!(account_capability("user(foo))"), None);
+        assert_eq!(account_capability("group(foo))"), None);
+        assert_eq!(account_capability("user(foo(bar))"), None);
+        assert_eq!(account_capability("user(a)b)"), None);
+    }
+
+    #[test]
     fn sysusers_snippet_paths_match_conf_under_sysusers_d() {
         assert!(is_sysusers_snippet("/usr/lib/sysusers.d/foo.conf"));
         assert!(is_sysusers_snippet("/etc/sysusers.d/foo.conf"));
