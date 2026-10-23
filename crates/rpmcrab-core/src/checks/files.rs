@@ -22,6 +22,7 @@ use std::sync::Arc;
 use fancy_regex::Regex;
 use indexmap::IndexMap;
 
+use super::fhs::cross_sysroot_matches;
 use super::filelist::sysconfig_good_matches;
 use super::is_match;
 use super::shared::{
@@ -3441,7 +3442,11 @@ impl FilesCheck {
     }
 
     fn check_normal_non_devel(&self, pkg: &Pkg, fname: &str, st: &PkgState, out: &mut Filter) {
-        if st.devel_pkg && fname.ends_with(".typelib") {
+        // FilesCheck.py:1079-1081. The cross-sysroot scoping is ours
+        // (issue #860, divergences.toml): under a cross-toolchain
+        // target sysroot the file is the devel package's own payload,
+        // not host layout.
+        if st.devel_pkg && fname.ends_with(".typelib") && !cross_sysroot_matches(fname) {
             add_info(
                 out,
                 Level::Error,
@@ -3491,8 +3496,12 @@ impl FilesCheck {
         st: &PkgState,
         out: &mut Filter,
     ) {
+        // FilesCheck.py:1083-1088, with the cross-sysroot scoping of
+        // check_normal_non_devel (issue #860): a runtime library under
+        // a target sysroot is the cross devel package's payload.
         if is_match(&self.lib_re, fname)
             && st.devel_pkg
+            && !cross_sysroot_matches(fname)
             && !(is_match(&self.sofile_re, fname) && pkgfile::is_symlink(pkgfile.mode))
         {
             add_info(
@@ -5664,6 +5673,113 @@ mod tests {
         check.check(&pkg, &config, &mut out);
         let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
         assert_has(&names, "non-devel-file-in-devel-package");
+    }
+
+    // Issue #860: run the check over one synthetic package and
+    // return the `non-devel-file-in-devel-package` report lines.
+    fn non_devel_lines(pkg_name: &str, fnames: &[&str]) -> Vec<String> {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.name = pkg_name.to_string();
+        pkg.doc_files = vec![];
+        pkg.files = fnames
+            .iter()
+            .map(|fname| {
+                let path = dir.path().join(fname.trim_start_matches('/'));
+                std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+                std::fs::write(&path, b"fake lib\n").expect("write temp file");
+                PkgFile {
+                    name: fname.to_string(),
+                    path: path.to_string_lossy().into_owned(),
+                    mode: 0o100644,
+                    magic: "ASCII text".to_string(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        out.results()
+            .iter()
+            .filter(|(name, _)| name == "non-devel-file-in-devel-package")
+            .map(|(_, line)| line.clone())
+            .collect()
+    }
+
+    #[test]
+    fn cross_sysroot_runtime_libs_in_devel_package_are_quiet() {
+        // Issue #860: the glibc-cross packages ship the target's
+        // runtime libraries under the sys-root; that payload is the
+        // cross devel package's own content, not host layout.
+        let lines = non_devel_lines(
+            "cross-aarch64-glibc-devel",
+            &[
+                "/usr/aarch64-suse-linux/sys-root/lib64/libc.so.6",
+                "/usr/aarch64-suse-linux/sys-root/lib64/libanl.so.1",
+                "/usr/hppa-suse-linux/sys-root/lib/libc.so.6",
+                // the whole triplet tree is target content: no
+                // sys-root component is required
+                "/usr/powerpc64le-suse-linux/lib64/libc.so.6",
+            ],
+        );
+        assert!(lines.is_empty(), "{lines:?}");
+    }
+
+    #[test]
+    fn every_measured_cross_sysroot_is_quiet_for_non_devel() {
+        // Pin the whole measured set against this check too: a
+        // sysroot dropped from the shared set fails here as well as
+        // in FHSCheck's own pin on the set.
+        for sysroot in crate::checks::fhs::FHS_USR_CROSS_SYSROOTS {
+            let path = format!("/usr/{sysroot}/sys-root/lib64/libc.so.6");
+            let lines = non_devel_lines("cross-foo-glibc-devel", &[&path]);
+            assert!(lines.is_empty(), "{sysroot}: {lines:?}");
+        }
+    }
+
+    #[test]
+    fn non_devel_still_fires_outside_the_measured_sysroots() {
+        // The sanction is the measured set in the leading component,
+        // not the triplet shape and not the sys-root name anywhere in
+        // the path: host layout, a novel triplet, a measured name
+        // extended by a suffix and a sysroot name below another
+        // component all keep firing.
+        let fnames = [
+            "/usr/lib64/libc.so.6",
+            "/usr/frobnicate-suse-linux/sys-root/lib64/libc.so.6",
+            "/usr/aarch64-suse-linux2/sys-root/lib64/libc.so.6",
+            "/usr/share/aarch64-suse-linux/sys-root/lib64/libc.so.6",
+            "/usr/local/aarch64-suse-linux/sys-root/lib64/libc.so.6",
+        ];
+        let lines = non_devel_lines("cross-aarch64-glibc-devel", &fnames);
+        assert_eq!(lines.len(), fnames.len(), "{lines:?}");
+        for fname in fnames {
+            assert!(
+                lines.iter().any(|l| l.contains(fname)),
+                "{fname}: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cross_sysroot_typelib_in_devel_package_is_quiet() {
+        // The scoping is a property of the path, so the typelib arm
+        // of the finding is scoped the same way.
+        let lines = non_devel_lines(
+            "cross-aarch64-glibc-devel",
+            &["/usr/aarch64-suse-linux/sys-root/lib64/girepository-1.0/Target-1.0.typelib"],
+        );
+        assert!(lines.is_empty(), "{lines:?}");
+        // the same payload at a host path keeps firing
+        let lines = non_devel_lines(
+            "foo-devel",
+            &["/usr/lib64/girepository-1.0/Foo-1.0.typelib"],
+        );
+        assert_eq!(lines.len(), 1, "{lines:?}");
     }
 
     #[test]
