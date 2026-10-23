@@ -381,7 +381,11 @@ impl TagsCheck {
         // plusky/rpmcrab#283 (DevelNumberExceptions / word-boundary regex
         // for required names) stays open.
         let requirer_is_biarch_devel = is_match(devel_infix_regex(), &pkg.name);
-        let generated_lib_names = generated_soname_package_names(deps);
+        // The generated-soname package-name set is consulted only by
+        // the explicit-lib-dependency predicate, and only for a leaf
+        // that passes that predicate's decidable guards; it is built on
+        // the first such leaf rather than for every package (#888).
+        let mut generated_lib_names: Option<std::collections::HashSet<String>> = None;
         for dep in deps {
             let value = format_require(dep);
             // Rich `(a or b)` expressions (RPM >= 4.13): run the name and
@@ -466,17 +470,21 @@ impl TagsCheck {
                         && leaf.qualifier.is_none()
                         && !leaf.name.contains("__")
                         && !leaf.name.contains('(')
-                        && generated_lib_names.contains(leaf.name.as_str())
-                        && let Ok(Some(caps)) = self.lib_package_re.captures(&leaf.name)
-                        && caps.get(1).is_none()
                     {
-                        add_info(
-                            out,
-                            Level::Error,
-                            pkg,
-                            "explicit-lib-dependency",
-                            &[&leaf.name],
-                        );
+                        let generated_lib_names = generated_lib_names
+                            .get_or_insert_with(|| generated_soname_package_names(deps));
+                        if generated_lib_names.contains(leaf.name.as_str())
+                            && let Ok(Some(caps)) = self.lib_package_re.captures(&leaf.name)
+                            && caps.get(1).is_none()
+                        {
+                            add_info(
+                                out,
+                                Level::Error,
+                                pkg,
+                                "explicit-lib-dependency",
+                                &[&leaf.name],
+                            );
+                        }
                     }
                 }
                 if leaf.flags == RPMSENSE_EQUAL && leaf.release.is_some() {

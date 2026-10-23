@@ -3,15 +3,15 @@ rpmlint = "2.10.0"           # reference version the divergence is measured agai
 reference_sha = "84848c05c5571c22274a55ff9afdfe6d88c67dc9"   # the pinned rpmlint commit (see setup-rpmlint-ref.sh)
 flavour = "openSUSE"         # config flavour; see "The overlay trap" in README.md
 checks = 43                  # reference check count under the openSUSE overlay
-argv = ["explicit-libdep-probe-1.0-1.noarch.rpm"] # exactly what was passed (basenames); no config arg (see README.md)
-captured = "2026-10-09"
+argv = ["--no-time-report", "explicit-libdep-probe-1.0-1.x86_64.rpm"] # exactly what was passed; no config arg (see README.md). --no-time-report keeps the snapshot free of the timing-dependent report section.
+captured = "2026-10-23"
 
 [source]
-description = "Hand-built probe RPM (rpmbuild, noarch) for the explicit-lib-dependency suffix-narrowing (rpmcrab#365). Requires: appstream-glib is a suffix-only name (the reference fires, rpmcrab deliberately stays silent); Requires: zlib is a genuine library without the lib* prefix (a true positive the reference gets right and rpmcrab knowingly silences per openSUSE naming policy); Requires: libfoo is a genuine lib* library (the reference fires). Since rpmcrab#851 the probe draws no explicit-lib-dependency finding at all: it has no binaries, so nothing in it generates a soname dependency for an explicit requirement to duplicate, and redundancy is the condition for firing. The case now pins the silence of all three names; its expected/ predates that change (and the badness removal) and is retained as the historical capture."
+description = "Hand-built probe RPM (rpmbuild, x86_64) for explicit-lib-dependency. The package ships a binary linking libfoo.so.1, so its header carries the generated dependency libfoo.so.1()(64bit), and four explicit requirements. libfoo1 is the conventional package name of that generated soname dependency, and it is the one name rpmcrab fires on. appstream-glib is a suffix-only name and zlib a genuine library without the lib* prefix: the reference fires on both, rpmcrab stays silent — neither duplicates a generated dependency, and the anchored lib-package regex (#365) matches neither. libfoo is the bare lib<stem> form: it names a different package than the library package libfoo1 (the libnbd tools package vs libnbd0), so it duplicates nothing and stays silent (#851). Redundancy is not the sole condition: the requirement must also be unversioned and unqualified, a plain package name rather than a capability, and pass the anchored regex with no .so capture. expected/ is a hand-written synthetic snapshot of rpmcrab's own output on this input — not a reference capture — regenerated for the binary-carrying probe; the run exits 64, the one error failing the run (#699)."
 
 [tools]
-present = ["rpmbuild"]       # external tools used to build the input
+present = ["rpmbuild", "gcc"]       # external tools used to build the input
 
 [[input]]
-file = "explicit-libdep-probe-1.0-1.noarch.rpm"
-sha256 = "187774bce7329cf4fad38796af6fa80390760232b5c3fcb94eaa412e5472bdb2"
+file = "explicit-libdep-probe-1.0-1.x86_64.rpm"
+sha256 = "aba715f3778cea0a9125a0fdead53f60ad20895e053fe6642a31e1a4f732b69b"
