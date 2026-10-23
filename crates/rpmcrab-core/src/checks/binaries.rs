@@ -2548,11 +2548,10 @@ fn elf_machine_class_from_magic(magic: &str) -> ElfMachineClass {
         "OpenRISC",
         "Blackfin",
         "TILE",
-        "ARC ",
+        "ARC",
         "CSKY",
         "VAX",
         "XCore",
-        "AArch64",
     ];
     if FOREIGN_TOKENS.iter().any(|t| magic.contains(t)) {
         ElfMachineClass::Foreign
@@ -2591,7 +2590,8 @@ enum ArchiveElfClass {
     AllForeign,
     /// An ELF member is for the host family or names no machine.
     HasHostOrUnknown,
-    /// The archive bytes cannot be read or parsed.
+    /// The archive bytes cannot be read or parsed, or a member the
+    /// index names cannot be extracted.
     Unreadable,
 }
 
@@ -2605,17 +2605,27 @@ fn archive_elf_class(pkgfile: &PkgFile) -> ArchiveElfClass {
     let Ok(archive) = goblin::archive::Archive::parse(&data) else {
         return ArchiveElfClass::Unreadable;
     };
-    let mut members = 0usize;
     let mut elf_members = 0usize;
     for i in 0..archive.len() {
+        // A member the index names but that cannot be extracted
+        // leaves the classification incomplete -- the unreadable
+        // member may be the host-code one -- so the archive is
+        // unreadable, like a member range out of bounds.
         let Some(member) = archive.get_at(i) else {
-            continue;
-        };
-        let end = member.offset.saturating_add(member.size() as u64) as usize;
-        let Some(bytes) = data.get(member.offset as usize..end) else {
             return ArchiveElfClass::Unreadable;
         };
-        members += 1;
+        // Member offsets are u64; on a 32-bit target an offset past
+        // 4 GiB does not fit a usize index. Fail closed (unreadable)
+        // rather than truncate into another member's bytes.
+        let Ok(start) = usize::try_from(member.offset) else {
+            return ArchiveElfClass::Unreadable;
+        };
+        let Ok(end) = usize::try_from(member.offset.saturating_add(member.size() as u64)) else {
+            return ArchiveElfClass::Unreadable;
+        };
+        let Some(bytes) = data.get(start..end) else {
+            return ArchiveElfClass::Unreadable;
+        };
         if !bytes.starts_with(ELF_MAGIC) {
             continue;
         }
@@ -2624,10 +2634,7 @@ fn archive_elf_class(pkgfile: &PkgFile) -> ArchiveElfClass {
             return ArchiveElfClass::HasHostOrUnknown;
         }
     }
-    if members == 0 && archive.len() > 0 {
-        // The archive declares members but none could be read.
-        ArchiveElfClass::Unreadable
-    } else if elf_members == 0 {
+    if elf_members == 0 {
         ArchiveElfClass::NoElfMembers
     } else {
         ArchiveElfClass::AllForeign
@@ -2648,6 +2655,7 @@ fn in_target_payload_location(fname: &str) -> bool {
         && matches!(segments.next(), Some("usr"))
         && segments.next().is_some_and(|triplet| triplet.contains('-'))
         && matches!(segments.next(), Some("sys-root"))
+        && segments.next().is_some_and(|rest| !rest.is_empty())
 }
 
 /// Whether a binary-class file in a noarch package is foreign-target
@@ -2667,8 +2675,8 @@ fn noarch_binary_is_foreign_target(pkgfile: &PkgFile) -> bool {
             ArchiveElfClass::HasHostOrUnknown | ArchiveElfClass::Unreadable => false,
         }
     } else if elf_regex().is_match(&pkgfile.magic).unwrap_or(false) {
-        elf_machine_class(pkgfile) == ElfMachineClass::Foreign
-            && in_target_payload_location(&pkgfile.name)
+        in_target_payload_location(&pkgfile.name)
+            && elf_machine_class(pkgfile) == ElfMachineClass::Foreign
     } else {
         // OCaml native code and Lua bytecode carry no ELF machine to
         // classify; the finding keeps firing for them.
@@ -8220,6 +8228,71 @@ description = "explicit priority string bypasses the system crypto policy"
             "arch-independent-package-contains-binary-or-object",
         );
         assert_eq!(lines.len(), 1, "Lua bytecode fires: {results:?}");
+    }
+
+    #[test]
+    fn noarch_ocaml_native_still_fires() {
+        // OCaml native code carries no ELF machine to classify, so
+        // the foreign-target exemption does not reach it -- in a
+        // target-payload location either.
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "noarchpkg",
+            "noarch",
+            vec![syn_file(
+                "/usr/riscv64-suse-linux/sys-root/lib64/camlprog",
+                "Objective caml native code executable, version 5.2",
+            )],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(lines.len(), 1, "OCaml native code fires: {results:?}");
+    }
+
+    #[test]
+    fn noarch_file_named_sysroot_still_fires() {
+        // The sys-root location is the path *below* sys-root: a file
+        // whose path ends at sys-root itself sits in no sys-root, so
+        // foreign evidence does not exempt it.
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "noarchpkg",
+            "noarch",
+            vec![syn_file(
+                "/usr/riscv64-suse-linux/sys-root",
+                "ELF 64-bit LSB shared object, UCB RISC-V, version 1 (SYSV)",
+            )],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(
+            lines.len(),
+            1,
+            "the sys-root path itself fires: {results:?}"
+        );
+    }
+
+    #[test]
+    fn noarch_magic_machine_names_classify_foreign() {
+        // The spellings libmagic actually emits: aarch64 payloads are
+        // "ARM aarch64" (the ARM token carries them), and the ARC
+        // machine name arrives in comma form.
+        assert_eq!(
+            elf_machine_class_from_magic(
+                "ELF 64-bit LSB shared object, ARM aarch64, version 1 (SYSV)"
+            ),
+            ElfMachineClass::Foreign
+        );
+        assert_eq!(
+            elf_machine_class_from_magic("ELF 32-bit LSB relocatable, ARC, version 1 (SYSV)"),
+            ElfMachineClass::Foreign
+        );
     }
 
     #[test]
