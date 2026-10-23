@@ -45,6 +45,7 @@ use crate::pkg::dep::DepLeaf;
 use crate::pkg::dep::RPMSENSE_EQUAL;
 use crate::pkg::dep::RPMSENSE_GREATER;
 use crate::pkg::dep::RPMSENSE_LESS;
+use crate::pkg::dep::is_rich_dep_expr;
 use crate::pkg::dep::version_to_string;
 use crate::pkg::pkgfile::is_symlink;
 
@@ -100,29 +101,19 @@ fn source_key(pkg: &Pkg) -> String {
     }
 }
 
-/// The stem of an isa-qualified name: `foo(x86-64)` -> `foo`. The
-/// qualifier is the `%{_isa}` shape — a name and a bit width joined by
-/// `-` inside parentheses; any other parenthesised suffix is part of
-/// the name (a soname's `()(64bit)`, a capability's argument).
-fn isa_stem(name: &str) -> Option<&str> {
-    let (stem, inner) = name.strip_suffix(')').and_then(|n| n.split_once('('))?;
-    let (isa_name, bits) = inner.split_once('-')?;
-    let isa_shape = !isa_name.is_empty()
-        && isa_name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && !bits.is_empty()
-        && bits.chars().all(|c| c.is_ascii_digit());
-    isa_shape.then_some(stem)
-}
-
 /// The package names a requirement can anchor on: the name itself,
-/// plus the stem when it carries an isa qualifier — `akonadi(x86-64)`
-/// anchors on the `akonadi` package, the way the direct credit's
-/// `definition + isa` arm names the library package.
-fn anchor_names(name: &str) -> Vec<&str> {
+/// plus the stem when the name carries the running `%{_isa}`
+/// qualifier — `akonadi(x86-64)` anchors on the `akonadi` package,
+/// the way the direct credit's `definition + isa` arm names the
+/// library package. Only the running isa is stripped: a foreign isa
+/// qualifies a different architecture's package, and any other
+/// parenthesised suffix is part of the name (a soname's `()(64bit)`,
+/// a capability's argument).
+fn anchor_names<'a>(name: &'a str, isa: &str) -> Vec<&'a str> {
     let mut names = vec![name];
-    if let Some(stem) = isa_stem(name) {
+    if !isa.is_empty()
+        && let Some(stem) = name.strip_suffix(isa)
+    {
         names.push(stem);
     }
     names
@@ -176,7 +167,7 @@ impl PkgSnapshot {
                 .chain(pkg.prereq.iter())
                 .cloned()
                 .collect(),
-            provides: pkg.provides.iter().flat_map(|d| d.leaf_names()).collect(),
+            provides: pkg.provides.iter().map(|d| d.name.clone()).collect(),
         }
     }
 }
@@ -231,9 +222,11 @@ impl LibraryDependencyCheck {
     /// (plusky/rpmcrab#863): one of the devel package's requirements
     /// names a package of the run built from the devel's source
     /// for the devel's own arch, pinned with `=` to that sibling's
-    /// own version, and the sibling's own requirements name the
-    /// library package or one of
-    /// its provides. The credit is exactly one hop: a requirement on
+    /// own version, and the sibling's own plain requirements name the
+    /// library package, its isa-qualified spelling, or one of
+    /// its provides. Rich (`or`/`if`) requirements take no part on
+    /// either hop: their leaves are alternatives and conditions, not
+    /// guarantees. The credit is exactly one hop: a requirement on
     /// the devel package itself or on the library package is the
     /// direct credit's business, an unpinned or differently pinned
     /// requirement guarantees no particular sibling build, and a
@@ -259,7 +252,8 @@ impl LibraryDependencyCheck {
         let Some(lib) = snapshots_by_key.get(&(definition, definition_arch)) else {
             return false;
         };
-        let mut lib_names: Vec<&str> = vec![definition];
+        let isa_name = format!("{definition}{}", self.isa);
+        let mut lib_names: Vec<&str> = vec![definition, isa_name.as_str()];
         lib_names.extend(lib.provides.iter().map(String::as_str));
         // The sibling is the anchor name's build for the devel
         // package's own arch; a `noarch` build stands in when the
@@ -270,21 +264,26 @@ impl LibraryDependencyCheck {
                 .copied()
                 .or_else(|| snapshots_by_key.get(&(target, "noarch")).copied())
         };
-        dev.requires.iter().flat_map(|d| d.leaves()).any(|leaf| {
-            anchor_names(&leaf.name).iter().any(|target| {
-                *target != devel.0
-                    && *target != definition
-                    && sibling(target).is_some_and(|sib| {
-                        sib.source == dev.source
-                            && pin_matches(&leaf, sib)
-                            && sib
-                                .requires
-                                .iter()
-                                .flat_map(|d| d.leaves())
-                                .any(|sib_leaf| lib_names.contains(&sib_leaf.name.as_str()))
-                    })
+        dev.requires
+            .iter()
+            .filter(|d| !is_rich_dep_expr(&d.name))
+            .flat_map(|d| d.leaves())
+            .any(|leaf| {
+                anchor_names(&leaf.name, &self.isa).iter().any(|target| {
+                    *target != devel.0
+                        && *target != definition
+                        && sibling(target).is_some_and(|sib| {
+                            sib.source == dev.source
+                                && pin_matches(&leaf, sib)
+                                && sib
+                                    .requires
+                                    .iter()
+                                    .filter(|d| !is_rich_dep_expr(&d.name))
+                                    .flat_map(|d| d.leaves())
+                                    .any(|sib_leaf| lib_names.contains(&sib_leaf.name.as_str()))
+                        })
+                })
             })
-        })
     }
 }
 
@@ -989,14 +988,75 @@ mod tests {
 
     #[test]
     fn anchor_chain_isa_qualified_anchor_credits() {
-        // The anchor named with its isa qualifier, the spelling a
-        // handful of the measured chains take (rocm-clang-devel and
-        // rocm-llvm-devel on their sibling libs packages).
+        // The anchor named with the running isa qualifier, the
+        // spelling a handful of the measured chains take
+        // (rocm-clang-devel and rocm-llvm-devel on their sibling libs
+        // packages).
+        let config = Config::default();
+        let isa = LibraryDependencyCheck::new(&config).isa.clone();
         let (lib, anchor, devel) = anchor_trio(
             &[require("libfoo.so.1()(64bit)")],
-            &[require_pinned("foo(x86-64)", "1")],
+            &[require_pinned(&format!("foo{isa}"), "1")],
         );
         assert!(run_trio(&lib, &anchor, &devel).is_empty());
+    }
+
+    #[test]
+    fn anchor_chain_foreign_isa_anchor_still_fires() {
+        // Only the running isa is stripped: a pin on the anchor's
+        // foreign-isa spelling qualifies another architecture's
+        // package, so the name anchors on nothing in this run.
+        let config = Config::default();
+        let isa = LibraryDependencyCheck::new(&config).isa.clone();
+        let foreign = if isa == "(x86-64)" {
+            "(aarch-64)"
+        } else {
+            "(x86-64)"
+        };
+        let (lib, anchor, devel) = anchor_trio(
+            &[require("libfoo.so.1()(64bit)")],
+            &[require_pinned(&format!("foo{foreign}"), "1")],
+        );
+        let results = run_trio(&lib, &anchor, &devel);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "no-library-dependency-on");
+    }
+
+    #[test]
+    fn anchor_chain_isa_qualified_library_name_credits() {
+        // The sibling can reach the library by its isa-qualified
+        // package name, the spelling the direct credit's
+        // `definition + isa` arm accepts.
+        let config = Config::default();
+        let isa = LibraryDependencyCheck::new(&config).isa.clone();
+        let (lib, anchor, devel) = anchor_trio(
+            &[require(&format!("libfoo{isa}"))],
+            &[require_pinned("foo", "1")],
+        );
+        assert!(run_trio(&lib, &anchor, &devel).is_empty());
+    }
+
+    #[test]
+    fn anchor_chain_rich_requirements_do_not_credit() {
+        // A rich requirement's leaves are alternatives and conditions,
+        // not guarantees: on the devel hop the pinned anchor inside an
+        // `or` credits nothing, and on the sibling hop the library
+        // name inside an `or` reaches nothing.
+        let (lib, anchor, devel) = anchor_trio(
+            &[require("libfoo.so.1()(64bit)")],
+            &[require("(foo = 1 or baz)")],
+        );
+        let results = run_trio(&lib, &anchor, &devel);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "no-library-dependency-on");
+
+        let (lib, anchor, devel) = anchor_trio(
+            &[require("(libfoo.so.1()(64bit) or libother.so.9()(64bit))")],
+            &[require_pinned("foo", "1")],
+        );
+        let results = run_trio(&lib, &anchor, &devel);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "no-library-dependency-on");
     }
 
     #[test]
