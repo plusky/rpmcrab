@@ -98,10 +98,20 @@ Three different check sets, three different outputs:
 | Reference under the openSUSE overlay — what the cases pin | 43 |
 
 `meta.toml` records the pinned count as `checks = 43`. A port-side runner
-**must** load the same overlay — the port resolves config pyxdg-style, so
-`XDG_CONFIG_HOME=.parity-ref/xdg` reproduces it — or every comparison it
-makes is meaningless. Run the port under its own 33-check default config and
-the fixtures diverge heavily; that divergence is the config, not the port.
+loads the same overlay through the port's vendored distro layer:
+`scripts/generate-distro-configs.py` generates that layer from the same
+`configs/openSUSE` files the capture overlay is copied from, and CI's
+distro-config-drift job keeps the two in sync. The vendored layer is the
+overlay in the form the port ships, deliberate amendments included (the
+`DROP_LIVE_FILTERS` drops and the removed badness keys live there). A
+reproduction run therefore points `XDG_CONFIG_HOME` at an empty directory,
+and the vendored layer loads every distro config file exactly once.
+Pointing `XDG_CONFIG_HOME` at `.parity-ref/xdg` instead loads each distro
+config a second time from disk, on top of the vendored copy: the session
+header lists every distro file twice, filters the generator dropped apply
+again, and the removed `BadnessThreshold` key warns. The reference capture
+is unaffected by the choice: the reference has no vendored layer, so its
+overlay loads from `.parity-ref/xdg` exactly once.
 
 ## Normalization
 
@@ -163,9 +173,12 @@ Every non-empty entry is a reviewed, deliberate decision.
 
 ```sh
 scripts/setup-rpmlint-ref.sh                 # build the reference env (once)
-XDG_CONFIG_HOME=.parity-ref/xdg \
-  scripts/capture-parity.sh <name> <input.rpm|spec> [-- extra rpmlint args]
+scripts/capture-parity.sh <name> <input.rpm|spec> [-- extra rpmlint args]
 ```
+
+`capture-parity.sh` sets `XDG_CONFIG_HOME` for the reference itself, from
+`RPMLINT_REF` (override the config dir with `RPMLINT_XDG`); the ambient
+`XDG_CONFIG_HOME` of the calling shell is deliberately not inherited.
 
 Then fill in `cases/<name>/meta.toml`'s `[source] description`, review the
 diff, and commit. External tools rpmlint shells out to (`checkbashisms`,
