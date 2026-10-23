@@ -10,6 +10,18 @@
 //!
 //! Parses the permissions profiles (`/usr/share/permissions/permissions`,
 //! `permissions.secure`, and per-package `permissions.d/` drop-ins) natively.
+//!
+//! The setuid/setgid verdicts (`permissions-file-setuid-bit`,
+//! `permissions-directory-setuid-bit`) are claims about that registration
+//! data, so they are emitted only when at least one central profile was
+//! read at construction; a profile that reads as empty still establishes
+//! the registration set. Per-package drop-ins extend the set but do not
+//! establish it — the registrations that acquit the canonical setuid set
+//! live in the central data. With no central profile read, whether a
+//! file is registered is a fact about the lint host's installed data,
+//! not about the package. Packaged capabilities are rejected outright
+//! in every data state: that verdict is decidable from the package
+//! alone.
 
 use std::collections::HashMap;
 use std::fs;
@@ -229,6 +241,12 @@ fn parse_profile(
 pub struct SUIDPermissionsCheck {
     perms: HashMap<String, Vec<PermissionsEntry>>,
     var_handler: VariablesHandler,
+    /// Whether any central permissions profile was read at construction.
+    /// A profile that reads as empty counts: its content establishes the
+    /// registration set. Drop-ins extend the set without establishing
+    /// it. The setuid/setgid verdicts are claims about that set, so
+    /// they are emitted only in this state.
+    profiles_read: bool,
 }
 
 impl SUIDPermissionsCheck {
@@ -244,6 +262,7 @@ impl SUIDPermissionsCheck {
     fn new_with(variables_conf: &str, profile_bases: &[&str]) -> Self {
         let var_handler = VariablesHandler::new(variables_conf);
         let mut perms: HashMap<String, Vec<PermissionsEntry>> = HashMap::new();
+        let mut profiles_read = false;
 
         // Parse order mirrors the reference's `_paths_to('permissions',
         // 'permissions.secure')` — every `permissions` file before every
@@ -257,13 +276,18 @@ impl SUIDPermissionsCheck {
                     continue;
                 }
                 let entries = parse_profile(&var_handler, &path).unwrap_or_else(|e| panic!("{e}"));
+                profiles_read = true;
                 for (k, v) in entries {
                     perms.insert(k, v);
                 }
             }
         }
 
-        Self { perms, var_handler }
+        Self {
+            perms,
+            var_handler,
+            profiles_read,
+        }
     }
 
     fn is_suid(mode: u32) -> bool {
@@ -373,34 +397,53 @@ impl SUIDPermissionsCheck {
         }
     }
 
-    /// Complain about privileged bits with no permissions-profile whitelisting.
-    fn complain_restricted_privs(pkg: &Pkg, path: &str, pkgfile: &PkgFile, out: &mut Filter) {
+    /// Complain about packaged capabilities with no permissions-profile
+    /// whitelisting. Packaged capabilities are rejected outright — they
+    /// should only be managed by the permissions package — so this
+    /// verdict is decidable from the package alone and is emitted in
+    /// every data state.
+    fn complain_capabilities(pkg: &Pkg, path: &str, pkgfile: &PkgFile, out: &mut Filter) {
+        let Some(caps) = &pkgfile.filecaps else {
+            return;
+        };
+        // The finding name for unlisted privileged bits, split by kind.
         let diag = if is_dir(pkgfile.mode) {
             "permissions-directory-setuid-bit"
         } else {
             "permissions-file-setuid-bit"
         };
-        if let Some(caps) = &pkgfile.filecaps {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                diag,
-                &[&format!("{path} is packaged with capabilities ({caps})")],
-            );
-        }
-        if Self::is_suid(pkgfile.mode) {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                diag,
-                &[&format!(
-                    "{path} is packaged with setuid/setgid bits (0{:o})",
-                    pkgfile.mode & 0o7777
-                )],
-            );
-        }
+        add_info(
+            out,
+            Level::Error,
+            pkg,
+            diag,
+            &[&format!("{path} is packaged with capabilities ({caps})")],
+        );
+    }
+
+    /// Complain about setuid/setgid bits with no permissions-profile
+    /// whitelisting. The verdict is a claim about the registration set,
+    /// so callers emit it only when profile data was read
+    /// (`profiles_read`): with no profile read, whether the bits are
+    /// registered is a fact about the lint host's installed data, not
+    /// about the package.
+    fn complain_setuid_bit(pkg: &Pkg, path: &str, pkgfile: &PkgFile, out: &mut Filter) {
+        // The finding name for unlisted privileged bits, split by kind.
+        let diag = if is_dir(pkgfile.mode) {
+            "permissions-directory-setuid-bit"
+        } else {
+            "permissions-file-setuid-bit"
+        };
+        add_info(
+            out,
+            Level::Error,
+            pkg,
+            diag,
+            &[&format!(
+                "{path} is packaged with setuid/setgid bits (0{:o})",
+                pkgfile.mode & 0o7777
+            )],
+        );
     }
 
     /// Check whether a call to `permctl -n {path}` is found in the `%post`
@@ -547,11 +590,29 @@ impl Check for SUIDPermissionsCheck {
                 }
             }
             if !matched {
-                // No matching entry: no whitelisting for any privileged bits.
-                let grants_privileges = pkgfile.filecaps.is_some() || Self::is_suid(mode);
-                if !is_link && grants_privileges {
-                    check_scriptlets = true;
-                    Self::complain_restricted_privs(pkg, path, pkgfile, out);
+                // No matching entry: no whitelisting for any privileged
+                // bits. The capabilities complaint is decidable from the
+                // package alone and fires in every data state; the
+                // setuid/setgid verdict is a claim about the registration
+                // set and fires only when profile data was read — with
+                // none read, "unregistered" describes the lint host, not
+                // this package (the polkit-untracked-privilege rule,
+                // issue #795). The permctl demands below follow whichever
+                // complaint fired: they are the registration machinery's
+                // other half.
+                if !is_link {
+                    let mut complained = false;
+                    if pkgfile.filecaps.is_some() {
+                        Self::complain_capabilities(pkg, path, pkgfile, out);
+                        complained = true;
+                    }
+                    if Self::is_suid(mode) && self.profiles_read {
+                        Self::complain_setuid_bit(pkg, path, pkgfile, out);
+                        complained = true;
+                    }
+                    if complained {
+                        check_scriptlets = true;
+                    }
                 }
             }
 
@@ -628,17 +689,27 @@ mod tests {
         }
     }
 
-    /// A check with no central profiles, so tests inject entries directly.
+    /// A check with profile data read, so tests inject entries directly.
     /// Clears anything `new()` picked up (e.g. on openSUSE hosts) to stay
-    /// environment-independent.
+    /// environment-independent; the data state is set explicitly because
+    /// an entry-injected check stands for one whose profiles were read.
     fn check_with(entries: Vec<PermissionsEntry>) -> SUIDPermissionsCheck {
         let mut check = SUIDPermissionsCheck::new(&test_config());
         check.perms.clear();
+        check.profiles_read = true;
         for e in entries {
             let key = e.path.trim_end_matches('/').to_string();
             let key = if key.is_empty() { "/".to_string() } else { key };
             check.perms.entry(key).or_default().push(e);
         }
+        check
+    }
+
+    /// A check in the no-data state: no profile was read anywhere, so
+    /// the registration set is unknown on this host.
+    fn check_no_data() -> SUIDPermissionsCheck {
+        let mut check = check_with(vec![]);
+        check.profiles_read = false;
         check
     }
 
@@ -795,6 +866,143 @@ mod tests {
             !names.iter().any(|n| n.contains("/usr/bin/plain")),
             "plain file must not appear: {results:?}"
         );
+    }
+
+    #[test]
+    fn no_data_loaded_setuid_bits_are_silent() {
+        // With no profile read anywhere, the registration set is unknown:
+        // an unlisted setuid file and an unlisted setgid directory draw
+        // no verdict of the family — no setuid-bit complaint and none of
+        // the permctl demands that follow it. The same package with data
+        // read (an empty registration set) draws both complaints.
+        let mut pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.files = vec![
+            pkgfile("/usr/bin/rogue", 0o1004755),
+            pkgfile("/var/lib/rogue-dir", 0o042775),
+        ];
+        let mut check = check_no_data();
+        let results = run_check(&pkg, &mut check);
+        assert!(
+            results.iter().all(|(n, _)| !n.starts_with("permissions-")),
+            "no-data state must stay silent: {results:?}"
+        );
+
+        let mut check = check_with(vec![]);
+        let results = run_check(&pkg, &mut check);
+        let names: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"permissions-file-setuid-bit"),
+            "data read, file unlisted: {results:?}"
+        );
+        assert!(
+            names.contains(&"permissions-directory-setuid-bit"),
+            "data read, directory unlisted: {results:?}"
+        );
+    }
+
+    #[test]
+    fn no_data_loaded_capabilities_still_reported() {
+        // Packaged capabilities are rejected outright in every data
+        // state: a capabilities-only file and a capabilities+setuid file
+        // each draw exactly the capabilities complaint with no profile
+        // read — the setuid/setgid message is the only part suppressed —
+        // and the permctl demands follow the complaint.
+        let mut pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        let mut caponly = pkgfile("/usr/bin/caponly", 0o100755);
+        caponly.filecaps = Some("cap_net_raw+ep".to_string());
+        let mut capsu = pkgfile("/usr/bin/capsu", 0o1004755);
+        capsu.filecaps = Some("cap_net_raw+ep".to_string());
+        pkg.files = vec![caponly, capsu];
+        let mut check = check_no_data();
+        let results = run_check(&pkg, &mut check);
+        let setuid_lines: Vec<&str> = results
+            .iter()
+            .filter(|(n, _)| *n == "permissions-file-setuid-bit")
+            .map(|(_, l)| l.as_str())
+            .collect();
+        assert_eq!(setuid_lines.len(), 2, "one complaint per file: {results:?}");
+        assert!(
+            setuid_lines.iter().all(|l| l.contains("capabilities")),
+            "only the capabilities message: {results:?}"
+        );
+        let names: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"permissions-missing-postin"),
+            "demands follow the complaint: {results:?}"
+        );
+    }
+
+    #[test]
+    fn read_but_empty_profile_still_reports_unlisted() {
+        // A central profile that is read establishes the registration
+        // set even when it carries no entries (the polkit file-read
+        // rule): an unlisted setuid file still fires.
+        let dir = std::env::temp_dir().join("rpmcrab-suid-empty-profile");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        std::fs::write(dir.join("permissions"), "# no entries yet\n").expect("write profile");
+        let base = dir.to_str().unwrap().to_string();
+        let mut check =
+            SUIDPermissionsCheck::new_with("/nonexistent/rpmcrab-variables.conf", &[base.as_str()]);
+        assert!(check.profiles_read, "a read profile establishes the set");
+        assert!(check.perms.is_empty(), "the profile carries no entries");
+
+        let mut pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.files = vec![pkgfile("/usr/bin/rogue", 0o1004755)];
+        let results = run_check(&pkg, &mut check);
+        let names: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"permissions-file-setuid-bit"),
+            "unlisted file fires against an empty read set: {results:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dropin_read_alone_keeps_no_data_state() {
+        // A package shipping only a drop-in (for an unrelated path) plus
+        // a rogue setuid file, starting from the no-data state: the
+        // drop-in is read and applied — its entry is in the set — but it
+        // does not establish the registration set, which is the central
+        // data's role, so the rogue file stays silent. (Exim is the
+        // corpus shape: its own drop-in plus a setuid binary the central
+        // profiles register; a drop-in-established set would report the
+        // binary as unregistered on any host without the central data.)
+        let dir = std::env::temp_dir().join("rpmcrab-suid-dropin-gate");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let profile = dir.join("otherpkg");
+        std::fs::write(&profile, "/usr/bin/other root:root 4755\n").expect("write profile");
+
+        let mut pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        let mut dropin = pkgfile("/usr/share/permissions/permissions.d/otherpkg", 0o100644);
+        dropin.path = profile.to_string_lossy().into_owned();
+        pkg.files = vec![
+            dropin,
+            pkgfile("/usr/bin/rogue", 0o1004755),
+            // The drop-in's own registered file, packaged exactly as
+            // registered: verified against the drop-in in every data
+            // state, so it draws no finding either.
+            pkgfile("/usr/bin/other", 0o1004755),
+        ];
+
+        let mut check = check_no_data();
+        let results = run_check(&pkg, &mut check);
+        assert!(
+            check.perms.contains_key("/usr/bin/other"),
+            "the drop-in was read and applied: {:?}",
+            check.perms.keys().collect::<Vec<_>>()
+        );
+        let names: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            !names.contains(&"permissions-file-setuid-bit"),
+            "a drop-in alone does not open the verdict: {results:?}"
+        );
+        assert!(
+            !names.contains(&"permissions-incorrect"),
+            "the drop-in-registered file verifies clean: {results:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1018,6 +1226,22 @@ mod tests {
         let check = SUIDPermissionsCheck::new_with(vars.to_str().unwrap(), &[base.as_str()]);
         assert!(check.perms.contains_key("/usr/bin/runme"));
         assert!(check.perms.contains_key("/usr/sbin/runme"));
+        assert!(check.profiles_read, "a parsed profile was read");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_with_no_profiles_reads_no_data() {
+        // Bases carrying neither `permissions` nor `permissions.secure`
+        // leave the check in the no-data state.
+        let dir = std::env::temp_dir().join("rpmcrab-suid-new-nodata");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let base = dir.to_str().unwrap().to_string();
+        let check =
+            SUIDPermissionsCheck::new_with("/nonexistent/rpmcrab-variables.conf", &[base.as_str()]);
+        assert!(!check.profiles_read);
+        assert!(check.perms.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
