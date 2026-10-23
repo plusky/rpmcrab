@@ -1111,6 +1111,94 @@ def test_drop_live_filters_drops_kernel_modules_line():
     assert 'kernel-modules-not-in-kernel-packages' in dropped[0], dropped
     assert pruned == [] and retargeted == [], (pruned, retargeted)
 # ---------------------------------------------------------------------------
+# assert_kept_filters: the recorded KEEP decisions survive regeneration
+# ---------------------------------------------------------------------------
+
+def _kept_config_text():
+    """A synthetic opensuse.toml carrying every KEEP_FILTERS pattern."""
+    lines = ["Filters = [\n"]
+    for pattern in gen.KEEP_FILTERS:
+        if pattern == "cross-directory-hard-link":
+            continue
+        lines.append(f"    '{pattern}',\n")
+    lines.append("]\n")
+    lines.append("FilterErrorTitles = ['cross-directory-hard-link']\n")
+    return "".join(lines)
+
+
+def test_keep_filters_table_is_the_ratified_set():
+    """KEEP_FILTERS carries exactly the audit's 24 findings + 2 classes."""
+    assert set(gen.KEEP_FILTERS) == {
+        ".*invalid-version.*",
+        ".*invalid-packager.*",
+        ".*invalid-buildhost.*",
+        " dir-or-file-in-opt ",
+        "incoherent-version-in-changelog",
+        " symlink-crontab-file",
+        " setuid-binary.*",
+        " setgid-binary ",
+        " non-readable ",
+        " non-standard-dir-perm ",
+        " non-standard-executable-perm ",
+        "configure-without-libdir-spec",
+        "use-of-RPM_SOURCE_DIR",
+        "hardcoded-library-path",
+        " perl-temp-file ",
+        " requires-on-release",
+        " prereq-use",
+        " file-not-utf8",
+        " mixed-use-of-spaces-and-tabs ",
+        " log-files-without-logrotate",
+        " no-documentation",
+        " multiple-specfiles",
+        " non-coherent-filename ",
+        "cross-directory-hard-link",
+        r"^qa\S+: [EWI]:",
+        r"^\S*(?:INTERNAL|internal)\.\S+: [EWI]:",
+    }
+
+
+def test_assert_kept_filters_logs_every_survivor():
+    kept = gen.assert_kept_filters(_kept_config_text())
+    assert len(kept) == len(gen.KEEP_FILTERS), kept
+    titles = [e for e in kept if e.startswith("FilterErrorTitles:")]
+    assert len(titles) == 1 and "cross-directory-hard-link" in titles[0], kept
+    filters = [e for e in kept if e.startswith("Filters:")]
+    assert len(filters) == len(gen.KEEP_FILTERS) - 1, kept
+
+
+def test_assert_kept_filters_raises_and_names_the_missing():
+    text = _kept_config_text().replace("    ' prereq-use',\n", "")
+    try:
+        gen.assert_kept_filters(text)
+    except AssertionError as exc:
+        assert " prereq-use" in str(exc), exc
+    else:
+        raise AssertionError("a missing kept pattern must raise")
+
+
+def test_assert_kept_filters_substring_survival():
+    """A kept pattern survives inside a broader scoped entry."""
+    text = _kept_config_text().replace(
+        "    'incoherent-version-in-changelog',\n",
+        "    'somepkg incoherent-version-in-changelog scoped',\n",
+    )
+    kept = gen.assert_kept_filters(text)
+    assert any("incoherent-version-in-changelog" in e for e in kept), kept
+
+
+def test_assert_kept_filters_accepts_the_vendored_config():
+    """The checked-in vendored config carries every kept pattern."""
+    vendored = (
+        os.path.join(os.path.dirname(HERE), "crates", "rpmcrab-core",
+                     "data", "distro", "opensuse", "opensuse.toml")
+    )
+    with open(vendored, encoding="utf-8") as fh:
+        kept = gen.assert_kept_filters(fh.read())
+    assert len(kept) == len(gen.KEEP_FILTERS), kept
+
+
+# ---------------------------------------------------------------------------
 # scope_filters: bare entries narrowed to their recorded rationale
 # ---------------------------------------------------------------------------
 
