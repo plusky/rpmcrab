@@ -1,6 +1,6 @@
 //! `InstalledPkg` (M2c) parity.
 //!
-//! The rpmdb is host-specific, so the oracle is not a committed dump. Three
+//! The rpmdb is host-specific, so the oracle is not a committed dump. Four
 //! layers:
 //!
 //! - `installed_facade_matches_file_pkg`: builds an `InstalledPkg` from the
@@ -12,17 +12,24 @@
 //!   throwaway database (`Db::open_with_root` + `init_db`, neither of which
 //!   needs privilege), pinning that an unknown name is reported missing rather
 //!   than raising, and that a glob is routed to the glob query.
+//! - `find_in_against_a_populated_db`: registers the corpus RPM's header in
+//!   a throwaway database and pins that exact and glob lookups resolve it and
+//!   that the facade builds from a database-returned header. The database
+//!   path is redirected to a tempdir (`_dbpath`) while the root stays `/`,
+//!   and the header is registered with a `JUSTDB` transaction, so the test
+//!   needs no privilege and writes no payload. Deterministic.
 //! - `host_db_smoke` (`#[ignore]`): resolves `rpm` through the real host rpmdb,
 //!   which is also the **ndb** check (openSUSE's backend). Ignored by default
-//!   because it needs a populated host database: CI installs only `librpm-dev`,
-//!   and a *populated* throwaway database is not reachable either, because
-//!   `Transaction::run` chroots and therefore needs privilege. Run it on a
-//!   developer machine with `cargo test --test pkg_installed -- --ignored`.
+//!   because it needs a populated host database: CI installs only `librpm-dev`.
+//!   Run it on a developer machine with
+//!   `cargo test --test pkg_installed -- --ignored`.
 
 use std::path::Path;
 
 use librpm::PackageHeader;
 use librpm::db::Db;
+use librpm::macro_context::MacroContext;
+use librpm::transaction::{ProblemFilter, TransactionFlags};
 use librpm::verify::VerifyOptions;
 use rpmcrab_core::pkg::Pkg;
 use rpmcrab_core::pkg::installed::{find_in, find_installed};
@@ -90,9 +97,8 @@ fn installed_facade_matches_file_pkg() {
 }
 
 /// The librpm query path against a valid but empty database. `init_db` and
-/// `open_with_root` need no privilege, so this runs everywhere; populating the
-/// database does (`Transaction::run` chroots), which is what the ignored host
-/// smoke test is for.
+/// `open_with_root` need no privilege, so this runs everywhere.
+/// `find_in_against_a_populated_db` covers the registered-header case.
 #[test]
 fn find_in_against_an_empty_db() {
     // A `Db` can only be built once librpm is configured; the crate's own
@@ -110,6 +116,103 @@ fn find_in_against_an_empty_db() {
 
     assert!(headers.is_empty());
     assert_eq!(missing, names, "every name is missing in an empty database");
+}
+
+/// Macros defined for the duration of a scope and popped on drop, including
+/// on panic, so a test never leaks librpm configuration into its siblings.
+struct ScopedMacros {
+    context: MacroContext,
+    names: Vec<&'static str>,
+}
+
+impl ScopedMacros {
+    fn define(defs: &[(&'static str, String)]) -> Self {
+        let context = MacroContext::default();
+        let mut names = Vec::new();
+        for (name, body) in defs {
+            context
+                .define(&format!("{name} {body}"), 0)
+                .expect("define macro");
+            names.push(*name);
+        }
+        Self { context, names }
+    }
+}
+
+impl Drop for ScopedMacros {
+    fn drop(&mut self) {
+        for name in &self.names {
+            let _ = self.context.pop(name);
+        }
+    }
+}
+
+/// The librpm query path against a database holding one registered package.
+///
+/// Registration takes a payload to register, not a transaction against the
+/// live system: the corpus RPM's header is added with a `JUSTDB` transaction,
+/// which writes only the database. Two pieces of steering keep that hermetic
+/// and unprivileged:
+///
+/// - `_dbpath` points at a tempdir while the database root stays `/` — a
+///   rooted database is what makes `Transaction::run` chroot.
+/// - The corpus package's signing key is not in the throwaway keyring, and
+///   the registration is about the header, so verification is off
+///   (`_pkgverify_level none`; the transaction's verification flags are
+///   skipped too). The problem filter ignores the host's platform and free
+///   space: a Linux/aarch64 header registers on any host, and `JUSTDB`
+///   writes no payload whose size could matter.
+#[test]
+fn find_in_against_a_populated_db() {
+    rpmcrab_core::pkg::init().expect("init librpm");
+    let root = tempfile::tempdir().unwrap();
+    let dbpath = root.path().join("rpmdb");
+    std::fs::create_dir_all(&dbpath).unwrap();
+    let _macros = ScopedMacros::define(&[
+        ("_dbpath", dbpath.display().to_string()),
+        ("_pkgverify_level", "none".to_string()),
+    ]);
+
+    let mut db = Db::open().expect("open db at the redirected path");
+    db.init_db(0o755).expect("init db");
+    let rpm = corpus_rpm();
+    let header = PackageHeader::from_file(&rpm, Some(&VerifyOptions::skip_verification()))
+        .expect("open header");
+    {
+        let mut ts = db.transaction();
+        ts.set_flags(TransactionFlags::JUSTDB | TransactionFlags::NOSCRIPTS);
+        ts.set_verify_options(&VerifyOptions::skip_verification());
+        ts.set_problem_filter(
+            ProblemFilter::IGNORE_OS
+                | ProblemFilter::IGNORE_ARCH
+                | ProblemFilter::DISK_SPACE
+                | ProblemFilter::DISK_NODES,
+        );
+        ts.add_install(&header, &rpm, false).expect("add install");
+        ts.run().expect("register the header");
+    }
+
+    let names: Vec<String> = ["llvm21-gold", "llvm21-*", "no-such-pkg"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let (headers, missing) = find_in(&db, &names).expect("query the populated db");
+    assert_eq!(missing, vec!["no-such-pkg".to_string()]);
+    assert_eq!(headers.len(), 2, "exact and glob lookups both resolve");
+
+    // The facade builds from headers that came out of the database, with the
+    // identity fields of the file-backed package.
+    let scratch = tempfile::tempdir().unwrap();
+    let file_pkg = Pkg::open(&rpm, scratch.path(), true).unwrap();
+    for header in &headers {
+        let inst = Pkg::installed(header.clone()).expect("build installed package");
+        assert_eq!(inst.name, "llvm21-gold");
+        assert_eq!(inst.name, file_pkg.name);
+        assert_eq!(inst.arch, file_pkg.arch);
+        assert_eq!(inst.files.len(), file_pkg.files.len());
+        assert!(!inst.is_source);
+        assert_eq!(inst.dir_name(), Path::new("/"));
+    }
 }
 
 /// Dev-machine only: needs a populated host rpmdb. See the module docs.
