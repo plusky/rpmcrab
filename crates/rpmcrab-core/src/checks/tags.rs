@@ -2446,7 +2446,8 @@ mod tests {
     #[test]
     fn license_split_yields_bare_leaves() {
         // Parentheses cut at any depth and boolean operators split, so
-        // every piece is a bare leaf: no parenthesis fragment survives.
+        // the pieces are the bare leaves inside: no parenthesis fragment
+        // survives.
         assert_eq!(
             TagsCheck::split_license("(GPLv2 or GPLv3) and (GPLv2+ with exceptions)"),
             vec!["GPLv2", "GPLv3", "GPLv2+ with exceptions"],
@@ -2491,6 +2492,15 @@ mod tests {
         assert_eq!(TagsCheck::split_license("(GPLv2))"), vec!["GPLv2"]);
         assert_eq!(TagsCheck::split_license("()"), vec!["()"]);
         assert!(TagsCheck::split_license("( )").is_empty());
+        // A dangling trailing operator is never a cut point (the
+        // operator cuts need whitespace on both sides), so it stays
+        // glued to the tail piece and the malformed text is what is
+        // reported (helvum's shape).
+        assert_eq!(TagsCheck::split_license("MIT AND"), vec!["MIT AND"]);
+        assert_eq!(
+            TagsCheck::split_license("GPLv2 AND MIT AND"),
+            vec!["GPLv2", "MIT AND"]
+        );
     }
 
     #[test]
