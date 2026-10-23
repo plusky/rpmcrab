@@ -3384,15 +3384,7 @@ impl BinariesCheck {
                 add_info(out, Level::Warning, pkg, "no-soname", &[&pkgfile.name]);
             }
             Some(soname) => {
-                if !validso_regex().is_match(soname).unwrap_or(false) {
-                    add_info(
-                        out,
-                        Level::Error,
-                        pkg,
-                        "invalid-soname",
-                        &[&pkgfile.name, soname],
-                    );
-                } else {
+                if validso_regex().is_match(soname).unwrap_or(false) {
                     self.check_soname_symlink(pkg, &pkgfile.name, soname, out);
                     if pkg.name.starts_with("lib")
                         && !self
@@ -8753,20 +8745,18 @@ description = "explicit priority string bypasses the system crypto policy"
             lines[0]
         );
 
-        // Malformed SONAME -> E invalid-soname.
+        // A malformed SONAME stays quiet: it fails the validity gate
+        // that guards the symlink and shlib-policy checks, and no
+        // finding is emitted for the name itself.
         let mut info = syn_info();
         info.is_shlib = true;
         info.soname = Some("b soname".to_string());
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_shared_library(&pkg, &pkgfile, &info, &mut out);
-        let results = out.results().to_vec();
-        let lines = lines_for(&results, "invalid-soname");
-        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
-        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
         assert!(
-            lines[0].contains("b soname"),
-            "detail names the soname: {}",
-            lines[0]
+            out.results().is_empty(),
+            "malformed soname must be quiet: {:?}",
+            out.results()
         );
 
         // A well-formed SONAME with a correct symlink is quiet.
@@ -8990,8 +8980,8 @@ description = "explicit priority string bypasses the system crypto policy"
             // digits (the libtcl8.6.so shape): soversion_str is
             // empty, so the emission guard stays shut even when the
             // package name does not derive from the stem at all.
-            // Unlike the libfoo.so row above, whose SONAME exits via
-            // invalid-soname before the guard, these rows reach it
+            // Unlike the libfoo.so row above, whose SONAME fails the
+            // validity gate before the guard, these rows reach it
             // (issue #673).
             ("libfoo1", "libfoo1.so", false),
             ("libfoo2", "libfoo1.so", false),
