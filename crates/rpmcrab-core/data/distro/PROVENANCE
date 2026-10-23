@@ -247,3 +247,32 @@
 # Adjudicated digest records (Factory content decides;
 # see DIGEST_ADJUDICATIONS):
 #   digest: adjudicated dbus-services.toml record for cups path /usr/share/dbus-1/system.d/cups.conf to the Factory-shipped hash set (issue #760)
+#
+# Kept Filters entries (whole-finding suppressions kept
+# as rpmcrab's recorded decision; see KEEP_FILTERS):
+#   Filters: kept '.*invalid-version.*' (autobuild redundancy: OBS stamps the version (upstream: 'Stuff autobuild takes care about'))
+#   Filters: kept '.*invalid-packager.*' (autobuild redundancy: OBS stamps the packager (upstream: 'Stuff autobuild takes care about'))
+#   Filters: kept '.*invalid-buildhost.*' (autobuild redundancy: OBS stamps the build host (upstream: 'Stuff autobuild takes care about'))
+#   Filters: kept ' dir-or-file-in-opt ' (superseded: FilelistCheck's filelist-forbidden-opt fires on the same content, unsuppressed at E (upstream: 'handled by CheckFilelist.py'))
+#   Filters: kept 'incoherent-version-in-changelog' (recorded decision (issue #883): upstream openSUSE's shipped suppression stands; no case for surfacing it has been made)
+#   Filters: kept ' symlink-crontab-file' (recorded decision: upstream suppresses it citing bnc#591431)
+#   Filters: kept ' setuid-binary.*' (the dedicated permissions machinery carries the genuine cases — its findings are shielded in BlockedFilters — not this generic one)
+#   Filters: kept ' setgid-binary ' (the dedicated permissions machinery carries the genuine cases; upstream: 'An issue with OBS, works with autobuild')
+#   Filters: kept ' non-readable ' (the dedicated permissions machinery carries the genuine cases; upstream: 'An issue with OBS, works with autobuild')
+#   Filters: kept ' non-standard-dir-perm ' (the dedicated permissions machinery carries the genuine cases; upstream: 'An issue with OBS, works with autobuild')
+#   Filters: kept ' non-standard-executable-perm ' (the dedicated permissions machinery carries the genuine cases; upstream: 'An issue with OBS, works with autobuild')
+#   Filters: kept 'configure-without-libdir-spec' (recorded decision (issue #883): the line sits in upstream's bnc#456048 kernel-module block; the suppression is upstream's shipped behaviour)
+#   Filters: kept 'use-of-RPM_SOURCE_DIR' (recorded decision (issue #883): the line sits in upstream's bnc#456048 kernel-module block; the suppression is upstream's shipped behaviour)
+#   Filters: kept 'hardcoded-library-path' (recorded decision (issue #883): the line sits in upstream's bnc#456048 kernel-module block; the suppression is upstream's shipped behaviour)
+#   Filters: kept ' perl-temp-file ' (deliberate content decision (upstream: 'We want these files'))
+#   Filters: kept ' requires-on-release' (upstream: 'We check for that already')
+#   Filters: kept ' prereq-use' (upstream: 'currently too noisy, but might become relevant in the future')
+#   Filters: kept ' file-not-utf8' (upstream: 'currently too noisy, but might become relevant in the future')
+#   Filters: kept ' mixed-use-of-spaces-and-tabs ' (upstream: 'currently too noisy, but might become relevant in the future')
+#   Filters: kept ' log-files-without-logrotate' (upstream: 'An issue with OBS, works with autobuild')
+#   Filters: kept ' no-documentation' (measured: the finding is a structural property of -devel/-doc package splits — 128 of the 300 audit-sample packages, one line each)
+#   Filters: kept ' multiple-specfiles' (upstream: 'An issue with OBS, works with autobuild')
+#   Filters: kept ' non-coherent-filename ' (upstream: 'Many places have shorter paths')
+#   FilterErrorTitles: kept 'cross-directory-hard-link' (measured concentration: 3,420 lines in 18 audit-sample packages that hard-link deliberately (documentation and Python byte-code farms))
+#   Filters: kept '^qa\\S+: [EWI]:' (blanket package-class filter: OBS QA-script packages are build-service internals, not shipped product)
+#   Filters: kept '^\\S*(?:INTERNAL|internal)\\.\\S+: [EWI]:' (blanket package-class filter: OBS-internal packages are build-service internals, not shipped product)
