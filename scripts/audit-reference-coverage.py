@@ -2305,6 +2305,7 @@ def audit_port(checks_dir):
                 ("bashisms.rs", "warning"): ("classify_bashisms", fn_describe_tuple_literals),
                 ("duplicates.rs", "name"): ("describe", fn_describe_tuple_literals),
                 ("menu_xdg.rs", "finding"): ("parse_desktop", fn_err_literals),
+                ("suid_permissions.rs", "diag"): ("diag_for", fn_finding_literals),
                 ("systemd_install.rs", "finding"): ("check_unit", fn_finding_literals),
             }
             site_key = (fn, arg)
