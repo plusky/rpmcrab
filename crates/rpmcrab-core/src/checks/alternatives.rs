@@ -23,7 +23,7 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
-use crate::pkg::pkgfile::is_symlink;
+use crate::pkg::pkgfile::{is_reg, is_symlink};
 use librpm::Tag;
 use std::sync::OnceLock;
 
@@ -329,13 +329,15 @@ impl AlternativesCheck {
     }
 
     /// Whether a `binary=` entry path resolves, through the package's
-    /// own symlink entries, to a file the package ships (issue #932).
+    /// own symlink entries, to a regular file the package ships (issue
+    /// #932).
     /// libalternatives resolves the entry path on the installed
     /// system, where a directory symlink shipped by the package (the
     /// JDK layout: `/usr/lib64/jvm/java-11-openjdk` pointing at
     /// `java-11-openjdk-11`) puts the shipped file at the entry path.
     /// A resolution landing outside the package's file set earns no
-    /// credit, so targets shipped by sibling packages and genuinely
+    /// credit, and neither does a walk that never lands (a symlink
+    /// cycle), so targets shipped by sibling packages and genuinely
     /// absent targets keep firing. The walk canonicalises the value
     /// the way the kernel resolves it, so a doubled leading slash in
     /// the value (`binary=//usr/bin/...`, as the SUSE python
@@ -344,20 +346,22 @@ impl AlternativesCheck {
         if !value.starts_with('/') {
             return false;
         }
-        let resolved = Self::resolve_through_package_symlinks(pkg, value);
+        let Some(resolved) = Self::resolve_through_package_symlinks(pkg, value) else {
+            return false;
+        };
         pkg.files
             .iter()
-            .any(|f| f.name == resolved && !is_symlink(f.mode))
+            .any(|f| f.name == resolved && is_reg(f.mode))
     }
 
     /// Follow package-shipped symlinks at every prefix of `path` and
-    /// return the path the walk lands on. Each substitution restarts
-    /// the scan at the leftmost symlink prefix, mirroring
-    /// component-wise path resolution; the hop bound (the kernel's
-    /// MAXSYMLINKS) terminates cycles, whose landing path names a
-    /// symlink rather than a shipped file and so earns no credit in
-    /// the caller.
-    fn resolve_through_package_symlinks(pkg: &Pkg, path: &str) -> String {
+    /// return the path the walk lands on, or `None` when the walk
+    /// exhausts the hop bound (the kernel's MAXSYMLINKS): exhaustion
+    /// means the resolution cycles (the kernel's ELOOP), so there is
+    /// no landing path to credit. Each substitution restarts the scan
+    /// at the leftmost symlink prefix, mirroring component-wise path
+    /// resolution.
+    fn resolve_through_package_symlinks(pkg: &Pkg, path: &str) -> Option<String> {
         // `normalize_path` preserves a leading `//` (POSIX leaves its
         // meaning implementation-defined); the kernel resolves it to
         // the single-slash path on Linux, so collapse it before
@@ -401,10 +405,10 @@ impl AlternativesCheck {
             }
             match substituted {
                 Some(next) => current = canonical(&next),
-                None => break,
+                None => return Some(current),
             }
         }
-        current
+        None
     }
 }
 
@@ -1362,6 +1366,76 @@ mod tests {
             name: "/usr/lib/jvm/loop2".to_string(),
             mode: 0o120777,
             linkto: "loop".to_string(),
+            ..Default::default()
+        });
+        let results = findings_for(&pkg);
+        for name in [
+            "binary-entry-value-not-found",
+            "wrong-or-missed-binary-entry",
+        ] {
+            let count = results.iter().filter(|(n, _)| n == name).count();
+            assert_eq!(count, 1, "expected exactly one {name}: {results:?}");
+        }
+    }
+
+    /// The resolver credit requires a regular file: an entry whose
+    /// path resolves through a shipped directory symlink onto a
+    /// directory the package ships is not satisfied, so both
+    /// findings still fire (issue #938).
+    #[test]
+    fn binary_entry_resolving_to_directory_still_fires() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let mut pkg = libalternatives_pkg(
+            dir.path(),
+            &[("jar.conf", "binary=/usr/lib64/jvm/java-11-openjdk/bin\n")],
+        );
+        pkg.files.push(PkgFile {
+            name: "/usr/lib64/jvm/java-11-openjdk".to_string(),
+            mode: 0o120777,
+            linkto: "java-11-openjdk-11".to_string(),
+            ..Default::default()
+        });
+        pkg.files.push(PkgFile {
+            name: "/usr/lib64/jvm/java-11-openjdk-11/bin".to_string(),
+            mode: 0o040755,
+            ..Default::default()
+        });
+        let results = findings_for(&pkg);
+        for name in [
+            "binary-entry-value-not-found",
+            "wrong-or-missed-binary-entry",
+        ] {
+            let count = results.iter().filter(|(n, _)| n == name).count();
+            assert_eq!(count, 1, "expected exactly one {name}: {results:?}");
+        }
+    }
+
+    /// A cycle whose walk happens to land on a shipped file's name
+    /// when the hop bound runs out earns no credit: the resolution
+    /// never lands (the kernel's ELOOP), so both findings still
+    /// fire (issue #938).
+    #[test]
+    fn binary_entry_through_cycle_landing_on_shipped_name_still_fires() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let mut pkg = libalternatives_pkg(
+            dir.path(),
+            &[("jar.conf", "binary=/usr/lib/jvm/a/bin/jar\n")],
+        );
+        for (name, linkto) in [
+            ("/usr/lib/jvm/a", "b"),
+            ("/usr/lib/jvm/b", "c"),
+            ("/usr/lib/jvm/c", "a"),
+        ] {
+            pkg.files.push(PkgFile {
+                name: name.to_string(),
+                mode: 0o120777,
+                linkto: linkto.to_string(),
+                ..Default::default()
+            });
+        }
+        pkg.files.push(PkgFile {
+            name: "/usr/lib/jvm/b/bin/jar".to_string(),
+            mode: 0o100755,
             ..Default::default()
         });
         let results = findings_for(&pkg);
