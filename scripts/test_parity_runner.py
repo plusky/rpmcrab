@@ -9,6 +9,7 @@ the rule makes the test fail.
 Run:  python3 scripts/test_parity_runner.py
 """
 
+import hashlib
 import importlib.util
 import os
 import sys
@@ -151,6 +152,34 @@ def test_presence_diff_attributed_by_name_and_module():
                          entry("report", "behaviour"),
                          entry("gone-finding", "detail")])
     assert unattributed(diff(ref, port, wrong_kind))
+
+
+def test_only_in_rpmcrab_not_attributed_by_missing_entry():
+    # A `missing` entry records that the port does not emit the finding;
+    # it cannot account for the finding appearing in the port's output —
+    # that is exactly the regression shape the ledger must catch.
+    ref = session(HEADER_REF, [], (0, 0))
+    port = session(HEADER_PORT, ["pkg.noarch: W: new-finding /a"], (0, 1))
+    base = [entry("session-header", "behaviour"),
+            entry("report", "behaviour")]
+    led = ledger(base + [entry("new-finding", "missing")])
+    assert unattributed(diff(ref, port, led))
+    for kind in ("behaviour", "limitation"):
+        led = ledger(base + [entry("new-finding", kind)])
+        assert not unattributed(diff(ref, port, led))
+
+
+def test_entry_without_check_attributes_nothing():
+    # An entry missing its `check` key accounts for nothing: with the
+    # finding unknown to the module map, a None check would otherwise
+    # compare equal to the None module and attribute it anyway.
+    ref = session(HEADER_REF, ["pkg.noarch: E: unknown-finding /a"], (1, 0))
+    port = session(HEADER_PORT, [], (0, 0))
+    malformed = {"case": "global", "kind": "missing",
+                 "reason": "", "since": "0.1.0"}
+    led = ledger([entry("session-header", "behaviour"),
+                  entry("report", "behaviour"), malformed])
+    assert unattributed(diff(ref, port, led))
 
 
 def test_detail_diff_attributed_by_detail_entry():
