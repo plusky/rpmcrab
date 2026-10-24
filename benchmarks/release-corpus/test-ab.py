@@ -11,7 +11,11 @@
 
 import importlib.util
 import json
+import os
 import pathlib
+import stat
+import sys
+import tempfile
 import unittest
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -106,6 +110,41 @@ class VerdictTests(unittest.TestCase):
         # the rule needs both conditions, so bash stays unreported.
         self.assertFalse(any("bash" in r for r in verdict["reasons"]))
 
+    def test_dead_candidate_fails_closed(self):
+        # A candidate that crashes instantly on every package records
+        # unmeasurable medians against a baseline that did real work:
+        # the gate fails closed instead of passing it as faster.
+        candidate = {name: 0.0 for name in BASE}
+        verdict = ab.compute_verdict(BASE, candidate, (BASE, BASE))
+        self.assertEqual(verdict["verdict"], "fail")
+        self.assertTrue(
+            any("did no work" in r for r in verdict["reasons"]),
+            verdict["reasons"],
+        )
+
+    def test_dead_candidate_on_one_package_fails_closed(self):
+        candidate = dict(BASE)
+        candidate["chromium"] = 0.0
+        verdict = ab.compute_verdict(BASE, candidate, (BASE, BASE))
+        self.assertEqual(verdict["verdict"], "fail")
+        self.assertTrue(
+            any(
+                "chromium" in r and "did no work" in r
+                for r in verdict["reasons"]
+            ),
+            verdict["reasons"],
+        )
+
+    def test_unmeasurable_on_both_sides_passes(self):
+        # A package both binaries dispatch unmeasurably fast measured
+        # nothing on either side: the clamped ratio is 1.0 and the
+        # dead-candidate rule stays silent (its baseline is equally
+        # unmeasurable).
+        base = {"tiny": 0.0, "bash": 1.0}
+        candidate = {"tiny": 0.0, "bash": 1.0}
+        verdict = ab.compute_verdict(base, candidate, (base, base))
+        self.assertEqual(verdict["verdict"], "pass")
+
     def test_no_baseline(self):
         verdict = ab.compute_verdict(None, None)
         self.assertEqual(verdict["verdict"], "no-baseline")
@@ -149,6 +188,50 @@ class VerdictTests(unittest.TestCase):
         )
         self.assertEqual(verdict["verdict"], "pass")
         self.assertAlmostEqual(verdict["geomean_ratio"], 1.0, places=3)
+
+
+class TimingRunTests(unittest.TestCase):
+    def _script(self, body):
+        fd, path = tempfile.mkstemp(suffix=".py")
+        with os.fdopen(fd, "w") as f:
+            f.write(f"#!{sys.executable}\n{body}")
+        os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
+        self.addCleanup(os.unlink, path)
+        return path
+
+    @unittest.skipUnless(os.name == "posix", "signal death is POSIX")
+    def test_signal_death_fails_closed(self):
+        script = self._script(
+            "import os, signal\n"
+            "os.kill(os.getpid(), signal.SIGKILL)\n"
+        )
+        with self.assertRaises(ab.TimingError):
+            ab.time_binary(script, "ignored.rpm")
+
+    def test_timeout_fails_closed(self):
+        script = self._script("import time\ntime.sleep(30)\n")
+        saved = ab.RUN_TIMEOUT_S
+        ab.RUN_TIMEOUT_S = 0.2
+        try:
+            with self.assertRaises(ab.TimingError):
+                ab.time_binary(script, "ignored.rpm")
+        finally:
+            ab.RUN_TIMEOUT_S = saved
+
+    def test_missing_rpms_dir_with_baseline_exits_cleanly(self):
+        # --rpms-dir is optional in argparse but the baseline path
+        # dereferences it: direct CLI use without it exits with a
+        # clear error instead of crashing.
+        with self.assertRaises(SystemExit) as ctx:
+            ab.main(
+                [
+                    "--candidate",
+                    sys.executable,
+                    "--baseline",
+                    sys.executable,
+                ]
+            )
+        self.assertIn("--rpms-dir", str(ctx.exception))
 
 
 class MedianTests(unittest.TestCase):

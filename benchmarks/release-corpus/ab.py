@@ -10,6 +10,11 @@
 #   * a single package that more than doubles while also costing at least
 #     PACKAGE_MIN_DELTA_S extra seconds fails on its own.
 #
+# The gate fails closed on a candidate that plausibly did no work: a
+# timed run killed by a signal or exceeding its timeout aborts the
+# measurement, and a candidate whose median on a package is unmeasurable
+# against a measurable baseline median fails the verdict.
+#
 # bench.sh drives this script. test-ab.py exercises compute_verdict with
 # synthetic timing data.
 
@@ -33,6 +38,14 @@ PACKAGE_MIN_DELTA_S = 0.25
 # sides are unmeasurably fast); the per-package rule judges such packages
 # by their absolute delta.
 TIME_FLOOR_S = 0.001
+# Per-run timeout for one timed invocation: the slowest corpus package
+# medians in single-digit seconds, so a run still alive after ten
+# minutes is hung, and the gate fails closed instead of waiting on it.
+RUN_TIMEOUT_S = 600
+
+
+class TimingError(Exception):
+    """A timed run died by signal or exceeded its timeout."""
 
 
 def median(values):
@@ -65,7 +78,9 @@ def compute_verdict(baseline, candidate, aa_pair=None):
     (first, second) pair of median maps for the baseline binary timed
     against itself. With baseline None the verdict is "no-baseline".
     Every reason collected fails the gate: the verdict is "pass" only
-    when the reasons list is empty.
+    when the reasons list is empty. A candidate median at or below the
+    timer floor against a baseline median above it means the candidate
+    plausibly did no work on that package and fails the gate.
     """
     result = {
         "verdict": "pass",
@@ -129,6 +144,16 @@ def compute_verdict(baseline, candidate, aa_pair=None):
                     f"the A/A spread {aa_spread:.4f}"
                 )
         for name in shared:
+            if (
+                candidate[name] <= TIME_FLOOR_S
+                and baseline[name] > TIME_FLOOR_S
+            ):
+                result["reasons"].append(
+                    f"{name}: candidate median {candidate[name]:.3f}s is "
+                    f"unmeasurable against baseline median "
+                    f"{baseline[name]:.3f}s; the candidate plausibly "
+                    f"did no work"
+                )
             delta = candidate[name] - baseline[name]
             if ratios[name] > PACKAGE_RATIO_MAX and delta >= PACKAGE_MIN_DELTA_S:
                 result["reasons"].append(
@@ -155,16 +180,29 @@ def binary_version(binary):
 
 
 def time_binary(binary, rpm_path):
-    # rpmcrab exits nonzero when findings exist; that is not a timing
-    # failure, so the exit code is ignored exactly as in bench.sh's
-    # single-binary mode.
+    # rpmcrab exits nonzero when findings exist; that is an ordinary
+    # lint outcome, so a completed run's exit code carries no timing
+    # information and is ignored exactly as in bench.sh's single-binary
+    # mode. A run that never completes -- killed by a signal or past
+    # its timeout -- measured nothing, so it raises TimingError and
+    # the gate fails closed.
     start = time.perf_counter()
-    subprocess.run(
-        [binary, rpm_path],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+    try:
+        out = subprocess.run(
+            [binary, rpm_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=RUN_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        raise TimingError(
+            f"{binary} timed out after {RUN_TIMEOUT_S}s on {rpm_path}"
+        ) from None
+    if out.returncode < 0:
+        raise TimingError(
+            f"{binary} was killed by signal {-out.returncode} on {rpm_path}"
+        )
     return time.perf_counter() - start
 
 
@@ -228,6 +266,11 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if args.rounds < 1 or args.aa_rounds < 1:
         raise SystemExit("ab.py: --rounds and --aa-rounds must be >= 1")
+    if args.baseline and not args.no_baseline and not args.rpms_dir:
+        raise SystemExit(
+            "ab.py: --rpms-dir is required with --baseline "
+            "(or pass --no-baseline)"
+        )
 
     candidate_version = binary_version(args.candidate)
     out = {
@@ -286,7 +329,7 @@ def main(argv=None):
         aa1_s, aa2_s = time_pair(
             rpms, args.baseline, args.baseline, args.aa_rounds, "A/A"
         )
-    except OSError as e:
+    except (OSError, TimingError) as e:
         raise SystemExit(f"ab.py: timing run failed: {e}")
 
     base_med = medians(base_s)
