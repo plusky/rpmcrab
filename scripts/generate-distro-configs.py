@@ -325,84 +325,6 @@ def check_rs_files(regen_files):
     """
     return list(regen_files)
 
-# The openSUSE config's spelling-error jargon filter. The words are
-# RPM-ecosystem technical terms the hunspell en_US dictionary lacks, in
-# both the system dictionary and the LibreOffice dictionaries pinned by
-# scripts/install-hunspell-dicts.sh, so a provisioned reference flags
-# them too; issue #778 has the evidence (the rpm 6.1.0 package set flags
-# all four in the Summary(C) and %description -l C detail shapes).
-# Fedora's rpmlint config carries the same kind of spelling-error
-# jargon list, citing
-# https://bugzilla.redhat.com/show_bug.cgi?id=1424684#c9, and its list
-# includes namespace. The word list itself lives in a line-itemized
-# TOML next to this script so it stays reviewable as it grows; the
-# filter pattern is built from it here.
-SPELLING_JARGON_TOML = (
-    Path(__file__).resolve().parent / "opensuse-spelling-jargon.toml"
-)
-
-
-def load_spelling_jargon(path=SPELLING_JARGON_TOML):
-    """Load the spelling-error jargon words from their TOML file.
-
-    Returns the words sorted. The TOML is the reviewable source of the
-    list, so duplicates and non-string entries fail loudly instead of
-    silently warping the built filter.
-    """
-    try:
-        import tomllib
-    except ModuleNotFoundError:
-        sys.stderr.write(
-            "error: generate-distro-configs.py needs Python 3.11+ (tomllib)\n"
-        )
-        raise
-    with open(path, "rb") as f:
-        data = tomllib.load(f)
-    words = data["words"]
-    if not all(isinstance(word, str) for word in words):
-        raise ValueError(f"{path}: 'words' must be a list of strings")
-    if len(set(words)) != len(words):
-        raise ValueError(f"{path}: 'words' contains duplicates")
-    return sorted(words)
-
-
-def _spelling_jargon_word_pattern(word):
-    """One jargon word as a regex alternative.
-
-    The spelling check reports words as written, so the first letter
-    is case-flexible (a jargon word at the start of a sentence arrives
-    capitalised) and a trailing plural s is optional (the plural of a
-    jargon term is the same jargon). The rest of the word is
-    regex-escaped.
-    """
-    first = word[0]
-    if first.isascii() and first.isalpha():
-        head = f"[{first.upper()}{first.lower()}]"
-    else:
-        head = re.escape(first)
-    return head + re.escape(word[1:]) + "s?"
-
-
-def spelling_jargon_filter(words):
-    """Build the spelling-error Filters pattern for the jargon words.
-
-    One alternative per word (see _spelling_jargon_word_pattern),
-    closed by a word boundary so a word merely starting with a jargon
-    word still surfaces; the two detail shapes are the ones the
-    spelling check renders (Summary(<lang>) and %description
-    -l <lang>), and the locale class also carries the digits and
-    hyphen of real locales such as C.UTF-8 and de_DE.UTF-8.
-    """
-    alternation = "|".join(_spelling_jargon_word_pattern(word) for word in words)
-    return (
-        r"^.*spelling-error (Summary\([A-Za-z0-9_@.-]+\)|%description -l [A-Za-z0-9_@.-]+) ("
-        + alternation
-        + r")\b"
-    )
-
-
-SPELLING_JARGON_WORDS = load_spelling_jargon()
-
 # Extra Filters appended to the openSUSE config that do not come from upstream
 # rpmlint's configs/openSUSE/*.toml. Each entry pairs the filter pattern
 # with the reason the generator logs for it in data/distro/PROVENANCE.
@@ -425,15 +347,6 @@ EXTRA_FILTERS = [
     (
         r"^mingw64-.*arch-independent-package-contains-binary-or-object.*\.a$",
         "mingw -filesystem packages' rpmlintrc",
-    ),
-    # Spelling-error filter for the jargon word list in
-    # scripts/opensuse-spelling-jargon.toml, built by
-    # spelling_jargon_filter (see SPELLING_JARGON_TOML above).
-    (
-        spelling_jargon_filter(SPELLING_JARGON_WORDS),
-        "RPM-ecosystem jargon the hunspell en_US dictionary lacks"
-        " (issue #778); the words are itemised in"
-        " scripts/opensuse-spelling-jargon.toml",
     ),
 ]
 

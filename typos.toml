@@ -48,10 +48,10 @@ sourcen = "sourcen"
 extend-glob = ["**/tags-emission-pins.spec", "**/tags.rs", "**/binary_cli.rs"]
 extend-words = { packag = "packag" }
 
-# recieve is a deliberate misspelling in the jargon-filter negative
-# fixture in filter.rs: it proves the vendored openSUSE spelling-error
-# filter still surfaces a genuine typo. Scoped to that file so the
-# allow-list does not silence a real "recieve" typo repo-wide.
+# recieve is a deliberate misspelling in the spelling negative
+# fixture in filter.rs: it proves no filter in the vendored openSUSE
+# config suppresses a genuine spelling typo. Scoped to that file so
+# the allow-list does not silence a real "recieve" typo repo-wide.
 [type.recieve-fixture]
 extend-glob = ["**/filter.rs"]
 extend-words = { recieve = "recieve" }
@@ -62,3 +62,11 @@ extend-words = { recieve = "recieve" }
 [type.spdx]
 extend-glob = ["**/spdx.rs"]
 extend-words = { matix = "matix", nd = "nd", tou = "tou" }
+
+# informations and libary are deliberate misspellings in the spelling
+# tests in spellcheck.rs: they prove the supplementary wordlist does
+# not accept genuine misspellings. Scoped to that file so the
+# allow-list does not silence real typos repo-wide.
+[type.spelling-fixture]
+extend-glob = ["**/spellcheck.rs"]
+extend-words = { informations = "informations", libary = "libary" }

@@ -1884,103 +1884,10 @@ def test_append_systemd_preset_packages_appends_at_eof_without_table():
 
 
 
-def test_spelling_jargon_shipped_words_build_the_shipped_filter():
-    """The shipped jargon TOML carries the four words issue #778
-    evidenced, sorted, and the filter built from them is the one
-    EXTRA_FILTERS appends to the openSUSE config.
-
-    Pins both ends of the generator: a word silently dropping out of
-    the TOML (or out of the built alternation) re-opens #778.
-    """
-    assert gen.SPELLING_JARGON_WORDS == [
-        "init",
-        "librpm",
-        "namespace",
-        "scriptlet",
-    ], gen.SPELLING_JARGON_WORDS
-    expected = (
-        r"^.*spelling-error (Summary\([A-Za-z0-9_@.-]+\)|%description -l [A-Za-z0-9_@.-]+) "
-        r"([Ii]nits?|[Ll]ibrpms?|[Nn]amespaces?|[Ss]criptlets?)\b"
-    )
-    assert gen.spelling_jargon_filter(gen.SPELLING_JARGON_WORDS) == expected
-    patterns = [pattern for pattern, _reason in gen.EXTRA_FILTERS]
-    assert expected in patterns, patterns
-
-
-def test_spelling_jargon_added_word_appears_in_filter():
-    """A word added to the TOML appears in the built filter, regex-
-    escaped, and the loader returns the words sorted regardless of
-    file order.
-
-    The list is meant to grow one line at a time; this proves the
-    growth path end to end without touching the shipped file.
-    """
-    import re
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as td:
-        path = os.path.join(td, "jargon.toml")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write('words = [\n    "scriptlet",\n    "frobnicate",\n    "lib.rpm",\n]\n')
-        words = gen.load_spelling_jargon(path)
-    assert words == ["frobnicate", "lib.rpm", "scriptlet"], words
-    pattern = gen.spelling_jargon_filter(words)
-    assert "[Ff]robnicates?" in pattern, pattern
-    assert r"[Ll]ib\.rpms?" in pattern, pattern
-    rx = re.compile(pattern)
-    assert rx.search("foo.x86_64: E: spelling-error Summary(C) frobnicate -> frob nicate")
-    assert rx.search("foo.x86_64: E: spelling-error %description -l C lib.rpm -> lib rpm")
-    # The closing word boundary keeps a longer word that merely starts
-    # with a jargon word visible, and unlisted words are untouched.
-    assert not rx.search("foo.x86_64: E: spelling-error Summary(C) frobnicated -> frob nicate")
-    assert not rx.search("foo.x86_64: E: spelling-error Summary(C) blorple -> blurple")
-
-
-def test_spelling_jargon_duplicate_words_raise():
-    """Duplicates in the TOML fail loudly: a duplicated alternative
-    would ride along as dead weight in every vendored copy of the
-    filter."""
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as td:
-        path = os.path.join(td, "jargon.toml")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write('words = ["init", "init"]\n')
-        try:
-            gen.load_spelling_jargon(path)
-        except ValueError:
-            return
-    raise AssertionError("load_spelling_jargon accepted duplicate words")
-
-
-def test_spelling_jargon_filter_covers_capitals_plurals_and_utf8_locales():
-    """The built filter matches the shapes the spelling check actually
-    emits for a jargon word: capitalised at the start of a sentence,
-    pluralised, and under locales carrying digits and a hyphen
-    (C.UTF-8, de_DE.UTF-8). A longer word that merely starts with a
-    jargon word still surfaces."""
-    import re
-
-    rx = re.compile(gen.spelling_jargon_filter(gen.SPELLING_JARGON_WORDS))
-    for line in [
-        "foo.x86_64: E: spelling-error Summary(C.UTF-8) namespace -> name space",
-        "foo.x86_64: E: spelling-error %description -l de_DE.UTF-8 scriptlet -> script let",
-        "foo.x86_64: E: spelling-error Summary(C) Init -> i nit",
-        "foo.x86_64: E: spelling-error %description -l C Namespace -> name space",
-        "foo.x86_64: E: spelling-error Summary(C) namespaces -> name spaces",
-        "foo.x86_64: E: spelling-error %description -l C scriptlets -> script lets",
-    ]:
-        assert rx.search(line), line
-    assert not rx.search(
-        "foo.x86_64: E: spelling-error Summary(C) initialisation -> initialization"
-    )
-
-
 def test_extra_filters_carry_their_provenance_reasons():
     """Each EXTRA_FILTERS entry pairs its pattern with the
     reason the generator logs for it in PROVENANCE: the mingw entries
-    keep their rpmlintrc attribution and the spelling-jargon entry
-    cites issue #778 instead of inheriting the mingw label."""
+    keep their rpmlintrc attribution."""
     reasons = dict(gen.EXTRA_FILTERS)
     assert len(reasons) == len(gen.EXTRA_FILTERS)
     for pattern, reason in gen.EXTRA_FILTERS:
@@ -1991,8 +1898,6 @@ def test_extra_filters_carry_their_provenance_reasons():
         if pattern.startswith("^mingw")
     ]
     assert mingw_reasons == ["mingw -filesystem packages' rpmlintrc"] * 2, mingw_reasons
-    jargon_pattern = gen.spelling_jargon_filter(gen.SPELLING_JARGON_WORDS)
-    assert "#778" in reasons[jargon_pattern], reasons[jargon_pattern]
 
 
 def test_apply_digest_adjudications_rewrites_cups_record():
