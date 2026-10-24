@@ -193,7 +193,6 @@ Filters = [
     # in scripts/generate-distro-configs.py.
     '^mingw32-.*arch-independent-package-contains-binary-or-object.*\.a$',
     '^mingw64-.*arch-independent-package-contains-binary-or-object.*\.a$',
-    '^.*spelling-error (Summary\([A-Za-z0-9_@.-]+\)|%description -l [A-Za-z0-9_@.-]+) ([Ii]nits?|[Ll]ibrpms?|[Nn]amespaces?|[Ss]criptlets?)\b',
 ]
 
 BlockedFilters = [

@@ -2,7 +2,11 @@
 //!
 //! Mirrors rpmlint's `spellcheck.py`: loads the en_US dictionary from the
 //! system hunspell paths, checks words in Summary/Description, and degrades
-//! gracefully when the dictionary is absent.
+//! gracefully when the dictionary is absent. Package descriptions are
+//! en_US text, so en_US is the only dictionary consulted and British
+//! spellings are findings. One deliberate extension sits on top of the
+//! system dictionary: the bundled supplementary vocabulary
+//! (`data/spelling-wordlist.txt`) is added to it.
 
 use std::path::Path;
 
@@ -21,6 +25,13 @@ const DICT_PATHS: &[&str] = &[
     "/usr/share/myspell",
     "/opt/homebrew/share/hunspell",
 ];
+
+/// The bundled supplementary vocabulary, one entry per line (`#` lines
+/// are comments); an entry may carry hunspell affix flags covering its
+/// derivations. Added to the system dictionary at load: the words are
+/// established vocabulary that package prose uses correctly and the
+/// system dictionary lacks, so reporting them was noise.
+const SUPPLEMENTARY_WORDS: &str = include_str!("../data/spelling-wordlist.txt");
 
 /// Well-known generic TLDs, for recognising a bare host (no scheme) as
 /// a URL. Country-code TLDs are absent on purpose: the reference checks
@@ -156,26 +167,46 @@ fn build_dictionary(
     spellbook::Dictionary::new_with_hasher(aff, dic, DictionaryBuildHasher)
 }
 
+/// Load one language's dictionary from the standard paths.
+fn load_dictionary(lang: &str) -> Option<spellbook::Dictionary<DictionaryBuildHasher>> {
+    for dir in DICT_PATHS {
+        let aff = Path::new(dir).join(format!("{lang}.aff"));
+        let dic = Path::new(dir).join(format!("{lang}.dic"));
+        let (Ok(aff_s), Ok(dic_s)) = (std::fs::read_to_string(&aff), std::fs::read_to_string(&dic))
+        else {
+            continue;
+        };
+        if let Ok(dict) = build_dictionary(&aff_s, &dic_s) {
+            return Some(dict);
+        }
+    }
+    None
+}
+
+/// Add the bundled supplementary vocabulary to `dict`. An entry the
+/// dictionary's affix parser rejects is skipped: the bundled list is
+/// pinned by a unit test, so a bad entry fails the test suite, never
+/// a user run.
+fn add_supplementary_words(dict: &mut spellbook::Dictionary<DictionaryBuildHasher>) {
+    for line in SUPPLEMENTARY_WORDS.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let _ = dict.add(line);
+    }
+}
+
 impl Spellchecker {
     /// Try to load the en_US dictionary from standard paths.
     /// Returns `None` if not found (graceful degradation).
     pub fn new() -> Option<Self> {
-        for dir in DICT_PATHS {
-            let aff = Path::new(dir).join("en_US.aff");
-            let dic = Path::new(dir).join("en_US.dic");
-            let (Ok(aff_s), Ok(dic_s)) =
-                (std::fs::read_to_string(&aff), std::fs::read_to_string(&dic))
-            else {
-                continue;
-            };
-            if let Ok(dict) = build_dictionary(&aff_s, &dic_s) {
-                return Some(Self {
-                    dict,
-                    ngram_suggestions: ngram_suggestions_enabled(),
-                });
-            }
-        }
-        None
+        let mut dict = load_dictionary("en_US")?;
+        add_supplementary_words(&mut dict);
+        Some(Self {
+            dict,
+            ngram_suggestions: ngram_suggestions_enabled(),
+        })
     }
 
     /// Build from inline dictionary strings (for tests). Defaults to
@@ -186,6 +217,19 @@ impl Spellchecker {
             dict,
             ngram_suggestions: true,
         })
+    }
+
+    /// Add the bundled supplementary vocabulary (for tests: `new()` is
+    /// the only production caller).
+    #[cfg(test)]
+    pub(crate) fn with_supplementary_words(mut self) -> Self {
+        add_supplementary_words(&mut self.dict);
+        self
+    }
+
+    /// Whether the dictionary accepts the word.
+    fn accepts(&self, word: &str) -> bool {
+        self.dict.check(word)
     }
 
     /// Override the ngram-suggester switch (for tests).
@@ -231,7 +275,11 @@ impl Spellchecker {
             // Skip words inside a URL or email address, and WikiWords
             // (CamelCase).
             let word_end = *byte_offset + word.len();
-            if spans.iter().any(|(s, e)| *byte_offset < *e && *s < word_end) || is_wiki_word(word) {
+            if spans
+                .iter()
+                .any(|(s, e)| *byte_offset < *e && *s < word_end)
+                || is_wiki_word(word)
+            {
                 continue;
             }
 
@@ -240,7 +288,7 @@ impl Spellchecker {
                 continue;
             }
 
-            if self.dict.check(word) {
+            if self.accepts(word) {
                 continue;
             }
             warned.insert(word.to_string());
@@ -402,6 +450,47 @@ mod tests {
     use super::*;
 
     const TEST_AFF: &str = "SET UTF-8\n";
+
+    /// The pinned en_US affix rules for the flags the bundled wordlist
+    /// uses (S, D, G, M, N, P, R, Y, Z), copied from the pinned
+    /// dictionary's .aff so flagged entries parse and derive in tests
+    /// exactly as in production.
+    const TEST_AFF_WITH_AFFIXES: &str = "SET UTF-8\n\
+SFX S Y 4\n\
+SFX S y ies [^aeiou]y\n\
+SFX S 0 s [aeiou]y\n\
+SFX S 0 es [sxzh]\n\
+SFX S 0 s [^sxzhy]\n\
+SFX D Y 4\n\
+SFX D 0 d e\n\
+SFX D y ied [^aeiou]y\n\
+SFX D 0 ed [^ey]\n\
+SFX D 0 ed [aeiou]y\n\
+SFX G Y 2\n\
+SFX G e ing e\n\
+SFX G 0 ing [^e]\n\
+SFX R Y 4\n\
+SFX R 0 r e\n\
+SFX R y ier [^aeiou]y\n\
+SFX R 0 er [aeiou]y\n\
+SFX R 0 er [^ey]\n\
+SFX Z Y 4\n\
+SFX Z 0 rs e\n\
+SFX Z y iers [^aeiou]y\n\
+SFX Z 0 ers [aeiou]y\n\
+SFX Z 0 ers [^ey]\n\
+SFX Y Y 1\n\
+SFX Y 0 ly .\n\
+SFX P Y 3\n\
+SFX P y iness [^aeiou]y\n\
+SFX P 0 ness [aeiou]y\n\
+SFX P 0 ness [^y]\n\
+SFX M Y 1\n\
+SFX M 0 's .\n\
+SFX N Y 3\n\
+SFX N e ion e\n\
+SFX N y ication y\n\
+SFX N 0 en [^ey]\n";
     const TEST_DIC: &str = "5\nhello\nworld\ntest\npackage\ncheck\n";
 
     fn test_checker() -> Spellchecker {
@@ -895,5 +984,95 @@ mod tests {
         let result = checker.check("hello wrld' world", "testpkg", &[]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, "wrld");
+    }
+
+    #[test]
+    fn supplementary_words_are_accepted() {
+        // The bundled wordlist is production vocabulary: with it, the
+        // words package prose uses correctly stop being findings.
+        let checker = test_checker().with_supplementary_words();
+        assert!(
+            checker
+                .check("hello backend world", "testpkg", &[])
+                .is_empty()
+        );
+        assert!(
+            checker
+                .check("hello subpackage world", "testpkg", &[])
+                .is_empty()
+        );
+        // Sentence-initial capitalised form of a listed word.
+        assert!(
+            checker
+                .check("Backend hello world", "testpkg", &[])
+                .is_empty()
+        );
+        // A word the list does not carry is still reported.
+        let result = checker.check("hello wrld", "testpkg", &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "wrld");
+    }
+
+    #[test]
+    fn every_supplementary_word_parses_and_is_accepted() {
+        // Pins the bundled file: every entry must parse as a dictionary
+        // line and its stem must be accepted once added (a typo'd entry
+        // would silently do nothing in production). Flagged entries
+        // resolve against the affix rules of the dictionary they join,
+        // so this checker carries the pinned en_US rules for the flags
+        // the list uses.
+        let mut checker =
+            Spellchecker::from_strings(TEST_AFF_WITH_AFFIXES, TEST_DIC).expect("test dictionary");
+        for line in SUPPLEMENTARY_WORDS.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            assert!(
+                checker.dict.add(line).is_ok(),
+                "supplementary entry {line:?} does not parse"
+            );
+            let stem = line.split('/').next().unwrap_or(line);
+            assert!(
+                checker.accepts(stem),
+                "supplementary entry {line:?} not accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn supplementary_affix_flags_cover_derivations() {
+        // One flagged entry covers its regular derivations, so the
+        // bundled list names stems rather than every written form.
+        let checker = Spellchecker::from_strings(TEST_AFF_WITH_AFFIXES, TEST_DIC)
+            .expect("test dictionary")
+            .with_supplementary_words();
+        for word in [
+            "backends",      // backend + S
+            "filesystems",   // filesystem + S
+            "deserialized",  // deserialize + D
+            "deserializing", // deserialize + G
+            "tokenization",  // tokenize + N
+            "namespaces",    // namespace + S
+            "scriptlets",    // scriptlet + S
+        ] {
+            assert!(checker.accepts(word), "derivation {word:?} not accepted");
+        }
+        // The flags grant the paradigms of the listed stems only:
+        // British spellings and genuine misspellings stay findings.
+        for word in ["behaviour", "deserialise", "informations", "libary"] {
+            assert!(!checker.accepts(word), "word {word:?} must stay flagged");
+        }
+    }
+
+    #[test]
+    fn british_spelling_is_flagged() {
+        // Package descriptions are en_US text: a British spelling is a
+        // finding (the tags check reports spelling findings at warning
+        // level), so packagers fix the prose to en_US.
+        let checker = test_checker();
+        let result = checker.check("hello behaviour world", "testpkg", &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "behaviour");
     }
 }
