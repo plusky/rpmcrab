@@ -399,7 +399,7 @@ fn skippable_spans(text: &str) -> Vec<(usize, usize)> {
 /// Whether one whitespace-delimited chunk is a URL or an email
 /// address: a scheme URL, a `www.` host, an address with a dotted
 /// domain part, or a bare host whose last label is a well-known TLD —
-/// each optionally followed by a path.
+/// each optionally followed by a port, a path, a query or a fragment.
 fn is_skippable_chunk(chunk: &str) -> bool {
     let chunk = chunk.trim_matches(|c: char| !(c.is_alphanumeric() || "@.:/_-+%~#?=&".contains(c)));
     if chunk.contains("://") {
@@ -412,6 +412,10 @@ fn is_skippable_chunk(chunk: &str) -> bool {
         return domain.contains('.');
     }
     let host = chunk.split('/').next().unwrap_or("");
+    // The host part ends at a port, a query or a fragment, and a
+    // trailing dot belongs to the written form, not to the last label.
+    let host = host.split([':', '?', '#']).next().unwrap_or("");
+    let host = host.trim_end_matches('.');
     match host.rsplit_once('.') {
         Some((_, tld)) => URL_TLDS.contains(&tld.to_lowercase().as_str()),
         None => false,
@@ -965,6 +969,17 @@ SFX N 0 en [^ey]\n";
     }
 
     #[test]
+    fn bare_hosts_with_port_query_fragment_or_trailing_dot_are_skipped() {
+        // The host rule reads the last label as the TLD: a trailing
+        // dot, a port, a query or a fragment after the host does not
+        // defeat it (issue #941).
+        let checker = test_checker();
+        let text = "hello docs.qwargl.io. docs.qwargl.io:8080 docs.qwargl.io?x=1 \
+                    docs.qwargl.io#part docs.qwargl.io:8080/en check";
+        assert!(checker.check(text, "testpkg", &[]).is_empty());
+    }
+
+    #[test]
     fn dotted_filenames_are_still_checked() {
         // Only hosts are skipped: a dotted file name's parts are
         // checked, like the reference checks them.
@@ -1048,13 +1063,14 @@ SFX N 0 en [^ey]\n";
             .expect("test dictionary")
             .with_supplementary_words();
         for word in [
-            "backends",      // backend + S
-            "filesystems",   // filesystem + S
-            "deserialized",  // deserialize + D
-            "deserializing", // deserialize + G
-            "tokenization",  // tokenize + N
-            "namespaces",    // namespace + S
-            "scriptlets",    // scriptlet + S
+            "backends",       // backend + S
+            "filesystems",    // filesystem + S
+            "deserialized",   // deserialize + D
+            "deserializing",  // deserialize + G
+            "deduplication",  // deduplicate + N
+            "autocompletion", // autocomplete + N
+            "namespaces",     // namespace + S
+            "scriptlets",     // scriptlet + S
         ] {
             assert!(checker.accepts(word), "derivation {word:?} not accepted");
         }

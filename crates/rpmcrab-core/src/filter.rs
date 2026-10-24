@@ -1008,7 +1008,8 @@ mod tests {
         );
         // A genuine typo in the rendered shape still surfaces: no
         // shipped filter suppresses it.
-        let line = "foo.x86_64: E: spelling-error Summary(C) recieve -> receive";
+        assert!(!patterns.is_empty(), "shipped config carries filters");
+        let line = "foo.x86_64: W: spelling-error Summary(C) recieve -> receive";
         for pattern in &patterns {
             let re = fancy_regex::Regex::new(pattern).expect("compile shipped filter");
             assert!(
