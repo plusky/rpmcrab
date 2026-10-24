@@ -129,7 +129,7 @@ since = "0.1.0"
 case = "global"
 check = "spelling-error"
 kind = "behaviour"
-reason = "Backend is the pure-Rust spellbook crate, not pyenchant; findings may differ from the reference on the same input even with a dictionary present."
+reason = "Backend is the pure-Rust spellbook crate, not pyenchant; findings may differ from the reference on the same input even with a dictionary present. The port adds a bundled supplementary vocabulary (crates/rpmcrab-core/data/spelling-wordlist.txt) to the dictionary — entries carry hunspell affix flags where derivations are regular — so established technical vocabulary the reference's en_US-only backend flags is not a finding here; British spellings stay findings, as package descriptions are en_US text. URLs and email addresses are skipped whole, as the reference's URL and email filters skip them; the reference's tokenizer still checks some bare-host labels the port's host rule skips (uk in example.co.uk)."
 since = "0.1.0"
 
 [[divergence]]
@@ -2277,6 +2277,13 @@ kind = "severity"
 reason = "Deliberate severity recalibration (issue #883): the port reports W where the reference reports E, and the vendored configs drop upstream's blanket filter (DROP_LIVE_FILTERS in scripts/generate-distro-configs.py), so the finding surfaces under the distro flavours where the reference's shipped openSUSE config hides it entirely ('Too noisy, and usually not something downstream packagers can fix'). A stale FSF postal address in a shipped licence text or licence header is a documentation defect with no artefact consequence, so it is not an error; the suppressed set is nonetheless text the distribution ships and can correct in its own files or carry upstream. Measured with the filter lifted over the 300-RPM audit sample of the Factory corpus: the filter hides 203 lines in 39 packages, 150 of them kernel-devel-longterm's shipped kernel headers carrying the old address in their licence headers, the remainder licence texts and licence headers in 38 further packages."
 since = "0.3.1"
 upstream = "https://github.com/plusky/rpmcrab/issues/883"
+
+[[divergence]]
+case = "global"
+check = "spelling-error"
+kind = "severity"
+reason = "Deliberate severity recalibration (decided 2026-10-24): the port reports W where the reference reports E. A flagged word in a summary or description is a prose-quality defect with no artefact consequence; as an error the class printed 34,596 E across 8,946 of 17,242 source packages in the 2026-10-24 Factory sweep (binary at 38459d25, 9,869 distinct flagged words, the majority of them occurring in a handful of packages or once). The port also shrinks the class itself: URLs and email addresses are not tokenised into words, and the bundled supplementary vocabulary (data/spelling-wordlist.txt, curated against the pinned en_US dictionary alone, its entries carrying hunspell affix flags where derivations are regular) is added to the dictionary. British spellings stay flagged: descriptions are en_US text, so a British spelling is a prose defect for the packager to fix. Re-running the same corpus with these changes leaves 17,561 W across 6,176 source packages (7,292 distinct words) and moves no other check; the residue is the one-off tail the warning exists for."
+since = "0.3.1"
 
 [[divergence]]
 case = "global"
