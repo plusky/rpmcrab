@@ -2364,6 +2364,71 @@ def missing_check_names(entries):
     return {e.get("check") for e in entries if e.get("kind") == "missing"}
 
 
+def port_config_family_names(data_dir):
+    """Concrete finding names the port's computed families can emit,
+    derived from the shipped config data the family iterates.
+
+    `dir-or-file-in-<dir>` is computed from the `DisallowedDirs` list
+    (FilesCheck): the code carries only the `dir-or-file-in-{}` template,
+    so the emittable concrete names live in the config data, not the
+    source. Union the defaults and every vendored flavour list --
+    flavours merge over the defaults, so a name is emittable when any
+    shipped list carries its directory.
+    """
+    names = set()
+    candidates = [os.path.join(data_dir, "configdefaults.toml")]
+    distro = os.path.join(data_dir, "distro")
+    if os.path.isdir(distro):
+        for flavour in sorted(os.listdir(distro)):
+            fdir = os.path.join(distro, flavour)
+            if os.path.isdir(fdir):
+                candidates.extend(
+                    os.path.join(fdir, f) for f in sorted(os.listdir(fdir))
+                    if f.endswith(".toml"))
+    for path in candidates:
+        if not os.path.isfile(path):
+            continue
+        with open(path, "rb") as f:
+            table = tomllib.load(f)
+        for d in table.get("DisallowedDirs", []):
+            mangled = "-".join(seg for seg in str(d).split("/") if seg)
+            if mangled:
+                names.add(f"dir-or-file-in-{mangled}")
+    return names
+
+
+def census_missing(entries, findings, exact_patterns, family_names,
+                   stale_pairs):
+    """The C4 census: every kind="missing" ledger entry with its
+    non-emission validation. Shared by main() and the test suite so
+    drift in the construction is caught.
+
+    Returns (rows, bad): rows are (check, mode) in ledger order -- mode
+    "name" for a finding-name entry, "module (N findings)" for an entry
+    keying a whole reference check module. An entry is bad when the
+    port emits what it claims is missing: a name entry whose name is an
+    exact port pattern or a config-derived family name, or a module
+    entry with a stale (module, finding) pair.
+    """
+    modules = {module for module, _ in findings}
+    stale_set = set(stale_pairs)
+    rows, bad = [], []
+    for e in entries:
+        if e.get("kind") != "missing":
+            continue
+        check = e.get("check", "")
+        if check in modules:
+            names = [name for module, name in findings if module == check]
+            rows.append((check, f"module ({len(names)} findings)"))
+            if any((check, name) in stale_set for name in names):
+                bad.append(check)
+        else:
+            rows.append((check, "name"))
+            if check in exact_patterns or check in family_names:
+                bad.append(check)
+    return rows, bad
+
+
 def is_stale_entry(module, name, missing_modules, port_templates, by_module, check_map):
     """Whether a ledger entry is stale: the check is marked missing but the
     port now implements it with an exact (non-wildcard) pattern for this
@@ -2410,6 +2475,11 @@ def main(argv):
 
     findings, unresolved, nmods = audit_reference(ref)
     by_module, port_unresolved = audit_port(port_dir)
+    data_dir = os.path.normpath(os.path.join(
+        os.path.dirname(port_dir), "..", "data"))
+    family_names = port_config_family_names(data_dir)
+    if family_names:
+        by_module.setdefault("files", set()).update(family_names)
     port_templates = set().union(*by_module.values()) if by_module else set()
     check_map = port_check_map(os.path.join(os.path.dirname(port_dir), "check.rs"))
     if not check_map:
@@ -2491,7 +2561,23 @@ def main(argv):
             print(f"  {name}  [{module}.py]")
         print()
 
-    if gaps or unresolved or port_unresolved or stale:
+    exact_patterns = {p for p in port_templates if "*" not in p}
+    census_rows, census_bad = census_missing(
+        entries, findings, exact_patterns, family_names, stale)
+    print(f"C4 CENSUS ({len(census_rows)}): every kind=\"missing\" ledger "
+          "entry, validated not emitted by the port -- name entries against "
+          "the port's exact patterns and the config-derived family names, "
+          "module entries against their findings")
+    for check, mode in census_rows:
+        marker = "  EMITTED -- census failure" if check in census_bad else ""
+        print(f"  {check}  [{mode}]{marker}")
+    if census_bad:
+        print(f"CENSUS FAILURES ({len(census_bad)}): the port emits a "
+              "finding a kind=\"missing\" entry claims is unported: "
+              + ", ".join(sorted(census_bad)))
+    print()
+
+    if gaps or unresolved or port_unresolved or stale or census_bad:
         return 1
     return 0
 
