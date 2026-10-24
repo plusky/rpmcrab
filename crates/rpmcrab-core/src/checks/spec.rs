@@ -2,14 +2,13 @@
 //!
 //! Covers the reference's `add_info` call sites: the per-line checks (sections,
 //! buildroot usage, `%setup`/`%autosetup`/`%autopatch`, applied patches,
-//! `%{_sourcedir}` use, `./configure` handling, hardcoded library paths,
 //! preamble tags, dependencies, changelog/files-section rules,
-//! indentation, deprecated grep, `Group` validity, macros in comments, the
+//! deprecated grep, `Group` validity, macros in comments, the
 //! python helpers, forbidden control characters, the
 //! `update-desktop-files` deprecation) and the whole-package checks
 //! (`BuildRoot` tag, missing sections, superfluous `%clean`, multiple
-//! `%changelog`, depgen, patch fuzz, mixed
-//! indentation, `%ifarch`-applied and unapplied patches), plus the two
+//! `%changelog`, depgen, patch fuzz,
+//! `%ifarch`-applied and unapplied patches), plus the two
 //! checks that need the `rpm` tool or the spec parser (`specfile-error`,
 //! `specfile-warning`, `invalid-url`), skipped in mini mode.
 //!
@@ -83,13 +82,6 @@ static APPLIED_PATCH_I_RE: OnceLock<Regex> = OnceLock::new();
 fn applied_patch_i_re() -> &'static Regex {
     APPLIED_PATCH_I_RE.get_or_init(|| {
         Regex::new(r"(?:%\{?__)?patch\}?.*?\s+(?:<|-i)\s+%\{PATCH(\d+)\}").expect("static regex")
-    })
-}
-
-static SOURCE_DIR_RE: OnceLock<Regex> = OnceLock::new();
-fn source_dir_re() -> &'static Regex {
-    SOURCE_DIR_RE.get_or_init(|| {
-        Regex::new(r"^[^#]*(\$RPM_SOURCE_DIR|%{?_sourcedir}?)").expect("static regex")
     })
 }
 
@@ -173,30 +165,6 @@ static BUILDROOT_ASSIGN_SPACE_RE: OnceLock<Regex> = OnceLock::new();
 fn buildroot_assign_space_re() -> &'static Regex {
     BUILDROOT_ASSIGN_SPACE_RE
         .get_or_init(|| Regex::new(r"(?:^|\s)--[A-Za-z][A-Za-z0-9_-]*\s+$").expect("static regex"))
-}
-
-static CONFIGURE_LIBDIR_SPEC_RE: OnceLock<Regex> = OnceLock::new();
-fn configure_libdir_spec_re() -> &'static Regex {
-    CONFIGURE_LIBDIR_SPEC_RE.get_or_init(|| {
-        Regex::new(r"ln |\./configure[^#]*--libdir=(\S+)[^#]*").expect("static regex")
-    })
-}
-
-/// `hardcoded_library_paths`, start-anchored: the reference applies it with
-/// `re.match`.
-static HARDCODED_LIBDIR_PATHS_RE: OnceLock<Regex> = OnceLock::new();
-fn hardcoded_libdir_paths_re() -> &'static Regex {
-    HARDCODED_LIBDIR_PATHS_RE.get_or_init(|| {
-        Regex::new(r"^(/lib|/usr/lib|/usr/X11R6/lib/(?!([^/]+/)+)[^/]*\.([oa]|la|so[0-9.]*))")
-            .expect("static regex")
-    })
-}
-
-/// `DEFAULT_BIARCH_PACKAGES`: hardcoded library paths are not checked in
-/// biarch packages.
-static BIARCH_PACKAGE_RE: OnceLock<Regex> = OnceLock::new();
-fn biarch_package_re() -> &'static Regex {
-    BIARCH_PACKAGE_RE.get_or_init(|| Regex::new(r"^(gcc|glibc)").expect("static regex"))
 }
 
 static LIBDIR_RE: OnceLock<Regex> = OnceLock::new();
@@ -290,12 +258,6 @@ fn tmpfiles_macro_re() -> &'static Regex {
     })
 }
 
-static HARDCODED_LIBRARY_PATH_RE: OnceLock<Regex> = OnceLock::new();
-fn hardcoded_library_path_re() -> &'static Regex {
-    HARDCODED_LIBRARY_PATH_RE.get_or_init(|| Regex::new(r"^[^#]*((^|\s+|\.\./\.\.|\${?RPM_BUILD_ROOT}?|%{?buildroot}?|%{?_prefix}?)(/lib|/usr/lib|/usr/X11R6/lib/(?!([^/]+/)+)[^/]*\.([oa]|la|so[0-9.]*))(?=[\s;/])([^\s,;]*))")
-        .expect("static regex"))
-}
-
 static DEPSCRIPT_OVERRIDE_RE: OnceLock<Regex> = OnceLock::new();
 fn depscript_override_re() -> &'static Regex {
     DEPSCRIPT_OVERRIDE_RE.get_or_init(|| {
@@ -315,14 +277,6 @@ static PATCH_FUZZ_OVERRIDE_RE: OnceLock<Regex> = OnceLock::new();
 fn patch_fuzz_override_re() -> &'static Regex {
     PATCH_FUZZ_OVERRIDE_RE.get_or_init(|| {
         Regex::new(r"(^|\s)%(define|global)\s+_default_patch_fuzz\s+(\d+)").expect("static regex")
-    })
-}
-
-static INDENT_SPACES_RE: OnceLock<Regex> = OnceLock::new();
-fn indent_spaces_re() -> &'static Regex {
-    INDENT_SPACES_RE.get_or_init(|| {
-        Regex::new(r"( \t|(^|\t)([^\t]{8})*[^\t]{4}[^\t]?([^\t][^\t.!?]|[^\t]?[.!?] )  )")
-            .expect("static regex")
     })
 }
 
@@ -1461,7 +1415,6 @@ fn source_line_is_packaged(line: &str) -> bool {
 
 /// `SpecCheck`, ported from rpmlint's `SpecCheck.py`.
 pub struct SpecCheck {
-    hardcoded_lib_path_exceptions_re: Regex,
     mini_mode: bool,
     macro_re: Regex,
     patch_re: Regex,
@@ -1470,7 +1423,6 @@ pub struct SpecCheck {
     applied_patch_p_re: Regex,
     applied_patch_pipe_re: Regex,
     applied_patch_i_re: Regex,
-    source_dir_re: Regex,
     obsolete_tags_re: Regex,
     packager_re: Regex,
     buildarch_re: Regex,
@@ -1479,21 +1431,16 @@ pub struct SpecCheck {
     suse_version_re: Regex,
     make_check_re: Regex,
     rpm_buildroot_re: Regex,
-    configure_libdir_spec_re: Regex,
-    hardcoded_libdir_paths_re: Regex,
-    biarch_package_re: Regex,
     libdir_re: Regex,
     description_lang_re: Regex,
     section_res: Vec<(String, Regex)>,
     deprecated_grep_re: Regex,
     tmpfiles_macro_re: Regex,
-    hardcoded_library_path_re: Regex,
     /// Required: spec parsing shells out to `rpm`.
     rpm: Tool,
     depscript_override_re: Regex,
     depgen_disable_re: Regex,
     patch_fuzz_override_re: Regex,
-    indent_spaces_re: Regex,
     requires_re: Regex,
     provides_re: Regex,
     obsoletes_re: Regex,
@@ -1522,14 +1469,9 @@ pub struct SpecCheck {
     patches: BTreeMap<i64, String>,
     applied_patches: Vec<i64>,
     patches_auto_applied: bool,
-    source_dir: bool,
-    configure_linenum: Option<u32>,
-    configure_cmdline: String,
     depscript_override: bool,
     depgen_disabled: bool,
     patch_fuzz_override: bool,
-    indent_spaces: u32,
-    indent_tabs: u32,
     section: BTreeMap<String, u32>,
     declarative: bool,
     current_section: String,
@@ -1574,16 +1516,7 @@ impl SpecCheck {
                     .collect()
             })
             .unwrap_or_default();
-        let exceptions = config
-            .configuration
-            .get("HardcodedLibPathExceptions")
-            .and_then(toml::Value::as_str)
-            // An empty pattern would match every path and suppress all
-            // findings; fall back to the configdefaults.toml default.
-            .unwrap_or(r"/lib/(modules|cpp|perl5|rpm|hotplug|firmware|systemd)($|[\s/,])");
         Self {
-            hardcoded_lib_path_exceptions_re: Regex::new(exceptions)
-                .unwrap_or_else(|_| Regex::new("$^").expect("static regex")),
             mini_mode: config.mini_mode,
             macro_re: macro_regex().clone(),
             patch_re: patch_re().clone(),
@@ -1592,7 +1525,6 @@ impl SpecCheck {
             applied_patch_p_re: applied_patch_p_re().clone(),
             applied_patch_pipe_re: applied_patch_pipe_re().clone(),
             applied_patch_i_re: applied_patch_i_re().clone(),
-            source_dir_re: source_dir_re().clone(),
             obsolete_tags_re: obsolete_tags_re().clone(),
             packager_re: packager_re().clone(),
             buildarch_re: buildarch_re().clone(),
@@ -1601,19 +1533,14 @@ impl SpecCheck {
             suse_version_re: suse_version_re().clone(),
             make_check_re: make_check_re().clone(),
             rpm_buildroot_re: rpm_buildroot_re().clone(),
-            configure_libdir_spec_re: configure_libdir_spec_re().clone(),
-            hardcoded_libdir_paths_re: hardcoded_libdir_paths_re().clone(),
-            biarch_package_re: biarch_package_re().clone(),
             libdir_re: libdir_re().clone(),
             description_lang_re: description_lang_re().clone(),
             section_res: section_res(),
             deprecated_grep_re: deprecated_grep_re().clone(),
             tmpfiles_macro_re: tmpfiles_macro_re().clone(),
-            hardcoded_library_path_re: hardcoded_library_path_re().clone(),
             depscript_override_re: depscript_override_re().clone(),
             depgen_disable_re: depgen_disable_re().clone(),
             patch_fuzz_override_re: patch_fuzz_override_re().clone(),
-            indent_spaces_re: indent_spaces_re().clone(),
             requires_re: requires_re().clone(),
             provides_re: provides_re().clone(),
             obsoletes_re: obsoletes_re().clone(),
@@ -1641,14 +1568,9 @@ impl SpecCheck {
             patches: BTreeMap::new(),
             applied_patches: Vec::new(),
             patches_auto_applied: false,
-            source_dir: false,
-            configure_linenum: None,
-            configure_cmdline: String::new(),
             depscript_override: false,
             depgen_disabled: false,
             patch_fuzz_override: false,
-            indent_spaces: 0,
-            indent_tabs: 0,
             section: BTreeMap::new(),
             declarative: false,
             current_section: "package".to_string(),
@@ -1870,22 +1792,6 @@ impl Check for SpecCheck {
         if self.patch_fuzz_override {
             self.info(out, pkg, Level::Warning, "patch-fuzz-is-changed", &[]);
         }
-        if self.indent_spaces != 0 && self.indent_tabs != 0 {
-            let detail = format!(
-                "(spaces: line {}, tab: line {})",
-                self.indent_spaces, self.indent_tabs
-            );
-            pkg.current_linenum
-                .set(Some(self.indent_spaces.max(self.indent_tabs)));
-            self.info(
-                out,
-                pkg,
-                Level::Warning,
-                "mixed-use-of-spaces-and-tabs",
-                &[&detail],
-            );
-            pkg.current_linenum.set(None);
-        }
         if !self.patches_auto_applied {
             let patches: Vec<(i64, String)> =
                 self.patches.iter().map(|(n, f)| (*n, f.clone())).collect();
@@ -1918,14 +1824,9 @@ impl Check for SpecCheck {
         self.patches.clear();
         self.applied_patches.clear();
         self.patches_auto_applied = false;
-        self.source_dir = false;
-        self.configure_linenum = None;
-        self.configure_cmdline.clear();
         self.depscript_override = false;
         self.depgen_disabled = false;
         self.patch_fuzz_override = false;
-        self.indent_spaces = 0;
-        self.indent_tabs = 0;
         self.section.clear();
         self.declarative = false;
         self.current_section = "package".to_string();
@@ -2091,13 +1992,9 @@ impl SpecCheck {
         self.checkline_autopatch(pkg, out, line);
         self.checkline_patch_applying_macros(pkg, out, line);
         self.checkline_applied_patch(pkg, out, line);
-        self.checkline_sourcedir(pkg, out, line);
-        self.checkline_configure(pkg, out, line);
-        self.checkline_hardcoded_library_path(pkg, out, line);
         self.checkline_package(pkg, out, line);
         self.checkline_changelog(pkg, out, line);
         self.checkline_files(pkg, out, line);
-        self.checkline_indent(pkg, line);
         self.checkline_deprecated_grep(pkg, out, line);
         self.checkline_obsolete_tmpfiles_macro(pkg, out, line);
         self.checkline_macros_in_comments(pkg, out, line);
@@ -2334,98 +2231,6 @@ impl SpecCheck {
                 .and_then(|m| m.as_str().parse().ok())
                 .unwrap_or(0);
             self.applied_patches.push(pnum);
-        }
-    }
-
-    fn checkline_sourcedir(&mut self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
-        if self.source_dir {
-            return;
-        }
-        if self.source_dir_re.is_match(line).unwrap_or(false) {
-            self.source_dir = true;
-            self.info(out, pkg, Level::Error, "use-of-RPM_SOURCE_DIR", &[]);
-        }
-    }
-
-    fn checkline_configure(&mut self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
-        if let Some(configure_linenum) = self.configure_linenum {
-            if self.configure_cmdline.ends_with('\\') {
-                self.configure_cmdline.pop();
-                self.configure_cmdline.push_str(line.trim());
-            } else {
-                match self
-                    .configure_libdir_spec_re
-                    .captures(&self.configure_cmdline)
-                    .ok()
-                    .flatten()
-                {
-                    None => {
-                        // Report at the line where ./configure started.
-                        let real_linenum = pkg.current_linenum.get();
-                        pkg.current_linenum.set(Some(configure_linenum));
-                        self.info(
-                            out,
-                            pkg,
-                            Level::Warning,
-                            "configure-without-libdir-spec",
-                            &[],
-                        );
-                        pkg.current_linenum.set(real_linenum);
-                    }
-                    Some(caps) => {
-                        if let Some(m) = caps.get(1)
-                            && let Ok(Some(hc)) =
-                                self.hardcoded_libdir_paths_re.captures(m.as_str())
-                        {
-                            let path = hc.get(1).map(|m| m.as_str()).unwrap_or("");
-                            self.info(
-                                out,
-                                pkg,
-                                Level::Error,
-                                "hardcoded-library-path",
-                                &[path, "in configure options"],
-                            );
-                        }
-                    }
-                }
-                self.configure_linenum = None;
-            }
-        }
-
-        let hash_pos = line.find('#');
-        if self.current_section != "changelog"
-            && let Some(cfg_pos) = line.find("./configure")
-            && hash_pos.is_none_or(|h| h > cfg_pos)
-        {
-            self.configure_linenum = pkg.current_linenum.get();
-            self.configure_cmdline = line.trim().to_string();
-        }
-    }
-
-    fn checkline_hardcoded_library_path(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
-        if self.current_section == "changelog" {
-            return;
-        }
-        if let Ok(Some(caps)) = self.hardcoded_library_path_re.captures(line) {
-            let path = caps.get(1).map(|m| m.as_str().trim_start()).unwrap_or("");
-            // Don't check for hardcoded library paths in biarch packages.
-            if self.biarch_package_re.is_match(&pkg.name).unwrap_or(false) {
-                return;
-            }
-            if self
-                .hardcoded_lib_path_exceptions_re
-                .is_match(path)
-                .unwrap_or(false)
-            {
-                return;
-            }
-            self.info(
-                out,
-                pkg,
-                Level::Error,
-                "hardcoded-library-path",
-                &["in", path],
-            );
         }
     }
 }
@@ -3081,15 +2886,6 @@ impl SpecCheck {
             && !documentation_only
         {
             self.info(out, pkg, Level::Error, "no-license-file-in-spec", &[]);
-        }
-    }
-
-    fn checkline_indent(&mut self, pkg: &SpecPkg, line: &str) {
-        if self.indent_tabs == 0 && line.contains('\t') {
-            self.indent_tabs = pkg.current_linenum.get().unwrap_or(0);
-        }
-        if self.indent_spaces == 0 && self.indent_spaces_re.is_match(line).unwrap_or(false) {
-            self.indent_spaces = pkg.current_linenum.get().unwrap_or(0);
         }
     }
 
@@ -3884,12 +3680,17 @@ make install
             "comparison-operator-in-deptoken",
             "suse-update-desktop-file-deprecated",
             "no-%check-section",
-            "configure-without-libdir-spec",
             "shared-dir-glob-in-files",
             "patch-not-applied",
         ] {
             assert!(has(&results, check), "missing {check}: {results:?}");
         }
+        // Negative pin for the removed `configure-without-libdir-spec`
+        // finding: the bare `./configure` above stays silent.
+        assert!(
+            !has(&results, "configure-without-libdir-spec"),
+            "must stay silent: {results:?}"
+        );
         // Patch0 applied via `%patch -P 0`; Patch1 never applied.
         let not_applied = lines_for(&results, "patch-not-applied");
         assert_eq!(not_applied.len(), 1);
@@ -5118,17 +4919,15 @@ exit 1"#,
         );
     }
 
+    /// Negative pin for the removed `mixed-use-of-spaces-and-tabs`
+    /// finding: the conventional layout (tab after the colon, spaces
+    /// aligning the value) stays silent.
     #[test]
-    fn mixed_use_of_spaces_and_tabs_fires_warning_ref1043() {
-        // Mirrors the reference fixture: tabs after the colon, spaces
-        // aligning the Version value.
+    fn killed_mixed_use_of_spaces_and_tabs_stays_absent() {
         let results = run_mini("Name:\tfoo\nVersion:        1.0\n");
-        let lines = lines_for(&results, "mixed-use-of-spaces-and-tabs");
-        assert_eq!(lines.len(), 1, "results: {results:?}");
         assert!(
-            lines[0].contains("W: mixed-use-of-spaces-and-tabs (spaces: line 2, tab: line 1)"),
-            "line: {}",
-            lines[0]
+            !has(&results, "mixed-use-of-spaces-and-tabs"),
+            "must stay silent: {results:?}"
         );
     }
 
@@ -6636,37 +6435,38 @@ Patch0: foo.patch
         );
     }
 
+    /// Negative pin for the removed `use-of-RPM_SOURCE_DIR` finding:
+    /// both the variable and the macro form stay silent.
     #[test]
-    fn use_of_rpm_source_dir_fires_error_ref357() {
+    fn killed_use_of_rpm_source_dir_stays_absent() {
         let results = run_mini("Name: foo\n%build\necho $RPM_SOURCE_DIR\n");
-        let lines = lines_for(&results, "use-of-RPM_SOURCE_DIR");
-        assert_eq!(lines.len(), 1, "results: {results:?}");
         assert!(
-            lines[0].contains("E: use-of-RPM_SOURCE_DIR"),
-            "line: {}",
-            lines[0]
+            !has(&results, "use-of-RPM_SOURCE_DIR"),
+            "must stay silent: {results:?}"
         );
-        // The macro form is the same finding.
         let macro_form = run_mini("Name: foo\n%build\necho %{_sourcedir}\n");
         assert!(
-            has(&macro_form, "use-of-RPM_SOURCE_DIR"),
-            "results: {macro_form:?}"
+            !has(&macro_form, "use-of-RPM_SOURCE_DIR"),
+            "must stay silent: {macro_form:?}"
         );
     }
 
+    /// Negative pin for the removed `hardcoded-library-path` finding:
+    /// a literal library path stays silent.
     #[test]
-    fn hardcoded_library_path_fires_error_ref401() {
+    fn killed_hardcoded_library_path_stays_absent() {
         let results = run_mini("Name: foo\n%description\n/usr/lib\n");
-        let lines = lines_for(&results, "hardcoded-library-path");
-        assert_eq!(lines.len(), 1, "results: {results:?}");
         assert!(
-            lines[0].contains("E: hardcoded-library-path in /usr/lib"),
-            "line: {}",
-            lines[0]
+            !has(&results, "hardcoded-library-path"),
+            "must stay silent: {results:?}"
         );
-        // The macro form stays quiet.
-        let ok = run_mini("Name: foo\n%description\n%{_libdir}/foo\n");
-        assert!(!has(&ok, "hardcoded-library-path"), "results: {ok:?}");
+        // The configure-options form is the same removed finding.
+        let configure_form =
+            run_mini("Name: foo\n%build\n./configure --libdir=/usr/lib\n");
+        assert!(
+            !has(&configure_form, "hardcoded-library-path"),
+            "must stay silent: {configure_form:?}"
+        );
     }
 
     #[test]

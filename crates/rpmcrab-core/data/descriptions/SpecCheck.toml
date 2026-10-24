@@ -9,13 +9,6 @@ The spec file name (without the .spec suffix) must match the package name
 non-utf8-spec-file="""
 The character encoding of the spec file is not UTF-8.
 """
-use-of-RPM_SOURCE_DIR="""
-You use $RPM_SOURCE_DIR or %{_sourcedir} in your spec file. Files itemized
-as Source#: must be referenced by their %{SOURCEN} macro instead: if a
-Source#: entry is renamed, the old filename still resolves in the source
-directory, so the build succeeds locally while the SRPM silently ships the
-wrong file.
-"""
 patch-not-applied="""
 A patch is included in your package but was not applied.
 """
@@ -43,15 +36,6 @@ buildarch-instead-of-exclusivearch-tag="""
 Use ExclusiveArch instead of BuildArch (or BuildArchitectures)
 to restrict build on some specific architectures.
 Only use BuildArch with noarch
-"""
-hardcoded-library-path="""
-A library path is hardcoded to one of the following paths: /lib,
-/usr/lib. It should be replaced by something like /%{_lib} or %{_libdir}.
-"""
-configure-without-libdir-spec="""
-A configure script is run without specifying the libdir. configure
-options must be augmented with something like --libdir=%{_libdir} whenever
-the script supports it.
 """
 "no-%prep-section"="""
 The spec file does not contain a %prep section.  Even if some packages don't
@@ -122,10 +106,6 @@ In some common rpm configurations/versions, defining __find_provides and/or
 __find_requires has no effect if rpm's internal dependency generator has not
 been disabled for the build.  %define _use_internal_dependency_generator to 0
 to disable it in the specfile, or don't define __find_provides/requires.
-"""
-mixed-use-of-spaces-and-tabs="""
-The specfile mixes use of spaces and tabs for indentation, which is a
-cosmetic annoyance.
 """
 libdir-macro-in-noarch-package="""
 The %{_libdir} or %{_lib} macro was found in a noarch package in a section

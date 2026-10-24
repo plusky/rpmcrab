@@ -259,7 +259,6 @@ InvalidRequires = [
 DisallowedDirs = [
     "/home",
     "/mnt",
-    "/opt",
     "/proc",
     "/tmp",
     "/usr/local",

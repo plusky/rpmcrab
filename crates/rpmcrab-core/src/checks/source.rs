@@ -1,9 +1,8 @@
 //! `SourceCheck` — validate the files in a source package.
 //!
-//! Ported from `rpmlint/checks/SourceCheck.py`. Five findings:
+//! Ported from `rpmlint/checks/SourceCheck.py`. Four findings:
 //! `inconsistent-file-extension`, `strange-permission`,
-//! `source-not-compressed` and `prebuilt-binary-in-sources` (warnings),
-//! `multiple-specfiles` (error).
+//! `source-not-compressed` and `prebuilt-binary-in-sources` (warnings).
 //!
 //! `prebuilt-binary-in-sources` is rpmcrab-new (upstream rpmlint#4, still
 //! open): the reference never unpacks source archives.
@@ -21,7 +20,6 @@ pub struct SourceCheck {
     compress_ext: String,
     valid_src_perms: Vec<u128>,
     ext_magic: Vec<(String, String, Regex)>,
-    spec_file: Option<String>,
 }
 
 impl SourceCheck {
@@ -103,7 +101,6 @@ impl SourceCheck {
             compress_ext,
             valid_src_perms,
             ext_magic,
-            spec_file: None,
         }
     }
 
@@ -158,21 +155,6 @@ impl SourceCheck {
             ));
         }
         out
-    }
-
-    /// `multiple-specfiles`: the second `.spec` seen reports the first.
-    /// State resets between packages via [`Check::reset`].
-    fn check_specfile(&mut self, fname: &str) -> Option<(String, String)> {
-        if !fname.ends_with(".spec") {
-            return None;
-        }
-        match &self.spec_file {
-            Some(first) => Some((first.clone(), fname.to_string())),
-            None => {
-                self.spec_file = Some(fname.to_string());
-                None
-            }
-        }
     }
 
     /// `prebuilt-binary-in-sources` (issue #150, upstream rpmlint#4): scan
@@ -725,21 +707,8 @@ impl Check for SourceCheck {
                 let refs: Vec<&str> = details.iter().map(String::as_str).collect();
                 add_info(out, level, pkg, check, &refs);
             }
-            if let Some((first, second)) = self.check_specfile(&f.name) {
-                add_info(
-                    out,
-                    Level::Error,
-                    pkg,
-                    "multiple-specfiles",
-                    &[&first, &second],
-                );
-            }
         }
         self.check_prebuilt_binaries(pkg, out);
-    }
-
-    fn reset(&mut self) {
-        self.spec_file = None;
     }
 }
 
@@ -874,15 +843,44 @@ ValidSrcPerms = ["0o644", "0o755"]
         assert!(found.is_empty(), "{found:?}");
     }
 
+    /// Negative pin for the removed `multiple-specfiles` finding: a
+    /// source package carrying two spec files stays silent, and
+    /// `cargo test` (not just the reference-coverage auditor) must catch
+    /// a re-add.
     #[test]
-    fn second_specfile_reports_the_first() {
-        let mut c = checker();
-        assert!(c.check_specfile("foo.spec").is_none());
-        assert!(c.check_specfile("bar.spec").is_some());
-        let (first, second) = c.check_specfile("bar.spec").unwrap();
-        assert_eq!((first.as_str(), second.as_str()), ("foo.spec", "bar.spec"));
-        c.reset();
-        assert!(c.check_specfile("bar.spec").is_none());
+    fn killed_multiple_specfiles_stays_absent() {
+        use std::path::Path;
+
+        use crate::color::Color;
+        use crate::pkg::pkgfile::PkgFile;
+
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
+        pkg.files = ["foo.spec", "bar.spec"]
+            .iter()
+            .map(|name| PkgFile {
+                name: name.to_string(),
+                mode: 0o100644,
+                magic: "ASCII text".to_string(),
+                ..Default::default()
+            })
+            .collect();
+        let table: toml::Table =
+            toml::from_str("CompressExtension = \"gz\"\nValidSrcPerms = [\"0o644\", \"0o755\"]")
+                .expect("parse test config");
+        let config = Config {
+            configuration: table,
+            ..Default::default()
+        };
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SourceCheck::new(&config);
+        check.check_source(&pkg, &config, &mut out);
+        let names: Vec<&str> = out.results().iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            !names.contains(&"multiple-specfiles"),
+            "must stay silent: {names:?}"
+        );
     }
 
     #[test]

@@ -25,9 +25,7 @@ use indexmap::IndexMap;
 use super::fhs::cross_sysroot_matches;
 use super::filelist::sysconfig_good_matches;
 use super::is_match;
-use super::shared::{
-    devel_regex, is_mingw_package, lib_package_regex, macro_regex, python_str_repr,
-};
+use super::shared::{devel_regex, is_mingw_package, macro_regex, python_str_repr};
 use crate::check::{Check, add_info, make_finding};
 use crate::config::Config;
 use crate::filter::Filter;
@@ -297,12 +295,6 @@ static LIB_REGEX: OnceLock<Regex> = OnceLock::new();
 fn lib_regex() -> &'static Regex {
     LIB_REGEX.get_or_init(|| Regex::new(r"/lib(?:64)?/lib[A-Za-z0-9](?:(?:|[\w\-\.]*[A-Za-z0-9])\.so\.[\w+\.]+|\w*-\d(?:|[\w\-\.]*[A-Za-z0-9])\.so)$")
         .expect("static regex"))
-}
-
-static PERL_TEMP_FILE_REGEX: OnceLock<Regex> = OnceLock::new();
-fn perl_temp_file_regex() -> &'static Regex {
-    PERL_TEMP_FILE_REGEX
-        .get_or_init(|| Regex::new(r".*perl.*/(\.packlist|perllocal\.pod)$").expect("static regex"))
 }
 
 static INTERPRETER_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -643,7 +635,6 @@ pub struct FilesCheck {
     man_base_re: Regex,
     info_re: Regex,
     devel_re: Regex,
-    lib_package_re: Regex,
     kernel_package_re: Regex,
     debuginfo_package_re: Regex,
     debugsource_package_re: Regex,
@@ -665,7 +656,6 @@ pub struct FilesCheck {
     buildconfig_rpath_re: Regex,
     sofile_re: Regex,
     lib_re: Regex,
-    perl_temp_file_re: Regex,
     interpreter_re: Regex,
     script_re: Regex,
     sourced_script_re: Regex,
@@ -696,13 +686,6 @@ pub struct FilesCheck {
     python_default_version: String,
     /// Probed `gzip`, `bzip2`, `xz`, `zstd`, in that order.
     decompressors: [Tool; 4],
-    /// Session state for `no-documentation` (issue #539): the doc-less
-    /// non-lib packages seen since the last export, as
-    /// `(name, arch, source key)`, and the source keys of the packages
-    /// that ship documentation. The finding is decided in `after_checks`,
-    /// once every package of the run has been seen.
-    nodoc_candidates: Vec<(String, String, String)>,
-    documented_sources: HashSet<String>,
     /// Session state for `dangling-relative-symlink` (issue #547): the
     /// file names shipped by every package seen since the last export,
     /// and the relative links no single package resolved. The finding
@@ -729,8 +712,8 @@ pub struct FilesCheck {
     /// base dependency.
     nodep_candidates: Vec<NodepCandidate>,
     pkg_deps: HashMap<String, Vec<PkgDeps>>,
-    /// Decompressed bytes per file path, shared between `is_utf8_file`
-    /// and `manpage_text` (see `decompressed_bytes`); `None` entries
+    /// Decompressed bytes per file path for `manpage_text`
+    /// (see `decompressed_bytes`); `None` entries
     /// record outputs that could not be obtained or exceeded the text
     /// limit, so the fallback read is not repeated either.
     decompressed_cache: std::cell::RefCell<HashMap<String, Option<Arc<[u8]>>>>,
@@ -786,7 +769,6 @@ impl FilesCheck {
             man_base_re: man_base_regex().clone(),
             info_re: info_regex().clone(),
             devel_re: devel_regex().clone(),
-            lib_package_re: lib_package_regex().clone(),
             kernel_package_re: kernel_package_regex().clone(),
             debuginfo_package_re: debuginfo_package_regex().clone(),
             debugsource_package_re: debugsource_package_regex().clone(),
@@ -811,7 +793,6 @@ impl FilesCheck {
             buildconfig_rpath_re: buildconfig_rpath_regex().clone(),
             sofile_re: sofile_regex().clone(),
             lib_re: lib_regex().clone(),
-            perl_temp_file_re: perl_temp_file_regex().clone(),
             interpreter_re: interpreter_regex().clone(),
             script_re: script_regex().clone(),
             sourced_script_re: sourced_script_regex().clone(),
@@ -842,8 +823,6 @@ impl FilesCheck {
             python_default_version: get_str("PythonDefaultVersion"),
             decompressors: ["gzip", "bzip2", "xz", "zstd"]
                 .map(|name| Tool::probe(&source, name, &[]).0),
-            nodoc_candidates: Vec::new(),
-            documented_sources: HashSet::new(),
             session_files: HashSet::new(),
             dangling_candidates: Vec::new(),
             owner_candidates: Vec::new(),
@@ -872,14 +851,11 @@ struct PkgState {
     is_kernel_package: bool,
     debuginfo_package: bool,
     debugsource_package: bool,
-    lib_package: bool,
     perl_dep_error: bool,
     python_dep_error: bool,
     /// `no-dependency-on` candidates this package recorded (issue
     /// #862), drained into the check's session state by `check_binary`.
     nodep_candidates: Vec<NodepCandidate>,
-    log_files: Vec<String>,
-    logrotate_file: bool,
     debuginfo_srcs: bool,
     debuginfo_debugs: bool,
     postin: String,
@@ -889,7 +865,6 @@ struct PkgState {
     /// package ships (issue #569): together with the standard libdirs,
     /// the only directories ldconfig scans.
     ldconfig_dirs: std::collections::HashSet<String>,
-    hardlinks: HashMap<(u32, u32), Vec<String>>,
     bindir_exes: IndexMap<String, Vec<String>>,
     man_basenames: std::collections::HashSet<String>,
 }
@@ -926,7 +901,6 @@ impl Check for FilesCheck {
                 }
             }
         }
-        st.lib_package = is_match(&self.lib_package_re, &pkg.name);
         st.is_kernel_package = is_match(&self.kernel_package_re, &pkg.name);
         st.debuginfo_package = is_match(&self.debuginfo_package_re, &pkg.name);
         st.debugsource_package = is_match(&self.debugsource_package_re, &pkg.name);
@@ -961,7 +935,6 @@ impl Check for FilesCheck {
             .entry(pkg.name.clone())
             .or_default()
             .push(PkgDeps::snapshot(pkg));
-        self.check_nodoc(pkg, &st);
         self.check_meta_package(pkg, &st, out);
         self.check_empty_debuginfo(pkg, &st, out);
         for f in &pkg.files {
@@ -969,7 +942,6 @@ impl Check for FilesCheck {
         }
         self.check_manpage_so_refs(pkg, out);
         self.check_debug_files_in_non_debug_package(pkg, &st, out);
-        self.check_log_files_without_logrotate(pkg, &st, out);
         self.check_debuginfo_without_sources(pkg, &st, out);
         self.check_bindir_exes(pkg, &st, out);
         self.check_sysconfig_fillup_usage(pkg, out);
@@ -977,22 +949,6 @@ impl Check for FilesCheck {
     }
 
     fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
-        // The session-aware `no-documentation` decision (issue #539): a
-        // candidate is suppressed when any package from the same source
-        // in the run ships documentation. Candidates are in lint order,
-        // which the stable output sort preserves for equal keys.
-        for (name, arch, source) in &self.nodoc_candidates {
-            if !self.documented_sources.contains(source) {
-                out.add_info(make_finding(
-                    name,
-                    arch,
-                    Level::Warning,
-                    "no-documentation",
-                    vec![],
-                    None,
-                ));
-            }
-        }
         // The session-aware `dangling-relative-symlink` decision (issue
         // #547): a candidate fires only when no package of the run
         // ships its normalised target. Candidates are in lint order,
@@ -1080,8 +1036,6 @@ impl Check for FilesCheck {
     }
 
     fn reset(&mut self) {
-        self.nodoc_candidates.clear();
-        self.documented_sources.clear();
         self.session_files.clear();
         self.dangling_candidates.clear();
         self.owner_candidates.clear();
@@ -1093,9 +1047,7 @@ impl Check for FilesCheck {
     }
 
     fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
-        if self.nodoc_candidates.is_empty()
-            && self.documented_sources.is_empty()
-            && self.session_files.is_empty()
+        if self.session_files.is_empty()
             && self.dangling_candidates.is_empty()
             && self.owner_candidates.is_empty()
             && self.declared_users.is_empty()
@@ -1106,8 +1058,6 @@ impl Check for FilesCheck {
             return None;
         }
         Some(Box::new(FilesSessionState {
-            nodoc_candidates: std::mem::take(&mut self.nodoc_candidates),
-            documented_sources: std::mem::take(&mut self.documented_sources),
             session_files: std::mem::take(&mut self.session_files),
             dangling_candidates: std::mem::take(&mut self.dangling_candidates),
             owner_candidates: std::mem::take(&mut self.owner_candidates),
@@ -1120,8 +1070,6 @@ impl Check for FilesCheck {
 
     fn import_state(&mut self, state: Box<dyn std::any::Any + Send>) {
         if let Ok(state) = state.downcast::<FilesSessionState>() {
-            self.nodoc_candidates.extend(state.nodoc_candidates);
-            self.documented_sources.extend(state.documented_sources);
             self.session_files.extend(state.session_files);
             self.dangling_candidates.extend(state.dangling_candidates);
             self.owner_candidates.extend(state.owner_candidates);
@@ -1144,12 +1092,10 @@ impl Check for FilesCheck {
 
 /// Cross-package `FilesCheck` state, exported per package and merged
 /// before `after_checks` (`rpmlint#1595`): the session-aware
-/// `no-documentation` (issue #539), `dangling-relative-symlink`
-/// (issue #547), `non-standard-uid` / `non-standard-gid`
-/// (issue #756) and `no-dependency-on` (issue #862) decisions.
+/// `dangling-relative-symlink` (issue #547), `non-standard-uid` /
+/// `non-standard-gid` (issue #756) and `no-dependency-on`
+/// (issue #862) decisions.
 struct FilesSessionState {
-    nodoc_candidates: Vec<(String, String, String)>,
-    documented_sources: HashSet<String>,
     session_files: HashSet<String>,
     dangling_candidates: Vec<DanglingCandidate>,
     owner_candidates: Vec<OwnerCandidate>,
@@ -1598,25 +1544,6 @@ impl FilesCheck {
         }
     }
 
-    /// Record the package for the session-aware `no-documentation`
-    /// decision in `after_checks` (issue #539): a package carrying doc
-    /// files documents its whole source group, and a doc-less non-lib
-    /// package becomes a candidate. A candidate fires only when no
-    /// package from the same source in the run ships documentation —
-    /// the standard layout of docs in the main package and none in its
-    /// data/devel subpackages stays quiet, while a genuinely doc-less
-    /// source still fires on every non-lib package. The reference
-    /// decides per package (`FilesCheck.py` `_check_nodoc`) and has no
-    /// cross-package awareness; the divergence is ledgered.
-    fn check_nodoc(&mut self, pkg: &Pkg, st: &PkgState) {
-        if !pkg.doc_files.is_empty() {
-            self.documented_sources.insert(source_key(pkg));
-        } else if !st.lib_package {
-            self.nodoc_candidates
-                .push((pkg.name.clone(), pkg.arch.clone(), source_key(pkg)));
-        }
-    }
-
     fn check_meta_package(&self, pkg: &Pkg, _st: &PkgState, out: &mut Filter) {
         if !pkg.files.is_empty() && is_match(&self.meta_package_re, &pkg.name) {
             add_info(out, Level::Warning, pkg, "file-in-meta-package", &[]);
@@ -1626,21 +1553,6 @@ impl FilesCheck {
     fn check_empty_debuginfo(&self, pkg: &Pkg, st: &PkgState, out: &mut Filter) {
         if pkg.files.is_empty() && (st.debuginfo_package || st.debugsource_package) {
             add_info(out, Level::Error, pkg, "empty-debuginfo-package", &[]);
-        }
-    }
-
-    fn check_log_files_without_logrotate(&self, pkg: &Pkg, st: &PkgState, out: &mut Filter) {
-        if !st.log_files.is_empty() && !st.logrotate_file {
-            let mut files = st.log_files.clone();
-            files.sort();
-            let joined = files.join(" ");
-            add_info(
-                out,
-                Level::Warning,
-                pkg,
-                "log-files-without-logrotate",
-                &[&joined],
-            );
         }
     }
 
@@ -1785,14 +1697,6 @@ impl FilesCheck {
         st: &mut PkgState,
         out: &mut Filter,
     ) {
-        // Only entries directly under /var/log count as log files here:
-        // a nested path's top-level entry is itself in the file list, and
-        // /var/log-shaped paths elsewhere in the tree are not log files.
-        // log_file_re (^/var/log/[^/]+$) is the same definition the
-        // per-file log checks below use.
-        if is_match(&self.log_file_re, fname) {
-            st.log_files.push(fname.to_string());
-        }
         self.check_file_manpage(pkg, fname, pkgfile, st, out);
         self.check_file_infopage_compressed(pkg, fname, out);
         self.check_file_unexpanded_macro(pkg, fname, out);
@@ -1815,10 +1719,9 @@ impl FilesCheck {
         self.check_file_manifest_in_perl_module(pkg, fname, out);
         self.check_file_info_dir_file(pkg, fname, out);
         self.check_file_makefile_junk(pkg, fname, out);
-        self.check_file_logrotate(pkg, fname, st, out);
+        self.check_file_logrotate(pkg, fname, out);
         self.check_file_crontab(pkg, fname, out);
         self.check_file_compressed_symlink(pkg, fname, pkgfile, out);
-        self.check_file_hardlink(pkg, fname, pkgfile, st, out);
         self.check_file_normal_file(pkg, fname, pkgfile, st, out);
         self.check_file_dir(pkg, fname, pkgfile, out);
         self.check_file_link(pkg, fname, pkgfile, st, out);
@@ -1838,60 +1741,6 @@ fn read_prefix(reader: impl std::io::Read, limit: u64) -> std::io::Result<Vec<u8
     let mut buf = Vec::new();
     reader.take(limit).read_to_end(&mut buf)?;
     Ok(buf)
-}
-
-/// Whether the full contents of the reader are valid UTF-8, validated in
-/// bounded chunks so arbitrarily large inputs are never buffered whole.
-/// The verdict is identical to validating the buffered contents; a read
-/// error propagates so the caller can apply its own fallback, unless the
-/// invalid verdict has already latched, in which case it is kept.
-///
-/// The reader is always drained to end-of-stream, even after an invalid
-/// sequence is seen: the reader may be a decompressor child's stdout
-/// pipe, and abandoning it mid-stream would SIGPIPE the child, whose
-/// failed exit status the caller would then read as "valid".
-fn stream_is_utf8(reader: &mut impl std::io::Read) -> std::io::Result<bool> {
-    let mut pending: Vec<u8> = Vec::new();
-    let mut invalid = false;
-    let mut buf = [0u8; 8192];
-    loop {
-        // A read error after the verdict has latched invalid must not
-        // discard it: the caller collapses `Err` to "valid", and
-        // abandoning the pipe mid-stream would SIGPIPE a decompressor
-        // child and flip the verdict the same way. An error before any
-        // invalid sequence still propagates.
-        let n = match reader.read(&mut buf) {
-            Ok(n) => n,
-            // A signal interrupting the read is not an error: retry it
-            // rather than discarding the stream (or the latched verdict).
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) if invalid => break,
-            Err(e) => return Err(e),
-        };
-        if n == 0 {
-            break;
-        }
-        if invalid {
-            // Verdict already latched; keep draining so a piped writer
-            // is never cut off mid-stream.
-            continue;
-        }
-        pending.extend_from_slice(&buf[..n]);
-        match std::str::from_utf8(&pending) {
-            Ok(_) => pending.clear(),
-            Err(e) => {
-                if e.error_len().is_some() {
-                    invalid = true;
-                    pending.clear();
-                } else {
-                    // Incomplete multi-byte sequence at the tail: keep
-                    // the unvalidated bytes for the next chunk.
-                    pending.drain(..e.valid_up_to());
-                }
-            }
-        }
-    }
-    Ok(!invalid && pending.is_empty())
 }
 
 /// Kept in sync with the filesystem package, mirroring the reference's
@@ -2402,15 +2251,10 @@ impl FilesCheck {
         self.decompressors.iter().find(|t| t.name() == name)
     }
 
-    /// The decompressed bytes of `path` through `fname`'s decompressor,
-    /// shared between `is_utf8_file` and `manpage_text`: a `%doc` man
-    /// page would otherwise run the same `<tool> -dc` pipeline twice per
-    /// package. A complete output up to `MANPAGE_TEXT_LIMIT` is cached
+    /// The decompressed bytes of `path` through `fname`'s decompressor.
+    /// A complete output up to `MANPAGE_TEXT_LIMIT` is cached
     /// per path on this instance when the caller passes `cache_result`
-    /// (the man-page consumer). The UTF-8 consumer reads through
-    /// without caching: it validates files the man-page check never
-    /// looks at, and pinning every compressed file's output until
-    /// `reset()` costs up to the limit per file for no second use. `None` — no decompressor for the
+    /// (the man-page consumer). `None` — no decompressor for the
     /// suffix, an absent or failing decompressor, or an output past the
     /// limit — is cached as well; callers then apply their own read for
     /// those cases (streaming validation, a capped prefix) exactly as
@@ -2448,56 +2292,6 @@ impl FilesCheck {
         }
         result
     }
-
-    /// rpmlint's `is_utf8`: strict UTF-8, transparently decompressing the
-    /// compression formats the reference knows. A failed decompression reads
-    /// as UTF-8, matching the reference's `except OSError: return True`.
-    ///
-    /// An absent decompressor also reads as UTF-8. The reference decompresses
-    /// IN-PROCESS (pkg.py imports bz2, gzip, lzma, zstandard) so it never needs
-    /// a decompressor binary and always gets to the real bytes; reading the
-    /// still-compressed file instead would report `file-not-utf8` for every
-    /// `.gz` man page on a host without gzip, which the reference never does.
-    ///
-    /// The content is validated in chunks rather than buffered whole (the
-    /// reference buffers it); the verdict is the same either way.
-    fn is_utf8_file(&self, fname: &str, path: &str) -> bool {
-        match self.decompressor_for(fname) {
-            Some(tool) => {
-                // A previous decompression of this path (by either
-                // consumer) is validated from memory instead of running
-                // the pipeline again.
-                if let Some(bytes) = self.decompressed_bytes(fname, path, false) {
-                    let mut slice: &[u8] = &bytes;
-                    return stream_is_utf8(&mut slice).unwrap_or(true);
-                }
-                let Some(mut cmd) = tool.command() else {
-                    return true;
-                };
-                cmd.arg("-dc")
-                    .arg(path)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::null());
-                let mut child = match cmd.spawn() {
-                    Ok(c) => c,
-                    Err(_) => return true,
-                };
-                let valid = child
-                    .stdout
-                    .take()
-                    .and_then(|mut s| stream_is_utf8(&mut s).ok());
-                match child.wait() {
-                    Ok(status) => !status.success() || valid.unwrap_or(true),
-                    Err(_) => true,
-                }
-            }
-            None => match std::fs::File::open(path) {
-                Ok(mut f) => stream_is_utf8(&mut f).unwrap_or(true),
-                Err(_) => true,
-            },
-        }
-    }
 }
 
 impl FilesCheck {
@@ -2505,8 +2299,7 @@ impl FilesCheck {
     /// when its name carries a compression suffix. `None` when the
     /// content cannot be obtained (unreadable file, missing or failing
     /// decompressor): the page's references cannot be judged, so the
-    /// page is skipped rather than guessed at — the absent-tool stance
-    /// `is_utf8_file` takes. A name carrying a compression suffix the
+    /// page is skipped rather than guessed at. A name carrying a compression suffix the
     /// codebase recognises but has no decompressor for (`.zip`) is
     /// skipped the same way: its bytes are compressed content, not
     /// page text to scan.
@@ -3003,10 +2796,9 @@ impl FilesCheck {
             .collect()
     }
 
-    fn check_file_logrotate(&self, pkg: &Pkg, fname: &str, st: &mut PkgState, out: &mut Filter) {
+    fn check_file_logrotate(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
         // logrotate_regex: /etc/logrotate.d/
         if fname.starts_with("/etc/logrotate.d/") && fname != "/etc/logrotate.d/" {
-            st.logrotate_file = true;
             let basename = fname.rsplit('/').next().unwrap_or("");
             if basename != pkg.name {
                 add_info(
@@ -3077,41 +2869,11 @@ impl FilesCheck {
         }
     }
 
-    fn check_file_hardlink(
-        &self,
-        pkg: &Pkg,
-        fname: &str,
-        pkgfile: &PkgFile,
-        st: &mut PkgState,
-        out: &mut Filter,
-    ) {
-        let key = (pkgfile.rdev, pkgfile.inode);
-        if let Some(hardlinks) = st.hardlinks.get(&key) {
-            for hardlink in hardlinks {
-                let hp = Path::new(hardlink).parent();
-                let fp = Path::new(fname).parent();
-                if hp != fp {
-                    add_info(
-                        out,
-                        Level::Warning,
-                        pkg,
-                        "cross-directory-hard-link",
-                        &[fname, hardlink],
-                    );
-                }
-            }
-        }
-        st.hardlinks.entry(key).or_default().push(fname.to_string());
-    }
-
     fn check_file_crond(&self, pkg: &Pkg, fname: &str, pkgfile: &PkgFile, out: &mut Filter) {
         if !fname.starts_with("/etc/cron.d/") {
             return;
         }
         let mode = pkgfile.mode;
-        if pkgfile::is_symlink(mode) {
-            add_info(out, Level::Error, pkg, "symlink-crontab-file", &[fname]);
-        }
         if mode & 0o111 != 0 {
             add_info(out, Level::Error, pkg, "executable-crontab-file", &[fname]);
         }
@@ -3488,16 +3250,6 @@ impl FilesCheck {
                 &[fname, &format!("{:o}", perm)],
             );
         }
-        // non-standard-dir-perm: dirs should be 0755
-        if perm != 0o755 && perm != 0o555 {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "non-standard-dir-perm",
-                &[fname, &format!("{:o}", perm)],
-            );
-        }
         if !FILESYS_PACKAGES.contains(&pkg.name.as_str()) && STANDARD_DIRS.contains(&fname) {
             add_info(
                 out,
@@ -3521,17 +3273,14 @@ impl FilesCheck {
             return;
         }
         let mut fd = FileData::default();
-        self.check_normal_setuid_bit(pkg, fname, pkgfile, out);
         self.check_normal_logfile(pkg, fname, pkgfile, &mut fd, out);
         self.check_normal_getdata(pkg, fname, pkgfile, &mut fd, out);
         self.check_normal_doc(pkg, fname, &mut fd, out);
         self.check_normal_non_devel(pkg, fname, st, out);
         self.check_normal_lib(pkg, fname, pkgfile, st, out);
-        self.check_normal_perl_temp(pkg, fname, out);
         self.check_normal_rpaths_in_buildconfig(pkg, fname, &fd, out);
         self.check_normal_bin(pkg, fname, pkgfile, st, out);
         self.check_normal_devel(pkg, fname, st, &fd, out);
-        self.check_normal_non_readable(pkg, fname, pkgfile, out);
         self.check_normal_world_w(pkg, fname, pkgfile, out);
         self.check_normal_perl_dep(pkg, fname, st);
         self.check_normal_python_dep(pkg, fname, st);
@@ -3543,45 +3292,8 @@ impl FilesCheck {
         self.check_normal_pem(pkg, fname, out);
         self.check_normal_tcl(pkg, fname, out);
         self.check_normal_text(pkg, fname, pkgfile, &mut fd, out);
-        self.check_normal_not_utf8(pkg, fname, pkgfile, &fd, out);
         // library without ldconfig (with #1602 fix: check interpreter too)
         self.check_ldconfig(pkg, fname, pkgfile, st, out);
-    }
-
-    fn check_normal_setuid_bit(&self, pkg: &Pkg, fname: &str, pkgfile: &PkgFile, out: &mut Filter) {
-        let mode = pkgfile.mode;
-        let perm = mode & 0o7777;
-        if mode & 0o6000 == 0 {
-            return;
-        }
-        // setuid/setgid
-        if mode & 0o4000 != 0 {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "setuid-binary",
-                &[fname, &pkgfile.user, &format!("{:o}", perm)],
-            );
-        }
-        if mode & 0o2000 != 0 {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "setgid-binary",
-                &[fname, &pkgfile.group, &format!("{:o}", perm)],
-            );
-        }
-        if mode & 0o777 != 0o755 {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "non-standard-executable-perm",
-                &[fname, &format!("{:o}", perm)],
-            );
-        }
     }
 
     fn check_normal_logfile(
@@ -3733,12 +3445,6 @@ impl FilesCheck {
         }
     }
 
-    fn check_normal_perl_temp(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
-        if is_match(&self.perl_temp_file_re, fname) {
-            add_info(out, Level::Warning, pkg, "perl-temp-file", &[fname]);
-        }
-    }
-
     fn check_normal_rpaths_in_buildconfig(
         &self,
         pkg: &Pkg,
@@ -3786,26 +3492,6 @@ impl FilesCheck {
                         .push(fname.to_string());
                 }
             }
-        }
-    }
-
-    fn check_normal_non_readable(
-        &self,
-        pkg: &Pkg,
-        fname: &str,
-        pkgfile: &PkgFile,
-        out: &mut Filter,
-    ) {
-        let perm = pkgfile.mode & 0o7777;
-        // non-readable (#1291: skip ghost files)
-        if perm & 0o444 == 0 && !pkgfile.is_ghost() {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "non-readable",
-                &[fname, &format!("{:o}", perm)],
-            );
         }
     }
 
@@ -4124,17 +3810,7 @@ impl FilesCheck {
         out: &mut Filter,
     ) {
         let mode = pkgfile.mode;
-        let perm = mode & 0o7777;
         let mode_is_exec = mode & 0o111 != 0;
-        if mode & 0o100 != 0 && perm != 0o755 {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "non-standard-executable-perm",
-                &[fname, &format!("{:o}", perm)],
-            );
-        }
         if mode_is_exec {
             if pkg.config_files.iter().any(|c| c == fname) {
                 add_info(
@@ -4440,12 +4116,6 @@ impl FilesCheck {
                     &[fname],
                 );
             }
-            // We check only doc text files for UTF-8-ness;
-            // checking everything may be slow and can generate
-            // lots of unwanted noise.
-            if !self.is_utf8_file(fname, &pkgfile.path) {
-                add_info(out, Level::Warning, pkg, "file-not-utf8", &[fname]);
-            }
         }
         // Upstream rpmlint#40: the reference scans only its 2048-byte peek
         // chunk for the FSF address, missing it in longer files. The port
@@ -4453,24 +4123,6 @@ impl FilesCheck {
         // bounded windows so a large file never sits in memory twice.
         if self.fsf_address_matches(pkg, pkgfile, out) {
             add_info(out, Level::Warning, pkg, "incorrect-fsf-address", &[fname]);
-        }
-    }
-
-    fn check_normal_not_utf8(
-        &self,
-        pkg: &Pkg,
-        fname: &str,
-        pkgfile: &PkgFile,
-        fd: &FileData,
-        out: &mut Filter,
-    ) {
-        let is_doc = pkg.doc_files.iter().any(|d| d == fname);
-        if !fd.istext && is_doc && !fd.chunk.is_empty() && is_match(&self.compr_re, fname) {
-            // compressed docs, eg. info and man files etc
-            let base = self.compr_re.replace(fname, "").to_string();
-            if !is_match(&self.skipdocs_re, &base) && !self.is_utf8_file(fname, &pkgfile.path) {
-                add_info(out, Level::Warning, pkg, "file-not-utf8", &[fname]);
-            }
         }
     }
 
@@ -4878,9 +4530,9 @@ mod tests {
     #[test]
     fn dir_or_file_in_other_disallowed_dir_quiet_for_ghost() {
         let names = finding_names(&run_files_check_with_files(vec![ghost_file(
-            "/opt/fcprobe",
+            "/home/fcprobe",
         )]));
-        assert_lacks(&names, "dir-or-file-in-opt");
+        assert_lacks(&names, "dir-or-file-in-home");
     }
 
     #[test]
@@ -4979,10 +4631,11 @@ mod tests {
         }
     }
 
+    /// Negative pin for the removed `log-files-without-logrotate`
+    /// finding: top-level /var/log entries without a logrotate file
+    /// stay silent.
     #[test]
-    fn log_files_without_logrotate_fires_on_top_level_entries() {
-        // Every entry directly under /var/log counts: directories, plain
-        // files and %ghost files alike.
+    fn killed_log_files_without_logrotate_stays_absent() {
         for files in [
             vec![plain_file("/var/log/fcprobe")],
             vec![plain_file("/var/log/fcprobe.log")],
@@ -4994,59 +4647,8 @@ mod tests {
             }],
         ] {
             let names = finding_names(&run_files_check_with_files(files));
-            assert_has(&names, "log-files-without-logrotate");
+            assert_lacks(&names, "log-files-without-logrotate");
         }
-    }
-
-    #[test]
-    fn log_files_without_logrotate_ignores_nested_paths() {
-        // A log file nested under a /var/log subdirectory does not count
-        // on its own: when the package ships the subdirectory, its
-        // top-level entry is the log file; when it does not, the package
-        // has no log files for this check.
-        let names = finding_names(&run_files_check_with_files(vec![plain_file(
-            "/var/log/fcprobe/fcprobe.log",
-        )]));
-        assert_lacks(&names, "log-files-without-logrotate");
-    }
-
-    #[test]
-    fn log_files_without_logrotate_ignores_var_log_shaped_paths_elsewhere() {
-        // Skeleton/template payload that merely contains a var/log-shaped
-        // tail (rear ships /usr/share/rear/skel/* trees) is not a log
-        // file: the definition is anchored at the filesystem root.
-        let names = finding_names(&run_files_check_with_files(vec![
-            plain_file("/usr/share/rear/skel/EXAMPLE/var/log/galaxy"),
-            plain_file("/usr/share/rear/skel/EXAMPLE/var/log/galaxy/Log_Files"),
-        ]));
-        assert_lacks(&names, "log-files-without-logrotate");
-    }
-
-    #[test]
-    fn log_files_without_logrotate_detail_lists_top_level_only() {
-        let results = run_files_check_with_files(vec![
-            plain_file("/var/log/fcprobe"),
-            plain_file("/var/log/fcprobe/fcprobe.log"),
-            plain_file("/var/log/other.log"),
-        ]);
-        let (_, line) = results
-            .iter()
-            .find(|(n, _)| n == "log-files-without-logrotate")
-            .expect("finding fires");
-        let detail = line
-            .split_once("log-files-without-logrotate ")
-            .map(|(_, d)| d)
-            .expect("detail present");
-        assert_eq!(detail, "/var/log/fcprobe /var/log/other.log");
-    }
-
-    #[test]
-    fn log_files_without_logrotate_suppressed_by_logrotate_file() {
-        let names = finding_names(&run_files_check_with_files(vec![
-            plain_file("/var/log/fcprobe.log"),
-            plain_file("/etc/logrotate.d/fcprobe"),
-        ]));
-        assert_lacks(&names, "log-files-without-logrotate");
     }
 
     #[test]
@@ -5191,10 +4793,9 @@ mod tests {
         // permission findings
         assert_has(&names, "non-executable-in-bin");
         assert_has(&names, "spurious-executable-perm");
-        assert_has(&names, "non-standard-executable-perm");
         // documentation and encoding
         assert_has(&names, "wrong-file-end-of-line-encoding");
-        assert_has(&names, "file-not-utf8");
+        assert_lacks(&names, "file-not-utf8");
         assert_has(&names, "incorrect-fsf-address");
         // symlinks
         assert_has(&names, "symlink-has-too-many-up-segments");
@@ -5210,15 +4811,18 @@ mod tests {
         assert_has(&names, "pem-private-key");
         // misc
         assert_has(&names, "tcl-extension-file");
-        assert_has(&names, "perl-temp-file");
         assert_has(&names, "python-bytecode-without-source");
         assert_has(&names, "rpath-in-buildconfig");
         assert_has(&names, "gzipped-svg-icon");
         assert_has(&names, "noarch-python-in-64bit-path");
         assert_has(&names, "standard-dir-owned-by-package");
-        assert_has(&names, "dir-or-file-in-opt");
         // no read errors: extraction works
         assert_lacks(&names, "read-error");
+        // Removed findings (issue #883 leftover rulings): the fixture
+        // exercises all three shapes and stays silent.
+        assert_lacks(&names, "non-standard-executable-perm");
+        assert_lacks(&names, "perl-temp-file");
+        assert_lacks(&names, "dir-or-file-in-opt");
     }
 
     /// Build a package of executable files with real on-disk content (so
@@ -5289,11 +4893,12 @@ mod tests {
         assert_has(&names, "missing-dependency-to-crontabs");
     }
 
+    /// Negative pin for the removed `no-documentation` finding: a
+    /// doc-less non-lib package stays silent through the session
+    /// lifecycle (export, merge, after_checks).
     #[test]
-    fn no_documentation_fires_for_non_lib_without_docs() {
-        // Complement of lib_package_without_docs_skips_no_documentation: a
-        // non-lib package with no %doc files must emit no-documentation.
-        // The decision lands in after_checks (issue #539), so drive the
+    fn killed_no_documentation_stays_absent() {
+        // Drive the
         // session lifecycle the lint loop drives: export the package's
         // state, merge it back, then run after_checks.
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -5311,7 +4916,7 @@ mod tests {
         }
         check.after_checks(&config, &mut out);
         let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
-        assert_has(&names, "no-documentation");
+        assert_lacks(&names, "no-documentation");
     }
 
     #[test]
@@ -6573,7 +6178,7 @@ mod tests {
         let mut check = FilesCheck::new(&config);
         check.check(&pkg, &config, &mut out);
         let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
-        assert_has(&names, "file-not-utf8");
+        assert_lacks(&names, "file-not-utf8");
     }
 
     #[test]
@@ -7518,77 +7123,6 @@ mod tests {
     }
 
     #[test]
-    fn lib_package_without_docs_skips_no_documentation() {
-        // The shared lib_package_regex must match "libnodoc-test": with the
-        // broken double-escaped form it never matched, so no-documentation
-        // fired on every lib package (a false positive the reference does
-        // not emit). Restoring the broken regex makes this fail.
-        let config = test_config();
-        let (names, _dir) =
-            run_files_check(&fixture_path("libnodoc-test-1.0-1.noarch.rpm"), &config);
-        assert_lacks(&names, "no-documentation");
-    }
-
-    #[test]
-    fn no_documentation_fires_for_lone_docless_package() {
-        // Issue #539: a doc-less package with no documented sibling in
-        // the run still fires — the session awareness must not become a
-        // blanket suppression.
-        let config = test_config();
-        let (results, _dirs) =
-            run_files_check_session(&[&fixture_path("nodoc-lone-1.0-1.noarch.rpm")], &config);
-        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
-        assert_has(&names, "no-documentation");
-    }
-
-    #[test]
-    fn no_documentation_suppressed_when_sibling_ships_docs() {
-        // Issue #539: nodoc-session-main and nodoc-session-data are built
-        // from one spec; the main package ships %doc files, so the data
-        // subpackage stays quiet — in either lint order. Dropping the
-        // sibling awareness (deciding per package, as the reference
-        // does) makes the data package fire and this fail.
-        let config = test_config();
-        let main = fixture_path("nodoc-session-main-1.0-1.noarch.rpm");
-        let data = fixture_path("nodoc-session-data-1.0-1.noarch.rpm");
-        for rpms in [
-            [data.as_str(), main.as_str()],
-            [main.as_str(), data.as_str()],
-        ] {
-            let (results, _dirs) = run_files_check_session(&rpms, &config);
-            let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
-            assert_lacks(&names, "no-documentation");
-        }
-    }
-
-    #[test]
-    fn no_documentation_mixed_sources_decide_per_source() {
-        // Issue #539: two sources in one run — the sibling-covered data
-        // package stays quiet while the lone doc-less package from the
-        // other source fires, exactly once and on the right package.
-        let config = test_config();
-        let (results, _dirs) = run_files_check_session(
-            &[
-                &fixture_path("nodoc-session-data-1.0-1.noarch.rpm"),
-                &fixture_path("nodoc-session-main-1.0-1.noarch.rpm"),
-                &fixture_path("nodoc-lone-1.0-1.noarch.rpm"),
-            ],
-            &config,
-        );
-        let lines: Vec<&str> = results
-            .iter()
-            .filter(|(n, _)| n == "no-documentation")
-            .map(|(_, line)| line.as_str())
-            .collect();
-        assert_eq!(lines.len(), 1, "got: {results:?}");
-        assert!(
-            lines[0].starts_with("nodoc-lone.noarch"),
-            "unexpected line: {}",
-            lines[0]
-        );
-    }
-
-    #[test]
     fn filename_with_unexpanded_macro_emits_finding() {
         // The shared macro_regex must match "%{unexpanded}" in a filename:
         // with the broken double-escaped form it matched a literal
@@ -8512,10 +8046,11 @@ mod tests {
         );
     }
 
+    /// Negative pin for the removed `cross-directory-hard-link`
+    /// finding: two files sharing (rdev, inode) in different
+    /// directories stay silent.
     #[test]
-    fn cross_directory_hard_link_fires() {
-        // Two files sharing (rdev, inode) in different directories.
-        // FilesCheck.py:802.
+    fn killed_cross_directory_hard_link_stays_absent() {
         let (pkg, _dir) = pkg_with_files(vec![
             PkgFile {
                 rdev: 7,
@@ -8529,15 +8064,39 @@ mod tests {
             },
         ]);
         let results = run_check_binary(&pkg);
-        let line = results
-            .iter()
-            .find(|(n, _)| n == "cross-directory-hard-link")
-            .map(|(_, l)| l.clone())
-            .expect("cross-directory-hard-link should fire");
         assert!(
-            line.contains(": W: cross-directory-hard-link"),
-            "name and level must match, got: {line}"
+            !results
+                .iter()
+                .any(|(n, _)| n == "cross-directory-hard-link"),
+            "must stay silent: {results:?}"
         );
+    }
+
+    /// Negative pins for the removed permission findings: setuid,
+    /// setgid, non-standard executable and directory permissions and
+    /// non-readable files all stay silent.
+    #[test]
+    fn killed_permission_findings_stay_absent() {
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/suidtool", 0o104755, 41),
+            mkfile("/usr/bin/sgidtool", 0o102755, 42),
+            mkfile("/usr/bin/exec700", 0o100700, 43),
+            mkfile("/usr/share/secret", 0o100000, 44),
+            mkfile("/usr/share/odd-dir", 0o40770, 45),
+        ]);
+        let results = run_check_binary(&pkg);
+        for name in [
+            "setuid-binary",
+            "setgid-binary",
+            "non-standard-executable-perm",
+            "non-standard-dir-perm",
+            "non-readable",
+        ] {
+            assert!(
+                !results.iter().any(|(n, _)| n == name),
+                "{name} must stay silent: {results:?}"
+            );
+        }
     }
 
     fn mkfile(name: &str, mode: u32, inode: u32) -> PkgFile {
@@ -9248,79 +8807,6 @@ mod tests {
         );
     }
 
-    /// An absent decompressor must not turn a compressed file into
-    /// `file-not-utf8`. The reference decompresses in-process (pkg.py imports
-    /// bz2/gzip/lzma/zstandard), so it never needs a binary and always reaches
-    /// the real bytes. Reading the still-compressed file instead flagged every
-    /// `.gz` man page on a host without gzip -- a regression against main, which
-    /// returned true.
-    #[test]
-    fn absent_decompressor_reads_as_utf8() {
-        let empty = tempfile::TempDir::new().expect("tmpdir");
-        let config = Config::default();
-        let check = FilesCheck::with_tool_dir(&config, Some(empty.path()));
-        let doc = empty.path().join("page.gz");
-        std::fs::write(&doc, [0x1f, 0x8b, 0x08, 0x00, 0xff, 0xfe, 0xfd]).expect("write");
-        assert!(
-            check.is_utf8_file(&doc.to_string_lossy(), &doc.to_string_lossy()),
-            "a compressed file with no decompressor must read as UTF-8"
-        );
-    }
-
-    /// The decompressor branch end to end: a present `gzip` tool is
-    /// spawned and its stdout is what gets validated, so bytes the tool
-    /// emits decide the verdict -- here a stand-in tool that emits
-    /// invalid UTF-8 for one package file and valid UTF-8 for another.
-    #[test]
-    #[cfg(unix)]
-    fn decompressor_branch_validates_the_child_output() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::TempDir::new().expect("tmpdir");
-        // The fake gzip ignores `-dc <path>` and prints the payload named
-        // by the input file's stem, so each input gets its own bytes.
-        let bad = dir.path().join("bad.out");
-        std::fs::write(&bad, [0xff, 0xfe, 0x61]).expect("write bad payload");
-        let good = dir.path().join("good.out");
-        std::fs::write(&good, "plain text\n").expect("write good payload");
-        let script = dir.path().join("gzip");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\nfor last; do :; done\ncat \"${last%.*}.out\"\n",
-        )
-        .expect("write fake gzip");
-        let mut perms = std::fs::metadata(&script)
-            .expect("stat fake gzip")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&script, perms).expect("chmod fake gzip");
-        // A just-written script can still be "text file busy" (ETXTBSY) on
-        // first spawn under parallel load; settle it so the probe below
-        // sees an exec-ready tool.
-        for _ in 0..100 {
-            match std::process::Command::new(&script)
-                .arg("--version")
-                .output()
-            {
-                Ok(_) => break,
-                Err(e) if e.raw_os_error() == Some(26) => {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-                Err(e) => panic!("fake gzip failed: {e}"),
-            }
-        }
-        let config = Config::default();
-        let check = FilesCheck::with_tool_dir(&config, Some(dir.path()));
-        for (stem, expected) in [("bad", false), ("good", true)] {
-            let doc = dir.path().join(format!("{stem}.gz"));
-            std::fs::write(&doc, b"not really gzip").expect("write doc");
-            assert_eq!(
-                check.is_utf8_file(&doc.to_string_lossy(), &doc.to_string_lossy()),
-                expected,
-                "decompressor output for {stem}.gz must decide the verdict"
-            );
-        }
-    }
-
     #[test]
     fn non_conf_in_etc_exempts_managed_dropins() {
         // Upstream rpmlint#1137: entries under /etc/alternatives/ are managed
@@ -9414,109 +8900,6 @@ mod tests {
         };
         assert_eq!(read_prefix(&mut small, 2048).expect("read"), b"short");
         assert_eq!(small.consumed, 5);
-    }
-
-    struct DripReader {
-        data: Vec<u8>,
-        pos: usize,
-    }
-
-    impl std::io::Read for DripReader {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            if self.pos >= self.data.len() || buf.is_empty() {
-                return Ok(0);
-            }
-            buf[0] = self.data[self.pos];
-            self.pos += 1;
-            Ok(1)
-        }
-    }
-
-    #[test]
-    fn stream_is_utf8_matches_buffered_verdicts() {
-        // Byte-at-a-time delivery splits every multi-byte sequence; the
-        // streamed verdict must still match whole-buffer validation.
-        let euro = [0xE2u8, 0x82, 0xAC];
-        let mut mixed = b"hello ".to_vec();
-        mixed.extend_from_slice(&euro);
-        mixed.extend_from_slice(&[0xF0, 0x9F, 0x98, 0x80]);
-        let cases: Vec<&[u8]> = vec![
-            b"",
-            b"plain ascii",
-            &mixed,
-            &[0x61, 0xFF, 0x62],
-            &[0xE2, 0x82],
-            &[0xC3, 0x28],
-        ];
-        for case in cases {
-            let mut drip = DripReader {
-                data: case.to_vec(),
-                pos: 0,
-            };
-            assert_eq!(
-                stream_is_utf8(&mut drip).expect("read"),
-                is_utf8(case),
-                "verdict mismatch"
-            );
-        }
-        // A valid input long enough to split a sequence across the
-        // internal 8192-byte chunk boundary.
-        let mut long: Vec<u8> = (0..5000).flat_map(|_| euro).collect();
-        long.extend_from_slice(b"tail");
-        let mut cur = std::io::Cursor::new(long);
-        assert!(stream_is_utf8(&mut cur).expect("read"));
-    }
-
-    #[test]
-    fn stream_is_utf8_drains_the_reader_after_invalid_input() {
-        // The first byte is invalid, but the reader must still be
-        // consumed to the end: abandoning a decompressor child's pipe
-        // mid-stream SIGPIPEs the child and flips the caller's verdict.
-        let mut data = vec![0xFFu8];
-        data.extend(vec![0x61u8; 100_000]);
-        let total = data.len();
-        let mut reader = CountingReader {
-            inner: std::io::Cursor::new(data),
-            consumed: 0,
-        };
-        assert!(!stream_is_utf8(&mut reader).expect("read"));
-        assert_eq!(reader.consumed, total, "reader must be fully drained");
-    }
-
-    struct FailAfterReader {
-        data: Vec<u8>,
-        pos: usize,
-    }
-
-    impl std::io::Read for FailAfterReader {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            if self.pos >= self.data.len() {
-                return Err(std::io::Error::other("read failed after data"));
-            }
-            let n = (self.data.len() - self.pos).min(buf.len());
-            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
-            self.pos += n;
-            Ok(n)
-        }
-    }
-
-    #[test]
-    fn stream_is_utf8_keeps_invalid_verdict_when_a_later_read_fails() {
-        // Regression: the invalid verdict latches, but a read error
-        // afterwards used to propagate as `Err`, which the caller
-        // collapses to "valid" -- flipping an already-proven-invalid
-        // stream to UTF-8.
-        let mut reader = FailAfterReader {
-            data: vec![0xFF, 0x61, 0x62],
-            pos: 0,
-        };
-        assert!(!stream_is_utf8(&mut reader).expect("latched verdict"));
-        // An error before any invalid byte still propagates.
-        let mut reader = FailAfterReader {
-            data: b"plain ascii".to_vec(),
-            pos: 0,
-        };
-        assert!(stream_is_utf8(&mut reader).is_err());
     }
 
     #[test]
@@ -10724,48 +10107,6 @@ mod tests {
             so_ref_hits(&results).is_empty(),
             "a suffixed argument matches the target under any suffix: {results:?}"
         );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn utf8_reads_do_not_populate_the_decompression_cache() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::TempDir::new().expect("tmpdir");
-        let payload = dir.path().join("page.out");
-        std::fs::write(&payload, "plain text\n").expect("write payload");
-        let script = dir.path().join("gzip");
-        std::fs::write(&script, format!("#!/bin/sh\ncat {}\n", payload.display()))
-            .expect("write fake gzip");
-        let mut perms = std::fs::metadata(&script)
-            .expect("stat fake gzip")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&script, perms).expect("chmod fake gzip");
-        let page = dir.path().join("page.3.gz");
-        std::fs::write(&page, b"not really gzip").expect("write page");
-        let page = page.to_string_lossy().into_owned();
-        let config = test_config();
-        let check = FilesCheck::with_tool_dir(&config, Some(dir.path()));
-        // The UTF-8 consumer validates through the decompressor but
-        // keeps nothing: its files are not the man-page check's.
-        assert!(check.is_utf8_file("page.3.gz", &page));
-        assert!(
-            check.decompressed_cache.borrow().is_empty(),
-            "an is_utf8-only read must not populate the cache"
-        );
-        // The man-page consumer does populate it: its pages are the
-        // UTF-8 consumer's likeliest re-reads.
-        let pkgfile = PkgFile {
-            name: "/usr/share/man/man3/page.3.gz".to_string(),
-            path: page,
-            mode: 0o100644,
-            ..Default::default()
-        };
-        assert_eq!(
-            check.manpage_text(&pkgfile).as_deref(),
-            Some("plain text\n")
-        );
-        assert_eq!(check.decompressed_cache.borrow().len(), 1);
     }
 
     #[test]

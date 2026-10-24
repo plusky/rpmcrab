@@ -42,10 +42,6 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ("menu.rs", "Regex::new(regexp).ok()", "config"),
     ("menu.rs", "Regex::new(icon_ext)", "config"),
     ("tags.rs", "Regex::new(p).ok()", "config"),
-    ("tags.rs", "Regex::new(&packager).ok()", "config"),
-    ("tags.rs", "Regex::new(&release_ext).ok()", "config"),
-    ("tags.rs", "Regex::new(&valid_buildhost).ok()", "config"),
-    ("spec.rs", "Regex::new(exceptions)", "config"),
     // Package-data-driven: patterns incorporate package names/paths.
     ("alternatives.rs", "--remove\\s+", "package"),
     ("alternatives.rs", ".*.conf$", "package"),
@@ -82,7 +78,6 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ("tags.rs", "changelog_version_re", "ctor-once"),
     // Fallback "never matches" pattern for config-driven regexes.
     ("files.rs", "Regex::new(\"$^\")", "fallback"),
-    ("spec.rs", "Regex::new(\"$^\")", "fallback"),
     // Constant patterns in struct fields (compile once per instance).
     ("tags.rs", "leading_space_re", "ctor-once"),
     ("tags.rs", "license_exception_re", "ctor-once"),

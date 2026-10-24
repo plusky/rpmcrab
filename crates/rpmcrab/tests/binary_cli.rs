@@ -2636,15 +2636,14 @@ fn explain_staged_sysconfig_fillup_usage() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `FilesCheck.toml` resolves `no-documentation` instead of "Unknown message".
+/// `--explain`: staged `FilesCheck.toml` resolves `non-ghost-file` instead of "Unknown message".
 #[test]
 fn explain_staged_files_check() {
-    let out = rpmcrab(&["-e", "no-documentation"]);
+    let out = rpmcrab(&["-e", "non-ghost-file"]);
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
-        stdout,
-        "no-documentation:\nThe package contains no documentation (README, doc, etc). You have to include\ndocumentation files.\n\n\n",
+        stdout, "non-ghost-file:\nFile should be tagged %ghost.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());
@@ -2888,15 +2887,14 @@ fn explain_staged_systemd_tmpfiles_check() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `TagsCheck.toml` resolves `invalid-version` instead of "Unknown message".
+/// `--explain`: staged `TagsCheck.toml` resolves `summary-ended-with-dot` instead of "Unknown message".
 #[test]
 fn explain_staged_tags_check() {
-    let out = rpmcrab(&["-e", "invalid-version"]);
+    let out = rpmcrab(&["-e", "summary-ended-with-dot"]);
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
-        stdout,
-        "invalid-version:\nThe version string must not contain the pre, alpha, beta or rc suffixes\nbecause when the final version will be out, you will have to use an Epoch tag\nto make the package upgradable. Instead put it in the release tag, prefixed\nwith something you have control over.\n\n\n",
+        stdout, "summary-ended-with-dot:\nSummary ends with a dot.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());
@@ -2958,20 +2956,6 @@ fn explain_reworded_shlib_fixed_dependency() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: reworded `TagsCheck.toml` entry `invalid-packager` pins the fixed wording.
-#[test]
-fn explain_reworded_invalid_packager() {
-    let out = rpmcrab(&["-e", "invalid-packager"]);
-    assert_eq!(out.status.code(), Some(0));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(
-        stdout,
-        "invalid-packager:\nThe Packager tag does not match the pattern configured in the Packager option\nof the rpmlint configuration. Please change it and rebuild your package.\n\n\n",
-        "exact --explain stdout",
-    );
-    assert!(out.stderr.is_empty());
-}
-
 /// `--explain`: reworded `MenuXDGCheck.toml` entry `desktopfile-without-binary` pins the fixed wording.
 #[test]
 fn explain_reworded_desktopfile_without_binary() {
@@ -3023,20 +3007,6 @@ fn explain_reworded_zero_perms() {
     assert_eq!(
         stdout,
         "zero-perms:\nYour package contains a file with no permissions. This is usually an error\nbecause the file won't be accessible by any user. You should check the file\npermissions, ensure they are correct, or fix them in the %install section.\n\n\n",
-        "exact --explain stdout",
-    );
-    assert!(out.stderr.is_empty());
-}
-
-/// `--explain`: reworded `FilesCheck.toml` entry `perl-temp-file` pins the fixed wording.
-#[test]
-fn explain_reworded_perl_temp_file() {
-    let out = rpmcrab(&["-e", "perl-temp-file"]);
-    assert_eq!(out.status.code(), Some(0));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(
-        stdout,
-        "perl-temp-file:\nYou have a perl temporary file in your package. Usually, this file begins with\na dot (.) and contains 'perl' in its name.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());

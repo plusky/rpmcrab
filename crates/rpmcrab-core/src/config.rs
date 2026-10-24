@@ -1423,9 +1423,14 @@ mod tests {
         // distro config.
         let cfg = load_inner(&[], &[], true).unwrap();
         assert_eq!(cfg.flavor, "opensuse");
-        // The vendored openSUSE Filters list applies: invalid-version is
-        // filtered upstream, so it must be present in the merged config.
-        assert!(cfg.filters.iter().any(|f| f.contains("invalid-version")));
+        // The vendored openSUSE Filters list applies: the
+        // unstripped-binary-or-object filter is present in the merged
+        // config.
+        assert!(
+            cfg.filters
+                .iter()
+                .any(|f| f.contains("unstripped-binary-or-object"))
+        );
         // No SLFO files leak into the default flavor.
         assert!(
             !cfg.conf_files
