@@ -1060,7 +1060,15 @@ SFX N 0 en [^ey]\n";
         }
         // The flags grant the paradigms of the listed stems only:
         // British spellings and genuine misspellings stay findings.
-        for word in ["behaviour", "deserialise", "informations", "libary"] {
+        for word in [
+            "behaviour",
+            "deserialise",
+            "analyse",
+            "labelling",
+            "adaptor",
+            "informations",
+            "libary",
+        ] {
             assert!(!checker.accepts(word), "word {word:?} must stay flagged");
         }
     }
@@ -1069,10 +1077,15 @@ SFX N 0 en [^ey]\n";
     fn british_spelling_is_flagged() {
         // Package descriptions are en_US text: a British spelling is a
         // finding (the tags check reports spelling findings at warning
-        // level), so packagers fix the prose to en_US.
-        let checker = test_checker();
-        let result = checker.check("hello behaviour world", "testpkg", &[]);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].0, "behaviour");
+        // level), so packagers fix the prose to en_US. The checker
+        // carries the supplementary vocabulary, so this also pins that
+        // the wordlist does not accept British spellings.
+        let checker = test_checker().with_supplementary_words();
+        for word in ["behaviour", "analyse", "labelling", "adaptor"] {
+            let text = format!("hello {word} world");
+            let result = checker.check(&text, "testpkg", &[]);
+            assert_eq!(result.len(), 1, "word {word:?}: {result:?}");
+            assert_eq!(result[0].0, word);
+        }
     }
 }
