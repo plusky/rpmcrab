@@ -920,7 +920,7 @@ def test_retarget_filters_rewrites_moved_targets():
         "    '.* statically-linked-binary /sbin/ldconfig',\n"
         "    '.* statically-linked-binary /sbin/init',\n"
         "    'glibc\\.\\S+: \\w: statically-linked-binary /usr/sbin/glibc_post_upgrade',\n"
-        "    'incoherent-version-in-changelog',\n"
+        "    'unstripped-binary-or-object',\n"
         ']\n'
     )
     pruned, dropped, retargeted = [], [], []
@@ -930,7 +930,7 @@ def test_retarget_filters_rewrites_moved_targets():
     assert "'.* statically-linked-binary /usr/sbin/ldconfig'," in out, out
     assert '/sbin/init' not in out, out
     assert 'glibc_post_upgrade' not in out, out
-    assert "    'incoherent-version-in-changelog',\n" in out, out
+    assert "    'unstripped-binary-or-object',\n" in out, out
     assert len(retargeted) == 2, retargeted
     assert len(pruned) == 2, pruned
     assert dropped == [], dropped
@@ -967,7 +967,7 @@ def test_prune_stale_filters_drops_orphaned_group_comment():
         "    'no-buildroot-tag',\n"
         '\n'
         '# Kept group\n'
-        "    'incoherent-version-in-changelog',\n"
+        "    'unstripped-binary-or-object',\n"
         ']\n'
     )
     pruned, dropped, retargeted = [], [], []
@@ -977,7 +977,7 @@ def test_prune_stale_filters_drops_orphaned_group_comment():
         "    'kept-entry',\n"
         '\n'
         '# Kept group\n'
-        "    'incoherent-version-in-changelog',\n"
+        "    'unstripped-binary-or-object',\n"
         ']\n'
     ), out
     assert len(pruned) == 1, pruned
@@ -989,7 +989,7 @@ def test_prune_stale_filters_keeps_shared_group_comment():
         'Filters = [\n'
         '# Shared group\n'
         "    'no-buildroot-tag',\n"
-        "    'incoherent-version-in-changelog',\n"
+        "    'unstripped-binary-or-object',\n"
         ']\n'
     )
     pruned, dropped, retargeted = [], [], []
@@ -997,10 +997,28 @@ def test_prune_stale_filters_keeps_shared_group_comment():
     assert out == (
         'Filters = [\n'
         '# Shared group\n'
-        "    'incoherent-version-in-changelog',\n"
+        "    'unstripped-binary-or-object',\n"
         ']\n'
     ), out
     assert len(pruned) == 1, pruned
+
+
+def test_prune_stale_filters_drops_filter_error_titles():
+    """FilterErrorTitles lines referencing killed findings are pruned
+    like Filters lines: the cross-directory-hard-link suppression
+    lives in that list, not in Filters."""
+    text = (
+        'FilterErrorTitles = [\n'
+        "    'cross-directory-hard-link',\n"
+        "    'live-title',\n"
+        ']\n'
+    )
+    pruned, dropped, retargeted = [], [], []
+    out = gen.prune_stale_filters(text, {"live-title"}, pruned, dropped, retargeted)
+    assert 'cross-directory-hard-link' not in out, out
+    assert "    'live-title',\n" in out, out
+    assert len(pruned) == 1 and 'cross-directory-hard-link' in pruned[0], pruned
+    assert pruned[0].startswith("FilterErrorTitles:"), pruned
 
 
 def test_add_filters_inserts_after_anchor():
@@ -1099,14 +1117,14 @@ def test_drop_live_filters_drops_kernel_modules_line():
     text = (
         'Filters = [\n'
         "    'kernel-modules-not-in-kernel-packages',\n"
-        "    'incoherent-version-in-changelog',\n"
+        "    'unstripped-binary-or-object',\n"
         ']\n'
     )
     pruned, dropped, retargeted = [], [], []
     out = gen.prune_stale_filters(
         text, {"kernel-modules-not-in-kernel-packages"}, pruned, dropped, retargeted)
     assert 'kernel-modules-not-in-kernel-packages' not in out, out
-    assert "    'incoherent-version-in-changelog',\n" in out, out
+    assert "    'unstripped-binary-or-object',\n" in out, out
     assert len(dropped) == 1, dropped
     assert 'kernel-modules-not-in-kernel-packages' in dropped[0], dropped
     assert pruned == [] and retargeted == [], (pruned, retargeted)
@@ -1118,41 +1136,16 @@ def _kept_config_text():
     """A synthetic opensuse.toml carrying every KEEP_FILTERS pattern."""
     lines = ["Filters = [\n"]
     for pattern in gen.KEEP_FILTERS:
-        if pattern == "cross-directory-hard-link":
-            continue
         lines.append(f"    '{pattern}',\n")
     lines.append("]\n")
-    lines.append("FilterErrorTitles = ['cross-directory-hard-link']\n")
     return "".join(lines)
 
 
 def test_keep_filters_table_is_the_ratified_set():
-    """KEEP_FILTERS carries exactly the audit's 24 findings + 2 classes."""
+    """KEEP_FILTERS carries exactly the one surviving finding
+    suppression (` prereq-use`) plus the 2 package-class filters."""
     assert set(gen.KEEP_FILTERS) == {
-        ".*invalid-version.*",
-        ".*invalid-packager.*",
-        ".*invalid-buildhost.*",
-        " dir-or-file-in-opt ",
-        "incoherent-version-in-changelog",
-        " symlink-crontab-file",
-        " setuid-binary.*",
-        " setgid-binary ",
-        " non-readable ",
-        " non-standard-dir-perm ",
-        " non-standard-executable-perm ",
-        "configure-without-libdir-spec",
-        "use-of-RPM_SOURCE_DIR",
-        "hardcoded-library-path",
-        " perl-temp-file ",
-        " requires-on-release",
         " prereq-use",
-        " file-not-utf8",
-        " mixed-use-of-spaces-and-tabs ",
-        " log-files-without-logrotate",
-        " no-documentation",
-        " multiple-specfiles",
-        " non-coherent-filename ",
-        "cross-directory-hard-link",
         r"^qa\S+: [EWI]:",
         r"^\S*(?:INTERNAL|internal)\.\S+: [EWI]:",
     }
@@ -1161,10 +1154,8 @@ def test_keep_filters_table_is_the_ratified_set():
 def test_assert_kept_filters_logs_every_survivor():
     kept = gen.assert_kept_filters(_kept_config_text())
     assert len(kept) == len(gen.KEEP_FILTERS), kept
-    titles = [e for e in kept if e.startswith("FilterErrorTitles:")]
-    assert len(titles) == 1 and "cross-directory-hard-link" in titles[0], kept
     filters = [e for e in kept if e.startswith("Filters:")]
-    assert len(filters) == len(gen.KEEP_FILTERS) - 1, kept
+    assert len(filters) == len(gen.KEEP_FILTERS), kept
 
 
 def test_assert_kept_filters_raises_and_names_the_missing():
@@ -1180,11 +1171,11 @@ def test_assert_kept_filters_raises_and_names_the_missing():
 def test_assert_kept_filters_substring_survival():
     """A kept pattern survives inside a broader scoped entry."""
     text = _kept_config_text().replace(
-        "    'incoherent-version-in-changelog',\n",
-        "    'somepkg incoherent-version-in-changelog scoped',\n",
+        "    ' prereq-use',\n",
+        "    'somepkg prereq-use scoped',\n",
     )
     kept = gen.assert_kept_filters(text)
-    assert any("incoherent-version-in-changelog" in e for e in kept), kept
+    assert any("prereq-use" in e for e in kept), kept
 
 
 def test_assert_kept_filters_accepts_the_vendored_config():
@@ -1631,14 +1622,14 @@ def test_drop_live_filters_drops_executable_config_line():
     text = (
         'Filters = [\n'
         "    ' executable-marked-as-config-file',\n"
-        "    'incoherent-version-in-changelog',\n"
+        "    'unstripped-binary-or-object',\n"
         ']\n'
     )
     pruned, dropped, retargeted = [], [], []
     out = gen.prune_stale_filters(
         text, {"executable-marked-as-config-file"}, pruned, dropped, retargeted)
     assert 'executable-marked-as-config-file' not in out, out
-    assert "    'incoherent-version-in-changelog',\n" in out, out
+    assert "    'unstripped-binary-or-object',\n" in out, out
     assert len(dropped) == 1, dropped
     assert 'executable-marked-as-config-file' in dropped[0], dropped
     assert pruned == [] and retargeted == [], (pruned, retargeted)
@@ -1656,14 +1647,14 @@ def test_drop_live_filters_drops_description_line_too_long_line():
     text = (
         'Filters = [\n'
         "    'description-line-too-long',\n"
-        "    'incoherent-version-in-changelog',\n"
+        "    'unstripped-binary-or-object',\n"
         ']\n'
     )
     pruned, dropped, retargeted = [], [], []
     out = gen.prune_stale_filters(
         text, {"description-line-too-long"}, pruned, dropped, retargeted)
     assert 'description-line-too-long' not in out, out
-    assert "    'incoherent-version-in-changelog',\n" in out, out
+    assert "    'unstripped-binary-or-object',\n" in out, out
     assert len(dropped) == 1, dropped
     assert 'description-line-too-long' in dropped[0], dropped
     assert pruned == [] and retargeted == [], (pruned, retargeted)
@@ -1687,14 +1678,14 @@ def test_drop_live_filters_drops_usr_local_line():
     text = (
         'Filters = [\n'
         "    ' dir-or-file-in-usr-local ',  # handled by CheckFilelist.py\n"
-        "    'incoherent-version-in-changelog',\n"
+        "    'unstripped-binary-or-object',\n"
         ']\n'
     )
     pruned, dropped, retargeted = [], [], []
     out = gen.prune_stale_filters(
         text, {"dir-or-file-in-usr-local"}, pruned, dropped, retargeted)
     assert 'dir-or-file-in-usr-local' not in out, out
-    assert "    'incoherent-version-in-changelog',\n" in out, out
+    assert "    'unstripped-binary-or-object',\n" in out, out
     assert len(dropped) == 1, dropped
     assert 'dir-or-file-in-usr-local' in dropped[0], dropped
     assert pruned == [] and retargeted == [], (pruned, retargeted)
@@ -1786,7 +1777,7 @@ def test_drop_live_filters_drops_dangerous_command_family_line():
         'Filters = [\n'
         "    ' dangerous-command.*',\n"
         "    'somepkg\\..*: dangerous-command-in-%post /bin/rm',\n"
-        "    'incoherent-version-in-changelog',\n"
+        "    'unstripped-binary-or-object',\n"
         ']\n'
     )
     pruned, dropped, retargeted = [], [], []
@@ -1794,7 +1785,7 @@ def test_drop_live_filters_drops_dangerous_command_family_line():
         text, {"dangerous-command"}, pruned, dropped, retargeted)
     assert ' dangerous-command.*' not in out, out
     assert 'dangerous-command-in-%post' in out, out
-    assert 'incoherent-version-in-changelog' in out, out
+    assert 'unstripped-binary-or-object' in out, out
     assert len(dropped) == 1, dropped
     assert 'dangerous-command' in dropped[0], dropped
     assert pruned == [] and retargeted == [], (pruned, retargeted)

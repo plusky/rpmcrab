@@ -61,21 +61,11 @@ AtomicDisallowedSubdirs = [
 ]
 
 FilterErrorTitles = [
-    'cross-directory-hard-link',
 ]
 
 Filters = [
-# Stuff autobuild takes care about
-    '.*invalid-version.*',
-    '.*invalid-packager.*',
-    '.*invalid-buildhost.*',
-
 # Output filters
-    ' dir-or-file-in-opt ',  # handled by CheckFilelist.py
-    'incoherent-version-in-changelog',
-    ' symlink-crontab-file',  #bnc591431
     'unstripped-binary-or-object.*\.ko',
-    ' setuid-binary.*',
     'non-standard-dir-in-usr openwin',
     'ibcs2 non-standard-dir-in-usr i486-sysv4',
     'shlibs5 non-standard-dir-in-usr i486-linux-libc5',
@@ -128,21 +118,16 @@ Filters = [
     'sdb.* dangling-relative-symlink /usr/share/doc/sdb/.*/gifs ../gifs',
 
 # SUSE kmp's don't need manual depmod (bnc#456048)
-    'configure-without-libdir-spec',
-    'use-of-RPM_SOURCE_DIR',
     'symlink-contains-up-and-down-segments /var/lib/named',
     '^\S*-kmp-\S+\.\S+: \w: no-ldconfig-symlink',
     'aaa_base\.\S+: \w: use-of-home-in-%post',
-    'hardcoded-library-path',
 
 # We want these files
-    ' perl-temp-file ',
     ' hidden-file-or-dir .*/\.packlist',
     ' hidden-file-or-dir .*/\.directory',
     'perl-.*no-binary',
 
 # We check for that already
-    ' requires-on-release',
     ' non-executable-script /etc/profile.d/',
     ' non-executable-script /var/adm/fillup-templates/',
     '.* statically-linked-binary /usr/sbin/ldconfig',
@@ -154,18 +139,9 @@ Filters = [
 
 # Stuff that is currently too noisy, but might become relevant in the future
     ' prereq-use',
-    ' file-not-utf8',
-    ' mixed-use-of-spaces-and-tabs ',
 
 # An issue with OBS, works with autobuild
-    ' non-standard-dir-perm ',
-    ' non-standard-executable-perm ',
     '^\S+\.\S+: \w: read-error No such file or directory',
-    ' log-files-without-logrotate',
-    ' no-documentation',
-    ' multiple-specfiles',
-    ' setgid-binary ',
-    ' non-readable ',
 
 # Exceptions for filelist checks
     'nfs-client\.\S+: \w: filelist-forbidden-backup-file /var/lib/nfs/sm.bak',
@@ -180,9 +156,6 @@ Filters = [
 
 # Too noisy, and usually not something downstream packagers can fix
     ' static-library-without-debuginfo /usr/lib(?:64)?/ghc-[\d\.]+/',
-
-# Many places have shorter paths
-    ' non-coherent-filename ',
 
 # Bash completion files are not scripts, do not require them marked as %config
     'W: non-conffile-in-etc /etc/bash_completion.d/',
