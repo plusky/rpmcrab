@@ -199,7 +199,13 @@ class Ledger:
         out = []
         for e in self.applicable(case):
             check = e.get("check")
-            if check in (name, stem, module):
+            if not check:
+                # An entry with no check name accounts for nothing: a
+                # None check would compare equal to a None module and
+                # attribute any finding the module map does not know.
+                continue
+            if (check in (name, stem)
+                    or (module is not None and check == module)):
                 out.append(e)
             elif (check not in self.known_findings
                     and family_stem(check or "") not in self.known_findings
@@ -359,8 +365,11 @@ def diff_outputs(case, ref, port, ref_exit, port_exit, ledger):
                     {"missing", "behaviour", "limitation"})
         diffs.append(Diff(f"only in reference: {render(f)}", e))
     for f in sorted(rem_p):
+        # A `missing` entry records that the port does not emit the
+        # finding; it cannot account for the finding appearing in the
+        # port's output.
         e = by_kind(ledger.candidates(case, f[2]),
-                    {"missing", "behaviour", "limitation"})
+                    {"behaviour", "limitation"})
         diffs.append(Diff(f"only in rpmcrab: {render(f)}", e))
 
     # -- unparsed body lines -------------------------------------------------
