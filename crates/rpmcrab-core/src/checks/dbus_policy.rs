@@ -171,21 +171,21 @@ fn check_content(content: &str) -> Result<Vec<(Level, &'static str, String)>, St
     // and `send_destination` value on its <allow>/<deny> elements. A
     // destination for one of these names can always be written, so an
     // interface rule naming one of them is not the agent idiom below.
+    // An `own_prefix` value pins by prefix as well as by its own
+    // string: an interface under a granted prefix sits in the prefix
+    // owner's namespace, so a destination for it can be written too.
     let mut pinned: HashSet<&str> = HashSet::new();
-    let mut file_has_own = false;
+    let mut own_prefixes: Vec<&str> = Vec::new();
     for block in &policies {
-        for (kind, elem) in &block.elems {
+        for (_, elem) in &block.elems {
             for (key, val) in &elem.attrs {
                 match key.as_str() {
-                    "own" | "own_prefix" => {
-                        // Only a concrete <allow> own declares that the
-                        // service owns a name: a <deny own> forbids owning
-                        // (the common <deny own="*"/> included), and an
-                        // empty or wildcard value names nothing concrete.
-                        if *kind == "allow" && !val.is_empty() && !val.contains('*') {
-                            file_has_own = true;
-                        }
+                    "own" => {
                         pinned.insert(val.as_str());
+                    }
+                    "own_prefix" => {
+                        pinned.insert(val.as_str());
+                        own_prefixes.push(val.as_str());
                     }
                     "send_destination" => {
                         pinned.insert(val.as_str());
@@ -201,13 +201,15 @@ fn check_content(content: &str) -> Result<Vec<(Level, &'static str, String)>, St
     let mut findings = Vec::new();
     let mut send_policy_seen = false;
     for block in &policies {
+        let block_own = block_has_own(block);
         for (kind, elem) in &block.elems {
             if *kind == "allow" {
                 send_policy_seen |= check_allow(
                     elem,
                     block.subject_scoped,
                     &pinned,
-                    file_has_own,
+                    &own_prefixes,
+                    block_own,
                     &mut findings,
                 );
             } else {
@@ -219,6 +221,22 @@ fn check_content(content: &str) -> Result<Vec<(Level, &'static str, String)>, St
         findings.push((Level::Error, "dbus-policy-missing-allow", String::new()));
     }
     Ok(findings)
+}
+
+/// Whether a `<policy>` block declares, via a concrete `<allow>` own,
+/// the names its service owns. Only an `<allow>` own declares
+/// ownership: a `<deny own>` forbids owning (the common
+/// `<deny own="*"/>` included), and an empty or wildcard value names
+/// nothing concrete. The declaration credits only rules in its own
+/// block; another block's ownership says nothing about this block's
+/// rules.
+fn block_has_own(block: &PolicyBlock) -> bool {
+    block.elems.iter().any(|(kind, elem)| {
+        *kind == "allow"
+            && elem.attrs.iter().any(|(key, val)| {
+                (key == "own" || key == "own_prefix") && !val.is_empty() && !val.contains('*')
+            })
+    })
 }
 
 /// True when the leaf (final dotted component) of an interface name
@@ -239,15 +257,18 @@ fn is_agent_interface(name: &str) -> bool {
 /// recipient and the rule is complete as written. The idiom applies
 /// only where the file gives the rule its service-policy context:
 /// the interface must not be one of the names the file itself pins
-/// (a destination for those can always be written), and the file
-/// must either declare, via a concrete `<allow>` own, the names
-/// its service owns, scope the rule to an object path, or name an
-/// agent interface outright.
+/// (a destination for those can always be written; an `own_prefix`
+/// pins every interface under the prefix), it must not carry a
+/// wildcard (a wildcard names no single implementer), and the rule's
+/// own `<policy>` block must either declare, via a concrete
+/// `<allow>` own, the names its service owns, scope the rule to a
+/// non-root object path, or name an agent interface outright.
 fn is_agent_idiom(
     elem: &PolicyElement,
     subject_scoped: bool,
     pinned: &HashSet<&str>,
-    file_has_own: bool,
+    own_prefixes: &[&str],
+    block_has_own: bool,
 ) -> bool {
     if !subject_scoped {
         return false;
@@ -262,10 +283,22 @@ fn is_agent_idiom(
     let Some(iface) = get("send_interface") else {
         return false;
     };
-    if pinned.contains(iface) {
+    if pinned.contains(iface)
+        || own_prefixes.iter().any(|p| {
+            !p.is_empty()
+                && iface
+                    .strip_prefix(p)
+                    .is_some_and(|rest| rest.starts_with('.'))
+        })
+    {
         return false;
     }
-    file_has_own || get("send_path").is_some() || is_agent_interface(iface)
+    if iface.contains('*') {
+        return false;
+    }
+    block_has_own
+        || get("send_path").is_some_and(|p| !p.is_empty() && p != "/")
+        || is_agent_interface(iface)
 }
 
 /// Check one `<allow>` element, returning true when it counts as a send
@@ -274,7 +307,8 @@ fn check_allow(
     elem: &PolicyElement,
     subject_scoped: bool,
     pinned: &HashSet<&str>,
-    file_has_own: bool,
+    own_prefixes: &[&str],
+    block_has_own: bool,
     findings: &mut Vec<(Level, &'static str, String)>,
 ) -> bool {
     let attrs = &elem.attrs;
@@ -284,7 +318,7 @@ fn check_allow(
     if (has("send_interface") || has("send_member") || has("send_path")) && !has("send_destination")
     {
         seen = true;
-        if !is_agent_idiom(elem, subject_scoped, pinned, file_has_own) {
+        if !is_agent_idiom(elem, subject_scoped, pinned, own_prefixes, block_has_own) {
             findings.push((
                 Level::Error,
                 "dbus-policy-allow-without-destination",
@@ -592,8 +626,8 @@ mod tests {
     fn deny_own_wildcard_does_not_grant_agent_credit() {
         // A <deny own="*"/> forbids owning any name; it declares no
         // ownership, so a destinationless non-agent interface rule in
-        // the same file still fires -- file_has_own stays unset and no
-        // other credit arm applies (no send_path, no agent leaf).
+        // the same block still fires -- no ownership is declared and
+        // no other credit arm applies (no send_path, no agent leaf).
         let xml = r#"<busconfig><policy user="root">
 <deny own="*"/>
 <allow send_interface="org.foo.GattThing1"/>
@@ -660,6 +694,125 @@ mod tests {
         let xml = r#"<busconfig><policy user="root">
 <allow own=""/>
 <allow send_interface="org.foo.GattThing1"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn own_prefix_pins_interfaces_under_it() {
+        // An interface under a granted own_prefix sits in the prefix
+        // owner's namespace: a destination for it can be written, so
+        // the rule is no idiom even though the same block's own_prefix
+        // supplies an ownership declaration.
+        let xml = r#"<busconfig><policy user="root">
+<allow own_prefix="org.foo"/>
+<allow send_interface="org.foo.Bar"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn own_prefix_does_not_pin_foreign_interfaces() {
+        // The prefix match reaches only the granted namespace: an
+        // interface outside it is still credited by the block's
+        // ownership declaration.
+        let xml = r#"<busconfig><policy user="root">
+<allow own_prefix="org.foo"/>
+<allow send_interface="org.bar.Thing"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn own_in_another_policy_does_not_grant_agent_credit() {
+        // The ownership arm is scoped to its own <policy> block: one
+        // block's concrete own does not quiet another block's
+        // destinationless interface rule.
+        let xml = r#"<busconfig>
+<policy user="root">
+<allow own="org.foo"/>
+</policy>
+<policy user="alice">
+<allow send_interface="org.bar.Thing"/>
+</policy>
+</busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn root_send_path_does_not_grant_agent_credit() {
+        // A send_path of "/" scopes the rule to no object in
+        // particular; only a non-root path supplies the object-path
+        // arm of the idiom.
+        let xml = r#"<busconfig><policy user="root">
+<allow send_interface="org.foo.Bar" send_path="/"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn wildcard_interface_is_not_credited_by_own() {
+        // A wildcard interface names no single implementer, so the
+        // ownership arm does not quiet it.
+        let xml = r#"<busconfig><policy user="root">
+<allow own="org.foo"/>
+<allow send_interface="org.foo.*"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn wildcard_interface_is_not_credited_by_send_path() {
+        // The object-path arm does not quiet a wildcard interface
+        // either.
+        let xml = r#"<busconfig><policy user="root">
+<allow send_interface="org.foo.*" send_path="/org/foo/Bar"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn wildcard_interface_is_not_credited_by_agent_leaf() {
+        // Nor does an agent leaf at the end of a wildcarded name.
+        let xml = r#"<busconfig><policy user="root">
+<allow send_interface="org.*.Agent"/>
 </policy></busconfig>"#;
         let findings = check_content(xml).expect("parses");
         assert!(
