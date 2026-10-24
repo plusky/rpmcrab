@@ -1137,6 +1137,85 @@ def test_census_covers_the_real_ledger_with_no_emissions():
     assert ("dir-or-file-in-opt", "name") in rows, rows
 
 
+def test_census_records_ecosystem_absent_entries_without_validating():
+    # The Group findings are dispositioned by ecosystem absence: the
+    # census records them but never fails on them, even if the name
+    # were emitted again.
+    mod = _load()
+    entries = [{"kind": "missing", "check": name, "case": "global"}
+               for name in sorted(mod.ECOSYSTEM_ABSENT)]
+    rows, bad = mod.census_missing(
+        entries, [], set(mod.ECOSYSTEM_ABSENT), set(), [])
+    assert bad == [], bad
+    assert all(mode == "excluded (ecosystem absence)" for _c, mode in rows), rows
+    assert len(rows) == 3, rows
+
+
+def test_reconcile_emissions_flags_only_the_unexplained():
+    mod = _load()
+    findings = [("FilesCheck", "known-finding"),
+                ("FilesCheck", "templated-*")]
+    by_module = {"files": {"known-finding", "templated-x",
+                           "native-finding"},
+                 "spec": {"spec-native"},
+                 "tags": {"mystery-finding"}}
+    entries = [{"kind": "behaviour", "check": "FilesCheck",
+                "reason": "module-level divergence"},
+               {"kind": "behaviour", "check": "other-topic",
+                "reason": "introduces `spec-native` here"}]
+    check_map = {"FilesCheck": "files", "SpecCheck": "spec",
+                 "TagsCheck": "tags"}
+    unexplained = mod.reconcile_emissions(findings, by_module, set(),
+                                          entries, check_map)
+    # known-finding: reference name. templated-x: reference template.
+    # native-finding: ledgered under its home module. spec-native:
+    # named in a ledger reason. Only mystery-finding is unexplained.
+    assert unexplained == ["mystery-finding"], unexplained
+
+
+def test_reconcile_missing_names_only_reference_absent_entries():
+    mod = _load()
+    findings = [("FilesCheck", "present-finding"),
+                ("TmpFilesCheck", "some-*")]
+    entries = [{"kind": "missing", "check": "present-finding"},
+               {"kind": "missing", "check": "some-thing"},
+               {"kind": "missing", "check": "FilesCheck"},
+               {"kind": "missing", "check": "long-gone-finding"},
+               {"kind": "behaviour", "check": "whatever"}]
+    assert mod.reconcile_missing(entries, findings) == ["long-gone-finding"]
+
+
+def test_reconcile_severity_directions():
+    mod = _load()
+    entries = [{"kind": "severity", "check": "demoted", "case": "global"},
+               {"kind": "severity", "check": "retired-finding",
+                "case": "global"}]
+    inventory = {"demoted": {"W"}, "sneaky": {"W"}, "faithful": {"E"}}
+    ref_levels = {("TagsCheck", "demoted"): {"E"},
+                  ("TagsCheck", "sneaky"): {"E"},
+                  ("TagsCheck", "faithful"): {"E"}}
+    port_templates = {"demoted", "sneaky", "faithful"}
+    unledgered, not_emitted, compared = mod.reconcile_severity(
+        entries, inventory, ref_levels, port_templates, {"TagsCheck"})
+    # demoted: W where the reference never uses W, but ledgered.
+    # sneaky: same shape, unledgered. faithful: same level, silent.
+    assert unledgered == ["sneaky"], unledgered
+    assert not_emitted == ["retired-finding"], not_emitted
+    assert compared == 3, compared
+
+
+def test_port_severity_inventory_reads_the_real_snapshot():
+    mod = _load()
+    path = os.path.join(os.path.dirname(HERE), "crates", "rpmcrab-core",
+                        "tests", "data", "severity-inventory.txt")
+    levels = mod.port_severity_inventory(path)
+    # prereq-use is emitted at W after its demotion (issue #883), and
+    # the removed shared-library-not-executable is absent entirely.
+    assert levels.get("prereq-use") == {"W"}, levels.get("prereq-use")
+    assert "shared-library-not-executable" not in levels
+    assert len(levels) > 300, len(levels)
+
+
 def main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]
