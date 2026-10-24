@@ -650,6 +650,33 @@ DROP_LIVE_FILTERS = {
     # catch -- so it fires unsuppressed. Ledgered in
     # tests/parity/divergences.toml.
     "non-standard-dir-in-usr": "blanket filter dropped by ruling (issue #582): FHSCheck whitelists /usr/etc, the MinGW sysroots, X11R6 and the measured cross-toolchain target sysroots in the check itself, so the set the blanket suppressed (416 W lines over the Factory corpus: 213 /usr/etc, 92 MinGW sysroots, 111 cross-toolchain sysroots) is sanctioned practice at the source; the tag now fires only on genuinely novel /usr top-level directories, unsuppressed",
+    # Ruled in the suppressed-checks follow-through (issue #883):
+    # upstream's line sits under 'Too noisy, and usually not something
+    # downstream packagers can fix', but the suppressed set is text
+    # the distribution itself ships -- licence texts and licence
+    # headers carrying the stale FSF postal address -- and can
+    # correct in its own files or carry upstream. The finding is
+    # demoted E -> W alongside (a stale postal address is a
+    # documentation defect with no artefact consequence), so it
+    # surfaces as a warning instead of staying hidden. Measured with
+    # the filter lifted over the 300-RPM audit sample of the Factory
+    # corpus: 203 lines in 39 packages, 150 of them
+    # kernel-devel-longterm's shipped kernel headers. Ledgered in
+    # tests/parity/divergences.toml.
+    "incorrect-fsf-address": "blanket filter dropped by ruling (issue #883): the finding is demoted to W (ledgered severity divergence) and surfaces; measured with the filter lifted over the 300-RPM Factory audit sample, the blanket hides 203 lines in 39 packages -- stale FSF postal addresses in shipped licence texts and licence headers (kernel-devel-longterm's header tree carries 150)",
+    # Ruled in the suppressed-checks follow-through (issue #883):
+    # upstream's line is a family pattern, ' dangerous-command.*',
+    # hiding every dangerous-command-in-%<section> finding; no
+    # reason for the suppression is recorded anywhere upstream. The
+    # check is a verbatim port at W, and the suppressed set is rm/mv
+    # invocations in the packagers' own scriptlet text. The key is
+    # the stem pure_finding_pattern returns for the family pattern:
+    # it strips the trailing '.*', so this entry drops exactly that
+    # line (no other shipped line reduces to this stem). Measured
+    # with the filter lifted over the 300-RPM audit sample of the
+    # Factory corpus: 14 lines in 12 packages. Ledgered in
+    # tests/parity/divergences.toml.
+    "dangerous-command": "blanket family filter dropped by ruling (issue #883): the check is a verbatim port at W and no reason for the suppression is recorded upstream; measured with the filter lifted over the 300-RPM Factory audit sample, it hides 14 lines in 12 packages (rm/mv invocations in packagers' own scriptlets)",
 }
 
 # (finding, scope) -> reason: Filters entries scoped to dead paths. The finding

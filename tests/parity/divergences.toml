@@ -2272,6 +2272,22 @@ upstream = "https://github.com/plusky/rpmcrab/issues/593"
 
 [[divergence]]
 case = "global"
+check = "incorrect-fsf-address"
+kind = "severity"
+reason = "Deliberate severity recalibration (issue #883): the port reports W where the reference reports E, and the vendored configs drop upstream's blanket filter (DROP_LIVE_FILTERS in scripts/generate-distro-configs.py), so the finding surfaces under the distro flavours where the reference's shipped openSUSE config hides it entirely ('Too noisy, and usually not something downstream packagers can fix'). A stale FSF postal address in a shipped licence text or licence header is a documentation defect with no artefact consequence, so it is not an error; the suppressed set is nonetheless text the distribution ships and can correct in its own files or carry upstream. Measured with the filter lifted over the 300-RPM audit sample of the Factory corpus: the filter hides 203 lines in 39 packages, 150 of them kernel-devel-longterm's shipped kernel headers carrying the old address in their licence headers, the remainder licence texts and licence headers in 38 further packages."
+since = "0.3.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/883"
+
+[[divergence]]
+case = "global"
+check = "dangerous-command-in"
+kind = "behaviour"
+reason = "Config-only (issue #883): the vendored configs drop upstream's family filter ' dangerous-command.*' (DROP_LIVE_FILTERS in scripts/generate-distro-configs.py), so the findings surface under the distro flavours where the reference's shipped openSUSE config hides them; no reason for the suppression is recorded upstream. The check is a verbatim port and unchanged (W in both implementations), emitting dangerous-command-in-%<section> per scriptlet section. Measured with the filter lifted over the 300-RPM audit sample of the Factory corpus: the filter hides 14 W lines in 12 packages \u2014 rm and mv invocations in the packagers' own scriptlet text (%posttrans 9, %post 2, %pre 1, %preun 1, %postun 1)."
+since = "0.3.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/883"
+
+[[divergence]]
+case = "global"
 check = "systemd-service-without-service_add_pre"
 kind = "severity"
 reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports W where the reference reports E, for the whole systemd-service-without-service_* family. The check cannot see manual scriptlet handling of a unit, so a missing macro call is not a certain defect: the pcp audit classified 60 E lines on services that work."

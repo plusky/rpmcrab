@@ -4452,7 +4452,7 @@ impl FilesCheck {
         // scans the whole file instead (divergences.toml), streaming it in
         // bounded windows so a large file never sits in memory twice.
         if self.fsf_address_matches(pkg, pkgfile, out) {
-            add_info(out, Level::Error, pkg, "incorrect-fsf-address", &[fname]);
+            add_info(out, Level::Warning, pkg, "incorrect-fsf-address", &[fname]);
         }
     }
 
@@ -6780,8 +6780,8 @@ mod tests {
         assert_eq!(
             fsf,
             [
-                "fsf-address-fixture.noarch: E: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-early",
-                "fsf-address-fixture.noarch: E: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-late",
+                "fsf-address-fixture.noarch: W: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-early",
+                "fsf-address-fixture.noarch: W: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-late",
             ],
         );
     }

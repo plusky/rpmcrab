@@ -75,7 +75,6 @@ Filters = [
     'incoherent-version-in-changelog',
     ' symlink-crontab-file',  #bnc591431
     'unstripped-binary-or-object.*\.ko',
-    ' dangerous-command.*',
     ' setuid-binary.*',
     'non-standard-dir-in-usr openwin',
     'ibcs2 non-standard-dir-in-usr i486-sysv4',
@@ -180,7 +179,6 @@ Filters = [
     '(?:dosutils|skelcd|installation-images|yast2-slide-show|instlux|skelcd-.*|patterns-.*)\.\S+: \w: filelist-forbidden-fhs23 /CD1',
 
 # Too noisy, and usually not something downstream packagers can fix
-    ' incorrect-fsf-address ',
     ' static-library-without-debuginfo /usr/lib(?:64)?/ghc-[\d\.]+/',
 
 # Many places have shorter paths
