@@ -115,17 +115,20 @@ jobs:
             ${{ steps.package.outputs.asset }}.sha256
           if-no-files-found: error
 
-  # End-to-end benchmark on the pinned release corpus. Informational only:
-  # continue-on-error means a benchmark failure never blocks the release.
-  # The summary JSON is uploaded as an artifact for trend tracking.
+  # A/B regression gate on the pinned release corpus: the candidate
+  # (this run's build) is timed against the previous release's binary on
+  # this same runner, interleaved per package, with an A/A calibration
+  # pass (the baseline against itself) measuring the noise floor. The
+  # verdict fails this job on a significant regression, and the release
+  # job depends on this one, so a failed gate blocks publication.
+  # Method and thresholds: benchmarks/release-corpus/README.md.
   benchmark:
     needs: [check-version, build]
-    # Pinned runner image: wall-clock is noisy on shared runners, so at
-    # least the OS image is fixed; compare medians across releases as a
-    # trend, never gate on single-run deltas.
+    # Pinned runner image: the A/B comparison happens on one runner by
+    # design, and a fixed OS image keeps the environment comparable
+    # across runs.
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    continue-on-error: true
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -140,21 +143,59 @@ jobs:
       # no rpm, so install both up front.
       - name: Install runtime deps
         run: sudo apt-get update && sudo apt-get install -y file rpm
-      - name: Extract release binary
+      - name: Extract release binary (the candidate)
         run: |
           set -euo pipefail
-          tar -xzf dist/rpmcrab-*.tar.gz -C /tmp
-          /tmp/rpmcrab --version
-      - name: Run corpus benchmark
+          mkdir -p /tmp/candidate
+          tar -xzf dist/rpmcrab-*.tar.gz -C /tmp/candidate
+          /tmp/candidate/rpmcrab --version
+      # The baseline is the previous published release's binary, fetched
+      # from its release assets: the newest release whose tag is not this
+      # run's tag. Resolution and download failures fail the job; the
+      # gate reports "no-baseline" only when no previous release exists.
+      - name: Resolve and fetch the baseline (previous release)
+        id: baseline
         env:
-          RPMCRAB_BIN: /tmp/rpmcrab
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: v${{ needs.check-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${{ github.repository }}/releases?per_page=30" > /tmp/releases.json
+          tag="$(jq -r --arg cur "$CANDIDATE_TAG" \
+            '[.[] | select(.draft | not) | .tag_name | select(. != $cur)] | first // empty' \
+            /tmp/releases.json)"
+          if [ -z "$tag" ]; then
+            echo "no previous release found; the gate will report no-baseline"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "baseline release: $tag"
+          mkdir -p /tmp/baseline-dist /tmp/baseline
+          gh release download "$tag" \
+            --pattern 'rpmcrab-*-x86_64-unknown-linux-gnu.tar.gz' \
+            --dir /tmp/baseline-dist
+          tar -xzf /tmp/baseline-dist/rpmcrab-*.tar.gz -C /tmp/baseline
+          /tmp/baseline/rpmcrab --version
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Run A/B benchmark gate
+        env:
+          RPMCRAB_BIN: /tmp/candidate/rpmcrab
+          BASELINE_TAG: ${{ steps.baseline.outputs.tag }}
           RESULTS_DIR: ${{ github.workspace }}/bench-results
         run: |
           set -euo pipefail
+          # With no previous release there is no baseline binary to
+          # point at; the unset variable is bench.sh's no-baseline
+          # signal.
+          if [ -n "$BASELINE_TAG" ]; then
+            export BASELINE_BIN=/tmp/baseline/rpmcrab
+          fi
           mkdir -p "$RESULTS_DIR"
-          ./benchmarks/release-corpus/bench.sh all \
+          ./benchmarks/release-corpus/bench.sh ab \
             | tee "$RESULTS_DIR/benchmark-${{ needs.check-version.outputs.version }}.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
         with:
           name: benchmark-${{ needs.check-version.outputs.version }}
           path: ${{ github.workspace }}/bench-results/
@@ -163,7 +204,7 @@ jobs:
   release:
     # Tag pushes only: a dispatch run is a dry-run and stops after build.
     if: github.event_name == 'push'
-    needs: [check-version, build]
+    needs: [check-version, build, benchmark]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -182,6 +223,13 @@ jobs:
           pattern: dist-*
           path: dist
           merge-multiple: true
+          if-no-files-found: error
+      # The gate's verdict JSON rides the same release-create call as
+      # the tarballs, so it lands on the release as an asset.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: benchmark-${{ needs.check-version.outputs.version }}
+          path: dist
           if-no-files-found: error
 
       - name: Write combined checksums
@@ -228,6 +276,7 @@ jobs:
             dist/*
             !dist/*.sha256
             !dist/*.asc
+            !dist/*.json
 
       - name: Create or update GitHub release
         env:
