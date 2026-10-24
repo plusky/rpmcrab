@@ -3120,3 +3120,19 @@ kind = "missing"
 reason = "Deliberate removal (issue #883): measured over all 16,501 Factory specs, 2,117 flag; a 24-spec sample showed the conventional layout in every case (space-aligned tags, tab-indented continuations) and no genuine mix. rpmcrab does not emit it."
 since = "0.3.1"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
+
+[[divergence]]
+check = "prereq-use"
+kind = "severity"
+case = "global"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
+since = "0.3.1"
+reason = "The reference reports prereq-use at E. The legacy tag is widespread in the Factory tree (253 plain PreReq: lines in 153 specs), so the finding surfaces at W: visible in every run and mechanically actionable (spec-cleaner converts PreReq), while the builds carrying the tag keep passing."
+
+[[divergence]]
+check = "prereq-use"
+kind = "behaviour"
+case = "global"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
+since = "0.3.1"
+reason = "The reference predicate requires the parenthesised qualifier form PreReq(...):, which occurs nowhere in the Factory spec tree. The port's predicate makes the qualifier optional, so the finding fires on every PreReq usage, the plain tag form included (253 lines in 153 Factory specs); Requires(pre): and Requires(post): stay silent."

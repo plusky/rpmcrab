@@ -146,7 +146,6 @@
 #   Filters: dropped duplicate '^filesystem\\..*: dir-or-file-in-var-run' (byte-identical to an earlier Filters entry)
 #   Filters: dropped duplicate '^filesystem\\..*: dir-or-file-in-var-lock' (byte-identical to an earlier Filters entry)
 #   Filters: dropped duplicate '^filesystem\\..*: hidden-file-or-dir /root/.gnupg' (byte-identical to an earlier Filters entry)
-#   Filters: dropped ' prereq-use ' (subsumed by ' prereq-use': both name 'prereq-use' and the broader literal matches everything it does)
 #
 # Pruned whitelist stanzas (packages gone from Tumbleweed):
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
@@ -275,6 +274,5 @@
 #
 # Kept Filters entries (whole-finding suppressions kept
 # as rpmcrab's recorded decision; see KEEP_FILTERS):
-#   Filters: kept ' prereq-use' (upstream: 'currently too noisy, but might become relevant in the future')
 #   Filters: kept '^qa\\S+: [EWI]:' (blanket package-class filter: OBS QA-script packages are build-service internals, not shipped product)
 #   Filters: kept '^\\S*(?:INTERNAL|internal)\\.\\S+: [EWI]:' (blanket package-class filter: OBS-internal packages are build-service internals, not shipped product)

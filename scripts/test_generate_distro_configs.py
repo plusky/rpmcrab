@@ -1142,10 +1142,8 @@ def _kept_config_text():
 
 
 def test_keep_filters_table_is_the_ratified_set():
-    """KEEP_FILTERS carries exactly the one surviving finding
-    suppression (` prereq-use`) plus the 2 package-class filters."""
+    """KEEP_FILTERS carries exactly the 2 package-class filters."""
     assert set(gen.KEEP_FILTERS) == {
-        " prereq-use",
         r"^qa\S+: [EWI]:",
         r"^\S*(?:INTERNAL|internal)\.\S+: [EWI]:",
     }
@@ -1159,11 +1157,11 @@ def test_assert_kept_filters_logs_every_survivor():
 
 
 def test_assert_kept_filters_raises_and_names_the_missing():
-    text = _kept_config_text().replace("    ' prereq-use',\n", "")
+    text = _kept_config_text().replace("    '^qa\\S+: [EWI]:',\n", "")
     try:
         gen.assert_kept_filters(text)
     except AssertionError as exc:
-        assert " prereq-use" in str(exc), exc
+        assert r"^qa\S+: [EWI]:" in str(exc), exc
     else:
         raise AssertionError("a missing kept pattern must raise")
 
@@ -1171,11 +1169,11 @@ def test_assert_kept_filters_raises_and_names_the_missing():
 def test_assert_kept_filters_substring_survival():
     """A kept pattern survives inside a broader scoped entry."""
     text = _kept_config_text().replace(
-        "    ' prereq-use',\n",
-        "    'somepkg prereq-use scoped',\n",
+        "    '^qa\\S+: [EWI]:',\n",
+        "    'somepkg ^qa\\S+: [EWI]: scoped',\n",
     )
     kept = gen.assert_kept_filters(text)
-    assert any("prereq-use" in e for e in kept), kept
+    assert any("^qa" in e for e in kept), kept
 
 
 def test_assert_kept_filters_accepts_the_vendored_config():
