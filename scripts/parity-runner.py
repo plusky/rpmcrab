@@ -21,6 +21,12 @@ XDG / ref-dir / home / case-dir paths become <VENV>/<XDG>/<REF>/<HOME>/
 <CASE>, `has taken X s` becomes `has taken <DURATION> s`, and the
 host-dependent `unable to init enchant` line is dropped from stderr.
 
+Both subprocesses run with HOME set to a scratch home whose .rpmmacros
+pins %{_unitdir} to /usr/lib/systemd/system, the value the frozen
+captures were taken under: the reference expands %{_unitdir} at import
+time (SystemdInstallCheck) and matches no unit files on a host whose
+rpm leaves the macro undefined.
+
 A case whose inputs carry device nodes needs an environment that can create
 device nodes: the reference extracts payloads with rpm2archive, which calls
 mknod. In an environment whose mknod probe fails, such a case is reported
@@ -459,6 +465,13 @@ class Runner:
         self.empty_xdg = os.path.join(scratch, "empty-xdg")
         os.makedirs(self.home, exist_ok=True)
         os.makedirs(self.empty_xdg, exist_ok=True)
+        # The capture environment pins %{_unitdir}: the reference
+        # expands it at import time (SystemdInstallCheck) and matches
+        # no unit files where the host rpm leaves it undefined, which
+        # silently degrades the reference. Both subprocesses run with
+        # HOME=self.home, and librpm reads ~/.rpmmacros from it.
+        with open(os.path.join(self.home, ".rpmmacros"), "w") as fh:
+            fh.write("%_unitdir /usr/lib/systemd/system\n")
 
     def subs(self, work):
         # The capture script's substitution order: the venv and the XDG dir

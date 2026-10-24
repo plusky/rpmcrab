@@ -181,6 +181,11 @@ runs rpmcrab with the case's recorded argv under the reproduction
 invocation — empty `XDG_CONFIG_HOME`, so the vendored distro layer loads
 every distro config exactly once; `RUST_LOG=off`; `--no-time-report
 --jobs 1` — and diffs rpmcrab's output against the live reference output.
+Both runs execute with `HOME` set to a scratch home whose `.rpmmacros`
+pins `%{_unitdir}` to `/usr/lib/systemd/system`, the value the captures
+were taken under; the reference expands `%{_unitdir}` at import time
+(SystemdInstallCheck) and matches no unit files on a host whose rpm
+leaves the macro undefined.
 
 The differ attributes each difference to a `divergences.toml` entry. An
 entry naming the finding, its family stem (for templated findings such

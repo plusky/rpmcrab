@@ -12,6 +12,7 @@ Run:  python3 scripts/test_parity_runner.py
 import importlib.util
 import os
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -251,6 +252,16 @@ def test_extraction_abort_pattern():
         ("", "(none): E: fatal error while reading x.rpm: Command "
              "'rpm2archive - | tar -xz' returned non-zero", 3))
     assert not runner.extraction_aborted(("", "some other error", 3))
+
+
+def test_runner_pins_unitdir_in_scratch_home():
+    # The reference expands %{_unitdir} at import time and matches no
+    # unit files where the host rpm leaves it undefined; the runner
+    # pins it in the scratch HOME both subprocesses run under.
+    with tempfile.TemporaryDirectory() as td:
+        runner.Runner("ref", "bin", td)
+        with open(os.path.join(td, "home", ".rpmmacros")) as fh:
+            assert fh.read() == "%_unitdir /usr/lib/systemd/system\n"
 
 
 def main():
