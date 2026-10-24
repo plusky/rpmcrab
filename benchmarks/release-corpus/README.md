@@ -49,11 +49,13 @@ The gate fails when any rule trips:
   ratio of 1.10) **and** 3× the A/A spread. On a quiet runner the 10%
   line binds; on a noisy runner the spread widens and absorbs the
   moves the measurement cannot attribute.
-- **Dead-candidate rule** — a candidate median at or below the timer
-  floor (1 ms) on a package whose baseline median is above it means
-  the candidate plausibly did no work there, and a timed run killed
-  by a signal or past its timeout aborts the measurement: the gate
-  fails closed instead of reading an instant crash as a speedup.
+- **Run-validity rule** — every timed run records its exit status.
+  Completed lint runs return 0 or 64 (an error printed). A signal
+  death, a timeout (300 s per package run by default; `ab.py
+  --run-timeout` adjusts it), or any other status renders a fail
+  verdict naming the run, and a candidate median under 0.01 s against
+  a baseline median of at least 0.05 s fails as startup noise rather
+  than a completed run over the package.
 - **Per-package rule** — any single package's ratio exceeds 2.0 while
   its median also grows by at least 0.25 s. The absolute floor keeps
   sub-second packages out of the rule: doubling a 0.1 s package is a
@@ -79,6 +81,9 @@ BASELINE_BIN=/path/to/previous/rpmcrab BASELINE_TAG=v0.3.0 ./bench.sh ab
 Env overrides: `RPMCRAB_BIN` (default: `../../target/release/rpmcrab`),
 `BASELINE_BIN`, `BASELINE_TAG`, `AB_ROUNDS`, `AA_ROUNDS`, `RESULTS_DIR`
 (workflow only).
+
+Direct `ab.py` use with `--baseline` requires `--rpms-dir` (the
+verified corpus directory); omitting it is a usage error.
 
 `ab.py` holds the timing engine and the verdict computation.
 `test-ab.py` pins the verdict rules against synthetic timing data:

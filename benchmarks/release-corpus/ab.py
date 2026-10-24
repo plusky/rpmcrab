@@ -10,10 +10,12 @@
 #   * a single package that more than doubles while also costing at least
 #     PACKAGE_MIN_DELTA_S extra seconds fails on its own.
 #
-# The gate fails closed on a candidate that plausibly did no work: a
-# timed run killed by a signal or exceeding its timeout aborts the
-# measurement, and a candidate whose median on a package is unmeasurable
-# against a measurable baseline median fails the verdict.
+# The gate fails closed on runs that did not complete a lint: every
+# timed run records its exit status, and a signal death, a timeout, or
+# a status other than rpmcrab's completed lint outcomes (0 or 64)
+# renders a fail verdict instead of a timing. A candidate median below
+# the plausibility floor against a measurable baseline median fails
+# the verdict the same way.
 #
 # bench.sh drives this script. test-ab.py exercises compute_verdict with
 # synthetic timing data.
@@ -25,6 +27,7 @@ import json
 import math
 import os
 import platform
+import signal
 import subprocess
 import sys
 import time
@@ -38,14 +41,17 @@ PACKAGE_MIN_DELTA_S = 0.25
 # sides are unmeasurably fast); the per-package rule judges such packages
 # by their absolute delta.
 TIME_FLOOR_S = 0.001
-# Per-run timeout for one timed invocation: the slowest corpus package
-# medians in single-digit seconds, so a run still alive after ten
-# minutes is hung, and the gate fails closed instead of waiting on it.
-RUN_TIMEOUT_S = 600
-
-
-class TimingError(Exception):
-    """A timed run died by signal or exceeded its timeout."""
+# A timed run is complete when rpmcrab returns one of its documented
+# lint outcomes: 0 (no error printed) or 64 (an error printed). Every
+# other status, a signal death, or a timeout means the binary did not
+# complete the package, so the gate fails instead of timing the failure.
+COMPLETED_EXIT_CODES = frozenset({0, 64})
+RUN_TIMEOUT_S = 300.0
+# A candidate median under this floor, against a baseline median of at
+# least BASELINE_MEASURABLE_S, is process-startup noise rather than a
+# completed lint run over the package.
+CANDIDATE_MIN_PLAUSIBLE_S = 0.01
+BASELINE_MEASURABLE_S = 0.05
 
 
 def median(values):
@@ -78,9 +84,10 @@ def compute_verdict(baseline, candidate, aa_pair=None):
     (first, second) pair of median maps for the baseline binary timed
     against itself. With baseline None the verdict is "no-baseline".
     Every reason collected fails the gate: the verdict is "pass" only
-    when the reasons list is empty. A candidate median at or below the
-    timer floor against a baseline median above it means the candidate
-    plausibly did no work on that package and fails the gate.
+    when the reasons list is empty. A candidate median below the
+    plausibility floor against a baseline median at or above the
+    measurable floor means the candidate plausibly did no work on that
+    package and fails the gate.
     """
     result = {
         "verdict": "pass",
@@ -145,14 +152,13 @@ def compute_verdict(baseline, candidate, aa_pair=None):
                 )
         for name in shared:
             if (
-                candidate[name] <= TIME_FLOOR_S
-                and baseline[name] > TIME_FLOOR_S
+                candidate[name] < CANDIDATE_MIN_PLAUSIBLE_S
+                and baseline[name] >= BASELINE_MEASURABLE_S
             ):
                 result["reasons"].append(
-                    f"{name}: candidate median {candidate[name]:.3f}s is "
-                    f"unmeasurable against baseline median "
-                    f"{baseline[name]:.3f}s; the candidate plausibly "
-                    f"did no work"
+                    f"{name}: candidate median {candidate[name]:.4f}s is below "
+                    f"the {CANDIDATE_MIN_PLAUSIBLE_S:g}s plausibility floor "
+                    f"against a {baseline[name]:.3f}s baseline median"
                 )
             delta = candidate[name] - baseline[name]
             if ratios[name] > PACKAGE_RATIO_MAX and delta >= PACKAGE_MIN_DELTA_S:
@@ -179,13 +185,15 @@ def binary_version(binary):
     return out.stdout.strip()
 
 
-def time_binary(binary, rpm_path):
-    # rpmcrab exits nonzero when findings exist; that is an ordinary
-    # lint outcome, so a completed run's exit code carries no timing
-    # information and is ignored exactly as in bench.sh's single-binary
-    # mode. A run that never completes -- killed by a signal or past
-    # its timeout -- measured nothing, so it raises TimingError and
-    # the gate fails closed.
+class TimingRunError(RuntimeError):
+    """A timed binary did not complete a package run."""
+
+
+def time_binary(binary, rpm_path, timeout_s=RUN_TIMEOUT_S):
+    # rpmcrab exits nonzero when findings exist: 64 is a completed lint
+    # outcome, as is 0. The status is still part of the measurement: a
+    # signal death, a timeout, or any other status fails the gate rather
+    # than letting a binary that did no work win on time.
     start = time.perf_counter()
     try:
         out = subprocess.run(
@@ -193,20 +201,30 @@ def time_binary(binary, rpm_path):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
-            timeout=RUN_TIMEOUT_S,
+            timeout=timeout_s,
         )
-    except subprocess.TimeoutExpired:
-        raise TimingError(
-            f"{binary} timed out after {RUN_TIMEOUT_S}s on {rpm_path}"
-        ) from None
+    except subprocess.TimeoutExpired as e:
+        raise TimingRunError(
+            f"{binary} timed out after {timeout_s:g}s on "
+            f"{os.path.basename(rpm_path)}"
+        ) from e
+    elapsed = time.perf_counter() - start
     if out.returncode < 0:
-        raise TimingError(
-            f"{binary} was killed by signal {-out.returncode} on {rpm_path}"
+        sig = -out.returncode
+        raise TimingRunError(
+            f"{binary} died from signal {sig} "
+            f"({signal.strsignal(sig) or 'unknown'}) on "
+            f"{os.path.basename(rpm_path)}"
         )
-    return time.perf_counter() - start
+    if out.returncode not in COMPLETED_EXIT_CODES:
+        raise TimingRunError(
+            f"{binary} exited with status {out.returncode} on "
+            f"{os.path.basename(rpm_path)}; completed lint runs return 0 or 64"
+        )
+    return elapsed
 
 
-def time_pair(rpms, first, second, rounds, label):
+def time_pair(rpms, first, second, rounds, label, timeout_s=RUN_TIMEOUT_S):
     """Interleave two binaries over every RPM for `rounds` paired rounds.
 
     rpms is a list of (name, path). Even rounds run first-then-second and
@@ -222,7 +240,7 @@ def time_pair(rpms, first, second, rounds, label):
             if rnd % 2:
                 order = (order[1], order[0])
             for binary, samples in order:
-                samples[name].append(time_binary(binary, path))
+                samples[name].append(time_binary(binary, path, timeout_s))
         print(
             f"{label} round {rnd + 1}/{rounds}: "
             f"{time.perf_counter() - t0:.1f}s",
@@ -233,6 +251,17 @@ def time_pair(rpms, first, second, rounds, label):
 
 def medians(samples):
     return {name: median(vals) for name, vals in samples.items()}
+
+
+def failed_verdict(reason):
+    return {
+        "verdict": "fail",
+        "reasons": [reason],
+        "geomean_ratio": None,
+        "aa_geomean_ratio": None,
+        "aa_spread": None,
+        "package_ratios": {},
+    }
 
 
 def cpu_model():
@@ -259,18 +288,23 @@ def main(argv=None):
         "--aa-rounds", type=int, default=3, help="A/A calibration paired rounds"
     )
     ap.add_argument(
+        "--run-timeout",
+        type=float,
+        default=RUN_TIMEOUT_S,
+        help="per-package run timeout in seconds",
+    )
+    ap.add_argument(
         "--no-baseline",
         action="store_true",
         help="emit a no-baseline verdict without timing anything",
     )
     args = ap.parse_args(argv)
+    if args.baseline and not args.no_baseline and not args.rpms_dir:
+        ap.error("--rpms-dir is required when --baseline is supplied")
     if args.rounds < 1 or args.aa_rounds < 1:
         raise SystemExit("ab.py: --rounds and --aa-rounds must be >= 1")
-    if args.baseline and not args.no_baseline and not args.rpms_dir:
-        raise SystemExit(
-            "ab.py: --rpms-dir is required with --baseline "
-            "(or pass --no-baseline)"
-        )
+    if args.run_timeout <= 0:
+        raise SystemExit("ab.py: --run-timeout must be > 0")
 
     candidate_version = binary_version(args.candidate)
     out = {
@@ -280,6 +314,7 @@ def main(argv=None):
         "baseline": None,
         "rounds": args.rounds,
         "aa_rounds": args.aa_rounds,
+        "run_timeout_s": args.run_timeout,
         "thresholds": {
             "geomean_max": GEOMEAN_MAX,
             "aa_spread_multiplier": AA_SPREAD_MULTIPLIER,
@@ -322,15 +357,33 @@ def main(argv=None):
         # costs (binary page-in, shared-library warm-up) land outside the
         # samples.
         for binary in (args.baseline, args.candidate):
-            time_binary(binary, rpms[0][1])
+            time_binary(binary, rpms[0][1], args.run_timeout)
         base_s, cand_s = time_pair(
-            rpms, args.baseline, args.candidate, args.rounds, "A/B"
+            rpms,
+            args.baseline,
+            args.candidate,
+            args.rounds,
+            "A/B",
+            args.run_timeout,
         )
         aa1_s, aa2_s = time_pair(
-            rpms, args.baseline, args.baseline, args.aa_rounds, "A/A"
+            rpms,
+            args.baseline,
+            args.baseline,
+            args.aa_rounds,
+            "A/A",
+            args.run_timeout,
         )
-    except (OSError, TimingError) as e:
-        raise SystemExit(f"ab.py: timing run failed: {e}")
+    except TimingRunError as e:
+        out.update(failed_verdict(str(e)))
+        out["packages"] = []
+        print(json.dumps(out, indent=2))
+        return 1
+    except OSError as e:
+        out.update(failed_verdict(f"timing run failed: {e}"))
+        out["packages"] = []
+        print(json.dumps(out, indent=2))
+        return 1
 
     base_med = medians(base_s)
     cand_med = medians(cand_s)

@@ -3,13 +3,18 @@
 #
 # Run: python3 test-ab.py
 #
-# Every case feeds synthetic per-package median seconds into
-# compute_verdict and pins the verdict: the pass case, each gate rule
+# The verdict cases feed synthetic per-package median seconds into
+# compute_verdict and pin the verdict: the pass case, each gate rule
 # tripping on its own, the noise band absorbing a geomean move, the
 # no-baseline verdict, and the fail-closed edges (unpaired packages,
-# missing calibration, zero-length timings).
+# missing calibration, zero-length timings). The timing cases run fake
+# binaries through main and time_binary and pin the run-validity and
+# usage-error paths: a run counts only when it completes a lint, which
+# rpmcrab reports with exit status 0 or 64.
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -112,13 +117,13 @@ class VerdictTests(unittest.TestCase):
 
     def test_dead_candidate_fails_closed(self):
         # A candidate that crashes instantly on every package records
-        # unmeasurable medians against a baseline that did real work:
+        # near-zero medians against a baseline that did real work:
         # the gate fails closed instead of passing it as faster.
         candidate = {name: 0.0 for name in BASE}
         verdict = ab.compute_verdict(BASE, candidate, (BASE, BASE))
         self.assertEqual(verdict["verdict"], "fail")
         self.assertTrue(
-            any("did no work" in r for r in verdict["reasons"]),
+            any("plausibility floor" in r for r in verdict["reasons"]),
             verdict["reasons"],
         )
 
@@ -129,7 +134,7 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(verdict["verdict"], "fail")
         self.assertTrue(
             any(
-                "chromium" in r and "did no work" in r
+                "chromium" in r and "plausibility floor" in r
                 for r in verdict["reasons"]
             ),
             verdict["reasons"],
@@ -138,11 +143,29 @@ class VerdictTests(unittest.TestCase):
     def test_unmeasurable_on_both_sides_passes(self):
         # A package both binaries dispatch unmeasurably fast measured
         # nothing on either side: the clamped ratio is 1.0 and the
-        # dead-candidate rule stays silent (its baseline is equally
+        # plausibility rule stays silent (its baseline is equally
         # unmeasurable).
         base = {"tiny": 0.0, "bash": 1.0}
         candidate = {"tiny": 0.0, "bash": 1.0}
         verdict = ab.compute_verdict(base, candidate, (base, base))
+        self.assertEqual(verdict["verdict"], "pass")
+
+    def test_candidate_median_below_plausibility_floor_fails(self):
+        candidate = dict(BASE)
+        candidate["bash"] = 0.0005
+        verdict = ab.compute_verdict(BASE, candidate, (BASE, BASE))
+        self.assertEqual(verdict["verdict"], "fail")
+        self.assertTrue(
+            any(
+                "bash" in r and "plausibility floor" in r
+                for r in verdict["reasons"]
+            )
+        )
+
+    def test_candidate_median_above_plausibility_floor_can_pass(self):
+        candidate = dict(BASE)
+        candidate["git"] = 0.02
+        verdict = ab.compute_verdict(BASE, candidate, (BASE, BASE))
         self.assertEqual(verdict["verdict"], "pass")
 
     def test_no_baseline(self):
@@ -190,6 +213,117 @@ class VerdictTests(unittest.TestCase):
         self.assertAlmostEqual(verdict["geomean_ratio"], 1.0, places=3)
 
 
+class TimingTests(unittest.TestCase):
+    def write_binary(self, directory, name, package_action):
+        path = pathlib.Path(directory) / name
+        path.write_text(
+            chr(10).join(
+                [
+                    "#!/bin/sh",
+                    'if [ "$1" = "--version" ]; then',
+                    "    echo 'fake 1.0'",
+                    "    exit 0",
+                    "fi",
+                    package_action,
+                    "",
+                ]
+            )
+        )
+        path.chmod(
+            path.stat().st_mode
+            | stat.S_IXUSR
+            | stat.S_IXGRP
+            | stat.S_IXOTH
+        )
+        return path
+
+    def run_gate(self, directory, baseline, candidate, extra=()):
+        rpm = pathlib.Path(directory) / "pkg.rpm"
+        rpm.write_bytes(b"fake rpm")
+        stdout = io.StringIO()
+        args = [
+            "--rpms-dir",
+            str(directory),
+            "--baseline",
+            str(baseline),
+            "--candidate",
+            str(candidate),
+            "--rounds",
+            "1",
+            "--aa-rounds",
+            "1",
+            *extra,
+        ]
+        with contextlib.redirect_stdout(stdout):
+            rc = ab.main(args)
+        return rc, json.loads(stdout.getvalue())
+
+    def fake_gate(self, directory, candidate_action, extra=()):
+        baseline = self.write_binary(directory, "baseline", "exit 64")
+        candidate = self.write_binary(
+            directory, "candidate", candidate_action
+        )
+        return self.run_gate(directory, baseline, candidate, extra)
+
+    def test_crashing_candidate_fails_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rc, out = self.fake_gate(directory, "exit 1")
+        self.assertEqual(rc, 1)
+        self.assertEqual(out["verdict"], "fail")
+        self.assertTrue(
+            any(
+                "candidate" in r and "exited with status 1" in r
+                for r in out["reasons"]
+            )
+        )
+
+    def test_candidate_killed_by_signal_fails_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rc, out = self.fake_gate(directory, "kill -11 $$")
+        self.assertEqual(rc, 1)
+        self.assertEqual(out["verdict"], "fail")
+        self.assertTrue(
+            any("died from signal 11" in r for r in out["reasons"])
+        )
+
+    def test_candidate_timeout_fails_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rc, out = self.fake_gate(
+                directory, "sleep 2", ("--run-timeout", "0.05")
+            )
+        self.assertEqual(rc, 1)
+        self.assertEqual(out["verdict"], "fail")
+        self.assertTrue(
+            any("timed out after 0.05s" in r for r in out["reasons"])
+        )
+
+    def test_time_binary_accepts_completed_lint_exit_codes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rpm = pathlib.Path(directory) / "pkg.rpm"
+            rpm.write_bytes(b"fake rpm")
+            for code in (0, 64):
+                binary = self.write_binary(
+                    directory, f"binary-{code}", f"exit {code}"
+                )
+                self.assertGreaterEqual(
+                    ab.time_binary(str(binary), str(rpm)), 0.0
+                )
+
+    def test_baseline_without_rpms_dir_is_a_usage_error(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as raised:
+                ab.main(
+                    ["--candidate", "unused", "--baseline", "also-unused"]
+                )
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn(
+            "--rpms-dir is required when --baseline is supplied",
+            stderr.getvalue(),
+        )
+        self.assertNotIn("Traceback", stderr.getvalue())
+
+
 class TimingRunTests(unittest.TestCase):
     def _script(self, body):
         fd, path = tempfile.mkstemp(suffix=".py")
@@ -205,33 +339,21 @@ class TimingRunTests(unittest.TestCase):
             "import os, signal\n"
             "os.kill(os.getpid(), signal.SIGKILL)\n"
         )
-        with self.assertRaises(ab.TimingError):
+        with self.assertRaises(ab.TimingRunError) as ctx:
             ab.time_binary(script, "ignored.rpm")
+        self.assertIn("died from signal 9", str(ctx.exception))
 
     def test_timeout_fails_closed(self):
         script = self._script("import time\ntime.sleep(30)\n")
-        saved = ab.RUN_TIMEOUT_S
-        ab.RUN_TIMEOUT_S = 0.2
-        try:
-            with self.assertRaises(ab.TimingError):
-                ab.time_binary(script, "ignored.rpm")
-        finally:
-            ab.RUN_TIMEOUT_S = saved
+        with self.assertRaises(ab.TimingRunError) as ctx:
+            ab.time_binary(script, "ignored.rpm", timeout_s=0.2)
+        self.assertIn("timed out after 0.2s", str(ctx.exception))
 
-    def test_missing_rpms_dir_with_baseline_exits_cleanly(self):
-        # --rpms-dir is optional in argparse but the baseline path
-        # dereferences it: direct CLI use without it exits with a
-        # clear error instead of crashing.
-        with self.assertRaises(SystemExit) as ctx:
-            ab.main(
-                [
-                    "--candidate",
-                    sys.executable,
-                    "--baseline",
-                    sys.executable,
-                ]
-            )
-        self.assertIn("--rpms-dir", str(ctx.exception))
+    def test_disallowed_exit_status_fails_closed(self):
+        script = self._script("import sys\nsys.exit(3)\n")
+        with self.assertRaises(ab.TimingRunError) as ctx:
+            ab.time_binary(script, "ignored.rpm")
+        self.assertIn("exited with status 3", str(ctx.exception))
 
 
 class MedianTests(unittest.TestCase):
