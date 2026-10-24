@@ -120,22 +120,33 @@ fn find_in_against_an_empty_db() {
 
 /// Macros defined for the duration of a scope and popped on drop, including
 /// on panic, so a test never leaks librpm configuration into its siblings.
+/// The scope holds the crate's global macro lock throughout: the context
+/// behind `MacroContext::default()` is process-global, and the lock keeps
+/// the define/pop sequence from interleaving with another thread's macro
+/// work. The value is built incrementally -- each name is recorded as it
+/// is defined -- so a panic from `define` unwinds through a live value
+/// whose `Drop` pops the names defined so far instead of leaking them.
 struct ScopedMacros {
     context: MacroContext,
     names: Vec<&'static str>,
+    _guard: std::sync::MutexGuard<'static, ()>,
 }
 
 impl ScopedMacros {
     fn define(defs: &[(&'static str, String)]) -> Self {
-        let context = MacroContext::default();
-        let mut names = Vec::new();
+        let mut scoped = Self {
+            context: MacroContext::default(),
+            names: Vec::new(),
+            _guard: rpmcrab_core::pkg::global_macro_lock(),
+        };
         for (name, body) in defs {
-            context
+            scoped
+                .context
                 .define(&format!("{name} {body}"), 0)
                 .expect("define macro");
-            names.push(*name);
+            scoped.names.push(*name);
         }
-        Self { context, names }
+        scoped
     }
 }
 
