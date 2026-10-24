@@ -758,6 +758,11 @@ class RefModule:
 # every check module, so a base class sees its subclasses' self.prefix.
 GLOBAL_SELF_ATTRS = {}
 
+# (module, finding template) -> set of levels the reference emits it at,
+# populated by audit_reference for the calls whose level argument
+# resolves to literals. Read by the severity reconciliation in main().
+REF_LEVELS = {}
+
 
 # Attributes deliberately unioned across check modules: `self.prefix` is
 # set per subclass (device, world-writable, ...) and the base class
@@ -1273,6 +1278,7 @@ def audit_reference(pkgdir):
         modules.append(RefModule(os.path.join(checkdir, fn), fn[:-3], pkgdir))
     global GLOBAL_SELF_ATTRS
     GLOBAL_SELF_ATTRS = {}
+    REF_LEVELS.clear()
     for m in modules:
         for attr, vals in m.self_attrs.items():
             GLOBAL_SELF_ATTRS.setdefault(attr, set()).update(vals)
@@ -1293,8 +1299,18 @@ def audit_reference(pkgdir):
             func = enclosing_func(mod.tree, node)
             names, ok = resolve_add_info_name(mod, node, func)
             if ok:
+                levels = set()
+                if node.args:
+                    first = node.args[0]
+                    if isinstance(first, ast.Constant) and first.value in ("E", "W", "I"):
+                        levels = {first.value}
+                    else:
+                        levels = {v.t for v in resolve_expr(first, mod, func)
+                                  if isinstance(v, S) and v.t in ("E", "W", "I")}
                 for n in names:
                     findings.add((mod.modname, n))
+                    if levels:
+                        REF_LEVELS.setdefault((mod.modname, n), set()).update(levels)
             else:
                 seg = ast.get_source_segment(mod.source, node) or "<source unavailable>"
                 unresolved.append((mod.modname, node.lineno,
@@ -2397,6 +2413,18 @@ def port_config_family_names(data_dir):
     return names
 
 
+# Findings dispositioned by ecosystem absence (ruling, 2026-10-24):
+# the Group tag's ecosystem is absent -- openSUSE dropped the tag by
+# community agreement and spec-cleaner removes it on sight, Fedora
+# never adopted it. The census records these entries but excludes
+# them from emission validation.
+ECOSYSTEM_ABSENT = {
+    "no-group-tag",
+    "non-standard-group",
+    "devel-package-with-non-devel-group",
+}
+
+
 def census_missing(entries, findings, exact_patterns, family_names,
                    stale_pairs):
     """The C4 census: every kind="missing" ledger entry with its
@@ -2405,10 +2433,12 @@ def census_missing(entries, findings, exact_patterns, family_names,
 
     Returns (rows, bad): rows are (check, mode) in ledger order -- mode
     "name" for a finding-name entry, "module (N findings)" for an entry
-    keying a whole reference check module. An entry is bad when the
-    port emits what it claims is missing: a name entry whose name is an
-    exact port pattern or a config-derived family name, or a module
-    entry with a stale (module, finding) pair.
+    keying a whole reference check module, "excluded (ecosystem
+    absence)" for the ECOSYSTEM_ABSENT entries, which are recorded but
+    not validated. An entry is bad when the port emits what it claims
+    is missing: a name entry whose name is an exact port pattern or a
+    config-derived family name, or a module entry with a stale
+    (module, finding) pair.
     """
     modules = {module for module, _ in findings}
     stale_set = set(stale_pairs)
@@ -2417,6 +2447,9 @@ def census_missing(entries, findings, exact_patterns, family_names,
         if e.get("kind") != "missing":
             continue
         check = e.get("check", "")
+        if check in ECOSYSTEM_ABSENT:
+            rows.append((check, "excluded (ecosystem absence)"))
+            continue
         if check in modules:
             names = [name for module, name in findings if module == check]
             rows.append((check, f"module ({len(names)} findings)"))
@@ -2427,6 +2460,164 @@ def census_missing(entries, findings, exact_patterns, family_names,
             if check in exact_patterns or check in family_names:
                 bad.append(check)
     return rows, bad
+
+
+# Pre-existing drift between the ledger and the code, recorded at the
+# C4 reconciliation (2026-10-24) and reported in that PR for
+# disposition. The reconciliation fails on any observed drift that is
+# not recorded here, and on a recorded item that no longer drifts, so
+# the record is removed as the drift is fixed.
+KNOWN_DRIFT = {
+    "unexplained-emissions": set(),
+    # Both name findings the reference itself has since removed:
+    # lengthy-symlink's only emission is commented out in
+    # FilesCheck.py, and TmpFilesCheck._check_post_tmpfile was
+    # removed upstream (rpmlint#1374). The entries stand as the
+    # record that the port does not emit them either.
+    "missing-entries-naming-no-reference-finding": {
+        "lengthy-symlink",
+        "post-without-tmpfile-creation",
+    },
+    "severity-unledgered": set(),
+    "severity-not-emitted": set(),
+}
+
+
+def reconcile_emissions(findings, by_module, family_names, entries,
+                        check_map):
+    """Port patterns explained by nothing: every pattern the port can
+    emit must be a reference finding (by exact name or template), be
+    named by a ledger entry, be keyed by a ledger entry for its home
+    check module, or be named in a ledger entry's reason text (the
+    ledger keys native findings by module/topic and names them
+    there). Returns the sorted unexplained patterns.
+    """
+    ref_names = {name for _module, name in findings}
+    ref_templates = {n for n in ref_names if "*" in n}
+    ledger_checks = {e.get("check", "") for e in entries}
+    reasons = "\n".join(e.get("reason", "") for e in entries)
+    stem_to_module = {stem: module for module, stem in check_map.items()}
+    unexplained = []
+    for stem, patterns in sorted(by_module.items()):
+        module_key = stem_to_module.get(stem, "")
+        for pattern in sorted(patterns):
+            if "*" not in pattern:
+                if (pattern in ref_names or pattern in ledger_checks
+                        or pattern in family_names
+                        or module_key in ledger_checks
+                        or pattern in reasons):
+                    continue
+                if any(template_regex(t).match(pattern)
+                       for t in ref_templates):
+                    continue
+                unexplained.append(pattern)
+                continue
+            pfx = pattern.split("*")[0]
+            bare = pfx.rstrip("-")
+            if any(covers(pattern, t) or covers(t, pattern)
+                   for t in ref_names):
+                continue
+            if any(n.startswith(pfx) for n in ref_names):
+                continue
+            if any(c and (c.startswith(pfx) or pfx.startswith(c))
+                   for c in ledger_checks):
+                continue
+            if module_key in ledger_checks or bare in reasons:
+                continue
+            unexplained.append(pattern)
+    return unexplained
+
+
+def reconcile_missing(entries, findings):
+    """kind="missing" entries that name nothing in the current
+    reference: neither a finding (exact or by template) nor a whole
+    check module. Such an entry validates nothing in the census; the
+    legitimate cases are findings the reference itself has since
+    removed or commented out, recorded in KNOWN_DRIFT. Returns the
+    sorted entry names.
+    """
+    ref_names = {name for _module, name in findings}
+    ref_templates = {n for n in ref_names if "*" in n}
+    modules = {module for module, _name in findings}
+    out = []
+    for e in entries:
+        if e.get("kind") != "missing":
+            continue
+        name = e.get("check", "")
+        if name in modules or name in ref_names:
+            continue
+        if any(template_regex(t).match(name) for t in ref_templates):
+            continue
+        out.append(name)
+    return sorted(set(out))
+
+
+def port_severity_inventory(path):
+    """The port's emitted levels per finding, from the checked-in
+    severity inventory snapshot ([emitted-levels] section)."""
+    levels = {}
+    in_section = False
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("["):
+                in_section = line == "[emitted-levels]"
+                continue
+            if not in_section or not line or line.startswith("#"):
+                continue
+            m = re.match(r"^(\S+) = ([EWI](?:, [EWI])*)$", line)
+            if m:
+                levels.setdefault(m.group(1), set()).update(
+                    m.group(2).split(", "))
+    return levels
+
+
+def reconcile_severity(entries, inventory, ref_levels, port_templates,
+                       modules):
+    """Severity reconciliation in the two mechanically sound
+    directions (the third -- an entry whose levels have converged --
+    is not decidable here: the config-only entries of issue #594
+    record divergences at the [Scoring] layer, where the emission
+    levels on both sides are equal by construction).
+
+    Returns (unledgered, not_emitted, compared):
+    - unledgered: emitted findings using a level the reference never
+      uses for them, with no severity entry naming them;
+    - not_emitted: severity entries naming a finding the port does
+      not emit (not in the inventory, not among the port patterns,
+      and not a whole-module key);
+    - compared: how many emitted findings had resolvable reference
+      levels.
+    """
+    def ref_levels_for(name):
+        out = set()
+        for (_module, template), levels in ref_levels.items():
+            if template == name or ("*" in template
+                                    and template_regex(template).match(name)):
+                out |= levels
+        return out
+
+    ledgered_names = {e.get("check", "") for e in entries
+                      if e.get("kind") == "severity"}
+    exact = {p for p in port_templates if "*" not in p}
+    templates = {p for p in port_templates if "*" in p}
+
+    def emitted(name):
+        return (name in inventory or name in exact or name in modules
+                or any(template_regex(t).match(name) for t in templates))
+
+    not_emitted = sorted({e.get("check", "") for e in entries
+                          if e.get("kind") == "severity"
+                          and not emitted(e.get("check", ""))})
+    unledgered, compared = [], 0
+    for name, levels in inventory.items():
+        ref = ref_levels_for(name)
+        if not ref:
+            continue
+        compared += 1
+        if levels - ref and name not in ledgered_names:
+            unledgered.append(name)
+    return sorted(unledgered), not_emitted, compared
 
 
 def is_stale_entry(module, name, missing_modules, port_templates, by_module, check_map):
@@ -2577,7 +2768,47 @@ def main(argv):
               + ", ".join(sorted(census_bad)))
     print()
 
-    if gaps or unresolved or port_unresolved or stale or census_bad:
+    inventory_path = os.path.normpath(os.path.join(
+        data_dir, "..", "tests", "data", "severity-inventory.txt"))
+    inventory = port_severity_inventory(inventory_path)
+    unexplained = reconcile_emissions(findings, by_module, family_names,
+                                      entries, check_map)
+    missing_dangling = reconcile_missing(entries, findings)
+    sev_unledgered, sev_not_emitted, sev_compared = reconcile_severity(
+        entries, inventory, REF_LEVELS, port_templates,
+        {module for module, _name in findings})
+    observed = {
+        "unexplained-emissions": set(unexplained),
+        "missing-entries-naming-no-reference-finding": set(missing_dangling),
+        "severity-unledgered": set(sev_unledgered),
+        "severity-not-emitted": set(sev_not_emitted),
+    }
+    missing_total = sum(1 for e in entries if e.get("kind") == "missing")
+    print(f"RECONCILIATION: {len(port_templates) - len(unexplained)} of "
+          f"{len(port_templates)} port patterns explained by a reference "
+          "finding or a ledger entry; "
+          f"{missing_total - len(missing_dangling)} of {missing_total} "
+          'kind="missing" entries name a current reference finding or '
+          f"module; severity compared for {sev_compared} emitted "
+          "findings with resolvable reference levels")
+    drift_bad = False
+    for label in sorted(observed):
+        recorded = KNOWN_DRIFT[label]
+        for name in sorted(observed[label] - recorded):
+            print(f"  DRIFT (new) {label}: {name}")
+            drift_bad = True
+        for name in sorted(recorded - observed[label]):
+            print(f"  DRIFT (recorded, no longer observed -- remove "
+                  f"the record) {label}: {name}")
+            drift_bad = True
+        for name in sorted(observed[label] & recorded):
+            print(f"  DRIFT (recorded) {label}: {name}")
+    if not drift_bad:
+        print("DRIFT: none beyond the recorded set")
+    print()
+
+    if gaps or unresolved or port_unresolved or stale or census_bad \
+            or drift_bad:
         return 1
     return 0
 
