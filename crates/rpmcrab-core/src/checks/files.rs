@@ -4278,8 +4278,10 @@ impl FilesCheck {
     /// own because shell scripts are routinely sourced and carry no
     /// interpreter line; language source extensions (.py, .pl, .rb,
     /// ...) name modules as readily as scripts, so they make a file a
-    /// script only through its interpreter line; `.ps1` behaves the
-    /// same way, because the PowerShell interpreter accepts CRLF. A
+    /// script only through its interpreter line; `.ps1` sits with
+    /// them rather than with the shell extensions because the
+    /// PowerShell interpreter accepts CRLF, so a dot-sourced `.ps1`
+    /// is not corrupted by it. A
     /// `.bat`/`.cmd` name
     /// suppresses the name- and location-based arms — CRLF is the
     /// correct end-of-line encoding for a Windows batch file — while an
