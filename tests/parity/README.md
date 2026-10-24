@@ -192,15 +192,19 @@ entry naming the finding, its family stem (for templated findings such
 as `daemon-activation-in-%post`), or its emitting check module — or a
 check-module entry whose reason names the finding — accounts for a presence
 difference when its kind is `missing`, `behaviour` or `limitation`;
-severity differences take a `severity` entry, and detail differences a
+a finding only rpmcrab emits is the exception — it takes `behaviour`
+or `limitation`, since a `missing` entry records that the port does
+not emit the finding and cannot account for it appearing. Severity
+differences take a `severity` entry, and detail differences a
 `detail` or `behaviour` entry. The session header is accounted by the
-`session-header` and `config` entries, the footer and the exit code by
-`report` and `time-report`, and a multi-package run's stderr progress
-lines by `worker/report`. rpmcrab's own output contract is checked at
-the same time: the exit code is 64 exactly when the session emitted an
-error, the footer counts the emitted findings, and the session header
-loads each config once. A difference with no accounting entry fails the
-case and prints with a unified diff of the two sessions.
+`session-header` and `config` entries, the footer by `report` and
+`time-report`, the exit code by `report` and `cli`, and a multi-package
+run's stderr progress lines by `worker/report`. rpmcrab's own output
+contract is checked at the same time: the exit code is 64 exactly when
+the session emitted an error, the footer counts the emitted findings,
+and the session header loads each config once. A difference with no
+accounting entry fails the case and prints with a unified diff of the
+two sessions.
 `scripts/test_parity_runner.py` pins the differ's attribution rules.
 
 ```sh
