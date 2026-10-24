@@ -1,16 +1,5 @@
-invalid-version="""
-The version string must not contain the pre, alpha, beta or rc suffixes
-because when the final version will be out, you will have to use an Epoch tag
-to make the package upgradable. Instead put it in the release tag, prefixed
-with something you have control over.
-"""
 spelling-error="""
 The value of this tag appears to be misspelled. Please double-check.
-"""
-invalid-packager="""
-The Packager tag does not match the pattern configured in the Packager
-option of the rpmlint configuration. Please change it and rebuild your
-package.
 """
 no-version-tag="""
 There is no Version tag in your package. You have to specify a version using
@@ -23,9 +12,6 @@ the Release tag.
 no-name-tag="""
 There is no Name tag in your package. You have to specify a name using the
 Name tag.
-"""
-non-coherent-filename="""
-The file which contains the package should be named <NAME>-<VERSION>-<RELEASE>.<ARCH>.rpm.
 """
 description-shorter-than-summary="""
 The package description should be longer than the summary.
@@ -63,10 +49,6 @@ please insert a '%changelog' section in your spec file and add an entry change b
 no-version-in-last-changelog="""
 The latest changelog entry doesn't contain a version. Please insert the
 version that is coherent with the version of the package and rebuild it.
-"""
-incoherent-version-in-changelog="""
-The latest entry in %changelog contains a version identifier that is not
-coherent with the epoch:version-release tuple of the package.
 """
 changelog-time-overflow="""
 The timestamp of the latest entry in %changelog is suspiciously far away in
@@ -112,9 +94,6 @@ Identical automated and manual provides exist, so the redundant manual
 provide is useless: the same provide name is listed more than once
 (e.g. 'foo' together with 'foo = 1.0').
 """
-requires-on-release="""
-This rpm requires a specific release of another package.
-"""
 no-url-tag="""
 The URL tag is missing.
 """
@@ -151,9 +130,6 @@ This package has a description line of length greater than 79 characters. Break 
 """
 description-use-invalid-word="""
 The Description tag contains a word that must not be used. Reword the description.
-"""
-invalid-buildhost="""
-The BuildHost tag contains an invalid hostname.
 """
 invalid-changelog-author="""
 The changelog entry has an invalid author line. Use the `Name <email>` format.

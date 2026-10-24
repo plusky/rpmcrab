@@ -52,7 +52,7 @@ fn reproduces_llvm21_gold_byte_for_byte() {
     let mut config = config::load_bundled();
     config.conf_files = CONF_FILES.iter().map(|s| (*s).to_string()).collect();
     config.checks = (0..43).map(|i| format!("Check{i}")).collect();
-    config.filters = vec!["no-documentation".to_string()];
+    config.filters = vec!["dangling-relative-symlink".to_string()];
     let canned = vec![
         (
             Level::Error,
@@ -69,8 +69,8 @@ fn reproduces_llvm21_gold_byte_for_byte() {
             "no-soname",
             vec!["/usr/lib64/LLVMgold.so".to_string()],
         ),
-        // Suppressed by the `no-documentation` filter -> "1 filtered".
-        (Level::Warning, "no-documentation", vec![]),
+        // Suppressed by the `dangling-relative-symlink` filter -> "1 filtered".
+        (Level::Warning, "dangling-relative-symlink", vec![]),
     ];
     let make_checks = || {
         vec![Box::new(SyntheticCheck::new(

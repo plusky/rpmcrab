@@ -59,9 +59,12 @@ Provenance, verified against the pinned reference (`84848c0`):
   symbols are provided at once claim is not always accurate: duplicate
   versioned provides trigger the check too), staged ahead of the reference
   per the fix-in-port rule; minus the `non-standard-group`,
-  `no-group-tag`, `devel-package-with-non-devel-group`, and
-  `no-major-in-name` entries, dropped with the deliberately-removed
-  findings. Ledgered in `tests/parity/divergences.toml`.
+  `no-group-tag`, `devel-package-with-non-devel-group`,
+  `no-major-in-name`, `incoherent-version-in-changelog`,
+  `invalid-buildhost`, `invalid-packager`, `invalid-version`,
+  `non-coherent-filename` and `requires-on-release` entries, dropped
+  with the deliberately-removed findings. Ledgered in
+  `tests/parity/divergences.toml`.
 - `DeviceFilesCheck.toml`, `WorldWritableCheck.toml` — the entries carved
   out of the reference's `FileMetadataCheck.toml`, normalized to the
   reference's single-line form: the carved files used `"""` blocks, whose
@@ -75,13 +78,13 @@ Provenance, verified against the pinned reference (`84848c0`):
   `translated-description` (upstream rpmlint#2), `license-file-as-doc`
   and `no-license-file-in-spec` (#821). The reference has no such
   findings, so `--explain` would print `Unknown message` for them;
-  minus the seven entries dropped with their deliberately-removed findings
+  minus the eleven entries dropped with their deliberately-removed findings
   (`no-buildroot-tag`, `hardcoded-path-in-buildroot-tag`,
   `%ifarch-applied-patch`, `unversioned-explicit-provides`,
   `unversioned-explicit-obsoletes`, `setup-not-quiet`,
-  `lib-package-without-%mklibname`); and the
-  `use-of-RPM_SOURCE_DIR`
-  entry reworded (the reference's `$RPM_BUILD_ROOT` advice is wrong).
+  `lib-package-without-%mklibname`, `configure-without-libdir-spec`,
+  `use-of-RPM_SOURCE_DIR`, `hardcoded-library-path`,
+  `mixed-use-of-spaces-and-tabs`).
   Ledgered in `tests/parity/divergences.toml`.
 - `AlternativesCheck.toml`, `FileDigestCheck.toml`, `FilelistCheck.toml`
   (minus the dropped `filelist-forbidden-xinetd-configuration` entry),
@@ -106,11 +109,20 @@ Provenance, verified against the pinned reference (`84848c0`):
 - `FilesCheck.toml` — the reference file, minus the `outside-libdir-files`
   entry (openSUSE: "Doesn't seem to make sense") dropped with
   the findings, and minus the port-only `zero-length` entry dropped with
-  the deliberately removed `zero-length` finding (issue #479). Plus the
+  the deliberately removed `zero-length` finding (issue #479), and minus
+  the `cross-directory-hard-link`, `file-not-utf8`,
+  `log-files-without-logrotate`, `no-documentation`, `non-readable`,
+  `non-standard-dir-perm`, `non-standard-executable-perm`,
+  `perl-temp-file`, `setgid-binary`, `setuid-binary` and
+  `symlink-crontab-file` entries dropped
+  with their deliberately-removed findings (issue #883). Plus the
   port-only `manpage-dangling-so-ref`, `sysconfig-fillup-usage`,
   `systemd-preset-packaged` and `symlink-loop` entries: the reference has no such findings, so `--explain` would
   print `Unknown message` for them; ledgered in
   `tests/parity/divergences.toml`.
+- `SourceCheck.toml` — the reference file, minus the
+  `multiple-specfiles` entry dropped with the deliberately-removed
+  finding (issue #883). Ledgered in `tests/parity/divergences.toml`.
 - Every other `*.toml` file — byte-identical to the reference
   `rpmlint/descriptions/` file of the same name.
 

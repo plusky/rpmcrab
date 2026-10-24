@@ -9,8 +9,6 @@
 //! `spelling-error` via the `spellbook` crate (pure Rust, Hunspell-compatible).
 //! In mini-mode the spellchecker is disabled, matching the reference.
 
-use std::path::Path;
-
 use fancy_regex::Regex;
 use librpm::Tag;
 
@@ -27,13 +25,6 @@ use crate::pkg::dep::{
     version_to_string,
 };
 use std::sync::OnceLock;
-
-/// `invalid_version_regex`: `([0-9](?:rc|alpha|beta|pre).*)`, case-insensitive.
-static INVALID_VERSION_REGEX: OnceLock<Regex> = OnceLock::new();
-fn invalid_version_regex() -> &'static Regex {
-    INVALID_VERSION_REGEX
-        .get_or_init(|| Regex::new(r"(?i)([0-9](?:rc|alpha|beta|pre).*)").expect("static regex"))
-}
 
 /// Words that may start a summary in lowercase (`CAPITALIZED_IGNORE_LIST`).
 const CAPITALIZED_IGNORE_LIST: &[&str] = &["jQuery", "openSUSE", "wxWidgets", "a", "an", "uWSGI"];
@@ -66,19 +57,15 @@ pub struct TagsCheck {
     /// Upstream rpmlint#180: bot/invalid changelog authors, from the
     /// `InvalidChangelogAuthors` config regex list.
     invalid_changelog_authors: Vec<Regex>,
-    packager_regex: Option<Regex>,
-    extension_regex: Option<Regex>,
     use_version_in_changelog: bool,
     invalid_url_regex: Option<Regex>,
     forbidden_words_regex: Option<Regex>,
-    valid_buildhost_regex: Option<Regex>,
     use_epoch: bool,
     max_line_len: usize,
     valid_license_exceptions: Vec<String>,
     macro_re: Regex,
     devel_re: Regex,
     lib_package_re: Regex,
-    invalid_version_re: Regex,
     changelog_version_re: Regex,
     changelog_text_version_re: Regex,
     leading_space_re: Regex,
@@ -111,11 +98,8 @@ impl TagsCheck {
         };
         let get_bool = |k: &str| tbl.get(k).and_then(toml::Value::as_bool).unwrap_or(false);
 
-        let packager = get_str("Packager");
-        let release_ext = get_str("ReleaseExtension");
         let invalid_url = get_str("InvalidURL");
         let forbidden_words = get_str("ForbiddenWords");
-        let valid_buildhost = get_str("ValidBuildHost");
 
         Self {
             valid_licenses: get_strings("ValidLicenses"),
@@ -127,21 +111,12 @@ impl TagsCheck {
                 .iter()
                 .filter_map(|p| Regex::new(p).ok())
                 .collect(),
-            packager_regex: (!packager.is_empty())
-                .then(|| Regex::new(&packager).ok())
-                .flatten(),
-            extension_regex: (!release_ext.is_empty())
-                .then(|| Regex::new(&release_ext).ok())
-                .flatten(),
             use_version_in_changelog: get_bool("UseVersionInChangelog"),
             invalid_url_regex: (!invalid_url.is_empty())
                 .then(|| Regex::new(&format!("(?i){invalid_url}")).ok())
                 .flatten(),
             forbidden_words_regex: (!forbidden_words.is_empty())
                 .then(|| Regex::new(&format!("(?i)({forbidden_words})")).ok())
-                .flatten(),
-            valid_buildhost_regex: (!valid_buildhost.is_empty())
-                .then(|| Regex::new(&valid_buildhost).ok())
                 .flatten(),
             use_epoch: get_bool("UseEpoch"),
             max_line_len: tbl
@@ -152,7 +127,6 @@ impl TagsCheck {
             macro_re: macro_regex().clone(),
             devel_re: devel_regex().clone(),
             lib_package_re: explicit_lib_package_regex().clone(),
-            invalid_version_re: invalid_version_regex().clone(),
             changelog_version_re: Regex::new(r"[^>]([^ >]+)\s*$").expect("static regex"),
             changelog_text_version_re: Regex::new(r"^\s*-\s*((\d+:)?[\w\.]+-[\w\.]+)").expect("static regex"),
             leading_space_re: Regex::new(r"^\s+").expect("static regex"),
@@ -239,7 +213,7 @@ impl TagsCheck {
             ignored_words.extend(dep.leaf_names());
         }
 
-        self.check_invalid_packager(pkg, out, &tag_str(Tag::PACKAGER));
+        self.check_packager(pkg, out, &tag_str(Tag::PACKAGER));
         self.check_version(pkg, out, &tag_str(Tag::VERSION));
         self.check_release(pkg, out, &tag_str(Tag::RELEASE));
         self.check_epoch(pkg, out, epoch);
@@ -266,7 +240,6 @@ impl TagsCheck {
         self.check_useless_provides(pkg, out);
         self.check_forbidden_controlchar(pkg, out);
         self.check_self_obsoletion(pkg, out);
-        self.check_non_coherent_filename(pkg, out);
 
         for (tagname, tag) in [
             ("Distribution", Tag::DISTRIBUTION),
@@ -280,23 +253,15 @@ impl TagsCheck {
         }
     }
 
-    fn check_invalid_packager(&self, pkg: &Pkg, out: &mut Filter, packager: &str) {
+    fn check_packager(&self, pkg: &Pkg, out: &mut Filter, packager: &str) {
         if !packager.is_empty() {
             self.unexpanded_macro(out, pkg, "Packager", packager);
-            if let Some(re) = &self.packager_regex
-                && !re.is_match(packager).unwrap_or(true)
-            {
-                add_info(out, Level::Warning, pkg, "invalid-packager", &[packager]);
-            }
         }
     }
 
     fn check_version(&self, pkg: &Pkg, out: &mut Filter, version: &str) {
         if !version.is_empty() {
             self.unexpanded_macro(out, pkg, "Version", version);
-            if is_match(&self.invalid_version_re, version) {
-                add_info(out, Level::Error, pkg, "invalid-version", &[version]);
-            }
         } else {
             add_info(out, Level::Error, pkg, "no-version-tag", &[]);
         }
@@ -497,15 +462,6 @@ impl TagsCheck {
                             );
                         }
                     }
-                }
-                if leaf.flags == RPMSENSE_EQUAL && leaf.release.is_some() {
-                    add_info(
-                        out,
-                        Level::Warning,
-                        pkg,
-                        "requires-on-release",
-                        &[&leaf_value],
-                    );
                 }
             }
             self.unexpanded_macro(out, pkg, &format!("dependency {value}"), &value);
@@ -1176,10 +1132,6 @@ impl TagsCheck {
         self.unexpanded_macro(out, pkg, "BuildHost", buildhost);
         if buildhost.is_empty() {
             add_info(out, Level::Error, pkg, "no-buildhost-tag", &[]);
-        } else if let Some(re) = &self.valid_buildhost_regex
-            && !re.is_match(buildhost).unwrap_or(true)
-        {
-            add_info(out, Level::Warning, pkg, "invalid-buildhost", &[buildhost]);
         }
     }
 }
@@ -1210,10 +1162,6 @@ impl TagsCheck {
     }
 
     fn check_changelog(&self, pkg: &Pkg, out: &mut Filter, changelog: &[String]) {
-        let version = pkg.tag_str(Tag::VERSION).unwrap_or_default();
-        let release = pkg.tag_str(Tag::RELEASE).unwrap_or_default();
-        let name = pkg.name.as_str();
-        let epoch: Option<i64> = pkg.tag_i64(Tag::EPOCH);
         if changelog.is_empty() {
             add_info(out, Level::Error, pkg, "no-changelogname-tag", &[]);
             return;
@@ -1229,54 +1177,14 @@ impl TagsCheck {
             {
                 found = caps.get(1).map(|m| m.as_str().to_string());
             }
-            match found {
-                None => {
-                    add_info(
-                        out,
-                        Level::Warning,
-                        pkg,
-                        "no-version-in-last-changelog",
-                        &[],
-                    );
-                }
-                Some(ret) => {
-                    if !version.is_empty() && !release.is_empty() {
-                        let srpm = pkg.tag_str(Tag::SOURCERPM).unwrap_or_default();
-                        let srpm_base = srpm
-                            .strip_suffix(".src.rpm")
-                            .or_else(|| srpm.strip_suffix(".rpm"))
-                            .unwrap_or(&srpm);
-                        if srpm_base == format!("{name}-{version}-{release}") {
-                            let mut expected = vec![format!("{version}-{release}")];
-                            if let Some(e) = epoch {
-                                expected[0] = format!("{e}:{}", expected[0]);
-                            }
-                            // A configured `%{?dist}`-style release extension is
-                            // stripped before comparing, so a changelog entry
-                            // without the distro suffix still matches.
-                            if let Some(re) = &self.extension_regex {
-                                let stripped = re.replace_all(&expected[0], "").to_string();
-                                if stripped != expected[0] {
-                                    expected.push(stripped);
-                                }
-                            }
-                            if !expected.contains(&ret) {
-                                let exp_str = if expected.len() == 1 {
-                                    expected[0].clone()
-                                } else {
-                                    format!("{:?}", expected)
-                                };
-                                add_info(
-                                    out,
-                                    Level::Warning,
-                                    pkg,
-                                    "incoherent-version-in-changelog",
-                                    &[&ret, &exp_str],
-                                );
-                            }
-                        }
-                    }
-                }
+            if found.is_none() {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "no-version-in-last-changelog",
+                    &[],
+                );
             }
         }
         let mut combined: Vec<String> = changelog.to_vec();
@@ -1620,28 +1528,6 @@ impl TagsCheck {
             }
         }
     }
-
-    fn check_non_coherent_filename(&self, pkg: &Pkg, out: &mut Filter) {
-        let version = pkg.tag_str(Tag::VERSION).unwrap_or_default();
-        let release = pkg.tag_str(Tag::RELEASE).unwrap_or_default();
-        // `%{_build_name_fmt}` is `%{ARCH}/%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}.rpm`;
-        // the reference takes the basename. `pkg.arch` is already `src`/`nosrc`
-        // for source packages.
-        let expected = format!("{}-{}-{}.{}.rpm", pkg.name, version, release, pkg.arch);
-        let basename = Path::new(&pkg.filename)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if basename != expected {
-            add_info(
-                out,
-                Level::Warning,
-                pkg,
-                "non-coherent-filename",
-                &[&basename, &expected],
-            );
-        }
-    }
 }
 
 /// `has_forbidden_controlchars`: any char < 32 other than tab/LF/CR.
@@ -1749,6 +1635,7 @@ impl TagsCheck {
 mod tests {
     use super::*;
     use crate::color::Color;
+    use std::path::Path;
 
     fn test_config() -> Config {
         test_config_with(None)
@@ -1780,23 +1667,6 @@ mod tests {
         config
     }
 
-    /// The shipped `ReleaseExtension` catalog: the strip tests pin the live
-    /// default rather than a copy of it.
-    fn shipped_release_extension() -> String {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/configdefaults.toml");
-        let raw = std::fs::read_to_string(&path).expect("read configdefaults.toml");
-        let tbl: toml::Table = toml::from_str(&raw).expect("parse configdefaults.toml");
-        let ext = tbl
-            .get("ReleaseExtension")
-            .and_then(toml::Value::as_str)
-            .unwrap_or("");
-        assert!(
-            !ext.is_empty(),
-            "ReleaseExtension default must be non-empty"
-        );
-        ext.to_string()
-    }
-
     /// Open a fixture RPM, extracting into a unique tempdir (kept alive by
     /// the caller) rather than the shared `temp_dir()`: concurrent runs must
     /// not share one extraction directory.
@@ -1824,66 +1694,6 @@ mod tests {
         let mut check = TagsCheck::new(config);
         check.check(pkg, config, &mut out);
         out.results().to_vec()
-    }
-
-    #[test]
-    fn release_extension_strip_tolerates_dist_suffix_in_changelog() {
-        // Release 3.fc42 with a changelog entry of 1.15.1-3 (no dist suffix):
-        // the configured extension is stripped before comparing, so no
-        // incoherent-version-in-changelog.
-        let config = test_config_with(Some(&shipped_release_extension()));
-        let (_tmp, pkg) = fixture_pkg("distrelease-1.15.1-3.fc42.noarch.rpm");
-        let results = run_check_with(&config, &pkg);
-        assert!(
-            results
-                .iter()
-                .all(|(n, _)| n != "incoherent-version-in-changelog"),
-            "unexpected incoherent-version-in-changelog: {results:?}"
-        );
-    }
-
-    #[test]
-    fn release_extension_strip_still_reports_real_incoherence() {
-        // The version itself differs (1.15.2 vs 1.15.1): stripping the dist
-        // suffix must not hide a genuinely incoherent changelog entry.
-        let config = test_config_with(Some(&shipped_release_extension()));
-        let (_tmp, pkg) = fixture_pkg("distrelease-badver-1.15.1-3.fc42.noarch.rpm");
-        let results = run_check_with(&config, &pkg);
-        let finding = results
-            .iter()
-            .find(|(n, _)| n == "incoherent-version-in-changelog")
-            .expect("incoherent-version-in-changelog");
-        assert!(finding.1.contains(": W: "), "level: {}", finding.1);
-        assert!(
-            finding.1.contains("1.15.2-3"),
-            "changelog entry: {}",
-            finding.1
-        );
-        assert!(
-            finding.1.contains(r#"["1.15.1-3.fc42", "1.15.1-3"]"#),
-            "expected candidates: {}",
-            finding.1
-        );
-    }
-
-    #[test]
-    fn release_extension_strip_ignores_unknown_suffix() {
-        // 3.weird9 is not in the catalog: nothing is stripped, so the
-        // suffix-less changelog entry is incoherent.
-        let config = test_config_with(Some(&shipped_release_extension()));
-        let (_tmp, pkg) = fixture_pkg("distrelease-weird-1.15.1-3.weird9.noarch.rpm");
-        let results = run_check_with(&config, &pkg);
-        let inco = results
-            .iter()
-            .find(|(n, _)| n == "incoherent-version-in-changelog")
-            .expect("incoherent-version-in-changelog");
-        // The catalog matches nothing here, so the detail keeps the gh-main
-        // single-string shape -- no duplicated candidate list.
-        assert!(
-            inco.1.contains("1.15.1-3.weird9") && !inco.1.contains('['),
-            "single-string detail shape, not a duplicated candidate list: {}",
-            inco.1
-        );
     }
 
     #[test]
@@ -1963,8 +1773,7 @@ mod tests {
         }
         assert!(patched, "CHANGELOGTIME missing in {fixture}");
         let tmp = tempfile::tempdir().expect("tmpdir for patched rpm");
-        // Keep the fixture's own filename: the basename feeds
-        // `non-coherent-filename`, and a renamed copy would emit it.
+        // Keep the fixture's own filename.
         let rpm_path = tmp.path().join(fixture);
         std::fs::write(&rpm_path, &bytes).expect("write patched rpm");
         (tmp, rpm_path)
@@ -2957,13 +2766,79 @@ mod tests {
         );
     }
 
+    /// Negative pin for the removed `invalid-version` finding: the
+    /// badversion fixture's `0pre` version stays silent, and
+    /// `cargo test` (not just the reference-coverage auditor) must catch
+    /// a re-add.
     #[test]
-    fn invalid_version_emits() {
+    fn killed_invalid_version_stays_absent() {
         let (_tmp, pkg) = fixture_pkg("tags-badversion-0pre-1.noarch.rpm");
         let results = run_check(&pkg);
-        let hits = tag_hits(&results, "invalid-version");
-        assert_eq!(hits.len(), 1, "all: {results:?}");
-        assert_eq!(hits[0].1, "tags-badversion.noarch: E: invalid-version 0pre");
+        assert!(
+            tag_hits(&results, "invalid-version").is_empty(),
+            "must stay silent: {results:?}"
+        );
+    }
+
+    /// Negative pins for the removed `invalid-packager` and
+    /// `invalid-buildhost` findings: with both patterns set to match
+    /// nothing, the badversion fixture's packager and buildhost stay
+    /// silent.
+    #[test]
+    fn killed_invalid_packager_and_buildhost_stay_absent() {
+        let (_tmp, pkg) = fixture_pkg("tags-badversion-0pre-1.noarch.rpm");
+        let mut config = test_config_with(None);
+        config.configuration.insert(
+            "Packager".to_string(),
+            toml::Value::String("^$".to_string()),
+        );
+        config.configuration.insert(
+            "ValidBuildHost".to_string(),
+            toml::Value::String("^$".to_string()),
+        );
+        config.finalize().expect("fixture config");
+        let results = run_check_with(&config, &pkg);
+        assert!(
+            tag_hits(&results, "invalid-packager").is_empty(),
+            "must stay silent: {results:?}"
+        );
+        assert!(
+            tag_hits(&results, "invalid-buildhost").is_empty(),
+            "must stay silent: {results:?}"
+        );
+    }
+
+    /// Negative pin for the removed
+    /// `incoherent-version-in-changelog` finding: the badver fixture's
+    /// changelog version (1.15.2) differs from its version (1.15.1) and
+    /// stays silent.
+    #[test]
+    fn killed_incoherent_version_in_changelog_stays_absent() {
+        let (_tmp, pkg) = fixture_pkg("distrelease-badver-1.15.1-3.fc42.noarch.rpm");
+        let results = run_check(&pkg);
+        assert!(
+            tag_hits(&results, "incoherent-version-in-changelog").is_empty(),
+            "must stay silent: {results:?}"
+        );
+    }
+
+    /// Negative pin for the removed `non-coherent-filename` finding: a
+    /// copy of the fcprobe fixture under a name that does not match its
+    /// name/version/release stays silent.
+    #[test]
+    fn killed_non_coherent_filename_stays_absent() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let bytes = std::fs::read(&src).expect("read fixture");
+        let tmp = tempfile::tempdir().expect("tmpdir for renamed rpm");
+        let rpm_path = tmp.path().join("renamed-9.9-9.noarch.rpm");
+        std::fs::write(&rpm_path, &bytes).expect("write renamed rpm");
+        let pkg = Pkg::open(&rpm_path, tmp.path(), true).expect("open renamed pkg");
+        let results = run_check(&pkg);
+        assert!(
+            tag_hits(&results, "non-coherent-filename").is_empty(),
+            "must stay silent: {results:?}"
+        );
     }
 
     #[test]
@@ -3484,23 +3359,17 @@ mod rich_dep_emission_tests {
         }
     }
 
+    /// Negative pin for the removed `requires-on-release` finding: a
+    /// rich dependency whose leaf pins a release stays silent.
     #[test]
-    fn requires_on_release_uses_leaf_constraint() {
+    fn killed_requires_on_release_stays_absent() {
         let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
         pkg.requires.push(rich_dep("(relfoo = 1.0-2 or relbar)"));
         let config = rich_test_config(&[], false);
         let results = run(&pkg, &config);
-        let hits = named(&results, "requires-on-release");
-        assert_eq!(hits.len(), 1, "all: {results:?}");
         assert!(
-            hits[0].1.contains(": W: requires-on-release"),
-            "line: {}",
-            hits[0].1
-        );
-        assert!(
-            hits[0].1.ends_with(" relfoo = 1.0-2"),
-            "line: {}",
-            hits[0].1
+            named(&results, "requires-on-release").is_empty(),
+            "must stay silent: {results:?}"
         );
     }
 

@@ -203,7 +203,7 @@ Examples that must reproduce exactly:
 
 ```
 llvm21.src: W: unused-rpmlintrc-filter "devel-file-in-non-devel-package .*/usr/include/.*"
-qdmr.spec:24: W: mixed-use-of-spaces-and-tabs (spaces: line 24, tab: line 2)
+qdmr.spec:24: W: libdir-macro-in-noarch-package (main package) %{_libdir}/foo
 llvm21-gold.aarch64: E: suse-zypp-packageand packageand(clang21:binutils)
 ```
 

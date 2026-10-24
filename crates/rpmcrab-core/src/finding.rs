@@ -175,8 +175,8 @@ mod tests {
     fn spec_line_with_linenum() {
         let f = Finding {
             level: Level::Warning,
-            check: "mixed-use-of-spaces-and-tabs".to_string(),
-            details: vec!["(spaces: line 24, tab: line 2)".to_string()],
+            check: "libdir-macro-in-noarch-package".to_string(),
+            details: vec!["(main package) %{_libdir}/foo".to_string()],
             pkg_name: "qdmr.spec".to_string(),
             arch: None,
             line: Some(24),
@@ -184,7 +184,7 @@ mod tests {
         };
         assert_eq!(
             f.line(&Color::for_tty(false)),
-            "qdmr.spec:24: W: mixed-use-of-spaces-and-tabs (spaces: line 24, tab: line 2)"
+            "qdmr.spec:24: W: libdir-macro-in-noarch-package (main package) %{_libdir}/foo"
         );
     }
 

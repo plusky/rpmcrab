@@ -1,7 +1,3 @@
-no-documentation="""
-The package contains no documentation (README, doc, etc).
-You have to include documentation files.
-"""
 not-listed-as-documentation="""
 The documentation files of this package are not listed with
 the standard %doc tag.
@@ -20,10 +16,6 @@ a call to ldconfig.
 """
 postun-without-ldconfig="""
 This package contains a library and its %postun doesn't call ldconfig.
-"""
-perl-temp-file="""
-You have a perl temporary file in your package. Usually, this
-file begins with a dot (.) and contains 'perl' in its name.
 """
 non-ghost-in-run="""
 A file or directory in the package is located in /run. Files installed
@@ -80,20 +72,6 @@ compressed-symlink-with-wrong-ext="""
 The symlink points to a compressed file but doesn't use the same
 extension.
 """
-setuid-binary="""
-The file is setuid; this may be dangerous, especially if this
-file is setuid root. Sometimes file capabilities can be used instead of
-setuid bits.
-"""
-setgid-binary="""
-The file is setgid. Usually this is a packaging bug. If this is a game,
-then, you should use the proper rpm group, or location.
-"""
-non-standard-executable-perm="""
-A standard executable should have permission set to 0755. If you get this
-message, it means that you have a wrong executable permissions in some files
-included in your package.
-"""
 non-executable-in-bin="""
 A file is being installed in /usr/bin, but is not an executable. Be sure
 that the file is an executable or that it has executable permissions.
@@ -104,11 +82,6 @@ included in a non-devel package. These files should go in devel packages.
 """
 non-devel-file-in-devel-package="""
 A non-development file is located in a devel package.
-"""
-non-standard-dir-perm="""
-A standard directory should have permission set to 0755. If you get this
-message, it means that you have wrong directory permissions in some dirs
-included in your package.
 """
 spurious-executable-perm="""
 The file is installed with executable permissions, but was identified as one
@@ -123,10 +96,6 @@ standard-dir-owned-by-package="""
 This package owns a directory that is part of the standard hierarchy, which
 can lead to default directory permissions or ownerships being changed to
 something non-standard.
-"""
-cross-directory-hard-link="""
-File is hard linked across directories. This can cause problems in
-installations where the directories are located on different devices.
 """
 dangling-symlink="""
 The target of the symbolic link does not exist within this package or its
@@ -149,9 +118,6 @@ within the package leads back to a link that was already visited, so
 the link can never resolve and opening it always fails. Point the
 link at a real file, or break the cycle.
 """
-non-readable="""
-The file can't be read by everybody. Review if this is expected.
-"""
 incoherent-logrotate-file="""
 Your logrotate file should be named /etc/logrotate.d/<package name>.
 """
@@ -169,10 +135,6 @@ File should be tagged %ghost.
 hidden-file-or-dir="""
 The file or directory is hidden. You should see if this is normal,
 and delete it from the package if not.
-"""
-log-files-without-logrotate="""
-This package contains files in /var/log/ without adding logrotate
-configuration for them.
 """
 unexpanded-macro="""
 This package contains a file whose path contains something that looks like
@@ -244,10 +206,6 @@ This file has wrong end-of-line encoding, usually caused by creation or
 modification on a non-Unix system. It could prevent it from being displayed
 correctly in some circumstances.
 """
-file-not-utf8="""
-The character encoding of this file is not UTF-8. Consider converting it
-in the specfile's %prep section for example using iconv(1).
-"""
 filename-not-utf8="""
 The character encoding of the name of this file is not UTF-8.
 Rename it.
@@ -299,10 +257,6 @@ of cron
 non-owner-writeable-only-crontab-file="""
 This crontab file is writeable by other users as its owner, which is refused
 by newer version of cron and insecure
-"""
-symlink-crontab-file="""
-This crontab file is a symbolic link, which is insecure and refused by newer
-version of cron
 """
 rpath-in-buildconfig="""
 This build configuration file contains rpaths which will be introduced into
