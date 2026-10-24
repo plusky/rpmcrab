@@ -22,6 +22,16 @@ const DICT_PATHS: &[&str] = &[
     "/opt/homebrew/share/hunspell",
 ];
 
+/// Well-known generic TLDs, for recognising a bare host (no scheme) as
+/// a URL. Country-code TLDs are absent on purpose: the reference checks
+/// the labels of `example.co.uk`-style hosts individually, and file
+/// extensions that collide with a country code (`readme.md`) stay
+/// checked either way.
+const URL_TLDS: &[&str] = &[
+    "aero", "app", "asia", "biz", "com", "coop", "dev", "edu", "gov", "info", "int", "io", "jobs",
+    "mil", "mobi", "museum", "name", "net", "org", "post", "pro", "tel", "travel", "xxx",
+];
+
 /// Environment variable that disables spellbook's ngram suggester when
 /// set (any value), mirroring the presence-based
 /// `CONFIG_DISABLE_AUTOLOADING` switch in config.rs. The ngram
@@ -208,13 +218,20 @@ impl Spellchecker {
         // Simple word tokenizer with positions for sentence-break detection.
         let words = tokenize(&normalized);
 
+        // Spans the reference never checks: its checker filters URLs
+        // and email addresses out before checking (spellcheck.py's
+        // URLFilter and EmailFilter), so their words are not findings.
+        let spans = skippable_spans(&normalized);
+
         for (word, byte_offset) in words.iter() {
             if warned.contains(*word) {
                 continue;
             }
 
-            // Skip emails, URLs, WikiWords (CamelCase).
-            if is_email(word) || is_url(word) || is_wiki_word(word) {
+            // Skip words inside a URL or email address, and WikiWords
+            // (CamelCase).
+            let word_end = *byte_offset + word.len();
+            if spans.iter().any(|(s, e)| *byte_offset < *e && *s < word_end) || is_wiki_word(word) {
                 continue;
             }
 
@@ -275,7 +292,9 @@ impl Spellchecker {
 }
 
 /// Split text into (word, byte_offset) pairs, keeping only alphabetic
-/// sequences with apostrophes.
+/// sequences with apostrophes. Apostrophes at a token's edges are
+/// quoting, not part of the word, and are trimmed (the reference's
+/// tokenizer does the same); an all-apostrophe run yields no token.
 fn tokenize(text: &str) -> Vec<(&str, usize)> {
     let mut words = Vec::new();
     let mut start: Option<usize> = None;
@@ -285,22 +304,70 @@ fn tokenize(text: &str) -> Vec<(&str, usize)> {
                 start = Some(i);
             }
         } else if let Some(s) = start {
-            words.push((&text[s..i], s));
+            push_token(&mut words, text, s, i);
             start = None;
         }
     }
     if let Some(s) = start {
-        words.push((&text[s..], s));
+        push_token(&mut words, text, s, text.len());
     }
     words
 }
 
-fn is_email(word: &str) -> bool {
-    word.contains('@') && word.contains('.')
+fn push_token<'a>(words: &mut Vec<(&'a str, usize)>, text: &'a str, start: usize, end: usize) {
+    let raw = &text[start..end];
+    let trimmed = raw.trim_matches('\'');
+    if trimmed.is_empty() {
+        return;
+    }
+    let offset = start + (raw.len() - raw.trim_start_matches('\'').len());
+    words.push((trimmed, offset));
 }
 
-fn is_url(word: &str) -> bool {
-    word.starts_with("http://") || word.starts_with("https://") || word.starts_with("www.")
+/// Byte spans of the whitespace-normalized text that hold a URL or an
+/// email address.
+fn skippable_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start: Option<usize> = None;
+    for (i, c) in text.char_indices() {
+        if c == ' ' {
+            if let Some(s) = start.take()
+                && is_skippable_chunk(&text[s..i])
+            {
+                spans.push((s, i));
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(s) = start
+        && is_skippable_chunk(&text[s..])
+    {
+        spans.push((s, text.len()));
+    }
+    spans
+}
+
+/// Whether one whitespace-delimited chunk is a URL or an email
+/// address: a scheme URL, a `www.` host, an address with a dotted
+/// domain part, or a bare host whose last label is a well-known TLD —
+/// each optionally followed by a path.
+fn is_skippable_chunk(chunk: &str) -> bool {
+    let chunk = chunk.trim_matches(|c: char| !(c.is_alphanumeric() || "@.:/_-+%~#?=&".contains(c)));
+    if chunk.contains("://") {
+        return true;
+    }
+    if chunk.to_lowercase().starts_with("www.") {
+        return true;
+    }
+    if let Some((_, domain)) = chunk.split_once('@') {
+        return domain.contains('.');
+    }
+    let host = chunk.split('/').next().unwrap_or("");
+    match host.rsplit_once('.') {
+        Some((_, tld)) => URL_TLDS.contains(&tld.to_lowercase().as_str()),
+        None => false,
+    }
 }
 
 fn is_wiki_word(word: &str) -> bool {
@@ -792,5 +859,41 @@ mod tests {
                 "child must report its mode (disabled={disabled})"
             );
         }
+    }
+
+    #[test]
+    fn url_and_email_words_are_not_checked() {
+        // The reference filters URLs and email addresses out before
+        // checking; none of their parts are findings.
+        let checker = test_checker();
+        let text = "hello https://qwargl.example.com/x www.qwargl.org test \
+                    bob@qwargl.net package docs.qwargl.io/en check";
+        assert!(checker.check(text, "testpkg", &[]).is_empty());
+        // The same word outside a URL is still reported.
+        let result = checker.check("hello qwargl world", "testpkg", &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "qwargl");
+    }
+
+    #[test]
+    fn dotted_filenames_are_still_checked() {
+        // Only hosts are skipped: a dotted file name's parts are
+        // checked, like the reference checks them.
+        let checker = test_checker();
+        let result = checker.check("test qwargl.toml check", "testpkg", &[]);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, "qwargl");
+        assert_eq!(result[1].0, "toml");
+    }
+
+    #[test]
+    fn quoted_words_are_checked_without_their_quotes() {
+        let checker = test_checker();
+        let result = checker.check("hello 'wrld' world", "testpkg", &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "wrld");
+        let result = checker.check("hello wrld' world", "testpkg", &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "wrld");
     }
 }
