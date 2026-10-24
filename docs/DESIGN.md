@@ -395,8 +395,8 @@ requires it.
 for post-build runs that only care about errors. CLI-only
 (the filter lives in check loading, `check::load_with`). The filter is a
 **static pre-scoring bound** on each check's declared `max_severity`
-(`BashismsCheck`, `ConfigFilesCheck`, `FHSCheck`, `SystemdInstallCheck`,
-`TmpFilesCheck` — every
+(`BashismsCheck`, `ConfigFilesCheck`, `FHSCheck`, `SourceCheck`,
+`SystemdInstallCheck`, `TmpFilesCheck` — every
 `add_info` call site audited): runtime promotions a finding may receive at emit
 time (`Scoring>0`, severity overrides) are invisible at load time, so a finding
 that promotion would have raised to E on a skipped check never runs

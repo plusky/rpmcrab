@@ -498,7 +498,7 @@ mod tests {
 
     #[test]
     fn warning_only_checks_report_warning_max_severity() {
-        // Every `add_info` call site in these five passes `Level::Warning`
+        // Every `add_info` call site in these six passes `Level::Warning`
         // (verified by audit); the annotation must match or `--errors-only`
         // would wrongly keep them.
         let config = Config::default();
@@ -512,6 +512,12 @@ mod tests {
         );
         assert_eq!(
             crate::checks::fhs::FHSCheck::new(&config).max_severity(),
+            Level::Warning
+        );
+        // `SourceCheck::new` requires `CompressExtension`, which only the
+        // bundled defaults provide.
+        assert_eq!(
+            crate::checks::source::SourceCheck::new(&crate::config::load_bundled()).max_severity(),
             Level::Warning
         );
         assert_eq!(

@@ -1958,7 +1958,7 @@ fn strict_reenables_warning_only_checks_under_errors_only() {
 }
 
 /// `--format json --errors-only`: the finding multiset matches the full run
-/// (the five skipped checks fire nothing on this fixture), no finding names
+/// (the six skipped checks fire nothing on this fixture), no finding names
 /// a warning-only check, the JSON `checks` field reports the configured
 /// count, and the summary exit code matches the process.
 #[test]
@@ -1979,6 +1979,7 @@ fn errors_only_json_finding_set_matches_full_run() {
                 "BashismsCheck",
                 "ConfigFilesCheck",
                 "FHSCheck",
+                "SourceCheck",
                 "SystemdInstallCheck",
                 "TmpFilesCheck"
             ]
