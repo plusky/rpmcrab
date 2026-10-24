@@ -42,13 +42,18 @@ the **A/A spread**: the noise floor of this measurement on this runner.
 
 ### Verdict
 
-The gate fails when either rule trips:
+The gate fails when any rule trips:
 
 - **Geomean rule** — the geomean of the per-package ratios
   (candidate / baseline), minus 1, exceeds **both** 0.10 (a geomean
   ratio of 1.10) **and** 3× the A/A spread. On a quiet runner the 10%
   line binds; on a noisy runner the spread widens and absorbs the
   moves the measurement cannot attribute.
+- **Dead-candidate rule** — a candidate median at or below the timer
+  floor (1 ms) on a package whose baseline median is above it means
+  the candidate plausibly did no work there, and a timed run killed
+  by a signal or past its timeout aborts the measurement: the gate
+  fails closed instead of reading an instant crash as a speedup.
 - **Per-package rule** — any single package's ratio exceeds 2.0 while
   its median also grows by at least 0.25 s. The absolute floor keeps
   sub-second packages out of the rule: doubling a 0.1 s package is a
