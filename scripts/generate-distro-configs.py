@@ -477,6 +477,59 @@ PRUNE_CANDIDATES = {
     # upstream or here (the name survives only in those configs): the port
     # never had this finding — a non-UTF-8 header tag aborts the read.
     "tag-not-utf8": "never ported: non-UTF-8 header tags abort the read; no finding is emitted",
+    # Removed with the findings in the leftover-suppressions pass
+    # (issue #883): OBS stamps or normalises the properties these
+    # checks policed, and the deliberate-content findings flag
+    # artefacts the distro ships on purpose.
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py
+    "invalid-version": "killed: OBS stamps the version (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py
+    "invalid-packager": "killed: OBS stamps the packager (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py
+    "invalid-buildhost": "killed: OBS stamps the build host (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py
+    "incoherent-version-in-changelog": "killed: changelog/version coherence is not an OBS build property (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py
+    "requires-on-release": "killed: release-pinned requires are a deliberate dependency shape (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py
+    "non-coherent-filename": "killed: OBS names build outputs itself (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py
+    "dir-or-file-in-opt": "killed: FilelistCheck's filelist-forbidden-opt covers the same content (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py
+    "cross-directory-hard-link": "killed: cross-directory hard links are a deliberate package layout (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py
+    "setuid-binary": "killed: OBS normalises file permissions (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py
+    "setgid-binary": "killed: OBS normalises file permissions (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py
+    "non-readable": "killed: OBS normalises file permissions (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py
+    "non-standard-dir-perm": "killed: OBS normalises file permissions (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py
+    "non-standard-executable-perm": "killed: OBS normalises file permissions (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py
+    "perl-temp-file": "killed: deliberate content, the distro ships these files on purpose (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py
+    "no-documentation": "killed: structural property of -devel/-doc package splits (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py
+    "configure-without-libdir-spec": "killed: bnc#456048 header set (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py
+    "use-of-RPM_SOURCE_DIR": "killed: bnc#456048 header set (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py
+    "hardcoded-library-path": "killed: bnc#456048 header set (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SourceCheck.py
+    "multiple-specfiles": "killed: multiple spec files are valid in OBS (issue #883)",
+    # Removed with the findings after the leftover-suppressions
+    # investigation (issue #883): the flagged shapes are extinct,
+    # invisible to the check, or non-UTF-8 / conventional by design.
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py
+    "symlink-crontab-file": "killed: no Factory package ships a crontab symlink (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py
+    "log-files-without-logrotate": "killed: rotation the check cannot see dominates the flagged set (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py
+    "file-not-utf8": "killed: the flagged set is non-UTF-8 by design (issue #883)",
+    # upstream: https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py
+    "mixed-use-of-spaces-and-tabs": "killed: the flagged layout is the conventional one (issue #883)",
 }
 
 # Filters dropped for findings that are still live: upstream's distro
@@ -644,30 +697,7 @@ PRUNE_RAW = {
 # spaces around the finding name).
 KEEP_FILTERS = {
     # pattern: reason
-    ".*invalid-version.*": "autobuild redundancy: OBS stamps the version (upstream: 'Stuff autobuild takes care about')",
-    ".*invalid-packager.*": "autobuild redundancy: OBS stamps the packager (upstream: 'Stuff autobuild takes care about')",
-    ".*invalid-buildhost.*": "autobuild redundancy: OBS stamps the build host (upstream: 'Stuff autobuild takes care about')",
-    " dir-or-file-in-opt ": "superseded: FilelistCheck's filelist-forbidden-opt fires on the same content, unsuppressed at E (upstream: 'handled by CheckFilelist.py')",
-    "incoherent-version-in-changelog": "recorded decision (issue #883): upstream openSUSE's shipped suppression stands; no case for surfacing it has been made",
-    " symlink-crontab-file": "recorded decision: upstream suppresses it citing bnc#591431",
-    " setuid-binary.*": "the dedicated permissions machinery carries the genuine cases \u2014 its findings are shielded in BlockedFilters \u2014 not this generic one",
-    " setgid-binary ": "the dedicated permissions machinery carries the genuine cases; upstream: 'An issue with OBS, works with autobuild'",
-    " non-readable ": "the dedicated permissions machinery carries the genuine cases; upstream: 'An issue with OBS, works with autobuild'",
-    " non-standard-dir-perm ": "the dedicated permissions machinery carries the genuine cases; upstream: 'An issue with OBS, works with autobuild'",
-    " non-standard-executable-perm ": "the dedicated permissions machinery carries the genuine cases; upstream: 'An issue with OBS, works with autobuild'",
-    "configure-without-libdir-spec": "recorded decision (issue #883): the line sits in upstream's bnc#456048 kernel-module block; the suppression is upstream's shipped behaviour",
-    "use-of-RPM_SOURCE_DIR": "recorded decision (issue #883): the line sits in upstream's bnc#456048 kernel-module block; the suppression is upstream's shipped behaviour",
-    "hardcoded-library-path": "recorded decision (issue #883): the line sits in upstream's bnc#456048 kernel-module block; the suppression is upstream's shipped behaviour",
-    " perl-temp-file ": "deliberate content decision (upstream: 'We want these files')",
-    " requires-on-release": "upstream: 'We check for that already'",
     " prereq-use": "upstream: 'currently too noisy, but might become relevant in the future'",
-    " file-not-utf8": "upstream: 'currently too noisy, but might become relevant in the future'",
-    " mixed-use-of-spaces-and-tabs ": "upstream: 'currently too noisy, but might become relevant in the future'",
-    " log-files-without-logrotate": "upstream: 'An issue with OBS, works with autobuild'",
-    " no-documentation": "measured: the finding is a structural property of -devel/-doc package splits \u2014 128 of the 300 audit-sample packages, one line each",
-    " multiple-specfiles": "upstream: 'An issue with OBS, works with autobuild'",
-    " non-coherent-filename ": "upstream: 'Many places have shorter paths'",
-    "cross-directory-hard-link": "measured concentration: 3,420 lines in 18 audit-sample packages that hard-link deliberately (documentation and Python byte-code farms)",
     r"^qa\S+: [EWI]:": "blanket package-class filter: OBS QA-script packages are build-service internals, not shipped product",
     r"^\S*(?:INTERNAL|internal)\.\S+: [EWI]:": "blanket package-class filter: OBS-internal packages are build-service internals, not shipped product",
 }
@@ -1098,7 +1128,8 @@ def raw_filter_pattern(entry):
 
 
 def prune_stale_filters(text, known, pruned_log, dropped_log, retargeted_log):
-    """Drop Filters/BlockedFilters lines referencing killed findings or dead
+    """Drop Filters/BlockedFilters/FilterErrorTitles lines referencing
+    killed findings or dead
     scopes, and rewrite lines whose target path moved (RETARGET_FILTERS).
 
     A comment block inside a list heads the entries that follow it, up to
@@ -1133,7 +1164,7 @@ def prune_stale_filters(text, known, pruned_log, dropped_log, retargeted_log):
 
     for line in lines:
         stripped = line.strip()
-        m = re.match(r"^(Filters|BlockedFilters)\s*=\s*\[", stripped)
+        m = re.match(r"^(Filters|BlockedFilters|FilterErrorTitles)\s*=\s*\[", stripped)
         if m:
             in_list = m.group(1)
             out.append(line)
