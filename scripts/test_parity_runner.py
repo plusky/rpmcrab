@@ -293,6 +293,55 @@ def test_runner_pins_unitdir_in_scratch_home():
             assert fh.read() == "%_unitdir /usr/lib/systemd/system\n"
 
 
+def test_unpinned_input_file_fails_the_case():
+    # The runner copies the whole input directory into both runs, so a
+    # file meta.toml does not pin would influence them unverified; the
+    # case fails on it before anything runs.
+    with tempfile.TemporaryDirectory() as td:
+        case_dir = os.path.join(td, "cases", "pin-case")
+        os.makedirs(os.path.join(case_dir, "input"))
+        payload = b"fake rpm bytes"
+        with open(os.path.join(case_dir, "input", "a.rpm"), "wb") as fh:
+            fh.write(payload)
+        with open(os.path.join(case_dir, "input", "stray.rpm"), "wb") as fh:
+            fh.write(b"unpinned")
+        meta = ('argv = ["a.rpm"]\n\n[[input]]\nfile = "a.rpm"\n'
+                f'sha256 = "{hashlib.sha256(payload).hexdigest()}"\n')
+        with open(os.path.join(case_dir, "meta.toml"), "w") as fh:
+            fh.write(meta)
+        old = runner.CASES_DIR
+        runner.CASES_DIR = os.path.join(td, "cases")
+        try:
+            res = runner.check_case("pin-case", None, ledger([]), td)
+        finally:
+            runner.CASES_DIR = old
+        assert res.status == "FAIL"
+        assert any("unpinned" in d.text for d in res.unattributed)
+
+
+def test_default_binary_never_falls_back_to_debug():
+    # A stale target/debug build must not silently become the binary
+    # under test: the default is the just-built release binary only.
+    with tempfile.TemporaryDirectory() as td:
+        def fake_bin(relpath):
+            path = os.path.join(td, relpath)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write("#!/bin/sh\n")
+            os.chmod(path, 0o755)
+            return path
+
+        fake_bin(os.path.join("target", "debug", "rpmcrab"))
+        old = runner.REPO_ROOT
+        runner.REPO_ROOT = td
+        try:
+            assert runner.default_port_bin() is None
+            fresh = fake_bin(os.path.join("target", "release", "rpmcrab"))
+            assert runner.default_port_bin() == fresh
+        finally:
+            runner.REPO_ROOT = old
+
+
 def main():
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]
