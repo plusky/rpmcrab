@@ -1204,6 +1204,24 @@ def test_reconcile_severity_directions():
     assert compared == 3, compared
 
 
+def test_port_severity_inventory_parses_multi_level_lines():
+    # The inventory writer joins a finding's levels with "," and no space
+    # (severity_inventory.rs: `letters.join(",")`); a parser that only
+    # accepts ", " silently drops every multi-level entry.
+    mod = _load()
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "severity-inventory.txt")
+        _write(path, "[emitted-levels]\n"
+                     "multi-level = E,W\n"
+                     "single-level = W\n"
+                     "\n[unresolved-sites]\n"
+                     "not-a-finding = E,W\n")
+        levels = mod.port_severity_inventory(path)
+    assert levels.get("multi-level") == {"E", "W"}, levels.get("multi-level")
+    assert levels.get("single-level") == {"W"}, levels.get("single-level")
+    assert "not-a-finding" not in levels
+
+
 def test_port_severity_inventory_reads_the_real_snapshot():
     mod = _load()
     path = os.path.join(os.path.dirname(HERE), "crates", "rpmcrab-core",
@@ -1212,6 +1230,11 @@ def test_port_severity_inventory_reads_the_real_snapshot():
     # prereq-use is emitted at W after its demotion (issue #883), and
     # the removed shared-library-not-executable is absent entirely.
     assert levels.get("prereq-use") == {"W"}, levels.get("prereq-use")
+    # The snapshot's two multi-level lines use the writer's "," join.
+    assert levels.get("forbidden-controlchar-found") == {"E", "W"}, \
+        levels.get("forbidden-controlchar-found")
+    assert levels.get("no-dependency-on") == {"E", "W"}, \
+        levels.get("no-dependency-on")
     assert "shared-library-not-executable" not in levels
     assert len(levels) > 300, len(levels)
 
