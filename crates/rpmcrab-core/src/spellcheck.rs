@@ -2,7 +2,11 @@
 //!
 //! Mirrors rpmlint's `spellcheck.py`: loads the en_US dictionary from the
 //! system hunspell paths, checks words in Summary/Description, and degrades
-//! gracefully when the dictionary is absent.
+//! gracefully when the dictionary is absent. Two deliberate extensions sit
+//! on top of the system dictionary: the bundled supplementary vocabulary
+//! (`data/spelling-wordlist.txt`) is added to it, and a word the en_GB
+//! dictionary accepts is accepted too, so British spellings in package
+//! prose are not findings.
 
 use std::path::Path;
 
@@ -20,6 +24,22 @@ const DICT_PATHS: &[&str] = &[
     "/usr/share/hunspell",
     "/usr/share/myspell",
     "/opt/homebrew/share/hunspell",
+];
+
+/// The bundled supplementary vocabulary, one word per line (`#` lines
+/// are comments). Added to the system dictionary at load: the words are
+/// established vocabulary that package prose uses correctly and the
+/// system dictionaries lack, so reporting them was noise.
+const SUPPLEMENTARY_WORDS: &str = include_str!("../data/spelling-wordlist.txt");
+
+/// Well-known generic TLDs, for recognising a bare host (no scheme) as
+/// a URL. Country-code TLDs are absent on purpose: the reference checks
+/// the labels of `example.co.uk`-style hosts individually, and file
+/// extensions that collide with a country code (`readme.md`) stay
+/// checked either way.
+const URL_TLDS: &[&str] = &[
+    "aero", "app", "asia", "biz", "com", "coop", "dev", "edu", "gov", "info", "int", "io", "jobs",
+    "mil", "mobi", "museum", "name", "net", "org", "post", "pro", "tel", "travel", "xxx",
 ];
 
 /// Environment variable that disables spellbook's ngram suggester when
@@ -41,6 +61,10 @@ fn ngram_suggestions_enabled() -> bool {
 /// A spellchecker, or `None` if no dictionary was found.
 pub struct Spellchecker {
     dict: spellbook::Dictionary<DictionaryBuildHasher>,
+    /// The en_GB dictionary, when installed: a word it accepts is
+    /// accepted, so British spellings are not findings. Suggestions
+    /// still come from the en_US dictionary alone.
+    dict_gb: Option<spellbook::Dictionary<DictionaryBuildHasher>>,
     /// Whether spellbook's ngram suggester contributes suggestions.
     /// On unless disabled (see `DISABLE_NGRAM_SUGGESTIONS_ENV`); the
     /// switch shapes suggestions only, never which words are flagged.
@@ -146,26 +170,48 @@ fn build_dictionary(
     spellbook::Dictionary::new_with_hasher(aff, dic, DictionaryBuildHasher)
 }
 
+/// Load one language's dictionary from the standard paths.
+fn load_dictionary(lang: &str) -> Option<spellbook::Dictionary<DictionaryBuildHasher>> {
+    for dir in DICT_PATHS {
+        let aff = Path::new(dir).join(format!("{lang}.aff"));
+        let dic = Path::new(dir).join(format!("{lang}.dic"));
+        let (Ok(aff_s), Ok(dic_s)) = (std::fs::read_to_string(&aff), std::fs::read_to_string(&dic))
+        else {
+            continue;
+        };
+        if let Ok(dict) = build_dictionary(&aff_s, &dic_s) {
+            return Some(dict);
+        }
+    }
+    None
+}
+
+/// Add the bundled supplementary vocabulary to `dict`. An entry the
+/// dictionary's affix parser rejects is skipped: the bundled list is
+/// pinned by a unit test, so a bad entry fails the test suite, never
+/// a user run.
+fn add_supplementary_words(dict: &mut spellbook::Dictionary<DictionaryBuildHasher>) {
+    for line in SUPPLEMENTARY_WORDS.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let _ = dict.add(line);
+    }
+}
+
 impl Spellchecker {
     /// Try to load the en_US dictionary from standard paths.
     /// Returns `None` if not found (graceful degradation).
     pub fn new() -> Option<Self> {
-        for dir in DICT_PATHS {
-            let aff = Path::new(dir).join("en_US.aff");
-            let dic = Path::new(dir).join("en_US.dic");
-            let (Ok(aff_s), Ok(dic_s)) =
-                (std::fs::read_to_string(&aff), std::fs::read_to_string(&dic))
-            else {
-                continue;
-            };
-            if let Ok(dict) = build_dictionary(&aff_s, &dic_s) {
-                return Some(Self {
-                    dict,
-                    ngram_suggestions: ngram_suggestions_enabled(),
-                });
-            }
-        }
-        None
+        let mut dict = load_dictionary("en_US")?;
+        add_supplementary_words(&mut dict);
+        let dict_gb = load_dictionary("en_GB");
+        Some(Self {
+            dict,
+            dict_gb,
+            ngram_suggestions: ngram_suggestions_enabled(),
+        })
     }
 
     /// Build from inline dictionary strings (for tests). Defaults to
@@ -174,8 +220,38 @@ impl Spellchecker {
     pub(crate) fn from_strings(aff: &str, dic: &str) -> Option<Self> {
         build_dictionary(aff, dic).ok().map(|dict| Self {
             dict,
+            dict_gb: None,
             ngram_suggestions: true,
         })
+    }
+
+    /// Build from inline en_US and en_GB dictionary strings (for tests).
+    #[cfg(test)]
+    pub(crate) fn from_strings_with_gb(aff: &str, dic: &str, gb_dic: &str) -> Option<Self> {
+        let dict = build_dictionary(aff, dic).ok()?;
+        let dict_gb = build_dictionary(aff, gb_dic).ok();
+        Some(Self {
+            dict,
+            dict_gb,
+            ngram_suggestions: true,
+        })
+    }
+
+    /// Add the bundled supplementary vocabulary (for tests: `new()` is
+    /// the only production caller).
+    #[cfg(test)]
+    pub(crate) fn with_supplementary_words(mut self) -> Self {
+        add_supplementary_words(&mut self.dict);
+        self
+    }
+
+    /// Whether either dictionary accepts the word.
+    fn accepts(&self, word: &str) -> bool {
+        self.dict.check(word)
+            || self
+                .dict_gb
+                .as_ref()
+                .is_some_and(|dict_gb| dict_gb.check(word))
     }
 
     /// Override the ngram-suggester switch (for tests).
@@ -208,13 +284,24 @@ impl Spellchecker {
         // Simple word tokenizer with positions for sentence-break detection.
         let words = tokenize(&normalized);
 
+        // Spans the reference never checks: its checker filters URLs
+        // and email addresses out before checking (spellcheck.py's
+        // URLFilter and EmailFilter), so their words are not findings.
+        let spans = skippable_spans(&normalized);
+
         for (word, byte_offset) in words.iter() {
             if warned.contains(*word) {
                 continue;
             }
 
-            // Skip emails, URLs, WikiWords (CamelCase).
-            if is_email(word) || is_url(word) || is_wiki_word(word) {
+            // Skip words inside a URL or email address, and WikiWords
+            // (CamelCase).
+            let word_end = *byte_offset + word.len();
+            if spans
+                .iter()
+                .any(|(s, e)| *byte_offset < *e && *s < word_end)
+                || is_wiki_word(word)
+            {
                 continue;
             }
 
@@ -223,7 +310,7 @@ impl Spellchecker {
                 continue;
             }
 
-            if self.dict.check(word) {
+            if self.accepts(word) {
                 continue;
             }
             warned.insert(word.to_string());
@@ -275,7 +362,9 @@ impl Spellchecker {
 }
 
 /// Split text into (word, byte_offset) pairs, keeping only alphabetic
-/// sequences with apostrophes.
+/// sequences with apostrophes. Apostrophes at a token's edges are
+/// quoting, not part of the word, and are trimmed (the reference's
+/// tokenizer does the same); an all-apostrophe run yields no token.
 fn tokenize(text: &str) -> Vec<(&str, usize)> {
     let mut words = Vec::new();
     let mut start: Option<usize> = None;
@@ -285,22 +374,70 @@ fn tokenize(text: &str) -> Vec<(&str, usize)> {
                 start = Some(i);
             }
         } else if let Some(s) = start {
-            words.push((&text[s..i], s));
+            push_token(&mut words, text, s, i);
             start = None;
         }
     }
     if let Some(s) = start {
-        words.push((&text[s..], s));
+        push_token(&mut words, text, s, text.len());
     }
     words
 }
 
-fn is_email(word: &str) -> bool {
-    word.contains('@') && word.contains('.')
+fn push_token<'a>(words: &mut Vec<(&'a str, usize)>, text: &'a str, start: usize, end: usize) {
+    let raw = &text[start..end];
+    let trimmed = raw.trim_matches('\'');
+    if trimmed.is_empty() {
+        return;
+    }
+    let offset = start + (raw.len() - raw.trim_start_matches('\'').len());
+    words.push((trimmed, offset));
 }
 
-fn is_url(word: &str) -> bool {
-    word.starts_with("http://") || word.starts_with("https://") || word.starts_with("www.")
+/// Byte spans of the whitespace-normalized text that hold a URL or an
+/// email address.
+fn skippable_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start: Option<usize> = None;
+    for (i, c) in text.char_indices() {
+        if c == ' ' {
+            if let Some(s) = start.take()
+                && is_skippable_chunk(&text[s..i])
+            {
+                spans.push((s, i));
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(s) = start
+        && is_skippable_chunk(&text[s..])
+    {
+        spans.push((s, text.len()));
+    }
+    spans
+}
+
+/// Whether one whitespace-delimited chunk is a URL or an email
+/// address: a scheme URL, a `www.` host, an address with a dotted
+/// domain part, or a bare host whose last label is a well-known TLD —
+/// each optionally followed by a path.
+fn is_skippable_chunk(chunk: &str) -> bool {
+    let chunk = chunk.trim_matches(|c: char| !(c.is_alphanumeric() || "@.:/_-+%~#?=&".contains(c)));
+    if chunk.contains("://") {
+        return true;
+    }
+    if chunk.to_lowercase().starts_with("www.") {
+        return true;
+    }
+    if let Some((_, domain)) = chunk.split_once('@') {
+        return domain.contains('.');
+    }
+    let host = chunk.split('/').next().unwrap_or("");
+    match host.rsplit_once('.') {
+        Some((_, tld)) => URL_TLDS.contains(&tld.to_lowercase().as_str()),
+        None => false,
+    }
 }
 
 fn is_wiki_word(word: &str) -> bool {
@@ -792,5 +929,107 @@ mod tests {
                 "child must report its mode (disabled={disabled})"
             );
         }
+    }
+
+    #[test]
+    fn url_and_email_words_are_not_checked() {
+        // The reference filters URLs and email addresses out before
+        // checking; none of their parts are findings.
+        let checker = test_checker();
+        let text = "hello https://qwargl.example.com/x www.qwargl.org test \
+                    bob@qwargl.net package docs.qwargl.io/en check";
+        assert!(checker.check(text, "testpkg", &[]).is_empty());
+        // The same word outside a URL is still reported.
+        let result = checker.check("hello qwargl world", "testpkg", &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "qwargl");
+    }
+
+    #[test]
+    fn dotted_filenames_are_still_checked() {
+        // Only hosts are skipped: a dotted file name's parts are
+        // checked, like the reference checks them.
+        let checker = test_checker();
+        let result = checker.check("test qwargl.toml check", "testpkg", &[]);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, "qwargl");
+        assert_eq!(result[1].0, "toml");
+    }
+
+    #[test]
+    fn quoted_words_are_checked_without_their_quotes() {
+        let checker = test_checker();
+        let result = checker.check("hello 'wrld' world", "testpkg", &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "wrld");
+        let result = checker.check("hello wrld' world", "testpkg", &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "wrld");
+    }
+
+    #[test]
+    fn supplementary_words_are_accepted() {
+        // The bundled wordlist is production vocabulary: with it, the
+        // words package prose uses correctly stop being findings.
+        let checker = test_checker().with_supplementary_words();
+        assert!(
+            checker
+                .check("hello backend world", "testpkg", &[])
+                .is_empty()
+        );
+        assert!(
+            checker
+                .check("hello subpackage world", "testpkg", &[])
+                .is_empty()
+        );
+        // Sentence-initial capitalised form of a listed word.
+        assert!(
+            checker
+                .check("Backend hello world", "testpkg", &[])
+                .is_empty()
+        );
+        // A word the list does not carry is still reported.
+        let result = checker.check("hello wrld", "testpkg", &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "wrld");
+    }
+
+    #[test]
+    fn every_supplementary_word_parses_and_is_accepted() {
+        // Pins the bundled file: every entry must parse as a dictionary
+        // line and be accepted once added (a typo'd entry would
+        // silently do nothing in production).
+        let mut checker = test_checker();
+        for line in SUPPLEMENTARY_WORDS.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            assert!(
+                checker.dict.add(line).is_ok(),
+                "supplementary entry {line:?} does not parse"
+            );
+            assert!(
+                checker.accepts(line),
+                "supplementary entry {line:?} not accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn british_spelling_accepted_only_with_gb_dictionary() {
+        let gb_dic = "3\nhello\nworld\nbehaviour\n";
+        let with_gb =
+            Spellchecker::from_strings_with_gb(TEST_AFF, TEST_DIC, gb_dic).expect("dictionaries");
+        assert!(
+            with_gb
+                .check("hello behaviour world", "testpkg", &[])
+                .is_empty()
+        );
+        // Without the en_GB dictionary the same word is a finding.
+        let without_gb = test_checker();
+        let result = without_gb.check("hello behaviour world", "testpkg", &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "behaviour");
     }
 }
