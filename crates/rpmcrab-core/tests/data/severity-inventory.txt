@@ -403,7 +403,7 @@ zero-perms-ghost = W
 # count = 37
 alternatives.rs: add_info( out, level, pkg, "li
 binaries.rs: add_info( out, info_type, pkg, "unused-direct-
-binaries.rs: add_info(out, Level::Warning, pkg, &r_name, &[&pkgfile.name, &f_name])
+binaries.rs: add_info(out, Level::Warning, pkg, r_name, &[&pkgfile.name, f_name])
 check.rs: add_info(Finding { level: *level, check: (*check).to_string(),
 check.rs: add_info(make_finding( &pkg.name, "", level, check, details.iter().map
 check.rs: add_info(make_finding( &pkg.name, &pkg.arch, level, check, details.ite

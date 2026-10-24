@@ -2690,6 +2690,77 @@ fn noarch_binary_is_foreign_target(pkgfile: &PkgFile) -> bool {
     }
 }
 
+/// Collect the forbidden-function calls one file makes: for every
+/// `WarnOnFunction` config entry whose function pattern matches the
+/// file's symbols, the finding name, the function name and the
+/// compiled `good_param` waiver pattern.
+fn forbidden_function_calls(
+    info: &ReadelfInfo,
+    config: &Config,
+) -> Vec<(String, String, Option<Regex>)> {
+    let forbidden_tbl = config
+        .configuration
+        .get("WarnOnFunction")
+        .and_then(toml::Value::as_table);
+    let forbidden: Vec<(String, String, Regex, Option<Regex>)> = forbidden_tbl
+        .map(|t| {
+            t.iter()
+                .filter_map(|(k, v)| {
+                    let f_name = v.get("f_name")?.as_str()?;
+                    let f_regex = Regex::new(&format!(r"({})\s?.*$", f_name)).ok()?;
+                    let good_param = v
+                        .get("good_param")
+                        .and_then(|g| g.as_str())
+                        .and_then(|gp| Regex::new(gp).ok());
+                    Some((k.clone(), f_name.to_string(), f_regex, good_param))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut forbidden_calls = Vec::new();
+    for (r_name, f_name, f_regex, good_param) in &forbidden {
+        if info.has_function_matching(f_regex) {
+            forbidden_calls.push((r_name.clone(), f_name.clone(), good_param.clone()));
+        }
+    }
+    forbidden_calls
+}
+
+/// Emit the findings for one file's forbidden-function calls from its
+/// collected `strings` output: a failed `strings` run reports
+/// `strings-failed`; otherwise each call warns unless a string in the
+/// output matches the entry's `good_param` waiver pattern.
+fn report_forbidden_functions(
+    pkg: &Pkg,
+    pkgfile: &PkgFile,
+    forbidden_calls: &[(String, String, Option<Regex>)],
+    strings: &StringsInfo,
+    out: &mut Filter,
+) {
+    if let Some(reason) = &strings.failed {
+        add_info(
+            out,
+            Level::Error,
+            pkg,
+            "strings-failed",
+            &[&pkgfile.name, reason],
+        );
+        return;
+    }
+    for (r_name, f_name, good_param) in forbidden_calls {
+        let mut waived = false;
+        if let Some(re) = good_param {
+            waived = strings
+                .strings
+                .iter()
+                .any(|s| re.is_match(s).unwrap_or(false));
+        }
+        if !waived {
+            add_info(out, Level::Warning, pkg, r_name, &[&pkgfile.name, f_name]);
+        }
+    }
+}
+
 impl BinariesCheck {
     pub fn new(config: &Config) -> Self {
         Self::with_tool_source(config, ToolSource::Path)
@@ -3834,34 +3905,7 @@ impl BinariesCheck {
         config: &Config,
         out: &mut Filter,
     ) {
-        let forbidden_tbl = config
-            .configuration
-            .get("WarnOnFunction")
-            .and_then(toml::Value::as_table);
-        let forbidden: Vec<(String, String, Regex, Option<Regex>)> = forbidden_tbl
-            .map(|t| {
-                t.iter()
-                    .filter_map(|(k, v)| {
-                        let f_name = v.get("f_name")?.as_str()?;
-                        let f_regex = Regex::new(&format!(r"({})\s?.*$", f_name)).ok()?;
-                        let good_param = v
-                            .get("good_param")
-                            .and_then(|g| g.as_str())
-                            .and_then(|gp| Regex::new(gp).ok());
-                        Some((k.clone(), f_name.to_string(), f_regex, good_param))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        if forbidden.is_empty() {
-            return;
-        }
-        let mut forbidden_calls = Vec::new();
-        for (r_name, f_name, f_regex, good_param) in &forbidden {
-            if info.has_function_matching(f_regex) {
-                forbidden_calls.push((r_name.clone(), f_name.clone(), good_param.clone()));
-            }
-        }
+        let forbidden_calls = forbidden_function_calls(info, config);
         if forbidden_calls.is_empty() {
             return;
         }
@@ -3870,28 +3914,7 @@ impl BinariesCheck {
             return;
         }
         let strings = StringsInfo::parse(&self.strings, &pkgfile.path);
-        if let Some(reason) = strings.failed {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "strings-failed",
-                &[&pkgfile.name, &reason],
-            );
-            return;
-        }
-        for (r_name, f_name, good_param) in forbidden_calls {
-            let mut waived = false;
-            if let Some(re) = good_param {
-                waived = strings
-                    .strings
-                    .iter()
-                    .any(|s| re.is_match(s).unwrap_or(false));
-            }
-            if !waived {
-                add_info(out, Level::Warning, pkg, &r_name, &[&pkgfile.name, &f_name]);
-            }
-        }
+        report_forbidden_functions(pkg, pkgfile, &forbidden_calls, &strings, out);
     }
 
     fn check_optflags(&self, pkg: &Pkg, pkgfile: &PkgFile, config: &Config, out: &mut Filter) {
@@ -7554,21 +7577,6 @@ description = "explicit priority string bypasses the system crypto policy"
         let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
         run_batch(&mut check, pkg, config, &mut out);
         out.results().to_vec()
-    }
-
-    fn fake_tool_dir(name: &str, script_body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
-        let dir = tempfile::TempDir::new().expect("tmpdir");
-        let tool_dir = dir.path().join("tools");
-        std::fs::create_dir(&tool_dir).expect("mkdir tools");
-        let path = tool_dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{script_body}\n")).expect("write fake tool");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod fake tool");
-        }
-        (dir, tool_dir)
     }
 
     // A minimal ELF64 executable parseable by goblin, so run_elf_checks
@@ -12417,20 +12425,41 @@ description = "explicit priority string bypasses the system crypto policy"
     fn forbidden_function_crypto_policy() {
         // Reference warn-on-functions.toml: the finding fires on a bare
         // SSL_CTX_set_cipher_list call, and is waived when the strings
-        // output shows the PROFILE=SYSTEM good_param.
+        // output shows the PROFILE=SYSTEM good_param. The evaluation is
+        // pinned on collected strings rather than a live `strings` run:
+        // this test flaked repeatedly in CI (#548, #736) when a
+        // transient fork/exec failure under parallel load flipped the
+        // tool probe or the parse spawn behind it. The end-to-end path
+        // over the real tool stays pinned by the fixture tests
+        // (forbidden_function_fires_for_dynsym_import,
+        // forbidden_function_waived_by_good_param).
         let config = config_with(
             "[WarnOnFunction.crypto-policy-non-compliance-openssl]\n\
              f_name = \"SSL_CTX_set_cipher_list\"\n\
              good_param = \"PROFILE=SYSTEM\"\n",
         );
-        let (_tmp, tool_dir) = fake_tool_dir("strings", "echo symbol-table-dump");
-        let check = BinariesCheck::with_tool_dir(&config, Some(&tool_dir));
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
         let pkgfile = syn_file("/usr/bin/openssl-app", "ELF 64-bit LSB executable");
         let mut info = syn_info();
         info.functions = vec!["SSL_CTX_set_cipher_list".to_string()];
+        let calls = forbidden_function_calls(&info, &config);
+        assert_eq!(calls.len(), 1, "one forbidden call collected");
+        assert_eq!(calls[0].0, "crypto-policy-non-compliance-openssl");
+        assert_eq!(calls[0].1, "SSL_CTX_set_cipher_list");
+        assert!(calls[0].2.is_some(), "good_param pattern compiled");
+
+        let strings = |lines: &[&str]| StringsInfo {
+            strings: lines.iter().map(ToString::to_string).collect(),
+            failed: None,
+        };
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_forbidden_functions(&pkg, &pkgfile, &info, &config, &mut out);
+        report_forbidden_functions(
+            &pkg,
+            &pkgfile,
+            &calls,
+            &strings(&["symbol-table-dump"]),
+            &mut out,
+        );
         let results = out.results().to_vec();
         let lines = lines_for(&results, "crypto-policy-non-compliance-openssl");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
@@ -12442,15 +12471,52 @@ description = "explicit priority string bypasses the system crypto policy"
         );
 
         // The good_param in the strings output waives the finding.
-        let (_tmp, tool_dir) = fake_tool_dir("strings", "echo PROFILE=SYSTEM");
-        let check = BinariesCheck::with_tool_dir(&config, Some(&tool_dir));
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_forbidden_functions(&pkg, &pkgfile, &info, &config, &mut out);
+        report_forbidden_functions(
+            &pkg,
+            &pkgfile,
+            &calls,
+            &strings(&["PROFILE=SYSTEM"]),
+            &mut out,
+        );
         assert!(
             out.results().is_empty(),
             "waived call must be quiet: {:?}",
             out.results()
         );
+    }
+
+    #[test]
+    fn forbidden_function_strings_failure_is_reported() {
+        // A failed `strings` run over a file with a forbidden call
+        // reports strings-failed instead of the per-function findings:
+        // the waiver scan has no output to consult.
+        let config = config_with(
+            "[WarnOnFunction.crypto-policy-non-compliance-openssl]\n\
+             f_name = \"SSL_CTX_set_cipher_list\"\n\
+             good_param = \"PROFILE=SYSTEM\"\n",
+        );
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/bin/openssl-app", "ELF 64-bit LSB executable");
+        let mut info = syn_info();
+        info.functions = vec!["SSL_CTX_set_cipher_list".to_string()];
+        let calls = forbidden_function_calls(&info, &config);
+        let failed = StringsInfo {
+            strings: Vec::new(),
+            failed: Some("exit status: 1".to_string()),
+        };
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        report_forbidden_functions(&pkg, &pkgfile, &calls, &failed, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "strings-failed");
+        assert_eq!(lines.len(), 1, "exactly one failure line: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("exit status: 1"),
+            "detail carries the reason: {}",
+            lines[0]
+        );
+        assert_lacks(&results, "crypto-policy-non-compliance-openssl");
     }
 
     #[test]
