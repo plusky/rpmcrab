@@ -5,7 +5,8 @@ divergence ledger.
 
 For each case the runner:
 
-  1. verifies the case inputs against the sha256 pins in meta.toml;
+  1. verifies the case inputs against the sha256 pins in meta.toml and
+     fails on any input file meta.toml does not pin;
   2. runs the pinned reference (scripts/setup-rpmlint-ref.sh's environment)
      with the case's recorded argv and requires its normalized output to
      reproduce the frozen expected/ triple byte-for-byte;
@@ -38,8 +39,8 @@ Usage:
 
 Environment:
   RPMLINT_REF   reference env dir (default: .parity-ref/ in the repo root)
-  RPMCRAB_BIN   rpmcrab binary (default: target/release/rpmcrab, then
-                target/debug/rpmcrab, in the repo root)
+  RPMCRAB_BIN   rpmcrab binary (default: target/release/rpmcrab in
+                the repo root)
 """
 
 import argparse
@@ -600,7 +601,10 @@ def check_case(name, runner, ledger, scratch):
     case_dir = os.path.join(CASES_DIR, name)
     meta = load_toml(os.path.join(case_dir, "meta.toml"))
 
-    # 1. Input pins.
+    # 1. Input pins: every file a run consumes is pinned by sha256 in
+    #    meta.toml, and the input directory holds nothing else — the
+    #    runner copies the whole directory into both runs, so an
+    #    unpinned file would otherwise influence them unverified.
     for inp in meta.get("input", []):
         path = os.path.join(case_dir, "input", inp["file"])
         if not os.path.exists(path):
@@ -613,6 +617,17 @@ def check_case(name, runner, ledger, scratch):
                 f"input sha256 drift: {inp['file']} does not match "
                 "meta.toml"))
             return res
+    input_dir = os.path.join(case_dir, "input")
+    on_disk = (set(os.listdir(input_dir))
+               if os.path.isdir(input_dir) else set())
+    unpinned = sorted(on_disk
+                      - {inp["file"] for inp in meta.get("input", [])})
+    if unpinned:
+        res.status = "FAIL"
+        res.unattributed.append(Diff(
+            "unpinned input file(s) not in meta.toml: "
+            + ", ".join(unpinned)))
+        return res
 
     work = os.path.join(scratch, "case-" + name)
     try:
@@ -672,6 +687,16 @@ def check_case(name, runner, ledger, scratch):
     return res
 
 
+def default_port_bin():
+    """The default binary under test: the just-built release binary.
+    A debug build is never a fallback — it can be a stale artefact of
+    an older tree and would silently test the wrong code."""
+    path = os.path.join(REPO_ROOT, "target", "release", "rpmcrab")
+    if os.path.isfile(path) and os.access(path, os.X_OK):
+        return path
+    return None
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--case", action="append", default=[],
@@ -690,11 +715,7 @@ def main(argv=None):
         "RPMLINT_REF", os.path.join(REPO_ROOT, ".parity-ref")))
     port_bin = args.bin or os.environ.get("RPMCRAB_BIN")
     if not port_bin:
-        for cand in ("target/release/rpmcrab", "target/debug/rpmcrab"):
-            path = os.path.join(REPO_ROOT, cand)
-            if os.path.isfile(path) and os.access(path, os.X_OK):
-                port_bin = path
-                break
+        port_bin = default_port_bin()
     if not port_bin or not os.path.isfile(port_bin):
         print("no rpmcrab binary: build one (cargo build --release) or "
               "pass --bin / $RPMCRAB_BIN", file=sys.stderr)
