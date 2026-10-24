@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Install the LibreOffice en_US hunspell dictionaries into a target directory.
+# Install the LibreOffice en_US and en_GB hunspell dictionaries into a target
+# directory.
 #
-# Spellcheck tests need real hunspell dictionaries; the en_US pair comes from
+# Spellcheck tests need real hunspell dictionaries; the pairs come from
 # the LibreOffice dictionaries repository (the same source openSUSE packages
 # from).
 #
@@ -21,6 +22,8 @@ target_dir="${1:?usage: install-hunspell-dicts.sh <target-dir>}"
 dict_commit="6feecdc45bb14d46b4273f2cf6c0e3491cbee276"
 aff_sha256="c7a8c4d08c29d237880844b1623099f59092602f189be38ce3912e457ff38bc1"
 dic_sha256="fa070979b1c5448bd7ab66eb6acb616d306f92879eb4218bc16ee35d39a608ee"
+gb_aff_sha256="c9dfcd5c8ced460579630ec6ed50f29ea9e967b5430026a2b0380daabea51b22"
+gb_dic_sha256="140c2d9804b380c943a57437dc608de736c1cbdfa0d65438f8ea1dce54013b8b"
 
 # Verify "<sum>  <path>" lines on stdin. sha256sum on Linux; shasum -a 256
 # is the same check where sha256sum is absent (macOS). With neither tool
@@ -65,3 +68,5 @@ fetch() {
 mkdir -p "$target_dir"
 fetch en_US.aff "$aff_sha256"
 fetch en_US.dic "$dic_sha256"
+fetch en_GB.aff "$gb_aff_sha256"
+fetch en_GB.dic "$gb_dic_sha256"
