@@ -7,7 +7,7 @@ argv = ["libLTO21-21.1.8-9.2.aarch64.rpm"]
 captured = "2026-10-23"
 
 [source]
-description = "openSUSE Factory llvm21 build, libLTO21 subpackage. shlib-policy-name-error badness 10000 > 999, abort banner, exit 66. Small (64K) committable exit-66 case."
+description = "openSUSE Factory llvm21 build, libLTO21 subpackage. shlib-policy-name-error (Badness: 10000) and unknown-key bring the badness to 10001 > 999: abort banner, exit 66. Small (64K) committable exit-66 case."
 
 [tools]
 present = ["checkbashisms","dash","desktop-file-validate","readelf","objdump","ldd","file"]

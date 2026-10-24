@@ -187,6 +187,14 @@ were taken under; the reference expands `%{_unitdir}` at import time
 (SystemdInstallCheck) and matches no unit files on a host whose rpm
 leaves the macro undefined.
 
+Both runs verify signatures against the host rpmdb's keyring — the
+reference through `rpm -Kv`, the port in-process through librpm. The
+frozen expectations pin the empty-keyring state: no signing keys
+imported into the rpmdb, so a signed input reports `unknown-key`
+(`liblto21`'s second error). A host whose rpmdb keyring holds the
+signing key verifies those signatures instead, and the affected cases
+no longer reproduce.
+
 The differ attributes each difference to a `divergences.toml` entry. An
 entry naming the finding, its family stem (for templated findings such
 as `daemon-activation-in-%post`), or its emitting check module — or a
@@ -230,6 +238,11 @@ scripts/capture-parity.sh <name> <input.rpm|spec> [-- extra rpmlint args]
 `capture-parity.sh` sets `XDG_CONFIG_HOME` for the reference itself, from
 `RPMLINT_REF` (override the config dir with `RPMLINT_XDG`); the ambient
 `XDG_CONFIG_HOME` of the calling shell is deliberately not inherited.
+
+Capture under the same preconditions the corpus runs under (see
+*Running the corpus*): in particular the capture host's rpmdb keyring
+holds no imported signing keys — the keyring state is baked into the
+frozen signature findings.
 
 Then fill in `cases/<name>/meta.toml`'s `[source] description`, review the
 diff, and commit. External tools rpmlint shells out to (`checkbashisms`,

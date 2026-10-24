@@ -9,6 +9,12 @@
 #   - The reference venv / XDG config paths in the header become <VENV>/<XDG>.
 #   - No host path, build root, home dir or username may survive (leak gate).
 #
+# Capture preconditions (tests/parity/README.md, "Running the corpus"):
+# the reference config is the overlay below, and signature verification
+# consults the host rpmdb's keyring — captures are taken with an empty
+# keyring (no signing keys imported), the state the frozen expectations
+# pin: a signed package reports unknown-key.
+#
 # Usage:
 #   scripts/capture-parity.sh <case> <input.rpm|spec> [more inputs] [-- extra rpmlint args]
 # Environment:
