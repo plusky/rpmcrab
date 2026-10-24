@@ -387,17 +387,19 @@ jobs:
       # gives the reference venv the librpm binding it is created against
       # (scripts/setup-rpmlint-ref.sh). git is declared for the same reason
       # as in the drift job: the setup script clones the pinned reference.
+      # binutils carries readelf/objdump for the reference and the port.
       - name: Install RPM toolchain and reference tools
         uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
         with:
-          packages: librpm-dev rpm file devscripts dash desktop-file-utils appstream-util python3-rpm git
+          packages: librpm-dev rpm file devscripts dash desktop-file-utils appstream-util python3-rpm git binutils
           version: ${{ steps.apt-cache-version.outputs.version }}
           execute_install_scripts: true
-      # setup-rpmlint-ref.sh builds the reference venv with uv.
+      # setup-rpmlint-ref.sh builds the reference venv with uv; both the
+      # action and the uv version it installs are pinned.
       - name: Install uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.5"
       # Spellcheck findings need real hunspell dictionaries; grab the
       # LibreOffice en_US pair (the same source openSUSE packages from).
       - name: Install hunspell dictionaries

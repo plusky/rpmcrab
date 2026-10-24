@@ -242,10 +242,14 @@ def build_module_map(ref_dir, port_descriptions):
             return
         for fn in sorted(os.listdir(directory)):
             if fn.endswith(".toml"):
-                try:
-                    keys = load_toml(os.path.join(directory, fn))
-                except Exception:
-                    continue
+                # A description that cannot be read or parsed fails the
+                # run: skipping it drops the check's findings from the
+                # module map, and their differences then surface
+                # unattributed with no pointer at the cause. A missing
+                # directory is the only tolerated absence (the isdir
+                # guard above); read and parse failures — OSError,
+                # TOMLDecodeError — propagate.
+                keys = load_toml(os.path.join(directory, fn))
                 for key in keys:
                     module_of.setdefault(key, fn[:-len(".toml")])
 
