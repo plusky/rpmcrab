@@ -215,6 +215,9 @@ impl AlternativesCheck {
                 continue;
             };
             let mut bin_found = false;
+            // Whether any `binary=` line was seen at all: presence and
+            // satisfaction are separate questions (issue #931).
+            let mut bin_seen = false;
             let mut man_found = false;
             for (line_nr, line) in content.lines().enumerate() {
                 let line_nr_str = format!("Line: {line_nr}");
@@ -232,6 +235,7 @@ impl AlternativesCheck {
                 let (key, value) = (parts[0], parts[1]);
                 match key {
                     "binary" => {
+                        bin_seen = true;
                         if bin_found {
                             add_info(
                                 out,
@@ -305,7 +309,11 @@ impl AlternativesCheck {
                     }
                 }
             }
-            if !bin_found {
+            // The summary finding reports a binary entry that was
+            // declared but not satisfied; a conf that never declared
+            // one (a man-only libalternatives group) has no binary
+            // entry to miss (issue #931).
+            if bin_seen && !bin_found {
                 add_info(
                     out,
                     Level::Warning,
@@ -1071,5 +1079,41 @@ mod tests {
             let count = results.iter().filter(|(n, _)| n == name).count();
             assert_eq!(count, 1, "expected exactly one {name}: {results:?}");
         }
+    }
+
+    /// A libalternatives group may register only a man page: a conf
+    /// whose lines carry no `binary=` entry has no binary entry to
+    /// miss, so neither binary finding fires (issue #931).
+    #[test]
+    fn man_only_conf_draws_no_binary_findings() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let pkg = libalternatives_pkg(dir.path(), &[("foo.conf", "man = foo.1\n")]);
+        let results = findings_for(&pkg);
+        for name in [
+            "binary-entry-value-not-found",
+            "wrong-or-missed-binary-entry",
+        ] {
+            assert!(
+                !has(&results, name),
+                "{name} must not fire for a man-only conf: {results:?}"
+            );
+        }
+    }
+
+    /// Silencing the summary finding for a man-only conf does not
+    /// silence the conf's man validation (issue #931).
+    #[test]
+    fn man_only_conf_with_missing_man_still_warns_for_the_man() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let pkg = libalternatives_pkg(dir.path(), &[("foo.conf", "man = absent.1\n")]);
+        let results = findings_for(&pkg);
+        assert!(
+            has(&results, "man-entry-value-not-found"),
+            "missing man entry must still be reported: {results:?}"
+        );
+        assert!(
+            !has(&results, "wrong-or-missed-binary-entry"),
+            "man-only conf must not draw the binary summary: {results:?}"
+        );
     }
 }
