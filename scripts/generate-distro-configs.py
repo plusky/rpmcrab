@@ -643,6 +643,18 @@ DROP_LIVE_FILTERS = {
     # Factory corpus: 14 lines in 12 packages. Ledgered in
     # tests/parity/divergences.toml.
     "dangerous-command": "blanket family filter dropped by ruling (issue #883): the check is a verbatim port at W and no reason for the suppression is recorded upstream; measured with the filter lifted over the 300-RPM Factory audit sample, it hides 14 lines in 12 packages (rm/mv invocations in packagers' own scriptlets)",
+    # Ruled in the suppressed-checks follow-through (issue #883):
+    # upstream hides the finding under 'currently too noisy, but
+    # might become relevant in the future'. The check now matches
+    # every PreReq usage -- the plain tag form included, which the
+    # parenthesised-only predicate never saw -- and the finding is
+    # demoted E -> W alongside (ledgered severity divergence), so
+    # the widespread legacy syntax surfaces without failing the
+    # builds that carry it. Measured over the Factory spec corpus:
+    # the plain form occurs on 253 lines in 153 specs; the
+    # parenthesised form occurs nowhere. spec-cleaner converts the
+    # tag mechanically. Ledgered in tests/parity/divergences.toml.
+    "prereq-use": "suppression dropped by ruling (issue #883): the check matches every PreReq usage, the plain tag form included, and the finding is demoted to W (ledgered severity divergence); measured over the Factory spec corpus, the plain form occurs on 253 lines in 153 specs and the parenthesised form nowhere",
 }
 
 # (finding, scope) -> reason: Filters entries scoped to dead paths. The finding
@@ -697,7 +709,6 @@ PRUNE_RAW = {
 # spaces around the finding name).
 KEEP_FILTERS = {
     # pattern: reason
-    " prereq-use": "upstream: 'currently too noisy, but might become relevant in the future'",
     r"^qa\S+: [EWI]:": "blanket package-class filter: OBS QA-script packages are build-service internals, not shipped product",
     r"^\S*(?:INTERNAL|internal)\.\S+: [EWI]:": "blanket package-class filter: OBS-internal packages are build-service internals, not shipped product",
 }
@@ -1071,7 +1082,7 @@ def pure_finding_pattern(entry):
 
     Strips quotes, trailing commas/comments, and the common '.*' wrappers plus
     surrounding whitespace: '.*no-buildroot-tag.*' -> 'no-buildroot-tag',
-    ' prereq-use' -> 'prereq-use'. Returns None for compound patterns
+    ' unstripped-binary-or-object' -> 'unstripped-binary-or-object'. Returns None for compound patterns
     (package anchors, paths, alternations) which are never pruned.
     """
     s = entry.strip().split("#", 1)[0].strip().rstrip(",").strip()

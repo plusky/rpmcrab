@@ -137,9 +137,6 @@ Filters = [
     'libzypp.*shlib-policy-name-error.*libzypp',
     'libtool.*shlib-policy.*',
 
-# Stuff that is currently too noisy, but might become relevant in the future
-    ' prereq-use',
-
 # An issue with OBS, works with autobuild
     '^\S+\.\S+: \w: read-error No such file or directory',
 

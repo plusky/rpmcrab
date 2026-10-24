@@ -113,8 +113,9 @@ fn buildprereq_re() -> &'static Regex {
 
 static PREREQ_RE: OnceLock<Regex> = OnceLock::new();
 fn prereq_re() -> &'static Regex {
-    PREREQ_RE
-        .get_or_init(|| Regex::new(r"(?i)^PreReq(\(.*\))\s*:\s*(\S.*?)\s*$").expect("static regex"))
+    PREREQ_RE.get_or_init(|| {
+        Regex::new(r"(?i)^PreReq(\(.*\))?\s*:\s*(\S.*?)\s*$").expect("static regex")
+    })
 }
 
 static SUSE_VERSION_RE: OnceLock<Regex> = OnceLock::new();
@@ -2334,7 +2335,7 @@ impl SpecCheck {
     fn checkline_package_prereq(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
         if let Ok(Some(caps)) = self.prereq_re.captures(line) {
             let value = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-            self.info(out, pkg, Level::Error, "prereq-use", &[value]);
+            self.info(out, pkg, Level::Warning, "prereq-use", &[value]);
         }
     }
 
@@ -6461,8 +6462,7 @@ Patch0: foo.patch
             "must stay silent: {results:?}"
         );
         // The configure-options form is the same removed finding.
-        let configure_form =
-            run_mini("Name: foo\n%build\n./configure --libdir=/usr/lib\n");
+        let configure_form = run_mini("Name: foo\n%build\n./configure --libdir=/usr/lib\n");
         assert!(
             !has(&configure_form, "hardcoded-library-path"),
             "must stay silent: {configure_form:?}"
@@ -6512,20 +6512,37 @@ Patch0: foo.patch
     }
 
     #[test]
-    fn prereq_use_fires_error_ref529() {
+    fn prereq_use_fires_warning_parenthesised_ref529() {
         let results = run_mini("Name: foo\nPreReq(pre): none\nPreReq(post): none_other\n");
         let lines = lines_for(&results, "prereq-use");
         assert_eq!(lines.len(), 2, "results: {results:?}");
         assert!(
-            lines[0].contains("E: prereq-use none"),
+            lines[0].contains("W: prereq-use none"),
             "line: {}",
             lines[0]
         );
         assert!(
-            lines[1].contains("E: prereq-use none_other"),
+            lines[1].contains("W: prereq-use none_other"),
             "line: {}",
             lines[1]
         );
+    }
+
+    #[test]
+    fn prereq_use_fires_on_plain_tag_form() {
+        // The plain `PreReq:` tag is the form the Factory tree carries
+        // (253 lines in 153 specs at measurement); the parenthesised
+        // qualifier is optional in the predicate.
+        let results = run_mini("Name: foo\nPreReq: sed\n");
+        let lines = lines_for(&results, "prereq-use");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(lines[0].contains("W: prereq-use sed"), "line: {}", lines[0]);
+    }
+
+    #[test]
+    fn prereq_use_silent_on_modern_requires_qualifiers() {
+        let results = run_mini("Name: foo\nRequires(pre): none\nRequires(post): none_other\n");
+        assert!(!has(&results, "prereq-use"), "unexpected: {results:?}");
     }
 
     #[test]
