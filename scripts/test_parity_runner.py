@@ -14,6 +14,7 @@ import importlib.util
 import os
 import sys
 import tempfile
+import tomllib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -340,6 +341,43 @@ def test_default_binary_never_falls_back_to_debug():
             assert runner.default_port_bin() == fresh
         finally:
             runner.REPO_ROOT = old
+
+
+# ---------------------------------------------------------------------------
+# module map construction
+# ---------------------------------------------------------------------------
+
+def test_module_map_records_description_keys():
+    with tempfile.TemporaryDirectory() as td:
+        ref_dir = os.path.join(td, "ref")
+        port_desc = os.path.join(td, "port-desc")
+        os.makedirs(port_desc)
+        with open(os.path.join(port_desc, "FilesCheck.toml"), "w") as fh:
+            fh.write('some-finding = "text"\n')
+        assert runner.build_module_map(ref_dir, port_desc) == {
+            "some-finding": "FilesCheck"}
+        # A missing descriptions directory is tolerated.
+        assert runner.build_module_map(
+            ref_dir, os.path.join(td, "nope")) == {}
+
+
+def test_malformed_description_fails_module_map_build():
+    # A description file that does not parse must fail loudly, not be
+    # skipped: a skipped file silently drops its check's findings from
+    # the module map, and their differences then surface unattributed
+    # with no pointer at the cause.
+    with tempfile.TemporaryDirectory() as td:
+        port_desc = os.path.join(td, "port-desc")
+        os.makedirs(port_desc)
+        with open(os.path.join(port_desc, "Broken.toml"), "w") as fh:
+            fh.write('key = "unterminated\n')
+        try:
+            runner.build_module_map(os.path.join(td, "ref"), port_desc)
+        except tomllib.TOMLDecodeError:
+            pass
+        else:
+            raise AssertionError(
+                "malformed description did not fail the module-map build")
 
 
 def main():
