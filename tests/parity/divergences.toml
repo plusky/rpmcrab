@@ -1145,7 +1145,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/issues/180"
 case = "global"
 check = "shared-library-not-executable"
 kind = "missing"
-reason = "Deliberate: the port does not emit E: shared-library-not-executable (upstream rpmlint#596). Shared libraries need no exec bit: the loader maps them PROT_EXEC regardless, Debian ships .so files as 0644, and an executable .so just segfaults when run. The reference still flags non-executable shared libraries."
+reason = "Mothballed after re-grounding (issue #939): the historical ground -- that the loader ignores the execute bit -- is false and is struck: find-debuginfo selects files by execute permission (rpm 4.14.3 scripts/find-debuginfo.sh, kept in debugedit's find-debuginfo.in), and rpm up to 4.16 set elf.attr exeonly so a non-executable shared library received no automatic Provides/Requires; that gating was dropped in rpm 4.17, while SLE 15 ships rpm 4.14.3. The ground that survives is scope: Factory ships rpm 4.17 and later, where dependency generation no longer keys on the bit, and rpmcrab targets Factory -- SLE's older rpm is outside its scope. rpmcrab does not emit it; the reference still emits it."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/596"
 [[divergence]]
@@ -1419,7 +1419,7 @@ since = "0.1.0"
 case = "global"
 check = "%ifarch-applied-patch"
 kind = "missing"
-reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding ('An issue with OBS, works with autobuild'); Fedora's config carries it only as a commented-out filter line inherited from the openSUSE config, never enabled -- the file's own FIXME asks whether these lines are relevant for Fedora at all ('PR which enables them or remove them is welcome'). No shipped config treats the finding as wanted signal, so the port does not emit it. The emission, its staged `--explain` entry, and the supporting tracking state are removed. The reference still emits it."
+reason = "Mothballed on measurement (issue #940): with the openSUSE filter lifted, the reference predicate fires 24 times across 19 of the 16,501 Factory specs, and every firing is the conventional idiom -- an architecture-specific patch (s390x, ppc64, aarch64, i586, big-endian) applied under the matching %ifarch. No decidable residue separates a mistaken application from the idiom, so the finding carries no actionable signal on Factory. rpmcrab does not emit it; the reference still emits it."
 since = "0.1.0"
 
 [[divergence]]
@@ -1461,7 +1461,7 @@ since = "0.1.0"
 case = "global"
 check = "unversioned-explicit-provides"
 kind = "missing"
-reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding; Fedora's config carries it only as a commented-out filter line, never enabled -- and on Fedora the warning is a known false positive against Fedora's own packaging guidelines (bundled()/deprecated() Provides: are required; upstream https://github.com/rpm-software-management/rpmlint/issues/1330). No shipped config treats the finding as wanted signal, so the port does not emit it. The emission and its staged `--explain` entry are removed. The reference still emits it."
+reason = "Mothballed on measurement (issue #940): the reference predicate fires 140,974 times across 1,303 of the 16,501 Factory specs. 138,569 firings (98.3%) are parenthesised capability names -- perl(...), pkgconfig(...), locale(...), appdata(...), group(...), user(...) -- whose versioning is carried by the capability scheme itself, and 136,771 firings sit in just 30 generated texlive specs. The plain residue (1,358 firings, 804 distinct names) is dominated by deliberate virtual provides (myspell-dictionary, kmp_in_kernel, ispell_dictionary, windowmanager, the jre1.x name-versioned family). Versioning these is a per-package judgement, not a decidable defect. rpmcrab does not emit it; the reference still emits it."
 since = "0.1.0"
 
 [[divergence]]
@@ -1587,7 +1587,7 @@ since = "0.1.0"
 case = "global"
 check = "invalid-ldconfig-symlink"
 kind = "missing"
-reason = "Deliberate removal per triage: openSUSE's own rpmlint config says 'Doesn't seem to make sense' about this finding. The port does not emit it. The reference still emits it."
+reason = "Mothballed on measurement (issue #940): over the full Factory tree the reference rule was evaluated exactly -- 4,191 packages carrying soname-shaped symlinks, 6,913 ELF files with SONAMEs, 6,621 SONAME entries examined -- and it fires 4 times: the libXaw6 and libXaw7 compatibility links, where the SONAME entry points at the versioned link in a two-hop chain, and libtfpsacrypto in both arch variants, where the SONAME entry points at the pre-rename library name from the mbedTLS to TF-PSA-Crypto transition. Every firing is a deliberate compatibility chain or alias that the loader and ldconfig resolve; the rule's single-hop assumption does not match these arrangements. rpmcrab does not emit it; the reference still emits it."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/BinariesCheck.py"
 
@@ -1603,7 +1603,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 case = "global"
 check = "only-non-binary-in-usr-lib"
 kind = "missing"
-reason = "Deliberate removal per triage: openSUSE's own rpmlint config says 'Doesn't seem to make sense' about this finding. The port does not emit it. The reference still emits it."
+reason = "Mothballed on measurement (issue #940): in the 300-package Factory sample the reference predicate flags 10 packages, every one data-resident in /usr/lib by design (dictionary data, typelibs, language commons, plugin data). The reference's own UsrLibBinaryException list already carves out the perl, python, ruby, ocaml and systemd shapes; the remaining tail is the same shape with no decidable boundary. rpmcrab does not emit it; the reference still emits it."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/BinariesCheck.py"
 
@@ -1675,7 +1675,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 case = "global"
 check = "uncompressed-zip"
 kind = "missing"
-reason = "Deliberate removal per triage: negligible value at distro scale. The port does not emit it. The reference still emits it."
+reason = "Mothballed on measurement (issue #940): over the full Factory tree, 3,781 zip-shaped archives (.zip/.jar/.ear/.war) in 1,317 packages were examined with the reference rule; 121 archives in 40 packages are stored uncompressed, and every firing class is a deliberate upstream form: Go's zoneinfo.zip ships stored by design (7 Go packages), JARs built stored (including the openj9 jvm-exports farm repeating the same jars under many names), test fixtures whose stored form is the test subject (the python testsuite namespace and zipdata zips, pooch data, fs-uae zipfile tests), SecLists traversal payloads, and game and document content archives (0ad, scummvm, ogre, Kivy examples, LibreOffice help images). Stored is a legitimate zip mode, and no decidable predicate separates a mistaken stored archive from these deliberate forms. rpmcrab does not emit it; the reference still emits it."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/ZipCheck.py"
 
@@ -1763,7 +1763,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 case = "global"
 check = "one-line-command-in-%filetrigger"
 kind = "missing"
-reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
+reason = "Mothballed on measurement (issue #940): across the 300-package Factory sample the one-line-command family fires exactly once -- a bare /sbin/ldconfig %post body in the Boost serialization package -- and in no other section. A one-line scriptlet body is the conventional form for ldconfig and single-command hooks, and the reference's concern has no decidable signature at this incidence. rpmcrab does not emit it; the reference still emits it."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/PostCheck.py"
 
@@ -1771,7 +1771,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 case = "global"
 check = "one-line-command-in-%post"
 kind = "missing"
-reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
+reason = "Mothballed on measurement (issue #940): across the 300-package Factory sample the one-line-command family fires exactly once -- a bare /sbin/ldconfig %post body in the Boost serialization package -- and in no other section. A one-line scriptlet body is the conventional form for ldconfig and single-command hooks, and the reference's concern has no decidable signature at this incidence. rpmcrab does not emit it; the reference still emits it."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/PostCheck.py"
 
@@ -1779,7 +1779,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 case = "global"
 check = "one-line-command-in-%posttrans"
 kind = "missing"
-reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
+reason = "Mothballed on measurement (issue #940): across the 300-package Factory sample the one-line-command family fires exactly once -- a bare /sbin/ldconfig %post body in the Boost serialization package -- and in no other section. A one-line scriptlet body is the conventional form for ldconfig and single-command hooks, and the reference's concern has no decidable signature at this incidence. rpmcrab does not emit it; the reference still emits it."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/PostCheck.py"
 
@@ -1787,7 +1787,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 case = "global"
 check = "one-line-command-in-%postun"
 kind = "missing"
-reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
+reason = "Mothballed on measurement (issue #940): across the 300-package Factory sample the one-line-command family fires exactly once -- a bare /sbin/ldconfig %post body in the Boost serialization package -- and in no other section. A one-line scriptlet body is the conventional form for ldconfig and single-command hooks, and the reference's concern has no decidable signature at this incidence. rpmcrab does not emit it; the reference still emits it."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/PostCheck.py"
 
@@ -1795,7 +1795,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 case = "global"
 check = "one-line-command-in-%pre"
 kind = "missing"
-reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
+reason = "Mothballed on measurement (issue #940): across the 300-package Factory sample the one-line-command family fires exactly once -- a bare /sbin/ldconfig %post body in the Boost serialization package -- and in no other section. A one-line scriptlet body is the conventional form for ldconfig and single-command hooks, and the reference's concern has no decidable signature at this incidence. rpmcrab does not emit it; the reference still emits it."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/PostCheck.py"
 
@@ -1803,7 +1803,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 case = "global"
 check = "one-line-command-in-%pretrans"
 kind = "missing"
-reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
+reason = "Mothballed on measurement (issue #940): across the 300-package Factory sample the one-line-command family fires exactly once -- a bare /sbin/ldconfig %post body in the Boost serialization package -- and in no other section. A one-line scriptlet body is the conventional form for ldconfig and single-command hooks, and the reference's concern has no decidable signature at this incidence. rpmcrab does not emit it; the reference still emits it."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/PostCheck.py"
 
@@ -1811,7 +1811,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 case = "global"
 check = "one-line-command-in-%preun"
 kind = "missing"
-reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
+reason = "Mothballed on measurement (issue #940): across the 300-package Factory sample the one-line-command family fires exactly once -- a bare /sbin/ldconfig %post body in the Boost serialization package -- and in no other section. A one-line scriptlet body is the conventional form for ldconfig and single-command hooks, and the reference's concern has no decidable signature at this incidence. rpmcrab does not emit it; the reference still emits it."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/PostCheck.py"
 
@@ -1819,7 +1819,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 case = "global"
 check = "one-line-command-in-%transfiletrigger"
 kind = "missing"
-reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
+reason = "Mothballed on measurement (issue #940): across the 300-package Factory sample the one-line-command family fires exactly once -- a bare /sbin/ldconfig %post body in the Boost serialization package -- and in no other section. A one-line scriptlet body is the conventional form for ldconfig and single-command hooks, and the reference's concern has no decidable signature at this incidence. rpmcrab does not emit it; the reference still emits it."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/PostCheck.py"
 
@@ -1827,7 +1827,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 case = "global"
 check = "one-line-command-in-%trigger"
 kind = "missing"
-reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
+reason = "Mothballed on measurement (issue #940): across the 300-package Factory sample the one-line-command family fires exactly once -- a bare /sbin/ldconfig %post body in the Boost serialization package -- and in no other section. A one-line scriptlet body is the conventional form for ldconfig and single-command hooks, and the reference's concern has no decidable signature at this incidence. rpmcrab does not emit it; the reference still emits it."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/PostCheck.py"
 
@@ -1835,7 +1835,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 case = "global"
 check = "one-line-command-in-%verifyscript"
 kind = "missing"
-reason = "Deliberate removal per triage: PostCheck stylistic nit (single-command scriptlet should use '-p <command>'), low value. The port does not emit it. The reference still emits it."
+reason = "Mothballed on measurement (issue #940): across the 300-package Factory sample the one-line-command family fires exactly once -- a bare /sbin/ldconfig %post body in the Boost serialization package -- and in no other section. A one-line scriptlet body is the conventional form for ldconfig and single-command hooks, and the reference's concern has no decidable signature at this incidence. rpmcrab does not emit it; the reference still emits it."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/PostCheck.py"
 
@@ -1850,7 +1850,7 @@ since = "0.1.0"
 case = "global"
 check = "unversioned-explicit-obsoletes"
 kind = "missing"
-reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding; Fedora's config carries it only as a commented-out filter line, never enabled (no upstream issue found 2026-10-08). No shipped config treats the finding as wanted signal, so the port does not emit it. The emission and its staged `--explain` entry are removed. The reference still emits it."
+reason = "Mothballed on measurement (issue #940): the reference predicate fires 1,311 times across 394 of the 16,501 Factory specs -- 609 plain predecessor-name obsoletes (the rename idiom, including -64bit variants), 699 macro-formed, and 3 shell-macro artefacts. rpmbuild itself warns on unversioned Obsoletes at build time, so the signal already reaches packagers through the build; the residue is the deliberate rename idiom. rpmcrab does not emit it; the reference still emits it."
 since = "0.1.0"
 
 [[divergence]]
