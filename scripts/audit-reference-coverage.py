@@ -2565,10 +2565,10 @@ def port_severity_inventory(path):
                 continue
             if not in_section or not line or line.startswith("#"):
                 continue
-            m = re.match(r"^(\S+) = ([EWI](?:, [EWI])*)$", line)
+            m = re.match(r"^(\S+) = ([EWI](?:, ?[EWI])*)$", line)
             if m:
                 levels.setdefault(m.group(1), set()).update(
-                    m.group(2).split(", "))
+                    s.strip() for s in m.group(2).split(","))
     return levels
 
 
