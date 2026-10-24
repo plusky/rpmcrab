@@ -1405,7 +1405,7 @@ since = "0.1.0"
 case = "global"
 check = "non-standard-group"
 kind = "missing"
-reason = "Deliberate removal per triage: openSUSE dropped the Group tag -- its own rpmlint config says 'Do not validate package rpm groups', the wiki (https://en.opensuse.org/openSUSE:Package_group_guidelines) says the field has fallen out of use, and the packaging guidelines say 'Group: -- always drop' -- so the port does not emit this finding. Both emission sites (SpecCheck and TagsCheck), the staged `--explain` entry, and the ValidGroups plumbing are removed. The reference still emits it."
+reason = "Deliberate removal per triage: the Group tag has been optional since rpm 4.6 and the openSUSE wiki wording is that it may be omitted; openSUSE dropped the tag by community agreement (openSUSE mailing list, 2019/2020) and spec-cleaner removes Group: tags on sight (remove_groups in rpmpreamble.py), while Fedora never adopted them and filters this finding in its shipped config (configs/Fedora/fedora.toml) -- the tag's ecosystem is absent, so the port does not emit this finding. The reference check also ships an empty ValidGroups list, so as configured it validates against no taxonomy. Both emission sites (SpecCheck and TagsCheck), the staged `--explain` entry, and the ValidGroups plumbing are removed. The reference still emits it."
 since = "0.1.0"
 
 [[divergence]]
@@ -1552,7 +1552,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/issues/776"
 case = "global"
 check = "non-standard-group"
 kind = "missing"
-reason = "Deliberate removal per triage: openSUSE dropped the Group tag -- its own rpmlint config says Do not validate package rpm groups and the packaging guidelines say 'Group: -- always drop' -- so the port does not emit this finding. Both emission sites (SpecCheck and TagsCheck), the staged `--explain` entry, and the ValidGroups plumbing are removed. The reference still emits it."
+reason = "Deliberate removal per triage: the reference ships an empty ValidGroups list in its default configuration (configdefaults.toml), so as configured this finding validates group strings against no taxonomy. The tag itself is ecosystem-absent: Group has been optional since rpm 4.6 and the openSUSE wiki wording is that it may be omitted; openSUSE dropped the tag by community agreement (openSUSE mailing list, 2019/2020) and spec-cleaner removes Group: tags on sight (remove_groups in rpmpreamble.py), while Fedora never adopted them and filters this finding in its shipped config (configs/Fedora/fedora.toml) -- rpmcrab does not emit it. Both emission sites (SpecCheck and TagsCheck), the staged `--explain` entry, and the ValidGroups plumbing are removed. The reference still emits it."
 since = "0.1.0"
 
 [[divergence]]
@@ -1659,7 +1659,7 @@ upstream = "https://github.com/plusky/rpmcrab/issues/562"
 case = "global"
 check = "hardcoded-prefix-tag"
 kind = "missing"
-reason = "Deliberate removal per triage: the Prefix: tag is obsolete and ignored by RPM, the same class as the killed BuildRoot findings. The port does not emit it. The reference still emits it."
+reason = "Deliberate removal per triage: Prefix: is the singular alias of the Prefixes: tag, RPM's relocation prefixes (rpm --relocate); rpm-spec(5) documents it with a literal-path example, and the reference flags any literal path in it at W (SpecCheck.py). openSUSE's shipped rpmlint config filters the finding, and Fedora's carries the line commented out, so Fedora emits it. Relocatable-prefix packages are not a Factory form, so the port does not emit it. The reference still emits it."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
 
@@ -1857,14 +1857,14 @@ since = "0.1.0"
 case = "global"
 check = "no-group-tag"
 kind = "missing"
-reason = "Deliberate removal per triage: openSUSE dropped the Group tag -- its own rpmlint config says 'Do not validate package rpm groups', the wiki (https://en.opensuse.org/openSUSE:Package_group_guidelines) says the field has fallen out of use, and the packaging guidelines say 'Group: -- always drop' -- so the port does not emit this finding. The emission and its staged `--explain` entry are removed. The reference still emits it. No upstream issue found 2026-10-08."
+reason = "Deliberate removal per triage: the Group tag has been optional since rpm 4.6 and the openSUSE wiki wording is that it may be omitted; openSUSE dropped the tag by community agreement (openSUSE mailing list, 2019/2020) and spec-cleaner removes Group: tags on sight (remove_groups in rpmpreamble.py), while Fedora never adopted them and filters this finding in its shipped config (configs/Fedora/fedora.toml) -- the tag's ecosystem is absent, so the port does not emit this finding. The emission and its staged `--explain` entry are removed. The reference still emits it. No upstream issue found 2026-10-08."
 since = "0.1.0"
 
 [[divergence]]
 case = "global"
 check = "devel-package-with-non-devel-group"
 kind = "missing"
-reason = "Deliberate removal per triage: openSUSE dropped the Group tag -- its own rpmlint config says 'Do not validate package rpm groups', the wiki (https://en.opensuse.org/openSUSE:Package_group_guidelines) says the field has fallen out of use, and the packaging guidelines say 'Group: -- always drop' -- so the port does not emit this finding. The emission and its staged `--explain` entry are removed. The reference still emits it. No upstream issue found 2026-10-08."
+reason = "Deliberate removal per triage: the Group tag has been optional since rpm 4.6 and the openSUSE wiki wording is that it may be omitted; openSUSE dropped the tag by community agreement (openSUSE mailing list, 2019/2020) and spec-cleaner removes Group: tags on sight (remove_groups in rpmpreamble.py), while Fedora never adopted them and filters this finding in its shipped config (configs/Fedora/fedora.toml) -- the tag's ecosystem is absent, so the port does not emit this finding. The emission and its staged `--explain` entry are removed. The reference still emits it. No upstream issue found 2026-10-08."
 since = "0.1.0"
 
 [[divergence]]
