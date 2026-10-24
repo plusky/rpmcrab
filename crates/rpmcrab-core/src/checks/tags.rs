@@ -992,7 +992,7 @@ impl TagsCheck {
                     format!(" -> {}", suggestions.join(", "))
                 };
                 let detail = format!("Summary({lang}) {word}{sug}");
-                add_info(out, Level::Error, pkg, "spelling-error", &[&detail]);
+                add_info(out, Level::Warning, pkg, "spelling-error", &[&detail]);
             }
         }
         let lang_err = Self::lang_for_error(lang);
@@ -1125,7 +1125,7 @@ impl TagsCheck {
                     format!(" -> {}", suggestions.join(", "))
                 };
                 let detail = format!("%description -l {lang} {word}{sug}");
-                add_info(out, Level::Error, pkg, "spelling-error", &[&detail]);
+                add_info(out, Level::Warning, pkg, "spelling-error", &[&detail]);
             }
         }
         let lang_err = Self::lang_for_error(lang);
@@ -2923,7 +2923,7 @@ mod tests {
         assert_eq!(hits.len(), 1, "all: {results:?}");
         assert!(
             hits[0].1.starts_with(
-                "tags-emission-pins-spell.noarch: E: spelling-error %description -l C packag"
+                "tags-emission-pins-spell.noarch: W: spelling-error %description -l C packag"
             ),
             "line: {}",
             hits[0].1
