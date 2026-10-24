@@ -953,30 +953,47 @@ def test_stale_check_catches_name_keyed_entry():
         "%ifarch-applied-patch",
         "InitScriptCheck",
         "LSBCheck",
+        "configure-without-libdir-spec",
+        "cross-directory-hard-link",
         "devel-package-with-non-devel-group",
+        "dir-or-file-in-opt",
         "executable-in-library-package",
+        "file-not-utf8",
         "filelist-forbidden-xinetd-configuration",
+        "hardcoded-library-path",
         "hardcoded-path-in-buildroot-tag",
         "hardcoded-prefix-tag",
+        "incoherent-version-in-changelog",
         "inaccessible-filename",
         "info-files-without-install-info-postin",
         "info-files-without-install-info-postun",
         "invalid-build-requires",
+        "invalid-buildhost",
         "invalid-ldconfig-symlink",
+        "invalid-packager",
         "invalid-soname",
+        "invalid-version",
         "jar-not-indexed",
         "lengthy-symlink",
         "lib-package-without-%mklibname",
+        "log-files-without-logrotate",
         "missing-dependency-to-xinetd",
         "missing-mandatory-optflags",
+        "mixed-use-of-spaces-and-tabs",
         "module-without-depmod-postin",
         "module-without-depmod-postun",
+        "multiple-specfiles",
         "no-buildroot-tag",
+        "no-documentation",
         "no-group-tag",
         "no-major-in-name",
         "no-packager-tag",
         "no-provides",
         "no-signature",
+        "non-coherent-filename",
+        "non-readable",
+        "non-standard-dir-perm",
+        "non-standard-executable-perm",
         "non-standard-group",
         "non-versioned-file-in-library-package",
         "not-standard-release-extension",
@@ -992,12 +1009,16 @@ def test_stale_check_catches_name_keyed_entry():
         "one-line-command-in-%verifyscript",
         "only-non-binary-in-usr-lib",
         "outside-libdir-files",
+        "perl-temp-file",
         "post-without-tmpfile-creation",
         "postin-without-ghost-file-creation",
         "postin-with-wrong-depmod",
         "postin-without-install-info",
         "postun-with-wrong-depmod",
+        "requires-on-release",
+        "setgid-binary",
         "setup-not-quiet",
+        "setuid-binary",
         "shared-library-not-executable",
         "spurious-bracket-in-%filetrigger",
         "spurious-bracket-in-%post",
@@ -1009,9 +1030,11 @@ def test_stale_check_catches_name_keyed_entry():
         "spurious-bracket-in-%transfiletrigger",
         "spurious-bracket-in-%trigger",
         "spurious-bracket-in-%verifyscript",
+        "symlink-crontab-file",
         "uncompressed-zip",
         "unversioned-explicit-obsoletes",
         "unversioned-explicit-provides",
+        "use-of-RPM_SOURCE_DIR",
         "zero-length",
     }, names
     assert all(e.get("case") == "global" for e in missing), [
@@ -1060,6 +1083,58 @@ def test_stale_check_module_keyed_entry_needs_own_module_pattern():
         "SomeOtherCheck", "shared-finding", {"shared-finding"},
         {"shared-finding"}, {"other_check": {"shared-finding"}}, {},
     ), "name-keyed match should be stale"
+
+
+def test_port_config_family_names_reads_shipped_configs():
+    # The dir-or-file-in-* family's concrete names come from the shipped
+    # DisallowedDirs lists: /usr/local is in the defaults, /opt was
+    # removed with dir-or-file-in-opt (issue #883).
+    mod = _load()
+    data_dir = os.path.join(os.path.dirname(HERE), "crates",
+                            "rpmcrab-core", "data")
+    names = mod.port_config_family_names(data_dir)
+    assert "dir-or-file-in-usr-local" in names, names
+    assert "dir-or-file-in-home" in names, names
+    assert "dir-or-file-in-opt" not in names, names
+
+
+def test_census_missing_flags_config_family_reemission():
+    # A name-keyed entry is a census failure when the name is emittable
+    # again through the config-derived family, even though no code
+    # pattern names it exactly.
+    mod = _load()
+    entries = [{"kind": "missing", "check": "dir-or-file-in-opt",
+                "case": "global"}]
+    rows, bad = mod.census_missing(entries, [], set(),
+                                   {"dir-or-file-in-opt"}, [])
+    assert rows == [("dir-or-file-in-opt", "name")], rows
+    assert bad == ["dir-or-file-in-opt"], bad
+    rows, bad = mod.census_missing(entries, [], set(),
+                                   {"dir-or-file-in-home"}, [])
+    assert bad == [], bad
+
+
+def test_census_covers_the_real_ledger_with_no_emissions():
+    # The C4 census over the real ledger and the real port tree: every
+    # kind="missing" entry is enumerated and none is emitted -- a
+    # re-added emission or a restored /opt DisallowedDirs entry fails
+    # here, in the plain test suite, without the reference tree.
+    mod = _load()
+    root = os.path.dirname(HERE)
+    ledger = mod.load_ledger(os.path.join(
+        root, "tests", "parity", "divergences.toml"))
+    by_module, _unresolved = mod.audit_port(os.path.join(
+        root, "crates", "rpmcrab-core", "src", "checks"))
+    family = mod.port_config_family_names(os.path.join(
+        root, "crates", "rpmcrab-core", "data"))
+    by_module.setdefault("files", set()).update(family)
+    exact = {p for patterns in by_module.values() for p in patterns
+             if "*" not in p}
+    rows, bad = mod.census_missing(ledger, [], exact, family, [])
+    missing = [e for e in ledger if e.get("kind") == "missing"]
+    assert len(rows) == len(missing), (len(rows), len(missing))
+    assert bad == [], bad
+    assert ("dir-or-file-in-opt", "name") in rows, rows
 
 
 def main():
