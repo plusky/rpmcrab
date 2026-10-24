@@ -36,10 +36,8 @@ deathmatch
 
 # Technical vocabulary of computing and packaging prose.
 accessor/MS
-adaptor/MS
 addon/MS
 allocator
-analyse
 applicative
 archiver
 arg/MS
@@ -168,7 +166,6 @@ journaling
 jpeg
 keymap/MS
 keyring
-labelling
 letterform/MS
 lexically
 librpm/MS
