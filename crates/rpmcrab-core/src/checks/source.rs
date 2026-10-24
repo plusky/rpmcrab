@@ -700,6 +700,12 @@ impl Check for SourceCheck {
         "SourceCheck"
     }
 
+    /// This check never emits errors (every `add_info` call site passes
+    /// `Level::Warning`), so `--errors-only` skips it.
+    fn max_severity(&self) -> Level {
+        Level::Warning
+    }
+
     fn check_source(&mut self, pkg: &Pkg, config: &Config, out: &mut Filter) {
         Self::register_error_details(config, out);
         for f in &pkg.files {
