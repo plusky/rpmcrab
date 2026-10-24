@@ -15,8 +15,21 @@ unmaintained = "workspace"
 # rsa release exists (0.9.10 and 0.10.0-rc are both affected, with
 # patched = [] upstream). This is the first advisory ignore in this
 # file: a deliberate exception, to be dropped once a fixed rsa ships.
+#
+# RUSTSEC-2026-0387 is secret-dependent branching in crypto-bigint
+# arithmetic (subtraction, division, Montgomery multiplication,
+# invert). It reaches the tree only through sequoia-openpgp 2.4.2
+# (via elliptic-curve 0.13), which is the newest sequoia release and
+# pins crypto-bigint 0.5.x, for which no fixed release exists (the
+# fix ships in 0.7.6, which nothing in the tree can yet use). The
+# vulnerable operations act on secret integers; rpmcrab holds no
+# OpenPGP secrets — it parses packets and verifies signatures with
+# public keys in a local CLI, exposing no timing oracle. Same
+# deliberate-exception shape as above: drop once a fixed
+# crypto-bigint reaches the tree.
 ignore = [
   "RUSTSEC-2023-0071",
+  "RUSTSEC-2026-0387",
 ]
 
 [licenses]
