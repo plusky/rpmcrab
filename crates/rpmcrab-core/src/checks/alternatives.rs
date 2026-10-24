@@ -250,10 +250,13 @@ impl AlternativesCheck {
                         // the entry wherever it lives: libalternatives
                         // targets commonly sit in /usr/libexec, outside
                         // every bin/ path (issue #811). The reference's
-                        // bin/ suffix rule covers the remaining shapes.
+                        // bin/ suffix rule covers the remaining shapes,
+                        // and a path resolving through the package's own
+                        // symlinks to a shipped file satisfies it too
+                        // (issue #932).
                         bin_found = pkg.files.iter().any(|f| {
                             f.name == value || (f.name.contains("bin/") && f.name.ends_with(value))
-                        });
+                        }) || Self::binary_entry_resolves_in_package(pkg, value);
                         if !bin_found {
                             add_info(
                                 out,
@@ -323,6 +326,85 @@ impl AlternativesCheck {
                 );
             }
         }
+    }
+
+    /// Whether a `binary=` entry path resolves, through the package's
+    /// own symlink entries, to a file the package ships (issue #932).
+    /// libalternatives resolves the entry path on the installed
+    /// system, where a directory symlink shipped by the package (the
+    /// JDK layout: `/usr/lib64/jvm/java-11-openjdk` pointing at
+    /// `java-11-openjdk-11`) puts the shipped file at the entry path.
+    /// A resolution landing outside the package's file set earns no
+    /// credit, so targets shipped by sibling packages and genuinely
+    /// absent targets keep firing. The walk canonicalises the value
+    /// the way the kernel resolves it, so a doubled leading slash in
+    /// the value (`binary=//usr/bin/...`, as the SUSE python
+    /// packaging macros emit it) names the shipped file too.
+    fn binary_entry_resolves_in_package(pkg: &Pkg, value: &str) -> bool {
+        if !value.starts_with('/') {
+            return false;
+        }
+        let resolved = Self::resolve_through_package_symlinks(pkg, value);
+        pkg.files
+            .iter()
+            .any(|f| f.name == resolved && !is_symlink(f.mode))
+    }
+
+    /// Follow package-shipped symlinks at every prefix of `path` and
+    /// return the path the walk lands on. Each substitution restarts
+    /// the scan at the leftmost symlink prefix, mirroring
+    /// component-wise path resolution; the hop bound (the kernel's
+    /// MAXSYMLINKS) terminates cycles, whose landing path names a
+    /// symlink rather than a shipped file and so earns no credit in
+    /// the caller.
+    fn resolve_through_package_symlinks(pkg: &Pkg, path: &str) -> String {
+        // `normalize_path` preserves a leading `//` (POSIX leaves its
+        // meaning implementation-defined); the kernel resolves it to
+        // the single-slash path on Linux, so collapse it before
+        // comparing against shipped file names.
+        fn canonical(path: &str) -> String {
+            let n = crate::pkg::normalize_path(path);
+            match n.strip_prefix("//") {
+                Some(rest) => format!("/{rest}"),
+                None => n,
+            }
+        }
+        let mut current = canonical(path);
+        for _ in 0..40 {
+            let comps: Vec<&str> = current.split('/').filter(|c| !c.is_empty()).collect();
+            let mut substituted: Option<String> = None;
+            for i in 1..=comps.len() {
+                let prefix = format!("/{}", comps[..i].join("/"));
+                let Some(link) = pkg
+                    .files
+                    .iter()
+                    .find(|f| f.name == prefix && is_symlink(f.mode) && !f.linkto.is_empty())
+                else {
+                    continue;
+                };
+                let joined = if link.linkto.starts_with('/') {
+                    link.linkto.clone()
+                } else {
+                    match prefix.rfind('/') {
+                        Some(0) => format!("/{}", link.linkto),
+                        Some(idx) => format!("{}/{}", &prefix[..idx], link.linkto),
+                        None => link.linkto.clone(),
+                    }
+                };
+                let rest = comps[i..].join("/");
+                substituted = Some(if rest.is_empty() {
+                    joined
+                } else {
+                    format!("{joined}/{rest}")
+                });
+                break;
+            }
+            match substituted {
+                Some(next) => current = canonical(&next),
+                None => break,
+            }
+        }
+        current
     }
 }
 
@@ -1115,5 +1197,200 @@ mod tests {
             !has(&results, "wrong-or-missed-binary-entry"),
             "man-only conf must not draw the binary summary: {results:?}"
         );
+    }
+
+    /// A `binary=` entry whose path reaches its shipped file through
+    /// a directory symlink the package itself ships (the JDK layout)
+    /// satisfies the entry: neither binary finding fires (issue #932).
+    #[test]
+    fn binary_entry_through_shipped_dir_symlink_is_credited() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let mut pkg = libalternatives_pkg(
+            dir.path(),
+            &[(
+                "jar.conf",
+                "binary=/usr/lib64/jvm/java-11-openjdk/bin/jar\n",
+            )],
+        );
+        pkg.files.push(PkgFile {
+            name: "/usr/lib64/jvm/java-11-openjdk".to_string(),
+            mode: 0o120777,
+            linkto: "java-11-openjdk-11".to_string(),
+            ..Default::default()
+        });
+        pkg.files.push(PkgFile {
+            name: "/usr/lib64/jvm/java-11-openjdk-11/bin/jar".to_string(),
+            mode: 0o100755,
+            ..Default::default()
+        });
+        let results = findings_for(&pkg);
+        for name in [
+            "binary-entry-value-not-found",
+            "wrong-or-missed-binary-entry",
+        ] {
+            assert!(
+                !has(&results, name),
+                "{name} must not fire when the entry resolves through a                  shipped dir symlink: {results:?}"
+            );
+        }
+    }
+
+    /// The same credit with an absolute symlink target (issue #932).
+    #[test]
+    fn binary_entry_through_absolute_dir_symlink_is_credited() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let mut pkg = libalternatives_pkg(
+            dir.path(),
+            &[(
+                "jar.conf",
+                "binary=/usr/lib64/jvm/java-11-openjdk/bin/jar\n",
+            )],
+        );
+        pkg.files.push(PkgFile {
+            name: "/usr/lib64/jvm/java-11-openjdk".to_string(),
+            mode: 0o120777,
+            linkto: "/usr/lib64/jvm/java-11-openjdk-11".to_string(),
+            ..Default::default()
+        });
+        pkg.files.push(PkgFile {
+            name: "/usr/lib64/jvm/java-11-openjdk-11/bin/jar".to_string(),
+            mode: 0o100755,
+            ..Default::default()
+        });
+        let results = findings_for(&pkg);
+        for name in [
+            "binary-entry-value-not-found",
+            "wrong-or-missed-binary-entry",
+        ] {
+            assert!(
+                !has(&results, name),
+                "{name} must not fire when the entry resolves through an                  absolute dir symlink: {results:?}"
+            );
+        }
+    }
+
+    /// Resolution follows a chain: a directory symlink whose target
+    /// climbs with `..`, landing on a file that is itself a symlink
+    /// to the shipped entry (issue #932).
+    #[test]
+    fn binary_entry_through_symlink_chain_is_credited() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let mut pkg = libalternatives_pkg(
+            dir.path(),
+            &[("jar.conf", "binary=/usr/lib/jvm/default/bin/jar\n")],
+        );
+        pkg.files.push(PkgFile {
+            name: "/usr/lib/jvm/default".to_string(),
+            mode: 0o120777,
+            linkto: "../jvm/java-11-openjdk-11".to_string(),
+            ..Default::default()
+        });
+        pkg.files.push(PkgFile {
+            name: "/usr/lib/jvm/java-11-openjdk-11/bin/jar".to_string(),
+            mode: 0o120777,
+            linkto: "jar-11".to_string(),
+            ..Default::default()
+        });
+        pkg.files.push(PkgFile {
+            name: "/usr/lib/jvm/java-11-openjdk-11/bin/jar-11".to_string(),
+            mode: 0o100755,
+            ..Default::default()
+        });
+        let results = findings_for(&pkg);
+        for name in [
+            "binary-entry-value-not-found",
+            "wrong-or-missed-binary-entry",
+        ] {
+            assert!(
+                !has(&results, name),
+                "{name} must not fire when the entry resolves through a                  symlink chain: {results:?}"
+            );
+        }
+    }
+
+    /// The symlink credit stops at the package boundary: the entry
+    /// resolves through the shipped directory symlink to a file the
+    /// package does not ship, so both findings still fire (issue
+    /// #932).
+    #[test]
+    fn binary_entry_through_dir_symlink_to_unshipped_file_still_fires() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let mut pkg = libalternatives_pkg(
+            dir.path(),
+            &[(
+                "jar.conf",
+                "binary=/usr/lib64/jvm/java-11-openjdk/bin/jar\n",
+            )],
+        );
+        pkg.files.push(PkgFile {
+            name: "/usr/lib64/jvm/java-11-openjdk".to_string(),
+            mode: 0o120777,
+            linkto: "java-11-openjdk-11".to_string(),
+            ..Default::default()
+        });
+        pkg.files.push(PkgFile {
+            name: "/usr/lib64/jvm/java-11-openjdk-11/bin/javac".to_string(),
+            mode: 0o100755,
+            ..Default::default()
+        });
+        let results = findings_for(&pkg);
+        for name in [
+            "binary-entry-value-not-found",
+            "wrong-or-missed-binary-entry",
+        ] {
+            let count = results.iter().filter(|(n, _)| n == name).count();
+            assert_eq!(count, 1, "expected exactly one {name}: {results:?}");
+        }
+    }
+
+    /// A symlink cycle never resolves: the walk terminates and the
+    /// entry keeps both findings (issue #932).
+    #[test]
+    fn binary_entry_through_symlink_loop_still_fires() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let mut pkg = libalternatives_pkg(
+            dir.path(),
+            &[("jar.conf", "binary=/usr/lib/jvm/loop/bin/jar\n")],
+        );
+        pkg.files.push(PkgFile {
+            name: "/usr/lib/jvm/loop".to_string(),
+            mode: 0o120777,
+            linkto: "loop2".to_string(),
+            ..Default::default()
+        });
+        pkg.files.push(PkgFile {
+            name: "/usr/lib/jvm/loop2".to_string(),
+            mode: 0o120777,
+            linkto: "loop".to_string(),
+            ..Default::default()
+        });
+        let results = findings_for(&pkg);
+        for name in [
+            "binary-entry-value-not-found",
+            "wrong-or-missed-binary-entry",
+        ] {
+            let count = results.iter().filter(|(n, _)| n == name).count();
+            assert_eq!(count, 1, "expected exactly one {name}: {results:?}");
+        }
+    }
+
+    /// A `binary=` value spelled with a doubled leading slash (the
+    /// SUSE python packaging macros emit `binary=//usr/bin/...`)
+    /// resolves to the file the package ships at the single-slash
+    /// path, so neither binary finding fires (issue #932).
+    #[test]
+    fn binary_entry_with_doubled_leading_slash_is_credited() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let pkg = libalternatives_pkg(dir.path(), &[("foo.conf", "binary=//usr/bin/foo\n")]);
+        let results = findings_for(&pkg);
+        for name in [
+            "binary-entry-value-not-found",
+            "wrong-or-missed-binary-entry",
+        ] {
+            assert!(
+                !has(&results, name),
+                "{name} must not fire for a doubled-slash entry naming a                  shipped file: {results:?}"
+            );
+        }
     }
 }
