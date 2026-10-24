@@ -9,12 +9,25 @@
 #   bench.sh download [RPMS_DIR]   fetch + sha512-verify all RPMs
 #   bench.sh run [RPMS_DIR]        time rpmcrab 3x, print summary JSON
 #   bench.sh all [RPMS_DIR]        download + run, print summary JSON
+#   bench.sh ab [RPMS_DIR]         A/B gate: time RPMCRAB_BIN (candidate)
+#                                  against BASELINE_BIN (previous release),
+#                                  interleaved per package, with an A/A
+#                                  calibration pass; print verdict JSON
+#                                  and exit nonzero on a FAIL verdict.
+#                                  With BASELINE_BIN unset, prints a
+#                                  "no-baseline" verdict and exits 0.
 #
 # Environment:
 #   RPMCRAB_BIN   rpmcrab binary (default: cargo-built release binary)
+#   BASELINE_BIN  baseline binary for `ab` (unset: no-baseline verdict)
+#   BASELINE_TAG  baseline release tag, recorded in the `ab` JSON
+#   AB_ROUNDS     paired A/B rounds for `ab` (default: 5)
+#   AA_ROUNDS     paired A/A calibration rounds for `ab` (default: 3)
 #
-# Output: one JSON object on stdout with median wall-clock seconds over
-# 3 runs, corpus metadata, and runner metadata (CPU, OS, date).
+# Output: one JSON object on stdout. `run`/`all`: median wall-clock
+# seconds over 3 runs, corpus metadata, and runner metadata (CPU, OS,
+# date). `ab`: per-package medians and ratios for both binaries, the
+# geomean ratio, the A/A spread, and the gate verdict.
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -208,9 +221,34 @@ print(json.dumps({
 EOF
 }
 
+# A/B regression gate (see ab.py and README.md): download + verify the
+# corpus, then time candidate against baseline. With no BASELINE_BIN the
+# gate reports "no-baseline" and exits 0 without timing anything; a set
+# but missing baseline binary is a hard failure, as are a failed download
+# and a corpus that fails verification.
+cmd_ab() {
+    local dir="${1:-$HERE/rpms}"
+    [ -x "$RPMCRAB_BIN" ] || die "candidate rpmcrab not found: $RPMCRAB_BIN"
+    local args=(--candidate "$RPMCRAB_BIN")
+    if [ -n "${BASELINE_TAG:-}" ]; then
+        args+=(--baseline-tag "$BASELINE_TAG")
+    fi
+    if [ -z "${BASELINE_BIN:-}" ]; then
+        python3 "$HERE/ab.py" "${args[@]}" --no-baseline
+        return $?
+    fi
+    [ -x "$BASELINE_BIN" ] || die "baseline rpmcrab not found: $BASELINE_BIN"
+    cmd_download "$dir" || die "corpus download failed"
+    verify_corpus "$dir" || die "corpus in $dir does not match manifest.toml"
+    args+=(--rpms-dir "$dir" --baseline "$BASELINE_BIN"
+           --rounds "${AB_ROUNDS:-5}" --aa-rounds "${AA_ROUNDS:-3}")
+    python3 "$HERE/ab.py" "${args[@]}"
+}
+
 case "${1:-}" in
     download) cmd_download "${2:-}" ;;
     run)      cmd_run "${2:-}" ;;
     all)      cmd_download "${2:-}" && cmd_run "${2:-}" ;;
-    *) die "usage: bench.sh {download|run|all} [RPMS_DIR]" ;;
+    ab)       cmd_ab "${2:-}" ;;
+    *) die "usage: bench.sh {download|run|all|ab} [RPMS_DIR]" ;;
 esac
