@@ -12,8 +12,10 @@
 # RPM development headers must be installed.
 set -euo pipefail
 
+semver='^[0-9]+\.[0-9]+\.[0-9]+$'
+
 new="${1:-}"
-if ! [[ "$new" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+if ! [[ "$new" =~ $semver ]]; then
   echo "usage: $0 X.Y.Z" >&2
   exit 2
 fi
@@ -21,28 +23,51 @@ fi
 cd "$(git rev-parse --show-toplevel)"
 
 old=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-if [ -z "$old" ]; then
-  echo "no [workspace.package] version found in Cargo.toml" >&2
+if ! [[ "$old" =~ $semver ]]; then
+  echo "no X.Y.Z [workspace.package] version found in Cargo.toml (got '$old')" >&2
   exit 1
 fi
-if [ "$old" = "$new" ] || [ "$(printf '%s\n%s\n' "$old" "$new" | sort -V | tail -1)" != "$new" ]; then
+
+# Numeric X.Y.Z comparison (10# keeps leading zeros decimal); portable,
+# unlike sort -V.
+IFS=. read -r o1 o2 o3 <<<"$old"
+IFS=. read -r n1 n2 n3 <<<"$new"
+if ((10#$n1 != 10#$o1)); then
+  forward=$((10#$n1 > 10#$o1))
+elif ((10#$n2 != 10#$o2)); then
+  forward=$((10#$n2 > 10#$o2))
+else
+  forward=$((10#$n3 > 10#$o3))
+fi
+if [ "$forward" -ne 1 ]; then
   echo "refusing to move $old to $new: the version only moves forward" >&2
+  echo "(a half-applied earlier run is undone with: git checkout -- .)" >&2
   exit 1
 fi
+
+# In-place edit without GNU sed -i; `cat >` keeps the file's mode.
+subst() { # sed-script file
+  local tmp
+  tmp=$(mktemp)
+  sed "$1" "$2" >"$tmp"
+  cat "$tmp" >"$2"
+  rm -f "$tmp"
+}
 
 old_re=${old//./\\.}
 
-sed -i "/^\[workspace\.package\]/,/^\[/s/^version = \"$old_re\"$/version = \"$new\"/" Cargo.toml
+subst "/^\[workspace\.package\]/,/^\[/s/^version = \"$old_re\"$/version = \"$new\"/" Cargo.toml
 for manifest in crates/rpmcrab/Cargo.toml crates/rpmcrab-core/Cargo.toml; do
   for dep in rpmcrab rpmcrab-core; do
-    sed -i "s/^${dep} = { version = \"$old_re\"/${dep} = { version = \"$new\"/" "$manifest"
+    subst "s/^${dep} = { version = \"$old_re\"/${dep} = { version = \"$new\"/" "$manifest"
   done
 done
 for doc in README.md docs/DESIGN.md; do
-  sed -i "s/current release is \*\*$old_re\*\*/current release is **$new**/" "$doc"
+  subst "s/current release is \*\*$old_re\*\*/current release is **$new**/" "$doc"
 done
 
-# Only the workspace members' lock entries move; dependencies stay put.
+# --workspace updates only the workspace members' lock entries;
+# dependencies stay put.
 cargo update --workspace --quiet
 make gen
 
