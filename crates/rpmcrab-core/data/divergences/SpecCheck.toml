@@ -136,14 +136,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "invalid-build-requires"
-kind = "missing"
-reason = "Deliberate removal per triage: openSUSE's rpmlint config calls this 'Mandriva specific stuff that we don't want'. The port does not emit it. The reference still emits it."
-since = "0.1.0"
-upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
-
-[[divergence]]
-case = "global"
 check = "lib-package-without-%mklibname"
 kind = "missing"
 reason = "Deliberate removal (issue #531): the port does not emit this finding -- it encodes Mandriva's library naming policy: upstream's SpecCheck docstring calls the check 'specific to Mandriva and its derivatives' (upstream issue #9 concludes it is not generic), and the `%mklibname` macro does not exist in SUSE or Fedora spec-land, so the finding can never be satisfied on a supported flavour; both distro configs filter it. The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. Mageia, the live Mandriva derivative, consumes upstream rpmlint, which keeps the check. The emission, its staged `--explain` entry, the supporting tracking state, and the dedicated tests are removed; a negative pin in the SpecCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
@@ -273,3 +265,25 @@ case = "global"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
 since = "0.4.0"
 reason = "The reference predicate requires the parenthesised qualifier form PreReq(...):, which occurs nowhere in the Factory spec tree. The port's predicate makes the qualifier optional, so the finding fires on every PreReq usage, the plain tag form included (253 lines in 153 Factory specs); Requires(pre): and Requires(post): stay silent."
+
+[[divergence]]
+case = "global"
+check = "hardcoded-prefix-tag"
+kind = "missing"
+reason = "Deliberate removal per triage: Prefix: is the singular alias of the Prefixes: tag, RPM's relocation prefixes (rpm --relocate); rpm-spec(5) documents it with a literal-path example, and the reference flags any literal path in it at W (SpecCheck.py). openSUSE's shipped rpmlint config filters the finding, and Fedora's carries the line commented out, so Fedora emits it. Relocatable-prefix packages are not a Factory form, so the port does not emit it. The reference still emits it."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
+
+[[divergence]]
+case = "global"
+check = "unversioned-explicit-provides"
+kind = "missing"
+reason = "Mothballed on measurement (issue #940): the reference predicate fires 140,974 times across 1,303 of the 16,501 Factory specs. 138,569 firings (98.3%) are parenthesised capability names -- perl(...), pkgconfig(...), locale(...), appdata(...), group(...), user(...) -- whose versioning is carried by the capability scheme itself, and 136,771 firings sit in just 30 generated texlive specs. The plain residue (1,358 firings, 804 distinct names) is dominated by deliberate virtual provides (myspell-dictionary, kmp_in_kernel, ispell_dictionary, windowmanager, the jre1.x name-versioned family). Versioning these is a per-package judgement, not a decidable defect. rpmcrab does not emit it; the reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "unversioned-explicit-obsoletes"
+kind = "missing"
+reason = "Mothballed on measurement (issue #940): the reference predicate fires 1,311 times across 394 of the 16,501 Factory specs -- 609 plain predecessor-name obsoletes (the rename idiom, including -64bit variants), 699 macro-formed, and 3 shell-macro artefacts. rpmbuild itself warns on unversioned Obsoletes at build time, so the signal already reaches packagers through the build; the residue is the deliberate rename idiom. rpmcrab does not emit it; the reference still emits it."
+since = "0.1.0"

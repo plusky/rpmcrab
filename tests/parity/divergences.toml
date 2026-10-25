@@ -254,14 +254,6 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 
 [[divergence]]
 case = "global"
-check = "outside-libdir-files"
-kind = "missing"
-reason = "Deliberate removal per triage: openSUSE's own rpmlint config says 'Doesn't seem to make sense' about this finding. The port does not emit it. The reference still emits it."
-since = "0.1.0"
-upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
-
-[[divergence]]
-case = "global"
 check = "BinariesCheck"
 kind = "detail"
 reason = "The `readelf-failed` detail carries goblin's parse error text (e.g. `a.o: Invalid magic number`) rather than the reference's readelf stderr; the finding name, level and file detail are unchanged. Only the human-readable reason differs."
@@ -451,6 +443,20 @@ case = "global"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/BinariesCheck.py"
 since = "0.4.1"
 reason = "The reference charges an ELF file with no DT_NEEDED and no ld.so soname (BinariesCheck.py _check_library_dependency at the pinned commit 84848c05), with no separate-debuginfo scoping, so the dwz multi-file artefact in a -debuginfo package (/usr/lib/debug/.dwz/<pkg>-<version>) draws the error: a relocatable ELF container of debug sections, carrying no DT_NEEDED by construction. The port returns early in check_library_dependency for separate debuginfo (the .debug name suffix or a path under /usr/lib/debug/), the predicate pair check_hardening already applies to its findings (plusky/rpmcrab#955). Statically linked executables outside the debug trees and under lookalike prefixes (/usr/lib/debugfoo) stay charged."
+
+[[divergence]]
+case = "global"
+check = "executable-in-library-package"
+kind = "missing"
+reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs (Fedora enables SharedLibraryPolicyCheck but filters this diagnostic, enforcing the policy in the build pipeline instead). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; a negative pin in the BinariesCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "non-versioned-file-in-library-package"
+kind = "missing"
+reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs (Fedora enables SharedLibraryPolicyCheck but filters this diagnostic, enforcing the policy in the build pipeline instead). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; a negative pin in the BinariesCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
+since = "0.1.0"
 
 [[divergence]]
 case = "global"
@@ -776,14 +782,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "world-writable-mismatched-attrs"
-kind = "behaviour"
-reason = "The reference test test_world_writable.py::test_device_files_simple asserts has: drwxr-xr-t for a file created with mode 0o41777, but stat.filemode(0o41777) is drwxrwxrwt, so the reference code itself reports has: drwxrwxrwt and its own test cannot pass. The port follows the code."
-since = "0.1.0"
-upstream = "https://github.com/rpm-software-management/rpmlint/issues/600"
-
-[[divergence]]
-case = "global"
 check = "filelist-forbidden-fhs23"
 kind = "behaviour"
 reason = "The reference emits filelist-forbidden-fhs23 once per matching Bad pattern, iterating a Python set (FilelistCheck.py:105); the port collects matches into a BTreeSet and emits one finding per FHS directory in sorted order, so one finding per pattern becomes one per directory and the order is sorted rather than set order."
@@ -1074,22 +1072,6 @@ check = "info-files-without-install-info-postun"
 kind = "missing"
 reason = "Intentional: info-dir maintenance is handled by file triggers (install-info is a no-op scriptlet call on modern systems), so policing install-info calls in %postun is obsolete. The staged `--explain` entry was removed with the finding: not emitted: no description for a finding that is absent."
 since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "postin-without-ghost-file-creation"
-kind = "missing"
-reason = "Deliberate removal (issue #562): the port does not emit this finding -- it flags each declared %ghost whose path never appears as a literal substring in the %prein/%postin scriptlet text, a detection model that predates systemd-tmpfiles and update-alternatives, the mechanisms that create ghosts today. Measured over the Factory corpus (17,242 srcpkgs / 51,586 binary RPMs; predicate-exact scan validated against both implementations on anchors, pcp 6,668 lines alike) the finding fires on 10,125 lines in 782 srcpkgs -- 97.9% of all %ghost declarations corpus-wide -- and hand-checked classification found no genuine defect among them: tmpfiles creation (~6,700, pcp stash-relocate architecture), update-alternatives (2,269; --install creates /etc/alternatives/<name> internally and never spells it), kernel delegated postin, admin placeholders, tool-generated caches and payload that materialises post-install by design. Both upstream distro configs (openSUSE and Fedora) filter it, so the finding is dead in every shipped configuration while still carrying parity and maintenance surface. The emission and its registered error detail are removed; the sibling ghost-files-without-postin stays, and the exact-vector fixture pins in the PostCheck tests keep the absence pinned under cargo test. The reference still emits it."
-since = "0.3.0"
-upstream = "https://github.com/plusky/rpmcrab/issues/562"
-
-[[divergence]]
-case = "global"
-check = "jar-not-indexed"
-kind = "missing"
-reason = "Deliberate removal per triage: niche Java index check with negligible value at distro scale. The port does not emit it. The reference still emits it."
-since = "0.1.0"
-upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/ZipCheck.py"
 
 [[divergence]]
 case = "global"
@@ -1495,6 +1477,14 @@ case = "global"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
 since = "0.4.1"
 reason = "The reference charges any lib-shaped path in a devel-classified package (FilesCheck.py _check_file_normal_file_lib at the pinned commit 84848c05), and the devel classification covers -debuginfo packages, so the mirrored .debug companion of a versioned soname in a -debuginfo package draws the error. The port scopes the versioned-library arm out of the debug trees (/usr/lib/debug and /usr/src/debug, via is_debug_path): a debuginfo package's payload is debug data by construction, and the companion is the debug form of the runtime library, not a runtime library misplaced into a devel package (plusky/rpmcrab#955). A real versioned runtime library in a -devel package and lib-shaped paths under lookalike prefixes (/usr/lib/debugfoo) stay charged."
+
+[[divergence]]
+case = "global"
+check = "outside-libdir-files"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's own rpmlint config says 'Doesn't seem to make sense' about this finding. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
 
 [[divergence]]
 case = "global"
@@ -1970,6 +1960,14 @@ upstream = "https://github.com/plusky/rpmcrab/issues/731"
 
 [[divergence]]
 case = "global"
+check = "postin-without-ghost-file-creation"
+kind = "missing"
+reason = "Deliberate removal (issue #562): the port does not emit this finding -- it flags each declared %ghost whose path never appears as a literal substring in the %prein/%postin scriptlet text, a detection model that predates systemd-tmpfiles and update-alternatives, the mechanisms that create ghosts today. Measured over the Factory corpus (17,242 srcpkgs / 51,586 binary RPMs; predicate-exact scan validated against both implementations on anchors, pcp 6,668 lines alike) the finding fires on 10,125 lines in 782 srcpkgs -- 97.9% of all %ghost declarations corpus-wide -- and hand-checked classification found no genuine defect among them: tmpfiles creation (~6,700, pcp stash-relocate architecture), update-alternatives (2,269; --install creates /etc/alternatives/<name> internally and never spells it), kernel delegated postin, admin placeholders, tool-generated caches and payload that materialises post-install by design. Both upstream distro configs (openSUSE and Fedora) filter it, so the finding is dead in every shipped configuration while still carrying parity and maintenance surface. The emission and its registered error detail are removed; the sibling ghost-files-without-postin stays, and the exact-vector fixture pins in the PostCheck tests keep the absence pinned under cargo test. The reference still emits it."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/562"
+
+[[divergence]]
+case = "global"
 check = "PythonCheck"
 kind = "behaviour"
 reason = "For a requires.txt requirement that already carries a marker inside a named extra section, the reference (`_convert_egg_info_reqs_to_simple_reqs` in CPython's importlib.metadata, still used by rpmlint 2.10.0's `Distribution.requires` for egg-info) appends the section condition as a second `;`-part verbatim: `w6extra; python_version > \"3.9\"; (sys_platform == \"linux\") and extra == \"extra\"` (verified against CPython 3.13.14). The port stores the post-first-`;` marker text verbatim instead of merging everything into one `and`ed marker. Parity, not a logical divergence: both forms carry the `extra ==` condition, which the leftover evaluator treats as not holding (`extra` is never provided), and the reference itself drops the double-semicolon string as InvalidRequirement, so findings are unaffected either way. Pinned by emission-path tests."
@@ -2067,20 +2065,6 @@ case = "global"
 check = "SharedLibraryPolicyCheck"
 kind = "detail"
 reason = "Typo fixes in staged `--explain` text for `shlib-policy-excessive-dependency`: redundant word dropped and the misspelling of `separate` fixed. Meaning unchanged."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "executable-in-library-package"
-kind = "missing"
-reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs (Fedora enables SharedLibraryPolicyCheck but filters this diagnostic, enforcing the policy in the build pipeline instead). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; a negative pin in the BinariesCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
-check = "non-versioned-file-in-library-package"
-kind = "missing"
-reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs (Fedora enables SharedLibraryPolicyCheck but filters this diagnostic, enforcing the policy in the build pipeline instead). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; a negative pin in the BinariesCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
 since = "0.1.0"
 
 [[divergence]]
@@ -2302,14 +2286,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "invalid-build-requires"
-kind = "missing"
-reason = "Deliberate removal per triage: openSUSE's rpmlint config calls this 'Mandriva specific stuff that we don't want'. The port does not emit it. The reference still emits it."
-since = "0.1.0"
-upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
-
-[[divergence]]
-case = "global"
 check = "lib-package-without-%mklibname"
 kind = "missing"
 reason = "Deliberate removal (issue #531): the port does not emit this finding -- it encodes Mandriva's library naming policy: upstream's SpecCheck docstring calls the check 'specific to Mandriva and its derivatives' (upstream issue #9 concludes it is not generic), and the `%mklibname` macro does not exist in SUSE or Fedora spec-land, so the finding can never be satisfied on a supported flavour; both distro configs filter it. The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. Mageia, the live Mandriva derivative, consumes upstream rpmlint, which keeps the check. The emission, its staged `--explain` entry, the supporting tracking state, and the dedicated tests are removed; a negative pin in the SpecCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
@@ -2439,6 +2415,28 @@ case = "global"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
 since = "0.4.0"
 reason = "The reference predicate requires the parenthesised qualifier form PreReq(...):, which occurs nowhere in the Factory spec tree. The port's predicate makes the qualifier optional, so the finding fires on every PreReq usage, the plain tag form included (253 lines in 153 Factory specs); Requires(pre): and Requires(post): stay silent."
+
+[[divergence]]
+case = "global"
+check = "hardcoded-prefix-tag"
+kind = "missing"
+reason = "Deliberate removal per triage: Prefix: is the singular alias of the Prefixes: tag, RPM's relocation prefixes (rpm --relocate); rpm-spec(5) documents it with a literal-path example, and the reference flags any literal path in it at W (SpecCheck.py). openSUSE's shipped rpmlint config filters the finding, and Fedora's carries the line commented out, so Fedora emits it. Relocatable-prefix packages are not a Factory form, so the port does not emit it. The reference still emits it."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
+
+[[divergence]]
+case = "global"
+check = "unversioned-explicit-provides"
+kind = "missing"
+reason = "Mothballed on measurement (issue #940): the reference predicate fires 140,974 times across 1,303 of the 16,501 Factory specs. 138,569 firings (98.3%) are parenthesised capability names -- perl(...), pkgconfig(...), locale(...), appdata(...), group(...), user(...) -- whose versioning is carried by the capability scheme itself, and 136,771 firings sit in just 30 generated texlive specs. The plain residue (1,358 firings, 804 distinct names) is dominated by deliberate virtual provides (myspell-dictionary, kmp_in_kernel, ispell_dictionary, windowmanager, the jre1.x name-versioned family). Versioning these is a per-package judgement, not a decidable defect. rpmcrab does not emit it; the reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "unversioned-explicit-obsoletes"
+kind = "missing"
+reason = "Mothballed on measurement (issue #940): the reference predicate fires 1,311 times across 394 of the 16,501 Factory specs -- 609 plain predecessor-name obsoletes (the rename idiom, including -64bit variants), 699 macro-formed, and 3 shell-macro artefacts. rpmbuild itself warns on unversioned Obsoletes at build time, so the signal already reaches packagers through the build; the residue is the deliberate rename idiom. rpmcrab does not emit it; the reference still emits it."
+since = "0.1.0"
 
 [[divergence]]
 case = "global"
@@ -2635,13 +2633,6 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "unversioned-explicit-provides"
-kind = "missing"
-reason = "Mothballed on measurement (issue #940): the reference predicate fires 140,974 times across 1,303 of the 16,501 Factory specs. 138,569 firings (98.3%) are parenthesised capability names -- perl(...), pkgconfig(...), locale(...), appdata(...), group(...), user(...) -- whose versioning is carried by the capability scheme itself, and 136,771 firings sit in just 30 generated texlive specs. The plain residue (1,358 firings, 804 distinct names) is dominated by deliberate virtual provides (myspell-dictionary, kmp_in_kernel, ispell_dictionary, windowmanager, the jre1.x name-versioned family). Versioning these is a per-package judgement, not a decidable defect. rpmcrab does not emit it; the reference still emits it."
-since = "0.1.0"
-
-[[divergence]]
-case = "global"
 check = "not-standard-release-extension"
 kind = "missing"
 reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs as autobuild redundancy (the build systems enforce release-tag hygiene, so the lint can never be actionable in a pipeline). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its in-code `--explain` detail, and the dedicated tests are removed; a negative pin in the TagsCheck tests keeps the absence pinned under `cargo test`. The `ReleaseExtension` catalog stays: it still tolerates dist suffixes in the changelog version comparison. The reference still emits it."
@@ -2676,21 +2667,6 @@ kind = "missing"
 reason = "Deliberate removal (issue #531): the port does not emit this finding -- it is the devel half of the same Mandriva naming policy as lib-package-without-%mklibname, emitted upstream from the same TagsCheck block as the already-removed no-provides. SUSE and Fedora policy is the opposite shape (the major lives only in the runtime package, e.g. libgeotiff5; the devel package is unnumbered), so the finding fires on policy-compliant packages; both distro configs filter it, and SUSE enforces its own library policy via SharedLibraryPolicyCheck. The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the supporting regex are removed; a negative pin in the TagsCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/531"
-
-[[divergence]]
-case = "global"
-check = "hardcoded-prefix-tag"
-kind = "missing"
-reason = "Deliberate removal per triage: Prefix: is the singular alias of the Prefixes: tag, RPM's relocation prefixes (rpm --relocate); rpm-spec(5) documents it with a literal-path example, and the reference flags any literal path in it at W (SpecCheck.py). openSUSE's shipped rpmlint config filters the finding, and Fedora's carries the line commented out, so Fedora emits it. Relocatable-prefix packages are not a Factory form, so the port does not emit it. The reference still emits it."
-since = "0.1.0"
-upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
-
-[[divergence]]
-case = "global"
-check = "unversioned-explicit-obsoletes"
-kind = "missing"
-reason = "Mothballed on measurement (issue #940): the reference predicate fires 1,311 times across 394 of the 16,501 Factory specs -- 609 plain predecessor-name obsoletes (the rename idiom, including -64bit variants), 699 macro-formed, and 3 shell-macro artefacts. rpmbuild itself warns on unversioned Obsoletes at build time, so the signal already reaches packagers through the build; the residue is the deliberate rename idiom. rpmcrab does not emit it; the reference still emits it."
-since = "0.1.0"
 
 [[divergence]]
 case = "global"
@@ -2863,6 +2839,14 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 
 [[divergence]]
 case = "global"
+check = "invalid-build-requires"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's rpmlint config calls this 'Mandriva specific stuff that we don't want'. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
+
+[[divergence]]
+case = "global"
 check = "tmpfile-not-in-filelist"
 kind = "behaviour"
 reason = "The reference (TmpFilesCheck._check_tmpfile_in_filelist) emits one finding per matching tmpfiles.d line, preserving duplicates and file order; the port collects the missing paths, then sorts and dedups them, emitting one finding per path in sorted order. Duplicate lines for the same path produce one finding instead of several, and findings come out sorted rather than in file order."
@@ -2875,6 +2859,14 @@ kind = "missing"
 reason = "Deliberate omission: upstream removed TmpFilesCheck._check_post_tmpfile (commit 1c04a49d, fixing rpmlint#1374) because %tmpfiles_create/%tmpfiles_create_package are NOPs since systemd-rpm-macros rev 102 -- creation is handled by the systemd package's file triggers, so demanding a %post creation call only produced false positives. The port does not reintroduce the deleted finding."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/1374"
+
+[[divergence]]
+case = "global"
+check = "world-writable-mismatched-attrs"
+kind = "behaviour"
+reason = "The reference test test_world_writable.py::test_device_files_simple asserts has: drwxr-xr-t for a file created with mode 0o41777, but stat.filemode(0o41777) is drwxrwxrwt, so the reference code itself reports has: drwxrwxrwt and its own test cannot pass. The port follows the code."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/600"
 
 [[divergence]]
 case = "global"
@@ -2920,6 +2912,14 @@ kind = "behaviour"
 reason = "Entry inflation is capped at 64 MiB per entry (issue #771): an entry inflating past the cap is reported (bad-crc-in-zip from the CRC pass, unable-to-read-zip from the manifest read) instead of being inflated in full, where the reference reads every entry completely. A package must not be able to exhaust the linter's memory: a highly-compressible entry otherwise forces unbounded heap growth up to OOM. Entries at or under the cap are read and CRC-verified exactly as before."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/771"
+
+[[divergence]]
+case = "global"
+check = "jar-not-indexed"
+kind = "missing"
+reason = "Deliberate removal per triage: niche Java index check with negligible value at distro scale. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/ZipCheck.py"
 
 [[divergence]]
 case = "global"

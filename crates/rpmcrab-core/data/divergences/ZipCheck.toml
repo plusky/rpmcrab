@@ -31,3 +31,11 @@ kind = "behaviour"
 reason = "Entry inflation is capped at 64 MiB per entry (issue #771): an entry inflating past the cap is reported (bad-crc-in-zip from the CRC pass, unable-to-read-zip from the manifest read) instead of being inflated in full, where the reference reads every entry completely. A package must not be able to exhaust the linter's memory: a highly-compressible entry otherwise forces unbounded heap growth up to OOM. Entries at or under the cap are read and CRC-verified exactly as before."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/771"
+
+[[divergence]]
+case = "global"
+check = "jar-not-indexed"
+kind = "missing"
+reason = "Deliberate removal per triage: niche Java index check with negligible value at distro scale. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/ZipCheck.py"
