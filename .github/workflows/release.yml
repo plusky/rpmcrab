@@ -327,11 +327,12 @@ jobs:
 
   # Opens the post-release development bump (X.Y.Z -> X.Y.(Z+1)) as a PR
   # with auto-merge on, so main stops carrying the shipped version as
-  # soon as the release is out; the PR still needs its human approval.
-  # Lives here rather than in a workflow triggered by the release event,
-  # because events the GITHUB_TOKEN creates start no other workflow. A
-  # failure leaves the published release as it is: re-running the job
-  # updates the same branch and PR.
+  # soon as the release is out. The PR still needs its human approval,
+  # and CI on a bot-opened PR waits for a maintainer's "Approve and run
+  # workflows". Lives here rather than in a workflow triggered by the
+  # release event, because events the GITHUB_TOKEN creates start no other
+  # workflow. A failure leaves the published release as it is: re-running
+  # the job updates the same branch and PR.
   post-release-bump:
     if: github.event_name == 'push'
     needs: [check-version, release]
@@ -352,10 +353,13 @@ jobs:
           else
             echo "pre-release $RELEASED: no post-release bump"
           fi
+      # No stored token: the build scripts below run third-party code. The
+      # push authenticates through gh's credential helper from GH_TOKEN.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.next.outputs.next
         with:
           ref: main
+          persist-credentials: false
       - name: Check main still carries the released version
         id: current
         if: steps.next.outputs.next
@@ -364,6 +368,7 @@ jobs:
         run: |
           set -euo pipefail
           current=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          test -n "$current" || { echo "no [workspace.package] version found on main" >&2; exit 1; }
           if [ "$current" = "$RELEASED" ]; then
             echo "bump=true" >> "$GITHUB_OUTPUT"
           else
@@ -389,6 +394,7 @@ jobs:
           RELEASED: ${{ needs.check-version.outputs.version }}
         run: |
           set -euo pipefail
+          gh auth setup-git --hostname github.com
           branch="release/bump-$NEXT"
           title="chore(release): bump to $NEXT for post-release development"
           git -c user.name=github-actions -c user.email=github-actions@github.com \
@@ -402,9 +408,11 @@ jobs:
           git fetch origin "$branch" || true
           git push --force-with-lease -u origin "$branch"
           body="v$RELEASED is out; main moves to $NEXT for post-release development. Opened by the release workflow."
-          pr=$(gh pr list --head "$branch" --json number --jq '.[0].number // empty')
+          # --head matches fork PRs by branch name too: only this repo's
+          # own branch may receive auto-merge.
+          pr=$(gh pr list --head "$branch" --json number,isCrossRepository \
+            --jq 'map(select(.isCrossRepository | not)) | .[0].number // empty')
           if [ -z "$pr" ]; then
-            gh pr create --base main --head "$branch" --title "$title" --body "$body"
-            pr=$(gh pr list --head "$branch" --json number --jq '.[0].number')
+            pr=$(gh pr create --base main --head "$branch" --title "$title" --body "$body")
           fi
           gh pr merge "$pr" --auto --rebase

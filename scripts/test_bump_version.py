@@ -17,13 +17,16 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().with_name("bump-version.sh")
 REPO = SCRIPT.parent.parent
 
-EXPECTED_FILES = {
-    "Cargo.lock",
-    "Cargo.toml",
-    "README.md",
-    "crates/rpmcrab/Cargo.toml",
-    "crates/rpmcrab/man/rpmcrab.1",
-    "docs/DESIGN.md",
+# Exact (added, removed) line counts per file, as in a manual bump: any
+# extra edit -- a historical "**X.Y.Z**" in DESIGN §9, a third-party lock
+# entry -- changes a count.
+EXPECTED_NUMSTAT = {
+    "Cargo.lock": (2, 2),
+    "Cargo.toml": (1, 1),
+    "README.md": (1, 1),
+    "crates/rpmcrab/Cargo.toml": (1, 1),
+    "crates/rpmcrab/man/rpmcrab.1": (2, 2),
+    "docs/DESIGN.md": (1, 1),
 }
 
 
@@ -36,23 +39,20 @@ def git(cwd, *args):
 def workspace_version(root):
     text = (Path(root) / "Cargo.toml").read_text()
     table = text.split("[workspace.package]", 1)[1].split("\n[", 1)[0]
-    return re.search(r'^version = "([^"]+)"$', table, re.M).group(1)
+    return re.search(r'^version = "([^"]+)"$', table, re.MULTILINE).group(1)
 
 
 class BumpVersionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls._tmp = tempfile.TemporaryDirectory()
-        cls.tree = Path(cls._tmp.name) / "tree"
+        tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(tmp.cleanup)
+        cls.tree = Path(tmp.name) / "tree"
         git(REPO, "worktree", "add", "--detach", str(cls.tree), "HEAD")
+        cls.addClassCleanup(git, REPO, "worktree", "remove", "--force", str(cls.tree))
         cls.env = dict(os.environ)
         cls.env.setdefault("CARGO_TARGET_DIR", str(REPO / "target"))
         cls.old = workspace_version(cls.tree)
-
-    @classmethod
-    def tearDownClass(cls):
-        git(REPO, "worktree", "remove", "--force", str(cls.tree))
-        cls._tmp.cleanup()
 
     def setUp(self):
         git(self.tree, "reset", "--hard", "-q")
@@ -62,6 +62,7 @@ class BumpVersionTest(unittest.TestCase):
         return subprocess.run(
             ["bash", str(SCRIPT), version],
             cwd=self.tree,
+            check=False,
             env=self.env,
             capture_output=True,
             text=True,
@@ -91,17 +92,13 @@ class BumpVersionTest(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn(f"versions: ok ({new})", res.stdout)
 
-        changed = set(git(self.tree, "diff", "--name-only").split())
-        self.assertEqual(changed, EXPECTED_FILES)
+        numstat = {}
+        for line in git(self.tree, "diff", "--numstat").splitlines():
+            added, removed, path = line.split("\t")
+            numstat[path] = (int(added), int(removed))
+        self.assertEqual(numstat, EXPECTED_NUMSTAT)
         untracked = git(self.tree, "ls-files", "--others", "--exclude-standard")
         self.assertEqual(untracked, "")
-
-        # Only the two workspace members' lock entries move.
-        numstat = git(self.tree, "diff", "--numstat", "--", "Cargo.lock").split()
-        self.assertEqual(numstat[:2], ["2", "2"])
-
-        # Historical mentions keep the version they describe.
-        self.assertEqual(git(self.tree, "diff", "--", "tests/parity/divergences.toml"), "")
 
 
 if __name__ == "__main__":
