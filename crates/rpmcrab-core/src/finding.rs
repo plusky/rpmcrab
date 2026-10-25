@@ -91,7 +91,7 @@ impl Finding {
     /// letter (`E`/`W`/`I`); empty details are dropped like in the text
     /// form; a line number of 0 renders as null like in the text prefix.
     pub fn json_value(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "level": self.level.letter().to_string(),
             "check": self.check,
             "package": self.pkg_name,
@@ -102,7 +102,13 @@ impl Finding {
                 .iter()
                 .filter(|d| !d.is_empty())
                 .collect::<Vec<_>>(),
-        })
+        });
+        // The defect-pattern class (issue #959): present on member
+        // findings only, mirroring the absent conventions above.
+        if let Some(class) = self.class {
+            value["class"] = serde_json::Value::String(class.to_string());
+        }
+        value
     }
 
     /// The printed line. Coloured iff `color` is the tty table.
@@ -154,6 +160,15 @@ mod tests {
             serde_json::json!(["packageand(clang21:binutils)"])
         );
         assert!(v.get("badness").is_none(), "no badness field: {v}");
+    }
+
+    #[test]
+    fn json_carries_class_only_when_resolved() {
+        let mut f = pkg("call-to-mktemp", Level::Error);
+        // Not yet retained by a Filter: no class key.
+        assert!(f.json_value().get("class").is_none());
+        f.class = Some("defect-pattern");
+        assert_eq!(f.json_value()["class"], "defect-pattern");
     }
 
     #[test]

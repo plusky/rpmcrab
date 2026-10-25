@@ -94,6 +94,12 @@ impl Renderer for TextRenderer {
             color: &lint.color,
             width: lint.width,
         }));
+        // Per-class count lines (issue #959): one per class with a
+        // retained finding, after the footer; the footer's own line
+        // keeps its frozen shape (DESIGN §4.5).
+        for (class, count) in lint.filter().class_counts() {
+            out.push_str(&format!("{class} findings: {count}\n"));
+        }
         out
     }
 }
@@ -118,6 +124,7 @@ impl Renderer for JsonRenderer {
                 "errors": lint.filter().printed(Level::Error),
                 "warnings": lint.filter().printed(Level::Warning),
                 "filtered": lint.filter().filtered_out,
+                "classes": lint.filter().class_counts(),
                 "exit_code": lint.exit_code(),
             },
         });
