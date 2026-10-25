@@ -4,7 +4,9 @@
 # Triggered by a `v`-prefixed tag (v0.9.0). The version is the tag minus the
 # `v` and must equal [workspace.package] version in Cargo.toml, or the run
 # fails before building anything. A manual workflow_dispatch run only builds
-# (dry-run): artifacts land on the run, no release is created.
+# (dry-run): artifacts land on the run, no release is created. After a
+# release is published, the post-release-bump job opens the X.Y.(Z+1)
+# development bump PR.
 #
 # Signing: when the `GPG_PRIVATE_KEY` secret holds the dedicated signing
 # SUBKEY (ASCII-armored; never the primary key), every tarball and the
@@ -322,3 +324,87 @@ jobs:
             gh release delete "$tag" --yes
             gh release create "$tag" --notes-file notes.md $pre dist/*
           fi
+
+  # Opens the post-release development bump (X.Y.Z -> X.Y.(Z+1)) as a PR
+  # with auto-merge on, so main stops carrying the shipped version as
+  # soon as the release is out; the PR still needs its human approval.
+  # Lives here rather than in a workflow triggered by the release event,
+  # because events the GITHUB_TOKEN creates start no other workflow. A
+  # failure leaves the published release as it is: re-running the job
+  # updates the same branch and PR.
+  post-release-bump:
+    if: github.event_name == 'push'
+    needs: [check-version, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Compute the next development version
+        id: next
+        env:
+          RELEASED: ${{ needs.check-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASED" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "next=${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))" >> "$GITHUB_OUTPUT"
+          else
+            echo "pre-release $RELEASED: no post-release bump"
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.next.outputs.next
+        with:
+          ref: main
+      - name: Check main still carries the released version
+        id: current
+        if: steps.next.outputs.next
+        env:
+          RELEASED: ${{ needs.check-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          current=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "$current" = "$RELEASED" ]; then
+            echo "bump=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "main already carries $current; nothing to bump"
+          fi
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        if: steps.current.outputs.bump
+        with:
+          toolchain: 1.99.0
+      - name: Install RPM development headers
+        if: steps.current.outputs.bump
+        run: sudo apt-get update && sudo apt-get install -y librpm-dev
+      - name: Bump every version surface
+        if: steps.current.outputs.bump
+        env:
+          NEXT: ${{ steps.next.outputs.next }}
+        run: bash scripts/bump-version.sh "$NEXT"
+      - name: Open the bump PR with auto-merge
+        if: steps.current.outputs.bump
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEXT: ${{ steps.next.outputs.next }}
+          RELEASED: ${{ needs.check-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          branch="release/bump-$NEXT"
+          title="chore(release): bump to $NEXT for post-release development"
+          git -c user.name=github-actions -c user.email=github-actions@github.com \
+            checkout -B "$branch"
+          git add -u
+          git -c user.name=github-actions -c user.email=github-actions@github.com \
+            commit -m "$title"
+          # A rerun resets the branch: force-with-lease updates the open PR
+          # instead of failing non-fast-forward. Fetch first so the lease
+          # has a baseline on a fresh clone.
+          git fetch origin "$branch" || true
+          git push --force-with-lease -u origin "$branch"
+          body="v$RELEASED is out; main moves to $NEXT for post-release development. Opened by the release workflow."
+          pr=$(gh pr list --head "$branch" --json number --jq '.[0].number // empty')
+          if [ -z "$pr" ]; then
+            gh pr create --base main --head "$branch" --title "$title" --body "$body"
+            pr=$(gh pr list --head "$branch" --json number --jq '.[0].number')
+          fi
+          gh pr merge "$pr" --auto --rebase
