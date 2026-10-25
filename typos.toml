@@ -50,11 +50,14 @@ extend-words = { packag = "packag" }
 
 # recieve is a deliberate misspelling in the spelling negative
 # fixture in filter.rs: it proves no filter in the vendored openSUSE
-# config suppresses a genuine spelling typo. Scoped to that file so
-# the allow-list does not silence a real "recieve" typo repo-wide.
+# config suppresses a genuine spelling typo. patern is a deliberate
+# misspelling in the unknown-class tests in the same file: a plausible
+# user typo of the real defect-pattern class is exactly what the
+# unknown-class error exists to catch. Scoped to that file so the
+# allow-list does not silence real "recieve"/"patern" typos repo-wide.
 [type.recieve-fixture]
 extend-glob = ["**/filter.rs"]
-extend-words = { recieve = "recieve" }
+extend-words = { recieve = "recieve", patern = "patern" }
 
 # SPDX ID table tokens: "iMatix" tokenizes as i + Matix, ND is "No
 # Derivatives" in CC IDs, CAPEC-TOU is a genuine ID. Scoped to the table
@@ -70,3 +73,13 @@ extend-words = { matix = "matix", nd = "nd", tou = "tou" }
 [type.spelling-fixture]
 extend-glob = ["**/spellcheck.rs"]
 extend-words = { informations = "informations", libary = "libary" }
+
+# patern is a deliberate misspelling in the unknown-class tests in
+# defect_pattern.rs: a plausible user typo of the real defect-pattern
+# class is exactly what the unknown-class error exists to catch. (The
+# filter.rs occurrence rides in the filter.rs-scoped section above: a
+# file takes the first matching type.) Scoped to this file so the
+# allow-list does not silence a real "patern" typo repo-wide.
+[type.patern-fixture]
+extend-glob = ["**/defect_pattern.rs"]
+extend-words = { patern = "patern" }
