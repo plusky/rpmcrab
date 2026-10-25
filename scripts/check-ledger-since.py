@@ -48,9 +48,14 @@ def _ident(entry):
     return (entry.get("case"), entry.get("check"), entry.get("kind"))
 
 
+def _sans_since(entry):
+    return {k: v for k, v in entry.items() if k != "since"}
+
+
 def _max_matching(left, right, edge):
     """Maximum bipartite matching (augmenting paths): returns the set of
-    matched `left` indices. Order-independent by construction."""
+    matched `left` indices. Its size, and so the pass/fail verdict, does
+    not depend on order; which entry is left unmatched may."""
     owner = [None] * len(right)
 
     def augment(i, seen):
@@ -81,8 +86,8 @@ def violations(base_entries, head_entries, released):
 
     Entries are aligned by position, as in the diff a reviewer reads; one found
     verbatim elsewhere in base merely moved. Within a changed run, an entry
-    moved forward to an unreleased `since` first claims a replaced entry of
-    its identity (case, check, kind) -- it is that entry's successor, so its
+    whose only change is a `since` moved forward to an unreleased version
+    first claims the replaced entry it came from -- its successor -- so the
     old `since` is not free for another. Every remaining head entry whose
     `since` is shipped or malformed must then be explained by a distinct
     replaced entry (see `_excuses`); a maximum matching decides, so the
@@ -94,13 +99,17 @@ def violations(base_entries, head_entries, released):
     head = [_frozen(e) for e in head_entries]
     moved = Counter(base) & Counter(head)
     moved_out, moved_in = moved.copy(), moved.copy()
-    matcher = SequenceMatcher(None, base, head, autojunk=False)
-    found = []
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+    opcodes = SequenceMatcher(None, base, head, autojunk=False).get_opcodes()
+    # Aligned entries reserve their share first: a verbatim duplicate added
+    # ahead of an unchanged run must not pass as "moved".
+    for tag, _i1, _i2, j1, j2 in opcodes:
         if tag == "equal":
             for f in head[j1:j2]:
                 moved_out[f] -= 1
                 moved_in[f] -= 1
+    found = []
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
             continue
         replaced = []
         for f, entry in zip(base[i1:i2], base_entries[i1:i2]):
@@ -115,13 +124,12 @@ def violations(base_entries, head_entries, released):
                 continue
             version = parse_version(entry.get("since"))
             if version is not None and version > released:
-                same = [b for b in replaced if _ident(b) == _ident(entry)]
-                if same:
-                    keep = next(
-                        (b for b in same if b.get("since") == entry.get("since")),
-                        same[0],
-                    )
-                    replaced.remove(keep)
+                # Only a pure `since` move is a successor: a new sibling of the
+                # same identity must not take a reworded entry's base.
+                rest = _sans_since(entry)
+                pred = next((b for b in replaced if _sans_since(b) == rest), None)
+                if pred is not None:
+                    replaced.remove(pred)
                 continue
             needy.append(entry)
         explained = _max_matching(needy, replaced, _excuses)
@@ -135,6 +143,11 @@ def _entries(text):
     entries = tomllib.loads(text).get("divergence")
     if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
         raise ValueError("no [[divergence]] array of tables")
+    # Entries are compared as hashable tuples: only scalar values fit.
+    for entry in entries:
+        for key, value in entry.items():
+            if not isinstance(value, (str, int, float, bool)):
+                raise TypeError(f"divergence field {key!r} is not a scalar")
     return entries
 
 
@@ -167,7 +180,7 @@ def main(argv):
     try:
         head_entries = _entries(Path(LEDGER).read_text(encoding="utf-8"))
         base_entries = _entries(base_text)
-    except (OSError, ValueError) as err:
+    except (OSError, ValueError, TypeError) as err:
         # Exit 2 like the git failures: a broken ledger is not a violation.
         # (TOMLDecodeError and UnicodeDecodeError are ValueErrors.)
         print(f"ledger since: cannot read the ledger: {err}", file=sys.stderr)
