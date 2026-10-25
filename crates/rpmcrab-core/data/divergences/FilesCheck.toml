@@ -1,0 +1,626 @@
+# Divergence ledger entries owned by `FilesCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "postin-without-ldconfig"
+kind = "behaviour"
+reason = "The reference only searches the scriptlet body for ldconfig, ignoring the -p interpreter. rpmcrab honors -p ldconfig: %post -p /sbin/ldconfig satisfies the check. See rpmlint#1602 which fixes rpmlint#550."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "inaccessible-filename"
+kind = "missing"
+reason = "Intentional: Python os.access can raise UnicodeError on undecodable paths; Rust paths do not have this failure mode. The staged `--explain` entry was removed with the finding: no description for a finding that can never be emitted."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "lengthy-symlink"
+kind = "missing"
+reason = "Intentional: reference emission is commented out in FilesCheck.py and unreachable."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "spurious-executable-perm"
+kind = "behaviour"
+reason = "Deliberate divergence (issue #522): a package named mingw32-* or mingw64-* does not emit this finding for paths ending in .dll.a. GCC and libtool create the Windows import libraries with the executable bit set. The reference emits the findings, but the Factory lint session suppresses exactly this shape via the '^mingw(32|64)-.*spurious-executable-perm.*\\.dll\\.a$' filter in mingw32.toml, a config the mingw32/64-filesystem packages install into the lint environment and the mirrored config set never contains. The filter carries no path condition beyond the suffix -- all 14 hits on the Factory sweep of main 782ac1d5 sit in the cross-gcc packages under /usr/lib64/gcc/<triplet>/, the host libdir, not the sys-root -- so the suppression has none either. Plain .a files are not covered by the filter and still fire."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/522"
+
+[[divergence]]
+case = "global"
+check = "python-bytecode-inconsistent-mtime"
+kind = "behaviour"
+reason = "python-bytecode-inconsistent-mtime only fires when the .pyc embedded timestamp is older than the .py mtime (stale bytecode). The reference (FilesCheck.py:1274) fires on any mismatch, but rpmlint#1331 (unmerged; closed 2025-04-24) proposes this fix: a newer .pyc is a local-build artifact, not an error. The port implements the proposed behaviour ahead of upstream."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck.is-utf8-decompressor"
+kind = "behaviour"
+reason = "The reference decompresses IN-PROCESS for is_utf8 (pkg.py imports bz2, gzip, lzma and zstandard), so it never invokes a decompressor binary and always reaches the real bytes. rpmcrab shells out to gzip/bzip2/xz/zstd, which is a divergence of its own; when the binary is absent rpmcrab reads as UTF-8, matching the reference's `except OSError: return True`. Reading the still-compressed file instead would report file-not-utf8 for every .gz man page on a host without gzip, which the reference never does."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "non-conffile-in-etc"
+kind = "behaviour"
+reason = "Files under /etc/alternatives/ are exempt: they are managed by the alternatives system, not hand-edited config, and flagging them is wrong (rpmlint#1137, still open upstream). The /etc/ld.so.conf.d/ exemption is reference parity, not a divergence."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/1137"
+
+[[divergence]]
+case = "global"
+check = "read-error"
+kind = "detail"
+reason = "FilesCheck.peek's read-error detail: the reference emits Python's str(OSError) including the filename -- e.g. [Errno 13] Permission denied: '/p' (FilesCheck.py:430, from open(path,'rb')). The port passes std::io::Error's Display (Permission denied (os error 13)), dropping both the [Errno N] prefix and the filename."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/72"
+
+[[divergence]]
+case = "global"
+check = "incorrect-fsf-address"
+kind = "behaviour"
+reason = "The port scans the whole file for the FSF license and wrong-address patterns; the reference (FilesCheck.py:1393-1395) searches only its 2048-byte peek chunk, so a stale FSF address past byte 2048 goes unreported. Deliberate fix-in-port of upstream rpmlint#40, open since 2013: the peek limit lets wrong addresses through in longer files."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/40"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "behaviour"
+reason = "Upstream rpmlint#435: a new `mimeinfo-cache-packaged` error fires when usr/share/applications/mimeinfo.cache is packaged as a real file; it is generated at install time. The frozen 2.10.0 reference has no such check. A %ghost entry (the desktop-file-utils exception) is exempt."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/435"
+
+[[divergence]]
+case = "global"
+check = "module-without-depmod-postin"
+kind = "missing"
+reason = "Deliberate: the port does not emit module-without-depmod-postin. The check polices manual depmod calls for .ko files shipped outside kernel packages -- a pattern that exists only in the SUSE KMP ecosystem: %kernel_module_package is a SUSE-only macro, Fedora has no KMP infrastructure and does not permit standalone kernel modules in its official repositories, so the only .ko files in Fedora proper are in kernel packages which the check exempts. Fedora's own config lists these four only as commented-out lines under '## SUSE kmp's don't need manual depmod (bnc#456048)' -- Fedora itself marks them SUSE-specific. The sole KMP consumer (openSUSE/SLFO) filters them because the KMP macro template calls depmod on install and removal. The staged `--explain` entry was removed with the finding."
+since = "0.1.0"
+upstream = "https://bugzilla.suse.com/show_bug.cgi?id=456048"
+
+[[divergence]]
+case = "global"
+check = "module-without-depmod-postun"
+kind = "missing"
+reason = "Deliberate: the port does not emit module-without-depmod-postun. The check polices manual depmod calls for .ko files shipped outside kernel packages -- a pattern that exists only in the SUSE KMP ecosystem: %kernel_module_package is a SUSE-only macro, Fedora has no KMP infrastructure and does not permit standalone kernel modules in its official repositories, so the only .ko files in Fedora proper are in kernel packages which the check exempts. Fedora's own config lists these four only as commented-out lines under '## SUSE kmp's don't need manual depmod (bnc#456048)' -- Fedora itself marks them SUSE-specific. The sole KMP consumer (openSUSE/SLFO) filters them because the KMP macro template calls depmod on install and removal. The staged `--explain` entry was removed with the finding."
+since = "0.1.0"
+upstream = "https://bugzilla.suse.com/show_bug.cgi?id=456048"
+
+[[divergence]]
+case = "global"
+check = "postin-with-wrong-depmod"
+kind = "missing"
+reason = "Deliberate: the port does not emit postin-with-wrong-depmod. The check polices manual depmod calls for .ko files shipped outside kernel packages -- a pattern that exists only in the SUSE KMP ecosystem: %kernel_module_package is a SUSE-only macro, Fedora has no KMP infrastructure and does not permit standalone kernel modules in its official repositories, so the only .ko files in Fedora proper are in kernel packages which the check exempts. Fedora's own config lists these four only as commented-out lines under '## SUSE kmp's don't need manual depmod (bnc#456048)' -- Fedora itself marks them SUSE-specific. The sole KMP consumer (openSUSE/SLFO) filters them because the KMP macro template calls depmod on install and removal. The staged `--explain` entry was removed with the finding."
+since = "0.1.0"
+upstream = "https://bugzilla.suse.com/show_bug.cgi?id=456048"
+
+[[divergence]]
+case = "global"
+check = "postun-with-wrong-depmod"
+kind = "missing"
+reason = "Deliberate: the port does not emit postun-with-wrong-depmod. The check polices manual depmod calls for .ko files shipped outside kernel packages -- a pattern that exists only in the SUSE KMP ecosystem: %kernel_module_package is a SUSE-only macro, Fedora has no KMP infrastructure and does not permit standalone kernel modules in its official repositories, so the only .ko files in Fedora proper are in kernel packages which the check exempts. Fedora's own config lists these four only as commented-out lines under '## SUSE kmp's don't need manual depmod (bnc#456048)' -- Fedora itself marks them SUSE-specific. The sole KMP consumer (openSUSE/SLFO) filters them because the KMP macro template calls depmod on install and removal. The staged `--explain` entry was removed with the finding."
+since = "0.1.0"
+upstream = "https://bugzilla.suse.com/show_bug.cgi?id=456048"
+
+[[divergence]]
+case = "global"
+check = "missing-dependency-to-xinetd"
+kind = "missing"
+reason = "Deliberate: the port does not emit missing-dependency-to-xinetd; its live /etc/xinetd.d/ rule is deleted. The reference rule can never fire -- FilesCheck.py:783 tests the typo'd prefix '/etc/xinet.d/' -- so the port's corrected-prefix version was an unledgered behavioral divergence, and one that contradicted E obsolete-xinetd-requirement (no package could ship an xinetd config without an error either way). Shipping xinetd configs is now E deprecated-xinetd-config instead. The staged `--explain` entry was removed with the finding."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/214"
+
+[[divergence]]
+case = "global"
+check = "zero-length"
+kind = "missing"
+reason = "Deliberate removal (issue #479): the port does not emit zero-length. In the Factory sweep the finding fired at Error 3,315 times over 526 packages (run-20261014-782ac1d5), and every sampled bucket is empty by design -- mailman templates, test/fixture paths, .fallback markers, __init__/stamp marker files, GAPDoc and clang tablegen files that are empty by construction; no accidentally-truncated file was observed across 17,242 packages. The reference exempts via a regex whitelist (FilesCheck.py:180) that has been maintained for years and still produces this pile, so extending it is an endless exemption tail for a finding with no observed true positive. The staged `--explain` entry and the exempt-regex plumbing are removed with the finding. The port also emitted at Error where the reference uses Warning; that level divergence disappears with the removal."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/479"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "behaviour"
+reason = "find_perm_in_tmpfiles normalizes the ghost path lexically (clean_path); the reference calls os.path.realpath, which additionally resolves symlinks against the build host's filesystem, so the match sets can differ when a tmpfiles.d path traverses a build-host symlink. Package paths from the RPM header are already canonical, and resolving them against the build host is meaningless for target-system paths. Separately, on a tmpfiles.d line with fewer than 5 whitespace-separated fields the reference's unpack raises ValueError (its except catches only IndexError), aborting the whole run via lint.py:293 (sys.exit(3)); the port skips the malformed line and continues with defaults."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "behaviour"
+reason = "Upstream rpmlint#11: a new `debug-files-in-non-debug-package` warning fires when a file under `/usr/lib/debug` or `/usr/src/debug` is packaged in a non-debuginfo package (typically a `%{_libdir}` glob also matching `%{_libdir}/debug`). The frozen 2.10.0 reference has no such check. Debuginfo/debugsource packages and `%ghost` entries are exempt."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/11"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "behaviour"
+reason = "New `systemd-preset-packaged` warning with no reference counterpart: a regular, non-%ghost file shipped directly under `/usr/lib/systemd/system-preset/`, `/usr/lib/systemd/user-preset/`, `/etc/systemd/system-preset/` or `/etc/systemd/user-preset/` fires unless the package is named in the `SystemdPresetPackages` config key, which the vendored openSUSE and SLFO distro configs set to the distribution's preset packages. The frozen 2.10.0 reference has no such check and no shipped config names preset packages. Where the key is not configured no package is exempt, so every preset shipper fires. Its staged `--explain` description lives in `crates/rpmcrab-core/data/descriptions/FilesCheck.toml`."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/634"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `zero-perms` was ungrammatical to the point of baffling. Reworded: check the file permissions, ensure they are correct, or fix them in the %install section."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `perl-temp-file` used wrong verb forms. Fixed to `begins ... and contains`."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "detail"
+reason = "Bundled typo fixes in staged `--explain` texts: the misspelling of `explicitly` in `missing-dependency-to-crontabs` and `missing-dependency-to-logrotate`, and in `pem-private-key` the verb agreement and the article. Meaning unchanged."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "detail"
+reason = "Staged `--explain` entry `postun-without-install-info` removed: dead upstream text, never emitted by the reference (which renamed the finding to `info-files-without-install-info-postun`) or the port. No description for a finding that cannot be emitted."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "detail"
+reason = "Port-only `--explain` descriptions for `debug-files-in-non-debug-package`, `infopage-not-compressed`, `kernel-modules-not-in-kernel-packages`, `manpage-not-compressed`, `mimeinfo-cache-packaged`, `no-dependency-on`, `noarch-python-in-64bit-path`, `symlink-contains-up-and-down-segments`, `symlink-has-too-many-up-segments`, `symlink-should-be-absolute`: the reference emits these findings but ships no descriptions."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "behaviour"
+reason = "Upstream rpmlint#776: a new `bidi-control-character` warning fires when a libmagic-described text file contains one of the nine Unicode bidirectional control characters (trojan-source, CVE-2021-42574). The frozen 2.10.0 reference has no such check (its sole \"bidi\" hit is an unrelated I18NCheck.py comment). The scan runs for source packages too, where the attack lives; one warning per file, naming the first control found. The text gate takes `text` as a whole word of the description: a substring test also scanned binary payloads whose format names contain the letters (the `texture` of Khronos KTX), whose compressed bytes coincide with control sequences (issue #533)."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/776"
+
+[[divergence]]
+case = "global"
+check = "postin-without-install-info"
+kind = "missing"
+reason = "Intentional: info-dir maintenance is handled by file triggers (install-info is a no-op scriptlet call on modern systems), so policing install-info calls in %post is obsolete. The staged `--explain` entry was removed with the finding: not emitted: no description for a finding that is absent."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "info-files-without-install-info-postin"
+kind = "missing"
+reason = "Intentional: info-dir maintenance is handled by file triggers (install-info is a no-op scriptlet call on modern systems), so policing install-info calls in %post is obsolete. The staged `--explain` entry was removed with the finding: not emitted: no description for a finding that is absent."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "info-files-without-install-info-postun"
+kind = "missing"
+reason = "Intentional: info-dir maintenance is handled by file triggers (install-info is a no-op scriptlet call on modern systems), so policing install-info calls in %postun is obsolete. The staged `--explain` entry was removed with the finding: not emitted: no description for a finding that is absent."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "postin-without-ghost-file-creation"
+kind = "missing"
+reason = "Deliberate removal (issue #562): the port does not emit this finding -- it flags each declared %ghost whose path never appears as a literal substring in the %prein/%postin scriptlet text, a detection model that predates systemd-tmpfiles and update-alternatives, the mechanisms that create ghosts today. Measured over the Factory corpus (17,242 srcpkgs / 51,586 binary RPMs; predicate-exact scan validated against both implementations on anchors, pcp 6,668 lines alike) the finding fires on 10,125 lines in 782 srcpkgs -- 97.9% of all %ghost declarations corpus-wide -- and hand-checked classification found no genuine defect among them: tmpfiles creation (~6,700, pcp stash-relocate architecture), update-alternatives (2,269; --install creates /etc/alternatives/<name> internally and never spells it), kernel delegated postin, admin placeholders, tool-generated caches and payload that materialises post-install by design. Both upstream distro configs (openSUSE and Fedora) filter it, so the finding is dead in every shipped configuration while still carrying parity and maintenance surface. The emission and its registered error detail are removed; the sibling ghost-files-without-postin stays, and the exact-vector fixture pins in the PostCheck tests keep the absence pinned under cargo test. The reference still emits it."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/562"
+
+[[divergence]]
+case = "global"
+check = "jar-not-indexed"
+kind = "missing"
+reason = "Deliberate removal per triage: niche Java index check with negligible value at distro scale. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/ZipCheck.py"
+
+[[divergence]]
+case = "global"
+check = "hidden-file-or-dir"
+kind = "behaviour"
+reason = "Upstream emits hidden-file-or-dir twice for a hidden directory: once from the per-file _check_file_hidden_file_or_dir and again from _check_file_dir (which carries only the /.build-id exception). rpmcrab emits it once per path; the duplicate line is upstream redundancy with no consumer value. Measured 2026-10-09 on the openSUSE:Factory bazel-skylib rpmlint.log: /usr/src/bazel-skylib/.bcr, .bazelci and .github each carry two identical W lines, while hidden files (.bazelignore, .bazelversion, .gitignore) carry one."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "hidden-file-or-dir"
+kind = "behaviour"
+reason = "Deliberate config fix (plusky/rpmcrab#739): the vendored openSUSE/SLFO configs add a Filters line upstream does not ship, '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.cache' (see ADD_FILTERS in scripts/generate-distro-configs.py). Upstream's config filters the sibling skeleton dotdirs .config/.local/.fonts (the vendored copies retarget them to /usr/etc/skel, #538) but carries no .cache line, so the one member of filesystem's deliberate 0700 XDG skeleton set that upstream's list predates fired while its siblings stayed quiet. Measured on the Factory filesystem package: the vendored flavours emitted exactly one hidden-file-or-dir line before this fix — the .cache warning — and none after."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/739"
+
+[[divergence]]
+case = "global"
+check = "script-without-shebang"
+kind = "behaviour"
+reason = "The reference flags any executable file lacking a shebang, including non-scripts: data files with wrong permissions (moka-icon-theme index.theme, COPYING), shell fragment templates (kernel scripts/atomic/fallbacks/*), Python modules (idlelib/pyshell.py), and build templates (syclcc-launch.rule.in). rpmcrab only emits script-without-shebang for files in script paths (bin/, sbin/, init.d, cron.*) or otherwise identified as scripts; a non-script file with the executable bit fires spurious-executable-perm instead (extended to data files in #426). The extension is gated on the file being text: the reference early-returns on non-text in the same code path and stays silent there (verified with a 120-control-byte probe), so the port warns nowhere the reference is silent. One gap in that claim was libtool .la files in lib paths (1,821 Factory sweep hits): the reference is deliberately silent there -- its devel-file regex covers .a but not .la, and its script-without-shebang path exempts (lib path + .la) -- while the text gate fired spurious-executable-perm on them. #493 applies the same exemption in the text gate, restoring the claim. Level note: the reference's shipped scoring promotes its spurious-executable-perm to E (score 50), while the port prints its emitted W -- shipped rpmcrab configs carry no scoring table since #699 (the #594 config entry records the promotion drop). The reference findings on these 9 packages are false positives under the wrong check name. One more consequence of the rename: rpmlintrc filters written against script-without-shebang matched nothing once the population moved tags, so package opt-outs silently stopped working and the filters were reported back as unused-rpmlintrc-filter (grpc 50 hits, winboat 83 in the 2026-10-14 Factory sweep). #524 gives the renamed findings a filter alias: matching also renders them under script-without-shebang, and an alias match counts as filter usage. The alias covers only the renamed population -- files marked by the name-based setters or the doc/log paths, which the reference tags spurious-executable-perm itself, do not answer to it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "devel-file-in-non-devel-package"
+kind = "behaviour"
+reason = "Deliberate divergence (issue #511): a package named mingw32-* or mingw64-* does not emit this finding for files under the MinGW sys-root (/usr/<triplet>-w64-mingw32/sys-root/). A cross toolchain's sys-root is headers and import libraries by definition -- the devel files are the product, with no -devel split to move them into. The reference emits the findings, but the Factory lint session suppresses them wholesale via addFilter lines in mingw32.toml, a config the mingw32/64-filesystem packages install into the lint environment; it is not part of rpmlint's config tree, so the mirrored config set never contains it and the port reported the family live: 1,586 of the finding's 2,212 Factory sweep hits on main 782ac1d5 (mingw32-gcc and mingw64-gcc 786 each, the pkgconf twins 7 each). The same unloaded config also filters files-duplicate wholesale and *.dll.a spurious-executable-perm for these packages; that wider gap is recorded in issue #511 and is not covered by this entry."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/511"
+
+[[divergence]]
+case = "global"
+check = "no-dependency-on"
+kind = "behaviour"
+reason = "Deliberate removal (issue #534): the port does not emit `no-dependency-on` from I18NCheck. The reference's trailing-language rule (I18NCheck.py) demands a `locales-<lang>` dependency from every binary package whose name ends in an ISO 639 code; that encodes Mandriva's per-language locale packages. Replicated over the Factory repo metadata the rule fires on 7,551 binary packages and not one of the demanded names exists as a package -- there is no `locales-<lang>` package for any code in the table (openSUSE ships a monolithic `glibc-locale`, Fedora uses `glibc-langpack-*`) -- so the demanded dependency can never be satisfied; `doc` alone (Darai) accounts for 5,553, and both the openSUSE and Fedora configs filter the `locales` shape. This supersedes the `-doc` carve-out (plusky/rpmcrab#459). The finding itself stays live: FilesCheck still emits `no-dependency-on` for its dangling-symlink exceptions and the perl/python versioned-dependency rules, which are satisfiable and config-driven. Pinned by `killed_locales_dependency_finding_stays_absent`."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/534"
+
+[[divergence]]
+case = "global"
+check = "no-documentation"
+kind = "behaviour"
+reason = "Deliberate fix (plusky/rpmcrab#539): the port decides `no-documentation` session-wide — a doc-less non-lib package stays quiet when any package built from the same source (the `SOURCERPM` header) in the same run ships documentation. The reference decides per package (`FilesCheck.py` `_check_nodoc`: `not lib_package and not pkg.doc_files`) with no cross-package awareness, so the standard SUSE layout (docs in the main package, none in its data/devel subpackages) fires on every subpackage and the vendored openSUSE/SLFO configs filter the finding outright (config-filters audit F1, tracked in plusky/rpmcrab#538). Measured on the proj 9.9.0 corpus (37 binary RPMs from one source, filter-free): 34 findings, all 34 sibling-covered by the `proj` main package, 0 genuinely doc-less. The decision is deferred to `after_checks` over state merged via `export_state`/`import_state`, the port's existing cross-package machinery; tag, level and message are unchanged, and a package with no documented sibling still fires. A header without `SOURCERPM` groups by its own name, preserving the per-package behaviour. Pinned by `no_documentation_suppressed_when_sibling_ships_docs`, `no_documentation_mixed_sources_decide_per_source` and `no_documentation_fires_for_lone_docless_package`."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/539"
+
+[[divergence]]
+case = "global"
+check = "no-manual-page-for-binary"
+kind = "severity"
+reason = "Deliberate post-parity demotion (rpmcrab#484): the port reports I where the frozen 2.10.0 reference reports W. A missing manpage is upstream debt the packager usually cannot fix, so the finding is surfaced as info rather than firing as a warning. The reference's effective openSUSE config also filters the finding away entirely; the vendored config drops that filter so the info line actually prints (see DROP_LIVE_FILTERS in scripts/generate-distro-configs.py)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/484"
+
+[[divergence]]
+case = "global"
+check = "dangling-relative-symlink"
+kind = "behaviour"
+reason = "Deliberate fix (plusky/rpmcrab#547): the port decides `dangling-relative-symlink` session-wide — a relative link is dangling only when its normalised target is shipped by no package in the run. The reference decides per package (`FilesCheck.py` `_check_file_link_relative`: the target must be in the emitting package's own file list) with no cross-package awareness, so the standard sibling layouts fire wholesale: measured over a 118-srcpkg Factory sample (paired runs, vendored config vs `Filters = []`, every suppressed line hand-classified), the blanket filter the vendored openSUSE/SLFO configs inherit from upstream under the stale comment 'We check for that already' hides 12,622 lines, of which 6,818 are sibling-resolved and Requires-covered (the -lang pattern: gnome-user-docs-lang, mate-panel, gnome-recipes, mono, libreoffice, lazarus) and 5,654 are one genuinely broken package (gfxboot-devel, whose theme symlinks carry /home/abuild/rpmbuild/BUILD build-host targets). The decision is deferred to `after_checks` over state merged via `export_state`/`import_state`, the port's existing cross-package machinery; the per-package `req_names` escape and the `DanglingSymlinkExceptions` diversion are computed per package at record time and are unchanged, the absolute sibling tag `dangling-symlink` is untouched, and a single-package run behaves exactly as the reference (its session set is its own file list). The vendored configs drop the blanket filter (see DROP_LIVE_FILTERS in scripts/generate-distro-configs.py), so the finding surfaces for the distro flavours; the scoped sdb filter line stays and is live again. Root-level links keep the reference's parity quirk: POSIX normpath preserves the double leading slash, so a normalised `//usr/...` target never equals a header entry and filesystem's own root links still fire, as they do in the reference (directory targets shipped as header entries do resolve). Tracked in plusky/rpmcrab#538 (config-filters audit №165). Pinned by `dangling_relative_suppressed_when_sibling_ships_target`, `dangling_relative_fires_for_lang_package_alone`, `dangling_relative_unrelated_package_does_not_resolve`, `dangling_relative_fires_for_lone_dangling_package`, `dangling_relative_exception_diverts_to_no_dependency_on` and `dangling_relative_exception_required_stays_silent`."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/547"
+
+[[divergence]]
+case = "global"
+check = "kernel-modules-not-in-kernel-packages"
+kind = "behaviour"
+reason = "Config-only (issue #538): the vendored configs drop upstream's bare filter for this finding (DROP_LIVE_FILTERS in scripts/generate-distro-configs.py). The finding itself is unchanged and stays config-gated in both implementations -- KernelModuleRPMsOK defaults to true in the port's configdefaults and the reference's alike, and no vendored config overrides it -- so under the shipped flavours neither side emits it (verified on real KMP packages, leancrypto-kmp and vhba-kmp: zero emissions). The filter only hid that gating; with it gone, a session that sets KernelModuleRPMsOK = false gets the port's findings unfiltered while the reference's distro config still hides them."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/538"
+
+[[divergence]]
+case = "global"
+check = "executable-marked-as-config-file"
+kind = "behaviour"
+reason = "Config-only (issue #557): the vendored configs drop upstream's bare filter for this finding (DROP_LIVE_FILTERS in scripts/generate-distro-configs.py). The check is a verbatim port and unchanged (regular file, any exec bit, RPMFILE_CONFIG set; E in both implementations). The reference's shipped openSUSE config hides the finding as policy -- its Fedora config has the same line commented out and lets it fire -- so under the reference's distro flavours it never prints, while the port's vendored flavours now surface it. Measured over the Factory corpus (header scan validated by paired runs on six anchor packages, exact): the filter suppressed 137 E lines in 44 srcpkgs, of which 24 are genuine accidental markings no other check covers (rear: one spec line marks the entire /usr/share/rear tree %config(noreplace), sweeping 14 rescue-image skeleton scripts; postfix-bdb: the %config(noreplace) /etc/postfix/* glob sweeps postfix's own control scripts; pcp: generated file lists mark every confdir file noreplace, daemon rc scripts included; build: /usr/lib/build/emulator/emulator.sh marked %config(noreplace)). The remaining 113 lines are deliberate or substance-free shapes packagers answer in per-package rpmlintrc: plain-%config scripts (no preservation hazard -- upgrades land, edits kept as .rpmsave), noreplace hook/template roles, data files carrying a stray exec bit, grub.d's open per-file noreplace policy, and %ghost stubs. Ruled in the config-filters follow-through (issue #538)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/557"
+
+[[divergence]]
+case = "global"
+check = "no-dependency-on"
+kind = "behaviour"
+reason = "Deliberate fix (issue #568, Fedora-config survey candidate 3): FilesCheck's python rule also counts a Requires/PreReq on `python3-base` (any relation) or on the versioned interpreter path `/usr/bin/python<X.Y>` as the base dependency, and both rules skip the package when it is the base package itself (`python-base` / `python3-base` / `perl-base`). The reference accepts only a `=`-pinned dependency on `python` / `python-base` / `python(abi)` (resp. `perl-base` / `perl` / `perl(:MODULE_COMPAT_...)`); on SUSE the base package is named `python3-base` and specs require it unversioned or with a `>=` floor (Factory spec corpus: 29 unversioned, 6 floors, 0 `=`-pins), interpreter consumers carry the generated path dependency which pins the version in the path itself, and `perl-base` fired on itself. Measured over the Factory corpus (10,361 candidate RPMs shipping python/perl tree files; header emulation confirmed by paired binary runs, exact after excluding two symlink-only pagure themes): the unmodified check fires on 127 packages, of which 19 are these false positives (18 interpreter-path, among them cephfs-top which also requires `python3-base`, plus perl-base itself). The paired A/B removes exactly those 19 lines and nothing else; the remaining 108 firings stay, among them the genuine python314-pyparsing (no python Requires at all), the sibling-transitive class (version-locked sibling Requires: -devel/-lang subpackages, the azure *-nspkg chains -- resolving it needs session-level dep resolution), the flavour-name form `python313-base` (6 packages, e.g. python-gobject-stubs), and unpinned perl base deps (perl-mapscript). The pinned forms keep their exact semantics. Fedora's shipped config filters the two firing dep names outright (fedora.toml); the check-level fix keeps the genuine residue visible instead of filtering it."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/568"
+
+[[divergence]]
+case = "global"
+check = "library-without-ldconfig-postin"
+kind = "behaviour"
+reason = "Deliberate fix (plusky/rpmcrab#569): the port applies the ldconfig scriptlet test only when the library's parent directory is ldconfig-managed -- a standard libdir (/lib, /lib64, /usr/lib, /usr/lib64, /usr/local/lib, /usr/local/lib64) or a directory named by an /etc/ld.so.conf.d/*.conf snippet shipped in the same package. The reference applies it to every file matching lib_regex anywhere in the path (FilesCheck.py:1084-1099). ldconfig never scans arbitrary subtrees, so the unscoped test is ~87% false positives on the Factory corpus (17,242 srcpkgs / 51,586 binary RPMs): of 675 visible family lines, 193 of the 195 private-subdir lines are GHC's /usr/lib64/ghc-<ver>/lib tree (libraries registered via ghc-pkg; SUSE's Haskell macros never emit %ldconfig_scriptlets) and the remainder of the class is polymake's private tree; the residual ~90 direct-libdir lines (powercap's /usr/lib64/libpowercap.so.0.6.0 the archetype) still fire. Fedora's config silences the whole family over its F28 ldconfig file triggers, which openSUSE does not have (verified: no ldconfig FILETRIGGER/TRANSFILETRIGGER in the corpus rpm-4.20.1 / glibc-2.44 headers). The same gate covers library-without-ldconfig-postun, postin-without-ldconfig and postun-without-ldconfig, ledgered alongside. Pinned by ldconfig_private_subtree_is_quiet, ldconfig_standard_libdirs_still_fire, ldconfig_conf_registered_dir_still_fires and ldconfig_conf_snippet_wires_through_check_binary."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/569"
+
+[[divergence]]
+case = "global"
+check = "library-without-ldconfig-postun"
+kind = "behaviour"
+reason = "Deliberate fix (plusky/rpmcrab#569): the port applies the ldconfig scriptlet test only when the library's parent directory is ldconfig-managed -- a standard libdir (/lib, /lib64, /usr/lib, /usr/lib64, /usr/local/lib, /usr/local/lib64) or a directory named by an /etc/ld.so.conf.d/*.conf snippet shipped in the same package. The reference applies it to every file matching lib_regex anywhere in the path (FilesCheck.py:1084-1099). ldconfig never scans arbitrary subtrees, so the unscoped test is ~87% false positives on the Factory corpus (17,242 srcpkgs / 51,586 binary RPMs): of 675 visible family lines, 193 of the 195 private-subdir lines are GHC's /usr/lib64/ghc-<ver>/lib tree (libraries registered via ghc-pkg; SUSE's Haskell macros never emit %ldconfig_scriptlets) and the remainder of the class is polymake's private tree; the residual ~90 direct-libdir lines (powercap's /usr/lib64/libpowercap.so.0.6.0 the archetype) still fire. Fedora's config silences the whole family over its F28 ldconfig file triggers, which openSUSE does not have (verified: no ldconfig FILETRIGGER/TRANSFILETRIGGER in the corpus rpm-4.20.1 / glibc-2.44 headers). The same gate covers library-without-ldconfig-postin, postin-without-ldconfig and postun-without-ldconfig, ledgered alongside. Pinned by ldconfig_private_subtree_is_quiet, ldconfig_standard_libdirs_still_fire, ldconfig_conf_registered_dir_still_fires and ldconfig_conf_snippet_wires_through_check_binary."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/569"
+
+[[divergence]]
+case = "global"
+check = "postin-without-ldconfig"
+kind = "behaviour"
+reason = "Deliberate fix (plusky/rpmcrab#569): the port applies the ldconfig scriptlet test only when the library's parent directory is ldconfig-managed -- a standard libdir (/lib, /lib64, /usr/lib, /usr/lib64, /usr/local/lib, /usr/local/lib64) or a directory named by an /etc/ld.so.conf.d/*.conf snippet shipped in the same package. The reference applies it to every file matching lib_regex anywhere in the path (FilesCheck.py:1084-1099). ldconfig never scans arbitrary subtrees, so the unscoped test is ~87% false positives on the Factory corpus (17,242 srcpkgs / 51,586 binary RPMs): of 675 visible family lines, 193 of the 195 private-subdir lines are GHC's /usr/lib64/ghc-<ver>/lib tree (libraries registered via ghc-pkg; SUSE's Haskell macros never emit %ldconfig_scriptlets) and the remainder of the class is polymake's private tree; the residual ~90 direct-libdir lines (powercap's /usr/lib64/libpowercap.so.0.6.0 the archetype) still fire. Fedora's config silences the whole family over its F28 ldconfig file triggers, which openSUSE does not have (verified: no ldconfig FILETRIGGER/TRANSFILETRIGGER in the corpus rpm-4.20.1 / glibc-2.44 headers). The same gate covers library-without-ldconfig-postin, library-without-ldconfig-postun and postun-without-ldconfig, ledgered alongside. Pinned by ldconfig_private_subtree_is_quiet, ldconfig_standard_libdirs_still_fire, ldconfig_conf_registered_dir_still_fires and ldconfig_conf_snippet_wires_through_check_binary."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/569"
+
+[[divergence]]
+case = "global"
+check = "postun-without-ldconfig"
+kind = "behaviour"
+reason = "Deliberate fix (plusky/rpmcrab#569): the port applies the ldconfig scriptlet test only when the library's parent directory is ldconfig-managed -- a standard libdir (/lib, /lib64, /usr/lib, /usr/lib64, /usr/local/lib, /usr/local/lib64) or a directory named by an /etc/ld.so.conf.d/*.conf snippet shipped in the same package. The reference applies it to every file matching lib_regex anywhere in the path (FilesCheck.py:1084-1099). ldconfig never scans arbitrary subtrees, so the unscoped test is ~87% false positives on the Factory corpus (17,242 srcpkgs / 51,586 binary RPMs): of 675 visible family lines, 193 of the 195 private-subdir lines are GHC's /usr/lib64/ghc-<ver>/lib tree (libraries registered via ghc-pkg; SUSE's Haskell macros never emit %ldconfig_scriptlets) and the remainder of the class is polymake's private tree; the residual ~90 direct-libdir lines (powercap's /usr/lib64/libpowercap.so.0.6.0 the archetype) still fire. Fedora's config silences the whole family over its F28 ldconfig file triggers, which openSUSE does not have (verified: no ldconfig FILETRIGGER/TRANSFILETRIGGER in the corpus rpm-4.20.1 / glibc-2.44 headers). The same gate covers library-without-ldconfig-postin, library-without-ldconfig-postun and postin-without-ldconfig, ledgered alongside. Pinned by ldconfig_private_subtree_is_quiet, ldconfig_standard_libdirs_still_fire, ldconfig_conf_registered_dir_still_fires and ldconfig_conf_snippet_wires_through_check_binary."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/569"
+
+[[divergence]]
+case = "global"
+check = "read-error"
+kind = "behaviour"
+reason = "Deliberate config fix (plusky/rpmcrab#579): the vendored openSUSE/SLFO configs narrow the upstream 'read-error' filter to the ENOENT detail (pattern '^\\S+\\.\\S+: \\w: read-error No such file or directory'; see SCOPE_FILTERS in scripts/generate-distro-configs.py). Upstream ships the filter unscoped in the 'An issue with OBS, works with autobuild' block, a rationale that does not cover this tag: read-error is the tool reporting its own read failure, and no OBS component re-checks it. Measured over the 2026-10-15 Factory corpus (17,242 srcpkgs / 51,586 binary RPMs; full-corpus port scan with filters neutralised, reconciled line-for-line against the reference on 55 srcpkgs -- 261 lines, 0 mismatches): the blanket filter suppresses 1,932 warnings in 481 source packages, every one with detail 'No such file or directory (os error 2)' -- 1,925 symlinks to %ghost placeholders under /etc/alternatives/ (the bindir-shebang peek opens the symlink's target; the placeholder is a mode-000 header-only file that update-alternatives replaces with a live symlink at install, so there is never anything to read) and 7 symlinks to install/runtime-generated files (ca-certificates' ca-bundle.pem, cockpit's /run issue file, inn's two status files, kernel-default-base's vmlinux, texlive's ls-R); unreadable payload files, corrupt packages and parser failures measure zero. With the narrowing the 1,932 stay filtered and any future read failure with a different errno surfaces. The pattern keys on the port's current detail format -- the detail divergence ledgered for this check in issue #72; if that divergence is fixed to the reference's path-carrying detail, this pattern must be re-cut in the same change or it silently stops matching."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/579"
+
+[[divergence]]
+case = "global"
+check = "symlink-should-be-relative"
+kind = "behaviour"
+reason = "Deliberate config fix (plusky/rpmcrab#573): the vendored openSUSE/SLFO configs scope the upstream 'symlink-should-be-relative' filter to update-alternatives targets (pattern '^\\S+: \\w: symlink-should-be-relative \\S+ /etc/alternatives/'; see SCOPE_FILTERS in scripts/generate-distro-configs.py). Upstream ships the filter unscoped in the 'We check for that already' block, a rationale that does not hold for this tag: nothing else reports absolute-symlink style, and the sibling dangling-symlink finding fires only when a target fails to resolve. Measured over the 2026-10-15 Factory corpus (51,586 binary RPMs; header scan validated by paired port/reference runs on anchor packages): the blanket filter suppresses 1,954 warnings in 486 source packages, of which 1,937 (99.1%) are update-alternatives endpoint links -- tool-owned artefacts generated by packaging macros (%python_alternative and kin) or declared %ghost for update-alternatives -- while the 17 remaining lines in 8 source packages are hand-authored (4 udev /dev/null masks, 11 texlive links, 1 javadoc doc link, and gavl's stale automake-1.18 license link, which already fires dangling-symlink). With the scope, alternatives endpoints stay filtered and the 17 hand-authored lines surface; parity with the reference session is deliberately given up for this tag because the reference config's blanket filter hides a small hand-authored residue behind a generated-machinery majority."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/573"
+
+[[divergence]]
+case = "global"
+check = "dir-or-file-in-usr-local"
+kind = "behaviour"
+reason = "Config-only (issue #583): the vendored configs drop upstream's bare filter for this finding (DROP_LIVE_FILTERS in scripts/generate-distro-configs.py), so the findings surface under the distro flavours where the reference's shipped openSUSE config hides them. The check is the reference's FilesCheck DisallowedDirs prefix walk (E in both, one emission per header entry) except that %ghost entries are exempt (issue #643, ledgered under FilesCheck), where the reference emits for them. Measured over the Factory corpus (header census over 51,586 binary RPMs, validated per-RPM against both the port and the reference binaries, exact): the filter suppresses 45 E lines in 2 srcpkgs / 20 binary RPMs, with a misfire rate of 0/45 -- no prefix collisions, no cross sysroots, no parser artefacts; genuine accidental violations measure zero. Both carriers are deliberate: filesystem's %ghost /usr/local skeleton tree (20 lines) and reproducible-faketools' /usr/local/bin PATH-shadowing wrappers plus support files (25 lines), the honest home for whose exceptions is a per-package rpmlintrc. Since the %ghost exemption the filesystem carrier no longer fires: re-measured with the current checker over the Factory corpus (full-corpus sweep of 17,242 srcpkgs; header census of both carriers reconciles exactly), the finding fires 25 E lines in 1 srcpkg / 19 binary RPMs -- all reproducible-faketools real payload -- and the exemption suppresses filesystem's 20 %ghost lines (refresh: issue #654). The filter's 'handled by CheckFilelist.py' rationale is a 1.x-era fossil: FilelistCheck's pattern rules cover 0 of the 45 lines, and its GoodPrefixes walk's coarser per-package E is itself filtered for filesystem by filesystem's own scoped exception. Fedora's shipped config carries the line commented out and lets the tag fire. Ruled in the config-filters follow-through (issue #538, ruling item 8)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/583"
+
+[[divergence]]
+case = "global"
+check = "incorrect-fsf-address"
+kind = "severity"
+reason = "Deliberate severity recalibration (issue #883): the port reports W where the reference reports E, and the vendored configs drop upstream's blanket filter (DROP_LIVE_FILTERS in scripts/generate-distro-configs.py), so the finding surfaces under the distro flavours where the reference's shipped openSUSE config hides it entirely ('Too noisy, and usually not something downstream packagers can fix'). A stale FSF postal address in a shipped licence text or licence header is a documentation defect with no artefact consequence, so it is not an error; the suppressed set is nonetheless text the distribution ships and can correct in its own files or carry upstream. Measured with the filter lifted over the 300-RPM audit sample of the Factory corpus: the filter hides 203 lines in 39 packages, 150 of them kernel-devel-longterm's shipped kernel headers carrying the old address in their licence headers, the remainder licence texts and licence headers in 38 further packages."
+since = "0.4.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/883"
+
+[[divergence]]
+case = "global"
+check = "devel-file-in-non-devel-package"
+kind = "severity"
+reason = "Config-only (issue #594): the vendored configs carry no [Scoring] table (#594 dropped this entry via DROP_SCORING in the generator; #699 then removed the vendored scoring tables wholesale), so the port prints W where the reference prints E: devel-file-in-non-devel-package (Badness: 50) (both emit at W; the reference's [Scoring] entry promotes it to E via the b > 0 rule). The finding is a packaging-shape judgement with a documented false-positive family -- runtime soname symlinks (Mesa's libEGL_mesa.so) fire alongside genuinely misplaced devel libraries (FreeCAD's libE57Format.so) -- so the harm is conditional and the promotion fails the pass's always-implies-damage rule (626 promoted E lines in the 20261016 Factory sweep)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/594"
+
+[[divergence]]
+case = "global"
+check = "spurious-executable-perm"
+kind = "severity"
+reason = "Config-only (issue #594): the vendored configs carry no [Scoring] table (#594 dropped this entry via DROP_SCORING in the generator; #699 then removed the vendored scoring tables wholesale), so the port prints W where the reference prints E: spurious-executable-perm (Badness: 50) (both emit at W; the reference's [Scoring] entry promotes it to E via the b > 0 rule). A stray exec bit on a data file implies no damage by itself -- nothing ever executes it -- and the promotion produced 3,989 printed E lines in the 20261016 Factory sweep (samtools test data alone 674), none of them an artefact defect."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/594"
+
+[[divergence]]
+case = "global"
+check = "makefile-junk"
+kind = "severity"
+reason = "Config-only (issue #594): the vendored configs carry no [Scoring] table (#594 dropped this entry via DROP_SCORING in the generator; #699 then removed the vendored scoring tables wholesale), so the port prints W where the reference prints E: makefile-junk (Badness: 109) (both emit at W; the reference's [Scoring] entry promotes it to E via the b > 0 rule). A Makefile shipped in a doc directory is a judgement call -- shipped examples are legitimate -- not damage (16 promoted E lines in the 20261016 Factory sweep)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/594"
+
+[[divergence]]
+case = "global"
+check = "dangling-relative-symlink"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports I where the reference reports W. The session-wide decision (plusky/rpmcrab#547, ledgered above) already removes the sibling-resolved majority; the residue is dominated by links whose target is provided outside the run or created at install time (gfxboot audit: about half genuine, half target-elsewhere), so the finding is info. The absolute sibling dangling-symlink stays W."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "manual-page-in-subfolder"
+kind = "behaviour"
+reason = "The `.+` filename capture that makes `manual-page-in-subfolder` reachable (plusky/rpmcrab#621) changes what prints for section-less files in a man subfolder, where the reference stays silent; what prints depends on the name, under a shipped (non-empty) `CompressExtension` (`gz`/`bz2`). A dotless subdir name such as `man1/foo/bar` prints only `manpage-not-compressed` (W): the suffix list holds just the whole filename, the compression step pops it unconditionally, and the empty remainder makes the `suffixes.first()` guard skip both error findings. A dotted section-less name such as `man1/foo/bar.baz` additionally fires `bad-manual-page-folder` (detail `expected folder: manfoo/bar`) and `manual-page-in-subfolder`. (Both error findings firing for the dotless shape would require an empty `CompressExtension` -- an unconfigured check, not a shipped config.) The shape is narrow, as narrowed in plusky's #621 review: top-level suffix-less files already matched before this change, and for suffixed subfolder pages such as `man1/foo/bar.3.gz` the reference fires both findings too (its `binary` group admits `/`); only suffix-less subdir files are a new fire-vs-silence shape."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/pull/621"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "behaviour"
+reason = "Deliberate false-positive fix: the port skips %ghost entries in dir-or-file-in-* for every DisallowedDirs entry. The reference applies the finding to %ghost entries with no exemption, so a tmpfiles-created path such as /var/run/<pkg> cannot satisfy both tmpfile-not-in-filelist, which requires the path in %files as %ghost, and dir-or-file-in-var-run. A %ghost installs no payload, so there is nothing in the disallowed directory to forbid; real payload files there still fire at Error. Provenance: bsc#1173166 and bsc#1190386."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/643"
+
+[[divergence]]
+case = "global"
+check = "non-ghost-in-run"
+kind = "behaviour"
+reason = "Deliberate tightening beyond the reference (issue #639): the reference matches /run/ only (FilesCheck.py _check_file_non_ghost_in_run), so a non-ghost payload under /var/run/ passes silently there. The port also matches /var/run/, which is the same directory via symlink on openSUSE (/var/run -> /run, both tmpfs), per the openSUSE systemd packaging guidelines: packages should not contain directories or files under /var/run or /run, and runtime directories belong in tmpfiles.d snippets. Tag and the %ghost exemption are unchanged; only the path coverage widens. Severity is E since #699 (separate severity entry)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/639"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "behaviour"
+reason = "Fedora bug 624410: a new `manpage-dangling-so-ref` warning fires when a man page's `.so` (soelim) line names a target page the package does not ship, so `man` fails to display the referencing page. The frozen 2.10.0 reference has no such check: symlink-based man page redirects are covered by the dangling-symlink family, but a `.so` line is file content, and neither tool read man page contents for `.so` references. The target is judged within the package, like the reference's dangling-symlink family: a target shipped by another package satisfies the reference only when this package declares the dependency, through the same `req_names` escape `check_link_absolute` uses (a file Require on the target page's path; both sides pass through `strip_man_compression_suffix` -- the Require names at compare time, the shipped set and the candidates at build time -- so a compressed Require satisfies the reference, matching the reference's own behaviour). The port's own relative-symlink form is session-aware (issue #547), but this check deliberately stays package-local beyond that escape, so a target a sibling package ships without a declared Require still fires. Both man roots (`/usr/share/man` and `/usr/man`) are accepted for both argument forms: a relative `man<section>/<page>` argument resolves under either root, and an absolute argument under either root names the same root-relative page. A referencing page under a locale directory also resolves against its own locale directory, where localised page sets keep their redirect targets, a bare-filename argument resolves against the referencing page's own directory, and a shipped file matches under any compression suffix the codebase recognises for man pages, or none. Deliberate silences: arguments naming no man-root page are dropped (absolute paths outside a man root, first directories without the `man<section>` shape), pages that cannot be read or decompressed are skipped rather than guessed at (including a `.zip` page, a recognised suffix with no decompressor), page text is read through an 8 MiB prefix cap, so a `.so` line past the cap is not seen and stays silent (pinned by manpage_so_ref_over_limit_output_hides_late_targets), and non-regular files are not scanned. One finding per (referencing page, missing target). Its staged `--explain` description lives in `crates/rpmcrab-core/data/descriptions/FilesCheck.toml`."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/649"
+
+[[divergence]]
+case = "global"
+check = "sysconfig-fillup-usage"
+kind = "behaviour"
+reason = "New port-only Warning: FilesCheck flags a package that uses the legacy sysconfig/fillup configuration scheme, once per package, with the detail naming every use found: a payload file below /etc/sysconfig, a template below a fillup-templates directory (/usr/share/fillup-templates or the legacy /var/adm/fillup-templates), a fillup invocation at command position in a scriptlet (the shape %fillup_only / %fillup_and_insserv expand to), or a shipped systemd unit whose EnvironmentFile points into /etc/sysconfig (the optional-file - prefix counts). The mechanism's own packages are exempt: a binary named sysconfig or fillup, or one whose source package (the SOURCERPM stem) is sysconfig or fillup, which covers sysconfig-netconfig. The reference is not silent on these payloads: it ships the Error filelist-forbidden-sysconfig (the sysconfig [[Check]] in rpmlint/checks/FilelistCheck.toml at the pinned reference, identical in the bundled crates/rpmcrab-core/data/FilelistCheck.toml, with Bad /var/adm/fillup-templates/*, /etc/sysconfig/* and /etc/rc.config.d/* and scoring 10000 in the openSUSE config, pinned by test/test_filelist.py), and rpmcrab ports that rule, so this Warning double-emits with that Error on the overlapping payload category: a payload file below /etc/sysconfig that a Bad pattern catches and no Good pattern blesses, and a template below /var/adm/fillup-templates, each draw both findings. Payload files matching the rule's Good patterns (the cbq file, scripts and scripts/*, network and network/*, hardware and hardware/*, isdn, isdn/scripts and isdn/scripts/*, SuSEfirewall2.d and SuSEfirewall2.d/*, and the uml entry, all below /etc/sysconfig) do not count as a use here, matching the exemption the Error applies. What this Warning adds is the categories the Error does not cover -- fillup invocations at command position in scriptlets, shipped systemd units whose EnvironmentFile points into /etc/sysconfig, and templates outside the Error's Bad patterns -- a template below any fillup-templates directory counts (in practice /usr/share/fillup-templates) -- plus the migration nudge itself: the staged description proposes the migration to daemon-native configuration or systemd drop-ins with EnvironmentFile at package-owned paths. Warning only: using sysconfig does not always imply damage, so this is a migration nudge. Measured on the Factory corpus: 316 binary RPMs in 260 source packages use the scheme in at least one category."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/641"
+
+[[divergence]]
+case = "global"
+check = "non-ghost-in-run"
+kind = "severity"
+reason = "Emission severity E since issue #699 (the reference emits W): payload files or directories under /run or /var/run are never legitimate package content -- both are tmpfs mounts whose runtime directories belong in tmpfiles.d snippets -- so the finding always implies the defect it names. Under the pre-#699 regime the openSUSE flavours reached E only via their vendored scoring (non-ghost-in-run = 10000); #699 removed config badness and made E the emission level. The #639 entry records the widened /var/run coverage."
+since = "0.3.0"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "behaviour"
+reason = "New `symlink-loop` error with no reference counterpart (issue #723): a shipped symlink whose resolution chain, followed within its own package, revisits a path -- the link points at itself, or a set of links point at each other in a cycle -- fires at E, and so does a link whose chain runs into such a cycle. The reference has no finding for the shape: its chain walk (pkg.py readlink) loops forever on a cyclic package, and the port's dangling findings are presence-based, so a loop's target -- present in the file list, being the link itself or another link in the cycle -- never fires them. The cycle is fully decidable from the payload and is always damage at runtime (every open fails with ELOOP), so the finding is an error. Chains that resolve to a shipped non-link entry, and chains that leave the package (the dangling family's existing business), stay silent. Measured over the Factory corpus (51,589 RPMs; the 3 unreadable entries are .nosrc.rpm placeholders with no payload): 434,286 symlinks walked, 12,372 in-package link-to-link hops, longest chain 4, zero loops -- the finding guards a class the reference cannot scan for at all. The header walk used for the count was validated against the built binary on a synthetic package carrying an absolute self-loop and a 2-cycle (both report exactly the same three links) and on a 250-RPM paired slice. openSUSE's brp-25-symlink rejects a self-pointing link at build time; this is the RPM-level counterpart. Its staged `--explain` description lives in `crates/rpmcrab-core/data/descriptions/FilesCheck.toml`."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/723"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "behaviour"
+reason = "Declared accounts credited for `non-standard-uid` / `non-standard-gid` (issue #756): the reference emits both findings as warnings from distro-registry membership alone, while rpmcrab treats an account as standard when the registry lists it or the checked source package's set declares it. A set is the packages built from one source: the grouping key is the package's full SOURCERPM header value, and a package whose header carries no SOURCERPM groups by its own name. The decision runs at the end of the run, grouped by that key, the session shape the no-documentation finding uses. Two routes declare an account for the whole set: a shipped sysusers.d snippet whose `u` / `g` lines name the account (a `u` line declares its like-named primary group as well, while a `g` line declares the group alone, so a group-only declaration still leaves a like-named user owner firing; `m` membership lines, `r` range lines and lines whose name field is `-` or numeric credit nothing); the `user(<name>)` / `group(<name>)` entries of a set package's header Provides, hand-written or generated alike (rpm's sysusers generator emits the same entries for a package shipping a snippet), matched per dependency leaf so plain, versioned and rich-wrapped spellings all credit. A third route credits the file-owning package alone: its own Requires on those capabilities -- plain Requires and the scriptlet-context Requires alike (Requires(pre), Requires(post), Requires(preun) and Requires(postun): the entries the header split gathers as `prereq`, together with the legacy prereq bit) -- matched per dependency leaf the same way, so plain, versioned and rich-wrapped spellings all credit there too. The scriptlet-context entries that credit are the ones a packager wrote: an entry whose prereq sense bits are exactly the sense mask of rpm's user/group dependency generator (SCRIPT_PRE|SCRIPT_POSTUN) whose dependency leaves are all account capabilities is the generator's restatement of the package's own file ownership -- derived from the very files under decision -- and credits nothing; the header loader drops it before any check runs (issue #827). Requires crediting is per file-owning package: a sibling subpackage's Requires credits nothing, since installed standalone the owning package carries no declaration of the account through any route. Measured over the Factory corpus under the openSUSE data (51,589 RPMs), counting the reference's warning lines and classifying each at its source package: 1,492 lines (287 uid, 1,205 gid) across 99 source packages -- 1,414 lines whose account the line's own source package declares through the snippet or Provides routes, and 78 lines whose file-owning package carries the account capability in its Requires -- 38 of them credited by a packager-written Requires entry, and 40 whose only account Requires entry is the generator stamp, so no genuine route credits them. The port's own corpus run -- one invocation per source package, no per-package rpmlintrc filtering -- fires the 40 stamp-only lines across 5 source packages (grommunio-web, gromox, pagure, shadowsocks-libev, shadowsocks-rust), every one an account the line's own source package declares through no genuine route, each provided by a different source package (the system-user pattern); the remaining 1,452 lines stay silent through the genuine routes (corpus re-measured for issue #827). An account owned by files in a package set that declares it through no route remains an error: with no in-set declaration, the files land owned by an unresolvable name or a recycled numeric id."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/756"
+
+[[divergence]]
+case = "global"
+check = "non-standard-uid"
+kind = "severity"
+reason = "The port reports `non-standard-uid` at error where the reference warns (issue #756): with declared accounts credited (see the FilesCheck behaviour entry for issue #756), a fired line's account has no in-set declaration through any of the three routes -- no snippet, no header Provides, no owning-package Requires -- so the files land owned by an unresolvable name or a recycled numeric id. The Factory corpus measurement behind that entry leaves zero residue at error over 51,589 RPMs."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/756"
+
+[[divergence]]
+case = "global"
+check = "non-standard-gid"
+kind = "severity"
+reason = "The port reports `non-standard-gid` at error where the reference warns (issue #756): with declared accounts credited (see the FilesCheck behaviour entry for issue #756), a fired line's account has no in-set declaration through any of the three routes -- no snippet, no header Provides, no owning-package Requires -- so the files land owned by an unresolvable name or a recycled numeric id. The Factory corpus measurement behind that entry leaves zero residue at error over 51,589 RPMs."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/756"
+
+[[divergence]]
+case = "global"
+check = "non-executable-script"
+kind = "behaviour"
+reason = "Fix-and-diverge (issues #813, #845): a non-executable file whose interpreter line marks content the owning program consumes by reading, importing, sourcing or rendering does not emit non-executable-script. The shapes are decidable from the path and the interpreter alone, and two guards bound them: a file installed directly in a script directory (/bin, /sbin, /usr/bin, /usr/sbin, /usr/local/bin, /usr/local/sbin) never counts as data, and the remaining directory-component shapes count only inside the data and library trees (/usr/src/, /usr/share/, /usr/lib/, /usr/lib64/, /usr/etc/, /etc/) -- the library trees count wherever they are rooted -- so the same components in an entry-point tree such as /usr/libexec/ keep firing. The shapes: library trees (a site-packages, dist-packages, node_modules or gems component; files under the Ruby library roots /usr/lib/ruby/ and /usr/lib64/ruby/ and the Perl library roots /usr/lib/perl5/ and /usr/lib64/perl5/), language directories (a python or python3[.x] component; a lib component past the first two path components holding a script-language file - .py, .rb, .pl, .lua, .php, .sh or .bash; a bash component holding a .sh or .bash file; a .py file in an extensions, plugins or auto-load component), source trees (a src component), test and example material (a test, tests, selftests, example, examples, sample or samples component), sourced fragments (files under /usr/share/bash-completion/; an exact profile or rc basename or a bashrc name segment (delimited by '.', '_' or '-') in a sourced location under /etc/, /usr/etc/, /usr/lib/, /usr/lib64/ or /usr/share/; an interpreter whose basename is exactly false) and templates (a final .in, .sample, .tmpl, .tpl, .template, .skel or .j2 suffix). The exempt files are modules, fragments, templates and source material the owning program reads, renders or streams elsewhere, so an interpreter line there does not mark a file executed in place and the missing exec bit is not a defect; in the salt battle test all 138 findings sit in Python library trees and every file is read, rendered or imported. The reference fires on these shapes; its only comparable step discards the interpreter of any file whose name ends in .pm, wherever the file sits - a step its own source marks as disputed - so such a file draws no interpreter-derived finding there. Measured on the Factory sweep run-20261022-857d5ece, recomputed with the final predicates by re-running the fixed binary over the same 280 packages and diffing the silenced set path by path: the class held 2,641 findings in 280 source packages and the fixed binary leaves 576 findings in 187 source packages, dominated by application-private module trees under /usr/share/<app>/ and /usr/lib/<app>/ whose paths carry no covered component; against the unguarded predicates the data-tree guard returns exactly two files to firing, glusterfs's Python daemon entry points under /usr/libexec/glusterfs/python/, and nothing else changes. The gate is confined to this one emission: executable files in the exempt shapes still draw the interpreter findings, and scripts the shapes do not cover still fire, in script directories and entry-point trees included."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/813"
+
+[[divergence]]
+case = "global"
+check = "wrong-script-end-of-line-encoding"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #849): wrong-script-end-of-line-encoding fires only for files that are scripts — a file carrying a kernel interpreter line (the parsed interpreter names an absolute path), a file whose name carries a Unix shell-script extension (.sh, .bash, .zsh, .ksh, .csh, .tcsh, .fish, .bsh; shell scripts are routinely sourced and carry no interpreter line), or an executable file in a script location (the script_regex paths). The scoping runs inside the check's outer gate — a file reaches the test only when it carries a #! line, an exec bit, or a script path — so the extension arm decides only files that reach it, and files under the sourced-script paths (/etc/bash_completion.d/, /etc/profile.d/) take the sourced-script branch and never reach the test. A .bat/.cmd name suppresses the name- and location-based arms, because CRLF is the correct end-of-line encoding for a Windows batch file; an interpreter line naming an absolute path still fires, because a file starting with #! is executed by that interpreter, while a non-path #! token fires nothing. Language source extensions (.py, .pl, .rb, .ps1) name modules as readily as scripts, so they reach the finding only through an interpreter line or as an executable file in a script location; .ps1 sits with them rather than with the shell extensions because the PowerShell interpreter accepts CRLF, so a dot-sourced .ps1 is not corrupted by it, and a leading #! followed by a non-path token is source syntax (a Rust #![...] inner attribute), not an interpreter line. Extension matching is case-insensitive. The reference fires for every text file carrying a carriage return, with an interpreter line, an exec bit, or a script path. Measured over the Factory corpus (sweep run-20261022-857d5ece, all 676 findings verified against the RPM payloads): 600 findings are files that are not scripts and go silent (444 Ansible YAML playbooks and data files, 40 Markdown documents, 40 Python modules without interpreter lines, 14 .bat/.cmd files, and 62 licence texts, templates, C headers, build and configuration data files and the Rust source file) and 76 keep firing (75 files with interpreter lines — Tcl/wish demos, Perl scripts including /usr/bin/file-rename and /usr/bin/unsafe-rename, shell and Python scripts — and one .bsh script whose interpreter line is not at offset 0). Pinned by script_eol_still_fires_for_scripts and script_eol_silent_for_non_scripts_and_batch_files in files.rs."
+since = "0.4.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/849"
+
+[[divergence]]
+case = "global"
+check = "non-devel-file-in-devel-package"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #860): non-devel-file-in-devel-package is charged only for host paths - a file under a cross-toolchain target sysroot (its first component under /usr is one of the measured set FHSCheck sanctions, issue #582, consulted through the shared cross_sysroot_matches helper) is the cross devel package's own payload: for a cross sys-root the target's runtime libraries are the devel content, there is no separate host-style library package for the target, and the sys-root is consumed as a whole by the cross compiler. The scoping is a property of the path, so both arms of the finding (the versioned-library arm and the .typelib arm) are scoped the same way. The reference charges these paths unchanged. Measured on the Factory corpus (sweep run-20261022-857d5ece population; the 18 affected source packages re-measured before and after with scan.py, the before side reproducing the sweep's 111 exactly and no other finding changing in those packages): 111 E in 18 source packages before, 28 E in 13 after. Silenced (83), every one under /usr/<triplet>/sys-root/ in the five glibc-cross source packages: cross-aarch64-glibc-devel 18, cross-hppa-glibc-devel 17, cross-ppc64le-glibc-devel 17, cross-s390x-glibc-devel 17, cross-loongarch64-glibc-devel 14. (The issue's count of 100 sys-root hits does not reproduce from the sweep artefacts; the sys-root subset measures 83.) The residue (28) is all host paths and keeps firing: glib2-stage1-devel 6, postgresql18-devel-mini 4, libomp18-devel 4, dapl-debug 3, mono-devel 3, gettext-tools and gettext-tools-mini 1 each (libgettextpo), and singletons in efl-devel, ipmiutil-devel, libunbound-devel-mini, sbd-devel, the pcp package itself and nemo-extension-preview (the population's one .typelib, at a host path). The sanction is the measured set, not the triplet shape: a novel component of triplet shape (frobnicate-suse-linux) and a measured name extended by a suffix still fire, a sysroot name below another component sanctions nothing, and the whole triplet tree is target content, so a runtime library directly under /usr/<triplet>/ with no sys-root component is silent as well. Pinned by cross_sysroot_runtime_libs_in_devel_package_are_quiet, every_measured_cross_sysroot_is_quiet_for_non_devel, non_devel_still_fires_outside_the_measured_sysroots and cross_sysroot_typelib_in_devel_package_is_quiet in files.rs, and cross_sysroot_matches_needs_the_leading_component in fhs.rs."
+since = "0.4.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/860"
+
+[[divergence]]
+case = "global"
+check = "version-control-internal-file"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #858): version-control-internal-file is charged only for genuine version-control internals: a file inside a .git, .svn, .hg or .bzr metadata tree, a file directly inside a CVS or RCS directory, an RCS ,v revision file, and a file inside an arch .arch-ids or {arch} directory. The reference's scm pattern also charges the working-tree dotfiles a project tracks as ordinary content (.gitignore, .cvsignore, .hgignore, .bzrignore, .svnignore and .hgtags). Measured on the Factory corpus (sweep run-20261022-857d5ece population, pristine-main A/B over the 126 affected source packages, all 16,342 findings compared): 199 E in 126 source packages before — 198 .gitignore and 1 .cvsignore, not one inside a version-control tree — and 4 E in 4 source packages after, with no other finding changed; all 4 were .gitmodules files \u2014 shipped submodule metadata (kicad's demo tree and the rubygem-amq-protocol, rubygem-sassc and rubygem-uglifier gem trees), not a version-control tree \u2014 so that charge was dropped, leaving the pattern charging only the internals listed above; the final count after the drop is 0 E in 0 of the A/B's 126 source packages. Corpus-wide there are 12 such .gitmodules files in 7 source packages; the other 8 (in ImHex, nextcloud and winboat) are already filtered by those packages' own rpmlintrc. Pinned by scm_regex_charges_vcs_internals and version_control_internal_file_charges_internals_not_dotfiles in files.rs."
+since = "0.4.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/858"
+
+[[divergence]]
+case = "global"
+check = "no-dependency-on"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #862): the perl/python base-dependency rules of no-dependency-on are decided over the whole run once every package has been seen — the finding's dangling-symlink arm is decided in the same pass under issue #547, only its exception disposition being computed per package at record time, and is untouched here — and two further expressions of the interpreter dependency are credited. A package's own Requires/PreReq credit it when they name the interpreter as a file or soname dependency: the unversioned interpreter paths /usr/bin/perl and /usr/bin/python3, a libperl.so soname for perl (version-agnostic, as the name itself is), and a libpython<version>.so soname for python, the soname carrying the version the package's files name. And a package whose own lists carry no credited form stays quiet when one of its Requires/PreReq names a package of the run built from the same source whose own lists carry the credited dependency — the subpackage anchored on its main package. Packages group by the SOURCERPM key, a package whose header carries none grouping by its own name, and the anchored name must differ from the package's own name. The anchor credit is one hop, judged by the same own-package predicate for the version the candidate's files name: the version-bearing forms must match that version, while the unversioned interpreter paths, the libperl.so soname and the python3-base name (credited in any relation, per issue #568) carry no version and credit as they stand; an anchor sibling carrying nothing credits nothing, a chain credits nothing beyond the first hop, and a requirement on a package of another source credits nothing. The own-package forms credited before this change are the reference =-pinned names (perl-base/perl and python/python-base/python(abi), each pinned = to the version) and the perl(:MODULE_COMPAT_<version>) token, credited on an exact match of the token — the version it embeds must be the candidate's — over Requires/Recommends/Suggests rather than on a relation pin, plus the #568 divergence (the python3-base name and the versioned interpreter path); the reference credits only a package's own forms. Measured on the Factory corpus (sweep run-20261022-857d5ece population; the 55 affected source packages re-measured before and after the fix with the corpus scanner, with zero other finding deltas across all findings of those packages): 103 E in 55 source packages before, 65 E in 35 source packages after — 31 silenced by the anchor arm and 7 by the file/soname forms of the packages themselves. The residue is accounted: 34 azure packages whose requirements name only rpmlib() entries or names from other sources, so no anchor exists to credit; 12 types-* stub packages and 2 py3c packages with rpmlib-only requirements; 4 folder-color extensions whose anchor sibling folder-color-common carries no base dependency; 4 gobject-stubs findings on the flavour-named base form python313-base, which stays uncredited as #568 left it; 5 perl packages with an unpinned perl requirement or none, the =-pin semantics being deliberate; 2 qtcharts-qt5-sip findings anchored only on another source's devel package; nemo-extension-emblems, whose only python-bearing requirement names a package of another source; and python314-pyparsing, which carries no python requirement at all. Pinned by the file/soname tests normal_perl_dep_interpreter_path_satisfies, normal_perl_dep_libperl_soname_satisfies, normal_python_dep_unversioned_interpreter_path_satisfies, normal_python_dep_libpython_soname_satisfies and normal_python_dep_libpython_soname_other_version_fires, and by the anchor tests normal_python_dep_anchor_sibling_carries_base, normal_python_dep_anchor_sibling_without_base_fires, normal_python_dep_anchor_other_source_fires, normal_python_dep_anchor_chain_does_not_credit, normal_python_dep_anchor_wrong_version_fires, normal_perl_dep_anchor_sibling_carries_compat and normal_perl_dep_anchor_sibling_carries_via_interpreter_path in files.rs."
+since = "0.4.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/862"
+
+[[divergence]]
+case = "global"
+check = "perl-temp-file"
+kind = "missing"
+reason = "Deliberate removal (issue #883): the perllocal.pod and .packlist files the finding flags are content the distro ships on purpose; upstream's own openSUSE config records the decision ('We want these files'). rpmcrab does not emit it."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
+
+[[divergence]]
+case = "global"
+check = "setuid-binary"
+kind = "missing"
+reason = "Deliberate removal (issue #883): OBS normalises file permissions during packaging; the dedicated permissions machinery carries the genuine permission cases. rpmcrab does not emit it."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
+
+[[divergence]]
+case = "global"
+check = "setgid-binary"
+kind = "missing"
+reason = "Deliberate removal (issue #883): OBS normalises file permissions during packaging; the dedicated permissions machinery carries the genuine permission cases. rpmcrab does not emit it."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
+
+[[divergence]]
+case = "global"
+check = "non-readable"
+kind = "missing"
+reason = "Deliberate removal (issue #883): OBS normalises file permissions during packaging; the dedicated permissions machinery carries the genuine permission cases. rpmcrab does not emit it."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
+
+[[divergence]]
+case = "global"
+check = "non-standard-dir-perm"
+kind = "missing"
+reason = "Deliberate removal (issue #883): OBS normalises file permissions during packaging; the dedicated permissions machinery carries the genuine permission cases. rpmcrab does not emit it."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
+
+[[divergence]]
+case = "global"
+check = "non-standard-executable-perm"
+kind = "missing"
+reason = "Deliberate removal (issue #883): OBS normalises file permissions during packaging; the dedicated permissions machinery carries the genuine permission cases. rpmcrab does not emit it."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
+
+[[divergence]]
+case = "global"
+check = "no-documentation"
+kind = "missing"
+reason = "Deliberate removal (issue #883): a package without documentation files is a structural property of -devel/-doc package splits: 128 of the 300 audit-sample packages carried the finding, one line each. rpmcrab does not emit it."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
+
+[[divergence]]
+case = "global"
+check = "cross-directory-hard-link"
+kind = "missing"
+reason = "Deliberate removal (issue #883): cross-directory hard links are a deliberate package layout (measured: 3,420 lines in 18 audit-sample packages, documentation and Python byte-code farms); OBS builds do not depend on link locality."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
+
+[[divergence]]
+case = "global"
+check = "dir-or-file-in-opt"
+kind = "missing"
+reason = "Deliberate removal (issue #883): FilelistCheck's filelist-forbidden-opt covers the same content and stays unsuppressed at E. Measured over the Factory corpus (51,589 RPMs): both findings fire on exactly the same 4 packages (mingw32-filesystem, mingw64-filesystem, openQA-llm-server, rpmlint-mini), with no package on either side only. The /opt member leaves the shipped DisallowedDirs, so the family no longer emits it. rpmcrab does not emit it."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
+
+[[divergence]]
+case = "global"
+check = "symlink-crontab-file"
+kind = "missing"
+reason = "Deliberate removal (issue #883): the flagged shape is extinct in Factory: measured over 51,589 RPMs, exactly 2 entries exist under /etc/cron.d and both are regular files. rpmcrab does not emit it."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
+
+[[divergence]]
+case = "global"
+check = "log-files-without-logrotate"
+kind = "missing"
+reason = "Deliberate removal (issue #883): measured over the Factory corpus, the finding flags 99 RPMs (97 srcpkgs), 93 of them on a directory rather than a log file; the flagged set is dominated by rotation the check cannot see (auditd self-rotation in its shipped config, sysstat's sa2, the journal directory), and no decidable predicate separates the small genuine residue. The decidable siblings (incoherent-logrotate-file, missing-dependency-to-logrotate) stay unsuppressed."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
+
+[[divergence]]
+case = "global"
+check = "file-not-utf8"
+kind = "missing"
+reason = "Deliberate removal (issue #883): measured over the Factory corpus, the finding fires ~4,100 times, 82% of them from 5 source packages; a 22-file sample was genuinely non-UTF-8 in every case and by design in every case (TeXmacs Cork/T1 documentation, dictionary data, a KOI8-R example file). The finding covers documentation files only. rpmcrab does not emit it."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"

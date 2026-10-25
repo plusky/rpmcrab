@@ -1,0 +1,11 @@
+# Divergence ledger entries owned by `finding-line`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "finding-line"
+kind = "behaviour"
+reason = "Deliberate output-contract break (issue #699, superseding the #289 D7 / #595 decision): the text renderer shows no (Badness: N) column at all, because rpmcrab no longer computes a badness number. #595 had shown the column whenever badness > 0 (the reference shows it only when N > 1, filter.py); #699 removed the value itself -- it is not stored on findings, not rendered, not totalled, and the JSON finding carries no badness field. The filter-match string (DESIGN §4.2) is unchanged: it never carried the column on either side."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/595"

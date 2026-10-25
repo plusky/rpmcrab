@@ -1,0 +1,32 @@
+# Divergence ledger entries owned by `MenuXDGCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "non-utf8-desktopfile"
+kind = "detail"
+reason = "The reference reports Python's UnicodeDecodeError (`'utf-8' codec can't decode byte 0xff in position 0: invalid start byte`); the port reports Rust's FromUtf8Error (`invalid utf-8 sequence of 1 bytes from index 0`). The finding name, severity and `Unicode error:` prefix match. The position is not reproducible, not merely formatted differently: the reference decodes through codecs.open + cfp.read_file, which pulls one line at a time, so UnicodeDecodeError.start is the offset WITHIN THE CURRENT LINE, whereas the port reads the whole file and reports a file-wide byte index. Verified: a bad byte at file offset 36 (line 3, column 3) is reported by the reference as position 0. The two agree only while the bad byte is on the first line."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "MenuXDGCheck"
+kind = "behaviour"
+reason = "Upstream rpmlint#19: a new `unexpanded-macro-in-desktop-file` warning fires when a desktop entry's Name/Comment/Icon contains `%{...}`, i.e. an RPM macro that was never expanded at build time. The frozen 2.10.0 reference has no such check. Exec= is not scanned: its %-codes (%f, %U) are desktop field codes, not macros. GenericName= and Keywords= are deliberately not scanned either: only the display fields Name/Comment/Icon are covered, and extending coverage would be a new-check design decision."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/19"
+
+[[divergence]]
+case = "global"
+check = "MenuXDGCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `desktopfile-without-binary` hid the subject (`is for a file not present in the package`) and had a grammar slip. Reworded: the .desktop file refers to a binary not present in the package."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "MenuXDGCheck"
+kind = "detail"
+reason = "Port-only `--explain` description for `unexpanded-macro-in-desktop-file`: the reference emits the finding but ships no descriptions."
+since = "0.1.0"

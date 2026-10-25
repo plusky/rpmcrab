@@ -1,0 +1,18 @@
+# Divergence ledger entries owned by `time-report`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "time-report"
+kind = "behaviour"
+reason = "With -t, a duration map whose entries all sum to zero prints cleanly; the reference divides by the total unguarded and raises ZeroDivisionError (lint.py:158), so `rpmcrab -i rpm -t` succeeds where `rpmlint -i rpm -t` dies."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "time-report"
+kind = "behaviour"
+reason = "With -t, BinariesCheck's “Checked files” column shows the run-lifetime total instead of blank: the check no longer resets per package (the per-worker check set is reset between packages, but the count accumulates for the merged report). The reference sets checked_files to None on every reset (AbstractCheck.py:65) and resets after each package (lint.py:271), so its column is blank."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"

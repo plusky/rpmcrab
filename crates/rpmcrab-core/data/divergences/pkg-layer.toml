@@ -1,0 +1,45 @@
+# Divergence ledger entries owned by `pkg-layer`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "pkg-layer"
+kind = "behaviour"
+reason = "Pkg::readlink bounds the symlink chain by the file count and returns None on a cycle; the reference (pkg.py:716-724) loops forever on a malformed package. A linter must not hang."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "pkg-layer"
+kind = "behaviour"
+reason = "Pkg::grep returns None when the regex engine errors on the data; the reference lets the exception propagate."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "pkg-layer"
+kind = "behaviour"
+reason = "Pkg::open returns ExtractError::BadDir when the extract directory is not a directory; the reference warns and continues with an unextracted package (pkg.py:608-613)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "pkg-layer"
+kind = "behaviour"
+reason = "Pkg::readlink starts from the package's own copy of the file (returning None for a foreign PkgFile); the reference starts from the passed PkgFile object."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "pkg-layer"
+kind = "behaviour"
+reason = "librpm panics decoding a non-UTF-8 string header tag (str::from_utf8 in td.rs); the reference (helpers.byte_to_string) decodes with errors='replace' and keeps linting. A malformed header aborts the port where the reference degrades."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "pkg-layer"
+kind = "behaviour"
+reason = "Extraction skips payload entries colliding with an incompatible existing path (a file where a directory entry lands or vice versa, e.g. case-colliding names on case-insensitive filesystems) and logs a warning, instead of aborting the whole package on the resulting ENOTDIR/EISDIR as before."
+since = "0.1.0"

@@ -1,0 +1,24 @@
+# Divergence ledger entries owned by `session-header`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "session-header"
+kind = "behaviour"
+reason = "The header's 'configuration:' block names the bundled defaults as <builtin>; the reference names the installed file it read (site-packages/rpmlint/configdefaults.toml). rpmcrab embeds its defaults at build time with include_str!, so there is no installed file to name, and reproducing an installation path would be false provenance."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "session-header"
+kind = "behaviour"
+reason = "The vendored distro-config layer lists every vendored file under 'configuration:' as <distro:opensuse>/... (one line per file), while the reference under the same overlay lists only the disk paths it read. A parity runner diffing full reports would flag the header even when every finding matches; normalize the <distro:...> lines out (or compare findings only) before diffing."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "session-header"
+kind = "behaviour"
+reason = "The session banner identifies rpmcrab itself ('rpmcrab: X.Y.Z', the crate's own version) instead of emulating the reference's banner ('rpmlint: 2.10.0'). The banner is not grepped by build tooling, so the reference emulation was dropped (see `docs/DESIGN.md` §4.5); the abort banner, footer, sort order and exit codes are untouched."
+since = "0.1.0"

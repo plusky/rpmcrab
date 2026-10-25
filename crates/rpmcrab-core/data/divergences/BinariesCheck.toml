@@ -1,0 +1,270 @@
+# Divergence ledger entries owned by `BinariesCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "forbidden-optflags"
+kind = "detail"
+reason = "DW_AT_producer is read with gimli instead of objdump: the reference keeps the text after the last ':' of the objdump DW_AT_producer line, truncating a producer value that itself contains a colon; the port keeps the full attribute string."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "missing-call-to-setgroups-before-setuid"
+kind = "behaviour"
+reason = "The reference reports this at Error when the binary is installed setuid and Warning otherwise (BinariesCheck.py: 'E' if is_uid else 'W'); rpmcrab reports Warning unconditionally — the level does not split on the setuid bit. The symbol pattern cannot distinguish an identity switch that neglects setgroups from the safe idiom that drops the effective ids to the real ids, so the split would still leave an Error on proven-bogus findings (fix-and-diverge, plusky/rpmcrab#743)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "executable-stack"
+kind = "behaviour"
+reason = "Fixed behaviour: the executable-stack arch list also matches aarch64. The reference's `arm.*` does not match the string 'aarch64', so the reference skips the check on ARM64; rpmcrab includes it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "binaries-dependency-scope"
+kind = "behaviour"
+reason = "The reference runs its ldd-based dependency analysis only for installed packages; rpmcrab runs the DT_NEEDED-based analysis for extracted files too. This is also what makes unused-direct-shlib-dependency impossible to replicate (no ldd -u on extracted files). Within that analysis, undefined-non-weak-symbol fires for shared libraries only: an executable's UND entries resolve at load time (the reference's `ldd -r` stays silent there), and scanning them raw produced hundreds of bogus hits. Undefined symbols are taken from .dynsym and resolved the way the reference's `ldd -r` resolves them (plusky/rpmcrab#467): against the DT_NEEDED closure formed by the libraries shipped in the invocation's packages first (each package's providers kept separate, one identity per package file: the consumer's own package file's copy of a SONAME is its provider -- two versions of one package in one invocation are distinct packages for resolution -- then other same-base-architecture packages' copies in check order, plusky/rpmcrab#735), then -- for installed packages and for invocations in which a single package contributes, which share one model -- against the system libraries of the environment rpmcrab runs in (ldconfig cache, then the standard library directories); a multi-contributor invocation resolves against its own package set plus the directories its objects' DT_RPATH/DT_RUNPATH entries name on the filesystem rpmcrab runs on (plusky/rpmcrab#701). The mode switch counts contributing packages across the whole invocation (a package contributes when it ships a captured consumer or a provider library), never the packages in the run. In the jailed container / build root rpmcrab normally runs in, that system environment is the checked packages' own install target, so the two models agree there; on an unjailed host the system fallback reflects the host's libraries, so installed and single-contributor verdicts can differ from the multi-contributor model. Providers are located the way the loader locates them (plusky/rpmcrab#504): the needing object's DT_RPATH (transitive, and ignored when the object also carries DT_RUNPATH) and DT_RUNPATH (direct dependencies only) are searched with $ORIGIN expansion after the package providers in every mode; where the system fallback applies, the search then continues into the cache and the standard directories. One gap remains: matching is by symbol name only, where the loader also binds symbol versions."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "shared-library-not-executable"
+kind = "missing"
+reason = "Mothballed after re-grounding (issue #939): the historical ground -- that the loader ignores the execute bit -- is false and is struck: find-debuginfo selects files by execute permission (rpm 4.14.3 scripts/find-debuginfo.sh, kept in debugedit's find-debuginfo.in), and rpm up to 4.16 set elf.attr exeonly so a non-executable shared library received no automatic Provides/Requires; that gating was dropped in rpm 4.17, while SLE 15 ships rpm 4.14.3. The ground that survives is scope: Factory ships rpm 4.17 and later, where dependency generation no longer keys on the bit, and rpmcrab targets Factory -- SLE's older rpm is outside its scope. rpmcrab does not emit it; the reference still emits it."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/596"
+
+[[divergence]]
+case = "global"
+check = "shared-library-without-dependency-information"
+kind = "behaviour"
+reason = "Upstream rpmlint#598: the pinned reference deleted the `shared-library-without-dependency-information` error after Go PIE false positives (Go executables are ET_DYN with no DT_NEEDED); the port restores the check scoped to non-Go shared objects, exempting ELFs that carry a `.note.go.buildid` section. Per plusky/rpmcrab#359 the port additionally exempts plugin-like objects for which an empty DT_NEEDED is legitimate: dlopen-only plugins (no DT_SONAME), fully self-contained objects (no non-weak undefined symbols), and executable-entry shims (define `main`)."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/598"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "detail"
+reason = "Port-only `--explain` description for `ar-failed`: the reference emits the finding but ships no description. The port describes it so `--explain` never prints \"Unknown message\"."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "invalid-ldconfig-symlink"
+kind = "missing"
+reason = "Mothballed on measurement (issue #940): over the full Factory tree the reference rule was evaluated exactly -- 4,191 packages carrying soname-shaped symlinks, 6,913 ELF files with SONAMEs, 6,621 SONAME entries examined -- and it fires 4 times: the libXaw6 and libXaw7 compatibility links, where the SONAME entry points at the versioned link in a two-hop chain, and libtfpsacrypto in both arch variants, where the SONAME entry points at the pre-rename library name from the mbedTLS to TF-PSA-Crypto transition. Every firing is a deliberate compatibility chain or alias that the loader and ldconfig resolve; the rule's single-hop assumption does not match these arrangements. rpmcrab does not emit it; the reference still emits it."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/BinariesCheck.py"
+
+[[divergence]]
+case = "global"
+check = "invalid-soname"
+kind = "missing"
+reason = "Deliberate removal (issue #883): openSUSE's own rpmlint config says 'Doesn't seem to make sense' about this finding and filters it, so it reaches no shipped-config user. The port does not emit it; the three findings carrying the same config verdict (invalid-ldconfig-symlink, only-non-binary-in-usr-lib, outside-libdir-files) are recorded removals on the same ground. A malformed SONAME still fails the validity gate that guards the symlink and shlib-policy checks. The reference still emits it."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/BinariesCheck.py"
+
+[[divergence]]
+case = "global"
+check = "only-non-binary-in-usr-lib"
+kind = "missing"
+reason = "Mothballed on measurement (issue #940): in the 300-package Factory sample the reference predicate flags 10 packages, every one data-resident in /usr/lib by design (dictionary data, typelibs, language commons, plugin data). The reference's own UsrLibBinaryException list already carves out the perl, python, ruby, ocaml and systemd shapes; the remaining tail is the same shape with no decidable boundary. rpmcrab does not emit it; the reference still emits it."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/BinariesCheck.py"
+
+[[divergence]]
+case = "global"
+check = "outside-libdir-files"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's own rpmlint config says 'Doesn't seem to make sense' about this finding. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "detail"
+reason = "The `readelf-failed` detail carries goblin's parse error text (e.g. `a.o: Invalid magic number`) rather than the reference's readelf stderr; the finding name, level and file detail are unchanged. Only the human-readable reason differs."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
+reason = "Thin ar archives (`!<thin>\n` magic) fall through to the ELF parser instead of being enumerated member-wise; host readelf exits 0 on them, so no finding is emitted either way. Only the parse path differs, not the outcome."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
+reason = "rpmcrab#17: checksec-style binary-level hardening verification via ELF inspection, which the frozen reference lacks. Four new Warning findings: `missing-fortify` (at least three distinct fortifiable libc imports but no `__*_chk` symbols), `missing-stack-protector` (no `__stack_chk_fail` on a binary that is not a pure dynamic-loader shim), `missing-relro` (no GNU_RELRO segment) and `partial-relro` (GNU_RELRO without BIND_NOW). They verify the effective artifact state instead of the compile flags, so silent downgrades (e.g. `-fstack-protector` appended after `%{optflags}` downgrading strong to basic SSP) are caught. The SSP check is presence-only: basic and strong SSP both emit `__stack_chk_fail`, and telling them apart needs per-function canary-coverage analysis. PIE needs no new finding: `non-position-independent-executable` / `position-independent-executable-suggested` already cover it for executables. Deliberate emission-direction divergence on captured cases (the reference emits none of these): `liblto21` gains exactly one port-only line `W: missing-fortify /usr/lib64/libLTO.so.21.1` (warnings 0->1), pinned by `hardening_captured_cases_pin_new_lines`; `llvm21-gold` gains none, because `LLVMgold.so` imports only two distinct fortifiable functions (`memcpy`, `snprintf`), below the rpmcrab#529 threshold. Gate scope: the check skips ar archives and Go binaries entirely (the Go toolchain emits none of these C-hardening artifacts, so every finding would be noise; Go detection covers both `.note.go.buildid` and the universal `.gopclntab`, since some builds lack the former); static binaries (no PT_DYNAMIC) skip the RELRO checks, as BIND_NOW is meaningless without a dynamic linker; AMDGPU code objects (e_machine EM_AMDGPU) skip both RELRO checks as well (rpmcrab#509): the GPU runtime loads them into GPU memory, the host dynamic linker never processes them, and the amdgcn link emits no FLAGS for BIND_NOW to attach to; they reach the block only through a vestigial PT_DYNAMIC whose GNU_RELRO covers exactly the dynamic section; Since 0.3.0 (rpmcrab#447) the two compile-time findings fire only when the binary has something to protect: `missing-fortify` requires at least three distinct fortifiable libc imports, and `missing-stack-protector` stays quiet for pure dynamic-loader shims (undefined imports limited to dlopen/dlsym/dlclose/dlerror/dladdr plus CRT boilerplate). Since rpmcrab#452 `missing-stack-protector` additionally requires at least one SSP-relevant import (the string/memory calls a stack canary exists to guard, formatted output into caller buffers, unformatted input, `alloca`, and the raw buffer fills: the read/recv families in their plain, positioned and vectored/message forms and the caller-buffer path functions `readlink`/`readlinkat`/`getcwd`/`getwd`/`realpath`; fortified `__*_chk` spellings count as their plain call); stdio buffered readers (`fread`, `fgets`) are deliberately not SSP-relevant. `missing-fortify` and `missing-stack-protector` additionally skip Rust, Zig, Haskell and OCaml binaries (rustc implements neither `_FORTIFY_SOURCE` nor default stack-protector instrumentation; detection combines `.rustc` section, Rust runtime symbols, `.debug_gdb_scripts` content and `.rodata` panic strings, conservative by design; Zig likewise emits neither, and `-fstack-protector` requires libc which the default static Zig build does not link; detection via `.comment` ziglang marker and `.rodata`/`.data.rel.ro` unreachable string; GHC and ocamlopt likewise emit neither for Haskell and OCaml code, rpmcrab#525; Haskell detection via `libHS*` DT_NEEDED/DT_SONAME, OCaml via defined (not merely imported) `caml_startup` / module-qualified `caml` symbols of generated code; OCaml detection is conservative by design, while Haskell detection is conservative only in the miss direction: a C host embedding Haskell links `libHSrts` too and is skipped as a known limitation (see the rpmcrab#525 entry)), while the linker-level RELRO checks still apply to Rust, Haskell and OCaml (Zig is fully skipped: its linker emits no GNU_RELRO either, verified on bun, opencode and waylock). Separate debuginfo files are skipped entirely (never executed or loaded by the dynamic linker; `.debug` name suffix or `/usr/lib/debug/` path). Only runs on ET_EXEC/ET_DYN ELFs. Provenance: `crates/rpmcrab-core/data/descriptions/BinariesCheck.toml`."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/17"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
+reason = "rpmcrab#447 narrows the rpmcrab#17 hardening rule: `missing-fortify` and `missing-stack-protector` apply only when the binary has \"something to protect\". `missing-fortify` fires only when the binary imports at least three distinct fortifiable libc functions (the glibc _FORTIFY_SOURCE set) without any `__*_chk` symbol (rpmcrab#529: below three distinct imports, zero `__*_chk` cannot distinguish a build without _FORTIFY_SOURCE from a fortified build whose fortifiable calls all have runtime-sized destinations, which glibc never redirects to `__*_chk`; measured on the 2026-10-14 Factory sweep, 11,117 of 18,071 hits sit in the 1-2 import buckets, 85-88% of them memory-family only, including the proven-fortified liblzfse.so); `missing-stack-protector` fires only when the binary is not a pure dynamic-loader shim (undefined imports limited to dlopen/dlsym/dlclose/dlerror/dladdr plus CRT boilerplate). Before this change rpmcrab fired both findings on any binary lacking the respective symbols, including shims and wrappers with no protectable code, where the findings are unactionable noise. Intentional post-0.2.0 strictening."
+since = "0.3.0"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
+reason = "rpmcrab#452 narrows the rpmcrab#447 hardening gate for `missing-stack-protector`: the finding fires only when the binary is not a pure dynamic-loader shim AND imports at least one SSP-relevant function (string/memory copies and fills, formatted output into caller buffers, the scanf family and `gets`, `alloca`, and the raw buffer fills: the read/recv families in their plain, positioned and vectored/message forms and the caller-buffer path functions `readlink`/`readlinkat`/`getcwd`/`getwd`/`realpath`). A fortified `__*_chk` spelling counts as its plain call (fortification is not SSP: a `-D_FORTIFY_SOURCE` binary whose only string call is `__strcpy_chk` still has stack buffers for a canary to guard), while a fortified spelling of an out-of-set call (`__fgets_chk`, `__printf_chk`) stays out. Stdio buffered readers (`fread`, `fgets`) are deliberately excluded: zoo's `fiz` reads into heap buffers and its finding was never actionable. Before this change any non-shim binary without `__stack_chk_fail` fired, including pixel-conversion loops and data-table libraries with no buffer-shaped calls, where the finding is unactionable noise. Ground truth from the Factory sweep audit: the gate silences roughly 60% of the class sweep-wide while every audited genuine catch (apparmor, apfsprogs, mjpg-streamer) keeps firing. `missing-fortify` is governed by its own import gate (rpmcrab#447, tightened by rpmcrab#529) and is unchanged by this entry. Intentional post-0.2.0 strictening."
+since = "0.3.0"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
+reason = "rpmcrab#525 extends the toolchain skip of the rpmcrab#17 hardening rule: `missing-fortify` and `missing-stack-protector` additionally skip Haskell and OCaml binaries, the same partial skip Rust takes (the linker-level RELRO checks still apply). Neither GHC nor ocamlopt emits `_FORTIFY_SOURCE` or stack-protector instrumentation for its own code, so the findings — driven by buffer-shaped imports that arrive via the runtime — are unactionable noise there: the Factory sweep audit (run-20261014-6013f789) counted 272 Haskell and 90 OCaml/Coq hits, and a 176-file ground-truth sample found every flagged file genuinely canary-free. OCaml detection is conservative, so a missed detection keeps the previous behaviour; Haskell detection is conservative only in that miss direction. Known limitation: a C host embedding Haskell (the documented `hs_init`/`-no-hs-main` FFI pattern) links `libHSrts`, carries the same `libHS*` DT_NEEDED signal as GHC output, and is skipped the same way; at DT_NEEDED granularity there is no cheap precise signal separating it from GHC output, and the behaviour is pinned by `hardening_haskell_embedder_skipped_known_limitation`. Haskell is detected by a `libHS*` DT_NEEDED entry or `libHS*` DT_SONAME (libHSrts itself links only system libraries, so the SONAME is its only signal; C utilities shipping with GHC such as hp2ps and unlit carry neither signal and stay checked). OCaml is detected by a defined `caml_startup` runtime entry point of native executables or a defined module-qualified `caml` symbol of OCaml-generated code (`camlStdlib__List`, `camlUnix__entry`): only defined symbols count, so a C program embedding OCaml, which merely imports `caml_startup`, stays checked (pinned by `hardening_ocaml_embedder_importing_caml_startup_still_flagged` and `hardening_ocaml_imported_module_symbol_still_flagged`); the runtime's and the C stub libraries' `caml_` primitives never match, so ocamlrun and the `dll*_stubs.so` libraries — compiled C — stay checked. Statically linked Haskell executables (hledger, xmonad) carry no `libHS*` reference and no other distinguishing signal in the extracted ELF data, so they stay checked. Intentional post-0.2.0 strictening."
+since = "0.3.0"
+
+[[divergence]]
+case = "global"
+check = "no-binary"
+kind = "behaviour"
+reason = "Strictening per #444: the no-binary exemption covers each arch's own native libdir (/usr/lib + /lib on 32-bit, /usr/lib64 + /lib64 on 64-bit), not just lib64. A hwcaps subarch (x86_64_v3, x86_64_v4) takes its base arch's libdir, since its packages ship under the base arch's dirs. On 32-bit %_libdir is /usr/lib, so a devel subpackage there (headers, .so symlink, pkgconfig, no binaries) is just as arch-bound as one in /usr/lib64 -- the old rule fired E: no-binary on i586 but stayed quiet on x86_64 for the same spec. The frozen 2.10.0 reference only exempts lib64."
+since = "0.3.0"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
+reason = "Deliberate fix (plusky/rpmcrab#515): the port runs no per-file ELF analysis on %ghost files -- they are in the header but not in the payload, so there is nothing on disk to read -- and omits the reference's per-file findings for ghost ELFs (unstripped-binary-or-object, position-independent-executable-suggested, readelf-failed). The reference analyses the header-declared file anyway and surfaces readelf-failed errors for the missing payload: 24 on pcp-testsuite's %ghost fixtures and one on kernel-default-base's %ghost vmlinux. Package-level accounting is unaffected: a binary-class ghost counts toward has_binary, so no-binary stays quiet for kernel-default-base as in the reference."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/515"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
+reason = "Deliberate fix (plusky/rpmcrab#846): an ar archive member that does not present as an ELF object (no ELF magic) is not charged as readelf-failed, and the ELF checks produce no findings for an archive whose members are all in other object formats. The reference runs readelf over the whole archive; readelf reports each non-ELF member ('Not an ELF file - it has the wrong magic bytes at the start'), exits nonzero, and the reference emits E: readelf-failed for the archive. The swept members are not ELF objects an ELF reader could parse: COFF import objects (the wine and mingw families, 1,316 of the finding's 1,471 Factory sweep hits on main 857d5ece, run-20261022-857d5ece), GIMPLE offload text (cross-nvptx, 136), wasm objects (the rust wasi libc.a, 10), LLVM bitcode (llvm libc++experimental.a, 4), a PalmOS m68k object (fpc, 1) and a plain-text fixture member (afl, 1) — 1,468 in all. The remaining 3 of the 1,471 are not archive members and stay charged: the opentoonz finding is over the #!/bin/sh wrapper /usr/bin/opentoonz, whose bytes the case-insensitive sweep filesystem swept in place of the genuine ELF payload /usr/bin/OpenToonz, and the suseconnect-ng and thunar findings are symlink-loop read failures, the case separated in plusky/rpmcrab#363. A member with ELF magic that then fails to parse still fails the archive, and a mixed archive is still analysed over its ELF members."
+since = "0.4.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/846"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
+reason = "Deliberate fix (plusky/rpmcrab#869): lto-no-text-in-archive charges only archives whose ELF members carry LTO content -- a section name containing `.gnu.lto_.` (GCC) or an `.llvmbc` section (LLVM embedded bitcode) in a member; a candidate archive is then judged on its merged text-like sections as before. The reference charges every archive with no non-empty text-like section, including plain libraries of data-only objects: on sweep run-20261022-857d5ece it charges the same 30 archives in the wine family (wine-staging / wine-wow64 / wine-staging-wow64 -devel), whose x86_64-unix members are ELF objects defining only GUID constants, with no non-empty `.text` or `.data` in any member and no LTO content, so the finding's premise (an archive built with LTO but without -ffat-lto-objects) cannot apply. Members in other object formats neither confer nor block candidacy (see the #846 entry): a mixed archive is judged on its ELF members."
+since = "0.4.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/869"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
+reason = "Deliberate fix (issue #848): a binary-class file in a noarch package is foreign-target payload and does not emit arch-independent-package-contains-binary-or-object when it is an ar archive with no ELF members, at any location (the glibc placeholder archives have no members at all; every member an archive does have is in another object format -- COFF, wasm, LLVM bitcode -- or is plain data), or when it is an ELF, or an archive whose ELF members are all for foreign machines, whose machine is outside the host family (EM_386 and EM_X86_64, the machines an x86-64 host executes natively) and it sits in a target-payload location: a cross sys-root (/usr/<triplet>/sys-root/, any target triplet) or a firmware directory (/usr/lib/firmware/, /lib/firmware/). The machine evidence is the payload's ELF header, with the magic string's machine as fallback for an ELF payload that cannot be opened; an archive's evidence is its parsed members alone, with no magic fallback. A host-machine ELF fires in every location, a foreign ELF outside the target locations fires, and a file whose machine cannot be determined fires (a header naming no machine (EM_NONE), a magic naming no machine, OCaml native code, Lua bytecode); an archive that cannot be read or parsed fires outright. A %ghost file never reaches the gate: it sits in the header with no payload on disk, so it feeds the package-level binary accounting without being classified. The reference fires for every binary-class file in a noarch package. Measured on the Factory corpus (sweep run-20261022-857d5ece, main 857d5ece): the finding's 765 hits, counted per file, classify by payload as 756 cross sys-root files of the glibc-cross-*-src family (ELFs and archive members for the RISC-V, PA-RISC, AArch64, S/390, LoongArch and PowerPC targets), 1 PowerPC DSP firmware image under /usr/lib/firmware (alsa-firmware), 2 ar archives whose members are wasm objects (the rust wit-bindgen runtime), and a 6-file residue that keeps firing: 4 host-machine ELFs (build-initvm-i586, build-initvm-x86_64, openvino-sample's compile_tool, texlive-opbible-doc's mod2tex), 1 ARM ELF in a documentation directory (giac-doc) and 1 Lua bytecode test file (wesnoth-data). Pinned by the noarch foreign-target tests in binaries.rs."
+since = "0.4.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/848"
+
+[[divergence]]
+case = "global"
+check = "no-ldconfig-symlink"
+kind = "behaviour"
+reason = "Deliberate config fix (plusky/rpmcrab#551): the vendored openSUSE/SLFO configs scope the upstream 'no-ldconfig-symlink' filter to kernel-module packages (pattern '^\\S*-kmp-\\S+\\.\\S+: \\w: no-ldconfig-symlink'; see SCOPE_FILTERS in scripts/generate-distro-configs.py). Upstream ships the filter unscoped under a comment giving a KMP-only rationale (bnc#456048 -- SUSE KMPs do not need manual depmod; the shared libraries in a KMP are private). Measured over the 2026-10-15 Factory corpus (51,586 binary RPMs; every package that can emit the finding run with and without the filter): the blanket filter suppresses 32 findings in 31 packages, none of them in a KMP -- no KMP in Factory ships a shared library the check reads -- and 22 of the 32 are genuine missing SONAME symlinks in ordinary library packages (libggml0, libode8, libkmip0, the MUMPS family); the rest are legitimate -devel, plugin and preload cases that belong in per-package rpmlintrc. With the scope, KMP findings stay filtered and the rest surface; parity with the reference session is deliberately given up for this tag because the reference config's filter is broader than its own stated rationale."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/551"
+
+[[divergence]]
+case = "global"
+check = "undefined-non-weak-symbol"
+kind = "severity"
+reason = "Deliberate severity recalibration (decided 2026-10-25): the port reports W where the reference reports E. The finding charges the undefined non-weak symbols a shared library's DT_NEEDED closure leaves unresolved, and the population is host-provided binding: libraries the host executable loads, sibling application libraries, the C/C++/OpenMP runtimes, and above all the Python C-API, which extension modules by design never link because the interpreter provides the symbols at load. Measured over the Factory corpus (17,242 srcpkgs, 2026-10-24 sweep at 38459d25, Linux/noisynator venue): 958,536 E over 2,045 srcpkgs -- the overwhelming mass of the corpus's 1,003,696 errors, against 45,160 E for every other finding combined. The 2026-10-25 re-verification of the #828 disposition classified 24,159 flagged symbols on the top packages' files (paraview, qgis, vtk, FreeCAD) by their actual definition site and found every one defined by a runtime provider, the providers declared at package level; the measured residue with no provider is zero. The binding is satisfied at load time, so a packager has no package change that sorts the class: as an error it blocks builds over a population nobody can act on. As a warning it stays visible per file, where a genuinely under-linked file stands out against the host-provided mass."
+since = "0.4.0"
+
+[[divergence]]
+case = "global"
+check = "undefined-non-weak-symbol"
+kind = "behaviour"
+reason = "Fix-and-diverge: the finding fires once per file, the detail naming the file and carrying the count and the names of its undefined non-weak symbols, where the reference fires once per symbol with the single symbol as the detail. Which files fire is unchanged: the same residue of the same resolution (the binaries-dependency-scope entry), grouped per file in the order the symbols are collected; the sibling unused-direct-shlib-dependency finding keeps its per-occurrence firing. A plugin library carries thousands of host-provided undefined symbols, and enumerating them a line per symbol drowns the signal the finding exists to give; the file is the unit a packager acts on, and the count and the names in the detail keep its whole population visible. Measured by re-counting the 2026-10-25 Factory corpus run (run-20261025-f0a364e0, Mac venue) per file: 1,490,818 per-symbol findings collapse to 8,883 per-file findings over 3,626 srcpkgs (vtk-openmpi4 13,423 symbols over 177 files; vtk 13,348 over 171), and the counts in the aggregated details sum back to the per-symbol totals exactly for every package."
+since = "0.4.0"
+
+[[divergence]]
+case = "global"
+check = "no-binary"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports W where the reference reports E. An arch package shipping no binary has a structural false-positive shape on self-contained devel content (pcp calibration set), so the absence is a warning for review, not a certain defect."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "missing-call-to-setgroups-before-setuid"
+kind = "severity"
+reason = "Deliberate false-positive fix (plusky/rpmcrab#743): the port reports W unconditionally; the reference splits the level on the setuid bit (E when the binary is installed setuid, W otherwise) and #593 previously recalibrated the port to E unconditionally. The util-linux adjudication showed every finding there traces to the drop_permissions() idiom — the effective ids dropped to the real ids, the invoking user's own groups throughout — and the symbol pattern cannot separate that idiom from an identity switch that neglects setgroups, so an Error at either split breaks builds on bogus findings. The check keeps firing at W as a human-review signal."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/743"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
+reason = "shlib-policy-name-error accepts a package name on either of two limbs: (A) it equals a name derived from the SONAME (stem with '.' folded to '_', plus the version glued or dash-separated per the SLPP construction; stem + '-' + soversion when the SONAME carries a -<pkgversion>), or (B) it ends with the expected suffix at a non-digit boundary, so the trailing version run matches as a whole while the stem is not policed. Both limbs are tried on the name as-is and with a trailing -<letters><digits> flavour segment (libgfortran5-gcc15, libnetcdf22-openmpi5) stripped, and after stripping a trailing -32bit/-64bit (baselibs). The reference (BinariesCheck.py _check_shared_library) uses a plain endswith test on the suffix. Measured over the 2026-10-16 Factory sweep corpus (51,589 RPMs; SONAMEs from RPM provides; 6,537 checkable package/SONAME pairs over 4,429 lib packages, excluding 12 pairs whose SONAMEs take the invalid-soname path): the reference fires on 611 pairs, this guard on 180, and 178 of those fire under both. The port diverges in two directions: stricter — a longer trailing version run no longer satisfies a shorter expected version (libkdecorations3private11 for a .so.1 library, bsc#1237372; that package was renamed libkdecorations3private1 in February 2025, so the shape is pinned by unit test; the only newly firing corpus pairs are the libnvidia-egl-x111 package's libnvidia-egl-xcb.so.1 and libnvidia-egl-xlib.so.1, whose trailing run 111 is not those SONAMEs' version 1); looser — names carrying a flavour or MPI tail after the version are quiet where the reference fires (433 pairs: 375 MPI-tail, 56 gcc-tail, 2 toolkit-tail), and a correct libfoo1-32bit/-64bit is quiet where the reference fires (no baselibs packages in the corpus; pinned by unit test). Names ending in the SONAME version with an unrelated stem stay quiet, as under the reference (libopenssl3 ships libssl.so.3; libicu73 ships libicuuc.so.73); a whole-name-only comparison fires on 1,873 such corpus pairs. A firing of this check is an error in both implementations; since #699 a session over a package containing one of the newly firing pairs exits 64 in the port, where a reference session over that same package exits 0 under its forced-permissive default (a corpus-wide reference session exits 66, over its badness threshold, on its own 611 firings)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/646"
+
+[[divergence]]
+case = "global"
+check = "missing-mandatory-optflags"
+kind = "missing"
+reason = "Deliberate removal: the port does not emit this finding. MandatoryOptflags is empty in the bundled defaults and in every shipped flavour, so the check could never fire as shipped, and a user config that still sets the key is a no-op. Its semantics are superseded by the artifact-level hardening findings (missing-fortify, missing-stack-protector, missing-relro, partial-relro, non-position-independent-executable, position-independent-executable-suggested), which verify the produced binary's effective state, including later flag overrides a recorded-flag check cannot see. ForbiddenOptflags is a separate prohibition list and is unchanged. The reference still emits it."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/645"
+
+[[divergence]]
+case = "global"
+check = "missing-cf-protection"
+kind = "behaviour"
+reason = "New port-only Warning: an x86_64 ET_EXEC/ET_DYN binary whose .note.gnu.property GNU_PROPERTY_X86_FEATURE_1_AND does not carry both the IBT and SHSTK bits and whose .text contains no ENDBR64 instruction emits W missing-cf-protection. The reference has no such finding; the port's hardening coverage is the four findings ledgered under rpmcrab#17, plus this one. openSUSE %{optflags} carry -fcf-protection on x86_64, so both records are present on C/C++ code built with the distribution flags. Scope follows the sibling C hardening findings under rpmcrab#17: archives, Go and Zig binaries and debuginfo files are skipped by the same gates as missing-fortify, and Rust, Haskell and OCaml binaries stay quiet because those toolchains emit neither the property nor ENDBR64 for their own code. The rpmcrab#447 applicability narrowing is not applied in its import-threshold form: a count of fortifiable libc imports says nothing about whether this flag reached the code, so the applicability evidence here is the ENDBR64 record itself. Noise audit over the Factory corpus (51,589 RPMs; 69,894 x86_64 ET_EXEC/ET_DYN ELFs): 59,022 (84.4%) carry both bits, 10,845 (15.5%) carry no FEATURE_1_AND at all, 27 carry exactly one bit and none carries a present-but-zero value. FEATURE_1_AND is the bitwise AND over all link inputs, so one input carrying no property (hand-written assembly, a prebuilt object) clears it for the whole binary; the merged note is what ld -z cet-report reports on. Of the 9,664 no-property ELFs outside the Go and debuginfo gates, 9,551 (98.8%) carry an ENDBR64 record in .text — the record is applicability evidence, not attribution: it shows the flag reached some of the code, not which link input contributed it (flag-built CRT glue lands in .text too) — as do all 27 one-bit ELFs (the asm-heavy FFmpeg family, whose assembly inputs carry SHSTK-only properties); 3 carry a compiler .comment but no ENDBR64 and 110 show no compiled-code evidence at all, the identified members of both residue classes being prebuilt upstream objects and legacy-toolchain (gcc7) libraries. Run over the corpus, a property-only predicate fired on 7,012 files in 715 source packages; with ENDBR64 absence also required, 98 files in 13 source packages remain (Free Pascal and gcc7 toolchain binaries, prebuilt objects), each a binary whose property lacks at least one feature and whose .text holds no ENDBR64 record. The residue classes above sum to 113 files; the 15-file difference is the gates the audit scanner did not model: six Go binaries it recognised only by the buildid note (the checker also accepts .gopclntab), one Rust and one Zig binary (the language gates), four files in noarch packages (ELF checks do not run there) and three vDSO images in bzip2-compressed kernel packages the checker could not open at audit time (bzip2 payloads are decoded since the bzip2 extraction work). A FEATURE_1_AND entry that is present but truncated or undersized counts as unreadable, not absent. Warning only: the gap is a hardening gap, not a demonstrated defect. Pinned by unit tests in binaries.rs."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/667"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
+reason = "Deliberate fix (plusky/rpmcrab#847): static-library-without-debuginfo is charged only when the archive carries host machine code: at least one member is an ELF object for the package's own architecture holding a non-zero byte in an executable PROGBITS section, or an executable PROGBITS section the file data does not fully hold (recorded per member while parsing as code_machines). The reference charges every archive whose merged readelf sections carry no .debug_ name (verified in the pinned-reference container: the reference emits all 223 wine-devel findings). Verified against the corpus RPM payloads of sweep run-20261022-857d5ece, where the finding's 988 E over 28 source packages classify as: 892 wine-family import libraries whose members' only executable sections are all-zero relocation slots against __wine$func$ pointers (884 archives) or which carry no executable section at all (8), 10 glibc archives with zero members (the post-2.34 empty linker placeholders), 19 compiler-rt archives whose members carry no executable section (the asan/hwasan/memprof preinit stubs and libomptarget.devicertl), and 34 cross-avr-gcc7 archives whose code-carrying members are ELF for EM_AVR in x86_64 packages. The remaining 33 findings sit on archives with real host code (among them libresvg.a, libphobos2.a, the OCaml archives and the BOLT runtime archives) and keep firing. A member with host code fires even alongside foreign or stub members, and an unmapped package arch charges any code, as before."
+since = "0.4.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/847"
+
+[[divergence]]
+case = "global"
+check = "missing-PT_GNU_STACK-section"
+kind = "behaviour"
+reason = "Deliberate fix (issue #850): missing-PT_GNU_STACK-section is charged only where the absence states something about how the file was linked: the file is ET_EXEC or ET_DYN, it carries a programme header table for the header to be absent from, and it is not separate debuginfo (a `.debug` name suffix, or a path under /usr/lib/debug/ -- the treatment check_hardening already applies to its findings). The reference charges every file whose readelf programme headers carry no GNU_STACK entry. Measured on the Factory corpus (sweep run-20261022-857d5ece; every binary RPM of the 17 affected source packages re-measured before and after the fix): the finding's 594 E classify as 568 EDK2 debuginfo artefacts in qemu-ovmf-x86_64-debug (ET_EXEC companions with LOAD/LOAD/DYNAMIC programme headers under /usr/lib/debug/ovmf-*/, stored for the debugger and never loaded by the dynamic linker), 14 relocatable objects, which carry no programme headers by construction (the Go race-runtime .syso files of go1.21 through go1.27, aws-nitro-enclaves-cli's nsm.ko, glibc-devel's libmcheck.a and lazarus' FPC .or files), and a 12-file residue that keeps firing -- linked images with a programme header table and no PT_GNU_STACK: e3's /usr/bin/e3, rr's librrpage.so and librrpage_32.so, hibiscus' libhbci4java-card-freebsd-64.so and libtowitoko-2.0.7.so, xen's three hypervisor images, qemu's openbios-sparc32, openbios-sparc64 and u-boot.e500 ROMs, and picotool's xip_ram_perms.elf. Pinned by the executable-stack gate tests in binaries.rs."
+since = "0.4.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/850"
+
+[[divergence]]
+case = "global"
+check = "call-to-mktemp"
+kind = "behaviour"
+reason = "Fix-and-diverge (plusky/rpmcrab#852): call-to-mktemp charges only an undefined reference in an archive \u2014 a FUNC symbol a member carries as SHN_UNDEF in .symtab or .dynsym, collected while parsing as undefined_function_refs. An archive's members are separate objects, so the member that implements mktemp is not a caller: newlib's libc.a carries mktemp as a definition in libc_a-mktemp.o (a real section index) and no undefined reference anywhere in the archive, and a definition site is not a call site \u2014 the finding's rationale is the caller's exposure to the mktemp race. Linked objects charge any FUNC match, defined or not, as the reference does: a statically linked executable bundling mktemp and a wrapper library that defines and calls its own variant both carry the definition with no undefined reference, and they fire. Measured on the Factory sweep run-20261022-857d5ece population over the same 52 source packages: 460 E in 52 source packages before, 74 E in 41 after, with no new firings; all 460 files were independently classified with readelf and by file kind \u2014 every silenced file is an archive carrying no undefined reference matching the pattern, and every remaining file carries an undefined reference or is a linked object carrying a defined match. Silenced: 386 archives \u2014 the cross newlib packages (360: cross-arm-none-newlib-devel 156, cross-rx-newlib-devel 128, cross-amdgcn-gcc13/14/15/16 64, cross-pru-newlib-devel 8, cross-riscv64-newlib-devel 4), Wine's C-runtime archives (21), glibc's libc.a and libc_p.a (2, the C library itself), ksh's archives (2) and one libguestfs archive (1). The 74 remaining findings are host executables and shared libraries: the 46 that carry an undefined reference (23 name mktemp itself, plain or versioned, and 23 name a project-private wrapper the pattern also matches \u2014 apr_file_mktemp, GNUNET_DISK_mktemp, gretl_mktemp, netsnmp_mktemp, e_mktemp, b_mktemp, r_syscmd_mktemp) plus 28 linked objects carrying a defined match only (the statically linked libguestfs family of guestfs-tools, virt-v2v and libguestfs binaries and libraries 16, ksh's libast/libcmd shared objects 2, net-snmp's shared objects 2, glibc's libc.so.6 1, and singletons in apr, evolution, fakechroot, gnunet, grass, gretl and radare2) \u2014 the pattern's reach is the reference's own searched regexp, unchanged here."
+since = "0.4.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/852"
+
+[[divergence]]
+case = "global"
+check = "no-binary"
+kind = "behaviour"
+reason = "Deliberate fix (plusky/rpmcrab#948): the port exempts -debugsource packages from no-binary. A -debugsource package is arch-specific and ships only source files under /usr/src/debug by construction -- no binaries, no libdir payload -- so the finding's condition is the package's expected shape, and the frozen 2.10.0 reference fires it on every such package (measured on pam-config-debugsource; the class is total by construction). The suffix test matches the debug-companion recognition FilesCheck and FilelistCheck already apply to the same names. -debuginfo packages are not exempted: their .debug payloads are ELF and already count toward has_binary."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/948"
+
+[[divergence]]
+case = "global"
+check = "unstripped-binary-or-object"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #949): unstripped-binary-or-object stays quiet for separate debuginfo -- a file whose name carries the `.debug` suffix or whose path sits under /usr/lib/debug/ -- the treatment check_hardening applies to its findings. A separate-debuginfo file is the stripped-off debug payload itself: carrying the symbol and debug content is its purpose, so the charge states nothing a packager can act on (pam-config-debuginfo: W on /usr/lib/debug/usr/sbin/pam-config.debug, and class-wide for -debuginfo packages). The reference charges every binary-class file whose magic reports not stripped, with no debuginfo exemption. Real binaries outside the debug tree, prefix lookalikes included, fire unchanged. Pinned by unstripped_binary_quiet_for_separate_debuginfo in binaries.rs."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/949"

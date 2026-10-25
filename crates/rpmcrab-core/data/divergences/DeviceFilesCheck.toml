@@ -1,0 +1,11 @@
+# Divergence ledger entries owned by `DeviceFilesCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "device-files-whitelist-validation"
+kind = "behaviour"
+reason = "Malformed whitelist entries (missing \"package\"/\"packages\", wrong types, missing required keys, unknown attribute keys) are logged and skipped; the reference raises KeyError in verify_whitelists or AttributeError in getattr at check time and crashes the whole run. Applies to DeviceFilesCheck and WorldWritableCheck."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/439"

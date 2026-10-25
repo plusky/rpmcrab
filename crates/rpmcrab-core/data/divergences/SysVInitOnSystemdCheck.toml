@@ -1,0 +1,10 @@
+# Divergence ledger entries owned by `SysVInitOnSystemdCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "SysVInitOnSystemdCheck"
+kind = "behaviour"
+reason = "The reference accumulates basenames in sets (SysVInitOnSystemdCheck.py:11-13), so a basename reachable by two init scripts yields one finding; the port sorts and dedups explicitly, giving the same single finding in sorted order rather than set order."
+since = "0.1.0"

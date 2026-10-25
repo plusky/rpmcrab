@@ -1,0 +1,25 @@
+# Divergence ledger entries owned by `PkgConfigCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "invalid-pkgconfig-file"
+kind = "behaviour"
+reason = "The suspicious-dir regex widens the build-dir component from \\w+ to [\\w.-]+ so hyphenated/dotted directories like /usr/src/linux-6.1/BUILD match. The reference (PkgConfigCheck.py:11) uses \\w and misses these — the common case for kernel builds — so this is a deliberate fix for reference under-reporting, not a porting gap."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/44"
+
+[[divergence]]
+case = "global"
+check = "pkgconfig-invalid-libs-dir"
+kind = "behaviour"
+reason = "The wrong-libdir direction follows the shared 64-bit arch predicate, which covers every 64-bit RPM arch (ppc64le, riscv64, loongarch64, ia64, mips64, mips64el, sparc64 as well as x86_64, ppc64, s390x, aarch64). The reference (PkgConfigCheck.py) lists only the latter four, so on riscv64 it flags -L/usr/lib64 and lets -L/usr/lib pass -- the opposite of that arch's native libdir."
+since = "0.3.0"
+
+[[divergence]]
+case = "global"
+check = "pkgconfig-exception"
+kind = "behaviour"
+reason = "A `.pc` read failing with NotADirectory draws no `pkgconfig-exception`. That failure is the extractor's collision gap: it leaves entries whose path collides with an incompatible existing object out of the tree and reports each skip itself (grpc-source's file `usr/src/grpc/BUILD` against its directory `usr/src/grpc/build` on a case-insensitive filesystem), so the read runs through the object that won the collision. The reference (PkgConfigCheck.py) turns the same failed `open()` into the finding through its `except Exception`. Everything else matches the reference: %ghost entries are dropped from the dispatch before any read, as AbstractFilesCheck (AbstractCheck.py:45) drops `pkg.ghost_files`, and the remaining read failures -- a header-listed file missing from the tree -- plus decode failures on materialised files report as exceptions exactly as the reference charges them."
+since = "0.4.0"

@@ -1,0 +1,11 @@
+# Divergence ledger entries owned by `LSBCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "LSBCheck"
+kind = "missing"
+reason = "Deliberate: the LSB effort is defunct (issue #483). The reference validates package name, version and release against LSB character rules (LSBCheck.py); the check is enabled in no shipped config -- neither configdefaults.toml, opensuse.toml nor the Fedora flavour lists it -- so the port does not keep it, it deletes the whole check instead of carrying dead code. The staged `LSBCheck.toml` was removed as well: no descriptions for a deleted check."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/483"

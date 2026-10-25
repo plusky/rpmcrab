@@ -1,0 +1,18 @@
+# Divergence ledger entries owned by `BashismsCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "bashisms"
+kind = "behaviour"
+reason = "When checkbashisms is absent the reference (BashismsCheck._detect_early_fail_option) runs `checkbashisms --help` via subprocess.check_output at init, which raises and kills the whole run; the port degrades gracefully instead: without dash the check is a no-op, without checkbashisms only `potential-bashisms` is suppressed (`bin-sh-syntax-error` still fires via `dash -n`). A missing optional tool must not abort the lint."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "potential-bashisms"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports I where the reference reports W. The finding is a heuristic portability hint produced by the external checkbashisms tool, not a defect in the script; the companion bin-sh-syntax-error, a real parse failure, stays W (pcp calibration set)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"

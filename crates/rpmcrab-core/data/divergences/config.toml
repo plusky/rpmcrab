@@ -1,0 +1,72 @@
+# Divergence ledger entries owned by `config`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "config"
+kind = "behaviour"
+reason = "Fixed behaviour: the SkipPackagePatterns default uses `\\d` (decimal digits, Unicode-aware) exactly like the reference's `re.search(r'/home/abuild/rpmbuild/RPMS/noarch/rpmlint-\\d')`. The port previously used `char::is_numeric`, a deliberate superset that also skip-guarded names like `rpmlint-².rpm`, which the reference lints."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1592"
+
+[[divergence]]
+case = "global"
+check = "config"
+kind = "behaviour"
+reason = "SkipPackagePatterns, RpmlintrcSearchPaths and SuppressExtractionStderr are real config keys instead of hardcoded SUSE behaviour. The bundled defaults carry the openSUSE flavour values: the rpmlint-package skip guard, rpmlintrc auto-discovery over the two SOURCES dirs, and extraction stderr discarded even in verbose mode. Non-default values are new surface with no reference counterpart. One pre-existing gap rides along unchanged: the reference gates its SOURCES auto-discovery on PYTEST_XDIST_TESTRUNUID (lint.py:205) and rpmcrab never implemented that gate, on main or here."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1592"
+
+[[divergence]]
+case = "global"
+check = "config"
+kind = "behaviour"
+reason = "Deliberate fix of a reference bug (#83): config.py:109-112 merges a list destination with `for item in v`, and a Python string iterates by CHARACTER, so a normal or XDG `SkipPackagePatterns = 'foo'` used to append 'f', 'o', 'o' to the destination -- and 'f' as a regex matches nearly every path, silently skipping almost everything on a misconfigured config. rpmcrab keeps a scalar string whole as a single list item instead. Only a `*.override.*` file replaces wholesale, which leaves the scalar intact for finalize() to reject with exit 1, unchanged."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1592"
+
+[[divergence]]
+case = "global"
+check = "config"
+kind = "behaviour"
+reason = "A non-iterable scalar (integer, float, bool, datetime) merged into a list key makes the reference die with a TypeError from _merge_dictionaries (config.py:109-112 iterates the incoming value); the port used to panic to match. rpmcrab returns a configuration error naming the key and the value instead, and the run exits 1 with '(none): E: fatal error in configuration: ...' -- crash-parity is out (#494). An rpmlintrc setBadness landing on a non-table Scoring likewise used to error at load instead of panicking on the insertion; since #699 setBadness is parsed and ignored with a warning, so that path is unreachable from rpmlintrc. Iterable merges are unchanged: lists union-append, tables append their keys, a scalar string stays a single item, and *.override.* files replace wholesale."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/501"
+
+[[divergence]]
+case = "global"
+check = "config"
+kind = "behaviour"
+reason = "SuppressExtractionStderr=false let the extractor child inherit stderr, but only in verbose mode: the effective discard was `suppress_extraction_stderr || !info`. The reference always discards (DEVNULL even in verbose mode, pkg.py). Since native extraction there is no child and no extractor stderr at all, so the observable behaviour matches the reference in every mode; the key is retained as a no-op for config compatibility."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1592"
+
+[[divergence]]
+case = "global"
+check = "config"
+kind = "behaviour"
+reason = "A present-but-non-table `Scoring` (e.g. `Scoring = 5`) is ignored wholesale: finalize substitutes an empty scoring map and prints a warning on stderr ('Scoring' must be a table, found ...; ignoring it). The reference stores the value as-is and evaluates `rpmlint_issue in self.badness` per finding (filter.py), so an integer raises TypeError and kills the run, while a string silently substring-matches finding names. Ignoring the whole map is the deliberate tolerance; the warning keeps the misconfiguration discoverable instead of silent."
+since = "0.3.0"
+
+[[divergence]]
+case = "global"
+check = "config"
+kind = "behaviour"
+reason = "`BadnessThreshold` is not a recognised key since issue #699 removed the threshold machinery: any value, integer or not, is inert (a warning on stderr, no abort, no exit 66), where the reference compares the value directly (lint.py: `badness_threshold > 0`), so a string raises TypeError at the end of its run and an integer over the run score aborts it. The pre-#699 behaviour warned and fell back to -1 for non-integer values; the whole key is dead now because the concept it configured no longer exists."
+since = "0.3.0"
+
+[[divergence]]
+case = "global"
+check = "config"
+kind = "behaviour"
+reason = "The vendored flavours bundle no [Scoring] table at all (issue #699, completing the #594 pass): upstream's scoring-strict.override.toml layer left the bundle in #594, and #699 removed the remaining vendored scoring.toml files, the generator's scoring carry-through and the flavour BadnessThreshold, so finding levels under a flavour are the emitted levels (a user-supplied [Scoring] table still works as a promotion-only override). At #594 time the strict layer's departure cut corpus badness from ~14.94M to ~2.20M (20261016 Factory sweep); the one strict entry whose absence would change a printed level, invalid-license, is preserved as an emission level instead (separate entry)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/594"
+
+[[divergence]]
+case = "global"
+check = "config"
+kind = "behaviour"
+reason = "rpmlintrc setBadness('name', N) is parsed and ignored, with a stderr warning per directive (issue #699): badness no longer adjusts finding levels, so the directive has nothing to write into [Scoring]. The reference stores the values in Scoring as strings and re-levels findings in both directions on their account, including downgrading an E to W at 0. addFilter directives in the same files are unaffected."
+since = "0.3.0"

@@ -1,0 +1,50 @@
+# Divergence ledger entries owned by `SystemdInstallCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "SystemdUnitDir"
+kind = "behaviour"
+reason = "The unit directory comes from the SystemdUnitDir config key rather than rpm.expandMacro('%{_unitdir}') (SystemdInstallCheck.py). The shipped value matches this host's macro, so behaviour is identical today, but a host whose rpm sets a different _unitdir would not be followed."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "systemd-service-without-service_add_pre"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports W where the reference reports E, for the whole systemd-service-without-service_* family. The check cannot see manual scriptlet handling of a unit, so a missing macro call is not a certain defect: the pcp audit classified 60 E lines on services that work."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "systemd-service-without-service_add_post"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports W where the reference reports E, for the whole systemd-service-without-service_* family. The check cannot see manual scriptlet handling of a unit, so a missing macro call is not a certain defect: the pcp audit classified 60 E lines on services that work."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "systemd-service-without-service_del_preun"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports W where the reference reports E, for the whole systemd-service-without-service_* family. The check cannot see manual scriptlet handling of a unit, so a missing macro call is not a certain defect: the pcp audit classified 60 E lines on services that work."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "systemd-service-without-service_del_postun"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports W where the reference reports E, for the whole systemd-service-without-service_* family. The check cannot see manual scriptlet handling of a unit, so a missing macro call is not a certain defect: the pcp audit classified 60 E lines on services that work."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "SystemdInstallCheck"
+kind = "behaviour"
+reason = "SystemdInstallCheck resolves a unit-named symlink within the package (Pkg::readlink) and evaluates the target unit instead of the alias: a D-Bus activation alias (wpa_supplicant ships dbus-fi.epitest.hostap.WPASupplicant.service and dbus-fi.w1.wpa_supplicant1.service as symlinks to wpa_supplicant.service) draws no systemd-service-without-service_* findings of its own, and several aliases to one target evaluate the target once. The reference treats every unit-named path as an independent unit and emits all four findings per alias (at E; the port has them at W). A symlink whose target is a shipped regular file that is not itself a unit is still evaluated under the link's own name, because systemd loads that content under it. A symlink resolving to no shipped regular file -- dangling, cyclic, or a mask link to /dev/null -- is not evaluated: scriptlets under the alias name could not make that name activatable, and the broken target is the dangling-symlink findings' defect. Pinned by unit tests in systemd_install.rs."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/720"

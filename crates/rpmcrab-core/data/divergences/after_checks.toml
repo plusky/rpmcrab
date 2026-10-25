@@ -1,0 +1,11 @@
+# Divergence ledger entries owned by `after_checks`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "after_checks"
+kind = "behaviour"
+reason = "after_checks sees the merged state of ALL packages in the batch (export/import). The pinned reference reset checks after each package, so after_checks only ever saw the last package's state."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"

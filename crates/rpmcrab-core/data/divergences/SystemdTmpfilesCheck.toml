@@ -1,0 +1,39 @@
+# Divergence ledger entries owned by `SystemdTmpfilesCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "systemd-tmpfile-parse-error"
+kind = "detail"
+reason = "The reference (TmpfilesParser.warn) formats parse warnings as 'source:line: msg'; the port formats 'source: msg' and passes the line as a separate finding detail. Only the warning string differs ('source: msg' vs 'source:line: msg'); the detail placement is argument-for-argument identical."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "systemd-tmpfile-entry-unauthorized"
+kind = "behaviour"
+reason = "On a non-octal mode field the reference (TmpfilesParser.get_octal_mode) raises via int(mode, 8); the port's octal_mode() returns None, which is_sensitive_entry treats as sensitive and emits the finding. The port lints where the reference crashes."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "systemd-tmpfile-device"
+kind = "behaviour"
+reason = "Deliberate fix of a reference bug (SystemdTmpfilesCheck.py:186): `tf_entry.get_target_path.startswith('/dev')` is missing its call parentheses, so the bound method is always truthy and the 'device not in /dev' sensitivity branch never fires. The port calls the equivalent and treats a device entry outside /dev as sensitive. The port's /dev test matches on a path-component boundary (issue #619): only /dev itself and paths below it are in /dev, so a target such as /device... is outside it."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/619"
+
+[[divergence]]
+case = "global"
+check = "SystemdTmpfilesCheck"
+kind = "behaviour"
+reason = "When the SystemdTmpfiles config section is absent the reference raises KeyError (SystemdTmpfilesCheck.py:39) and the whole check fails; the port falls back to the reference's own shipped defaults (DropinDirs /usr/lib/tmpfiles.d + /etc/tmpfiles.d, empty IgnorePackages) so the check still runs. A linter must not die on a missing optional config section."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SystemdTmpfilesCheck"
+kind = "detail"
+reason = "Typo fix in staged `--explain` text for `systemd-tmpfile-parse-error`: the misspelling of `occurred` fixed. Meaning unchanged."
+since = "0.1.0"

@@ -1,0 +1,53 @@
+# Divergence ledger entries owned by `PolkitCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "polkit-untracked-privilege"
+kind = "behaviour"
+reason = "Deliberate fix of a reference bug, and a bigger one than the check: PolkitCheck.py:70 does `action.getElementsByTagName('defaults')[0]`, which raises IndexError -- not the KeyError caught at :77 -- when <defaults> is absent, and the call at :57 sits outside the try at :52. The exception escapes check() and is caught only by lint.py:293, which prints `fatal error while reading <pkg>` and calls sys.exit(3): the reference emits NO finding, and abandons every remaining package with exit 3. The port treats the missing settings as `no` per the polkit default and reports polkit-untracked-privilege. Note the reference author evidently meant the opposite finding -- had the except caught IndexError, PolkitCheck.py:78 sets found_unauthorized = True and emits polkit-user-privilege. Exit-code divergence is captured by the parity harness (scripts/capture-parity.sh records expected/exit)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "PolkitCheck"
+kind = "behaviour"
+reason = "A privs profile line with a single token makes the reference (PolkitCheck.py:36-38, `value = line[1]`) raise IndexError, which escapes check() and is caught only by lint.py:293: the whole run dies with exit 3 and no finding is emitted for any package. The port skips one-token lines instead -- refusing to abandon every package over one malformed line in a system config file is the deliberate, saner behavior."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "PolkitCheck"
+kind = "behaviour"
+reason = "The reference strips comments with `line.split('#')[0].rstrip()` (PolkitCheck.py:34) while the port trims both ends. On an indented line such as `  org.foo bar`, the reference's `re.split(r'\\s+', ...)` yields `['', 'org.foo', 'bar']`, so it whitelists the empty action id with the real id as its value -- a wart, since no real profile indents entries and no action has an empty id. The port registers the entry as `org.foo -> bar`. Deliberate fix of an obvious reference wart rather than a replicated bug."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "polkit-xml-exception"
+kind = "detail"
+reason = "The reference formats the caught expat error via str(expat.ExpatError); the port formats quick-xml's Display for the parse error. The finding name and severity match; the detail text differs."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "PolkitCheck"
+kind = "behaviour"
+reason = "Self-closing `<allow_any/>` / `<allow_inactive/>` / `<allow_active/>` elements inside `<defaults>` are ignored by the port (rendered `no`), while the reference raises `AttributeError` on `i.firstChild.data` (PolkitCheck.py: `settings[i.nodeName] = i.firstChild.data`; a self-closing element has no firstChild) and exits 3 — the same class of crash as the missing-`<defaults>` `IndexError` divergence above, and the natural companion to it: this entry covers the settings elements, that one covers the absent `<defaults>` element, so nothing is double-counted."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "PolkitCheck"
+kind = "behaviour"
+reason = "PolkitCheck.py:70 does `action.getElementsByTagName('defaults')[0]`, a descendant search, so an outer `<action>` with no `<defaults>` of its own inherits the first `<defaults>` of a nested descendant action: on `<action id='aaa.outer.nodefaults'><action id='bbb.inner.withdefaults'><defaults><allow_any>yes</allow_any>...` the reference emits `E: polkit-user-privilege ... aaa.outer.nodefaults (yes:no:no)` while the port scopes each action to its own `<defaults>` and emits `E: polkit-untracked-privilege ... aaa.outer.nodefaults (no:no:no)` -- name and detail diverge on the outer action, on package-controlled XML; the order divergence is entailed by the name divergence, not a second bug: `__diag_sortkey` is `(name, level)` in both (`filter.py:236` vs `filter.rs:237`), so with equal names the reference keeps document order and only the differing finding names reorder the port's lines. Nested actions are rejected by real polkit, so this is pathological input and the inheritance is a minidom artifact; the port's per-action scoping is the deliberate, saner behavior. The IndexError entry above covers the no-`<defaults>`-anywhere case, this entry covers the nested-descendant case, so nothing is double-counted."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "polkit-untracked-privilege"
+kind = "behaviour"
+reason = "The untracked verdict requires privs data (issue #795): the port emits polkit-untracked-privilege only when at least one configured file was successfully read from the configured PolkitPrivsFiles. A read-but-empty file establishes an empty tracking set — a file that reads as empty or holds only comments and unusable lines still counts as read, so an action the data does not list draws the verdict. With no configured file successfully read — no configured file exists or is readable on the lint host — whether an action is tracked is a fact about the host's installed data rather than the package, so the port stays silent where the reference reports every action as untracked. The reference documents that it expects the polkit-default-privs package to be installed to work, and Factory's lint environment carries that data; OBS build roots and other hosts do not — the apparmor-utils actions (net.apparmor.pkexec.aa-notify.*) are tracked in the Factory profile yet fired in an OBS build root and on a bare macOS host. The polkit-user-privilege verdict is unaffected: it is decidable from the action's own defaults alone and fires with or without loaded data."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/795"

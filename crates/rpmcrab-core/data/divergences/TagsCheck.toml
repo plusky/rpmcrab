@@ -1,0 +1,334 @@
+# Divergence ledger entries owned by `TagsCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "TagsCheck"
+kind = "detail"
+reason = "useless-provides carries the upstream rpmlint#427 reword ahead of the pinned reference, per the fix-in-port rule: the reference text claims versioned and unversioned symbols are provided at once, which is not always accurate (duplicate versioned provides trigger the check too). The check behaviour and level are unchanged. Provenance: crates/rpmcrab-core/data/descriptions/README.md."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "self-obsoletion"
+kind = "behaviour"
+reason = "The reference emits self-obsoletion for the documented package-merge pattern (Provides: X = EVR with Obsoletes: X <= EVR); rpmcrab exempts it. Upstream's behaviour is the bug (rpmlint#1599, fixes rpmlint#438): a merge-pattern Obsoletes is not a self-obsoletion."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "spelling-error"
+kind = "behaviour"
+reason = "Backend is the pure-Rust spellbook crate, not pyenchant; findings may differ from the reference on the same input even with a dictionary present. The port adds a bundled supplementary vocabulary (crates/rpmcrab-core/data/spelling-wordlist.txt) to the dictionary — entries carry hunspell affix flags where derivations are regular — so established technical vocabulary the reference's en_US-only backend flags is not a finding here; British spellings stay findings, as package descriptions are en_US text. URLs and email addresses are skipped whole, as the reference's URL and email filters skip them; the reference's tokenizer still checks some bare-host labels the port's host rule skips (docs and qwargl in docs.qwargl.io)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "TagsCheck"
+kind = "behaviour"
+reason = "License: this is a deliberate asymmetry, not parity. Expressions are split into pieces before validation, and each piece gets its own WITH-exception match plus validity check, which on the WITH dimension reports strictly more than the reference -- the safer direction. The reference matches the exception regex against the whole string and then validates only the pre-WITH part, so sibling pieces (an invalid license in another paren group, a trailing tail after a WITH expression) are silently dropped from validation. An empty group `()` is kept as a literal piece (the reference reports invalid-license for it). The split is iterative and linear, so adversarial nesting terminates; its cut points are the nesting-aware ones of the invalid-license entry for issue #864."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/676"
+
+[[divergence]]
+case = "global"
+check = "TagsCheck"
+kind = "behaviour"
+reason = "Rich `(a or b)` expressions (RPM >= 4.13) are parsed into their leaves and the name/version analyses run against each leaf, so `Requires: (any or goodpkg)` emits `E: invalid-dependency any` where the reference emits nothing: its `parse_deps` (pkg.py:294, `re.split(r'[\\s,]+')`) shreds the expression into `(any`, `or`, `goodpkg)` and the `^any$` invalid-requires pattern never matches a fragment. Flagging the real leaf is the intended analysis, not shredded-string noise; treating the expression as one opaque token would hide genuinely invalid dependencies. Pinned by emission-path tests in tags.rs."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "TagsCheck"
+kind = "behaviour"
+reason = "Emits an Info-level `invalid-license-spellcheck` finding with did-you-mean suggestions for an invalid `License:` tag (upstream rpmlint#818). The reference 2.10.0 has no such check -- neither in `descriptions/` nor in `TagsCheck.py` -- and emits only `W: invalid-license`. The suggestions live in the separate Info finding; `invalid-license`'s detail stays byte-identical to the reference, so the frozen surface is untouched and the new finding can never break a build. Pinned by emission-path tests in tags.rs."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/818"
+
+[[divergence]]
+case = "global"
+check = "TagsCheck"
+kind = "behaviour"
+reason = "The bundled ReleaseExtension default is the per-distro %{?dist} suffix catalog (fedora/rhel/eln/mageia/amazon linux/openEuler/elrepo/suse); the reference still ships an empty default. rpmcrab therefore warns not-standard-release-extension on releases without a known dist suffix and tolerates known suffixes in the changelog version comparison, where the current reference does neither. Under the pinned openSUSE flavour the new finding is suppressed by opensuse.toml:66; of the 20 committed parity cases, the 11 whose footer matched on `gh-main` are each exactly +1 filtered over the frozen expected/stdout (e.g. `6 filtered` vs `5 filtered`); the other 9 were already off on `gh-main` and are unchanged. Across the 33 corpus RPMs no finding name, order, severity or detail differs."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1608"
+
+[[divergence]]
+case = "global"
+check = "TagsCheck"
+kind = "detail"
+reason = "Deliberate departure from TagsCheck.py:552-553: the reference appends the extension-stripped candidate to the expected list unconditionally whenever release_ext is truthy, so when the extension regex matches nothing the detail carries the same candidate twice (e.g. [\"1.15.1-3.weird9\", \"1.15.1-3.weird9\"]). rpmcrab only appends the stripped candidate when it differs from the unstripped one, keeping the single-string detail shape in that case; the duplicated candidate carries no information. When the catalog does strip a suffix, both candidates are reported (e.g. [\"1.15.1-3.fc42\", \"1.15.1-3\"])."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1608"
+
+[[divergence]]
+case = "global"
+check = "TagsCheck"
+kind = "behaviour"
+reason = "Upstream rpmlint#180: a new `invalid-changelog-author` warning fires for changelog entries whose author matches the `InvalidChangelogAuthors` config regex list (defaults: opensuse-packaging@opensuse\\.org, nobody@fedoraproject\\.org, nobody@mageia\\.org) — bot accounts hide who to contact and can generate list mail. The frozen 2.10.0 reference has no such check. One warning per offending entry; an uncompilable pattern is skipped like InvalidRequires."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/180"
+
+[[divergence]]
+case = "global"
+check = "TagsCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `invalid-packager` described the finding as an email-suffix rule; it fires when the tag does not match the configured `packager_regex` (verified in `checks/tags.rs`), a regex match. Reworded to describe the pattern mismatch."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "TagsCheck"
+kind = "detail"
+reason = "Typo fix in staged `--explain` text for `no-changelogname-tag`: the article fixed. Meaning unchanged."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "TagsCheck"
+kind = "detail"
+reason = "Staged `--explain` entries `enchant-dictionary-not-found` and `private-shared-object-provides` removed: dead upstream text, never emitted by the reference or the port. No descriptions for findings that cannot be emitted."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "non-standard-group"
+kind = "missing"
+reason = "Deliberate removal per triage: the Group tag has been optional since rpm 4.6 and the openSUSE wiki wording is that it may be omitted; openSUSE dropped the tag by community agreement (openSUSE mailing list, 2019/2020) and spec-cleaner removes Group: tags on sight (remove_groups in rpmpreamble.py), while Fedora never adopted them and filters this finding in its shipped config (configs/Fedora/fedora.toml) -- the tag's ecosystem is absent, so the port does not emit this finding. The reference check also ships an empty ValidGroups list, so as configured it validates against no taxonomy. Both emission sites (SpecCheck and TagsCheck), the staged `--explain` entry, and the ValidGroups plumbing are removed. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "TagsCheck"
+kind = "detail"
+reason = "Port-only `--explain` descriptions for `description-use-invalid-word`, `invalid-buildhost`, `invalid-changelog-author`, `invalid-license`, `invalid-license-spellcheck`, `invalid-url`, `missing-dependency-on`, `no-buildhost-tag`, `no-version-dependency-on`, `summary-use-invalid-word`: the reference emits these findings but ships no descriptions."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "unversioned-explicit-provides"
+kind = "missing"
+reason = "Mothballed on measurement (issue #940): the reference predicate fires 140,974 times across 1,303 of the 16,501 Factory specs. 138,569 firings (98.3%) are parenthesised capability names -- perl(...), pkgconfig(...), locale(...), appdata(...), group(...), user(...) -- whose versioning is carried by the capability scheme itself, and 136,771 firings sit in just 30 generated texlive specs. The plain residue (1,358 firings, 804 distinct names) is dominated by deliberate virtual provides (myspell-dictionary, kmp_in_kernel, ispell_dictionary, windowmanager, the jre1.x name-versioned family). Versioning these is a per-package judgement, not a decidable defect. rpmcrab does not emit it; the reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "not-standard-release-extension"
+kind = "missing"
+reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs as autobuild redundancy (the build systems enforce release-tag hygiene, so the lint can never be actionable in a pipeline). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its in-code `--explain` detail, and the dedicated tests are removed; a negative pin in the TagsCheck tests keeps the absence pinned under `cargo test`. The `ReleaseExtension` catalog stays: it still tolerates dist suffixes in the changelog version comparison. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "no-packager-tag"
+kind = "missing"
+reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs as pure build-pipeline redundancy (Fedora copied openSUSE's autobuild rationale verbatim; the build system stamps the packager itself). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; the exact-list TagsCheck fixture test keeps the absence pinned under `cargo test`. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "non-standard-group"
+kind = "missing"
+reason = "Deliberate removal per triage: the reference ships an empty ValidGroups list in its default configuration (configdefaults.toml), so as configured this finding validates group strings against no taxonomy. The tag itself is ecosystem-absent: Group has been optional since rpm 4.6 and the openSUSE wiki wording is that it may be omitted; openSUSE dropped the tag by community agreement (openSUSE mailing list, 2019/2020) and spec-cleaner removes Group: tags on sight (remove_groups in rpmpreamble.py), while Fedora never adopted them and filters this finding in its shipped config (configs/Fedora/fedora.toml) -- rpmcrab does not emit it. Both emission sites (SpecCheck and TagsCheck), the staged `--explain` entry, and the ValidGroups plumbing are removed. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "no-provides"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's rpmlint config calls this 'Mandriva specific stuff that we don't want'. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
+
+[[divergence]]
+case = "global"
+check = "no-major-in-name"
+kind = "missing"
+reason = "Deliberate removal (issue #531): the port does not emit this finding -- it is the devel half of the same Mandriva naming policy as lib-package-without-%mklibname, emitted upstream from the same TagsCheck block as the already-removed no-provides. SUSE and Fedora policy is the opposite shape (the major lives only in the runtime package, e.g. libgeotiff5; the devel package is unnumbered), so the finding fires on policy-compliant packages; both distro configs filter it, and SUSE enforces its own library policy via SharedLibraryPolicyCheck. The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the supporting regex are removed; a negative pin in the TagsCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/531"
+
+[[divergence]]
+case = "global"
+check = "hardcoded-prefix-tag"
+kind = "missing"
+reason = "Deliberate removal per triage: Prefix: is the singular alias of the Prefixes: tag, RPM's relocation prefixes (rpm --relocate); rpm-spec(5) documents it with a literal-path example, and the reference flags any literal path in it at W (SpecCheck.py). openSUSE's shipped rpmlint config filters the finding, and Fedora's carries the line commented out, so Fedora emits it. Relocatable-prefix packages are not a Factory form, so the port does not emit it. The reference still emits it."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
+
+[[divergence]]
+case = "global"
+check = "unversioned-explicit-obsoletes"
+kind = "missing"
+reason = "Mothballed on measurement (issue #940): the reference predicate fires 1,311 times across 394 of the 16,501 Factory specs -- 609 plain predecessor-name obsoletes (the rename idiom, including -64bit variants), 699 macro-formed, and 3 shell-macro artefacts. rpmbuild itself warns on unversioned Obsoletes at build time, so the signal already reaches packagers through the build; the residue is the deliberate rename idiom. rpmcrab does not emit it; the reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "no-group-tag"
+kind = "missing"
+reason = "Deliberate removal per triage: the Group tag has been optional since rpm 4.6 and the openSUSE wiki wording is that it may be omitted; openSUSE dropped the tag by community agreement (openSUSE mailing list, 2019/2020) and spec-cleaner removes Group: tags on sight (remove_groups in rpmpreamble.py), while Fedora never adopted them and filters this finding in its shipped config (configs/Fedora/fedora.toml) -- the tag's ecosystem is absent, so the port does not emit this finding. The emission and its staged `--explain` entry are removed. The reference still emits it. No upstream issue found 2026-10-08."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "devel-package-with-non-devel-group"
+kind = "missing"
+reason = "Deliberate removal per triage: the Group tag has been optional since rpm 4.6 and the openSUSE wiki wording is that it may be omitted; openSUSE dropped the tag by community agreement (openSUSE mailing list, 2019/2020) and spec-cleaner removes Group: tags on sight (remove_groups in rpmpreamble.py), while Fedora never adopted them and filters this finding in its shipped config (configs/Fedora/fedora.toml) -- the tag's ecosystem is absent, so the port does not emit this finding. The emission and its staged `--explain` entry are removed. The reference still emits it. No upstream issue found 2026-10-08."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "devel-dependency"
+kind = "behaviour"
+reason = "Biarch/flavored devel packages (`-devel-32bit`, `-devel-doc`, `-debug-libs`, ...) are recognized as devel packages: the devel keyword may be a hyphen-delimited component, not just a name suffix. The reference only matches the suffix form and misfires devel-dependency on 242 such packages in Tumbleweed (measured 2026-10-08 against the TW oss primary.xml). This is the requirer-side class; the dependency-side class from plusky/rpmcrab#283 (DevelNumberExceptions list / word-boundary regex for required names, e.g. `python310-sortinghat` requiring `python310-django-cors-headers`) remains open."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "explicit-lib-dependency"
+kind = "behaviour"
+reason = "Same requirer-side class as the devel-dependency entry: biarch/flavored devel packages (`-devel-32bit`, `-devel-doc`, `-debug-libs`, ...) are recognized as devel packages, so their lib requirements do not trip explicit-lib-dependency. The reference only matches the devel-name suffix form and treats these requirers as runtime packages."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "explicit-lib-dependency"
+kind = "behaviour"
+reason = "The reference lib-package regex's unanchored `libs?[\\d-]*` alternative matches any dependency name ending in \"lib\" (e.g. `appstream-glib`), which is not a library at all. Per openSUSE naming policy library packages are named `lib*`, which is what this check targets here; rpmcrab anchors both alternatives to the start of the name, so genuine `libfoo` findings still fire while suffix false positives stay silent. This knowingly silences non-`lib*` true positives like `Requires: zlib`, where the reference is right. Concrete case: rpmcrab's own package requires `appstream-glib` for its `appstream-util` binary (a runtime subprocess invocation rpm's autodeps can never see); the reference flags it, rpmcrab does not."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "explicit-lib-dependency"
+kind = "behaviour"
+reason = "Capability names are not library package names (#753): symbol capabilities in the SUSE lib<name>__<symbol> namespace — provided by a library package so individual symbol ABIs can be pinned; libuuid1 provides libuuid__uuid_generate_time_cont, which uuidd requires to restart against the new libuuid after an update — and qualified capabilities such as libzypp(econf) or libclc(llvm23) stay silent. The separators are decidable: plain library package names contain neither \"__\" nor \"(\". The reference's lib-package regex matches the lib prefix and fires E on both forms. Measured over the full Factory corpus (17,242 source packages, 2026-10-19): 625 findings before — 1 symbol capability, 5 qualified capabilities, 619 plain unversioned lib package names; after the fix the 6 capability findings are gone and the 619 plain-name findings are unchanged."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/753"
+
+[[divergence]]
+case = "global"
+check = "explicit-lib-dependency"
+kind = "behaviour"
+reason = "Rich `(libfoo if bar)` / `(libfoo unless bar)` dependencies yield `libfoo` as a leaf (the condition is a predicate, not a requirement, but the then-branch is real), so explicit-lib-dependency fires. The reference applies its anchored `^lib` regex to the whole `\"(libfoo if bar)\"` string, which does not match, so it stays silent. A conditional requirement is still a requirement — the divergence is intentional. Same for devel-dependency with `(foo-devel if bar)`."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "description-line-too-long"
+kind = "behaviour"
+reason = "Config-only (issue #578): the vendored configs drop upstream's bare filter for this finding (DROP_LIVE_FILTERS in scripts/generate-distro-configs.py), so the findings surface under the distro flavours where the reference's shipped openSUSE config hides them. The check's semantics match the reference (per-language DESCRIPTION lines over MaxLineLength, E in both; length counted in characters after the byte-count fix in #577). Upstream carries the bare line inside the bnc#456048 kernel-module block; Fedora's config does not filter the tag at all. Measured over the Factory corpus (header scan over 51,586 binary RPMs, validated by paired port/reference runs on eleven anchor packages, exact): the filter suppresses 5,089 E lines in 2,041 srcpkgs / 3,405 binary RPMs, and the block's implied KMP rationale measures empty -- the KMP class is 14 lines (0.28%) in 8 srcpkgs, all ordinary hand-written module prose (tp_smapi's 105-char sysfs sentence the archetype), while the three actual *-kmp srcpkgs (vhba-kmp, leancrypto-kmp, virtualbox-kmp) contribute zero. The residue is genuine: 96.6% plain prose with every token <= 40 chars, 54.5% of it marginal 80-89-char overshoot; only 38 lines carry an unbreakable >=80-char token (URLs), which belong in per-package rpmlintrc. Ruled in the config-filters follow-through (issue #538)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/578"
+
+[[divergence]]
+case = "global"
+check = "description-line-too-long"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593, decided in plusky/rpmcrab#289 D10 and approved by plusky there): the port reports W where the reference reports E. A description line over the length limit is a style defect with no artefact consequence; it printed 5,078 E lines in the 2026-10-16 Factory sweep."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "spelling-error"
+kind = "severity"
+reason = "Deliberate severity recalibration (decided 2026-10-24): the port reports W where the reference reports E. A flagged word in a summary or description is a prose-quality defect with no artefact consequence; as an error the class printed 34,596 E across 8,946 of 17,242 source packages in the 2026-10-24 Factory sweep (binary at 38459d25, 9,869 distinct flagged words, the majority of them occurring in a handful of packages or once). The port also shrinks the class itself: URLs and email addresses are not tokenised into words, and the bundled supplementary vocabulary (data/spelling-wordlist.txt, curated against the pinned en_US dictionary alone, its entries carrying hunspell affix flags where derivations are regular) is added to the dictionary. British spellings stay flagged: descriptions are en_US text, so a British spelling is a prose defect for the packager to fix. Re-running the same corpus with these changes leaves 17,561 W across 6,176 source packages (7,292 distinct words) and moves no other check; the residue is the one-off tail the warning exists for."
+since = "0.4.0"
+
+[[divergence]]
+case = "global"
+check = "invalid-license"
+kind = "severity"
+reason = "Emission level (issues #594, #699): the port emits invalid-license at E (tags.rs), while the reference emits W (TagsCheck.py:629) and its shipped base scoring does not promote it. #594 first carried the promotion in the vendored scoring.toml of both flavours (invalid-license = 100000, SCORING_ADDITIONS in the generator); #699 removed the vendored scoring tables and made E the emission level instead, because a license string that fails SPDX validation is a legal metadata defect in itself -- the always-implies-damage judgement #594 recorded. Near-miss spellings are covered by the separate I-level invalid-license-spellcheck suggestion, not by softening this one."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/594"
+
+[[divergence]]
+case = "global"
+check = "summary-not-capitalized"
+kind = "severity"
+reason = "Config-only (issue #594): the vendored configs carry no [Scoring] table (#594 dropped this entry via DROP_SCORING in the generator; #699 then removed the vendored scoring tables wholesale), so the port prints W where the reference prints E: summary-not-capitalized (Badness: 20) (both emit at W; the reference's [Scoring] entry promotes it to E via the b > 0 rule). A lowercase summary initial is style, not damage (268 promoted E lines in the 20261016 Factory sweep)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/594"
+
+[[divergence]]
+case = "global"
+check = "summary-ended-with-dot"
+kind = "severity"
+reason = "Config-only (issue #594): the vendored configs carry no [Scoring] table (#594 dropped this entry via DROP_SCORING in the generator; #699 then removed the vendored scoring tables wholesale), so the port prints W where the reference prints E: summary-ended-with-dot (Badness: 20) (both emit at W; the reference's [Scoring] entry promotes it to E via the b > 0 rule). Summary punctuation is style, not damage (63 promoted E lines in the 20261016 Factory sweep)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/594"
+
+[[divergence]]
+case = "global"
+check = "explicit-lib-dependency"
+kind = "behaviour"
+reason = "Fix-and-diverge (plusky/rpmcrab#851): explicit-lib-dependency fires only where the explicit requirement duplicates a dependency the package's own binaries already generate. The generated dependencies sit in the same header marked RPMSENSE_FIND_REQUIRES, and the library package they belong to follows the shared-library naming convention, so the duplication is decidable from the header alone: the explicit name must be the conventional package name of a generated soname dependency under the full-version SLPP mapping BinariesCheck uses (stem and version dots fold to underscores: lib<stem><version> or lib<stem>-<version>, so libfoo.so.10.0.0 maps to libfoo10_0_0 and libdb-4.8.so to libdb-4_8). Explicit requirements with no matching generated soname are the only expression of a real dependency and stay silent: ctypes-loaded libraries (python-libnacl on libsodium26), runtime-invoked tool packages (clevis-luks on libpwquality-tools), data companions (libthai-data, libgarcon-data), NSS module packages (libnss_usrfiles2) and flavour pins (libopenblas_pthreads0). The bare lib<stem> name is not a candidate: it names a different package than the library package (the libnbd tools package vs libnbd0, which provides libnbd.so.0). The reference fires on every unversioned lib* name. Measured on the Factory sweep run-20261022-857d5ece, re-run with the #851 narrowing over the same 284 source packages: 548 E in 284 source packages before, 26 E in 23 source packages after; the residue is the libyui sibling packages on libyui16 (7), the Lua database bindings on libmariadb3 (4), Qt6 requirers on libQt6Core6/libQt6Svg6 (4), the python-seccomp and python-systemd bindings (2 each), onedrive on libdbus-1-3 and libnotify4, and cyrus-sasl-bdb, jack, kunifiedpush, libiptcdata and xwayland."
+since = "0.4.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/851"
+
+[[divergence]]
+case = "global"
+check = "devel-dependency"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #861): devel-dependency credits a same-family cross pair \u2014 a requirer in a cross toolchain family (a cross-<target>-gcc... compiler, or any mingw32-*/mingw64-* package) whose devel-matching requirement is that family's own target sys-root devel package. The credit is narrow, a genuine sys-root leaf only, and decidable from the names alone. Cross names: the requirer is a compiler package, cross-<target>-gcc... (the tool component is the first gcc/gcc<version> component and may carry further components, as in gcc13-bootstrap; the target is what precedes it), and the leaf is that target's sys-root package, cross-<target>-<libc>-devel with libc glibc or newlib. For -elf requirers the libc is part of the pair: the target carries a trailing -elf component the sys-root packages drop (cross-riscv64-elf-gcc13 pairs with cross-riscv64-newlib-devel; riscv64-elf is the only -elf target in the measured population), and that spelling is the newlib toolchain, so the stripped form credits only a newlib leaf \u2014 cross-riscv64-elf-gcc13 on cross-riscv64-glibc-devel fires. The strip mirrors the leaf-side spelling: the sys-root packages drop the -elf component (cross-riscv64-newlib-devel, not cross-riscv64-elf-newlib-devel), while -none is part of the target the sys-root packages keep (cross-arm-none-newlib-devel), so no strip applies to it and an arm leaf never pairs with an arm-none requirer. A requirer name without the -elf spelling carries no libc component, so its matching is on the target alone and either libc leaf on that target credits \u2014 cross-riscv64-gcc13 on cross-riscv64-newlib-devel stays silent alongside its measured glibc pair. Both libc spellings occur among the measured families whose names carry no -elf suffix (glibc for the Linux targets, newlib for amdgcn, arm-none, nvptx and rx), so the target alone is the decidable predicate there, and the collision is pinned explicitly. MinGW names: a mingw32-* or mingw64-* requirer pairs only with the same bitness family's sys-root leaves \u2014 mingw32-headers and mingw32-winpthreads-devel for a mingw32 requirer, mingw64-headers and mingw64-winpthreads-devel for a mingw64 requirer. Within one family the sys-root devel package is the compiler's runtime data \u2014 the target headers and libraries the toolchain consumes as a whole \u2014 so the harm model (a runtime package dragging host development files onto end systems) runs in reverse. The credit is per leaf, so a credited leaf does not consume the finding's once-per-package latch: a later host devel requirement in the same package still fires. The reference charges these pairs unchanged. Measured on the Factory corpus (sweep run-20261022-857d5ece population; the 129 source packages carrying the class re-measured before and after with scan.py, the before side reproducing the sweep's 146 exactly, all 60,430 findings in those packages compared, none added and no other finding changed): 146 E in 129 source packages before, 97 E in 80 after. Silenced (49): the cross gcc families on their own sys-root devel (43 \u2014 aarch64, hppa, loongarch64, ppc64le, riscv64 and s390x on glibc-devel, 22; amdgcn, arm-none, nvptx, riscv64-elf and rx on newlib-devel, 21) and the MinGW families (6: the mingw32 and mingw64 cross-gcc, cross-gcc-bootstrap and runtime packages on their own headers). No winpthreads pair occurs in the measured population \u2014 its MinGW packages require headers only \u2014 so the winpthreads half of the credit is unmeasured: it stands on the leaf set's construction (headers and winpthreads-devel are the bitness family's two sys-root devel packages) and is pinned in tags.rs. Every silenced pair is a gcc requirer on its own target's glibc/newlib sys-root leaf or a MinGW package on its own bitness headers, so the narrowed sys-root-leaf credit covers the measured population exactly and the measurement stands. The residue (97) is host packages requiring host devel packages and keeps firing: the Java family (13 \u2014 jmods packages, ant, bazel and tools on java devel), python binding packages (12), kernel-family leaves (9), the guile family (7), qwt designers and examples (5), lazarus (5) and 46 further host-on-host pairs (compilers on glibc-devel, examples, designers and plugins on their own libraries' devel packages, busybox-static requirers). The boundary is pinned both ways: a different target's sys-root devel package fires, a same-target devel match that is not a sys-root leaf fires (cross-aarch64-gcc13 on cross-aarch64-foo-static, cross-aarch64-binutils-devel and its own cross-aarch64-gcc13-devel), a target runtime package on its own sys-root leaf fires because the requirer is not a compiler (cross-aarch64-glibc on cross-aarch64-glibc-devel), the wrong libc's sys-root package fires for an -elf toolchain, a requirer without the -elf spelling credits either libc leaf on its target (cross-riscv64-gcc13 on cross-riscv64-newlib-devel stays silent), a MinGW library devel package fires (mingw64-foo-devel), prefix-only targets fire in both directions (the leaf's target a prefix of the requirer's: cross-arm-none-gcc14 on cross-arm-glibc-devel; the requirer's target a prefix of the leaf's: cross-arm-gcc13 on cross-arm-none-newlib-devel), host-to-cross and cross-to-host fire, a cross requirer on a MinGW leaf and a MinGW requirer on a cross leaf fire (cross-aarch64-gcc13 on mingw64-headers; mingw64-cross-gcc on cross-aarch64-glibc-devel), and the other MinGW bitness fires. Pinned by devel_dependency_cross_family_pairs_are_silent, cross_family_spelling_rules_900, devel_dependency_cross_family_non_elf_libc_collision_is_silent, devel_dependency_cross_family_rich_leaf_is_silent, devel_dependency_cross_family_near_misses_still_fire and devel_dependency_credited_leaf_does_not_consume_the_latch in tags.rs."
+since = "0.4.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/861"
+
+[[divergence]]
+case = "global"
+check = "invalid-license"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #864): the licence split cuts at parentheses of any depth (and at the whitespace-surrounded boolean operators, as before), so the pieces the group structure yields are the bare leaves inside it. Three pieces are not bare leaves: the literal `()` a bare empty group survives as, a piece still carrying its WITH exception (the exception is matched per piece, as the TagsCheck entry above records), and the whole-expression fallback piece below. The reference's license_regex group alternative stops at the first closing paren, so where its validation reaches a nested group it validates parenthesis fragments instead of the leaves inside: `(LGPL-3.0-only OR (GPL-2.0-only OR GPL-3.0-or-later))` yields reference findings for `(GPL-2.0-only` and a bare `)` (verified by running the pinned 2.10.0 algorithm verbatim; the libQt5Help5 expression itself is dropped whole by the reference's whole-string WITH pre-match, the asymmetry of the TagsCheck entry above). Measured on the Factory corpus (sweep run-20261022-857d5ece population; the 10 affected source packages re-measured before and after, the before side reproducing the sweep's 43 exactly): 43 E in 10 source packages before, 11 E in 5 after, and no other E or W finding changing in those packages. Each of the 32 removed errors carried its own invalid-license-spellcheck I suggestion, so the I count falls by the same 32: 39 I in the 10 packages before, 7 I after. The 32 removed findings are all parenthesis fragments over valid leaves: `(GPL-2.0-only` (14) and a bare `)` (10) across the libqt5-qttools/libqt5-qtxmlpatterns/pyside6/shiboken6 families, `(Apache-2.0` (3, lapce and sccache), and `Unicode-DFS-2016)`, `Unicode-DFS-2016 )`, `MIT)`, `BSD-3-Clause)` and `(MIT` (1 each). The residue is bare text that fires under any split, per source package: dssim's AOMPL-1.0, Apache2 and VP8 (1 each); sheldon's BSD-4-clause (3); ima-evm-utils' LicenseRef-GPL-2.0-with-openssl-exception (3); lapce's MPL-2.0-or-later (1); and helvum's `MIT AND` (1) — helvum's licence value ends in a dangling operator, and the operator cuts need whitespace on both sides, so the trailing operator is never a cut point and the tail piece is the malformed text itself, reported rather than silently accepted. Unbalanced parens are structural too: the leaf inside is validated, never a fragment. When no piece survives the split at all — an expression of only parentheses and operators — the expression is reported whole rather than silently accepted, unless it is empty or a whitespace-only group, which vanishes as in the reference. Pinned by license_split_yields_bare_leaves, license_nested_parens_report_the_bare_leaf and license_deeply_nested_parens_terminates in tags.rs."
+since = "0.4.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/864"
+
+[[divergence]]
+case = "global"
+check = "requires-on-release"
+kind = "missing"
+reason = "Deliberate removal (issue #883): a release-pinned Requires is a deliberate dependency shape; upstream's own openSUSE config records 'We check for that already'. rpmcrab does not emit it."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
+
+[[divergence]]
+case = "global"
+check = "non-coherent-filename"
+kind = "missing"
+reason = "Deliberate removal (issue #883): OBS names its build outputs itself, so a package file name differing from the header's name-version-release is a property of the build service's layout. rpmcrab does not emit it."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
+
+[[divergence]]
+case = "global"
+check = "invalid-version"
+kind = "missing"
+reason = "Deliberate removal (issue #883): OBS stamps the version on every build, so the version string is a property the build service itself produces. rpmcrab does not emit it."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
+
+[[divergence]]
+case = "global"
+check = "invalid-packager"
+kind = "missing"
+reason = "Deliberate removal (issue #883): OBS stamps the packager identity on every build. rpmcrab does not emit it."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
+
+[[divergence]]
+case = "global"
+check = "invalid-buildhost"
+kind = "missing"
+reason = "Deliberate removal (issue #883): OBS stamps the build host on every build. rpmcrab does not emit it."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
+
+[[divergence]]
+case = "global"
+check = "incoherent-version-in-changelog"
+kind = "missing"
+reason = "Deliberate removal (issue #883): coherence between the changelog's latest version and the header version is not a property OBS builds depend on."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"

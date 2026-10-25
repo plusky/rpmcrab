@@ -1,0 +1,11 @@
+# Divergence ledger entries owned by `PAMModulesCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "PAMModulesCheck"
+kind = "behaviour"
+reason = "Deliberate enablement (plusky/rpmcrab#498): the port enables PAMModulesCheck in the bundled defaults and the vendored openSUSE flavour config, where the reference's shipping openSUSE branch config never enables it (rpmlint main lists it, paired with a flat PAMAuthorizedModules list). The port does not take up the flat list: measured over the 2026-10-13 Factory corpus (99 shipped PAM modules) it would fire on 16 legitimate modules (pam_systemd_home.so, pam_sss_gss.so, among them). Instead the authorized set is derived from the FileDigestGroup data of type pam -- the same security-review data FileDigestCheck consumes -- which covers every shipped module (0 would fire); an explicit PAMAuthorizedModules list is still honoured on top."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/498"
