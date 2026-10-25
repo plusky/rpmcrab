@@ -69,7 +69,10 @@ must be. Do not treat it as an authority on what is *correct*.
   (see `docs/DESIGN.md`). "Python did X" is a justification for a frozen byte
   shape; it is never a justification for a finding, a severity, or a bug.
 - Never preserve an upstream bug or false positive for parity. Fix it, in its
-  own commit, and record it in `tests/parity/divergences.toml`, linking the upstream
+  own commit, and record it in the divergence ledger — the entry goes in the
+  emitting check's file in `crates/rpmcrab-core/data/divergences/`, and
+  `scripts/generate-divergences-ledger.py` regenerates
+  `tests/parity/divergences.toml` from the sources — linking the upstream
   issue when the divergence is tracked there. Retiring a rationale is prose; changing the behaviour is
   not, and the two must not ride in the same commit.
 - First check whether an odd upstream shape is a **contract in disguise** — a
@@ -123,8 +126,10 @@ Inline `#[cfg(test)] mod tests` beside the changed module is the default, plus
 per-crate `tests/`. The **parity corpus** under `tests/parity/` is normative:
 `captured` cases get their expected output only from running real rpmlint,
 never hand-edited; `synthetic` cases may hand-write expectations. Every
-behavioural difference from rpmlint must have an entry in
-`tests/parity/divergences.toml` with a reason — and the upstream issue
+behavioural difference from rpmlint must have an entry in the
+emitting check's file in `crates/rpmcrab-core/data/divergences/`
+(the generator assembles the files into `tests/parity/divergences.toml`)
+with a reason — and the upstream issue
 linked when the divergence is tracked there —
 the CI `parity` job fails otherwise. Dependency changes must update
 `Cargo.lock`, preserve the MSRV, pass `cargo deny check`, and must not run a

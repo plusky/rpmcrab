@@ -60,9 +60,10 @@ call:
 let level = if config.is_slfo() { Level::Error } else { Level::Warning };
 ```
 
-Each gated divergence gets a `[[divergence]]` entry in
-`tests/parity/divergences.toml` with `flavor = "slfo"` recorded, so
-corpus diffs stay legible.
+Each gated divergence gets a `[[divergence]]` entry in the
+emitting check's file in `crates/rpmcrab-core/data/divergences/`
+(regenerated into `tests/parity/divergences.toml`) with
+`flavor = "slfo"` recorded, so corpus diffs stay legible.
 
 ## Severity decisions the audit settled
 
