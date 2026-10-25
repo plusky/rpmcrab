@@ -372,6 +372,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The ledger since gate diffs against the PR merge commit's first
+          # parent, so it needs one level of history.
+          fetch-depth: 2
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
@@ -414,6 +417,22 @@ jobs:
       # Hermetic differ tests first, so a network flake in the reference
       # setup cannot hide a differ failure.
       - run: python3 scripts/test_parity_runner.py
+      - run: python3 scripts/test_check_ledger_since.py
+      # A new ledger entry must name the next release, not one that has
+      # already shipped. HEAD^1 is the exact main the PR merge commit was
+      # built on, so a main that moved on since cannot misalign the diff.
+      - name: Check new ledger entries name an unreleased version
+        if: github.event_name == 'pull_request'
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # A checkout of the PR head instead of its merge commit would make
+          # HEAD^1 the previous PR commit and silently narrow the gate; a PR
+          # head that is itself a merge also has a HEAD^2, so compare it.
+          test "$(git rev-parse -q --verify HEAD^2 || true)" = "$PR_HEAD_SHA" \
+            || { echo "::error::HEAD is not this PR's merge commit"; exit 2; }
+          git fetch --no-tags --depth=1 origin 'refs/tags/v*:refs/tags/v*'
+          python3 scripts/check-ledger-since.py HEAD^1
       - run: cargo build --release -p rpmcrab --locked
       - run: bash scripts/setup-rpmlint-ref.sh
       - run: python3 scripts/parity-runner.py
