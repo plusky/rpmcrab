@@ -11066,7 +11066,7 @@ description = "explicit priority string bypasses the system crypto policy"
         // The installed path (`resolve_undefined_symbols` during
         // `check_binary`, no deferral): a symbol the package's own
         // provider defines stays quiet and a symbol nobody defines
-        // fires, at Error, during the package's own check.
+        // fires, as a warning, during the package's own check.
         let dir = tempfile::TempDir::new().expect("tmpdir");
         let provider = craft_shlib_elf(
             false,
