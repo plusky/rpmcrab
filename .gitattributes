@@ -1,0 +1,4 @@
+# Assembled from the per-owner sources in
+# crates/rpmcrab-core/data/divergences/ by
+# scripts/generate-divergences-ledger.py — edit the sources there.
+tests/parity/divergences.toml linguist-generated=true
