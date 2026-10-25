@@ -362,7 +362,16 @@ impl Filter {
             text = Some(overridden.to_string());
         }
         match text {
-            Some(text) => format!("{}\n\n", crate::term::textwrap_fill(&text, 78)),
+            Some(mut text) => {
+                // A registry member's description carries its class and
+                // recorded provenance (issue #959), appended to the
+                // staged (or config-overridden) text before the fill.
+                if let Some(member) = defect_pattern::member(check) {
+                    text.push_str("\n\n");
+                    text.push_str(&member.description_suffix());
+                }
+                format!("{}\n\n", crate::term::textwrap_fill(&text, 78))
+            }
 
             None => String::new(),
         }
@@ -547,6 +556,21 @@ mod tests {
         assert_eq!(f.filtered_out, 0);
         assert_eq!(f.printed(Level::Error), 1);
         assert_eq!(f.unused_filters(&c.filters), vec!["class:no-such-class"]);
+    }
+
+    #[test]
+    fn member_description_carries_class_and_provenance() {
+        let c = cfg();
+        let f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        let text = f.get_description("call-to-mktemp", &c);
+        assert!(
+            text.contains("Defect-pattern class: defect-pattern"),
+            "{text}"
+        );
+        assert!(text.contains("Provenance:"), "{text}");
+        // A non-member description is the staged text alone.
+        let plain = f.get_description("no-soname", &c);
+        assert!(!plain.contains("Defect-pattern class"), "{plain}");
     }
 
     #[test]
