@@ -820,7 +820,7 @@ neither the set of findings nor the *output contract*. **0.2.0** was
 the parity milestone — the frozen surface (§4) matched rpmlint
 2.10.0 (openSUSE flavour) — and since then the project deliberately
 diverges wherever rpmlint is wrong, with every departure recorded in
-the ledger (§6). The current release is **0.3.1**. A minor bump may
+the ledger (§6). The current release is **0.4.0**. A minor bump may
 change behaviour substantially, including a deliberate change to the
 frozen output contract. A major bump is reserved for an utter breaking
 change, such as dropping rpmlint compatibility entirely. **1.0** is an
@@ -858,6 +858,14 @@ no `(Badness: N)` (§4.1); `[Scoring]` survives only as a
 promotion-only override (§4.9). The exit-code model was revised with
 it (§4.6): exits 65 and 66 are gone, the set is `0/2/3/4/64/130`, and
 any printed error fails the run by default.
+
+**0.4.0** carries the post-calibration divergence wave: several findings
+that were errors print as warnings — `spelling-error`,
+`undefined-non-weak-symbol` (now aggregated to one finding per file),
+`incorrect-fsf-address` — while `prereq-use` and the
+`dangerous-command-in-%*` family newly surface, and `invalid-soname`
+plus 23 findings that only ever reached users through suppression are
+removed. The output format and the exit-code set are unchanged.
 
 ---
 

@@ -19,7 +19,7 @@ deliberate divergences recorded in the machine-enforced ledger
 a bug-for-bug port: upstream false positives and never-firing checks are
 fixed, and every fix is in the ledger. After 0.2.0 the project deliberately
 diverges wherever rpmlint is wrong, with every departure recorded in the
-ledger. The current release is **0.3.1**.
+ledger. The current release is **0.4.0**.
 
 - **The compatibility contract** — what is frozen and what may diverge — lives
   in [`docs/DESIGN.md`](docs/DESIGN.md).
