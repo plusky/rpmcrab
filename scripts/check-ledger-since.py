@@ -9,6 +9,10 @@ base revision and fails when an added entry carries a `since` at or below
 the latest `vX.Y.Z` tag. Entries edited in place -- reason, check, kind, or
 a `since` corrected to the release that really shipped them -- pass.
 
+The ledger is assembled from the per-owner sources in
+`crates/rpmcrab-core/data/divergences/`; a violation names the source
+file that holds the entry, which is where the entry is edited.
+
 Usage: check-ledger-since.py [BASE_REV]
   (default: the merge-base of origin/main and HEAD; CI passes the PR merge
   commit's first parent, the exact main the merge was built on)
@@ -22,6 +26,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 LEDGER = "tests/parity/divergences.toml"
+SRC_DIR = Path("crates/rpmcrab-core/data/divergences")
 
 
 def parse_version(text):
@@ -151,6 +156,27 @@ def _entries(text):
     return entries
 
 
+def _owner_file(entry, src_dir=SRC_DIR):
+    """The per-owner source file holding `entry`, or None.
+
+    The aggregate is assembled from the sources in `src_dir`, and the
+    entry a violation names is edited in its source, not in the
+    aggregate. A source that does not parse is skipped -- assembling
+    the ledger is what reports it.
+    """
+    if not src_dir.is_dir():
+        return None
+    target = _frozen(entry)
+    for path in sorted(src_dir.glob("*.toml")):
+        try:
+            entries = _entries(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        if any(_frozen(candidate) == target for candidate in entries):
+            return path
+    return None
+
+
 def _git(*args):
     return subprocess.run(
         ["git", *args], check=True, capture_output=True, text=True
@@ -197,9 +223,11 @@ def main(argv):
         reason = str(entry.get("reason", ""))
         if len(reason) > 60:
             reason = reason[:60] + "..."
+        owner = _owner_file(entry)
+        where = f"; edit {owner} and regenerate the ledger" if owner else ""
         print(
             f"ledger since: new {entry.get('check')} ({entry.get('kind')}) entry "
-            f"[{reason}] claims since = {since!r}, but {why}",
+            f"[{reason}] claims since = {since!r}, but {why}{where}",
             file=sys.stderr,
         )
     if bad:
