@@ -270,8 +270,10 @@ jobs:
       # The release workflow's post-release bump runs this script; it needs
       # the same toolchain and headers as the asset generation. Its own
       # worktree keeps it independent of the drift diffs below, so it runs
-      # first and a drift failure cannot hide it.
+      # first and a drift failure cannot hide it; it also runs when the
+      # asset generation above failed.
       - run: python3 scripts/test_bump_version.py
+        if: ${{ !cancelled() }}
       - run: diff -r /tmp/rpmcrab-gen-assets/man crates/rpmcrab/man
       - run: diff -r /tmp/rpmcrab-gen-assets/completions crates/rpmcrab/completions
 

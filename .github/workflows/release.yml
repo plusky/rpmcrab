@@ -397,19 +397,36 @@ jobs:
           gh auth setup-git --hostname github.com
           branch="release/bump-$NEXT"
           title="chore(release): bump to $NEXT for post-release development"
-          git -c user.name=github-actions -c user.email=github-actions@github.com \
-            checkout -B "$branch"
-          # Tracked edits, plus any file make gen newly generates.
-          git add -u
-          git add crates/rpmcrab/man crates/rpmcrab/completions
-          git -c user.name=github-actions -c user.email=github-actions@github.com \
-            commit -m "$title"
-          # A rerun resets the branch: force-with-lease updates the open PR
-          # instead of failing non-fast-forward. Fetch into the
-          # remote-tracking ref first so the lease has a baseline on a
-          # fresh clone.
-          git fetch origin "$branch:refs/remotes/origin/$branch" || true
-          git push --force-with-lease -u origin "$branch"
+          # Stage only the version surfaces and the generated docs: make gen
+          # ran third-party build code, and anything else it touched must
+          # fail the job rather than ride along in a version-bump PR.
+          git add Cargo.toml Cargo.lock README.md docs/DESIGN.md \
+            crates/rpmcrab/Cargo.toml crates/rpmcrab-core/Cargo.toml \
+            crates/rpmcrab/man crates/rpmcrab/completions
+          stray=$(git status --porcelain | grep -v '^[AMD] ' || true)
+          if [ -n "$stray" ]; then
+            echo "::error::the bump changed files outside the version surfaces:" >&2
+            echo "$stray" >&2
+            exit 1
+          fi
+          # A rerun finds the branch already pushed: it is left as is, so a
+          # maintainer's fix on the open bump PR is never overwritten, and
+          # the job only makes sure the PR and its auto-merge exist.
+          # ls-remote --exit-code: 0 = exists, 2 = absent, anything else is
+          # a real failure that must not read as "absent".
+          rc=0
+          git ls-remote --exit-code --heads origin "$branch" >/dev/null || rc=$?
+          case "$rc" in
+            0) echo "$branch already exists; leaving it as is" ;;
+            2)
+              git -c user.name=github-actions -c user.email=github-actions@github.com \
+                checkout -b "$branch"
+              git -c user.name=github-actions -c user.email=github-actions@github.com \
+                commit -m "$title"
+              git push -u origin "$branch"
+              ;;
+            *) echo "::error::git ls-remote failed ($rc)" >&2; exit 1 ;;
+          esac
           body="v$RELEASED is out; main moves to $NEXT for post-release development. Opened by the release workflow."
           # --head matches fork PRs by branch name too: only this repo's
           # own branch may receive auto-merge.
