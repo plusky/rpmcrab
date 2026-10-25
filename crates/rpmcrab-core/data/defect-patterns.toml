@@ -2,7 +2,7 @@
 #
 # One [[member]] record per finding tag in the defect-pattern class.
 # Class membership is a property of the tag, recorded here once; the
-# output renderers, the rpmlintrc filter expansion (`class:<name>`)
+# output renderers, the rpmlintrc `class:<name>` filter matching
 # and the `-v` descriptions all read this file, so every consumer
 # sees the same membership.
 #

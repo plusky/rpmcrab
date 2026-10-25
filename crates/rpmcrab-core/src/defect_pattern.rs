@@ -3,8 +3,8 @@
 //!
 //! Membership is a property of the finding tag, recorded once in the
 //! embedded `data/defect-patterns.toml`; the renderers, the rpmlintrc
-//! filter expansion and the `-v` descriptions all resolve through this
-//! module, so every consumer reads the same source. A member finder
+//! `class:` filter matching and the `-v` descriptions all resolve
+//! through this module, so every consumer reads the same source. A member finder
 //! pairs a pattern decidable from the shipped binary and package with
 //! a context gate; the registry records the gate shape each finder's
 //! severity hangs on and the defect samples (provenance) that put the
@@ -16,6 +16,12 @@ use std::sync::OnceLock;
 /// The embedded registry, baked in like the description corpus so an
 /// installed binary needs no data dir next to it.
 const REGISTRY_TOML: &str = include_str!("../data/defect-patterns.toml");
+
+/// The classes a registry member may name. A member's `class` is
+/// validated against this list at parse time, so a misspelled class
+/// fails registry validation instead of silently forming a class of
+/// its own that no filter or counter ever names.
+const KNOWN_CLASSES: &[&str] = &["defect-pattern"];
 
 /// The family a member belongs to: a dangerous-API / call pattern, or
 /// a mitigation-absence (hardening) pattern.
@@ -143,6 +149,18 @@ pub fn class_members(class: &str) -> Vec<&'static Member> {
     registry().class_members(class)
 }
 
+/// The canonical name of a class the registry knows, if any. Filter
+/// construction resolves a `class:<name>` pattern through this, so an
+/// unknown name is a configuration error there, never a pattern that
+/// silently matches nothing.
+pub fn known_class(class: &str) -> Option<&'static str> {
+    registry()
+        .members()
+        .iter()
+        .find(|m| m.class == class)
+        .map(|m| m.class.as_str())
+}
+
 /// Parse and validate the registry text. Validation is the on-ramp
 /// bar made mechanical (issue #959 §5): every member names a class, a
 /// known family and gate, and at least one provenance sample, and no
@@ -164,6 +182,10 @@ fn parse_registry(raw: &str) -> Registry {
                 .to_string()
         };
         let tag = field("tag");
+        assert!(
+            !tag.is_empty() && !tag.chars().any(char::is_whitespace),
+            "defect-pattern tag {tag:?} is empty or contains whitespace"
+        );
         let family = match field("family").as_str() {
             "pattern" => Family::Pattern,
             "hardening" => Family::Hardening,
@@ -193,9 +215,18 @@ fn parse_registry(raw: &str) -> Registry {
             !provenance.is_empty(),
             "defect-pattern member {tag} carries no provenance sample"
         );
+        assert!(
+            provenance.iter().all(|p| !p.trim().is_empty()),
+            "defect-pattern member {tag} carries an empty provenance sample"
+        );
+        let class = field("class");
+        assert!(
+            KNOWN_CLASSES.contains(&class.as_str()),
+            "defect-pattern member {tag}: unknown class {class:?}"
+        );
         let member = Member {
             tag: tag.clone(),
-            class: field("class"),
+            class,
             family,
             gate,
             provenance,
@@ -264,6 +295,44 @@ mod tests {
             Gate::SelfGated
         );
         assert_eq!(member("missing-relro").unwrap().family, Family::Hardening);
+    }
+
+    #[test]
+    fn known_class_resolves_registered_classes_only() {
+        assert_eq!(known_class("defect-pattern"), Some("defect-pattern"));
+        assert_eq!(known_class("defect-patern"), None);
+        assert_eq!(known_class(""), None);
+    }
+
+    /// One registry record as TOML text, for the validation tests.
+    fn member_toml(tag: &str, class: &str, provenance: &str) -> String {
+        format!(
+            "[[member]]\ntag = {tag:?}\nclass = {class:?}\nfamily = \"pattern\"\ngate = \"none\"\nprovenance = [{provenance:?}]\n"
+        )
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown class")]
+    fn registry_rejects_an_unknown_class() {
+        parse_registry(&member_toml("some-tag", "defect-patern", "a sample"));
+    }
+
+    #[test]
+    #[should_panic(expected = "empty or contains whitespace")]
+    fn registry_rejects_a_tag_with_a_space() {
+        parse_registry(&member_toml("some tag", "defect-pattern", "a sample"));
+    }
+
+    #[test]
+    #[should_panic(expected = "empty or contains whitespace")]
+    fn registry_rejects_an_empty_tag() {
+        parse_registry(&member_toml("", "defect-pattern", "a sample"));
+    }
+
+    #[test]
+    #[should_panic(expected = "empty provenance sample")]
+    fn registry_rejects_an_empty_provenance_sample() {
+        parse_registry(&member_toml("some-tag", "defect-pattern", ""));
     }
 
     #[test]
