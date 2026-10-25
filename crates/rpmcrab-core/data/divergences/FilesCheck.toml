@@ -624,3 +624,11 @@ kind = "missing"
 reason = "Deliberate removal (issue #883): measured over the Factory corpus, the finding fires ~4,100 times, 82% of them from 5 source packages; a 22-file sample was genuinely non-UTF-8 in every case and by design in every case (TeXmacs Cork/T1 documentation, dictionary data, a KOI8-R example file). The finding covers documentation files only. rpmcrab does not emit it."
 since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
+
+[[divergence]]
+check = "non-devel-file-in-devel-package"
+kind = "behaviour"
+case = "global"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
+since = "0.4.1"
+reason = "The reference charges any lib-shaped path in a devel-classified package (FilesCheck.py _check_file_normal_file_lib at the pinned commit 84848c05), and the devel classification covers -debuginfo packages, so the mirrored .debug companion of a versioned soname in a -debuginfo package draws the error. The port scopes the versioned-library arm out of the debug trees (/usr/lib/debug and /usr/src/debug, via is_debug_path): a debuginfo package's payload is debug data by construction, and the companion is the debug form of the runtime library, not a runtime library misplaced into a devel package (plusky/rpmcrab#955). A real versioned runtime library in a -devel package and lib-shaped paths under lookalike prefixes (/usr/lib/debugfoo) stay charged."
