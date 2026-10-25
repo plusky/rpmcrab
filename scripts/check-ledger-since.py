@@ -48,33 +48,45 @@ def _ident(entry):
     return (entry.get("case"), entry.get("check"), entry.get("kind"))
 
 
-_ANY = object()
+def _max_matching(left, right, edge):
+    """Maximum bipartite matching (augmenting paths): returns the set of
+    matched `left` indices. Order-independent by construction."""
+    owner = [None] * len(right)
+
+    def augment(i, seen):
+        for j in range(len(right)):
+            if j in seen or not edge(left[i], right[j]):
+                continue
+            seen.add(j)
+            if owner[j] is None or augment(owner[j], seen):
+                owner[j] = i
+                return True
+        return False
+
+    return {i for i in range(len(left)) if augment(i, set())}
 
 
-def _take(pool, since=_ANY, ident=_ANY):
-    """Remove and return the first pool entry with that `since` and
-    identity (either may be left open), or None."""
-    for i, entry in enumerate(pool):
-        if (since is _ANY or entry.get("since") == since) and (
-            ident is _ANY or _ident(entry) == ident
-        ):
-            return pool.pop(i)
-    return None
-
-
-def _shipped(entry, released):
-    v = parse_version(entry.get("since", ""))
-    return v is None or v <= released
+def _excuses(head_entry, base_entry):
+    """A replaced base entry explains a head entry as an in-place edit: the
+    same `since` (reason, check or kind rewritten), or the same identity with
+    a well-formed `since` (a `since` correction)."""
+    since = head_entry.get("since")
+    if since == base_entry.get("since"):
+        return True
+    return _ident(head_entry) == _ident(base_entry) and parse_version(since) is not None
 
 
 def violations(base_entries, head_entries, released):
     """Added entries in head whose `since` is not after `released`.
 
     Entries are aligned by position, as in the diff a reviewer reads; one found
-    verbatim elsewhere in base merely moved. Within a changed run a head entry
-    reusing a replaced entry's `since` is an in-place edit (reason, check or
-    kind rewritten); one taking the identity (case, check, kind) of a replaced
-    entry is a `since` correction. Any other shipped-`since` entry is added.
+    verbatim elsewhere in base merely moved. Within a changed run, an entry
+    moved forward to an unreleased `since` first claims a replaced entry of
+    its identity (case, check, kind) -- it is that entry's successor, so its
+    old `since` is not free for another. Every remaining head entry whose
+    `since` is shipped or malformed must then be explained by a distinct
+    replaced entry (see `_excuses`); a maximum matching decides, so the
+    outcome does not depend on order. Unexplained entries are added.
     """
     if released is None:
         return []
@@ -96,31 +108,34 @@ def violations(base_entries, head_entries, released):
                 moved_out[f] -= 1
             else:
                 replaced.append(entry)
-        pending = []
+        needy = []
         for f, entry in zip(head[j1:j2], head_entries[j1:j2]):
             if moved_in[f] > 0:
                 moved_in[f] -= 1
-            elif (
-                _take(replaced, since=entry.get("since", ""), ident=_ident(entry))
-                is None
-            ):
-                pending.append(entry)
-        # A correction (same identity, shipped `since`) claims its entry before
-        # a rewrite keeping some replaced entry's `since` can take it.
-        rest = []
-        for entry in pending:
-            if (
-                _shipped(entry, released)
-                and _take(replaced, ident=_ident(entry)) is not None
-            ):
                 continue
-            rest.append(entry)
-        for entry in rest:
-            if _take(replaced, since=entry.get("since", "")) is None and _shipped(
-                entry, released
-            ):
-                found.append(entry)
+            version = parse_version(entry.get("since"))
+            if version is not None and version > released:
+                same = [b for b in replaced if _ident(b) == _ident(entry)]
+                if same:
+                    keep = next(
+                        (b for b in same if b.get("since") == entry.get("since")),
+                        same[0],
+                    )
+                    replaced.remove(keep)
+                continue
+            needy.append(entry)
+        explained = _max_matching(needy, replaced, _excuses)
+        found.extend(e for i, e in enumerate(needy) if i not in explained)
     return found
+
+
+def _entries(text):
+    """The ledger's `[[divergence]]` entries, or ValueError when the text
+    does not hold a list of tables under that key."""
+    entries = tomllib.loads(text).get("divergence")
+    if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
+        raise ValueError("no [[divergence]] array of tables")
+    return entries
 
 
 def _git(*args):
@@ -150,13 +165,12 @@ def main(argv):
         )
         return 2
     try:
-        head_entries = tomllib.loads(Path(LEDGER).read_text(encoding="utf-8"))[
-            "divergence"
-        ]
-        base_entries = tomllib.loads(base_text)["divergence"]
-    except (tomllib.TOMLDecodeError, KeyError) as err:
+        head_entries = _entries(Path(LEDGER).read_text(encoding="utf-8"))
+        base_entries = _entries(base_text)
+    except (OSError, ValueError) as err:
         # Exit 2 like the git failures: a broken ledger is not a violation.
-        print(f"ledger since: cannot read the ledger: {err!r}", file=sys.stderr)
+        # (TOMLDecodeError and UnicodeDecodeError are ValueErrors.)
+        print(f"ledger since: cannot read the ledger: {err}", file=sys.stderr)
         return 2
     shipped = ".".join(map(str, released))
     bad = violations(base_entries, head_entries, released)

@@ -416,10 +416,14 @@ jobs:
       # built on, so a main that moved on since cannot misalign the diff.
       - name: Check new ledger entries name an unreleased version
         if: github.event_name == 'pull_request'
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           # A checkout of the PR head instead of its merge commit would make
-          # HEAD^1 the previous PR commit and silently narrow the gate.
-          git rev-parse -q --verify HEAD^2 >/dev/null || { echo "::error::not a PR merge commit"; exit 2; }
+          # HEAD^1 the previous PR commit and silently narrow the gate; a PR
+          # head that is itself a merge also has a HEAD^2, so compare it.
+          test "$(git rev-parse -q --verify HEAD^2 || true)" = "$PR_HEAD_SHA" \
+            || { echo "::error::HEAD is not this PR's merge commit"; exit 2; }
           git fetch --no-tags --depth=1 origin 'refs/tags/v*:refs/tags/v*'
           python3 scripts/check-ledger-since.py HEAD^1
       - run: cargo build --release -p rpmcrab --locked

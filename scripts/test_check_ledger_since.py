@@ -34,6 +34,16 @@ class LatestReleaseTest(unittest.TestCase):
         self.assertIsNone(_mod.latest_release([]))
 
 
+class EntriesTest(unittest.TestCase):
+    def test_table_instead_of_array_is_rejected(self):
+        with self.assertRaises(ValueError):
+            _mod._entries('[divergence]\ncheck = "x"\n')
+
+    def test_missing_key_is_rejected(self):
+        with self.assertRaises(ValueError):
+            _mod._entries('[other]\ncheck = "x"\n')
+
+
 class ViolationsTest(unittest.TestCase):
     def check(self, base, head):
         return _mod.violations(base, head, RELEASED)
@@ -106,6 +116,36 @@ class ViolationsTest(unittest.TestCase):
     def test_crossing_corrections_pass(self):
         base = [entry("a-check", "0.3.1"), entry("b-check", "0.1.0")]
         head = [entry("a-check", "0.1.0"), entry("b-check", "0.3.0")]
+        self.assertEqual(self.check(base, head), [])
+
+    def test_forward_moved_entry_does_not_free_its_old_since(self):
+        # I1 moved to an unreleased since is I1's successor; a new entry
+        # copying I1's old shipped since is still new.
+        old = entry("i1-check", "0.1.0")
+        moved = entry("i1-check", "0.5.0")
+        bad = entry("i2-check", "0.1.0")
+        self.assertEqual(self.check([old], [moved, bad]), [bad])
+
+    def test_malformed_since_is_not_a_correction(self):
+        old = entry("a-check", "0.3.0")
+        bad = entry("a-check", "next")
+        self.assertEqual(self.check([old], [bad]), [bad])
+
+    def test_duplicate_identities_match_regardless_of_order(self):
+        base = [
+            entry("i-check", "0.1.0", reason="x"),
+            entry("i-check", "0.2.0", reason="y"),
+        ]
+        head = [
+            entry("i-check", "0.3.0", reason="x"),
+            entry("j-check", "0.1.0", reason="y"),
+        ]
+        self.assertEqual(self.check(base, head), [])
+
+    def test_crossed_renames_beat_a_greedy_correction(self):
+        # a/0.3.1 is b renamed (same since); c/0.1.0 is a renamed.
+        base = [entry("a-check", "0.1.0"), entry("b-check", "0.3.1")]
+        head = [entry("a-check", "0.3.1"), entry("c-check", "0.1.0")]
         self.assertEqual(self.check(base, head), [])
 
     def test_rekeyed_entry_keeping_since_passes(self):
