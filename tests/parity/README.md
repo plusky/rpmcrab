@@ -153,7 +153,8 @@ upstream issue is still undecided (rpmcrab#56) — do not treat it as settled.
 `since` names the first release that ships the divergence, so a new entry
 never names an already-tagged version: `scripts/check-ledger-since.py` (run by
 the `parity` CI job) fails an added entry at or below the latest `vX.Y.Z`
-tag; in-place edits, a `since` correction included, pass.
+tag; in-place edits, a `since` correction included, pass. The failure
+names the owner source file that holds the entry.
 
 `kind` is one of:
 

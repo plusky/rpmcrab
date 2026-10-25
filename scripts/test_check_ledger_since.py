@@ -2,6 +2,7 @@
 """Unit tests for check-ledger-since.py."""
 
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -188,6 +189,49 @@ class ViolationsTest(unittest.TestCase):
 
     def test_no_release_means_nothing_to_check(self):
         self.assertEqual(_mod.violations([], [entry("no-binary", "0.0.1")], None), [])
+
+
+class OwnerFileTest(unittest.TestCase):
+    """The aggregate is generated from per-owner sources; a violation
+    is edited in the source that holds the entry, so the gate must be
+    able to name it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.src = Path(self.tmp.name) / "divergences"
+        self.src.mkdir()
+
+    def write(self, name, check, since, reason, kind="behaviour"):
+        (self.src / name).write_text(
+            f'[[divergence]]\ncase = "global"\ncheck = "{check}"\n'
+            f'kind = "{kind}"\nreason = "{reason}"\nsince = "{since}"\n',
+            encoding="utf-8",
+        )
+
+    def test_finds_the_source_holding_the_entry(self):
+        self.write("AlphaCheck.toml", "alpha-finding", "0.1.0", "alpha reason")
+        self.write("BetaCheck.toml", "beta-finding", "0.2.0", "beta reason",
+                   kind="missing")
+        held = entry("alpha-finding", "0.1.0", reason="alpha reason")
+        self.assertEqual(
+            _mod._owner_file(held, self.src), self.src / "AlphaCheck.toml")
+
+    def test_unknown_entry_has_no_owner(self):
+        self.write("AlphaCheck.toml", "alpha-finding", "0.1.0", "alpha reason")
+        self.assertIsNone(_mod._owner_file(entry("nope", "0.1.0"), self.src))
+
+    def test_unparsable_source_is_skipped(self):
+        (self.src / "Broken.toml").write_text(
+            "this is not = [ toml\n", encoding="utf-8")
+        self.write("AlphaCheck.toml", "alpha-finding", "0.1.0", "alpha reason")
+        held = entry("alpha-finding", "0.1.0", reason="alpha reason")
+        self.assertEqual(
+            _mod._owner_file(held, self.src), self.src / "AlphaCheck.toml")
+
+    def test_missing_source_dir_has_no_owner(self):
+        gone = Path(self.tmp.name) / "absent"
+        self.assertIsNone(_mod._owner_file(entry("x", "0.1.0"), gone))
 
 
 if __name__ == "__main__":
