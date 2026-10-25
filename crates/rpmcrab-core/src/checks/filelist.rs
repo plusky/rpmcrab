@@ -993,6 +993,113 @@ mod tests {
     }
 
     #[test]
+    fn move_to_usr_ghost_pam_file_is_quiet() {
+        // A %ghost pam.d file carries no payload: it is generated at
+        // install time (pam-config's common-*-pc files), so the rule
+        // does not report it.
+        let pkg = pkg_with_ghosts(
+            &["/etc/pam.d/common-auth-pc"],
+            &["/etc/pam.d/common-auth-pc"],
+        );
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        assert!(
+            lines_for(&results, "filelist-forbidden-move-to-usr").is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn move_to_usr_real_pam_file_still_fires() {
+        let pkg = pkg_with_files(&["/etc/pam.d/common-auth-pc"]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "filelist-forbidden-move-to-usr");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("E: filelist-forbidden-move-to-usr /etc/pam.d/common-auth-pc"),
+            "name, level and detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn move_to_usr_ghost_systemd_unit_is_quiet() {
+        let pkg = pkg_with_ghosts(
+            &["/lib/systemd/system/munge.service"],
+            &["/lib/systemd/system/munge.service"],
+        );
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        assert!(
+            lines_for(&results, "filelist-forbidden-move-to-usr").is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn move_to_usr_real_systemd_unit_still_fires() {
+        let pkg = pkg_with_files(&["/lib/systemd/system/munge.service"]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "filelist-forbidden-move-to-usr");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0]
+                .contains("E: filelist-forbidden-move-to-usr /lib/systemd/system/munge.service"),
+            "name, level and detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn move_to_usr_ghost_udev_rule_is_quiet() {
+        let pkg = pkg_with_ghosts(
+            &["/lib/udev/rules.d/99-munge.rules"],
+            &["/lib/udev/rules.d/99-munge.rules"],
+        );
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        assert!(
+            lines_for(&results, "filelist-forbidden-move-to-usr").is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn move_to_usr_real_udev_rule_still_fires() {
+        let pkg = pkg_with_files(&["/lib/udev/rules.d/99-munge.rules"]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "filelist-forbidden-move-to-usr");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("E: filelist-forbidden-move-to-usr /lib/udev/rules.d/99-munge.rules"),
+            "name, level and detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn move_to_usr_ghost_and_real_sibling_fires_once_for_real_file() {
+        // The exemption is per-file, not per-package: the ghost sibling
+        // stays quiet while the real sibling in the same rule still fires.
+        let pkg = pkg_with_ghosts(
+            &["/etc/pam.d/ghosted-pc", "/etc/pam.d/real-pc"],
+            &["/etc/pam.d/ghosted-pc"],
+        );
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "filelist-forbidden-move-to-usr");
+        assert_eq!(lines.len(), 1, "lines: {lines:?}");
+        assert!(
+            lines[0].contains("E: filelist-forbidden-move-to-usr /etc/pam.d/real-pc"),
+            "name, level and detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
     fn suse_vendor_opt_providers_are_exempt() {
         // A SUSE-vendor package may install under the `suse` and
         // `novell` providers; any other provider is still reported.
