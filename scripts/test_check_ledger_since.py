@@ -96,6 +96,18 @@ class ViolationsTest(unittest.TestCase):
         fixed = entry("TagsCheck", "0.1.0")
         self.assertEqual(self.check([old], [bad, fixed]), [bad])
 
+    def test_correction_before_a_reworded_neighbour_passes(self):
+        # The correction claims its own entry, not the neighbour's `since`.
+        old_t, old_u = entry("TagsCheck", "0.3.1"), entry("FilesCheck", "0.1.0")
+        new_t = entry("TagsCheck", "0.1.0")
+        new_u = entry("FilesCheck", "0.1.0", reason="reworded")
+        self.assertEqual(self.check([old_t, old_u], [new_t, new_u]), [])
+
+    def test_crossing_corrections_pass(self):
+        base = [entry("a-check", "0.3.1"), entry("b-check", "0.1.0")]
+        head = [entry("a-check", "0.1.0"), entry("b-check", "0.3.0")]
+        self.assertEqual(self.check(base, head), [])
+
     def test_rekeyed_entry_keeping_since_passes(self):
         old = entry("missing-mandatory-optflags", "0.1.0", kind="detail")
         new = entry("forbidden-optflags", "0.1.0", kind="detail")
