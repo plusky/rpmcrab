@@ -1772,6 +1772,24 @@ fn provided_by_closure(
         .clone()
 }
 
+/// The detail of the aggregated `undefined-non-weak-symbol` finding:
+/// the count and the names of the file's undefined non-weak symbols,
+/// in the parenthesised shape the aggregated findings use (the
+/// per-directory aggregation of `dir-or-file-outside-snapshot`).
+fn undefined_symbol_detail(symbols: &[String]) -> String {
+    let noun = if symbols.len() == 1 {
+        "symbol"
+    } else {
+        "symbols"
+    };
+    format!(
+        "({} undefined {}: {})",
+        symbols.len(),
+        noun,
+        symbols.join(", ")
+    )
+}
+
 /// Resolve undefined symbols the way the reference's `ldd -r`
 /// does: a file's undefined symbol is satisfied when a library in
 /// its DT_NEEDED closure -- the file itself included, as in the
@@ -3670,16 +3688,15 @@ impl BinariesCheck {
                         });
                     }
                 }
-            } else {
-                for symbol in &ldd.undefined_symbols {
-                    add_info(
-                        out,
-                        Level::Error,
-                        pkg,
-                        "undefined-non-weak-symbol",
-                        &[&pkgfile.name, symbol],
-                    );
-                }
+            } else if !ldd.undefined_symbols.is_empty() {
+                let detail = undefined_symbol_detail(&ldd.undefined_symbols);
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "undefined-non-weak-symbol",
+                    &[&pkgfile.name, &detail],
+                );
             }
         }
         let info_type = if info.is_shlib {
@@ -4390,17 +4407,26 @@ impl Check for BinariesCheck {
                     &root_ctx,
                     &owner,
                 );
-                for symbol in &consumer.undefined_symbols {
-                    if !provided.contains(symbol) && !consumer.defined_symbols.contains(symbol) {
-                        out.add_info(make_finding(
-                            &package.pkg_name,
-                            &package.pkg_arch,
-                            Level::Error,
-                            "undefined-non-weak-symbol",
-                            vec![consumer.file_name.clone(), symbol.clone()],
-                            None,
-                        ));
-                    }
+                let unresolved: Vec<String> = consumer
+                    .undefined_symbols
+                    .iter()
+                    .filter(|symbol| {
+                        !provided.contains(*symbol) && !consumer.defined_symbols.contains(*symbol)
+                    })
+                    .cloned()
+                    .collect();
+                if !unresolved.is_empty() {
+                    out.add_info(make_finding(
+                        &package.pkg_name,
+                        &package.pkg_arch,
+                        Level::Warning,
+                        "undefined-non-weak-symbol",
+                        vec![
+                            consumer.file_name.clone(),
+                            undefined_symbol_detail(&unresolved),
+                        ],
+                        None,
+                    ));
                 }
             }
         }
@@ -10331,8 +10357,70 @@ description = "explicit priority string bypasses the system crypto policy"
             "orphan finding names file and symbol: {lines:?}"
         );
         assert!(
-            lines.iter().all(|l| l.contains(" E: ")),
-            "Error level: {lines:?}"
+            lines.iter().all(|l| l.contains(" W: ")),
+            "Warning level: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("(1 undefined symbol: missing_sym)")),
+            "aggregated detail names count and symbol: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn undefined_symbols_aggregate_per_file() {
+        // The finding fires once per file, however many undefined
+        // symbols the file carries: the detail names the count and
+        // every symbol, so the population stays visible without a
+        // line per symbol.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let many = craft_shlib_elf(
+            false,
+            Some("libabsent.so.9"),
+            Some("libmany.so.1"),
+            &[
+                ("sym_one", 1, 0, 0),
+                ("sym_two", 1, 0, 0),
+                ("sym_three", 1, 0, 0),
+                ("sym_four", 1, 0, 0),
+                ("sym_five", 1, 0, 0),
+            ],
+        );
+        let one = craft_shlib_elf(
+            false,
+            Some("libabsent.so.9"),
+            Some("libone.so.1"),
+            &[("only_sym", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![
+                shlib_pkgfile(dir.path(), "libmany.so.1", &many),
+                shlib_pkgfile(dir.path(), "libone.so.1", &one),
+            ],
+        );
+        let results = driver_results(&pkg, &test_config());
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(lines.len(), 2, "one finding per file: {results:?}");
+        let many_line = lines
+            .iter()
+            .find(|l| l.contains("libmany.so.1"))
+            .expect("the many-symbol file fires");
+        assert!(many_line.contains(" W: "), "Warning level: {many_line}");
+        assert!(
+            many_line
+                .contains("(5 undefined symbols: sym_one, sym_two, sym_three, sym_four, sym_five)"),
+            "count and every symbol named: {many_line}"
+        );
+        let one_line = lines
+            .iter()
+            .find(|l| l.contains("libone.so.1"))
+            .expect("the one-symbol file fires");
+        assert!(
+            one_line.contains("(1 undefined symbol: only_sym)"),
+            "singular shape: {one_line}"
         );
     }
 
@@ -10364,10 +10452,15 @@ description = "explicit priority string bypasses the system crypto policy"
         );
         let config = test_config();
 
-        // The consumer alone: both symbols are unresolvable.
+        // The consumer alone: both symbols are unresolvable, and
+        // they aggregate into the file's single finding.
         let alone = driver_results(&consumer_pkg, &config);
         let lines = lines_for(&alone, "undefined-non-weak-symbol");
-        assert_eq!(lines.len(), 2, "both symbols fire alone: {alone:?}");
+        assert_eq!(lines.len(), 1, "one aggregated finding alone: {alone:?}");
+        assert!(
+            lines[0].contains("(2 undefined symbols: shared_sym, nowhere_sym)"),
+            "the aggregate names both symbols: {lines:?}"
+        );
 
         // Consumer first, provider second: the batch still
         // resolves shared_sym; only nowhere_sym remains.
@@ -10387,8 +10480,8 @@ description = "explicit priority string bypasses the system crypto policy"
             "the residue names the unprovided symbol: {lines:?}"
         );
         assert!(
-            lines[0].contains(" E: "),
-            "the residue is an error: {lines:?}"
+            lines[0].contains(" W: "),
+            "the residue is a warning: {lines:?}"
         );
     }
 
@@ -11019,8 +11112,8 @@ description = "explicit priority string bypasses the system crypto policy"
             "the residue names the symbol: {lines:?}"
         );
         assert!(
-            lines[0].contains(" E: "),
-            "the residue is an error: {lines:?}"
+            lines[0].contains(" W: "),
+            "the residue is a warning: {lines:?}"
         );
     }
 
@@ -11938,7 +12031,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let mut ldd = syn_ldd();
         ldd.undefined_symbols = vec!["GSS_C_NT_HOSTBASED_SERVICE".to_string()];
 
-        // Undefined symbols in a shared object -> Error.
+        // Undefined symbols in a shared object -> Warning.
         let mut info = syn_info();
         info.is_shlib = true;
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
@@ -11946,7 +12039,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let results = out.results().to_vec();
         let lines = lines_for(&results, "undefined-non-weak-symbol");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
-        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
         assert!(
             lines[0].contains("GSS_C_NT_HOSTBASED_SERVICE"),
             "detail names the symbol: {}",
