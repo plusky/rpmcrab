@@ -599,6 +599,11 @@ executable form of "records deliberate decisions". The `kind` taxonomy and the
 required/optional fields are documented in `tests/parity/README.md`; whether
 entries must carry an upstream link is still undecided (rpmcrab#56).
 
+Entries live with their owner — one file per check or run topic in
+`crates/rpmcrab-core/data/divergences/` — and `scripts/generate-divergences-ledger.py`
+assembles them into the ledger; the `divergences-ledger-drift` CI job keeps the
+committed aggregate in step with the sources.
+
 ---
 
 ## 7. Architecture

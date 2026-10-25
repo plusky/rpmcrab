@@ -343,6 +343,23 @@ jobs:
           fi
           exit "$rc"
 
+  divergences-ledger-drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The ledger sources in crates/rpmcrab-core/data/divergences/ are
+      # assembled into tests/parity/divergences.toml by
+      # scripts/generate-divergences-ledger.py; this fails when the
+      # committed aggregate diverges from the sources. See
+      # crates/rpmcrab-core/data/divergences/README.md.
+      # Fail-closed unit tests for the generator. Hermetic: runs before
+      # the --check so a generator failure cannot hide behind it.
+      - run: python3 scripts/test_generate_divergences_ledger.py
+      - run: python3 scripts/generate-divergences-ledger.py --check
+
   reference-coverage-audit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
