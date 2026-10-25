@@ -407,6 +407,14 @@ jobs:
       # Hermetic differ tests first, so a network flake in the reference
       # setup cannot hide a differ failure.
       - run: python3 scripts/test_parity_runner.py
+      - run: python3 scripts/test_check_ledger_since.py
+      # A new ledger entry must name the next release, not one that has
+      # already shipped; the gate needs main's ledger and the release tags.
+      - name: Check new ledger entries name an unreleased version
+        run: |
+          git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main
+          git fetch --no-tags --depth=1 origin 'refs/tags/v*:refs/tags/v*'
+          python3 scripts/check-ledger-since.py origin/main
       - run: cargo build --release -p rpmcrab --locked
       - run: bash scripts/setup-rpmlint-ref.sh
       - run: python3 scripts/parity-runner.py
