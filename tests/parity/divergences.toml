@@ -3166,3 +3166,11 @@ kind = "behaviour"
 reason = "Fix-and-diverge (issue #949): unstripped-binary-or-object stays quiet for separate debuginfo -- a file whose name carries the `.debug` suffix or whose path sits under /usr/lib/debug/ -- the treatment check_hardening applies to its findings. A separate-debuginfo file is the stripped-off debug payload itself: carrying the symbol and debug content is its purpose, so the charge states nothing a packager can act on (pam-config-debuginfo: W on /usr/lib/debug/usr/sbin/pam-config.debug, and class-wide for -debuginfo packages). The reference charges every binary-class file whose magic reports not stripped, with no debuginfo exemption. Real binaries outside the debug tree, prefix lookalikes included, fire unchanged. Pinned by unstripped_binary_quiet_for_separate_debuginfo in binaries.rs."
 since = "0.4.1"
 upstream = "https://github.com/plusky/rpmcrab/issues/949"
+
+[[divergence]]
+case = "global"
+check = "FilelistCheck"
+kind = "behaviour"
+reason = "The reference fires filelist-forbidden-move-to-usr on %ghost files: its move-to-usr rule has no ghost exemption. Those files are generated at install time and carry no payload that could be moved (pam-config's /etc/pam.d/common-*-pc ghosts; the static vendor copies already live under /usr/lib/pam.d), so the port exempts %ghost files from the rule, as it already does for filelist-forbidden-sysconfig. Real files under /etc/pam.d, /lib/systemd/system and /lib/udev/rules.d still fire."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/947"
