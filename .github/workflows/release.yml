@@ -289,6 +289,13 @@ jobs:
           if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             pre="--prerelease --latest=false"
           fi
+          # The release stays untitled (version tag only, no name): the
+          # notes body is generated first — a read-only API call that
+          # creates nothing — and handed to the create calls below as a
+          # file. Neither --title nor --generate-notes may reach them:
+          # either flag alone titles the release after the tag.
+          gh api -X POST "repos/${{ github.repository }}/releases/generate-notes" \
+            -f tag_name="$tag" --jq .body > notes.md
           # Assets ride the create call, not a later upload: gh creates as a
           # draft, uploads, then publishes, which is the only sequence an
           # immutable release accepts (a published release freezes its
@@ -301,17 +308,17 @@ jobs:
           # out is a new version, not a re-run.
           # shellcheck disable=SC2086
           if ! info="$(gh release view "$tag" --json isDraft,isImmutable,assets 2>/dev/null)"; then
-            gh release create "$tag" --title "$tag" --generate-notes $pre dist/*
+            gh release create "$tag" --notes-file notes.md $pre dist/*
           elif [ "$(jq -r .isDraft <<<"$info")" = "false" ] \
             && [ -n "$(jq -r '.assets[].name' <<<"$info")" ]; then
             echo "release $tag already published with assets; leaving it alone"
           elif [ "$(jq -r .isDraft <<<"$info")" = "true" ]; then
             gh release delete "$tag" --yes
-            gh release create "$tag" --title "$tag" --generate-notes $pre dist/*
+            gh release create "$tag" --notes-file notes.md $pre dist/*
           elif [ "$(jq -r .isImmutable <<<"$info")" = "true" ]; then
             echo "::error::release $tag is published, immutable, and has no assets; the tag name is retired and cannot back another release — bump the version and tag again"
             exit 1
           else
             gh release delete "$tag" --yes
-            gh release create "$tag" --title "$tag" --generate-notes $pre dist/*
+            gh release create "$tag" --notes-file notes.md $pre dist/*
           fi
