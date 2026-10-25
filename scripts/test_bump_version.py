@@ -72,7 +72,7 @@ class BumpVersionTest(unittest.TestCase):
         self.assertEqual(git(self.tree, "status", "--porcelain"), "")
 
     def test_malformed_version_is_rejected(self):
-        for bad in ["", "1.2", "v1.2.3", "1.2.3-rc1", "1.2.3.4"]:
+        for bad in ["", "1.2", "v1.2.3", "1.2.3-rc1", "1.2.3.4", "01.2.3", "1.02.3"]:
             res = self.bump(bad)
             self.assertEqual(res.returncode, 2, bad)
             self.assert_untouched()

@@ -12,7 +12,8 @@
 # RPM development headers must be installed.
 set -euo pipefail
 
-semver='^[0-9]+\.[0-9]+\.[0-9]+$'
+# No leading zeros: Cargo rejects them, and only after the tree is edited.
+semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 
 new="${1:-}"
 if ! [[ "$new" =~ $semver ]]; then
@@ -67,8 +68,14 @@ for doc in README.md docs/DESIGN.md; do
 done
 
 # --workspace updates only the workspace members' lock entries;
-# dependencies stay put.
+# dependencies stay put. Anything more (a newer cargo rewriting the lock
+# format, say) does not belong in a version bump.
 cargo update --workspace --quiet
+if [ "$(git diff --numstat -- Cargo.lock | cut -f1-2)" != "$(printf '2\t2')" ]; then
+  echo "Cargo.lock changed beyond the two workspace version lines:" >&2
+  git diff -- Cargo.lock >&2
+  exit 1
+fi
 make gen
 
 bash scripts/check-version-consistency.sh
