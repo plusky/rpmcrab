@@ -321,7 +321,7 @@ mod tests {
             ),
             (
                 "BrandingPolicyCheck.toml",
-                "eab07cd05c29feaa5b2a537aff908d815f15a39bb14a00cd2c70270aa7c9d24a",
+                "915ab3b5898d3f74ddfb8f0491185d5f96ed66b4ba8ec6450cdbccf27a36109e",
             ),
             (
                 "BuildRootAndDateCheck.toml",
