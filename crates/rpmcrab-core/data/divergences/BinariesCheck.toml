@@ -79,14 +79,6 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 
 [[divergence]]
 case = "global"
-check = "outside-libdir-files"
-kind = "missing"
-reason = "Deliberate removal per triage: openSUSE's own rpmlint config says 'Doesn't seem to make sense' about this finding. The port does not emit it. The reference still emits it."
-since = "0.1.0"
-upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
-
-[[divergence]]
-case = "global"
 check = "BinariesCheck"
 kind = "detail"
 reason = "The `readelf-failed` detail carries goblin's parse error text (e.g. `a.o: Invalid magic number`) rather than the reference's readelf stderr; the finding name, level and file detail are unchanged. Only the human-readable reason differs."
@@ -276,3 +268,17 @@ case = "global"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/BinariesCheck.py"
 since = "0.4.1"
 reason = "The reference charges an ELF file with no DT_NEEDED and no ld.so soname (BinariesCheck.py _check_library_dependency at the pinned commit 84848c05), with no separate-debuginfo scoping, so the dwz multi-file artefact in a -debuginfo package (/usr/lib/debug/.dwz/<pkg>-<version>) draws the error: a relocatable ELF container of debug sections, carrying no DT_NEEDED by construction. The port returns early in check_library_dependency for separate debuginfo (the .debug name suffix or a path under /usr/lib/debug/), the predicate pair check_hardening already applies to its findings (plusky/rpmcrab#955). Statically linked executables outside the debug trees and under lookalike prefixes (/usr/lib/debugfoo) stay charged."
+
+[[divergence]]
+case = "global"
+check = "executable-in-library-package"
+kind = "missing"
+reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs (Fedora enables SharedLibraryPolicyCheck but filters this diagnostic, enforcing the policy in the build pipeline instead). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; a negative pin in the BinariesCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "non-versioned-file-in-library-package"
+kind = "missing"
+reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs (Fedora enables SharedLibraryPolicyCheck but filters this diagnostic, enforcing the policy in the build pipeline instead). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; a negative pin in the BinariesCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
+since = "0.1.0"

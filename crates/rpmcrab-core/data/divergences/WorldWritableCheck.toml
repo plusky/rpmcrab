@@ -1,4 +1,4 @@
-# Divergence ledger entries owned by `FileMetadataCheck`.
+# Divergence ledger entries owned by `WorldWritableCheck`.
 # Assembled into tests/parity/divergences.toml by
 # scripts/generate-divergences-ledger.py.
 
