@@ -9,6 +9,16 @@
 //!
 //! `new` takes a `Config` only to satisfy the `Check` construction signature;
 //! like the reference's `__init__`, it reads no config keys.
+//!
+//! The flavour obligations — `branding-conflicts-missing`,
+//! `branding-supplements-missing` and `branding-provides-missing` — are
+//! scoped to the branding arm: they are charged on
+//! `<base>-branding-<flavor>` packages, whose flavour mechanism selects
+//! exactly one branding per base package. Theme packages
+//! (`<base>-theme-<flavor>`) are additive content packs, co-installed and
+//! selected by name; a theme package that provides the generic name is
+//! still charged `branding-provides-unversioned` for an unversioned
+//! provide, and the excessive-dependency warnings apply on both arms.
 
 use fancy_regex::Regex;
 
@@ -90,7 +100,7 @@ impl Check for BrandingPolicyCheck {
                 {
                     add_info(
                         out,
-                        Level::Error,
+                        Level::Warning,
                         pkg,
                         "branding-requires-unversioned",
                         &[&require.name],
@@ -103,31 +113,35 @@ impl Check for BrandingPolicyCheck {
         let generic_branding_name = format!("{branding_pkg}-{branding_type}");
         let branding_type_flavor = format!("{branding_type}-{branding_flavor}");
 
-        // Conflicts must name the generic branding package.
-        if !pkg
-            .conflicts
-            .iter()
-            .any(|d| d.name == generic_branding_name)
-        {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "branding-conflicts-missing",
-                &[&generic_branding_name],
-            );
-        }
+        // The flavour obligations are charged on the branding arm
+        // (issue #954): a branding package conflicts the generic name
+        // and carries exactly one supplement on
+        // `(branding_pkg and branding_type-flavor)`.
+        if branding_type == "branding" {
+            if !pkg
+                .conflicts
+                .iter()
+                .any(|d| d.name == generic_branding_name)
+            {
+                add_info(
+                    out,
+                    Level::Error,
+                    pkg,
+                    "branding-conflicts-missing",
+                    &[&generic_branding_name],
+                );
+            }
 
-        // Exactly one supplement on `(branding_pkg and branding_type-flavor)`.
-        let correct_supplement = format!("({branding_pkg} and {branding_type_flavor})");
-        if !pkg.supplements.iter().any(|d| d.name == correct_supplement) {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "branding-supplements-missing",
-                &[&correct_supplement],
-            );
+            let correct_supplement = format!("({branding_pkg} and {branding_type_flavor})");
+            if !pkg.supplements.iter().any(|d| d.name == correct_supplement) {
+                add_info(
+                    out,
+                    Level::Error,
+                    pkg,
+                    "branding-supplements-missing",
+                    &[&correct_supplement],
+                );
+            }
         }
 
         // Provides must carry the generic branding name, versioned with `=`.
@@ -137,7 +151,12 @@ impl Check for BrandingPolicyCheck {
             .find(|p| p.name == generic_branding_name)
         {
             None => {
-                add_info(out, Level::Error, pkg, "branding-provides-missing", &[]);
+                // The provides obligation is charged on the branding
+                // arm (issue #954); a present-but-unversioned provide
+                // is charged on both arms in the `Some` branch.
+                if branding_type == "branding" {
+                    add_info(out, Level::Error, pkg, "branding-provides-missing", &[]);
+                }
             }
             Some(provide) => {
                 // The reference guards on `len(branding_provide) < 2`, which is
@@ -299,8 +318,11 @@ mod tests {
 
         let unversioned = has(&results, "branding-requires-unversioned");
         assert_eq!(unversioned.len(), 1, "{results:?}");
+        // #953: the unversioned finding is a warning; the versioned form
+        // it prescribes is unsatisfiable for branding flavours on their
+        // own release train.
         assert!(
-            unversioned[0].contains(": E: "),
+            unversioned[0].contains(": W: "),
             "level: {}",
             unversioned[0]
         );
@@ -375,7 +397,8 @@ mod tests {
         );
     }
 
-    // Mirrors test_branding.py::test_branding_pkg2.
+    // Mirrors test_branding.py::test_branding_pkg2, with the #954
+    // scoping of the *-missing obligations to the branding arm.
     #[test]
     fn theme_package_reports_all_expected_findings() {
         let mut pkg = fixture_pkg();
@@ -395,13 +418,20 @@ mod tests {
         );
         assert!(unversioned[0].contains("bla-theme"));
 
-        let missing_suppl = has(&results, "branding-supplements-missing");
-        assert_eq!(missing_suppl.len(), 1, "{results:?}");
-        assert!(missing_suppl[0].contains("(bla and theme-openSUSE)"));
-
-        let missing_conf = has(&results, "branding-conflicts-missing");
-        assert_eq!(missing_conf.len(), 1, "{results:?}");
-        assert!(missing_conf[0].contains("bla-theme"));
+        // #954: the flavour obligations are scoped to the branding arm,
+        // so a theme package is charged none of the *-missing trio.
+        assert!(
+            has(&results, "branding-supplements-missing").is_empty(),
+            "{results:?}"
+        );
+        assert!(
+            has(&results, "branding-conflicts-missing").is_empty(),
+            "{results:?}"
+        );
+        assert!(
+            has(&results, "branding-provides-missing").is_empty(),
+            "{results:?}"
+        );
 
         for (finding, detail) in [
             ("branding-excessive-recommends", "recommendie"),
@@ -412,6 +442,92 @@ mod tests {
             assert_eq!(got.len(), 1, "{finding}: {results:?}");
             assert!(got[0].contains(": W: "), "level: {}", got[0]);
             assert!(got[0].contains(detail), "detail: {}", got[0]);
+        }
+    }
+
+    // #954: a theme package carrying none of the three flavour
+    // obligations is silent on all three *-missing findings.
+    #[test]
+    fn theme_package_without_obligations_is_silent_on_the_trio() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "bla-theme-openSUSE".to_string();
+        pkg.conflicts = vec![];
+        pkg.supplements = vec![];
+        pkg.provides = vec![];
+        let results = run(&pkg);
+        for finding in [
+            "branding-conflicts-missing",
+            "branding-supplements-missing",
+            "branding-provides-missing",
+        ] {
+            assert!(has(&results, finding).is_empty(), "{finding}: {results:?}");
+        }
+    }
+
+    // #954: a branding package missing all three obligations is still
+    // charged all three, each at E.
+    #[test]
+    fn branding_package_missing_all_obligations_reports_the_trio() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "bla-branding-upstream".to_string();
+        pkg.conflicts = vec![];
+        pkg.supplements = vec![];
+        pkg.provides = vec![];
+        let results = run(&pkg);
+        for finding in [
+            "branding-conflicts-missing",
+            "branding-supplements-missing",
+            "branding-provides-missing",
+        ] {
+            let got = has(&results, finding);
+            assert_eq!(got.len(), 1, "{finding}: {results:?}");
+            assert!(got[0].contains(": E: "), "level: {}", got[0]);
+        }
+    }
+
+    // #954: a participating theme package — it provides the generic
+    // name versioned and conflicts the generic name, the
+    // enlightenment-theme-upstream / terminology-theme-upstream shape
+    // — is silent on the trio: the missing supplement is not charged
+    // on the theme arm.
+    #[test]
+    fn participating_theme_package_is_silent_on_the_trio() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "bla-theme-upstream".to_string();
+        pkg.conflicts = vec![dep("bla-theme", 0)];
+        pkg.supplements = vec![];
+        pkg.provides = vec![dep_ev("bla-theme", RPMSENSE_EQUAL, "1.0")];
+        let results = run(&pkg);
+        for finding in [
+            "branding-conflicts-missing",
+            "branding-supplements-missing",
+            "branding-provides-missing",
+            "branding-provides-unversioned",
+        ] {
+            assert!(has(&results, finding).is_empty(), "{finding}: {results:?}");
+        }
+    }
+
+    // #954: a branding package missing exactly one obligation is
+    // charged exactly that one.
+    #[test]
+    fn branding_package_missing_one_obligation_reports_exactly_that_one() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "bla-branding-upstream".to_string();
+        pkg.conflicts = vec![dep("bla-branding", 0)];
+        pkg.supplements = vec![];
+        pkg.provides = vec![dep("bla-branding", RPMSENSE_EQUAL)];
+        let results = run(&pkg);
+        let got = has(&results, "branding-supplements-missing");
+        assert_eq!(got.len(), 1, "{results:?}");
+        assert!(got[0].contains(": E: "), "level: {}", got[0]);
+        assert!(got[0].contains("(bla and branding-upstream)"));
+        for finding in [
+            "branding-conflicts-missing",
+            "branding-provides-missing",
+            "branding-provides-unversioned",
+        ] {
+            assert!(has(&results, finding).is_empty(), "{finding}: {results:?}");
         }
     }
 }

@@ -2500,6 +2500,22 @@ fn explain_staged_branding_policy_check() {
     assert!(out.stderr.is_empty());
 }
 
+/// `--explain`: `branding-requires-unversioned` description (#953) also covers
+/// branding on a different version train, whose versioned requirement cannot
+/// be satisfied, directing such packages to suppress the warning in rpmlintrc.
+#[test]
+fn explain_branding_requires_unversioned() {
+    let out = rpmcrab(&["-e", "branding-requires-unversioned"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "branding-requires-unversioned:\nPlease make sure that your requires entry is similar to: 'Requires:\n%name-branding = <versionnumber>' Where the branding is versioned on a\ndifferent train than the package, so its version does not track the package\nversion, a versioned requirement cannot be satisfied; suppress this warning in\nthe package's rpmlintrc instead.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
 /// `--explain`: staged `BuildRootAndDateCheck.toml` resolves `file-contains-current-date` instead of "Unknown message".
 #[test]
 fn explain_staged_build_root_and_date_check() {
