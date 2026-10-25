@@ -5,7 +5,8 @@ Each test guards a failure mode that would silently corrupt the
 ledger: owner files assembling out of order scrambles the aggregate,
 a block edited in transit breaks the verbatim-entry guarantee, and a
 source whose blocks and parsed entries disagree (a fused entry) must
-fail at generation time rather than drift the committed file.
+fail at generation time rather than drift the committed file. Stray
+tables and unknown owners fail the same way.
 
 Run:  python3 scripts/test_generate_divergences_ledger.py
 """
@@ -96,9 +97,29 @@ def test_assemble_stamps_and_parses():
 
 
 def test_assemble_rejects_fused_source():
-    """A source whose block count and entry count disagree fails:
-    here one [[divergence]] header carries two entries' fields, which
-    is the fused shape a hand merge produces."""
+    """A source whose block count and entry count disagree fails.
+    The spaced header (`[[ divergence ]]`) parses as an entry but is
+    invisible to the block extractor — the shape that assembles
+    silently when the count guard is gone. The duplicate-key block
+    is the fused shape a hand merge produces; it fails as a
+    ValueError too."""
+    spaced = (
+        '[[ divergence ]]\n'
+        'case = "global"\n'
+        'check = "alpha-finding"\n'
+        'kind = "behaviour"\n'
+        'reason = "alpha reason"\n'
+        'since = "0.1.0"\n'
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _src(tmp, {"OneCheck.toml": spaced})
+        try:
+            gen.assemble(src)
+        except ValueError as exc:
+            assert "blocks but" in str(exc)
+        else:
+            raise AssertionError(
+                "spaced-header source assembled without an error")
     fused = (
         '[[divergence]]\n'
         'case = "global"\n'
@@ -112,13 +133,62 @@ def test_assemble_rejects_fused_source():
         src = _src(tmp, {"OneCheck.toml": fused})
         try:
             gen.assemble(src)
-        except Exception:
+        except ValueError:
             return
     raise AssertionError("fused source assembled without an error")
 
 
+def test_assemble_rejects_dropped_first_header():
+    """An entry whose [[divergence]] header was dropped leaves its
+    fields as top-level keys: the source fails instead of silently
+    losing the entry."""
+    dropped = ENTRY_A.split("\n", 1)[1]
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _src(tmp, {"OneCheck.toml": dropped})
+        try:
+            gen.assemble(src)
+        except ValueError:
+            return
+    raise AssertionError("headerless entry assembled without an error")
+
+
+def test_assemble_rejects_stray_tables():
+    """A top-level key or an interleaved [other] table rides
+    nowhere: both fail instead of being dropped or copied into the
+    aggregate."""
+    shapes = (
+        'stray = "x"\n\n' + ENTRY_A,
+        ENTRY_A + '\n[other]\nkey = "x"\n',
+    )
+    for shape in shapes:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = _src(tmp, {"OneCheck.toml": shape})
+            try:
+                gen.assemble(src)
+            except ValueError:
+                continue
+        raise AssertionError("stray table assembled without an error")
+
+
+def test_assemble_rejects_unknown_owner():
+    """With the owner set given, a source owned by no registered
+    check or listed run topic fails; a registered owner assembles."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _src(tmp, {"Bogus.toml": ENTRY_A})
+        try:
+            gen.assemble(src, owners=gen.known_owners())
+        except ValueError as exc:
+            assert "Bogus" in str(exc)
+        else:
+            raise AssertionError("Bogus.toml assembled without an error")
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _src(tmp, {"FilesCheck.toml": ENTRY_A})
+        _, count = gen.assemble(src, owners=gen.known_owners())
+        assert count == 1
+
+
 def _run_main(tmp, check):
-    src = _src(tmp, {"OneCheck.toml": "# header\n\n" + ENTRY_A})
+    src = _src(tmp, {"FilesCheck.toml": "# header\n\n" + ENTRY_A})
     ledger = Path(tmp) / "divergences.toml"
     old_src, old_ledger = gen.SRC_DIR, gen.LEDGER
     gen.SRC_DIR, gen.LEDGER = src, ledger

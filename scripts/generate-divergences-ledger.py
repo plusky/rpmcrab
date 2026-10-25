@@ -45,6 +45,43 @@ STAMP = (
 
 HEADER_RE = re.compile(r"(?m)^\[\[divergence\]\]")
 
+REFERENCE_CHECKS = REPO / "crates/rpmcrab-core/tests/data/reference-checks.txt"
+
+# Run topics: entries keyed by a topic of the run rather than by a
+# check (the session header, the report shape, the config layer, ...).
+# An owner file is named for one of these or for a check from the
+# reference set (REFERENCE_CHECKS).
+RUN_TOPICS = frozenset({
+    "after_checks",
+    "all",
+    "argument-globbing",
+    "check-error-handling",
+    "cli",
+    "config",
+    "config-scoring",
+    "config-severity-overrides",
+    "finding-line",
+    "header-decoding",
+    "installed-pkg-layer",
+    "interrupt-handling",
+    "pkg-layer",
+    "report",
+    "rpmlintrc-discovery",
+    "session-header",
+    "time-report",
+    "unused-rpmlintrc-filter",
+    "worker-report",
+})
+
+
+def known_owners():
+    """The owner names a source file may use: every check in the
+    reference set plus the run topics."""
+    checks = {line.strip() for line in
+              REFERENCE_CHECKS.read_text(encoding="utf-8").splitlines()
+              if line.strip() and not line.startswith("#")}
+    return checks | RUN_TOPICS
+
 
 def extract_blocks(text):
     """The `[[divergence]]` blocks of a source file, verbatim.
@@ -61,20 +98,35 @@ def extract_blocks(text):
     return blocks
 
 
-def assemble(src_dir):
+def assemble(src_dir, owners=None):
     """The aggregate ledger text built from the sources in `src_dir`.
 
     Every source parses as TOML and contributes exactly as many
     `[[divergence]]` entries as it carries blocks — a source whose
     blocks and entries disagree (a fused entry, a second table style)
-    fails loudly here instead of drifting the aggregate.
+    fails loudly here instead of drifting the aggregate. A source's
+    only top-level table is `divergence`, per source and per block:
+    a stray key or table (a dropped first header, an interleaved
+    `[other]` table) fails loudly instead of losing an entry or
+    smuggling one into the aggregate. With `owners` given, every
+    source's owner is one of them — a registered check or a listed
+    run topic.
     """
     blocks = []
     for name in sorted(os.listdir(src_dir)):
         if not name.endswith(".toml"):
             continue
+        if owners is not None and Path(name).stem not in owners:
+            raise ValueError(
+                f"{name}: the owner is not a registered check or a "
+                "listed run topic")
         text = (Path(src_dir) / name).read_text(encoding="utf-8")
         parsed = tomllib.loads(text)
+        if set(parsed) != {"divergence"}:
+            raise ValueError(
+                f"{name}: top-level keys are {sorted(parsed)}, not "
+                "just 'divergence' — a source carries only "
+                "[[divergence]] blocks")
         entries = parsed.get("divergence", [])
         file_blocks = extract_blocks(text)
         if len(entries) != len(file_blocks):
@@ -84,6 +136,10 @@ def assemble(src_dir):
                 "[[divergence]] blocks, one entry per block")
         for block in file_blocks:
             one = tomllib.loads(block + "\n")
+            if set(one) != {"divergence"}:
+                raise ValueError(
+                    f"{name}: a block carries top-level keys "
+                    f"{sorted(one)}, not just 'divergence'")
             if len(one.get("divergence", [])) != 1:
                 raise ValueError(f"{name}: a block does not parse to "
                                  "exactly one entry")
@@ -92,7 +148,7 @@ def assemble(src_dir):
 
 
 def generate():
-    return assemble(SRC_DIR)
+    return assemble(SRC_DIR, owners=known_owners())
 
 
 def main(argv=None):
