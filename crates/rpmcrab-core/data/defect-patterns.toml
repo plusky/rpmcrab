@@ -24,8 +24,8 @@ class = "defect-pattern"
 family = "pattern"
 gate = "privilege-or-exposure"
 provenance = [
-    "RsyncProject/rsync#563: in the rsync daemon's hosts allow/deny matching, hostname tokens resolved with gethostbyname() never match an IPv6 peer, so a hosts deny rule silently fails open (verified in the openSUSE rsync 3.5.1 audit; fixed upstream by RsyncProject/rsync#1140).",
-    "CVE-2026-43617 and CVE-2026-70452: fail-open defects in the same access-matching function, hardened upstream.",
+    "RsyncProject/rsync#563: in the rsync daemon's hosts allow/deny matching, hostname tokens resolved with gethostbyname() never match an IPv6 peer, so a hosts deny rule silently fails open (verified in the openSUSE rsync 3.5.1 audit; fix proposed upstream in RsyncProject/rsync#1140).",
+    "CVE-2026-43617 and CVE-2026-70452: fail-open defects in the same hostname-ACL path, hardened upstream.",
 ]
 
 [[member]]
