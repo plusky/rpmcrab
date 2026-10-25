@@ -221,6 +221,10 @@ GoodPrefixes = [
         "/lib/udev/rules.d/*",
 	"/etc/pam.d/*",
     ]
+    # Deliberate rpmcrab divergence (ledgered in tests/parity/divergences.toml):
+    # %ghost files are generated at install time and carry no payload that
+    # could be moved, so the reference's finding is a false positive.
+    IgnoreFileIf = "ghostfile"
 [[Check]]
     Message = "wrong-suse-capitalisation"
     Bad = [
