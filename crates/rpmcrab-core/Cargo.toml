@@ -10,6 +10,9 @@ homepage.workspace = true
 authors.workspace = true
 keywords = ["rpm", "rpmlint", "lint", "packaging", "opensuse"]
 categories = ["parsing", "os"]
+# The divergence ledger sources are generator input, never compiled in;
+# the aggregate they assemble into lives outside the crate.
+exclude = ["data/divergences/"]
 
 [lints]
 workspace = true
