@@ -43,6 +43,10 @@ class EntriesTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             _mod._entries('[other]\ncheck = "x"\n')
 
+    def test_non_scalar_value_is_rejected(self):
+        with self.assertRaises(TypeError):
+            _mod._entries('[[divergence]]\ncheck = ["x", "y"]\n')
+
 
 class ViolationsTest(unittest.TestCase):
     def check(self, base, head):
@@ -126,6 +130,20 @@ class ViolationsTest(unittest.TestCase):
         bad = entry("i2-check", "0.1.0")
         self.assertEqual(self.check([old], [moved, bad]), [bad])
 
+    def test_reworded_entry_beside_a_new_sibling_passes(self):
+        # The new same-identity sibling is not the old entry's successor.
+        old = entry("BinariesCheck", "0.4.0", reason="x")
+        reworded = entry("BinariesCheck", "0.4.0", reason="x, reworded")
+        sibling = entry("BinariesCheck", "0.4.1", reason="y")
+        self.assertEqual(self.check([old], [reworded, sibling]), [])
+        self.assertEqual(self.check([old], [sibling, reworded]), [])
+
+    def test_correction_beside_a_new_sibling_passes(self):
+        old = entry("BinariesCheck", "0.4.0", reason="x")
+        fixed = entry("BinariesCheck", "0.3.0", reason="x")
+        sibling = entry("BinariesCheck", "0.4.1", reason="y")
+        self.assertEqual(self.check([old], [fixed, sibling]), [])
+
     def test_malformed_since_is_not_a_correction(self):
         old = entry("a-check", "0.3.0")
         bad = entry("a-check", "next")
@@ -152,6 +170,12 @@ class ViolationsTest(unittest.TestCase):
         old = entry("missing-mandatory-optflags", "0.1.0", kind="detail")
         new = entry("forbidden-optflags", "0.1.0", kind="detail")
         self.assertEqual(self.check([old], [new]), [])
+
+    def test_verbatim_duplicate_ahead_of_its_original_fails(self):
+        # base [X, A] -> head [A, X, A]: the leading A is added, not moved.
+        x = entry("x-check", "0.1.0", reason="x")
+        a = entry("a-check", "0.3.0", reason="a")
+        self.assertEqual(self.check([x, a], [dict(a), x, a]), [a])
 
     def test_reordered_entries_pass(self):
         a, b, c = (entry(n, "0.1.0", reason=n) for n in ("a", "b", "c"))
