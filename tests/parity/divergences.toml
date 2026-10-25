@@ -766,7 +766,7 @@ case = "global"
 check = "pkgconfig-exception"
 kind = "behaviour"
 reason = "A `.pc` read failing with NotADirectory draws no `pkgconfig-exception`. That failure is the extractor's collision gap: it leaves entries whose path collides with an incompatible existing object out of the tree and reports each skip itself (grpc-source's file `usr/src/grpc/BUILD` against its directory `usr/src/grpc/build` on a case-insensitive filesystem), so the read runs through the object that won the collision. The reference (PkgConfigCheck.py) turns the same failed `open()` into the finding through its `except Exception`. Everything else matches the reference: %ghost entries are dropped from the dispatch before any read, as AbstractFilesCheck (AbstractCheck.py:45) drops `pkg.ghost_files`, and the remaining read failures -- a header-listed file missing from the tree -- plus decode failures on materialised files report as exceptions exactly as the reference charges them."
-since = "0.3.1"
+since = "0.4.0"
 [[divergence]]
 case = "global"
 check = "PythonCheck"
@@ -1596,7 +1596,7 @@ case = "global"
 check = "invalid-soname"
 kind = "missing"
 reason = "Deliberate removal (issue #883): openSUSE's own rpmlint config says 'Doesn't seem to make sense' about this finding and filters it, so it reaches no shipped-config user. The port does not emit it; the three findings carrying the same config verdict (invalid-ldconfig-symlink, only-non-binary-in-usr-lib, outside-libdir-files) are recorded removals on the same ground. A malformed SONAME still fails the validity gate that guards the symlink and shlib-policy checks. The reference still emits it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/BinariesCheck.py"
 
 [[divergence]]
@@ -2030,7 +2030,7 @@ case = "global"
 check = "BinariesCheck"
 kind = "behaviour"
 reason = "Deliberate fix (plusky/rpmcrab#846): an ar archive member that does not present as an ELF object (no ELF magic) is not charged as readelf-failed, and the ELF checks produce no findings for an archive whose members are all in other object formats. The reference runs readelf over the whole archive; readelf reports each non-ELF member ('Not an ELF file - it has the wrong magic bytes at the start'), exits nonzero, and the reference emits E: readelf-failed for the archive. The swept members are not ELF objects an ELF reader could parse: COFF import objects (the wine and mingw families, 1,316 of the finding's 1,471 Factory sweep hits on main 857d5ece, run-20261022-857d5ece), GIMPLE offload text (cross-nvptx, 136), wasm objects (the rust wasi libc.a, 10), LLVM bitcode (llvm libc++experimental.a, 4), a PalmOS m68k object (fpc, 1) and a plain-text fixture member (afl, 1) — 1,468 in all. The remaining 3 of the 1,471 are not archive members and stay charged: the opentoonz finding is over the #!/bin/sh wrapper /usr/bin/opentoonz, whose bytes the case-insensitive sweep filesystem swept in place of the genuine ELF payload /usr/bin/OpenToonz, and the suseconnect-ng and thunar findings are symlink-loop read failures, the case separated in plusky/rpmcrab#363. A member with ELF magic that then fails to parse still fails the archive, and a mixed archive is still analysed over its ELF members."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/846"
 
 [[divergence]]
@@ -2038,7 +2038,7 @@ case = "global"
 check = "BinariesCheck"
 kind = "behaviour"
 reason = "Deliberate fix (plusky/rpmcrab#869): lto-no-text-in-archive charges only archives whose ELF members carry LTO content -- a section name containing `.gnu.lto_.` (GCC) or an `.llvmbc` section (LLVM embedded bitcode) in a member; a candidate archive is then judged on its merged text-like sections as before. The reference charges every archive with no non-empty text-like section, including plain libraries of data-only objects: on sweep run-20261022-857d5ece it charges the same 30 archives in the wine family (wine-staging / wine-wow64 / wine-staging-wow64 -devel), whose x86_64-unix members are ELF objects defining only GUID constants, with no non-empty `.text` or `.data` in any member and no LTO content, so the finding's premise (an archive built with LTO but without -ffat-lto-objects) cannot apply. Members in other object formats neither confer nor block candidacy (see the #846 entry): a mixed archive is judged on its ELF members."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/869"
 
 [[divergence]]
@@ -2046,7 +2046,7 @@ case = "global"
 check = "BinariesCheck"
 kind = "behaviour"
 reason = "Deliberate fix (issue #848): a binary-class file in a noarch package is foreign-target payload and does not emit arch-independent-package-contains-binary-or-object when it is an ar archive with no ELF members, at any location (the glibc placeholder archives have no members at all; every member an archive does have is in another object format -- COFF, wasm, LLVM bitcode -- or is plain data), or when it is an ELF, or an archive whose ELF members are all for foreign machines, whose machine is outside the host family (EM_386 and EM_X86_64, the machines an x86-64 host executes natively) and it sits in a target-payload location: a cross sys-root (/usr/<triplet>/sys-root/, any target triplet) or a firmware directory (/usr/lib/firmware/, /lib/firmware/). The machine evidence is the payload's ELF header, with the magic string's machine as fallback for an ELF payload that cannot be opened; an archive's evidence is its parsed members alone, with no magic fallback. A host-machine ELF fires in every location, a foreign ELF outside the target locations fires, and a file whose machine cannot be determined fires (a header naming no machine (EM_NONE), a magic naming no machine, OCaml native code, Lua bytecode); an archive that cannot be read or parsed fires outright. A %ghost file never reaches the gate: it sits in the header with no payload on disk, so it feeds the package-level binary accounting without being classified. The reference fires for every binary-class file in a noarch package. Measured on the Factory corpus (sweep run-20261022-857d5ece, main 857d5ece): the finding's 765 hits, counted per file, classify by payload as 756 cross sys-root files of the glibc-cross-*-src family (ELFs and archive members for the RISC-V, PA-RISC, AArch64, S/390, LoongArch and PowerPC targets), 1 PowerPC DSP firmware image under /usr/lib/firmware (alsa-firmware), 2 ar archives whose members are wasm objects (the rust wit-bindgen runtime), and a 6-file residue that keeps firing: 4 host-machine ELFs (build-initvm-i586, build-initvm-x86_64, openvino-sample's compile_tool, texlive-opbible-doc's mod2tex), 1 ARM ELF in a documentation directory (giac-doc) and 1 Lua bytecode test file (wesnoth-data). Pinned by the noarch foreign-target tests in binaries.rs."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/848"
 
 [[divergence]]
@@ -2275,7 +2275,7 @@ case = "global"
 check = "incorrect-fsf-address"
 kind = "severity"
 reason = "Deliberate severity recalibration (issue #883): the port reports W where the reference reports E, and the vendored configs drop upstream's blanket filter (DROP_LIVE_FILTERS in scripts/generate-distro-configs.py), so the finding surfaces under the distro flavours where the reference's shipped openSUSE config hides it entirely ('Too noisy, and usually not something downstream packagers can fix'). A stale FSF postal address in a shipped licence text or licence header is a documentation defect with no artefact consequence, so it is not an error; the suppressed set is nonetheless text the distribution ships and can correct in its own files or carry upstream. Measured with the filter lifted over the 300-RPM audit sample of the Factory corpus: the filter hides 203 lines in 39 packages, 150 of them kernel-devel-longterm's shipped kernel headers carrying the old address in their licence headers, the remainder licence texts and licence headers in 38 further packages."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/883"
 
 [[divergence]]
@@ -2283,28 +2283,28 @@ case = "global"
 check = "spelling-error"
 kind = "severity"
 reason = "Deliberate severity recalibration (decided 2026-10-24): the port reports W where the reference reports E. A flagged word in a summary or description is a prose-quality defect with no artefact consequence; as an error the class printed 34,596 E across 8,946 of 17,242 source packages in the 2026-10-24 Factory sweep (binary at 38459d25, 9,869 distinct flagged words, the majority of them occurring in a handful of packages or once). The port also shrinks the class itself: URLs and email addresses are not tokenised into words, and the bundled supplementary vocabulary (data/spelling-wordlist.txt, curated against the pinned en_US dictionary alone, its entries carrying hunspell affix flags where derivations are regular) is added to the dictionary. British spellings stay flagged: descriptions are en_US text, so a British spelling is a prose defect for the packager to fix. Re-running the same corpus with these changes leaves 17,561 W across 6,176 source packages (7,292 distinct words) and moves no other check; the residue is the one-off tail the warning exists for."
-since = "0.3.1"
+since = "0.4.0"
 
 [[divergence]]
 case = "global"
 check = "undefined-non-weak-symbol"
 kind = "severity"
 reason = "Deliberate severity recalibration (decided 2026-10-25): the port reports W where the reference reports E. The finding charges the undefined non-weak symbols a shared library's DT_NEEDED closure leaves unresolved, and the population is host-provided binding: libraries the host executable loads, sibling application libraries, the C/C++/OpenMP runtimes, and above all the Python C-API, which extension modules by design never link because the interpreter provides the symbols at load. Measured over the Factory corpus (17,242 srcpkgs, 2026-10-24 sweep at 38459d25, Linux/noisynator venue): 958,536 E over 2,045 srcpkgs -- the overwhelming mass of the corpus's 1,003,696 errors, against 45,160 E for every other finding combined. The 2026-10-25 re-verification of the #828 disposition classified 24,159 flagged symbols on the top packages' files (paraview, qgis, vtk, FreeCAD) by their actual definition site and found every one defined by a runtime provider, the providers declared at package level; the measured residue with no provider is zero. The binding is satisfied at load time, so a packager has no package change that sorts the class: as an error it blocks builds over a population nobody can act on. As a warning it stays visible per file, where a genuinely under-linked file stands out against the host-provided mass."
-since = "0.3.1"
+since = "0.4.0"
 
 [[divergence]]
 case = "global"
 check = "undefined-non-weak-symbol"
 kind = "behaviour"
 reason = "Fix-and-diverge: the finding fires once per file, the detail naming the file and carrying the count and the names of its undefined non-weak symbols, where the reference fires once per symbol with the single symbol as the detail. Which files fire is unchanged: the same residue of the same resolution (the binaries-dependency-scope entry), grouped per file in the order the symbols are collected; the sibling unused-direct-shlib-dependency finding keeps its per-occurrence firing. A plugin library carries thousands of host-provided undefined symbols, and enumerating them a line per symbol drowns the signal the finding exists to give; the file is the unit a packager acts on, and the count and the names in the detail keep its whole population visible. Measured by re-counting the 2026-10-25 Factory corpus run (run-20261025-f0a364e0, Mac venue) per file: 1,490,818 per-symbol findings collapse to 8,883 per-file findings over 3,626 srcpkgs (vtk-openmpi4 13,423 symbols over 177 files; vtk 13,348 over 171), and the counts in the aggregated details sum back to the per-symbol totals exactly for every package."
-since = "0.3.1"
+since = "0.4.0"
 
 [[divergence]]
 case = "global"
 check = "dangerous-command-in"
 kind = "behaviour"
 reason = "Config-only (issue #883): the vendored configs drop upstream's family filter ' dangerous-command.*' (DROP_LIVE_FILTERS in scripts/generate-distro-configs.py), so the findings surface under the distro flavours where the reference's shipped openSUSE config hides them; no reason for the suppression is recorded upstream. The check is a verbatim port and unchanged (W in both implementations), emitting dangerous-command-in-%<section> per scriptlet section. Measured with the filter lifted over the 300-RPM audit sample of the Factory corpus: the filter hides 14 W lines in 12 packages \u2014 rm and mv invocations in the packagers' own scriptlet text (%posttrans 9, %post 2, %pre 1, %preun 1, %postun 1)."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/883"
 
 [[divergence]]
@@ -2789,7 +2789,7 @@ case = "global"
 check = "rpmlintrc-discovery"
 kind = "behaviour"
 reason = "Deliberate divergence (plusky/rpmcrab#830): with no -r files and nothing found in the RpmlintrcSearchPaths locations, rpmlintrc auto-discovery looks beside every positional argument in turn -- a file argument's directory, a directory argument itself -- and loads every file found; the reference gates the beside-argument lookup on exactly one positional argument (lint.py:209-216), so its multi-package runs discover no rpmlintrc beside the arguments. Filters are session-scoped once loaded in both implementations, so a package's name-scoped rpmlintrc filters apply identically whether the package is checked alone or in a multi-package run. An rpmlintrc found beside several arguments is deduplicated by path and loads once, so the unused-rpmlintrc-filter audit accounts its patterns exactly as it accounts an rpmlintrc loaded any other way."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/830"
 
 [[divergence]]
@@ -2797,7 +2797,7 @@ case = "global"
 check = "BinariesCheck"
 kind = "behaviour"
 reason = "Deliberate fix (plusky/rpmcrab#847): static-library-without-debuginfo is charged only when the archive carries host machine code: at least one member is an ELF object for the package's own architecture holding a non-zero byte in an executable PROGBITS section, or an executable PROGBITS section the file data does not fully hold (recorded per member while parsing as code_machines). The reference charges every archive whose merged readelf sections carry no .debug_ name (verified in the pinned-reference container: the reference emits all 223 wine-devel findings). Verified against the corpus RPM payloads of sweep run-20261022-857d5ece, where the finding's 988 E over 28 source packages classify as: 892 wine-family import libraries whose members' only executable sections are all-zero relocation slots against __wine$func$ pointers (884 archives) or which carry no executable section at all (8), 10 glibc archives with zero members (the post-2.34 empty linker placeholders), 19 compiler-rt archives whose members carry no executable section (the asan/hwasan/memprof preinit stubs and libomptarget.devicertl), and 34 cross-avr-gcc7 archives whose code-carrying members are ELF for EM_AVR in x86_64 packages. The remaining 33 findings sit on archives with real host code (among them libresvg.a, libphobos2.a, the OCaml archives and the BOLT runtime archives) and keep firing. A member with host code fires even alongside foreign or stub members, and an unmapped package arch charges any code, as before."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/847"
 
 [[divergence]]
@@ -2805,7 +2805,7 @@ case = "global"
 check = "wrong-script-end-of-line-encoding"
 kind = "behaviour"
 reason = "Fix-and-diverge (issue #849): wrong-script-end-of-line-encoding fires only for files that are scripts — a file carrying a kernel interpreter line (the parsed interpreter names an absolute path), a file whose name carries a Unix shell-script extension (.sh, .bash, .zsh, .ksh, .csh, .tcsh, .fish, .bsh; shell scripts are routinely sourced and carry no interpreter line), or an executable file in a script location (the script_regex paths). The scoping runs inside the check's outer gate — a file reaches the test only when it carries a #! line, an exec bit, or a script path — so the extension arm decides only files that reach it, and files under the sourced-script paths (/etc/bash_completion.d/, /etc/profile.d/) take the sourced-script branch and never reach the test. A .bat/.cmd name suppresses the name- and location-based arms, because CRLF is the correct end-of-line encoding for a Windows batch file; an interpreter line naming an absolute path still fires, because a file starting with #! is executed by that interpreter, while a non-path #! token fires nothing. Language source extensions (.py, .pl, .rb, .ps1) name modules as readily as scripts, so they reach the finding only through an interpreter line or as an executable file in a script location; .ps1 sits with them rather than with the shell extensions because the PowerShell interpreter accepts CRLF, so a dot-sourced .ps1 is not corrupted by it, and a leading #! followed by a non-path token is source syntax (a Rust #![...] inner attribute), not an interpreter line. Extension matching is case-insensitive. The reference fires for every text file carrying a carriage return, with an interpreter line, an exec bit, or a script path. Measured over the Factory corpus (sweep run-20261022-857d5ece, all 676 findings verified against the RPM payloads): 600 findings are files that are not scripts and go silent (444 Ansible YAML playbooks and data files, 40 Markdown documents, 40 Python modules without interpreter lines, 14 .bat/.cmd files, and 62 licence texts, templates, C headers, build and configuration data files and the Rust source file) and 76 keep firing (75 files with interpreter lines — Tcl/wish demos, Perl scripts including /usr/bin/file-rename and /usr/bin/unsafe-rename, shell and Python scripts — and one .bsh script whose interpreter line is not at offset 0). Pinned by script_eol_still_fires_for_scripts and script_eol_silent_for_non_scripts_and_batch_files in files.rs."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/849"
 
 [[divergence]]
@@ -2813,7 +2813,7 @@ case = "global"
 check = "missing-PT_GNU_STACK-section"
 kind = "behaviour"
 reason = "Deliberate fix (issue #850): missing-PT_GNU_STACK-section is charged only where the absence states something about how the file was linked: the file is ET_EXEC or ET_DYN, it carries a programme header table for the header to be absent from, and it is not separate debuginfo (a `.debug` name suffix, or a path under /usr/lib/debug/ -- the treatment check_hardening already applies to its findings). The reference charges every file whose readelf programme headers carry no GNU_STACK entry. Measured on the Factory corpus (sweep run-20261022-857d5ece; every binary RPM of the 17 affected source packages re-measured before and after the fix): the finding's 594 E classify as 568 EDK2 debuginfo artefacts in qemu-ovmf-x86_64-debug (ET_EXEC companions with LOAD/LOAD/DYNAMIC programme headers under /usr/lib/debug/ovmf-*/, stored for the debugger and never loaded by the dynamic linker), 14 relocatable objects, which carry no programme headers by construction (the Go race-runtime .syso files of go1.21 through go1.27, aws-nitro-enclaves-cli's nsm.ko, glibc-devel's libmcheck.a and lazarus' FPC .or files), and a 12-file residue that keeps firing -- linked images with a programme header table and no PT_GNU_STACK: e3's /usr/bin/e3, rr's librrpage.so and librrpage_32.so, hibiscus' libhbci4java-card-freebsd-64.so and libtowitoko-2.0.7.so, xen's three hypervisor images, qemu's openbios-sparc32, openbios-sparc64 and u-boot.e500 ROMs, and picotool's xip_ram_perms.elf. Pinned by the executable-stack gate tests in binaries.rs."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/850"
 
 [[divergence]]
@@ -2821,7 +2821,7 @@ case = "global"
 check = "call-to-mktemp"
 kind = "behaviour"
 reason = "Fix-and-diverge (plusky/rpmcrab#852): call-to-mktemp charges only an undefined reference in an archive \u2014 a FUNC symbol a member carries as SHN_UNDEF in .symtab or .dynsym, collected while parsing as undefined_function_refs. An archive's members are separate objects, so the member that implements mktemp is not a caller: newlib's libc.a carries mktemp as a definition in libc_a-mktemp.o (a real section index) and no undefined reference anywhere in the archive, and a definition site is not a call site \u2014 the finding's rationale is the caller's exposure to the mktemp race. Linked objects charge any FUNC match, defined or not, as the reference does: a statically linked executable bundling mktemp and a wrapper library that defines and calls its own variant both carry the definition with no undefined reference, and they fire. Measured on the Factory sweep run-20261022-857d5ece population over the same 52 source packages: 460 E in 52 source packages before, 74 E in 41 after, with no new firings; all 460 files were independently classified with readelf and by file kind \u2014 every silenced file is an archive carrying no undefined reference matching the pattern, and every remaining file carries an undefined reference or is a linked object carrying a defined match. Silenced: 386 archives \u2014 the cross newlib packages (360: cross-arm-none-newlib-devel 156, cross-rx-newlib-devel 128, cross-amdgcn-gcc13/14/15/16 64, cross-pru-newlib-devel 8, cross-riscv64-newlib-devel 4), Wine's C-runtime archives (21), glibc's libc.a and libc_p.a (2, the C library itself), ksh's archives (2) and one libguestfs archive (1). The 74 remaining findings are host executables and shared libraries: the 46 that carry an undefined reference (23 name mktemp itself, plain or versioned, and 23 name a project-private wrapper the pattern also matches \u2014 apr_file_mktemp, GNUNET_DISK_mktemp, gretl_mktemp, netsnmp_mktemp, e_mktemp, b_mktemp, r_syscmd_mktemp) plus 28 linked objects carrying a defined match only (the statically linked libguestfs family of guestfs-tools, virt-v2v and libguestfs binaries and libraries 16, ksh's libast/libcmd shared objects 2, net-snmp's shared objects 2, glibc's libc.so.6 1, and singletons in apr, evolution, fakechroot, gnunet, grass, gretl and radare2) \u2014 the pattern's reach is the reference's own searched regexp, unchanged here."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/852"
 
 [[divergence]]
@@ -2829,7 +2829,7 @@ case = "global"
 check = "explicit-lib-dependency"
 kind = "behaviour"
 reason = "Fix-and-diverge (plusky/rpmcrab#851): explicit-lib-dependency fires only where the explicit requirement duplicates a dependency the package's own binaries already generate. The generated dependencies sit in the same header marked RPMSENSE_FIND_REQUIRES, and the library package they belong to follows the shared-library naming convention, so the duplication is decidable from the header alone: the explicit name must be the conventional package name of a generated soname dependency under the full-version SLPP mapping BinariesCheck uses (stem and version dots fold to underscores: lib<stem><version> or lib<stem>-<version>, so libfoo.so.10.0.0 maps to libfoo10_0_0 and libdb-4.8.so to libdb-4_8). Explicit requirements with no matching generated soname are the only expression of a real dependency and stay silent: ctypes-loaded libraries (python-libnacl on libsodium26), runtime-invoked tool packages (clevis-luks on libpwquality-tools), data companions (libthai-data, libgarcon-data), NSS module packages (libnss_usrfiles2) and flavour pins (libopenblas_pthreads0). The bare lib<stem> name is not a candidate: it names a different package than the library package (the libnbd tools package vs libnbd0, which provides libnbd.so.0). The reference fires on every unversioned lib* name. Measured on the Factory sweep run-20261022-857d5ece, re-run with the #851 narrowing over the same 284 source packages: 548 E in 284 source packages before, 26 E in 23 source packages after; the residue is the libyui sibling packages on libyui16 (7), the Lua database bindings on libmariadb3 (4), Qt6 requirers on libQt6Core6/libQt6Svg6 (4), the python-seccomp and python-systemd bindings (2 each), onedrive on libdbus-1-3 and libnotify4, and cyrus-sasl-bdb, jack, kunifiedpush, libiptcdata and xwayland."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/851"
 
 [[divergence]]
@@ -2837,14 +2837,14 @@ case = "global"
 check = "branding-requires-unversioned"
 kind = "behaviour"
 reason = "Fix-and-diverge (issue #857): branding-requires-unversioned is charged only when the require name is the generic branding name in full — <base>-branding or <base>-theme, with nothing before it or after it — and the name is not an icon-theme name (<base>-icon-theme; the reference defines re_icon_theme for the same distinction and leaves it unused). The reference matches the generic pattern as a prefix, so it charges concrete data packages whose names merely contain the pattern: the icon themes the desktop packages integrate with, plural and suffixed theme packages (gnome-themes, kalpa-themes-sddm, ocean-sound-theme6) and non-name require forms (a soname, a config() name). A version on a require of a concrete data package pins no flavour, so the finding's rationale — the version pins the flavour of a branding virtual — reaches only the generic name itself, on the theme arm as on the branding arm. Measured on the Factory corpus (sweep run-20261022-857d5ece population; the 108 affected source packages re-measured before and after the fix): 133 E in 108 source packages before, 21 E in 19 after, and no other finding changed in those packages. The residue is 15 findings on branding virtuals (wallpaper-branding 2; compiz-branding, distrobox-branding, gcin-branding, libpurple-branding, lxde-common-branding, mate-menus-branding, plymouth-branding, pw3270-branding, systemd-default-settings-branding, systemd-presets-branding, xfce4-notifyd-branding, xfce4-session-branding and yast2-qt-branding 1 each) and 6 on concrete data packages whose names are exactly generic-shaped and so are indistinguishable from a theme virtual by name: yast2-theme 4 and python313/python314-pydata-sphinx-theme 1 each. Pinned by unversioned_requires_scoped_to_generic_branding_names in branding_policy.rs."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/857"
 [[divergence]]
 case = "global"
 check = "filelist-forbidden-fhs23"
 kind = "behaviour"
 reason = "Fix-and-diverge (issue #859): filelist-forbidden-fhs23 treats two further prefix families as good. The cross-toolchain target sysroots: the first component under /usr is one of the measured set FHSCheck sanctions (the *-suse-linux triples and the bare-metal targets, issue #582), consulted through that same set rather than a second copy - the sanction is the measured population, not the triplet shape, so a novel component of that shape (frobnicate-suse-linux) and a measured name extended by a suffix still fire, and a sysroot name below another component sanctions nothing. And the /usr/src tree: a package whose name ends in -source ships its payload there, so /usr/src is good for such a package, and /usr/src/kernel-modules joins /usr/src/debug and /usr/src/packages in the bundled GoodPrefixes as the tree kernel-module source packages install into; the same /usr/src payload in a package not named as a source package still fires. The reference's GoodPrefixes sanction none of these, so it emits the finding for all of them. Measured on the Factory corpus (sweep run-20261022-857d5ece population; the 134 affected source packages re-measured before and after the fix, the before side reproducing the sweep's 179 exactly and no other finding changing in those packages): 179 E in 134 source packages before, 32 E in 9 after. Silenced (147): 110 on cross-toolchain sysroots - every one a member of the sanctioned set, across the cross binutils/gcc/newlib and glibc-cross families (riscv64-suse-linux 11; avr and amdgcn-amdhsa 8 each; aarch64-suse-linux, arm-suse-linux-gnueabi, powerpc64le-suse-linux, rx-elf and s390x-suse-linux 7 each; the other 21 set members the remaining 48) - and 37 under /usr/src: 29 in packages named -source (the bazel family, nginx-source, googleapis-source, xorg-x11-server-source and their kin) and 8 /usr/src/kernel-modules findings in the nvidia signed-driver -devel packages, the tree virtualbox's -source packages also ship. The residue (32) is no sanctioned shape: /usr/local in reproducible-faketools (19, its deliberate PATH-shadowing wrappers), kernel-obs-build's five /.build.*.kvm root markers, /var/mail in exim and postfix-bdb, the installation-images-MicroOS /CD1 and /SuSE media roots, guix's /gnu and nix's /nix store roots, samba-client's /var/samba and xkeyboard-config's /var/. Pinned by cross_toolchain_sysroots_are_good_fhs_prefixes, every_measured_cross_sysroot_is_quiet_for_fhs23, unmeasured_usr_dirs_still_fire_fhs23, cross_sysroot_name_below_another_component_still_fires, source_package_usr_src_payload_is_quiet, usr_src_payload_of_other_packages_still_fires and kernel_modules_tree_is_quiet in filelist.rs, and cross_sysroot_matches_needs_the_leading_component in fhs.rs."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/859"
 
 [[divergence]]
@@ -2852,7 +2852,7 @@ case = "global"
 check = "non-devel-file-in-devel-package"
 kind = "behaviour"
 reason = "Fix-and-diverge (issue #860): non-devel-file-in-devel-package is charged only for host paths - a file under a cross-toolchain target sysroot (its first component under /usr is one of the measured set FHSCheck sanctions, issue #582, consulted through the shared cross_sysroot_matches helper) is the cross devel package's own payload: for a cross sys-root the target's runtime libraries are the devel content, there is no separate host-style library package for the target, and the sys-root is consumed as a whole by the cross compiler. The scoping is a property of the path, so both arms of the finding (the versioned-library arm and the .typelib arm) are scoped the same way. The reference charges these paths unchanged. Measured on the Factory corpus (sweep run-20261022-857d5ece population; the 18 affected source packages re-measured before and after with scan.py, the before side reproducing the sweep's 111 exactly and no other finding changing in those packages): 111 E in 18 source packages before, 28 E in 13 after. Silenced (83), every one under /usr/<triplet>/sys-root/ in the five glibc-cross source packages: cross-aarch64-glibc-devel 18, cross-hppa-glibc-devel 17, cross-ppc64le-glibc-devel 17, cross-s390x-glibc-devel 17, cross-loongarch64-glibc-devel 14. (The issue's count of 100 sys-root hits does not reproduce from the sweep artefacts; the sys-root subset measures 83.) The residue (28) is all host paths and keeps firing: glib2-stage1-devel 6, postgresql18-devel-mini 4, libomp18-devel 4, dapl-debug 3, mono-devel 3, gettext-tools and gettext-tools-mini 1 each (libgettextpo), and singletons in efl-devel, ipmiutil-devel, libunbound-devel-mini, sbd-devel, the pcp package itself and nemo-extension-preview (the population's one .typelib, at a host path). The sanction is the measured set, not the triplet shape: a novel component of triplet shape (frobnicate-suse-linux) and a measured name extended by a suffix still fire, a sysroot name below another component sanctions nothing, and the whole triplet tree is target content, so a runtime library directly under /usr/<triplet>/ with no sys-root component is silent as well. Pinned by cross_sysroot_runtime_libs_in_devel_package_are_quiet, every_measured_cross_sysroot_is_quiet_for_non_devel, non_devel_still_fires_outside_the_measured_sysroots and cross_sysroot_typelib_in_devel_package_is_quiet in files.rs, and cross_sysroot_matches_needs_the_leading_component in fhs.rs."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/860"
 
 [[divergence]]
@@ -2860,7 +2860,7 @@ case = "global"
 check = "version-control-internal-file"
 kind = "behaviour"
 reason = "Fix-and-diverge (issue #858): version-control-internal-file is charged only for genuine version-control internals: a file inside a .git, .svn, .hg or .bzr metadata tree, a file directly inside a CVS or RCS directory, an RCS ,v revision file, and a file inside an arch .arch-ids or {arch} directory. The reference's scm pattern also charges the working-tree dotfiles a project tracks as ordinary content (.gitignore, .cvsignore, .hgignore, .bzrignore, .svnignore and .hgtags). Measured on the Factory corpus (sweep run-20261022-857d5ece population, pristine-main A/B over the 126 affected source packages, all 16,342 findings compared): 199 E in 126 source packages before — 198 .gitignore and 1 .cvsignore, not one inside a version-control tree — and 4 E in 4 source packages after, with no other finding changed; all 4 were .gitmodules files \u2014 shipped submodule metadata (kicad's demo tree and the rubygem-amq-protocol, rubygem-sassc and rubygem-uglifier gem trees), not a version-control tree \u2014 so that charge was dropped, leaving the pattern charging only the internals listed above; the final count after the drop is 0 E in 0 of the A/B's 126 source packages. Corpus-wide there are 12 such .gitmodules files in 7 source packages; the other 8 (in ImHex, nextcloud and winboat) are already filtered by those packages' own rpmlintrc. Pinned by scm_regex_charges_vcs_internals and version_control_internal_file_charges_internals_not_dotfiles in files.rs."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/858"
 
 [[divergence]]
@@ -2868,7 +2868,7 @@ case = "global"
 check = "devel-dependency"
 kind = "behaviour"
 reason = "Fix-and-diverge (issue #861): devel-dependency credits a same-family cross pair \u2014 a requirer in a cross toolchain family (a cross-<target>-gcc... compiler, or any mingw32-*/mingw64-* package) whose devel-matching requirement is that family's own target sys-root devel package. The credit is narrow, a genuine sys-root leaf only, and decidable from the names alone. Cross names: the requirer is a compiler package, cross-<target>-gcc... (the tool component is the first gcc/gcc<version> component and may carry further components, as in gcc13-bootstrap; the target is what precedes it), and the leaf is that target's sys-root package, cross-<target>-<libc>-devel with libc glibc or newlib. For -elf requirers the libc is part of the pair: the target carries a trailing -elf component the sys-root packages drop (cross-riscv64-elf-gcc13 pairs with cross-riscv64-newlib-devel; riscv64-elf is the only -elf target in the measured population), and that spelling is the newlib toolchain, so the stripped form credits only a newlib leaf \u2014 cross-riscv64-elf-gcc13 on cross-riscv64-glibc-devel fires. The strip mirrors the leaf-side spelling: the sys-root packages drop the -elf component (cross-riscv64-newlib-devel, not cross-riscv64-elf-newlib-devel), while -none is part of the target the sys-root packages keep (cross-arm-none-newlib-devel), so no strip applies to it and an arm leaf never pairs with an arm-none requirer. A requirer name without the -elf spelling carries no libc component, so its matching is on the target alone and either libc leaf on that target credits \u2014 cross-riscv64-gcc13 on cross-riscv64-newlib-devel stays silent alongside its measured glibc pair. Both libc spellings occur among the measured families whose names carry no -elf suffix (glibc for the Linux targets, newlib for amdgcn, arm-none, nvptx and rx), so the target alone is the decidable predicate there, and the collision is pinned explicitly. MinGW names: a mingw32-* or mingw64-* requirer pairs only with the same bitness family's sys-root leaves \u2014 mingw32-headers and mingw32-winpthreads-devel for a mingw32 requirer, mingw64-headers and mingw64-winpthreads-devel for a mingw64 requirer. Within one family the sys-root devel package is the compiler's runtime data \u2014 the target headers and libraries the toolchain consumes as a whole \u2014 so the harm model (a runtime package dragging host development files onto end systems) runs in reverse. The credit is per leaf, so a credited leaf does not consume the finding's once-per-package latch: a later host devel requirement in the same package still fires. The reference charges these pairs unchanged. Measured on the Factory corpus (sweep run-20261022-857d5ece population; the 129 source packages carrying the class re-measured before and after with scan.py, the before side reproducing the sweep's 146 exactly, all 60,430 findings in those packages compared, none added and no other finding changed): 146 E in 129 source packages before, 97 E in 80 after. Silenced (49): the cross gcc families on their own sys-root devel (43 \u2014 aarch64, hppa, loongarch64, ppc64le, riscv64 and s390x on glibc-devel, 22; amdgcn, arm-none, nvptx, riscv64-elf and rx on newlib-devel, 21) and the MinGW families (6: the mingw32 and mingw64 cross-gcc, cross-gcc-bootstrap and runtime packages on their own headers). No winpthreads pair occurs in the measured population \u2014 its MinGW packages require headers only \u2014 so the winpthreads half of the credit is unmeasured: it stands on the leaf set's construction (headers and winpthreads-devel are the bitness family's two sys-root devel packages) and is pinned in tags.rs. Every silenced pair is a gcc requirer on its own target's glibc/newlib sys-root leaf or a MinGW package on its own bitness headers, so the narrowed sys-root-leaf credit covers the measured population exactly and the measurement stands. The residue (97) is host packages requiring host devel packages and keeps firing: the Java family (13 \u2014 jmods packages, ant, bazel and tools on java devel), python binding packages (12), kernel-family leaves (9), the guile family (7), qwt designers and examples (5), lazarus (5) and 46 further host-on-host pairs (compilers on glibc-devel, examples, designers and plugins on their own libraries' devel packages, busybox-static requirers). The boundary is pinned both ways: a different target's sys-root devel package fires, a same-target devel match that is not a sys-root leaf fires (cross-aarch64-gcc13 on cross-aarch64-foo-static, cross-aarch64-binutils-devel and its own cross-aarch64-gcc13-devel), a target runtime package on its own sys-root leaf fires because the requirer is not a compiler (cross-aarch64-glibc on cross-aarch64-glibc-devel), the wrong libc's sys-root package fires for an -elf toolchain, a requirer without the -elf spelling credits either libc leaf on its target (cross-riscv64-gcc13 on cross-riscv64-newlib-devel stays silent), a MinGW library devel package fires (mingw64-foo-devel), prefix-only targets fire in both directions (the leaf's target a prefix of the requirer's: cross-arm-none-gcc14 on cross-arm-glibc-devel; the requirer's target a prefix of the leaf's: cross-arm-gcc13 on cross-arm-none-newlib-devel), host-to-cross and cross-to-host fire, a cross requirer on a MinGW leaf and a MinGW requirer on a cross leaf fire (cross-aarch64-gcc13 on mingw64-headers; mingw64-cross-gcc on cross-aarch64-glibc-devel), and the other MinGW bitness fires. Pinned by devel_dependency_cross_family_pairs_are_silent, cross_family_spelling_rules_900, devel_dependency_cross_family_non_elf_libc_collision_is_silent, devel_dependency_cross_family_rich_leaf_is_silent, devel_dependency_cross_family_near_misses_still_fire and devel_dependency_credited_leaf_does_not_consume_the_latch in tags.rs."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/861"
 
 [[divergence]]
@@ -2876,7 +2876,7 @@ case = "global"
 check = "no-dependency-on"
 kind = "behaviour"
 reason = "Fix-and-diverge (issue #862): the perl/python base-dependency rules of no-dependency-on are decided over the whole run once every package has been seen — the finding's dangling-symlink arm is decided in the same pass under issue #547, only its exception disposition being computed per package at record time, and is untouched here — and two further expressions of the interpreter dependency are credited. A package's own Requires/PreReq credit it when they name the interpreter as a file or soname dependency: the unversioned interpreter paths /usr/bin/perl and /usr/bin/python3, a libperl.so soname for perl (version-agnostic, as the name itself is), and a libpython<version>.so soname for python, the soname carrying the version the package's files name. And a package whose own lists carry no credited form stays quiet when one of its Requires/PreReq names a package of the run built from the same source whose own lists carry the credited dependency — the subpackage anchored on its main package. Packages group by the SOURCERPM key, a package whose header carries none grouping by its own name, and the anchored name must differ from the package's own name. The anchor credit is one hop, judged by the same own-package predicate for the version the candidate's files name: the version-bearing forms must match that version, while the unversioned interpreter paths, the libperl.so soname and the python3-base name (credited in any relation, per issue #568) carry no version and credit as they stand; an anchor sibling carrying nothing credits nothing, a chain credits nothing beyond the first hop, and a requirement on a package of another source credits nothing. The own-package forms credited before this change are the reference =-pinned names (perl-base/perl and python/python-base/python(abi), each pinned = to the version) and the perl(:MODULE_COMPAT_<version>) token, credited on an exact match of the token — the version it embeds must be the candidate's — over Requires/Recommends/Suggests rather than on a relation pin, plus the #568 divergence (the python3-base name and the versioned interpreter path); the reference credits only a package's own forms. Measured on the Factory corpus (sweep run-20261022-857d5ece population; the 55 affected source packages re-measured before and after the fix with the corpus scanner, with zero other finding deltas across all findings of those packages): 103 E in 55 source packages before, 65 E in 35 source packages after — 31 silenced by the anchor arm and 7 by the file/soname forms of the packages themselves. The residue is accounted: 34 azure packages whose requirements name only rpmlib() entries or names from other sources, so no anchor exists to credit; 12 types-* stub packages and 2 py3c packages with rpmlib-only requirements; 4 folder-color extensions whose anchor sibling folder-color-common carries no base dependency; 4 gobject-stubs findings on the flavour-named base form python313-base, which stays uncredited as #568 left it; 5 perl packages with an unpinned perl requirement or none, the =-pin semantics being deliberate; 2 qtcharts-qt5-sip findings anchored only on another source's devel package; nemo-extension-emblems, whose only python-bearing requirement names a package of another source; and python314-pyparsing, which carries no python requirement at all. Pinned by the file/soname tests normal_perl_dep_interpreter_path_satisfies, normal_perl_dep_libperl_soname_satisfies, normal_python_dep_unversioned_interpreter_path_satisfies, normal_python_dep_libpython_soname_satisfies and normal_python_dep_libpython_soname_other_version_fires, and by the anchor tests normal_python_dep_anchor_sibling_carries_base, normal_python_dep_anchor_sibling_without_base_fires, normal_python_dep_anchor_other_source_fires, normal_python_dep_anchor_chain_does_not_credit, normal_python_dep_anchor_wrong_version_fires, normal_perl_dep_anchor_sibling_carries_compat and normal_perl_dep_anchor_sibling_carries_via_interpreter_path in files.rs."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/862"
 
 [[divergence]]
@@ -2884,7 +2884,7 @@ case = "global"
 check = "LibraryDependencyCheck"
 kind = "behaviour"
 reason = "Fix-and-diverge (issue #863): no-library-dependency-on also credits the anchor chain inside the scanned set. When a devel package requires a package built from the same source (the same SOURCERPM), pinned with = to that sibling's own version — the version spelling (77 of the credited chains) or the version-release spelling (12) — and the sibling's own requirements name the library package or one of its provides (the library's soname provide in 80, the package's own name in 29, the forms overlapping), the dependency on the library exists through the sibling and the finding stays silent; the reference credits only a direct requirement on the library package itself. The anchor can be named with its isa qualifier (rocm-clang-devel on rocm-clang-libs(x86-64) and kin, 4 chains). The credit is exactly one hop and every condition is load-bearing: an unversioned requirement on the sibling credits nothing, a pin to a version the sibling does not carry credits nothing, a requirement on a package of another source credits nothing, and a sibling whose requirements reach nothing of the library's leaves the chain broken. The sibling is resolved by (name, arch) like the check's devel state: a sibling built for another arch credits nothing, a noarch sibling stands in only when no same-arch build is in the run, and the library's provides are read from the build that ships the linked file. Measured on the Factory corpus (sweep run-20261022-857d5ece population; the 181 affected source packages re-measured before and after the fix, the before side reproducing the sweep's 194 exactly and no other finding changing in those packages): 194 E in 181 source packages before, 111 E in 105 after — 89 findings silenced by the chain credit, and 6 devel packages (libbraille, gensio, genders, syslog-ng, clamav, miredo) where the one-finding-per-devel-package verdict now names a later, genuinely uncredited link instead of the credited one. The residue (111) is accounted by shape: 45 direct requirements in the isa-qualified form (libfoo(x86-64) = EVR), which the reference's host-%{_isa} arm credits on a host of the package's own arch and the aarch64 sweep host cannot; 27 anchor chains that reach nothing of the library (liburing-devel on liburing-ffi2, rpm-devel on librpmbuild10, protobuf-devel on libprotoc36_2_0 — broken chains, the finding's real target); 29 devel packages requiring no sibling of the set at all (expect-devel requires nothing); 4 anchor chains without the exact pin (the toluapp family on its tools packages); and the 6 newly named second links. Pinned by anchor_chain_credits_devel_package, anchor_chain_version_release_pin_credits, anchor_chain_isa_qualified_anchor_credits, anchor_chain_library_name_reach_credits, anchor_without_reach_still_fires, anchor_unversioned_still_fires, anchor_wrong_version_still_fires, anchor_floor_pin_still_fires, anchor_other_source_still_fires, self_anchor_still_fires, anchor_matching_arch_credits, anchor_cross_arch_still_fires, anchor_noarch_fallback_credits, anchor_reach_via_other_arch_lib_provides_still_fires and anchor_chain_survives_export_import in library_dependency.rs."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/863"
 
 [[divergence]]
@@ -2892,7 +2892,7 @@ case = "global"
 check = "incorrect-locale-subdir"
 kind = "behaviour"
 reason = "Fix-and-diverge (issue #865): the correct-subdir shape admits an ISO 15924 script component — the component after the language is a territory (de_DE) or a script (zh_Hans, zh_Hant) — because script locales are the names the modern gettext/GNOME/KDE stack ships, and the filesystem package itself defines /usr/share/locale/zh_Hans and /usr/share/locale/zh_Hant in the standard tree it owns. The reference’s correct-subdir shape admits only the territory component, so it charges every script locale. The script component is exactly a capital and three lowercase letters: shorter, longer and wrongly cased forms (zh_Han, zh_Hanss, zh_hans, zh_HANS) keep firing, and a script component followed by a territory stays charged — that form ships nowhere in the corpus. The reference’s own generated ISO data already carries the script codes in its country table, so its is_valid_lang accepts these names today; the subdir shape was the only verdict condemning them. Measured on the Factory corpus (sweep run-20261022-857d5ece population; the 26 affected source packages re-measured before and after with scan.py, the before side reproducing the sweep’s 42 exactly and no other finding changing in those packages): 42 E in 26 source packages before, 0 after. A header census of every shipped locale subdir (137 distinct names across 1,643 binary packages) shows zh_Hans and zh_Hant are the only script forms shipped and the only names the old shape condemned. Pinned by script_locale_subdirs_are_quiet and misshapen_script_locale_subdirs_still_fire in i18n.rs."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/865"
 
 [[divergence]]
@@ -2900,7 +2900,7 @@ case = "global"
 check = "permissions-file-setuid-bit"
 kind = "behaviour"
 reason = "Fix-and-diverge (issue #868): the setuid/setgid verdicts (permissions-file-setuid-bit and permissions-directory-setuid-bit, one predicate over the mode bits 0o4000 and 0o2000) are emitted only when at least one central permissions profile was read at construction — the profiles this check's registration set is built from (/usr/share/permissions/permissions{,.secure}, /etc/permissions{,.secure}). The reference's SUIDPermissionsCheck reads the same host paths and reports every setuid/setgid file the loaded data does not name, so on a host without the profiles installed it reports the distro's canonical registered set exactly as the unmodified port did; 'unregistered' is a claim about that data and is undecidable without it. A profile that reads as empty still establishes the set, so an unlisted setuid file fires whenever data was read, exactly as before. Per-package drop-ins extend the set — a file a drop-in registers is verified against it in every data state — but they do not establish it: the registrations that acquit the canonical set live in the central data (exim is the corpus shape: a package shipping its own drop-in plus /usr/sbin/exim, which the central profiles register). Packaged capabilities keep reporting in every data state, that verdict being decidable from the package alone, and registered files keep their exact verification: a packaged mode differing from the registered one reports permissions-incorrect, so a mode exceeding the registration fires as before. Measured on the Factory corpus (sweep run-20261022-857d5ece population; the 38 affected source packages re-measured before and after): in the sweep environment (no profiles installed) permissions-file-setuid-bit 51 E in 35 source packages and permissions-directory-setuid-bit 3 E before, 0 of either after, the consequent permissions-missing-verifyscript (2, ceph and dbus-1) and permissions-missing-postin (1, ceph) demands falling with them and no other finding changed (9,695 to 9,638 findings over the 38 packages). With the corpus's own Factory profiles installed (permissions 1699_20260917, the build the corpus carries) the fixed build's findings are identical to the pristine build's across the same 38 packages (8,300 findings, zero deltas): no setuid-bit finding fires in either, and the family's residue is the verification path working as intended — physlock packaged 04750 root:trusted against a registered 0755 root:root (permissions-incorrect, permissions-incorrect-owner), policycoreutils-newrole packaged 04755 against a registered 0755 (permissions-incorrect), and dbus-1-daemon missing %verify_permissions for its registered launch helper (permissions-missing-verifyscript). Pinned by the no_data_loaded_setuid_bits_are_silent, no_data_loaded_capabilities_still_reported, read_but_empty_profile_still_reports_unlisted, dropin_read_alone_keeps_no_data_state, new_with_no_profiles_reads_no_data and unlisted_setuid_bits_reported tests in suid_permissions.rs; mutation-verified in both directions (gate removed: the no-data pins fail; mode comparison made vacuous: incorrect_mode_and_owner_reported fails)."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/868"
 
 [[divergence]]
@@ -2908,7 +2908,7 @@ case = "global"
 check = "permissions-directory-setuid-bit"
 kind = "behaviour"
 reason = "Fix-and-diverge (issue #868): the setuid/setgid verdicts (permissions-file-setuid-bit and permissions-directory-setuid-bit, one predicate over the mode bits 0o4000 and 0o2000) are emitted only when at least one central permissions profile was read at construction — the profiles this check's registration set is built from (/usr/share/permissions/permissions{,.secure}, /etc/permissions{,.secure}). The reference's SUIDPermissionsCheck reads the same host paths and reports every setuid/setgid file the loaded data does not name, so on a host without the profiles installed it reports the distro's canonical registered set exactly as the unmodified port did; 'unregistered' is a claim about that data and is undecidable without it. A profile that reads as empty still establishes the set, so an unlisted setuid file fires whenever data was read, exactly as before. Per-package drop-ins extend the set — a file a drop-in registers is verified against it in every data state — but they do not establish it: the registrations that acquit the canonical set live in the central data (exim is the corpus shape: a package shipping its own drop-in plus /usr/sbin/exim, which the central profiles register). Packaged capabilities keep reporting in every data state, that verdict being decidable from the package alone, and registered files keep their exact verification: a packaged mode differing from the registered one reports permissions-incorrect, so a mode exceeding the registration fires as before. Measured on the Factory corpus (sweep run-20261022-857d5ece population; the 38 affected source packages re-measured before and after): in the sweep environment (no profiles installed) permissions-file-setuid-bit 51 E in 35 source packages and permissions-directory-setuid-bit 3 E before, 0 of either after, the consequent permissions-missing-verifyscript (2, ceph and dbus-1) and permissions-missing-postin (1, ceph) demands falling with them and no other finding changed (9,695 to 9,638 findings over the 38 packages). With the corpus's own Factory profiles installed (permissions 1699_20260917, the build the corpus carries) the fixed build's findings are identical to the pristine build's across the same 38 packages (8,300 findings, zero deltas): no setuid-bit finding fires in either, and the family's residue is the verification path working as intended — physlock packaged 04750 root:trusted against a registered 0755 root:root (permissions-incorrect, permissions-incorrect-owner), policycoreutils-newrole packaged 04755 against a registered 0755 (permissions-incorrect), and dbus-1-daemon missing %verify_permissions for its registered launch helper (permissions-missing-verifyscript). Pinned by the no_data_loaded_setuid_bits_are_silent, no_data_loaded_capabilities_still_reported, read_but_empty_profile_still_reports_unlisted, dropin_read_alone_keeps_no_data_state, new_with_no_profiles_reads_no_data and unlisted_setuid_bits_reported tests in suid_permissions.rs; mutation-verified in both directions (gate removed: the no-data pins fail; mode comparison made vacuous: incorrect_mode_and_owner_reported fails)."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/868"
 
 [[divergence]]
@@ -2916,7 +2916,7 @@ case = "global"
 check = "invalid-license"
 kind = "behaviour"
 reason = "Fix-and-diverge (issue #864): the licence split cuts at parentheses of any depth (and at the whitespace-surrounded boolean operators, as before), so the pieces the group structure yields are the bare leaves inside it. Three pieces are not bare leaves: the literal `()` a bare empty group survives as, a piece still carrying its WITH exception (the exception is matched per piece, as the TagsCheck entry above records), and the whole-expression fallback piece below. The reference's license_regex group alternative stops at the first closing paren, so where its validation reaches a nested group it validates parenthesis fragments instead of the leaves inside: `(LGPL-3.0-only OR (GPL-2.0-only OR GPL-3.0-or-later))` yields reference findings for `(GPL-2.0-only` and a bare `)` (verified by running the pinned 2.10.0 algorithm verbatim; the libQt5Help5 expression itself is dropped whole by the reference's whole-string WITH pre-match, the asymmetry of the TagsCheck entry above). Measured on the Factory corpus (sweep run-20261022-857d5ece population; the 10 affected source packages re-measured before and after, the before side reproducing the sweep's 43 exactly): 43 E in 10 source packages before, 11 E in 5 after, and no other E or W finding changing in those packages. Each of the 32 removed errors carried its own invalid-license-spellcheck I suggestion, so the I count falls by the same 32: 39 I in the 10 packages before, 7 I after. The 32 removed findings are all parenthesis fragments over valid leaves: `(GPL-2.0-only` (14) and a bare `)` (10) across the libqt5-qttools/libqt5-qtxmlpatterns/pyside6/shiboken6 families, `(Apache-2.0` (3, lapce and sccache), and `Unicode-DFS-2016)`, `Unicode-DFS-2016 )`, `MIT)`, `BSD-3-Clause)` and `(MIT` (1 each). The residue is bare text that fires under any split, per source package: dssim's AOMPL-1.0, Apache2 and VP8 (1 each); sheldon's BSD-4-clause (3); ima-evm-utils' LicenseRef-GPL-2.0-with-openssl-exception (3); lapce's MPL-2.0-or-later (1); and helvum's `MIT AND` (1) — helvum's licence value ends in a dangling operator, and the operator cuts need whitespace on both sides, so the trailing operator is never a cut point and the tail piece is the malformed text itself, reported rather than silently accepted. Unbalanced parens are structural too: the leaf inside is validated, never a fragment. When no piece survives the split at all — an expression of only parentheses and operators — the expression is reported whole rather than silently accepted, unless it is empty or a whitespace-only group, which vanishes as in the reference. Pinned by license_split_yields_bare_leaves, license_nested_parens_report_the_bare_leaf and license_deeply_nested_parens_terminates in tags.rs."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/864"
 
 [[divergence]]
@@ -2924,7 +2924,7 @@ case = "global"
 check = "rpm-buildroot-usage"
 kind = "behaviour"
 reason = "Fix-and-diverge (issue #867): in %build and %prep, rpm-buildroot-usage is not charged on a line whose buildroot references all lead the value of an assignment -- a name= pair (DESTDIR=, destdir=, any variable or macro-definition payload name) or a configure-style --name option in its = or space-separated form. In those sections the buildroot is the install destination, and a reference in that position hands it to the build system as a path parameter the build consumes: the make DESTDIR staging idiom, Module::Build's destdir, configure's --prefix/--temproot/--buildroot and directory options, and variable assignments naming staged paths. Scriptlet sections keep the charge in every form -- a scriptlet runs on the installed system, where the buildroot does not exist -- and %install sits outside the finding's sections, as before. The reference charges every reference in scriptlets, %prep and %build alike, with no assignment scoping. The credit is judged per reference, so a line mixing a credited reference with an uncredited one still fires. Measured on the Factory corpus (sweep run-20261022-857d5ece population; the 22 affected source packages re-measured before and after with scan.py, the before side reproducing the sweep's 46 E exactly, all 1,244 findings in those packages compared, none added and no other finding changed): 46 E in 22 source packages before, 25 E in 9 after. Silenced (21): the DESTDIR lines of git, git-cola, latex2rtf (2) and sgmltool's make install line; frozen-bubble's destdir; rabbitmq-server's %global argument line (DESTDIR and DOC_INSTALL_DIR both lead values there); paexec's %prep %define (DESTDIR); the configure-option lines of chezscheme (--temproot), dvdisaster (--buildroot), fastjet-contrib and sgmltool (--prefix) and liblockfile (--prefix, --bindir, --mandir, --libdir, --includedir; 5); the Build.PL --prefix lines of perl-DateTime-Format-DateParse and perl-Encode-Detect (the $RPM_BUILD_ROOT spelling); and tetrinet-server's INCLUDE_DIR/LIB_DIR environment assignments prefixing its configure invocation ($RPM_BUILD_ROOT). The residue (25) keeps firing: the scriptlet arm in full (ibus %postun 9, rsyslog %post 2 -- buildroot references in shipped scriptlets are genuine defects) and 14 %build references that lead no assignment value: fipscheck running its just-installed tools from the buildroot (3), yast2-theme performing its install inside %build with mkdir and make-symlinks over buildroot paths (6), civetweb's CMAKE_INSTALL_DATADIR define inside CFLAGS (the reference sits behind a -D name inside a flags value and leads no assignment), jboss-logging-tools running %fdupes over the buildroot tree, orthanc-dicomweb's dir command on the buildroot, sgmltool's PATH suffix (the %buildroot spelling appended after $PATH:, so the reference does not lead the assignment's value) and bsd-games echoing the buildroot as an answer to its interactive configure (the destination semantics are real but the form is an echo, so it stays charged rather than growing an echo heuristic). The spellings the population uses are %{buildroot}, $RPM_BUILD_ROOT and %buildroot, and the fix scopes the check's existing spelling set without widening or narrowing it. Pinned by rpm_buildroot_usage_install_assignment_idiom_is_quiet, rpm_buildroot_usage_non_assignment_forms_still_fire and rpm_buildroot_usage_install_section_is_quiet in spec.rs."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/867"
 
 [[divergence]]
@@ -2932,7 +2932,7 @@ case = "global"
 check = "dbus-policy-allow-without-destination"
 kind = "behaviour"
 reason = "Fix-and-diverge (issue #866): an <allow> carrying send_interface without send_destination is quiet when it is the agent idiom -- the enclosing <policy> is subject-scoped (a user, group or at_console attribute), the interface is not one of the names the file itself pins via own, own_prefix or send_destination (an own_prefix pins every interface under the prefix, not only the prefix string itself), it carries no wildcard, and the rule's own <policy> block declares, via a concrete allow own or own_prefix (a non-empty, non-wildcard value on an <allow> element), the names its service owns, or the rule also carries a send_path naming a non-root object path, or the interface leaf is or ends in Agent with any version digits ignored. Agent interfaces are implemented by whichever process registers as the agent under a per-session unique bus name, so no static send_destination can name the recipient and the rule is complete as written; the reference carries no such credit and fires on all of these. Measured on the 17,241-source-package Factory sweep corpus (run-20261022-857d5ece), the finding drops from 46 E across 19 source packages to 9 E across 7: silenced are bluez 11, ofono 7, NetworkManager with its VPN plugins 7, connman 4, geoclue2 4, iwd 3 and polkit 1. The residue stays charged by shape: wpa_supplicant 1, tcmu-runner 1 and strongswan 1 name as send_interface the very name the same file pins as a destination, kauth and kf6-kauth (1 each) grant the interface from the default policy, the libteam 3 rules name the service's own name stem, and cups 1 sits in a file that pins nothing with no agent leaf and no send_path. Deny rules, member-only and path-only rules, and destination-carrying rules are unchanged. Pinned by agent_allows_in_service_policy_are_quiet, agent_allow_alone_still_counts_as_send_policy, agent_allow_in_pinless_file_is_quiet, service_interface_named_like_its_destination_still_fires, agent_allow_in_default_policy_still_fires, foreign_interface_in_pinless_file_still_fires, agent_manager_leaf_still_fires, member_only_allow_in_service_policy_still_fires, deny_with_agent_interface_still_fires, deny_own_wildcard_does_not_grant_agent_credit, deny_own_concrete_does_not_grant_agent_credit, concrete_allow_own_grants_agent_credit, wildcard_allow_own_does_not_grant_agent_credit, empty_allow_own_does_not_grant_agent_credit, own_prefix_pins_interfaces_under_it, own_prefix_does_not_pin_foreign_interfaces, own_in_another_policy_does_not_grant_agent_credit, root_send_path_does_not_grant_agent_credit, wildcard_interface_is_not_credited_by_own, wildcard_interface_is_not_credited_by_send_path and wildcard_interface_is_not_credited_by_agent_leaf in dbus_policy.rs."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/866"
 
 [[divergence]]
@@ -2940,7 +2940,7 @@ case = "global"
 check = "AlternativesCheck"
 kind = "behaviour"
 reason = "Fix-and-diverge (issue #931): a libalternatives conf that declares no `binary=` entry draws no binary findings. The reference tracks binary-entry satisfaction in a single flag, so a conf registering only a man page (a man-only group) is reported with `wrong-or-missed-binary-entry` as if it had declared a binary entry and missed it. rpmcrab tracks presence separately from satisfaction: `wrong-or-missed-binary-entry` fires only for a declared-but-unsatisfied entry, which `binary-entry-value-not-found` already reports at the line site. Man validation on such a conf is unchanged. Pinned by man_only_conf_draws_no_binary_findings and man_only_conf_with_missing_man_still_warns_for_the_man in alternatives.rs."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/931"
 
 [[divergence]]
@@ -2948,7 +2948,7 @@ case = "global"
 check = "AlternativesCheck"
 kind = "behaviour"
 reason = "Fix-and-diverge (issue #932): a libalternatives `binary=` entry is credited when its path resolves through the package's own symlinks to a shipped regular file. The reference credits an entry only by its bin/ suffix rule -- the literal-path credit is rpmcrab's own divergence, ledgered under issue #811 -- so an entry whose path resolves through a symlink shipped by the same package -- the JDK layout, /usr/lib64/jvm/java-11-openjdk -> java-11-openjdk-11 -- draws both `binary-entry-value-not-found` and `wrong-or-missed-binary-entry` on every conf even though the package ships the target. rpmcrab resolves the entry path through the package's own file set, following symlinks at every component, directory and file alike, component-wise with the kernel's hop bound, and credits it when the walk lands on a shipped regular file; a walk that exhausts the hop bound is a cycle (the kernel's ELOOP) and earns no credit; the walk canonicalises the value the way the kernel resolves it, so a doubled leading slash (binary=//usr/bin/..., emitted by the SUSE python packaging macros) names the shipped file too. Resolutions leaving the package's file set (sibling-package or genuinely absent targets) and symlink cycles keep firing. Pinned by binary_entry_through_shipped_dir_symlink_is_credited, binary_entry_through_absolute_dir_symlink_is_credited, binary_entry_through_symlink_chain_is_credited, binary_entry_through_dir_symlink_to_unshipped_file_still_fires, binary_entry_through_symlink_loop_still_fires, binary_entry_resolving_to_directory_still_fires, binary_entry_through_cycle_landing_on_shipped_name_still_fires and binary_entry_with_doubled_leading_slash_is_credited in alternatives.rs."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/932"
 
 [[divergence]]
@@ -2956,7 +2956,7 @@ case = "global"
 check = "perl-temp-file"
 kind = "missing"
 reason = "Deliberate removal (issue #883): the perllocal.pod and .packlist files the finding flags are content the distro ships on purpose; upstream's own openSUSE config records the decision ('We want these files'). rpmcrab does not emit it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
 
 [[divergence]]
@@ -2964,7 +2964,7 @@ case = "global"
 check = "requires-on-release"
 kind = "missing"
 reason = "Deliberate removal (issue #883): a release-pinned Requires is a deliberate dependency shape; upstream's own openSUSE config records 'We check for that already'. rpmcrab does not emit it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
 
 [[divergence]]
@@ -2972,7 +2972,7 @@ case = "global"
 check = "non-coherent-filename"
 kind = "missing"
 reason = "Deliberate removal (issue #883): OBS names its build outputs itself, so a package file name differing from the header's name-version-release is a property of the build service's layout. rpmcrab does not emit it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
 
 [[divergence]]
@@ -2980,7 +2980,7 @@ case = "global"
 check = "configure-without-libdir-spec"
 kind = "missing"
 reason = "Deliberate removal (issue #883): one of the three findings whose suppressions sit in upstream's bnc#456048 kernel-module header block; libdir configuration is the build system's own concern under OBS. rpmcrab does not emit it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
 
 [[divergence]]
@@ -2988,7 +2988,7 @@ case = "global"
 check = "use-of-RPM_SOURCE_DIR"
 kind = "missing"
 reason = "Deliberate removal (issue #883): one of the three findings whose suppressions sit in upstream's bnc#456048 kernel-module header block; OBS resolves a spec's sources through the build service. rpmcrab does not emit it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
 
 [[divergence]]
@@ -2996,7 +2996,7 @@ case = "global"
 check = "hardcoded-library-path"
 kind = "missing"
 reason = "Deliberate removal (issue #883): one of the three findings whose suppressions sit in upstream's bnc#456048 kernel-module header block; library paths in a spec resolve through the build system's macro set. rpmcrab does not emit it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
 
 [[divergence]]
@@ -3004,7 +3004,7 @@ case = "global"
 check = "invalid-version"
 kind = "missing"
 reason = "Deliberate removal (issue #883): OBS stamps the version on every build, so the version string is a property the build service itself produces. rpmcrab does not emit it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
 
 [[divergence]]
@@ -3012,7 +3012,7 @@ case = "global"
 check = "invalid-packager"
 kind = "missing"
 reason = "Deliberate removal (issue #883): OBS stamps the packager identity on every build. rpmcrab does not emit it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
 
 [[divergence]]
@@ -3020,7 +3020,7 @@ case = "global"
 check = "invalid-buildhost"
 kind = "missing"
 reason = "Deliberate removal (issue #883): OBS stamps the build host on every build. rpmcrab does not emit it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
 
 [[divergence]]
@@ -3028,7 +3028,7 @@ case = "global"
 check = "setuid-binary"
 kind = "missing"
 reason = "Deliberate removal (issue #883): OBS normalises file permissions during packaging; the dedicated permissions machinery carries the genuine permission cases. rpmcrab does not emit it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
 
 [[divergence]]
@@ -3036,7 +3036,7 @@ case = "global"
 check = "setgid-binary"
 kind = "missing"
 reason = "Deliberate removal (issue #883): OBS normalises file permissions during packaging; the dedicated permissions machinery carries the genuine permission cases. rpmcrab does not emit it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
 
 [[divergence]]
@@ -3044,7 +3044,7 @@ case = "global"
 check = "non-readable"
 kind = "missing"
 reason = "Deliberate removal (issue #883): OBS normalises file permissions during packaging; the dedicated permissions machinery carries the genuine permission cases. rpmcrab does not emit it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
 
 [[divergence]]
@@ -3052,7 +3052,7 @@ case = "global"
 check = "non-standard-dir-perm"
 kind = "missing"
 reason = "Deliberate removal (issue #883): OBS normalises file permissions during packaging; the dedicated permissions machinery carries the genuine permission cases. rpmcrab does not emit it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
 
 [[divergence]]
@@ -3060,7 +3060,7 @@ case = "global"
 check = "non-standard-executable-perm"
 kind = "missing"
 reason = "Deliberate removal (issue #883): OBS normalises file permissions during packaging; the dedicated permissions machinery carries the genuine permission cases. rpmcrab does not emit it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
 
 [[divergence]]
@@ -3068,7 +3068,7 @@ case = "global"
 check = "no-documentation"
 kind = "missing"
 reason = "Deliberate removal (issue #883): a package without documentation files is a structural property of -devel/-doc package splits: 128 of the 300 audit-sample packages carried the finding, one line each. rpmcrab does not emit it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
 
 [[divergence]]
@@ -3076,7 +3076,7 @@ case = "global"
 check = "multiple-specfiles"
 kind = "missing"
 reason = "Deliberate removal (issue #883): a source package carrying several spec files is valid; OBS builds the spec the package defines. rpmcrab does not emit it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SourceCheck.py"
 
 [[divergence]]
@@ -3084,7 +3084,7 @@ case = "global"
 check = "cross-directory-hard-link"
 kind = "missing"
 reason = "Deliberate removal (issue #883): cross-directory hard links are a deliberate package layout (measured: 3,420 lines in 18 audit-sample packages, documentation and Python byte-code farms); OBS builds do not depend on link locality."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
 
 [[divergence]]
@@ -3092,7 +3092,7 @@ case = "global"
 check = "incoherent-version-in-changelog"
 kind = "missing"
 reason = "Deliberate removal (issue #883): coherence between the changelog's latest version and the header version is not a property OBS builds depend on."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
 
 [[divergence]]
@@ -3100,7 +3100,7 @@ case = "global"
 check = "dir-or-file-in-opt"
 kind = "missing"
 reason = "Deliberate removal (issue #883): FilelistCheck's filelist-forbidden-opt covers the same content and stays unsuppressed at E. Measured over the Factory corpus (51,589 RPMs): both findings fire on exactly the same 4 packages (mingw32-filesystem, mingw64-filesystem, openQA-llm-server, rpmlint-mini), with no package on either side only. The /opt member leaves the shipped DisallowedDirs, so the family no longer emits it. rpmcrab does not emit it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
 
 [[divergence]]
@@ -3108,7 +3108,7 @@ case = "global"
 check = "symlink-crontab-file"
 kind = "missing"
 reason = "Deliberate removal (issue #883): the flagged shape is extinct in Factory: measured over 51,589 RPMs, exactly 2 entries exist under /etc/cron.d and both are regular files. rpmcrab does not emit it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
 
 [[divergence]]
@@ -3116,7 +3116,7 @@ case = "global"
 check = "log-files-without-logrotate"
 kind = "missing"
 reason = "Deliberate removal (issue #883): measured over the Factory corpus, the finding flags 99 RPMs (97 srcpkgs), 93 of them on a directory rather than a log file; the flagged set is dominated by rotation the check cannot see (auditd self-rotation in its shipped config, sysstat's sa2, the journal directory), and no decidable predicate separates the small genuine residue. The decidable siblings (incoherent-logrotate-file, missing-dependency-to-logrotate) stay unsuppressed."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
 
 [[divergence]]
@@ -3124,7 +3124,7 @@ case = "global"
 check = "file-not-utf8"
 kind = "missing"
 reason = "Deliberate removal (issue #883): measured over the Factory corpus, the finding fires ~4,100 times, 82% of them from 5 source packages; a 22-file sample was genuinely non-UTF-8 in every case and by design in every case (TeXmacs Cork/T1 documentation, dictionary data, a KOI8-R example file). The finding covers documentation files only. rpmcrab does not emit it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
 
 [[divergence]]
@@ -3132,7 +3132,7 @@ case = "global"
 check = "mixed-use-of-spaces-and-tabs"
 kind = "missing"
 reason = "Deliberate removal (issue #883): measured over all 16,501 Factory specs, 2,117 flag; a 24-spec sample showed the conventional layout in every case (space-aligned tags, tab-indented continuations) and no genuine mix. rpmcrab does not emit it."
-since = "0.3.1"
+since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
 
 [[divergence]]
@@ -3140,7 +3140,7 @@ check = "prereq-use"
 kind = "severity"
 case = "global"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
-since = "0.3.1"
+since = "0.4.0"
 reason = "The reference reports prereq-use at E. The legacy tag is widespread in the Factory tree (253 plain PreReq: lines in 153 specs), so the finding surfaces at W: visible in every run and mechanically actionable (spec-cleaner converts PreReq), while the builds carrying the tag keep passing."
 
 [[divergence]]
@@ -3148,5 +3148,5 @@ check = "prereq-use"
 kind = "behaviour"
 case = "global"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
-since = "0.3.1"
+since = "0.4.0"
 reason = "The reference predicate requires the parenthesised qualifier form PreReq(...):, which occurs nowhere in the Factory spec tree. The port's predicate makes the qualifier optional, so the finding fires on every PreReq usage, the plain tag form included (253 lines in 153 Factory specs); Requires(pre): and Requires(post): stay silent."
