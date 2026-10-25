@@ -3150,3 +3150,11 @@ case = "global"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
 since = "0.4.0"
 reason = "The reference predicate requires the parenthesised qualifier form PreReq(...):, which occurs nowhere in the Factory spec tree. The port's predicate makes the qualifier optional, so the finding fires on every PreReq usage, the plain tag form included (253 lines in 153 Factory specs); Requires(pre): and Requires(post): stay silent."
+
+[[divergence]]
+case = "global"
+check = "no-binary"
+kind = "behaviour"
+reason = "Deliberate fix (plusky/rpmcrab#948): the port exempts -debugsource packages from no-binary. A -debugsource package is arch-specific and ships only source files under /usr/src/debug by construction -- no binaries, no libdir payload -- so the finding's condition is the package's expected shape, and the frozen 2.10.0 reference fires it on every such package (measured on pam-config-debugsource; the class is total by construction). The suffix test matches the debug-companion recognition FilesCheck and FilelistCheck already apply to the same names. -debuginfo packages are not exempted: their .debug payloads are ELF and already count toward has_binary."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/948"

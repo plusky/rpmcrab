@@ -3000,7 +3000,16 @@ impl BinariesCheck {
         has_file_in_libdir: bool,
         out: &mut Filter,
     ) {
-        if !has_binary && !has_file_in_libdir && pkg.arch != "noarch" {
+        // A -debugsource package ships only source files under
+        // /usr/src/debug by construction, so an arch package of that
+        // shape with no binaries is the expected shape, not a defect.
+        // The suffix test matches the debug-companion recognition
+        // FilesCheck and FilelistCheck use (plusky/rpmcrab#948).
+        if !has_binary
+            && !has_file_in_libdir
+            && pkg.arch != "noarch"
+            && !pkg.name.ends_with("-debugsource")
+        {
             add_info(out, Level::Warning, pkg, "no-binary", &[]);
         }
     }
@@ -8410,6 +8419,72 @@ description = "explicit priority string bypasses the system crypto policy"
         let lines = lines_for(&results, "no-binary");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
         assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+    }
+
+    #[test]
+    fn no_binary_quiet_for_debugsource_package() {
+        // pam-config-debugsource shape (issue #948): an arch package
+        // whose whole payload is source files under /usr/src/debug.
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "pam-config-debugsource",
+            "x86_64",
+            vec![
+                syn_file(
+                    "/usr/src/debug/pam-config-2.14/src/pam-config.c",
+                    "ASCII text",
+                ),
+                syn_file(
+                    "/usr/src/debug/pam-config-2.14/src/pam-config.h",
+                    "ASCII text",
+                ),
+            ],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "no-binary");
+        assert!(
+            lines.is_empty(),
+            "no-binary must stay quiet for a -debugsource package: {results:?}"
+        );
+    }
+
+    #[test]
+    fn no_binary_still_fires_when_debugsource_is_not_the_suffix() {
+        // The exemption is the -debugsource suffix only: a name that
+        // merely contains the word, or carries it mid-name, is an
+        // ordinary package and still fires.
+        let config = test_config();
+        for name in ["mydebugsource", "foo-debugsource-data"] {
+            let pkg = synthetic_pkg(
+                name,
+                "x86_64",
+                vec![syn_file("/usr/share/doc/x/README", "ASCII text")],
+            );
+            let results = driver_results(&pkg, &config);
+            let lines = lines_for(&results, "no-binary");
+            assert_eq!(
+                lines.len(),
+                1,
+                "{name} must still fire no-binary: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_binary_still_fires_for_debuginfo_package_without_binaries() {
+        // The exemption covers -debugsource only. A -debuginfo package
+        // ships ELF .debug payloads, which the binary accounting counts,
+        // so it stays quiet through has_binary in practice; a payload
+        // with no binaries at all still fires, as in the reference.
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "foo-debuginfo",
+            "x86_64",
+            vec![syn_file("/usr/share/doc/foo/README", "ASCII text")],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "no-binary");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
     }
 
     #[test]
