@@ -31,6 +31,18 @@ def _load():
 
 gen = _load()
 
+
+def _load_guard():
+    spec = importlib.util.spec_from_file_location(
+        "check_ledger_since",
+        os.path.join(HERE, "check-ledger-since.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+guard = _load_guard()
+
 ENTRY_A = (
     '[[divergence]]\n'
     'case = "global"\n'
@@ -47,6 +59,24 @@ ENTRY_B = (
     'reason = "beta is not emitted"\n'
     'since = "0.2.0"\n'
     'upstream = "https://example.invalid/1"\n'
+)
+
+
+ENTRY_BAD = (
+    '[[divergence]]\n'
+    'case = "global"\n'
+    'check = "gamma-finding"\n'
+    'kind = "behaviour"\n'
+    'reason = "gamma reason"\n'
+    'since = "0.4.0"\n'
+)
+ENTRY_OK = (
+    '[[divergence]]\n'
+    'case = "global"\n'
+    'check = "delta-finding"\n'
+    'kind = "behaviour"\n'
+    'reason = "delta reason"\n'
+    'since = "0.4.1"\n'
 )
 
 
@@ -185,6 +215,32 @@ def test_assemble_rejects_unknown_owner():
         src = _src(tmp, {"FilesCheck.toml": ENTRY_A})
         _, count = gen.assemble(src, owners=gen.known_owners())
         assert count == 1
+
+
+def test_since_gate_judges_generated_like_the_monolith():
+    """The ledger `since` gate reaches the same verdict over the
+    generated aggregate as over the same entries in hand-written
+    append order: assembly reorders entries by owner, and a planted
+    entry claiming the shipped release is flagged in both shapes."""
+    import tomllib
+
+    def parsed(text):
+        return tomllib.loads(text)["divergence"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _src(tmp, {
+            "FilesCheck.toml": ENTRY_A + "\n" + ENTRY_BAD,
+            "BinariesCheck.toml": ENTRY_B + "\n" + ENTRY_OK,
+        })
+        text, _ = gen.assemble(src)
+        generated = parsed(text)
+    monolith = parsed(
+        ENTRY_A + "\n" + ENTRY_B + "\n" + ENTRY_BAD + "\n" + ENTRY_OK)
+    assert generated != monolith  # the assembly really did reorder
+    base = parsed(ENTRY_A + "\n" + ENTRY_B)
+    bad = parsed(ENTRY_BAD)
+    assert guard.violations(base, generated, (0, 4, 0)) == bad
+    assert guard.violations(base, monolith, (0, 4, 0)) == bad
 
 
 def _run_main(tmp, check):
