@@ -349,7 +349,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$RELEASED" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-            echo "next=${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))" >> "$GITHUB_OUTPUT"
+            echo "next=${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((10#${BASH_REMATCH[3]} + 1))" >> "$GITHUB_OUTPUT"
           else
             echo "pre-release $RELEASED: no post-release bump"
           fi
@@ -399,13 +399,16 @@ jobs:
           title="chore(release): bump to $NEXT for post-release development"
           git -c user.name=github-actions -c user.email=github-actions@github.com \
             checkout -B "$branch"
+          # Tracked edits, plus any file make gen newly generates.
           git add -u
+          git add crates/rpmcrab/man crates/rpmcrab/completions
           git -c user.name=github-actions -c user.email=github-actions@github.com \
             commit -m "$title"
           # A rerun resets the branch: force-with-lease updates the open PR
-          # instead of failing non-fast-forward. Fetch first so the lease
-          # has a baseline on a fresh clone.
-          git fetch origin "$branch" || true
+          # instead of failing non-fast-forward. Fetch into the
+          # remote-tracking ref first so the lease has a baseline on a
+          # fresh clone.
+          git fetch origin "$branch:refs/remotes/origin/$branch" || true
           git push --force-with-lease -u origin "$branch"
           body="v$RELEASED is out; main moves to $NEXT for post-release development. Opened by the release workflow."
           # --head matches fork PRs by branch name too: only this repo's
