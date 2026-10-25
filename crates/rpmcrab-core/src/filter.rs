@@ -56,6 +56,9 @@ pub enum FilterError {
     Pattern(fancy_regex::Error),
     /// A `[Scoring]` value cannot be coerced to an integer badness.
     Scoring { check: String, value: toml::Value },
+    /// A `class:<name>` filter names a class the defect-pattern
+    /// registry does not know.
+    UnknownClass { pattern: String, class: String },
 }
 
 impl fmt::Display for FilterError {
@@ -66,6 +69,10 @@ impl fmt::Display for FilterError {
                 f,
                 "invalid Scoring value {value} for {check:?} (want an integer badness)"
             ),
+            FilterError::UnknownClass { pattern, class } => write!(
+                f,
+                "filter {pattern:?} names unknown defect-pattern class {class:?}"
+            ),
         }
     }
 }
@@ -74,7 +81,7 @@ impl std::error::Error for FilterError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             FilterError::Pattern(e) => Some(e),
-            FilterError::Scoring { .. } => None,
+            FilterError::Scoring { .. } | FilterError::UnknownClass { .. } => None,
         }
     }
 }
@@ -120,57 +127,58 @@ fn coerce_scoring(check: &str, v: &toml::Value) -> Result<i64, FilterError> {
 
 /// One `Filters` pattern as compiled, with the string it was written
 /// as. The written form is what the unused-filter audit credits: a
-/// `class:<name>` pattern (issue #959) compiles to the registry's
-/// member-tag alternation, and a match credits the class pattern the
-/// user wrote, not the expansion.
+/// `class:<name>` pattern (issue #959) matches by class membership,
+/// and a match credits the class pattern the user wrote.
 struct CompiledFilter {
     source: String,
-    re: Regex,
+    kind: CompiledKind,
+}
+
+/// How a compiled pattern decides whether it suppresses a finding.
+enum CompiledKind {
+    /// A regex over the finding's match string (and its alias form):
+    /// the semantics of every ordinary pattern.
+    Regex(Regex),
+    /// A `class:<name>` pattern: suppresses exactly the findings whose
+    /// tag belongs to the named class, resolved against the
+    /// defect-pattern registry. The match string is never consulted, so
+    /// a member tag appearing in a finding's detail or in its package
+    /// name cannot suppress a non-member finding.
+    Class(&'static str),
 }
 
 impl CompiledFilter {
     fn new(source: &str) -> Result<Self, FilterError> {
+        if let Some(class) = source.strip_prefix("class:") {
+            let known =
+                defect_pattern::known_class(class).ok_or_else(|| FilterError::UnknownClass {
+                    pattern: source.to_string(),
+                    class: class.to_string(),
+                })?;
+            return Ok(Self {
+                source: source.to_string(),
+                kind: CompiledKind::Class(known),
+            });
+        }
         Ok(Self {
             source: source.to_string(),
-            re: Regex::new(&expand_class_pattern(source))?,
+            kind: CompiledKind::Regex(Regex::new(source)?),
         })
     }
-}
 
-/// Expand a `class:<name>` filter into the alternation of its member
-/// tags from the defect-pattern registry (issue #959), so one filter
-/// suppresses the whole class with the same emit-time semantics as
-/// every other filter. Any other pattern — including a `class:` name
-/// the registry does not know — compiles exactly as written.
-fn expand_class_pattern(pattern: &str) -> String {
-    let Some(class) = pattern.strip_prefix("class:") else {
-        return pattern.to_string();
-    };
-    let members = defect_pattern::class_members(class);
-    if members.is_empty() {
-        return pattern.to_string();
-    }
-    let alternation = members
-        .iter()
-        .map(|m| escape_regex(&m.tag))
-        .collect::<Vec<_>>()
-        .join("|");
-    format!("(?:{alternation})")
-}
-
-/// Escape a registry tag name for a regex alternation. Tag names are
-/// `[a-z0-9-]` in practice; this keeps the expansion exact for any
-/// future tag shape without naming the `regex` crate, which is not a
-/// direct dependency.
-fn escape_regex(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if "\\.+*?()|[]{}^$#&-~".contains(c) {
-            out.push('\\');
+    /// Whether this pattern suppresses `finding`. Regex patterns run
+    /// over `match_string` (the finding's de-coloured line) and over
+    /// `alias_string` (the same line under its former tag) when one
+    /// exists; class patterns resolve the finding's tag instead.
+    fn matches(&self, finding: &Finding, match_string: &str, alias_string: Option<&str>) -> bool {
+        match &self.kind {
+            CompiledKind::Class(class) => defect_pattern::class_of(&finding.check) == Some(*class),
+            CompiledKind::Regex(re) => {
+                matches!(re.find(match_string), Ok(Some(_)))
+                    || alias_string.is_some_and(|s| matches!(re.find(s), Ok(Some(_))))
+            }
         }
-        out.push(c);
     }
-    out
 }
 
 impl Filter {
@@ -230,7 +238,7 @@ impl Filter {
 
     /// Retained findings per defect-pattern class (issue #959), keyed
     /// by class name; a class with no retained finding is absent. The
-    /// renderers' per-class counters read this, so text and JSON agree.
+    /// JSON summary's per-class counts read this.
     pub fn class_counts(&self) -> std::collections::BTreeMap<&'static str, u64> {
         let mut counts = std::collections::BTreeMap::new();
         for finding in &self.findings {
@@ -288,11 +296,7 @@ impl Filter {
                 .filter_alias
                 .map(|alias| finding.match_string_as(alias));
             for pat in &self.filters {
-                let matched = matches!(pat.re.find(&match_string), Ok(Some(_)))
-                    || alias_string
-                        .as_ref()
-                        .is_some_and(|s| matches!(pat.re.find(s), Ok(Some(_))));
-                if matched {
+                if pat.matches(&finding, &match_string, alias_string.as_deref()) {
                     self.used_filters.insert(pat.source.clone());
                     self.filtered_out += 1;
                     return;
@@ -543,19 +547,49 @@ mod tests {
         assert_eq!(f.filtered_out, 2);
         assert_eq!(f.printed(Level::Warning), 1);
         assert_eq!(f.results().len(), 1);
-        // The audit credits the pattern as written, not its expansion.
+        // The audit credits the pattern as written.
         assert!(f.unused_filters(&c.filters).is_empty());
     }
 
     #[test]
-    fn unknown_class_filter_compiles_as_written() {
+    fn unknown_class_filter_is_a_configuration_error() {
+        // An unknown `class:` name is a typed error at construction,
+        // never a literal pattern that silently matches nothing.
+        for pattern in ["class:no-such-class", "class:defect-patern", "class:"] {
+            let mut c = cfg();
+            c.filters = vec![pattern.to_string()];
+            let err = Filter::new(&c, Color::for_tty(false))
+                .err()
+                .unwrap_or_else(|| panic!("{pattern} must not construct a Filter"));
+            assert!(
+                matches!(err, FilterError::UnknownClass { .. }),
+                "{pattern}: {err}"
+            );
+            assert!(err.to_string().contains(pattern), "{err}");
+        }
+    }
+
+    #[test]
+    fn class_filter_never_matches_member_tags_in_details_or_package_names() {
+        // Regression (PR #961 review): the class pattern used to expand
+        // to an unanchored alternation over the whole match string, so
+        // a member tag appearing in a non-member finding's detail, or
+        // as its package's name, suppressed a genuine error (printed
+        // errors went to 0 and the exit code from 64 to 0). Class
+        // membership is a property of the finding's tag alone.
         let mut c = cfg();
-        c.filters = vec!["class:no-such-class".to_string()];
+        c.filters = vec!["class:defect-pattern".to_string()];
         let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
-        f.add_info(finding("call-to-mktemp", Level::Error));
+        let mut by_detail = finding("no-soname", Level::Error);
+        by_detail.details = vec!["/usr/lib64/executable-stack-note.o".to_string()];
+        f.add_info(by_detail);
+        let mut by_package = finding("no-soname", Level::Error);
+        by_package.pkg_name = "call-to-mktemp-demo".to_string();
+        f.add_info(by_package);
         assert_eq!(f.filtered_out, 0);
-        assert_eq!(f.printed(Level::Error), 1);
-        assert_eq!(f.unused_filters(&c.filters), vec!["class:no-such-class"]);
+        assert_eq!(f.printed(Level::Error), 2);
+        // Nothing matched, so the audit reports the pattern unused.
+        assert_eq!(f.unused_filters(&c.filters), vec!["class:defect-pattern"]);
     }
 
     #[test]
