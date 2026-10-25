@@ -59,10 +59,17 @@ class ViolationsTest(unittest.TestCase):
         new = entry("zero-length", "0.3.0", reason="new wording")
         self.assertEqual(self.check([old], [new]), [])
 
-    def test_since_moved_onto_a_shipped_version_fails(self):
-        old = entry("zero-length", "0.4.1")
-        new = entry("zero-length", "0.4.0")
-        self.assertEqual(self.check([old], [new]), [new])
+    def test_since_correction_on_an_existing_entry_passes(self):
+        # #916 backdated an entry to the release that really shipped it.
+        old = entry("TagsCheck", "0.3.1")
+        new = entry("TagsCheck", "0.1.0")
+        self.assertEqual(self.check([old], [new]), [])
+
+    def test_added_entry_beside_a_since_correction_fails(self):
+        old = entry("TagsCheck", "0.3.1")
+        fixed = entry("TagsCheck", "0.1.0")
+        bad = entry("no-binary", "0.4.0")
+        self.assertEqual(self.check([old], [fixed, bad]), [bad])
 
     def test_release_prep_retargeting_passes(self):
         # The 0.4.0 bump rewrote unshipped 0.3.1 entries to 0.4.0 while
@@ -71,9 +78,24 @@ class ViolationsTest(unittest.TestCase):
         new = entry("prereq-use", "0.4.0")
         self.assertEqual(_mod.violations([old], [new], (0, 3, 0)), [])
 
+    def test_new_entry_sharing_key_and_since_with_an_old_one_fails(self):
+        old = entry("BinariesCheck", "0.4.0", reason="shipped")
+        new = entry("BinariesCheck", "0.4.0", reason="added after the tag")
+        self.assertEqual(self.check([old], [old, new]), [new])
+
+    def test_rekeyed_entry_keeping_since_passes(self):
+        old = entry("missing-mandatory-optflags", "0.1.0", kind="detail")
+        new = entry("forbidden-optflags", "0.1.0", kind="detail")
+        self.assertEqual(self.check([old], [new]), [])
+
+    def test_reordered_entries_pass(self):
+        a, b, c = (entry(n, "0.1.0", reason=n) for n in ("a", "b", "c"))
+        self.assertEqual(self.check([a, b, c], [c, a, b]), [])
+
     def test_malformed_since_fails(self):
-        bad = entry("no-binary", "next")
-        self.assertEqual(self.check([], [bad]), [bad])
+        for since in ["next", 123, "0.4.²"]:
+            bad = entry("no-binary", since)
+            self.assertEqual(self.check([], [bad]), [bad])
 
     def test_no_release_means_nothing_to_check(self):
         self.assertEqual(_mod.violations([], [entry("no-binary", "0.0.1")], None), [])
