@@ -1,0 +1,11 @@
+# Divergence ledger entries owned by `rpmlintrc-discovery`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "rpmlintrc-discovery"
+kind = "behaviour"
+reason = "Deliberate divergence (plusky/rpmcrab#830): with no -r files and nothing found in the RpmlintrcSearchPaths locations, rpmlintrc auto-discovery looks beside every positional argument in turn -- a file argument's directory, a directory argument itself -- and loads every file found; the reference gates the beside-argument lookup on exactly one positional argument (lint.py:209-216), so its multi-package runs discover no rpmlintrc beside the arguments. Filters are session-scoped once loaded in both implementations, so a package's name-scoped rpmlintrc filters apply identically whether the package is checked alone or in a multi-package run. An rpmlintrc found beside several arguments is deduplicated by path and loads once, so the unused-rpmlintrc-filter audit accounts its patterns exactly as it accounts an rpmlintrc loaded any other way."
+since = "0.4.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/830"

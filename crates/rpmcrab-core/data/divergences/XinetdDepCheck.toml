@@ -1,0 +1,18 @@
+# Divergence ledger entries owned by `XinetdDepCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "deprecated-xinetd-config"
+kind = "behaviour"
+reason = "New port-only Error: any file shipped under /etc/xinetd.d/ emits E deprecated-xinetd-config with the detail 'use a systemd socket unit instead'. The reference has no such finding -- its xinetd file rule is typo-dead (FilesCheck.py:783) and its deprecation signal is only E obsolete-xinetd-requirement on the dependency. Deliberate: systemd socket units are the replacement, and validating the dependency plumbing of a dead service manager is wasted effort. Pinned by emission-path tests in xinetd_dep.rs."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/214"
+
+[[divergence]]
+case = "global"
+check = "XinetdDepCheck"
+kind = "behaviour"
+reason = "Deliberate config divergence: rpmcrab enables XinetdDepCheck in its bundled default config (crates/rpmcrab-core/data/configdefaults.toml) and in the vendored openSUSE flavour config (crates/rpmcrab-core/data/distro/opensuse/opensuse.toml, appended by EXTRA_OPENSUSE_CHECKS in scripts/generate-distro-configs.py). The reference lists the check in no shipped config -- neither its configdefaults.toml nor the openSUSE branch's opensuse.toml -- so it never runs there. The port implements the check and its message is the point (xinetd is obsolete; the replacement is a systemd socket unit), so it runs by default: packages requiring xinetd or shipping /etc/xinetd.d/ files now error, and the run header reports checks: 45 where the reference reports 43. The Fedora flavour config is untouched."
+since = "0.3.0"

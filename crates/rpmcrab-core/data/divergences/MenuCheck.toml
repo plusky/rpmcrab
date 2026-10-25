@@ -1,0 +1,31 @@
+# Divergence ledger entries owned by `MenuCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "MenuCheck"
+kind = "behaviour"
+reason = "A whitespace-only quoted command (command=\" \") or a single-token command that matches a MenuLaunchers regexp (MenuCheck.py:118,137) raises IndexError in the reference and aborts the whole run with exit 3; the port emits `menu-command-not-in-package` with an empty detail and continues. One malformed menu entry must not forfeit the rest of the package."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "MenuCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `use-of-launcher-in-menu-but-no-requires-on` parsed ambiguously. Reworded: the package has no dependency on the package that provides the launcher (verified in `checks/menu.rs`)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "MenuCheck"
+kind = "detail"
+reason = "Typo fixes in staged `--explain` texts for `version-in-menu-longtitle` and `version-in-menu-title`: `filed` to `field`. Meaning unchanged."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "MenuCheck"
+kind = "detail"
+reason = "Port-only `--explain` descriptions for `executable-menu-file`, `invalid-menu-icon-type`, `menu-in-wrong-dir`, `old-menu-entry`, `strange-needs`, `unable-to-parse-menu-entry`, `unable-to-parse-menu-needs`: the reference emits these findings but ships no descriptions. Staged `menu-in-wrong-directory` removed: the port emits `menu-in-wrong-dir`, the `-directory` variant never fires."
+since = "0.1.0"

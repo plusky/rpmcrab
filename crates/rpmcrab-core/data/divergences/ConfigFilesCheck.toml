@@ -1,0 +1,42 @@
+# Divergence ledger entries owned by `ConfigFilesCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "ConfigFilesCheck"
+kind = "detail"
+reason = "`non-etc-or-var-file-marked-as-conffile` carries the upstream rpmlint#1606 reword (drop `%config` named as an option, not just moving files) ahead of the pinned reference, per the fix-in-port rule; the check behaviour is unchanged. Provenance: `crates/rpmcrab-core/data/descriptions/README.md`."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "ConfigFilesCheck"
+kind = "behaviour"
+reason = "New `usr-etc-file-marked-as-conffile` warning with no reference counterpart: a shipped regular file entry at `/usr/etc` or below it with the RPMFILE_CONFIG bit set (any `%config` variant) fires. %ghost entries are excluded (a ghost ships no vendor default in the package) and directory entries are excluded (a directory never gets .rpmnew/.rpmsave treatment), which aligns the scope with the sibling `shlib-policy-etc-payload` rule, which filters both the same way. Under the UsrEtc layout `/usr/etc` ships vendor defaults and administrator configuration lives in `/etc`, so the `%config` mark makes rpm treat a vendor default as administrator configuration across updates. The frozen 2.10.0 reference has no UsrEtc rule; its nearest finding, `non-etc-or-var-file-marked-as-conffile`, covers the path only incidentally (its bare is_config filter includes ghosts and directories) and prescribes the generic fix. A regular /usr/etc %config file therefore intentionally emits both findings — the generic placement info and this specific UsrEtc warning — rather than suppressing either. The predicate lives in `crates/rpmcrab-core/src/checks/atomic_update.rs` with the transactional-update family and is emitted by ConfigFilesCheck. Its staged `--explain` description lives in `crates/rpmcrab-core/data/descriptions/ConfigFilesCheck.toml`."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/712"
+
+[[divergence]]
+case = "global"
+check = "conffile-without-noreplace-flag"
+kind = "behaviour"
+reason = "Deliberate (plusky/rpmcrab#556, config-filters audit #538 ruling item 1): the check is a verbatim port and unchanged, but the vendored configs drop upstream's bare filter for this finding (DROP_LIVE_FILTERS in scripts/generate-distro-configs.py), so the findings surface under the distro flavours where the reference's own openSUSE config hides them as policy. Measured by header scan over the Factory snapshot corpus (51,586 binary RPMs; validated against paired port runs -- aaa_base 8, firejail 1,381, syslogd 1, laptop-mode-tools 34, default config 0), the filter hides 4,261 findings in 649 srcpkgs: ~78% of the volume is packager-deliberate bulk-glob corpora (firejail's 1,381 sandbox profiles the largest) and structural non-configs (ghosts, symlinks, /var state, vendor data outside /etc, drop-in snippets), while the residual 941 regular files under /etc in 420 srcpkgs -- daemon main configs an admin edits in place, syslogd's /etc/syslog.conf the archetype -- have no other coverage. The tag's --explain description diverges from the reference's alongside: where the reference prescribes %config(noreplace), the port's text (crates/rpmcrab-core/data/descriptions/ConfigFilesCheck.toml) states that both %config and %config(noreplace) are valid and lays out the upgrade semantics the choice turns on -- plain %config preserves a locally modified file only as .rpmsave and the newly shipped file takes effect, noreplace keeps local modifications in effect and the new file arrives as .rpmnew -- asking the maintainer to consider per file which behaviour fits."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/556"
+
+[[divergence]]
+case = "global"
+check = "non-etc-or-var-file-marked-as-conffile"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports I where the reference reports W. A %config mark outside /etc and /var is a packaging-shape observation with no artefact consequence on its own (pcp calibration set); the companion conffile-without-noreplace-flag, which carries the upgrade-clobber risk, stays W."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "conffile-without-noreplace-flag"
+kind = "behaviour"
+reason = "A `%ghost %config` entry does not fire (issue #793): a ghost ships no vendor content, so there is no shipped default for the noreplace flag to protect and the flag is meaningless for the entry. The reference's check iterates its config-file list the same way; it stays silent on shapes like the apparmor-profiles placeholders (49 `%ghost %config` files under /etc/apparmor.d/local) only because its openSUSE config blanket-filters the whole finding — the filter #556 dropped. The exclusion mirrors the one this check's UsrEtc rule already applies to ghost entries on the same rationale. Real conffiles without noreplace keep firing, and a ghost entry outside /etc and /var still draws the placement finding, which judges the %config mark itself."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/793"

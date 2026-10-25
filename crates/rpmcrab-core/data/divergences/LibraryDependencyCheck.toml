@@ -1,0 +1,33 @@
+# Divergence ledger entries owned by `LibraryDependencyCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "LibraryDependencyCheck"
+kind = "behaviour"
+reason = "Deliberate fix (plusky/rpmcrab#74): the per-package maps are keyed on `(name, arch)` instead of `pkg.name` alone. The reference keys on name alone (`LibraryDependencyCheck.py:37-39`), so linting `foo-devel.x86_64` then `foo-devel.aarch64` together silently drops the first arch — only the last arch is ever checked, and no user would want that. The port checks each arch. Pinned by `cross_arch_packages_are_each_checked`."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "LibraryDependencyCheck"
+kind = "behaviour"
+reason = "Symlink chains inside the devel package are resolved to the real file before the dependency check (any intermediate link, not just `.so` ones; joined targets are lexically normalised, so a `..` in a link target resolves to the provided path instead of silently missing); the reference records the unnormalised one-hop target, which misfires no-library-dependency-for on intermediate links the devel ships itself (Imath: libImath.so -> libImath-3_2.so -> libImath-3_2.so.30). Separately, the reference driver resets cross-package state after every package, so the check is effectively silent in multi-RPM runs; rpmcrab keeps the intended accumulate-then-verify semantics."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "no-library-dependency-for"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports W where the reference reports E. Like no-binary, the finding has a structural false-positive shape on self-contained devel content (pcp calibration set); the sibling no-library-dependency-on stays E."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "LibraryDependencyCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #863): no-library-dependency-on also credits the anchor chain inside the scanned set. When a devel package requires a package built from the same source (the same SOURCERPM), pinned with = to that sibling's own version — the version spelling (77 of the credited chains) or the version-release spelling (12) — and the sibling's own requirements name the library package or one of its provides (the library's soname provide in 80, the package's own name in 29, the forms overlapping), the dependency on the library exists through the sibling and the finding stays silent; the reference credits only a direct requirement on the library package itself. The anchor can be named with its isa qualifier (rocm-clang-devel on rocm-clang-libs(x86-64) and kin, 4 chains). The credit is exactly one hop and every condition is load-bearing: an unversioned requirement on the sibling credits nothing, a pin to a version the sibling does not carry credits nothing, a requirement on a package of another source credits nothing, and a sibling whose requirements reach nothing of the library's leaves the chain broken. The sibling is resolved by (name, arch) like the check's devel state: a sibling built for another arch credits nothing, a noarch sibling stands in only when no same-arch build is in the run, and the library's provides are read from the build that ships the linked file. Measured on the Factory corpus (sweep run-20261022-857d5ece population; the 181 affected source packages re-measured before and after the fix, the before side reproducing the sweep's 194 exactly and no other finding changing in those packages): 194 E in 181 source packages before, 111 E in 105 after — 89 findings silenced by the chain credit, and 6 devel packages (libbraille, gensio, genders, syslog-ng, clamav, miredo) where the one-finding-per-devel-package verdict now names a later, genuinely uncredited link instead of the credited one. The residue (111) is accounted by shape: 45 direct requirements in the isa-qualified form (libfoo(x86-64) = EVR), which the reference's host-%{_isa} arm credits on a host of the package's own arch and the aarch64 sweep host cannot; 27 anchor chains that reach nothing of the library (liburing-devel on liburing-ffi2, rpm-devel on librpmbuild10, protobuf-devel on libprotoc36_2_0 — broken chains, the finding's real target); 29 devel packages requiring no sibling of the set at all (expect-devel requires nothing); 4 anchor chains without the exact pin (the toluapp family on its tools packages); and the 6 newly named second links. Pinned by anchor_chain_credits_devel_package, anchor_chain_version_release_pin_credits, anchor_chain_isa_qualified_anchor_credits, anchor_chain_library_name_reach_credits, anchor_without_reach_still_fires, anchor_unversioned_still_fires, anchor_wrong_version_still_fires, anchor_floor_pin_still_fires, anchor_other_source_still_fires, self_anchor_still_fires, anchor_matching_arch_credits, anchor_cross_arch_still_fires, anchor_noarch_fallback_credits, anchor_reach_via_other_arch_lib_provides_still_fires and anchor_chain_survives_export_import in library_dependency.rs."
+since = "0.4.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/863"

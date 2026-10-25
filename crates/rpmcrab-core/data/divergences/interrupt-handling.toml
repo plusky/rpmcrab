@@ -1,0 +1,10 @@
+# Divergence ledger entries owned by `interrupt-handling`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "interrupt-handling"
+kind = "behaviour"
+reason = "On SIGINT the run ends with the shell's default status 130 but without printing the time report first; the reference catches KeyboardInterrupt, prints it, then re-raises (lint.py:122-127). Printing it needs a signal handler, which is a dependency decision not taken yet."
+since = "0.1.0"

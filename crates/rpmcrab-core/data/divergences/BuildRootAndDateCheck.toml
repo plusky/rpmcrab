@@ -1,0 +1,40 @@
+# Divergence ledger entries owned by `BuildRootAndDateCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "BuildRootAndDateCheck"
+kind = "behaviour"
+reason = "today_string() derives the date from UTC, while the reference's time.strftime('%b %e %Y') is local time. On hosts east of UTC the two disagree for 22:00-24:00 UTC, which moves which files trigger file-contains-current-date and file-contains-date-and-time. E-level today, but a real byte-level difference. Fixing it needs a timezone database or libc localtime; the workspace forbids unsafe_code, so this stays ledgered."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "BuildRootAndDateCheck"
+kind = "behaviour"
+reason = "today_string() hardcodes English month abbreviations, while the reference inherits the ambient locale for %b (BuildRootAndDateCheck.__init__ is one of the few places the reference does not apply ENGLISH_ENVIRONMENT). On non-English locales the reference matches e.g. 'Okt' where the port matches 'Oct'."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "BuildRootAndDateCheck"
+kind = "detail"
+reason = "`BuildRootAndDateCheck.toml` is the mechanical union of the reference's `descriptions/BuildDateCheck.toml` and `descriptions/BuildRootCheck.toml` (entries byte-identical); the port merged the two reference checks into one, so a single file named after the port check keeps the check-name to TOML mapping total. Provenance: `crates/rpmcrab-core/data/descriptions/README.md`."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "file-contains-date-and-time"
+kind = "severity"
+reason = "Deliberate severity recalibration (issue #759, decision D11 of #714): the port reports E where the reference reports W. An embedded build date stamps image content with the build moment and makes the image non-reproducible byte-for-byte, a significant defect on an image-based OS. Solidity was measured before the flip by build-time emulation over the Factory corpus (51,589 RPMs; every payload scanned for its own BUILDTIME date under the check's exact rule, the check itself matching the linter's run date): file-contains-date-and-time fires 443 times in 240 binary packages (208 srcpkgs). The matching rule is unchanged; only the level moves."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/759"
+
+[[divergence]]
+case = "global"
+check = "file-contains-current-date"
+kind = "severity"
+reason = "Deliberate severity recalibration (issue #759, decision D11 of #714): the port reports E where the reference reports W, on the file-contains-date-and-time reasoning. The build-time emulation over the Factory corpus (51,589 RPMs) fires it 135 times in 71 binary packages (59 srcpkgs); 25 hand-read firings across both date findings carried 23 genuine embedded build dates (ELF __DATE__/__TIME__ stamps, doxygen generation stamps, firmware build stamps, configure-stamped configuration). The 2 remaining firings of the 578 are upstream release-history files whose newest entry's date equals the build date on a release-day build (liberation-fonts ChangeLog, perl-Unicode-LineBreak Changes): the file genuinely contains the build date, the class is bounded and self-limiting, and the matching rule stays unchanged."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/759"

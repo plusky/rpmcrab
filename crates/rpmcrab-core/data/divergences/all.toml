@@ -1,0 +1,11 @@
+# Divergence ledger entries owned by `all`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "all"
+kind = "behaviour"
+reason = "Upstream rpmlint#134: a new `--errors-only` CLI flag skips warning-only checks entirely, for post-build runs that only care about errors. The frozen 2.10.0 reference has no such flag: every configured check runs. The filter is a static pre-scoring bound on each check's declared `max_severity` — BashismsCheck, ConfigFilesCheck, FHSCheck, SourceCheck, SystemdInstallCheck and TmpFilesCheck are the six warning-only checks (every `add_info` call site audited) — so a finding that runtime promotion (`Scoring>0`, severity overrides) would have raised to E on a skipped check never runs. `--strict` promotes every finding to E at emit time, so under `--strict` the effective maximum of every check is Error and the filter is disabled. The header still reports the configured `Checks` count (`checks: 43`), matching the reference's `lint.py:272`."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/134"

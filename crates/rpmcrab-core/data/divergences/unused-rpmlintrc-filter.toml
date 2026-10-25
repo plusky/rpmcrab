@@ -1,0 +1,11 @@
+# Divergence ledger entries owned by `unused-rpmlintrc-filter`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "unused-rpmlintrc-filter"
+kind = "severity"
+reason = "Deliberate severity divergence (plusky/rpmcrab#816): the port reports W; the reference reports E (filter.py validate_filters). The audit judges the rpmlintrc, not the package, and the reference gives the finding no build effect of its own: it is in no scoring table (the default badness 1 applies, scoring-strict included), and cli.py enforces --permissive on every invocation without -s/--strict (rpmlint#1592), so a reference run whose only error is this audit exits 0 — OBS fails a build on any nonzero linter exit (obs-build recipe_run_rpmlint), and Factory packages carrying the finding build. In the severity-only exit model (§4.6) the E failed builds on its own: home:scarabeus_iv apparmor branch builds under rpmcrab 0.3.0 failed on the libapparmor flavour whose only error was this finding, while the reference reports the identical finding on both apparmor flavour sets and the same packages build in Factory. Detection, matching and accounting are unchanged — a per-run audit on the last package reporting the reference's pattern set (#353) — and -s/--strict promotes the warning to E together with every other finding. Measured on the 2026-10-18 Factory sweep (run-20261018-175318e8): 1,599 findings in 635 source packages."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/816"

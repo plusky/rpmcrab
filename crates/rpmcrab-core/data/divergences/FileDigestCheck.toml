@@ -1,0 +1,78 @@
+# Divergence ledger entries owned by `FileDigestCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "detail"
+reason = "File digest finding details are byte-identical to the reference except `{type}-file-parse-error`, which renders the Rust `std::io::Error` text where the reference interpolates its own OS-error wording, and the `file-digest-mismatch` group-sibling case (issue #755), which has its own behaviour divergence entry; `whitelisted-file-missing` matches in detail (its severity is the FileDigestCheck severity divergence)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "behaviour"
+reason = "Once one entry of a digest group mismatches, the reference reports a `{type}-file-digest-mismatch` line for every group entry with a recorded digest, including entries whose recorded digest equals the file's own digest. The port reports only entries whose recorded digest differs from the file's digest, so every mismatch line names a file whose content differs from its record (issue #755)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/755"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#760, decision D10 of the single-flavour programme in plusky/rpmcrab#714): the port reports E where the reference reports W for `{type}-whitelisted-file-missing`. The finding prints only when the rest of the package's digest group verifies, so it names a package that ships a whitelisted restricted location's sibling files while omitting a recorded one; measured over the Factory corpus under the unified data set it fires 9 times."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/760"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "detail"
+reason = "FileDigestCheck drops the `({digest_hint})` detail argument on `{type}-file-unauthorized` findings; the reference appends the observed per-digester digests of the offending file."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "behaviour"
+reason = "The `xml` digester (plusky/rpmcrab#75) only accepts UTF-8, with an optional BOM stripped: a file in another encoding fails with `{type}-file-parse-error`, where the reference's expat-based `ET.canonicalize` would decode and digest it. All 156 `digester = \"xml\"` entries in dbus-services.toml are UTF-8."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/75"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "behaviour"
+reason = "The `xml` digester (plusky/rpmcrab#75) expands internal-subset general entities as text: markup inside an entity value (e.g. `<!ENTITY e \"<b>x</b>\">`) is escaped rather than parsed as elements, where the reference digests the parsed form. Such entities do not occur in the whitelisted XML configs."
+since = "0.1.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/75"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "behaviour"
+reason = "The `xml` digester accepts colon-bearing general entity names (`<!ENTITY ns:e \"v\">`, referenced as `&ns:e;`) and digests the document, where `xml.etree` rejects it: ET enforces `NCName` at its own layer above the parser. Raw-expat parity governs this check -- expat is its reference parser and expat's `Name` production includes the colon -- so the port follows expat. Names raw expat rejects (a leading digit, an empty or space-bearing reference) are still rejected."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/642"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "behaviour"
+reason = "Malformed configuration aborts via Rust panic (exit 101, panic text on stderr) where the reference raises out of `__init__` (exit 1, traceback on stderr). Both kill the run before any package is linted; the abort itself is the parity point, not the exit code."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "limitation"
+reason = "MD5, SHA-1 and the SHA-2 family are implemented; the reference's `hashlib.new()` accepts any algorithm hashlib knows (e.g. SHA3, BLAKE2). Anything else fails the run at configuration load. Latent: the shipped whitelists use only `sha256` and `skip`."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "detail"
+reason = "Typo fix in staged `--explain` text for `dbus-file-parse-error`: the article before `D-Bus` fixed. Meaning unchanged."
+since = "0.1.0"

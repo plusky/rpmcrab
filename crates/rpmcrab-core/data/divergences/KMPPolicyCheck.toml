@@ -1,0 +1,17 @@
+# Divergence ledger entries owned by `KMPPolicyCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "KMPPolicyCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `kmp-missing-supplements` told the packager to fix `BuildRequires` (`kernel-syms`, `modutils`) -- advice unrelated to the finding, which fires when the package lacks the kernel-flavor Supplements (verified in `checks/kmp_policy.rs`). Reworded in the voice of the sibling `kmp-missing-requires`/`kmp-missing-enhances` entries: extend `%kernel_module_package` with the preamble carrying `Supplements: packageand(kernel-%1:%name)`."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "KMPPolicyCheck"
+kind = "detail"
+reason = "Typo fix in staged `--explain` text for `kmp-excessive-supplements`: the misspelling of `Supplements` fixed. Meaning unchanged."
+since = "0.1.0"

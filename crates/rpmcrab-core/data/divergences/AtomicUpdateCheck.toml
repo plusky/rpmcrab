@@ -1,0 +1,72 @@
+# Divergence ledger entries owned by `AtomicUpdateCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "AtomicUpdateCheck"
+kind = "behaviour"
+reason = "A present-but-wrong-type AtomicCheckGhosts (e.g. the string \"false\") panics at construction; the reference treats any truthy value as enabled and runs. The port deliberately fails fast on a misconfigured type instead of reproducing the reference's permissiveness."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "AtomicUpdateCheck"
+kind = "behaviour"
+reason = "Config-scoped (issue #698, superseding issue #478): transactional updates are mandatory, so the check runs everywhere -- it is listed in the bundled default config and in both vendored flavor configs; the reference lists it only in its opensuse config, not in its configdefaults, so an unflavoured reference run never runs it. The generator's opensuse exclusion (EXCLUDED_OPENSUSE_CHECKS in scripts/generate-distro-configs.py) is empty, and the opensuse flavor keeps the filesystem exemption for the finding, as the slfo flavor does. Measured over the Factory corpus (17,242 srcpkgs, 2026-10-18): dir-or-file-outside-snapshot fires 58,713 times over 347 srcpkgs -- 94% of the lines under /srv/www, the FHS web root the distro mandates for web applications (nextcloud alone accounts for 30,148), and most of the rest /var state directories -- and ghost-outside-snapshot fires 7,289 times over 223 srcpkgs with AtomicCheckGhosts enabled (the shipped default is false). The port emits both findings exactly as the reference does, except the directory exemption ledgered under #711 and the per-folder aggregation of dir-or-file-outside-snapshot ledgered under #835 (the 58,713 count is the pre-exemption, pre-aggregation/reference-equivalent population)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/698"
+
+[[divergence]]
+case = "global"
+check = "AtomicUpdateCheck"
+kind = "behaviour"
+reason = "A present-but-wrong-type AtomicAllowedDirs (e.g. the string \"/etc/\") panics at construction; the reference iterates tuple('/etc/') as character prefixes and runs. The port deliberately fails fast on a misconfigured type instead of reproducing the reference's permissiveness."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "AtomicUpdateCheck"
+kind = "behaviour"
+reason = "A non-string element in AtomicAllowedDirs/AtomicDisallowedSubdirs (e.g. AtomicDisallowedSubdirs = [42]) panics at construction; the reference raises TypeError later, at check time. The port deliberately fails fast on a misconfigured type instead of reproducing the reference's deferred failure."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "AtomicUpdateCheck"
+kind = "behaviour"
+reason = "New `scriptlet-service-restart` warning with no reference counterpart: a scriptlet body (every kind except %verifyscript) that carries no TRANSACTIONAL_UPDATE guard and invokes systemctl with a restart, try-restart, reload-or-restart, try-reload-or-restart or start verb at command position — or the legacy service/rc* forms with restart, start, try-restart or condrestart — fires, with the scriptlet label and the offending line as detail. The reference's AtomicUpdateCheck docstring states that (re)starting daemons is not possible during a transactional update, but the reference implements no such rule (its AtomicUpdateCheck.py covers file placement only). On a transactional-update system scriptlets run inside the new snapshot with systemd offline, so a direct (re)start silently does nothing; the distribution macros stay silent because systemd-update-helper defers their service actions to the booted system. The scan is lexical and decidable: command position only (segment start, after shell keywords or assignments), comment lines and trailing comments ignored, and systemctl options plus their values are stepped over to reach the verb. The tokenisation is the line walker shared with the rc-link scan (issue #731): a command substitution's opener starts no segment and no substitution depth is tracked, so an interior command after a separator is a segment of its own, and the $(...) and backtick forms are judged identically (issue #783). Warning, not Error: on a classic system the restart works — only the transactional case no-ops. Where PostCheck's `daemon-activation` Error also applies (sh/bash/perl scriptlets under the general install-time activation policy), this warning adds the transactional-specific explanation rather than restating the policy error, and it is interpreter-agnostic, so macro-free bodies outside that scope are covered too. Pinned by unit tests in atomic_update.rs. Its staged `--explain` description lives in `crates/rpmcrab-core/data/descriptions/AtomicUpdateCheck.toml`."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/709"
+
+[[divergence]]
+case = "global"
+check = "dir-or-file-outside-snapshot"
+kind = "severity"
+reason = "Config-only (issue #698): the vendored configs drop upstream's [Scoring] entry dir-or-file-outside-snapshot = 0 (DROP_SCORING in scripts/generate-distro-configs.py), so for non-directory entries the port prints the emitted E with the default badness 1 where the reference under its opensuse config prints W with badness 0 (the b == 0 rule demotes E to W); directory entries (12.1% of findings) print nothing where the reference prints W, per the directory exemption ledgered under #711. Transactional updates are mandatory in every flavor, and under the badness doctrine (issue #699) no shipped badness is set for the finding: its significance is its Error level. The demote made the check advisory in the flavor that ran it: all 58,713 lines over 347 srcpkgs in the 20261018 Factory corpus measurement printed W with badness 0 under the pre-change slfo flavor config."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/698"
+
+[[divergence]]
+case = "global"
+check = "dir-or-file-outside-snapshot"
+kind = "behaviour"
+reason = "Fix-and-diverge: directory entries never fire. The reference iterates every entry with no dir/file distinction; chapter 4.2 of the transactional-update guide exempts directories, because a shipped directory carries no payload -- there is nothing for a snapshot switch to lose or leave inconsistent, and the directory can be recreated empty. The exemption keys on the entry type alone (S_IFDIR): it applies in disallowed subdirs too, and a symlink to a directory is not a directory and still fires. Measured over the Factory corpus population that fires the finding (58,713 findings over 347 srcpkgs / 424 binpkgs, 2026-10-18): 7,091 findings (12.1%) are directory entries, and 294 of the 424 binpkgs (from 239 of the 347 srcpkgs) fire ONLY on directories -- every sampled one a state, log or cache directory (/var/lib/<daemon>, /var/log/<daemon>, /var/cache/...). With the exemption those packages pass; the 51,443 regular-file findings (87.6%) and the 179 symlink findings (0.3%) are unchanged."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/711"
+
+[[divergence]]
+case = "global"
+check = "dir-or-file-outside-snapshot"
+kind = "behaviour"
+reason = "Fix-and-diverge: the error fires once per directory carrying payload outside the snapshot, the detail naming the directory and the number of files it carries there, where the reference fires once per file with the file's own path as the detail. Which entries fire is unchanged: the same non-directory, non-%ghost entries under the same allowed/disallowed prefix test (the #711 directory exemption composes -- directory entries neither fire nor count), grouped within the binary package, folders in the order their first firing entry appears; the sibling ghost-outside-snapshot and scriptlet-writes-outside-snapshot findings keep their per-occurrence firing. A web application installs thousands of files under one root, and enumerating them drowns the signal the finding exists to give; the directory is the unit a packager acts on, and the count in the detail keeps its mass visible. Measured over the Factory corpus (sweep run-20261022 at main 857d5ece; the fixed checker re-run over the 105 srcpkgs that fire the finding): 38,951 findings collapse to 4,118 (nextcloud 27,120 -> 2,832; cacti 4,578 -> 207; roundcubemail 2,452 -> 335; bugzilla 1,575 -> 285), and the counts in the collapsed details sum back to the per-file totals exactly for every package. The issue's 4,102 projection counted folders per source package; grouping per binary package -- the unit the check runs on -- gives 4,118, the whole 16-folder difference sitting in reproducible-faketools, whose 19 binary packages share 3 folders."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/835"
+
+[[divergence]]
+case = "global"
+check = "AtomicUpdateCheck"
+kind = "behaviour"
+reason = "New `scriptlet-writes-outside-snapshot` warning with no reference counterpart (issue #708): the reference check inspects the payload only, so a scriptlet that writes outside the snapshot at install time (a literal-path redirect or a write command -- mkdir/touch/rm/rmdir/tee with path arguments, cp/mv/ln with an outside destination, install, dd of= -- in %pre/%post/%preun/%postun/%pretrans/%posttrans) is invisible to it. On a transactional-update system such a write lands outside the snapshot being installed, takes effect immediately, and vanishes or turns inconsistent on rollback; the openSUSE packaging guidelines for transactional updates require the change to be deferred to first boot. The port scans shell scriptlet bodies with a deliberately narrow, decidable predicate: literal absolute targets only (no variables, macros or command substitution), runtime filesystems and their legacy spellings (/run, /var/run, /var/lock, /var/tmp, /tmp, /dev, /proc, /sys) are transient state and never fire, non-shell scriptlets are skipped, and trigger/verify scriptlets are out of scope. Measured with the shipped code over 8,605 Factory RPMs (the locally available corpus subsets; the full 51,589-RPM corpus was unreachable from the build host during the measurement): 30 raw findings, 22 across 15 packages after the sanctioned-spool refinement, every remaining firer eyeballed as a genuine literal write to persistent state outside the snapshot (state, log and cache directories, a generated ssh authorized_keys, dbus's machine-id, cyrus-sasl's update-scripts scratch). The finding is a warning because whether the write is lost depends on the target system's subvolume layout, which the package cannot know. The finding runs wherever AtomicUpdateCheck runs (the bundled defaults and both flavours). Its staged `--explain` description lives in `crates/rpmcrab-core/data/descriptions/AtomicUpdateCheck.toml`."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/708"

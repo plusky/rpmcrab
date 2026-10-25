@@ -1,0 +1,275 @@
+# Divergence ledger entries owned by `SpecCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "buildarch-instead-of-exclusivearch-tag"
+kind = "behaviour"
+reason = "Fixed behaviour per rpmlint#1600 (fixes rpmlint#698): a trailing line-continuation backslash is stripped before comparing, so 'BuildArch: noarch \\' inside a multi-line macro is not reported as a real architecture. The frozen 2.10.0 reference reports it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "macro-in-comment"
+kind = "behaviour"
+reason = "Fixed behaviour per rpmlint#1601 (fixes rpmlint#183): '#' inside shell-quoted strings does not start a comment (quote-aware comment_start_pos, tracking single/double-quote state and backslash escapes). The frozen 2.10.0 reference treats such '#' as a comment start and warns."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "specfile-error"
+kind = "detail"
+reason = "When the spec parser fails in _check_invalid_url and the rpm child query has not already reported that fatal failure (a non-zero child exit or its 'can't parse' summary) with a specfile-error finding that survived the filter, rpmcrab reports 'specfile-error' with only the spec path as detail; a surviving non-fatal child finding does not suppress the fallback (the specfile-error behaviour entry states the full condition). The reference also includes librpm's error text, which librpm 0.6's Spec::parse does not surface (it returns Option)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "specfile-error"
+kind = "behaviour"
+reason = "A spec parse failure is reported once: when the rpm child query in _check_specfile_error has already reported that fatal failure (a non-zero child exit or its 'can't parse' summary) with a specfile-error finding that survived the filter, the parse failure in _check_invalid_url does not add its fallback finding, whose detail is only the bare spec path. One exception: an undecodable child stderr is an encoding failure of the child's output, not a report of the parse failure: _check_specfile_error reports it as its own specfile-error finding (the decode error as detail) and returns as unreported, so the fallback fires alongside it. The reference reports both. In the #702 census of the 20261018 Factory sweep, this path produced 13,839 specfile-error findings: 6,920 bare-path fallbacks against 6,919 child summaries. The fallback fires at most once per spec parse, and the counts reconcile per spec: the fallbacks sit on 6,920 distinct specs. The 6,919 in the parseable outputs span 6,815 source packages, 13 of which carry more than one failing spec (gcc14, gcc15 and gcc16 with 27-28 each, kernel-source with 16, nine more with 2-3; 104 fallbacks beyond the first per package), and the remaining fallback is bash's, counted from one of the sweep's two JSON-polluted outputs, whose package sits outside the 6,815. All but one fallback pair with a child summary for the same spec, so 13,838 findings are one failure reported twice; the exception is antlr, whose child reported warnings only, so its fallback stands alone."
+since = "0.3.0"
+
+[[divergence]]
+case = "global"
+check = "obsolete-suse-version-check"
+kind = "behaviour"
+reason = "Fixed behaviour: the suse_version regex also matches the braced %{suse_version} form, which the frozen 2.10.0 reference's `%({\\?)?suse_version}?` misses (it only matches %suse_version and %{?suse_version})."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "invalid-suse-version-check"
+kind = "behaviour"
+reason = "Fixed behaviour: the suse_version regex also matches the braced %{suse_version} form, which the frozen 2.10.0 reference's `%({\\?)?suse_version}?` misses (it only matches %suse_version and %{?suse_version})."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "buildarch-instead-of-exclusivearch-tag"
+kind = "behaviour"
+reason = "Fixed behaviour per unmerged rpmlint#1600 (fixes rpmlint#698): a trailing line-continuation backslash is stripped before comparing, so 'BuildArch: noarch \\' inside a multi-line macro is not reported as a real architecture. The frozen 2.10.0 reference reports it."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1600"
+
+[[divergence]]
+case = "global"
+check = "macro-in-comment"
+kind = "behaviour"
+reason = "Fixed behaviour per unmerged rpmlint#1601 (fixes rpmlint#183): '#' inside shell-quoted strings does not start a comment (quote-aware comment_start_pos, tracking single/double-quote state and backslash escapes). The frozen 2.10.0 reference treats such '#' as a comment start and warns."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/pull/1601"
+
+[[divergence]]
+case = "global"
+check = "SpecCheck.rpm-tool"
+kind = "behaviour"
+reason = "rpm is needed only by check_specfile_error, which the reference likewise gates on there being a spec file (SpecCheck.py:224-227), so a binary-only lint never reaches it and probing the tool must not be fatal. The reference lets a missing rpm raise from the subprocess; rpmcrab skips the check instead, matching this project's standing treatment for an absent tool (see the PostCheck interpreter and BashismsCheck checkbashisms entries)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SpecCheck"
+kind = "behaviour"
+reason = "Upstream rpmlint#554: a non-breaking space in %description bodies, Summary: tag lines and %changelog entries is harmless prose typesetting, not a syntax hazard, so the port no longer emits `non-break-space` there; the frozen 2.10.0 reference flags every spec line containing U+00A0 (SpecCheck.py:428-432). Code and scriptlet sections keep the warning."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/554"
+
+[[divergence]]
+case = "global"
+check = "SpecCheck"
+kind = "behaviour"
+reason = "Upstream rpmlint#2: a new `translated-description` warning fires on `%description -l <lang>` sections, which some distros don't want to ship. The frozen 2.10.0 reference has no such check."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/2"
+
+[[divergence]]
+case = "global"
+check = "patch-not-applied"
+kind = "behaviour"
+reason = "Fixed behaviour per upstream rpmlint#1074: spec macros that wrap %autosetup (default: %forgeautosetup) count as patch-applying, so patch-not-applied stays quiet when they appear in %prep. The list lives in the config (PatchApplyingMacros) so distros can extend it; the frozen 2.10.0 reference only knows %autosetup/%autopatch."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/1074"
+
+[[divergence]]
+case = "global"
+check = "SpecCheck"
+kind = "detail"
+reason = "Bundled typo fixes in staged `--explain` texts: the article in `macro-in-comment`, the possessive and verb agreement in `patch-fuzz-is-changed`, and the misspelling of `explicitly` in `shared-dir-glob-in-files`. Meaning unchanged."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SpecCheck"
+kind = "behaviour"
+reason = "A new port-only `obsolete-tmpfiles-macro` warning flags `%tmpfiles_create` / `%tmpfiles_create_package` calls in spec scriptlets. Both macros have been no-ops since systemd-rpm-macros rev 102 (June 2023): tmpfiles.d entries are created by the systemd package's file triggers at install time, and upstream rpmlint deleted its `post-without-tmpfile-creation` check (commit 1c04a49d, Aug 2025) rather than flagging them. The check runs at spec level because built RPMs can never contain the expanded macro, and its `--explain` description is registered in code like the reference's other SpecCheck descriptions."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/1374"
+
+[[divergence]]
+case = "global"
+check = "%ifarch-applied-patch"
+kind = "missing"
+reason = "Mothballed on measurement (issue #940): with the openSUSE filter lifted, the reference predicate fires 24 times across 19 of the 16,501 Factory specs, and every firing is the conventional idiom -- an architecture-specific patch (s390x, ppc64, aarch64, i586, big-endian) applied under the matching %ifarch. No decidable residue separates a mistaken application from the idiom, so the finding carries no actionable signal on Factory. rpmcrab does not emit it; the reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "no-buildroot-tag"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding as noise/obsolete, so the port does not emit it. The emission, its staged `--explain` entry, and the supporting code are removed. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "hardcoded-path-in-buildroot-tag"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding as noise/obsolete, so the port does not emit it. The emission, its staged `--explain` entry, and the supporting code are removed. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SpecCheck"
+kind = "detail"
+reason = "Port-only `--explain` descriptions for `%autopatch-not-in-prep` and `%autosetup-not-in-prep`: the reference emits these findings but ships no descriptions."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "invalid-build-requires"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's rpmlint config calls this 'Mandriva specific stuff that we don't want'. The port does not emit it. The reference still emits it."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
+
+[[divergence]]
+case = "global"
+check = "lib-package-without-%mklibname"
+kind = "missing"
+reason = "Deliberate removal (issue #531): the port does not emit this finding -- it encodes Mandriva's library naming policy: upstream's SpecCheck docstring calls the check 'specific to Mandriva and its derivatives' (upstream issue #9 concludes it is not generic), and the `%mklibname` macro does not exist in SUSE or Fedora spec-land, so the finding can never be satisfied on a supported flavour; both distro configs filter it. The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. Mageia, the live Mandriva derivative, consumes upstream rpmlint, which keeps the check. The emission, its staged `--explain` entry, the supporting tracking state, and the dedicated tests are removed; a negative pin in the SpecCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/531"
+
+[[divergence]]
+case = "global"
+check = "setup-not-quiet"
+kind = "missing"
+reason = "Deliberate removal per triage: openSUSE's rpmlint configuration filters this finding as too noisy; Fedora's config carries it only as a commented-out filter line, never enabled. spec-cleaner already normalizes `%setup` to `%setup -q`, so in the openSUSE workflow the warning cannot fire on a cleaned spec. No shipped config treats the finding as wanted signal, so the port does not emit it. The emission, its staged `--explain` entry, and the now-dead -q/-T/-a/-b option regexes are removed. The reference still emits it."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SpecCheck"
+kind = "behaviour"
+reason = "`invalid-url` no longer fires on bare tarball filenames in `Source`/`Patch` tags (e.g. `Source0: foo-1.0.tar.gz`): a filename is not a URL and is not required to be one, so there is nothing to validate — a value is validated only when a URL scheme is present but malformed (e.g. `Source0: http://` with an empty netloc). The reference (`SpecCheck.py::_check_invalid_url`, gated on `tarball_regex`) warns on any tarball-looking source without scheme+netloc, and only for `Source`; the port now also covers `Patch`. Deliberate divergence per Tom's call; no upstream issue filed."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "macro-in-comment"
+kind = "behaviour"
+reason = "Strictening per #442/#482: macro-in-comment warns only on effectful expansions in a comment - shell (%(...)), Lua (%{lua:...}) and macro-file (%{load:...}) forms, plus the executing directives bare (%define, %global, %undefine, %lua, %load) and braced (%{define:...}, %{global:...}, %{undefine:...}, %{error:...}) added on review of #487 - including forms an enclosing %{expand:...} makes live by re-expanding escaped %% runs - because rpm executes, defines, loads or aborts on those while parsing even inside comments (verified against rpm 4.20.1: plain macro mentions expand harmlessly in any position, conditional keywords in comments are inert, and %%( outside an expand stays escaped). The frozen 2.10.0 reference warns on any macro occurrence in a comment."
+since = "0.3.0"
+
+[[divergence]]
+case = "global"
+check = "no-%check-section"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593, decided in plusky/rpmcrab#289 D1): the port reports I where the reference reports W. A missing %check section is an advisory absence: the class cannot distinguish a testable package that skips its upstream tests from the data and doc packages with nothing to test that make up most of its 9,055 lines in the 2026-10-16 Factory sweep, so it is surfaced as info, on the no-manual-page-for-binary precedent."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "obsolete-tmpfiles-macro"
+kind = "severity"
+reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports I where the reference reports W. The %tmpfiles_create macros have been no-ops since 2023 (tmpfiles.d entries are created by file triggers), so a leftover call is dead spec text: an advisory cleanup hint, not a defect in the built artefact (pcp calibration set)."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "specfile-error"
+kind = "severity"
+reason = "TEMPORARY levelling pending plusky/rpmcrab#702 (issue #699 Factory-corpus fallout pass): the port emits specfile-error at W, the reference at E. In the 20261018 Factory sweep the check produced 22,528 E findings carried by 6,876 of 17,241 srcpkgs; at E, under the #699 exit doctrine, that population alone fails about 40% of Factory. The mass is a parse-environment defect, not broken specs: the sweep parses specs without the distro macro context an OBS build root carries (Factory prjconf and the macro-providing packages), and the #702 census classified the population as overwhelmingly missing-context artefacts -- 13,839 findings are the double-report population (the rpm -q child summary and the Spec::parse fallback in check_invalid_url; the specfile-error behaviour entry gives the exact split), 4,756 are unknown-tag errors led by %python_subpackages (3,667); sampled firers are uniformly of this class, none a genuinely broken spec. #702 installs the stolen prjconf and the macro packages into the parse environment and re-measures the residue; genuinely unparsable specs return to E there. This entry and the W level are removed when #702 lands."
+since = "0.3.0"
+
+[[divergence]]
+case = "global"
+check = "SpecCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge (issues #751, #762): `deprecated-grep` fires only where `egrep`/`fgrep` stands in command position — at line start, or behind whitespace, a path slash, a quote, `(`, a backtick, a backslash, or one of `;`, `|`, `&` — and the name ends the token, so no word character, `.` or `-` follows it. The reference (`SpecCheck.py::_checkline_deprecated_grep`) matches the bare token `\\b[ef]grep\\b`, so it also fires on text that invokes no grep command at all: the findutils regex dialect name in `find -regextype posix-egrep` (util-linux %install, the case that surfaced this), a dotted data file like `foo.egrep`, a hyphenated helper like `my-egrep-helper`, a longer name like `egrep-helper` or `egrep.foo` at command position, and an assignment value like `FOO=egrep` or `--with-grep=fgrep`. The check's description targets direct use of grep as egrep or fgrep; genuine invocations — including the backslash-escaped alias-bypass spelling `\\egrep` — fire at the same W level with the identical detail rendering."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/751"
+
+[[divergence]]
+case = "global"
+check = "SpecCheck"
+kind = "behaviour"
+reason = "`invalid-spec-name` judges a source RPM's payload spec file against two names: the source RPM's header name, and the names the spec's own preamble can produce — its `Name:` declarations expanded against the macro definitions in effect at each declaration. OBS names multibuild flavour source RPMs after the build job — util-linux-systemd, python-libmount and ImageMagick-config_open all carry the base package's spec file, a name the declarations produce — so the reference's header-name comparison alone (SpecCheck.py:176; its `pkg.name` is likewise the header tag) fires an Error on a self-consistent spec and fails the flavour build, where rpmcrab stays quiet. A file named after the header stays quiet, as under the reference; the finding fires only when the file matches neither name. A source carrying several spec files fires only when none of them is consistent on either ground, and the spec checks then run on the first readable file the header names, else the first readable one a declaration names, else the last readable one; a payload file that cannot be opened is judged on the header ground alone. The expansion reads the preamble the way rpm evaluates it: rpm itself evaluates the branch conditions when it builds, so a built package carries exactly one branch's name, while the lint evaluates no condition, so the declarations and definitions of every conditional branch count and the accepted set is the union over all branches. Within that reading a definition takes effect from its own line on and a definition below the `Name:` line is not in effect at it; a `%undefine` removes a macro's earlier definitions, and one inside a conditional branch removes them for that branch's reading only, so the defined and undefined readings both count; a definition after a branch `%undefine` re-establishes the macro and ends the undefined reading only when it sits outside the branch, at a strictly shallower depth — one at the branch's own depth may sit in a sibling or `%else` branch whose readings never met the undefine, and one deeper inside a nested branch may not run where the undefine's did, so both leave the undefined reading in place. A macro counts as defined when a `%define` or `%global` before the declaration gives it a body — a parametric definition defines a function, not a value, and a body that opens with a parenthesis is the literal text it spells — and `%{nil}` expands to nothing; a `%{...}` group with an empty name is not expanded and counts as literal text. A macro with no such definition contributes an unconstrained segment. Only a wholly unconstrained pattern constrains nothing and is set aside: a declaration that still pins literal text constrains the name to that text, so `Name: foo%{undefined}` accepts `foo` and every name it anchors. The header-name comparison decides when no declaration constrains the name — a preamble declaring no `Name:` at all, every pattern set aside, an expansion past the pattern cap of 64 alternatives or the expansion depth cap of 8 — as it does for the declarations the scan cannot reach: the scan reads the main preamble and stops at the first section header — a header word matches on a word boundary, so a longer directive token such as `%files-foo` is preamble content, not a section — so `Name:` declarations in subpackage preambles behind a section header are outside the accepted set and the header ground judges those files."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/750"
+
+[[divergence]]
+case = "global"
+check = "SpecCheck"
+kind = "behaviour"
+reason = "Port-only licence-marking findings (#821): license-file-as-doc (W) fires per %files section whose unqualified %doc line carries a licence token while no %license line in the section carries an entry, and no-license-file-in-spec (E) fires when no %files section carries a licence file under %license, under %doc, or as a plain entry and none is installed by a literal install/cp copy in %install into a documentation directory a %files section ships (#833), and the shipped set is textually decidable. The E stays silent on the shapes a text scan cannot judge: sections served by -f list files or generator macros, braced or unbraced; %doc directory arguments and %doc globs whose literal prefix reaches no licence stem, whose contents %install fixes rather than the spec text (#831, #832); build-metadata (dist-info/egg-info) entries and gem/wheel sources, whose installers assemble the installed tree; public-domain-only License tags; specs with no archive source; and documentation-only packages. Presence accepts the licence names in use beyond the conversion predicate: suffixed, abbreviated, prefix-joined, brace-grouped and globbed names, and the Debian copyright file. The reference grades the License: tag string (TagsCheck) and the shipped files (FilesCheck); licence marking in the spec is outside its surface -- its flags module defines RPMFILE_LICENSE and nothing reads it, and its SpecCheck has no %files licence test. The %doc predicate is spec-cleaner's conversion predicate (re_doclicense with the re_file_qualifier exemption), so the warning names exactly the shape spec-cleaner rewrites automatically. Pinned by tests in spec.rs."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/821"
+
+[[divergence]]
+case = "global"
+check = "rpm-buildroot-usage"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #867): in %build and %prep, rpm-buildroot-usage is not charged on a line whose buildroot references all lead the value of an assignment -- a name= pair (DESTDIR=, destdir=, any variable or macro-definition payload name) or a configure-style --name option in its = or space-separated form. In those sections the buildroot is the install destination, and a reference in that position hands it to the build system as a path parameter the build consumes: the make DESTDIR staging idiom, Module::Build's destdir, configure's --prefix/--temproot/--buildroot and directory options, and variable assignments naming staged paths. Scriptlet sections keep the charge in every form -- a scriptlet runs on the installed system, where the buildroot does not exist -- and %install sits outside the finding's sections, as before. The reference charges every reference in scriptlets, %prep and %build alike, with no assignment scoping. The credit is judged per reference, so a line mixing a credited reference with an uncredited one still fires. Measured on the Factory corpus (sweep run-20261022-857d5ece population; the 22 affected source packages re-measured before and after with scan.py, the before side reproducing the sweep's 46 E exactly, all 1,244 findings in those packages compared, none added and no other finding changed): 46 E in 22 source packages before, 25 E in 9 after. Silenced (21): the DESTDIR lines of git, git-cola, latex2rtf (2) and sgmltool's make install line; frozen-bubble's destdir; rabbitmq-server's %global argument line (DESTDIR and DOC_INSTALL_DIR both lead values there); paexec's %prep %define (DESTDIR); the configure-option lines of chezscheme (--temproot), dvdisaster (--buildroot), fastjet-contrib and sgmltool (--prefix) and liblockfile (--prefix, --bindir, --mandir, --libdir, --includedir; 5); the Build.PL --prefix lines of perl-DateTime-Format-DateParse and perl-Encode-Detect (the $RPM_BUILD_ROOT spelling); and tetrinet-server's INCLUDE_DIR/LIB_DIR environment assignments prefixing its configure invocation ($RPM_BUILD_ROOT). The residue (25) keeps firing: the scriptlet arm in full (ibus %postun 9, rsyslog %post 2 -- buildroot references in shipped scriptlets are genuine defects) and 14 %build references that lead no assignment value: fipscheck running its just-installed tools from the buildroot (3), yast2-theme performing its install inside %build with mkdir and make-symlinks over buildroot paths (6), civetweb's CMAKE_INSTALL_DATADIR define inside CFLAGS (the reference sits behind a -D name inside a flags value and leads no assignment), jboss-logging-tools running %fdupes over the buildroot tree, orthanc-dicomweb's dir command on the buildroot, sgmltool's PATH suffix (the %buildroot spelling appended after $PATH:, so the reference does not lead the assignment's value) and bsd-games echoing the buildroot as an answer to its interactive configure (the destination semantics are real but the form is an echo, so it stays charged rather than growing an echo heuristic). The spellings the population uses are %{buildroot}, $RPM_BUILD_ROOT and %buildroot, and the fix scopes the check's existing spelling set without widening or narrowing it. Pinned by rpm_buildroot_usage_install_assignment_idiom_is_quiet, rpm_buildroot_usage_non_assignment_forms_still_fire and rpm_buildroot_usage_install_section_is_quiet in spec.rs."
+since = "0.4.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/867"
+
+[[divergence]]
+case = "global"
+check = "configure-without-libdir-spec"
+kind = "missing"
+reason = "Deliberate removal (issue #883): one of the three findings whose suppressions sit in upstream's bnc#456048 kernel-module header block; libdir configuration is the build system's own concern under OBS. rpmcrab does not emit it."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
+
+[[divergence]]
+case = "global"
+check = "use-of-RPM_SOURCE_DIR"
+kind = "missing"
+reason = "Deliberate removal (issue #883): one of the three findings whose suppressions sit in upstream's bnc#456048 kernel-module header block; OBS resolves a spec's sources through the build service. rpmcrab does not emit it."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
+
+[[divergence]]
+case = "global"
+check = "hardcoded-library-path"
+kind = "missing"
+reason = "Deliberate removal (issue #883): one of the three findings whose suppressions sit in upstream's bnc#456048 kernel-module header block; library paths in a spec resolve through the build system's macro set. rpmcrab does not emit it."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
+
+[[divergence]]
+case = "global"
+check = "mixed-use-of-spaces-and-tabs"
+kind = "missing"
+reason = "Deliberate removal (issue #883): measured over all 16,501 Factory specs, 2,117 flag; a 24-spec sample showed the conventional layout in every case (space-aligned tags, tab-indented continuations) and no genuine mix. rpmcrab does not emit it."
+since = "0.4.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
+
+[[divergence]]
+check = "prereq-use"
+kind = "severity"
+case = "global"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
+since = "0.4.0"
+reason = "The reference reports prereq-use at E. The legacy tag is widespread in the Factory tree (253 plain PreReq: lines in 153 specs), so the finding surfaces at W: visible in every run and mechanically actionable (spec-cleaner converts PreReq), while the builds carrying the tag keep passing."
+
+[[divergence]]
+check = "prereq-use"
+kind = "behaviour"
+case = "global"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SpecCheck.py"
+since = "0.4.0"
+reason = "The reference predicate requires the parenthesised qualifier form PreReq(...):, which occurs nowhere in the Factory spec tree. The port's predicate makes the qualifier optional, so the finding fires on every PreReq usage, the plain tag form included (253 lines in 153 Factory specs); Requires(pre): and Requires(post): stay silent."

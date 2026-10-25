@@ -1,0 +1,33 @@
+# Divergence ledger entries owned by `ZipCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "unable-to-read-zip"
+kind = "severity"
+reason = "The reference reports E on BadZipFile and W on RuntimeError (a password-protected archive). The pure-Rust zip crate surfaces a single error type, so rpmcrab reports E for every archive that fails to open; only password-protected entries (zip::ZipError::PASSWORD_REQUIRED, the reference's RuntimeError case) stay W and abort the file instead of naming an entry."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "ZipCheck"
+kind = "detail"
+reason = "Port-only `--explain` description for `unable-to-read-zip`: the reference emits the finding but ships no description."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "uncompressed-zip"
+kind = "missing"
+reason = "Mothballed on measurement (issue #940): over the full Factory tree, 3,781 zip-shaped archives (.zip/.jar/.ear/.war) in 1,317 packages were examined with the reference rule; 121 archives in 40 packages are stored uncompressed, and every firing class is a deliberate upstream form: Go's zoneinfo.zip ships stored by design (7 Go packages), JARs built stored (including the openj9 jvm-exports farm repeating the same jars under many names), test fixtures whose stored form is the test subject (the python testsuite namespace and zipdata zips, pooch data, fs-uae zipfile tests), SecLists traversal payloads, and game and document content archives (0ad, scummvm, ogre, Kivy examples, LibreOffice help images). Stored is a legitimate zip mode, and no decidable predicate separates a mistaken stored archive from these deliberate forms. rpmcrab does not emit it; the reference still emits it."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/ZipCheck.py"
+
+[[divergence]]
+case = "global"
+check = "ZipCheck"
+kind = "behaviour"
+reason = "Entry inflation is capped at 64 MiB per entry (issue #771): an entry inflating past the cap is reported (bad-crc-in-zip from the CRC pass, unable-to-read-zip from the manifest read) instead of being inflated in full, where the reference reads every entry completely. A package must not be able to exhaust the linter's memory: a highly-compressible entry otherwise forces unbounded heap growth up to OOM. Entries at or under the cap are read and CRC-verified exactly as before."
+since = "0.3.0"
+upstream = "https://github.com/plusky/rpmcrab/issues/771"

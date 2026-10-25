@@ -1,0 +1,26 @@
+# Divergence ledger entries owned by `report`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "report"
+kind = "behaviour"
+reason = "Upstream rpmlint#1156: a new `--format json` CLI flag (and `OutputFormat` config key) emits the run's findings as a machine-readable JSON document (findings sorted like the text report, plus a summary with the footer counters and exit code). The frozen 2.10.0 reference has no structured output. The text wire format is untouched; `--format text` (the default) renders byte-identical output."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/1156"
+
+[[divergence]]
+case = "global"
+check = "report"
+kind = "behaviour"
+reason = "Exit-code and badness-rendering contract (issue #699, superseding the scoped form of this entry): rpmcrab has no badness number at all -- findings carry no `(Badness: N)` segment in text output, JSON findings carry no badness field and the JSON summary carries no score/aborted fields, the footer prints no badness total, and there is no threshold abort banner. Any printed error exits 64 by default; `-P/--permissive` is an explicit opt-in under which errors print but exit 0; exits 65 and 66 do not exist. The reference renders `(Badness: N)` for N > 1, totals badness in the footer, prints `Badness N exceeds threshold T, aborting.` and exits 66 over BadnessThreshold (999 in the openSUSE flavour), and its forced-permissive default exits 0 for errors under the threshold. Shipped rpmcrab configs carry no `[Scoring]` table and no BadnessThreshold; `[Scoring]` survives only as a promotion-only override (a positive value promotes W to E; 0 or negative never downgrades)."
+since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "report"
+kind = "behaviour"
+reason = "rpmcrab adds `--format json` (plus the `OutputFormat` config key): a machine-readable JSON report of the same findings the text report emits. The reference has no machine-readable output (upstream rpmlint#109 / rpmlint#1156), so every consumer greps human text. Additive surface only: the default text report is byte-identical with or without the feature. An unknown `--format` value is a CLI usage error (exit 2); an unknown `OutputFormat` config value warns on stderr and falls back to text; the library `render_report` path falls back to text silently for unknown formats."
+since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/109"
