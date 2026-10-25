@@ -12,6 +12,7 @@ use fancy_regex::Regex;
 
 use crate::color::Color;
 use crate::config::Config;
+use crate::defect_pattern;
 use crate::describe;
 use crate::finding::Finding;
 use crate::level::Level;
@@ -24,7 +25,7 @@ pub struct Filter {
     severity_overrides: HashMap<String, Level>,
     filter_titles: HashSet<String>,
     blocked_filters: HashSet<String>,
-    filters: Vec<Regex>,
+    filters: Vec<CompiledFilter>,
     used_filters: HashSet<String>,
     /// `[SeverityOverrides]` names that matched at least one emitted finding.
     used_overrides: HashSet<String>,
@@ -117,6 +118,61 @@ fn coerce_scoring(check: &str, v: &toml::Value) -> Result<i64, FilterError> {
     }
 }
 
+/// One `Filters` pattern as compiled, with the string it was written
+/// as. The written form is what the unused-filter audit credits: a
+/// `class:<name>` pattern (issue #959) compiles to the registry's
+/// member-tag alternation, and a match credits the class pattern the
+/// user wrote, not the expansion.
+struct CompiledFilter {
+    source: String,
+    re: Regex,
+}
+
+impl CompiledFilter {
+    fn new(source: &str) -> Result<Self, FilterError> {
+        Ok(Self {
+            source: source.to_string(),
+            re: Regex::new(&expand_class_pattern(source))?,
+        })
+    }
+}
+
+/// Expand a `class:<name>` filter into the alternation of its member
+/// tags from the defect-pattern registry (issue #959), so one filter
+/// suppresses the whole class with the same emit-time semantics as
+/// every other filter. Any other pattern — including a `class:` name
+/// the registry does not know — compiles exactly as written.
+fn expand_class_pattern(pattern: &str) -> String {
+    let Some(class) = pattern.strip_prefix("class:") else {
+        return pattern.to_string();
+    };
+    let members = defect_pattern::class_members(class);
+    if members.is_empty() {
+        return pattern.to_string();
+    }
+    let alternation = members
+        .iter()
+        .map(|m| escape_regex(&m.tag))
+        .collect::<Vec<_>>()
+        .join("|");
+    format!("(?:{alternation})")
+}
+
+/// Escape a registry tag name for a regex alternation. Tag names are
+/// `[a-z0-9-]` in practice; this keeps the expansion exact for any
+/// future tag shape without naming the `regex` crate, which is not a
+/// direct dependency.
+fn escape_regex(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if "\\.+*?()|[]{}^$#&-~".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 impl Filter {
     /// Build a filter from the parsed config. The `Filters` strings are compiled
     /// with `fancy-regex` because rpmlint uses Python `re`, which supports
@@ -133,7 +189,7 @@ impl Filter {
     pub fn new(config: &Config, color: Color) -> Result<Self, FilterError> {
         let mut filters = Vec::with_capacity(config.filters.len());
         for f in &config.filters {
-            filters.push(Regex::new(f)?);
+            filters.push(CompiledFilter::new(f)?);
         }
         let mut scoring = HashMap::with_capacity(config.scoring.len());
         for (check, raw) in &config.scoring {
@@ -170,6 +226,19 @@ impl Filter {
             Level::Warning => self.printed_warnings,
             Level::Info => self.printed_infos,
         }
+    }
+
+    /// Retained findings per defect-pattern class (issue #959), keyed
+    /// by class name; a class with no retained finding is absent. The
+    /// renderers' per-class counters read this, so text and JSON agree.
+    pub fn class_counts(&self) -> std::collections::BTreeMap<&'static str, u64> {
+        let mut counts = std::collections::BTreeMap::new();
+        for finding in &self.findings {
+            if let Some(class) = finding.class {
+                *counts.entry(class).or_insert(0) += 1;
+            }
+        }
+        counts
     }
 
     /// Record a finding, applying scoring promotion, strict promotion, and
@@ -218,18 +287,24 @@ impl Filter {
             let alias_string = finding
                 .filter_alias
                 .map(|alias| finding.match_string_as(alias));
-            for re in &self.filters {
-                let matched = matches!(re.find(&match_string), Ok(Some(_)))
+            for pat in &self.filters {
+                let matched = matches!(pat.re.find(&match_string), Ok(Some(_)))
                     || alias_string
                         .as_ref()
-                        .is_some_and(|s| matches!(re.find(s), Ok(Some(_))));
+                        .is_some_and(|s| matches!(pat.re.find(s), Ok(Some(_))));
                 if matched {
-                    self.used_filters.insert(re.as_str().to_string());
+                    self.used_filters.insert(pat.source.clone());
                     self.filtered_out += 1;
                     return;
                 }
             }
         }
+
+        // The defect-pattern class (issue #959) resolves here, at the
+        // one point every retained finding passes through, so check
+        // code stays untouched: a member tag's finding carries its
+        // class into the JSON form and the per-class counters.
+        finding.class = defect_pattern::class_of(&finding.check);
 
         match finding.level {
             Level::Error => self.printed_errors += 1,
@@ -412,6 +487,7 @@ mod tests {
             arch: Some("src".to_string()),
             line: None,
             filter_alias: None,
+            class: None,
         }
     }
 
@@ -428,6 +504,49 @@ mod tests {
         assert_eq!(f.printed(Level::Warning), 0);
         assert_eq!(f.filtered_out, 1);
         assert!(f.results().is_empty());
+    }
+
+    #[test]
+    fn retained_member_finding_carries_its_class() {
+        let mut f = Filter::new(&cfg(), Color::for_tty(false)).unwrap();
+        f.add_info(finding("call-to-mktemp", Level::Error));
+        f.add_info(finding("no-soname", Level::Warning));
+        assert_eq!(f.findings()[0].class, Some("defect-pattern"));
+        assert_eq!(f.findings()[1].class, None);
+        assert_eq!(
+            f.class_counts(),
+            std::collections::BTreeMap::from([("defect-pattern", 1)])
+        );
+    }
+
+    #[test]
+    fn class_filter_suppresses_the_whole_class() {
+        let mut c = cfg();
+        c.filters = vec!["class:defect-pattern".to_string()];
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        f.add_info(finding("call-to-mktemp", Level::Error));
+        f.add_info(finding(
+            "binary-or-shlib-calls-gethostbyname",
+            Level::Warning,
+        ));
+        f.add_info(finding("no-soname", Level::Warning));
+        // Both member findings are suppressed; the non-member prints.
+        assert_eq!(f.filtered_out, 2);
+        assert_eq!(f.printed(Level::Warning), 1);
+        assert_eq!(f.results().len(), 1);
+        // The audit credits the pattern as written, not its expansion.
+        assert!(f.unused_filters(&c.filters).is_empty());
+    }
+
+    #[test]
+    fn unknown_class_filter_compiles_as_written() {
+        let mut c = cfg();
+        c.filters = vec!["class:no-such-class".to_string()];
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        f.add_info(finding("call-to-mktemp", Level::Error));
+        assert_eq!(f.filtered_out, 0);
+        assert_eq!(f.printed(Level::Error), 1);
+        assert_eq!(f.unused_filters(&c.filters), vec!["class:no-such-class"]);
     }
 
     #[test]
@@ -829,6 +948,7 @@ mod tests {
                 arch: Some("src".to_string()),
                 line: None,
                 filter_alias: None,
+                class: None,
             };
             (check.to_string(), f.line(&c))
         };

@@ -1,0 +1,111 @@
+# The defect-pattern registry (issue #959).
+#
+# One [[member]] record per finding tag in the defect-pattern class.
+# Class membership is a property of the tag, recorded here once; the
+# output renderers, the rpmlintrc filter expansion (`class:<name>`)
+# and the `-v` descriptions all read this file, so every consumer
+# sees the same membership.
+#
+# Fields per member:
+#   tag        the finding tag, exactly as emitted.
+#   class      the class the tag belongs to.
+#   family     "pattern" (a dangerous-API / call pattern) or
+#              "hardening" (a mitigation-absence pattern).
+#   gate       the context gate the finder's severity hangs on:
+#              "privilege-or-exposure", "no-safe-use", "self", "none".
+#   provenance the recorded defect samples that put the finder on
+#              the on-ramp: CVE/advisory root causes in the pattern's
+#              class, or a verified in-distro instance. Every member
+#              carries at least one.
+
+[[member]]
+tag = "binary-or-shlib-calls-gethostbyname"
+class = "defect-pattern"
+family = "pattern"
+gate = "privilege-or-exposure"
+provenance = [
+    "RsyncProject/rsync#563: in the rsync daemon's hosts allow/deny matching, hostname tokens resolved with gethostbyname() never match an IPv6 peer, so a hosts deny rule silently fails open (verified in the openSUSE rsync 3.5.1 audit; fixed upstream by RsyncProject/rsync#1140).",
+    "CVE-2026-43617 and CVE-2026-70452: fail-open defects in the same access-matching function, hardened upstream.",
+]
+
+[[member]]
+tag = "call-to-mktemp"
+class = "defect-pattern"
+family = "pattern"
+gate = "no-safe-use"
+provenance = [
+    "mktemp(3) returns a predictable name, so an attacker pre-plants a symlink at that name and the caller's subsequent open follows it (CWE-377); the manpage directs callers to mkstemp() instead.",
+    "Factory corpus measurement in rpmcrab#852: 74 errors in 41 source packages with every firing file classified.",
+]
+
+[[member]]
+tag = "missing-call-to-setgroups-before-setuid"
+class = "defect-pattern"
+family = "pattern"
+gate = "self"
+provenance = [
+    "A process that calls setuid()/setgid() without setgroups()/initgroups() keeps its supplementary group memberships across the privilege drop, so the dropped-to identity retains group access it must not have.",
+]
+
+[[member]]
+tag = "missing-fortify"
+class = "defect-pattern"
+family = "hardening"
+gate = "none"
+provenance = [
+    "With _FORTIFY_SOURCE absent, libc calls whose argument sizes are known at compile time run unchecked, so a buffer overflow the __*_chk variants abort on proceeds silently.",
+]
+
+[[member]]
+tag = "missing-stack-protector"
+class = "defect-pattern"
+family = "hardening"
+gate = "none"
+provenance = [
+    "Without a stack canary, a stack buffer overflow overwrites the saved return address with no runtime detection.",
+]
+
+[[member]]
+tag = "missing-relro"
+class = "defect-pattern"
+family = "hardening"
+gate = "none"
+provenance = [
+    "Without a GNU_RELRO segment the GOT stays writable for the whole process lifetime, so an arbitrary-write primitive can redirect a library call through it.",
+]
+
+[[member]]
+tag = "partial-relro"
+class = "defect-pattern"
+family = "hardening"
+gate = "none"
+provenance = [
+    "RELRO without BIND_NOW resolves relocations lazily, so the GOT stays writable until first use instead of being sealed at startup.",
+]
+
+[[member]]
+tag = "missing-cf-protection"
+class = "defect-pattern"
+family = "hardening"
+gate = "none"
+provenance = [
+    "Without IBT/SHSTK recorded in .note.gnu.property, indirect branches face no hardware control-flow check at runtime.",
+]
+
+[[member]]
+tag = "executable-stack"
+class = "defect-pattern"
+family = "hardening"
+gate = "none"
+provenance = [
+    "An executable stack turns a stack buffer overflow directly into code execution, with no need for a ROP chain.",
+]
+
+[[member]]
+tag = "non-position-independent-executable"
+class = "defect-pattern"
+family = "hardening"
+gate = "none"
+provenance = [
+    "A non-PIE executable loads at a fixed address, so its code and gadgets sit at known addresses and ASLR gives its main image no layout secrecy.",
+]

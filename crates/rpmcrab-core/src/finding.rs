@@ -33,6 +33,10 @@ pub struct Finding {
     /// written against the reference tag keep working. `None` for findings
     /// whose tag was never renamed.
     pub filter_alias: Option<&'static str>,
+    /// The defect-pattern class of the finding's tag (issue #959),
+    /// resolved from the registry by the `Filter` when it retained the
+    /// finding; `None` for findings whose tag is not a registry member.
+    pub class: Option<&'static str>,
 }
 
 impl Finding {
@@ -129,6 +133,7 @@ mod tests {
             arch: Some("aarch64".to_string()),
             line: None,
             filter_alias: None,
+            class: None,
         }
     }
 
@@ -181,6 +186,7 @@ mod tests {
             arch: None,
             line: Some(24),
             filter_alias: None,
+            class: None,
         };
         assert_eq!(
             f.line(&Color::for_tty(false)),

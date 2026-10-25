@@ -231,6 +231,7 @@ impl Lint {
                 },
                 line: None,
                 filter_alias: None,
+                class: None,
             });
         }
     }
@@ -393,6 +394,7 @@ mod exit_code_tests {
                 arch: None,
                 line: None,
                 filter_alias: None,
+                class: None,
             });
         }
         assert_eq!(lint.filter.printed(Level::Error), 2);
@@ -445,6 +447,7 @@ mod exit_code_tests {
                 arch: None,
                 line: None,
                 filter_alias: None,
+                class: None,
             });
         }
         assert_eq!(lint.filter.printed(Level::Error), 1);
@@ -477,6 +480,7 @@ mod exit_code_tests {
             arch: None,
             line: None,
             filter_alias: None,
+            class: None,
         });
         assert_eq!(lint.filter.printed(Level::Warning), 1);
         assert_eq!(lint.filter.printed(Level::Error), 0);
@@ -492,6 +496,7 @@ mod exit_code_tests {
             arch: None,
             line: None,
             filter_alias: None,
+            class: None,
         });
     }
 
@@ -578,6 +583,7 @@ mod exit_code_tests {
             arch: None,
             line: None,
             filter_alias: None,
+            class: None,
         });
         use crate::render::{JsonRenderer, RenderContext, Renderer};
         let ctx = RenderContext {
@@ -645,6 +651,7 @@ mod exit_code_tests {
                 arch: None,
                 line: None,
                 filter_alias: None,
+                class: None,
             });
         }
         let ctx = RenderContext {
