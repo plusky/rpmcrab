@@ -3883,6 +3883,17 @@ impl BinariesCheck {
         {
             return;
         }
+        // Separate debuginfo files are ELF containers of debug
+        // sections with no DT_NEEDED by construction -- the dwz
+        // multi-file artefact under /usr/lib/debug/.dwz included --
+        // so the absence of a library dependency states nothing
+        // there (issue #955, divergences.toml). `is_debug` covers
+        // the `.debug` name suffix; the path covers the rest of the
+        // canonical debuginfo location: the treatment
+        // `check_hardening` already applies to its findings.
+        if info.is_debug || pkgfile.name.starts_with("/usr/lib/debug/") {
+            return;
+        }
         let ldso = info
             .soname
             .as_ref()
@@ -5027,6 +5038,58 @@ mod tests {
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
         assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
         assert_lacks(&results, "shared-library-without-dependency-information");
+    }
+
+    fn libdep_results_for_name(id: &str, name: &str) -> Vec<(String, String)> {
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_shobj = false;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = PkgFile {
+            name: name.to_string(),
+            ..Default::default()
+        };
+        let bytes = craft_shlib_elf(false, None, None, &[]);
+        let path = std::env::temp_dir().join(format!("rpmcrab-libdep-{id}-{}", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let info = ReadelfInfo::parse(path.to_str().unwrap(), &pkgfile.name);
+        assert!(info.failed.is_none(), "crafted ELF must parse");
+        assert!(info.needed.is_empty(), "no DT_NEEDED");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_library_dependency(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        std::fs::remove_file(&path).ok();
+        results
+    }
+
+    #[test]
+    fn statically_linked_quiet_for_separate_debuginfo() {
+        // Issue #955: the dwz multi-file artefact is an ELF container
+        // of debug sections with no DT_NEEDED by construction; its
+        // name carries no `.debug` suffix, so only the path arm of
+        // the separate-debuginfo predicate can silence it.
+        let results = libdep_results_for_name(
+            "dwz",
+            "/usr/lib/debug/.dwz/plymouth-22.02.122+94.4bd41a3-0.x86_64",
+        );
+        assert!(
+            results.is_empty(),
+            "dwz artefact must be quiet: {results:?}"
+        );
+        // The `.debug` name-suffix arm, outside the debug tree.
+        let results = libdep_results_for_name("debugsuffix", "/usr/lib64/libfoo.so.1.debug");
+        assert!(
+            results.is_empty(),
+            ".debug payload must be quiet: {results:?}"
+        );
+        // Near misses stay charged: a statically linked executable
+        // in /usr/bin, and one under a lookalike prefix.
+        let results = libdep_results_for_name("bin", "/usr/bin/foo");
+        let lines = lines_for(&results, "statically-linked-binary");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        let results = libdep_results_for_name("debugfoo", "/usr/lib/debugfoo/foo");
+        let lines = lines_for(&results, "statically-linked-binary");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
     }
 
     fn fixture_path(name: &str) -> String {
