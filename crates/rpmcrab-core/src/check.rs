@@ -74,6 +74,7 @@ pub(crate) fn make_finding(
         arch: (!arch.is_empty()).then(|| arch.to_string()),
         line,
         filter_alias: None,
+        class: None,
     }
 }
 
@@ -476,6 +477,7 @@ impl Check for SyntheticCheck {
                 arch: self.arch.clone(),
                 line: None,
                 filter_alias: None,
+                class: None,
             });
         }
     }

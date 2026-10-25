@@ -18,6 +18,7 @@ pub mod check;
 pub mod checks;
 pub mod color;
 pub mod config;
+pub mod defect_pattern;
 pub mod describe;
 pub mod filter;
 pub mod finding;

@@ -60,6 +60,7 @@ impl Check for Recorder {
             arch: None,
             line: None,
             filter_alias: None,
+            class: None,
         });
     }
 
