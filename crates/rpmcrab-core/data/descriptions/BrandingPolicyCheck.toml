@@ -21,6 +21,9 @@ Branding packages should provide a supplement in the form:
 branding-requires-unversioned="""
 Please make sure that your requires entry is similar to:
 'Requires: %name-branding = <versionnumber>'
+Where the branding is versioned on a different train than the package, so
+its version does not track the package version, a versioned requirement
+cannot be satisfied; suppress this warning in the package's rpmlintrc instead.
 """
 branding-excessive-recommends="""
 Branding package should not have additional Recommends,

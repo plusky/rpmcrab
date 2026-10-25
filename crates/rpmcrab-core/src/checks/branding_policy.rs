@@ -90,7 +90,7 @@ impl Check for BrandingPolicyCheck {
                 {
                     add_info(
                         out,
-                        Level::Error,
+                        Level::Warning,
                         pkg,
                         "branding-requires-unversioned",
                         &[&require.name],
@@ -299,8 +299,11 @@ mod tests {
 
         let unversioned = has(&results, "branding-requires-unversioned");
         assert_eq!(unversioned.len(), 1, "{results:?}");
+        // #953: the unversioned finding is a warning; the versioned form
+        // it prescribes is unsatisfiable for branding flavours on their
+        // own release train.
         assert!(
-            unversioned[0].contains(": E: "),
+            unversioned[0].contains(": W: "),
             "level: {}",
             unversioned[0]
         );
