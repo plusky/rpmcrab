@@ -62,6 +62,11 @@ def _take(pool, since=_ANY, ident=_ANY):
     return None
 
 
+def _shipped(entry, released):
+    v = parse_version(entry.get("since", ""))
+    return v is None or v <= released
+
+
 def violations(base_entries, head_entries, released):
     """Added entries in head whose `since` is not after `released`.
 
@@ -91,22 +96,29 @@ def violations(base_entries, head_entries, released):
                 moved_out[f] -= 1
             else:
                 replaced.append(entry)
-        shipped = []
+        pending = []
         for f, entry in zip(head[j1:j2], head_entries[j1:j2]):
             if moved_in[f] > 0:
                 moved_in[f] -= 1
+            elif (
+                _take(replaced, since=entry.get("since", ""), ident=_ident(entry))
+                is None
+            ):
+                pending.append(entry)
+        # A correction (same identity, shipped `since`) claims its entry before
+        # a rewrite keeping some replaced entry's `since` can take it.
+        rest = []
+        for entry in pending:
+            if (
+                _shipped(entry, released)
+                and _take(replaced, ident=_ident(entry)) is not None
+            ):
                 continue
-            since = entry.get("since", "")
-            # An edit keeping `since` prefers the replaced entry it most
-            # resembles, so a same-identity one stays free for a correction.
-            if _take(replaced, since=since, ident=_ident(entry)) is not None:
-                continue
-            if _take(replaced, since=since) is not None:
-                continue
-            if (v := parse_version(since)) is None or v <= released:
-                shipped.append(entry)
-        for entry in shipped:
-            if _take(replaced, ident=_ident(entry)) is None:
+            rest.append(entry)
+        for entry in rest:
+            if _take(replaced, since=entry.get("since", "")) is None and _shipped(
+                entry, released
+            ):
                 found.append(entry)
     return found
 
