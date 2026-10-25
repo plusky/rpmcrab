@@ -70,3 +70,10 @@ check = "config"
 kind = "behaviour"
 reason = "rpmlintrc setBadness('name', N) is parsed and ignored, with a stderr warning per directive (issue #699): badness no longer adjusts finding levels, so the directive has nothing to write into [Scoring]. The reference stores the values in Scoring as strings and re-levels findings in both directions on their account, including downgrading an E to W at 0. addFilter directives in the same files are unaffected."
 since = "0.3.0"
+
+[[divergence]]
+case = "global"
+check = "Filters"
+kind = "behaviour"
+reason = "A `Filters` pattern of the form `class:<name>` is class syntax (issue #959), not a regex: it suppresses exactly the findings whose tag belongs to the named defect-pattern class, matched on the finding's tag, and an unknown class name is a configuration error at Filter construction. The reference compiles every `Filters` string as a plain regex, so the same string there is an ordinary pattern over the match string and is normally reported unused."
+since = "0.4.1"
