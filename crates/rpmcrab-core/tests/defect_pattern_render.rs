@@ -1,7 +1,7 @@
 //! Defect-pattern presentation, end to end (issue #959): a full
 //! `Lint` run whose findings mix member tags with a non-member pins
 //! the JSON class field, the JSON summary count, and the text
-//! summary line.
+//! report's frozen shape.
 
 use std::path::Path;
 
@@ -50,11 +50,11 @@ fn run_with_mixed_findings(format: &str) -> String {
 }
 
 #[test]
-fn text_report_counts_member_findings_in_a_summary_line() {
+fn text_report_has_no_per_class_summary_line() {
     let out = run_with_mixed_findings("text");
     assert!(
-        out.contains("defect-pattern findings: 2\n"),
-        "no per-class summary line:\n{out}"
+        !out.contains("defect-pattern findings"),
+        "per-class summary line in the default text report:\n{out}"
     );
     // The footer's own line keeps its frozen shape.
     assert!(
@@ -72,7 +72,7 @@ fn json_report_marks_members_and_counts_the_class() {
         findings
             .iter()
             .find(|f| f["check"] == tag)
-            .unwrap_or_else(|| panic!("{tag} finding present"))
+            .unwrap_or_else(|| panic!("{tag} finding missing"))
             .get("class")
             .cloned()
     };

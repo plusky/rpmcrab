@@ -366,15 +366,21 @@ impl Filter {
             text = Some(overridden.to_string());
         }
         match text {
-            Some(mut text) => {
-                // A registry member's description carries its class and
-                // recorded provenance (issue #959), appended to the
-                // staged (or config-overridden) text before the fill.
+            Some(text) => {
+                let mut out = crate::term::textwrap_fill(&text, 78);
+                // A registry member's description carries its class
+                // and recorded provenance (issue #959), wrapped as its
+                // own block after the staged (or config-overridden)
+                // text: filling the two together would reflow the
+                // class block onto the description's last line.
                 if let Some(member) = defect_pattern::member(check) {
-                    text.push_str("\n\n");
-                    text.push_str(&member.description_suffix());
+                    out.push_str("\n\n");
+                    out.push_str(&crate::term::textwrap_fill(
+                        &member.description_suffix(),
+                        78,
+                    ));
                 }
-                format!("{}\n\n", crate::term::textwrap_fill(&text, 78))
+                format!("{out}\n\n")
             }
 
             None => String::new(),
@@ -605,6 +611,31 @@ mod tests {
         // A non-member description is the staged text alone.
         let plain = f.get_description("no-soname", &c);
         assert!(!plain.contains("Defect-pattern class"), "{plain}");
+    }
+
+    #[test]
+    fn member_description_wraps_the_class_block_separately() {
+        // The exact `-e` shape (PR #961 review): the staged description
+        // and the class block are wrapped as separate blocks. Filling
+        // them together reflowed the class block onto the description's
+        // last line ("avoided.   Defect-pattern class:").
+        let c = cfg();
+        let f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        assert_eq!(
+            f.get_description("call-to-mktemp", &c),
+            concat!(
+                "This executable calls mktemp. As advised by the manpage (mktemp(3)), this\n",
+                "function should be avoided.\n",
+                "\n",
+                "Defect-pattern class: defect-pattern (family: pattern; gate: no-safe-use).\n",
+                "Provenance: mktemp(3) returns a predictable name, so an attacker pre-plants a\n",
+                "symlink at that name and the caller's subsequent open follows it (CWE-377);\n",
+                "the manpage directs callers to mkstemp() instead. Factory corpus measurement\n",
+                "in rpmcrab#852: 74 errors in 41 source packages with every firing file\n",
+                "classified.\n",
+                "\n",
+            )
+        );
     }
 
     #[test]
