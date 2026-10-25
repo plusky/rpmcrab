@@ -152,8 +152,8 @@ The schema is enforced by `crates/rpmcrab-core/tests/divergences_ledger.rs`:
 upstream issue is still undecided (rpmcrab#56) — do not treat it as settled.
 `since` names the first release that ships the divergence, so a new entry
 never names an already-tagged version: `scripts/check-ledger-since.py` (run by
-the `parity` CI job) fails an added entry, or a changed `since`, at or below
-the latest `vX.Y.Z` tag.
+the `parity` CI job) fails an added entry at or below the latest `vX.Y.Z`
+tag; in-place edits, a `since` correction included, pass.
 
 `kind` is one of:
 
