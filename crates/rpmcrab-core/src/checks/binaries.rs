@@ -2955,6 +2955,15 @@ impl BinariesCheck {
         pkgfile: &PkgFile,
         out: &mut Filter,
     ) {
+        // Separate debuginfo carries the debug symbols by design, so
+        // "not stripped" states nothing about it: the finding stays
+        // quiet there -- the treatment `check_hardening` applies to
+        // its findings. The `.debug` suffix covers the name-based
+        // half; the path covers the rest of the canonical debuginfo
+        // location (e.g. ovmf's GdbSyms.dll).
+        if bin_name.ends_with(".debug") || bin_name.starts_with("/usr/lib/debug/") {
+            return;
+        }
         if pkgfile.magic.contains("not stripped") {
             add_info(
                 out,
@@ -8755,6 +8764,83 @@ description = "explicit priority string bypasses the system crypto policy"
             "stripped binary must be quiet: {:?}",
             out.results()
         );
+    }
+
+    #[test]
+    fn unstripped_binary_quiet_for_separate_debuginfo() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg-debuginfo", "x86_64", vec![]);
+        let not_stripped = "ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), not stripped";
+
+        // The canonical debuginfo location: the pam-config-debuginfo
+        // payload of issue #949.
+        let pkgfile = syn_file("/usr/lib/debug/usr/sbin/pam-config.debug", not_stripped);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_unstripped_binary(
+            "/usr/lib/debug/usr/sbin/pam-config.debug",
+            &pkg,
+            &pkgfile,
+            &mut out,
+        );
+        assert!(
+            out.results().is_empty(),
+            "debuginfo payload must be quiet: {:?}",
+            out.results()
+        );
+
+        // The `.debug` suffix alone names separate debuginfo, wherever
+        // it sits.
+        let pkgfile = syn_file("/usr/lib64/libfoo.so.1.debug", not_stripped);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_unstripped_binary("/usr/lib64/libfoo.so.1.debug", &pkg, &pkgfile, &mut out);
+        assert!(
+            out.results().is_empty(),
+            ".debug payload must be quiet: {:?}",
+            out.results()
+        );
+
+        // The path alone covers debuginfo without the suffix (ovmf's
+        // GdbSyms.dll).
+        let pkgfile = syn_file("/usr/lib/debug/ovmf-x86_64/DEBUG/GdbSyms.dll", not_stripped);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_unstripped_binary(
+            "/usr/lib/debug/ovmf-x86_64/DEBUG/GdbSyms.dll",
+            &pkg,
+            &pkgfile,
+            &mut out,
+        );
+        assert!(
+            out.results().is_empty(),
+            "debug-tree payload must be quiet: {:?}",
+            out.results()
+        );
+
+        // A stripped debuginfo payload is quiet under the magic rule
+        // alone, as any stripped file is.
+        let pkgfile = syn_file(
+            "/usr/lib/debug/usr/bin/foo.debug",
+            "ELF 64-bit LSB executable, x86-64, version 1 (SYSV), stripped",
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_unstripped_binary("/usr/lib/debug/usr/bin/foo.debug", &pkg, &pkgfile, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "stripped payload must be quiet: {:?}",
+            out.results()
+        );
+
+        // Near misses: a prefix lookalike is not the debug tree, and a
+        // real unstripped binary outside it still fires.
+        for name in ["/usr/lib/debugfoo/tool", "/usr/lib64/libfoo.so.1"] {
+            let pkgfile = syn_file(name, not_stripped);
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_unstripped_binary(name, &pkg, &pkgfile, &mut out);
+            let results = out.results().to_vec();
+            let lines = lines_for(&results, "unstripped-binary-or-object");
+            assert_eq!(lines.len(), 1, "{} must still fire: {:?}", name, results);
+            assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        }
     }
 
     #[test]

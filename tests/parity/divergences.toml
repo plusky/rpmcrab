@@ -3158,3 +3158,11 @@ kind = "behaviour"
 reason = "Deliberate fix (plusky/rpmcrab#948): the port exempts -debugsource packages from no-binary. A -debugsource package is arch-specific and ships only source files under /usr/src/debug by construction -- no binaries, no libdir payload -- so the finding's condition is the package's expected shape, and the frozen 2.10.0 reference fires it on every such package (measured on pam-config-debugsource; the class is total by construction). The suffix test matches the debug-companion recognition FilesCheck and FilelistCheck already apply to the same names. -debuginfo packages are not exempted: their .debug payloads are ELF and already count toward has_binary."
 since = "0.4.1"
 upstream = "https://github.com/plusky/rpmcrab/issues/948"
+
+[[divergence]]
+case = "global"
+check = "unstripped-binary-or-object"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #949): unstripped-binary-or-object stays quiet for separate debuginfo -- a file whose name carries the `.debug` suffix or whose path sits under /usr/lib/debug/ -- the treatment check_hardening applies to its findings. A separate-debuginfo file is the stripped-off debug payload itself: carrying the symbol and debug content is its purpose, so the charge states nothing a packager can act on (pam-config-debuginfo: W on /usr/lib/debug/usr/sbin/pam-config.debug, and class-wide for -debuginfo packages). The reference charges every binary-class file whose magic reports not stripped, with no debuginfo exemption. Real binaries outside the debug tree, prefix lookalikes included, fire unchanged. Pinned by unstripped_binary_quiet_for_separate_debuginfo in binaries.rs."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/949"
