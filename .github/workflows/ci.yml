@@ -237,7 +237,7 @@ jobs:
   # and fail if the committed assets drifted.
   assets-drift:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -269,6 +269,9 @@ jobs:
       - run: cargo run -p rpmcrab --features gen --locked --bin rpmcrab-gen -- /tmp/rpmcrab-gen-assets
       - run: diff -r /tmp/rpmcrab-gen-assets/man crates/rpmcrab/man
       - run: diff -r /tmp/rpmcrab-gen-assets/completions crates/rpmcrab/completions
+      # The release workflow's post-release bump runs this script; it needs
+      # the same toolchain and headers as the asset generation above.
+      - run: python3 scripts/test_bump_version.py
 
 
   distro-config-drift:
