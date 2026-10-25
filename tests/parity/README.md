@@ -134,7 +134,7 @@ fixed, not committed.
 
 ## The divergence ledger
 
-`divergences.toml` is read by the parity runner. Each entry:
+`divergences.toml` is read by the parity runner. Its entries live with their owner — one source file per check (or run topic) in `crates/rpmcrab-core/data/divergences/`, assembled into this file by `scripts/generate-divergences-ledger.py`. Edit the owner's source file and re-run the generator; the `divergences-ledger-drift` CI job fails when the committed aggregate is behind the sources. Each entry:
 
 ```toml
 [[divergence]]
