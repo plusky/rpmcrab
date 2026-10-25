@@ -515,6 +515,12 @@ plus, where one exists, a linked upstream issue.
   identify rpmcrab itself (`rpmcrab: X.Y.Z`, the crate's own version) rather
   than the emulated reference — nobody greps for that part, so the emulation
   was dropped (Tom's call). Recorded in `tests/parity/divergences.toml`.
+- **`class:` filter patterns** (issue #959). A `Filters` string of the form
+  `class:<name>` is class syntax, not a regex: it suppresses exactly the
+  findings whose tag belongs to the named defect-pattern class, matched on
+  the finding's tag, and an unknown class name is a configuration error at
+  Filter construction. The reference compiles every `Filters` string as a
+  plain regex. Recorded in `tests/parity/divergences.toml`.
 
 ### 5.1 The divergence philosophy
 

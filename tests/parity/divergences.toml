@@ -3063,6 +3063,13 @@ since = "0.3.0"
 
 [[divergence]]
 case = "global"
+check = "Filters"
+kind = "behaviour"
+reason = "A `Filters` pattern of the form `class:<name>` is class syntax (issue #959), not a regex: it suppresses exactly the findings whose tag belongs to the named defect-pattern class, matched on the finding's tag, and an unknown class name is a configuration error at Filter construction. The reference compiles every `Filters` string as a plain regex, so the same string there is an ordinary pattern over the match string and is normally reported unused."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "finding-line"
 kind = "behaviour"
 reason = "Deliberate output-contract break (issue #699, superseding the #289 D7 / #595 decision): the text renderer shows no (Badness: N) column at all, because rpmcrab no longer computes a badness number. #595 had shown the column whenever badness > 0 (the reference shows it only when N > 1, filter.py); #699 removed the value itself -- it is not stored on findings, not rendered, not totalled, and the JSON finding carries no badness field. The filter-match string (DESIGN §4.2) is unchanged: it never carried the column on either side."
