@@ -44,14 +44,32 @@ def _frozen(entry):
     return tuple(sorted(entry.items()))
 
 
+def _ident(entry):
+    return (entry.get("case"), entry.get("check"), entry.get("kind"))
+
+
+_ANY = object()
+
+
+def _take(pool, since=_ANY, ident=_ANY):
+    """Remove and return the first pool entry with that `since` and
+    identity (either may be left open), or None."""
+    for i, entry in enumerate(pool):
+        if (since is _ANY or entry.get("since") == since) and (
+            ident is _ANY or _ident(entry) == ident
+        ):
+            return pool.pop(i)
+    return None
+
+
 def violations(base_entries, head_entries, released):
     """Added entries in head whose `since` is not after `released`.
 
     Entries are aligned by position, as in the diff a reviewer reads; one found
-    verbatim elsewhere in base merely moved. Within a changed run an entry
-    reusing a replaced entry's `since` is an in-place edit (reason, check,
-    kind), and each replaced entry left over may be a `since` correction, so
-    only shipped-`since` entries beyond those count as added.
+    verbatim elsewhere in base merely moved. Within a changed run a head entry
+    reusing a replaced entry's `since` is an in-place edit (reason, check or
+    kind rewritten); one taking the identity (case, check, kind) of a replaced
+    entry is a `since` correction. Any other shipped-`since` entry is added.
     """
     if released is None:
         return []
@@ -67,22 +85,29 @@ def violations(base_entries, head_entries, released):
                 moved_out[f] -= 1
                 moved_in[f] -= 1
             continue
-        kept = Counter()
+        replaced = []
         for f, entry in zip(base[i1:i2], base_entries[i1:i2]):
             if moved_out[f] > 0:
                 moved_out[f] -= 1
             else:
-                kept[entry.get("since", "")] += 1
+                replaced.append(entry)
         shipped = []
         for f, entry in zip(head[j1:j2], head_entries[j1:j2]):
-            since = entry.get("since", "")
             if moved_in[f] > 0:
                 moved_in[f] -= 1
-            elif kept[since] > 0:
-                kept[since] -= 1
-            elif (v := parse_version(since)) is None or v <= released:
+                continue
+            since = entry.get("since", "")
+            # An edit keeping `since` prefers the replaced entry it most
+            # resembles, so a same-identity one stays free for a correction.
+            if _take(replaced, since=since, ident=_ident(entry)) is not None:
+                continue
+            if _take(replaced, since=since) is not None:
+                continue
+            if (v := parse_version(since)) is None or v <= released:
                 shipped.append(entry)
-        found.extend(shipped[sum(kept.values()) :])
+        for entry in shipped:
+            if _take(replaced, ident=_ident(entry)) is None:
+                found.append(entry)
     return found
 
 
@@ -112,8 +137,15 @@ def main(argv):
             file=sys.stderr,
         )
         return 2
-    head_entries = tomllib.loads(Path(LEDGER).read_text(encoding="utf-8"))["divergence"]
-    base_entries = tomllib.loads(base_text)["divergence"]
+    try:
+        head_entries = tomllib.loads(Path(LEDGER).read_text(encoding="utf-8"))[
+            "divergence"
+        ]
+        base_entries = tomllib.loads(base_text)["divergence"]
+    except (tomllib.TOMLDecodeError, KeyError) as err:
+        # Exit 2 like the git failures: a broken ledger is not a violation.
+        print(f"ledger since: cannot read the ledger: {err!r}", file=sys.stderr)
+        return 2
     shipped = ".".join(map(str, released))
     bad = violations(base_entries, head_entries, released)
     for entry in bad:
@@ -123,9 +155,12 @@ def main(argv):
             if parse_version(since)
             else "it is not X.Y.Z"
         )
+        reason = str(entry.get("reason", ""))
+        if len(reason) > 60:
+            reason = reason[:60] + "..."
         print(
             f"ledger since: new {entry.get('check')} ({entry.get('kind')}) entry "
-            f"[{str(entry.get('reason', ''))[:60]}...] claims since = {since!r}, but {why}",
+            f"[{reason}] claims since = {since!r}, but {why}",
             file=sys.stderr,
         )
     if bad:

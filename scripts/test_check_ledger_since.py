@@ -83,6 +83,19 @@ class ViolationsTest(unittest.TestCase):
         new = entry("BinariesCheck", "0.4.0", reason="added after the tag")
         self.assertEqual(self.check([old], [old, new]), [new])
 
+    def test_unrelated_entry_replacing_one_in_place_fails(self):
+        # Deleting X and adding an unrelated Y at the same spot is not a
+        # since correction of X.
+        gone = entry("zero-length", "0.3.0", kind="missing")
+        bad = entry("no-binary", "0.4.0")
+        self.assertEqual(self.check([gone], [bad]), [bad])
+
+    def test_added_entry_is_reported_not_the_correction_beside_it(self):
+        old = entry("TagsCheck", "0.3.1")
+        bad = entry("no-binary", "0.4.0")
+        fixed = entry("TagsCheck", "0.1.0")
+        self.assertEqual(self.check([old], [bad, fixed]), [bad])
+
     def test_rekeyed_entry_keeping_since_passes(self):
         old = entry("missing-mandatory-optflags", "0.1.0", kind="detail")
         new = entry("forbidden-optflags", "0.1.0", kind="detail")
