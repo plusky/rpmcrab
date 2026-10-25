@@ -3429,9 +3429,14 @@ impl FilesCheck {
     ) {
         // FilesCheck.py:1083-1088, with the cross-sysroot scoping of
         // check_normal_non_devel (issue #860): a runtime library under
-        // a target sysroot is the cross devel package's payload.
+        // a target sysroot is the cross devel package's payload. The
+        // debug trees hold the mirrored .debug companions of the
+        // runtime libraries (issue #955, divergences.toml): a
+        // -debuginfo package's payload by construction, scoped out
+        // via is_debug_path.
         if is_match(&self.lib_re, fname)
             && st.devel_pkg
+            && !is_debug_path(fname)
             && !cross_sysroot_matches(fname)
             && !(is_match(&self.sofile_re, fname) && pkgfile::is_symlink(pkgfile.mode))
         {
@@ -5483,6 +5488,28 @@ mod tests {
         check.check(&pkg, &config, &mut out);
         let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
         assert_has(&names, "non-devel-file-in-devel-package");
+    }
+
+    #[test]
+    fn debug_companion_in_debuginfo_package_is_quiet() {
+        // Issue #955: a -debuginfo package's payload is the mirrored
+        // .debug companion of the versioned runtime library; the lib
+        // arm scopes the debug trees out.
+        let lines = non_devel_lines(
+            "libply5-debuginfo",
+            &["/usr/lib/debug/usr/lib64/libply.so.5.0.0.debug"],
+        );
+        assert!(lines.is_empty(), "debug companion must be quiet: {lines:?}");
+        // Near misses stay charged: a real versioned runtime library
+        // in a -devel package, and a lib-shaped path under a
+        // lookalike prefix.
+        let lines = non_devel_lines("foo-devel", &["/usr/lib64/libfoo.so.1.2.3"]);
+        assert_eq!(lines.len(), 1, "real runtime lib must fire: {lines:?}");
+        let lines = non_devel_lines(
+            "foo-devel",
+            &["/usr/lib/debugfoo/usr/lib64/libfoo.so.1.2.3"],
+        );
+        assert_eq!(lines.len(), 1, "debugfoo lookalike must fire: {lines:?}");
     }
 
     // Issue #860: run the check over one synthetic package and

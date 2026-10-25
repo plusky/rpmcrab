@@ -3174,3 +3174,18 @@ kind = "behaviour"
 reason = "The reference fires filelist-forbidden-move-to-usr on %ghost files: its move-to-usr rule has no ghost exemption. Those files are generated at install time and carry no payload that could be moved (pam-config's /etc/pam.d/common-*-pc ghosts; the static vendor copies already live under /usr/lib/pam.d), so the port exempts %ghost files from the rule, as it already does for filelist-forbidden-sysconfig. Real files under /etc/pam.d, /lib/systemd/system and /lib/udev/rules.d still fire."
 since = "0.4.1"
 upstream = "https://github.com/plusky/rpmcrab/issues/947"
+
+[[divergence]]
+check = "non-devel-file-in-devel-package"
+kind = "behaviour"
+case = "global"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
+since = "0.4.1"
+reason = "The reference charges any lib-shaped path in a devel-classified package (FilesCheck.py _check_file_normal_file_lib at the pinned commit 84848c05), and the devel classification covers -debuginfo packages, so the mirrored .debug companion of a versioned soname in a -debuginfo package draws the error. The port scopes the versioned-library arm out of the debug trees (/usr/lib/debug and /usr/src/debug, via is_debug_path): a debuginfo package's payload is debug data by construction, and the companion is the debug form of the runtime library, not a runtime library misplaced into a devel package (plusky/rpmcrab#955). A real versioned runtime library in a -devel package and lib-shaped paths under lookalike prefixes (/usr/lib/debugfoo) stay charged."
+[[divergence]]
+check = "statically-linked-binary"
+kind = "behaviour"
+case = "global"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/BinariesCheck.py"
+since = "0.4.1"
+reason = "The reference charges an ELF file with no DT_NEEDED and no ld.so soname (BinariesCheck.py _check_library_dependency at the pinned commit 84848c05), with no separate-debuginfo scoping, so the dwz multi-file artefact in a -debuginfo package (/usr/lib/debug/.dwz/<pkg>-<version>) draws the error: a relocatable ELF container of debug sections, carrying no DT_NEEDED by construction. The port returns early in check_library_dependency for separate debuginfo (the .debug name suffix or a path under /usr/lib/debug/), the predicate pair check_hardening already applies to its findings (plusky/rpmcrab#955). Statically linked executables outside the debug trees and under lookalike prefixes (/usr/lib/debugfoo) stay charged."
