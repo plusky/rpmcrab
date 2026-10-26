@@ -254,6 +254,18 @@ fn elf_machine_family(machine: u16) -> Option<&'static str> {
     })
 }
 
+/// Whether an ELF's machine belongs to a different ISA family than
+/// the package architecture: guest firmware and cross payloads the
+/// package arch's dynamic linker never loads. An unmapped package
+/// arch or an unclassified machine is not foreign -- the finding is
+/// charged as before, since the gate cannot classify the file.
+fn foreign_elf_machine(machine: u16, arch: &str) -> bool {
+    match (elf_machine_family(machine), pkg_arch_family(arch)) {
+        (Some(machine_family), Some(arch_family)) => machine_family != arch_family,
+        _ => false,
+    }
+}
+
 /// Parse ELF bytes, tolerating a dangling DT_GNU_HASH: stripping hash
 /// sections with objcopy leaves the dynamic entry behind, which fails
 /// goblin's strict parse. The reference never inspects the hash table, so
@@ -3963,11 +3975,16 @@ impl BinariesCheck {
             // there either: `is_debug` covers the `.debug` name suffix
             // and the path covers the canonical debuginfo location --
             // the treatment `check_hardening` already applies to its
-            // findings.
+            // findings. A linked image built for a different
+            // instruction set than the package architecture is payload
+            // for another machine (guest firmware, a cross helper):
+            // the package arch's dynamic linker never loads it, so
+            // the absence states nothing there either.
             if (info.elf_type == ET_EXEC || info.elf_type == ET_DYN)
                 && !info.program_headers.is_empty()
                 && !info.is_debug
                 && !pkgfile.name.starts_with("/usr/lib/debug/")
+                && !foreign_elf_machine(info.elf_machine, &pkg.arch)
             {
                 add_info(
                     out,
@@ -9233,6 +9250,90 @@ description = "explicit priority string bypasses the system crypto policy"
             let results = executable_stack_results(name, &bytes);
             assert_lacks(&results, "missing-PT_GNU_STACK-section");
         }
+    }
+
+    fn executable_stack_syn_machine(
+        elf_type: u16,
+        machine: u16,
+        headers: Vec<ElfProgramHeader>,
+    ) -> Vec<(String, String)> {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/bin/tool", "ELF 64-bit LSB executable, x86-64");
+        let mut info = syn_info();
+        info.elf_type = elf_type;
+        info.elf_machine = machine;
+        info.program_headers = headers;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_executable_stack(&pkg, &pkgfile, &info, &mut out);
+        out.results().to_vec()
+    }
+
+    #[test]
+    fn missing_gnu_stack_silent_for_foreign_machine() {
+        use goblin::elf::header::{EM_ARM, EM_PPC, EM_SPARC, EM_SPARCV9, ET_DYN, ET_EXEC};
+        // Guest firmware and cross payloads in an x86_64 package: the
+        // images are linked images with a programme header table, but
+        // built for another instruction set -- OpenBIOS for SPARC
+        // guests, a U-Boot ROM for a PPC guest, an ARM helper image.
+        // The package arch's dynamic linker never loads them, so the
+        // missing header states nothing about how they were linked.
+        for machine in [EM_SPARC, EM_SPARCV9, EM_PPC, EM_ARM] {
+            let results = executable_stack_syn_machine(ET_EXEC, machine, vec![phdr("LOAD", "R E")]);
+            assert_lacks(&results, "missing-PT_GNU_STACK-section");
+        }
+        let results = executable_stack_syn_machine(ET_DYN, EM_PPC, vec![phdr("LOAD", "R E")]);
+        assert_lacks(&results, "missing-PT_GNU_STACK-section");
+    }
+
+    #[test]
+    fn missing_gnu_stack_silent_for_foreign_machine_bytes() {
+        use goblin::elf::header::{EM_SPARCV9, ET_EXEC};
+        use goblin::elf::program_header::PT_LOAD;
+        // The byte-level counterpart of the synthetic test: the
+        // parser must surface the foreign e_machine for the gate to
+        // see it (the fixture builder writes EM_X86_64; patch the
+        // e_machine field at offset 18).
+        let mut bytes = elf_with_phdrs(ET_EXEC, &[PT_LOAD]);
+        bytes[18..20].copy_from_slice(&EM_SPARCV9.to_le_bytes());
+        let results = executable_stack_results("/usr/share/qemu/openbios-sparc64", &bytes);
+        assert_lacks(&results, "missing-PT_GNU_STACK-section");
+        assert_lacks(&results, "executable-stack");
+    }
+
+    #[test]
+    fn missing_gnu_stack_fires_for_same_family_machines() {
+        use goblin::elf::header::{EM_386, EM_X86_64, ET_DYN, ET_EXEC};
+        // Near misses: the other word size of the package's own ISA
+        // is served by the same dynamic linker family -- a 32-bit
+        // executable or shared library in an x86_64 package is
+        // exactly the population the finding addresses.
+        for (elf_type, machine) in [(ET_EXEC, EM_386), (ET_DYN, EM_386), (ET_EXEC, EM_X86_64)] {
+            let results =
+                executable_stack_syn_machine(elf_type, machine, vec![phdr("LOAD", "R E")]);
+            assert_eq!(
+                lines_for(&results, "missing-PT_GNU_STACK-section").len(),
+                1,
+                "machine {machine} keeps firing: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_gnu_stack_family_table_fails_closed() {
+        use goblin::elf::header::{EM_386, EM_AARCH64, EM_NONE, EM_PPC64, EM_SPARCV9, EM_X86_64};
+        // The word-size pairs share a family on both sides of the
+        // comparison (and a hwcaps subarch resolves to its base), and
+        // an unclassified machine or an unmapped package arch never
+        // counts as foreign: the gate cannot classify those, so the
+        // charge stands.
+        assert!(!foreign_elf_machine(EM_SPARCV9, "sparc64"));
+        assert!(!foreign_elf_machine(EM_PPC64, "ppc"));
+        assert!(!foreign_elf_machine(EM_386, "x86_64_v3"));
+        assert!(foreign_elf_machine(EM_AARCH64, "x86_64"));
+        assert!(!foreign_elf_machine(EM_NONE, "x86_64"));
+        assert!(!foreign_elf_machine(EM_X86_64, "noarch"));
     }
 
     fn executable_stack_syn(
