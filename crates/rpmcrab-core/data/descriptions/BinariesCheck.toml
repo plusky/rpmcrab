@@ -251,7 +251,8 @@ functions knows the size of the destination, so an input longer than
 the destination buffer overflows it (CWE-120). Whether a given call
 can actually overflow depends on the call site, which the binary
 alone cannot decide. Treat the finding as a prompt to audit the call
-sites and switch to a bounded form (strlcpy, snprintf, or the
+sites and switch to a bounded form (strlcpy for strcpy, strlcat
+for strcat, snprintf for sprintf, vsnprintf for vsprintf, or the
 fortified __*_chk variants the compiler selects under
 _FORTIFY_SOURCE); the fix belongs in the upstream source, not in
 the package.
