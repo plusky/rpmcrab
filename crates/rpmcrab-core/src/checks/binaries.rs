@@ -4236,28 +4236,83 @@ impl BinariesCheck {
                             // stripped: the version sits before the
                             // flavour tail, which is not part of the
                             // name.
+                            //
+                            // Two further derived forms are credited on
+                            // limb A only (the stripped or reduced name
+                            // must equal a SONAME-derived name exactly;
+                            // limb B's stem-blind suffix is not enough):
+                            //
+                            // (C) A trailing flavour segment of letters
+                            // only (-opencl, -mini, -dummy): the same
+                            // flavour shape as above with no digit in
+                            // the tail (libarmnn36-opencl ships
+                            // libarmnn.so.36, libuna1-mini ships
+                            // libuna.so.1). Limb A only, so a name whose
+                            // own stem merely ends in the version
+                            // (libqt5-qtwebengine for libQt5WebEngine.so.5)
+                            // still fires.
+                            //
+                            // (D) A SONAME version whose trailing
+                            // components are all zero, with the zeros
+                            // elided: libprotobuf.so.3.21.12.0 is
+                            // packaged as libprotobuf3_21_12 and
+                            // libCppMicroServices.so.4.0.0 as
+                            // libCppMicroServices4. A dropped zero
+                            // carries no ABI discrimination — any
+                            // non-zero change to the elided components
+                            // re-fires — while a partially elided form
+                            // (libfoo4_0 for libfoo.so.4.0.0) still
+                            // fires.
                             let stem = match soname.split_once(".so") {
                                 Some((head, _)) => head,
                                 None => soname,
                             }
                             .replace('.', "_");
                             let soversion_pkgform = soversion.replace('.', "_");
-                            let expected: Vec<String> = if pkgversion.is_empty() {
+                            let mut expected: Vec<String> = if pkgversion.is_empty() {
                                 vec![
                                     format!("{stem}{soversion_pkgform}"),
                                     format!("{stem}-{soversion_pkgform}"),
                                 ]
                             } else if soversion.is_empty() {
-                                vec![stem]
+                                vec![stem.clone()]
                             } else {
                                 vec![format!("{stem}-{soversion_pkgform}")]
                             };
+                            // (D) The trailing-zero-elided derived
+                            // names: drop trailing ".0" components of
+                            // the SONAME version (keeping at least one)
+                            // and derive again by the same construction.
+                            let mut reduced: Vec<&str> = soversion.split('.').collect();
+                            while reduced.len() > 1 && reduced.last() == Some(&"0") {
+                                reduced.pop();
+                            }
+                            let reduced_form = reduced.join("_");
+                            if reduced_form != soversion_pkgform {
+                                if pkgversion.is_empty() {
+                                    expected.push(format!("{stem}{reduced_form}"));
+                                    expected.push(format!("{stem}-{reduced_form}"));
+                                } else if !soversion.is_empty() {
+                                    expected.push(format!("{stem}-{reduced_form}"));
+                                }
+                            }
                             fn strip_flavour(name: &str) -> Option<&str> {
                                 let (head, tail) = name.rsplit_once('-')?;
                                 if !head.is_empty()
                                     && tail.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
                                     && tail.chars().last().is_some_and(|c| c.is_ascii_digit())
                                     && tail.chars().all(|c| c.is_ascii_alphanumeric())
+                                {
+                                    Some(head)
+                                } else {
+                                    None
+                                }
+                            }
+                            fn strip_alpha_flavour(name: &str) -> Option<&str> {
+                                let (head, tail) = name.rsplit_once('-')?;
+                                if !head.is_empty()
+                                    && !tail.is_empty()
+                                    && tail.chars().all(|c| c.is_ascii_alphabetic())
                                 {
                                     Some(head)
                                 } else {
@@ -4276,8 +4331,10 @@ impl BinariesCheck {
                                 expected.iter().any(|e| e == name)
                                     || whole_suffix(name, &soversion_str)
                             };
-                            let name_matches =
-                                accepts(pkgname) || strip_flavour(pkgname).is_some_and(accepts);
+                            let derived_only = |name: &str| expected.iter().any(|e| e == name);
+                            let name_matches = accepts(pkgname)
+                                || strip_flavour(pkgname).is_some_and(accepts)
+                                || strip_alpha_flavour(pkgname).is_some_and(derived_only);
                             if !soversion_str.is_empty() && !name_matches {
                                 add_info(
                                     out,
@@ -10632,7 +10689,11 @@ description = "explicit priority string bypasses the system crypto policy"
     /// ends with the expected suffix at a non-digit boundary (limb B:
     /// the trailing version run matches as a whole, the stem is not
     /// policed), after stripping a trailing baselibs (-32bit/-64bit)
-    /// or flavour (-gcc15, -openmpi4) segment.
+    /// or flavour (-gcc15, -openmpi4) segment. Two derived-only
+    /// extensions: an alphabetic flavour tail (-opencl, -mini) is
+    /// stripped when the remainder equals a derived name exactly
+    /// (limb C), and derived names are also built from the SONAME
+    /// version with trailing zero components elided (limb D).
     #[test]
     fn shlib_policy_name_matrix() {
         // (package name, SONAME, fires?)
@@ -10747,6 +10808,25 @@ description = "explicit priority string bypasses the system crypto policy"
             // it fires.
             ("libnetcdf22-openmpi5-32bit", "libnetcdf.so.22", false),
             ("libnetcdf22-32bit-openmpi5", "libnetcdf.so.22", true),
+            // Alphabetic flavour tails (limb C): the version sits
+            // before a trailing -<letters> segment and the stripped
+            // name must equal a SONAME-derived name exactly.
+            ("libarmnn36-opencl", "libarmnn.so.36", false), // corpus
+            ("libfoo1-mini", "libfoo.so.1", false),
+            ("libfoo1-dummy", "libfoo.so.1", false),
+            ("libfoo2-mini", "libfoo.so.1", true), // wrong version before tail
+            ("libbar5-baz", "libBaz.so.5", true),  // stem-blind suffix must not credit
+            ("libfoo1-compat", "libbar.so.1", true), // stripped name is another stem
+            // Trailing-zero elision (limb D): the name derives from
+            // the SONAME version with trailing zero components
+            // dropped; any non-zero change re-fires, and a partially
+            // elided form still fires.
+            ("libfoo4", "libfoo.so.4.0.0", false), // corpus shape (CppMicroServices)
+            ("libfoo3_21_12", "libfoo.so.3.21.12.0", false), // corpus shape (protobuf)
+            ("libfoo10", "libfoo.so.10.0.0", false), // elision to one component
+            ("libfoo4", "libfoo.so.4.0.1", true),  // non-zero tail component
+            ("libfoo4_0", "libfoo.so.4.0.0", true), // partial elision
+            ("libfoo4_0_0", "libfoo.so.4.0.0", false), // full form, as before
             // Corpus pairs every predicate fires on: pre-existing
             // Factory naming violations, unchanged by this guard.
             ("libLLVM18", "libLLVM.so.18.1", true), // suffix is 18_1
