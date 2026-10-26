@@ -4314,13 +4314,40 @@ impl BinariesCheck {
             add_info(out, Level::Error, pkg, "call-to-tmpnam", &[&pkgfile.name]);
         }
         if gethostbyname {
-            add_info(
-                out,
-                Level::Warning,
-                pkg,
-                "binary-or-shlib-calls-gethostbyname",
-                &[&pkgfile.name],
-            );
+            // Defect-pattern gate (registry gate shape
+            // "privilege-or-exposure", #959): the bare pattern stays a
+            // Warning. The gated forms report at Error: the file
+            // itself carries privilege (setuid/setgid bits or file
+            // capabilities), or the package ships systemd service or
+            // socket units, i.e. the caller runs as a daemon. The
+            // Error form also requires a call — an undefined reference
+            // to the family. A file that only defines the symbols
+            // (an NSS module implementing the legacy entry points, a
+            // bundled replacement) carries the pattern without making
+            // the call and stays in the Warning population: the same
+            // definition/call split the archive scoping of
+            // call-to-mktemp uses (#852). The level rests on the
+            // Factory corpus measurement recorded in the divergence
+            // ledger (#967).
+            if info.has_undefined_function_matching(&self.gethostbyname_call_regex)
+                && (file_is_privileged(pkgfile) || pkg_ships_daemon_units(pkg))
+            {
+                add_info(
+                    out,
+                    Level::Error,
+                    pkg,
+                    "binary-or-shlib-calls-gethostbyname",
+                    &[&pkgfile.name],
+                );
+            } else {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "binary-or-shlib-calls-gethostbyname",
+                    &[&pkgfile.name],
+                );
+            }
         }
         if md5 {
             add_info(
@@ -13815,6 +13842,143 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_eq!(count(&bare_pkg, &suid, &["arc4random"], &["arc4random"]), 0);
         assert_eq!(count(&bare_pkg, &suid, &["getrandom"], &["getrandom"]), 0);
         assert_eq!(count(&bare_pkg, &suid, &["getentropy"], &["getentropy"]), 0);
+    }
+
+    #[test]
+    fn gethostbyname_gate_levels() {
+        // The defect-pattern privilege/exposure gates (#959, #967):
+        // the bare pattern is a Warning; a firing file that itself
+        // carries privilege, or any firing file in a package shipping
+        // systemd service/socket units, is an Error.
+        fn run(pkg: &Pkg, pkgfile: &PkgFile, functions: &[&str]) -> Vec<String> {
+            let config = test_config();
+            let check = BinariesCheck::with_tool_dir(&config, None);
+            let mut info = syn_info();
+            info.functions = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs = info.functions.clone();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(pkg, pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "binary-or-shlib-calls-gethostbyname")
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        }
+        // A file that only defines the pattern (no undefined
+        // reference): the pattern fires, the gate cannot promote it.
+        fn run_definition_only(pkg: &Pkg, pkgfile: &PkgFile) -> Vec<String> {
+            let config = test_config();
+            let check = BinariesCheck::with_tool_dir(&config, None);
+            let mut info = syn_info();
+            info.functions = vec!["gethostbyname".to_string()];
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(pkg, pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "binary-or-shlib-calls-gethostbyname")
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        }
+        let plain = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        let bare_pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+
+        // Setuid firing file -> Error.
+        let mut suid = plain.clone();
+        suid.mode = 0o104755;
+        let lines = run(&bare_pkg, &suid, &["gethostbyname"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+
+        // Setgid firing file -> Error.
+        let mut sgid = plain.clone();
+        sgid.mode = 0o102755;
+        let lines = run(&bare_pkg, &sgid, &["gethostbyname"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+
+        // Capability-carrying firing file -> Error.
+        let mut caps = plain.clone();
+        caps.filecaps = Some("cap_net_raw+ep".to_string());
+        let lines = run(&bare_pkg, &caps, &["gethostbyname"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+
+        // Package shipping a systemd service unit -> Error, and the
+        // _r lookalike fires through the same gate.
+        let svc_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file(
+                "/usr/lib/systemd/system/foo.service",
+                "ASCII text",
+            )],
+        );
+        let lines = run(&svc_pkg, &plain, &["gethostbyname_r"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+
+        // Package shipping a systemd socket unit -> Error.
+        let sock_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file("/usr/lib/systemd/system/foo.socket", "ASCII text")],
+        );
+        let lines = run(&sock_pkg, &plain, &["gethostbyname"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+
+        // Near miss: a timer unit is not daemon surface -> Warning.
+        let timer_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file("/usr/lib/systemd/system/foo.timer", "ASCII text")],
+        );
+        let lines = run(&timer_pkg, &plain, &["gethostbyname"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // Near miss: a D-Bus activation file is not a systemd unit ->
+        // Warning.
+        let dbus_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file(
+                "/usr/share/dbus-1/services/org.example.Foo.service",
+                "ASCII text",
+            )],
+        );
+        let lines = run(&dbus_pkg, &plain, &["gethostbyname"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // Near miss: privilege on a *different* file of the package
+        // does not gate this file's finding -> Warning.
+        let mut other = syn_file("/usr/bin/helper", "ELF 64-bit LSB executable");
+        other.mode = 0o104755;
+        let mixed_pkg = synthetic_pkg("testpkg", "x86_64", vec![other]);
+        let lines = run(&mixed_pkg, &plain, &["gethostbyname"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // Near miss: a definition-only file in a daemon package
+        // (an NSS module implementing the legacy entry points)
+        // stays a Warning although the exposure gate matches.
+        let lines = run_definition_only(&svc_pkg, &plain);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // Near miss: a definition-only setuid file stays a Warning
+        // although the privilege gate matches.
+        let lines = run_definition_only(&bare_pkg, &suid);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // Quiet shape: a privileged file in a daemon package that
+        // resolves through getaddrinfo emits nothing.
+        let mut suid_svc = plain.clone();
+        suid_svc.mode = 0o104755;
+        let lines = run(&svc_pkg, &suid_svc, &["getaddrinfo"]);
+        assert!(lines.is_empty(), "no finding: {lines:?}");
     }
 
     #[test]
