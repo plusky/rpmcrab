@@ -3229,18 +3229,58 @@ fn perl_base_credited(lists: &DepLists, vers: &str) -> bool {
         .any(|d| d.name == "/usr/bin/perl" || d.name.starts_with("libperl.so"))
 }
 
+/// Whether `name` is a flavour base package name: `python3`
+/// followed by one or more digits and `-base` - `python313-base`,
+/// `python314-base` - carrying the optional `(arch-bits)` qualifier
+/// of the `dep_name_matches` shape. Nothing else is the form: a
+/// longer suffix (`python313-base-devel`), a letter in the digit run
+/// (`python31a-base`) or the bare `python3-base` (credited on its own
+/// arm) does not match.
+fn is_flavour_base_name(name: &str) -> bool {
+    let stem = match name.split_once('(') {
+        Some((head, rest)) => {
+            let Some(inner) = rest.strip_suffix(')') else {
+                return false;
+            };
+            let Some((arch, bits)) = inner.split_once('-') else {
+                return false;
+            };
+            if arch.is_empty()
+                || !arch.chars().all(|c| c.is_alphanumeric() || c == '_')
+                || bits.is_empty()
+                || !bits.chars().all(|c| c.is_ascii_digit())
+            {
+                return false;
+            }
+            head
+        }
+        None => name,
+    };
+    let Some(digits) = stem
+        .strip_prefix("python3")
+        .and_then(|rest| rest.strip_suffix("-base"))
+    else {
+        return false;
+    };
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
+
 /// Whether the lists carry the python base dependency for `ver`: the
 /// `=`-pinned `python` / `python-base` / `python(abi)` names the
 /// reference credits, the SUSE base name `python3-base` in any
 /// relation and the versioned interpreter path `/usr/bin/python<ver>`
 /// (issue #568), plus the interpreter expressed as the unversioned
 /// `/usr/bin/python3` path or the `libpython<ver>` soname (issue
-/// #862).
+/// #862), plus the flavour base name `python3<digits>-base` in any
+/// relation (maintainer ruling, 2026-10-26) - the base package of
+/// one specific flavour, which for a non-primary flavour is the
+/// only spelling of that base.
 fn python_base_credited(lists: &DepLists, ver: &str) -> bool {
     let interpreter = format!("/usr/bin/python{ver}");
     let soname = format!("libpython{ver}.so");
     if lists.hard().any(|d| {
         dep_name_matches(&d.name, "python3-base")
+            || is_flavour_base_name(&d.name)
             || d.name == interpreter
             || d.name == "/usr/bin/python3"
             || d.name.starts_with(&soname)
@@ -7360,13 +7400,60 @@ mod tests {
     }
 
     #[test]
-    fn normal_python_dep_flavour_base_name_fires() {
-        // The flavour-named base form (`python313-base`, even with a
-        // floor) is not one of the credited forms: #568 already left
-        // it firing, and #862 does not widen the name forms.
+    fn normal_python_dep_flavour_base_name_satisfies() {
+        // The flavour-named base form is the base dependency: the
+        // package `python313-base` is the very package that provides
+        // the credited `python3-base` name. #568 and #862 left the
+        // form uncredited; the maintainer ruling of 2026-10-26
+        // credits it (any relation, floor included).
         let names = run_dep_check(
             "foo",
             vec![dep_flagged("python313-base", 12, Some("3.9"))],
+            "/usr/lib/python3.13/site-packages/foo.py",
+            b"x = 1\n",
+        );
+        assert_lacks(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_python_dep_flavour_base_name_other_flavour_satisfies() {
+        // The 3.14 flavour's base package provides no `python3-base`
+        // at all, so the flavour name is the only spelling of its
+        // base dependency.
+        let names = run_dep_check(
+            "foo",
+            vec![dep_flagged("python314-base", 12, Some("3.9"))],
+            "/usr/lib/python3.14/site-packages/foo.py",
+            b"x = 1\n",
+        );
+        assert_lacks(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_python_dep_flavour_base_name_arch_qualified_satisfies() {
+        // The `(arch-bits)` qualifier shape counts, as it does for
+        // the `python3-base` name (`dep_name_matches` semantics).
+        let names = run_dep_check(
+            "foo",
+            vec![dep_named("python313-base(x86-64)")],
+            "/usr/lib/python3.13/site-packages/foo.py",
+            b"x = 1\n",
+        );
+        assert_lacks(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_python_dep_flavour_base_lookalikes_fire() {
+        // The grammar is exact - `python3` + digits + `-base` and
+        // nothing else: a suffixed package name, a letter in the
+        // digit run and a flavour module package are not the base.
+        let names = run_dep_check(
+            "foo",
+            vec![
+                dep_named("python313-base-devel"),
+                dep_named("python31a-base"),
+                dep_named("python313-gobject"),
+            ],
             "/usr/lib/python3.13/site-packages/foo.py",
             b"x = 1\n",
         );
@@ -7415,6 +7502,33 @@ mod tests {
                 nodep_lines(&results)
             );
         }
+    }
+
+    #[test]
+    fn normal_python_dep_anchor_sibling_carries_flavour_base() {
+        // The anchor judgement shares the own-package predicate: a
+        // sibling carrying the base dependency in its flavour-named
+        // form credits the anchored package the same way.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let lang = dep_test_pkg(
+            &dir,
+            "foo-lang",
+            vec![dep_flagged("foo", 8, Some("1.0"))],
+            Some(("/usr/lib/python3.13/site-packages/foo.py", b"x = 1\n")),
+        );
+        let main = dep_test_pkg(
+            &dir,
+            "foo",
+            vec![dep_flagged("python313-base", 12, Some("3.9"))],
+            None,
+        );
+        let (results, _levels) = run_files_check_pkgs(&[lang, main], &config);
+        assert!(
+            nodep_lines(&results).is_empty(),
+            "got {:?}",
+            nodep_lines(&results)
+        );
     }
 
     #[test]
