@@ -646,13 +646,20 @@ enum ShellTok {
 const FRAGMENT_PROOF_SCAN_LIMIT: u64 = 1_048_576;
 
 /// Whether `word` is a shell name (a function or variable name).
+/// The tail also admits `-` and `.`: bash accepts both in function
+/// names (`my-func ()`, `my.func ()`), and the function-definition
+/// arms gate on this — a definition the gate misses leaves the
+/// body's `return`s looking top-level, while a name it admits too
+/// freely only ever spans a body the shell reads as one too.
 fn is_shell_name(word: &str) -> bool {
     !word.is_empty()
         && word
             .chars()
             .next()
             .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
 }
 
 /// Whether `word`, read at command position, is a variable
@@ -684,6 +691,148 @@ fn word_keeps_command_position(word: &str) -> bool {
             | "builtin"
             | "exec"
     ) || is_assignment_word(word)
+}
+
+/// The index just past the bracket span that opens at `start`
+/// (`chars[start]` is `(` or `{`), or the end of the input if the
+/// span never closes. Quoted strings, backtick substitutions,
+/// escapes and comments inside the span are skipped whole, so a
+/// bracket inside one of them cannot close the span early. Inside
+/// a parenthesised span the `)` that ends a `case` pattern list
+/// is not the span's closer either: the scanner tracks each open
+/// `case` through its pattern and item phases, and only a `)`
+/// read outside a pattern list counts towards the balance.
+fn scan_balanced(chars: &[char], start: usize) -> usize {
+    #[derive(PartialEq)]
+    enum CasePhase {
+        /// `case` and its subject read, `in` not seen yet.
+        BeforeIn,
+        /// Reading a pattern list: a `)` ends the list, not the span.
+        Pattern,
+        /// Reading a pattern's commands, up to `;;` or `esac`.
+        Item,
+    }
+
+    let n = chars.len();
+    let open = chars[start];
+    let close = if open == '(' { ')' } else { '}' };
+    let parens = open == '(';
+    let mut depth = 0usize;
+    let mut cases: Vec<CasePhase> = Vec::new();
+    let mut command_start = true;
+    let mut i = start;
+    while i < n {
+        match chars[i] {
+            '\\' => {
+                i += if i + 1 < n { 2 } else { 1 };
+            }
+            '\'' => {
+                i += 1;
+                while i < n && chars[i] != '\'' {
+                    i += 1;
+                }
+                if i < n {
+                    i += 1;
+                }
+                command_start = false;
+            }
+            '"' => {
+                i += 1;
+                while i < n && chars[i] != '"' {
+                    i += if chars[i] == '\\' && i + 1 < n { 2 } else { 1 };
+                }
+                if i < n {
+                    i += 1;
+                }
+                command_start = false;
+            }
+            '`' => {
+                i += 1;
+                while i < n && chars[i] != '`' {
+                    i += if chars[i] == '\\' && i + 1 < n { 2 } else { 1 };
+                }
+                if i < n {
+                    i += 1;
+                }
+                command_start = false;
+            }
+            '#' if command_start && parens => {
+                while i < n && chars[i] != '\n' {
+                    i += if chars[i] == '\\' && i + 1 < n { 2 } else { 1 };
+                }
+            }
+            c if c == open => {
+                if !(parens && cases.last() == Some(&CasePhase::Pattern)) {
+                    depth += 1;
+                }
+                command_start = true;
+                i += 1;
+            }
+            c if c == close => {
+                if parens && cases.last() == Some(&CasePhase::Pattern) {
+                    if let Some(top) = cases.last_mut() {
+                        *top = CasePhase::Item;
+                    }
+                } else {
+                    depth -= 1;
+                    if depth == 0 {
+                        return i + 1;
+                    }
+                }
+                command_start = true;
+                i += 1;
+            }
+            ';' => {
+                if parens
+                    && i + 1 < n
+                    && matches!(chars[i + 1], ';' | '&')
+                    && cases.last() == Some(&CasePhase::Item)
+                {
+                    if let Some(top) = cases.last_mut() {
+                        *top = CasePhase::Pattern;
+                    }
+                }
+                command_start = true;
+                i += 1;
+            }
+            '&' | '|' | '\n' => {
+                command_start = true;
+                i += 1;
+            }
+            ' ' | '\t' | '\r' => {
+                i += 1;
+            }
+            _ => {
+                let mut j = i;
+                while j < n && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+                    j += 1;
+                }
+                if j == i {
+                    // punctuation that starts no word (`$`, `*`, ...)
+                    i += 1;
+                } else {
+                    if parens {
+                        let word: String = chars[i..j].iter().collect();
+                        match word.as_str() {
+                            "case" if command_start => cases.push(CasePhase::BeforeIn),
+                            "in" if cases.last() == Some(&CasePhase::BeforeIn) => {
+                                if let Some(top) = cases.last_mut() {
+                                    *top = CasePhase::Pattern;
+                                }
+                            }
+                            "esac" if command_start && !cases.is_empty() => {
+                                cases.pop();
+                            }
+                            _ => {}
+                        }
+                    }
+                    i = j;
+                }
+                command_start = false;
+            }
+        }
+    }
+    n
 }
 
 /// Scan one shell word starting at `i` (a character that starts a
@@ -753,25 +902,9 @@ fn scan_shell_word(chars: &[char], mut i: usize) -> (String, usize) {
                 }
             }
             '$' if i + 1 < n && (chars[i + 1] == '(' || chars[i + 1] == '{') => {
-                let (open, close) = if chars[i + 1] == '(' {
-                    ('(', ')')
-                } else {
-                    ('{', '}')
-                };
-                let mut depth = 0usize;
-                while i < n {
-                    let c = chars[i];
-                    word.push(c);
-                    i += 1;
-                    if c == open {
-                        depth += 1;
-                    } else if c == close {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                }
+                let end = scan_balanced(chars, i + 1);
+                word.extend(chars[i..end].iter().copied());
+                i = end;
             }
             c => {
                 word.push(c);
@@ -811,6 +944,9 @@ fn skip_heredoc_body(chars: &[char], mut i: usize, delim: &str, strip_tabs: bool
 /// command `(( ... ))` collapses to one opaque word, and
 /// here-document bodies are consumed at the newline that ends the
 /// line opening them, so none of those shapes can produce a token.
+/// Process substitutions are consumed whole as word tokens, and
+/// the brace tokens are re-read against command position at the
+/// end (see `recheck_brace_tokens`).
 fn lex_shell(content: &str) -> Vec<ShellTok> {
     let chars: Vec<char> = content.chars().collect();
     let n = chars.len();
@@ -829,8 +965,12 @@ fn lex_shell(content: &str) -> Vec<ShellTok> {
                 }
             }
             '#' => {
+                // A backslash-newline inside a comment continues
+                // it onto the next line, so backslashes are
+                // consumed in pairs: an escaped backslash does
+                // not fake a continuation.
                 while i < n && chars[i] != '\n' {
-                    i += 1;
+                    i += if chars[i] == '\\' && i + 1 < n { 2 } else { 1 };
                 }
             }
             '\\' if i + 1 < n && chars[i + 1] == '\n' => i += 2,
@@ -890,8 +1030,12 @@ fn lex_shell(content: &str) -> Vec<ShellTok> {
             }
             '<' => {
                 if i + 1 < n && chars[i + 1] == '(' {
-                    toks.push(ShellTok::LParen);
-                    i += 2;
+                    // a process substitution is a word-like
+                    // operand: consume it whole, like `$(...)`,
+                    // so its content produces no tokens
+                    let end = scan_balanced(&chars, i + 1);
+                    toks.push(ShellTok::Word(chars[i..end].iter().collect()));
+                    i = end;
                 } else if i + 2 < n && chars[i + 1] == '<' && chars[i + 2] == '<' {
                     // here-string: a redirection, no body follows
                     toks.push(ShellTok::Redir);
@@ -911,8 +1055,10 @@ fn lex_shell(content: &str) -> Vec<ShellTok> {
             }
             '>' => {
                 if i + 1 < n && chars[i + 1] == '(' {
-                    toks.push(ShellTok::LParen);
-                    i += 2;
+                    // process substitution, as in the `<` arm
+                    let end = scan_balanced(&chars, i + 1);
+                    toks.push(ShellTok::Word(chars[i..end].iter().collect()));
+                    i = end;
                 } else {
                     toks.push(ShellTok::Redir);
                     i += 1;
@@ -927,7 +1073,7 @@ fn lex_shell(content: &str) -> Vec<ShellTok> {
             '{' if i + 1 >= n
                 || matches!(
                     chars[i + 1],
-                    ' ' | '\t' | '\r' | '\n' | ';' | '&' | '|' | '(' | ')'
+                    ' ' | '\t' | '\r' | '\n' | ';' | '&' | '|' | '(' | ')' | '<' | '>'
                 ) =>
             {
                 toks.push(ShellTok::LBrace);
@@ -936,7 +1082,7 @@ fn lex_shell(content: &str) -> Vec<ShellTok> {
             '}' if i + 1 >= n
                 || matches!(
                     chars[i + 1],
-                    ' ' | '\t' | '\r' | '\n' | ';' | '&' | '|' | '(' | ')'
+                    ' ' | '\t' | '\r' | '\n' | ';' | '&' | '|' | '(' | ')' | '<' | '>'
                 ) =>
             {
                 toks.push(ShellTok::RBrace);
@@ -952,7 +1098,107 @@ fn lex_shell(content: &str) -> Vec<ShellTok> {
             }
         }
     }
-    toks
+    recheck_brace_tokens(&toks)
+}
+
+/// Re-read a lexed script's brace tokens. `{` and `}` are shell
+/// reserved words only at command position — a brace group's or
+/// a function body's brackets — and ordinary word characters
+/// everywhere else: arguments (`echo }` prints one), names and
+/// redirection targets. A brace emitted at a non-command
+/// position becomes a word token, so it can neither manufacture
+/// a command position for the word behind it (the `echo a }
+/// return` shape, where `return` is an argument) nor close a
+/// function span. The position pass mirrors the one in
+/// `shell_script_has_top_level_return`, plus the function-header
+/// zone that span detection recognizes: between a `name ()` or
+/// `function name` header and its body the position is still the
+/// body's, so a `{` there still opens it.
+fn recheck_brace_tokens(toks: &[ShellTok]) -> Vec<ShellTok> {
+    let mut out: Vec<ShellTok> = Vec::with_capacity(toks.len());
+    let mut expect_command = true;
+    let mut skip_word = false;
+    // Between a function header and its body; `name_pending` is
+    // set only by the `function` form, whose name is still to come.
+    let mut in_header = false;
+    let mut name_pending = false;
+    for (idx, tok) in toks.iter().enumerate() {
+        match tok {
+            ShellTok::LBrace | ShellTok::RBrace if skip_word || !expect_command => {
+                out.push(ShellTok::Word(
+                    if matches!(tok, ShellTok::LBrace) {
+                        "{"
+                    } else {
+                        "}"
+                    }
+                    .to_string(),
+                ));
+                skip_word = false;
+            }
+            ShellTok::LBrace => {
+                out.push(tok.clone());
+                in_header = false;
+                expect_command = true;
+            }
+            ShellTok::RBrace => {
+                out.push(tok.clone());
+                in_header = false;
+                expect_command = true;
+            }
+            ShellTok::Word(w) => {
+                out.push(tok.clone());
+                if skip_word {
+                    skip_word = false;
+                } else if !w.is_empty()
+                    && w.chars().all(|c| c.is_ascii_digit())
+                    && matches!(toks.get(idx + 1), Some(ShellTok::Redir))
+                {
+                    // an fd number before a redirection: the
+                    // command it prefixes is still to come, and
+                    // the position is unchanged
+                } else if in_header {
+                    if name_pending {
+                        name_pending = false;
+                    } else {
+                        // the first word of a brace-less body
+                        in_header = false;
+                        expect_command = word_keeps_command_position(w);
+                    }
+                } else if expect_command {
+                    if w == "function" {
+                        in_header = true;
+                        name_pending = true;
+                    } else if is_shell_name(w)
+                        && matches!(toks.get(idx + 1), Some(ShellTok::LParen))
+                        && matches!(toks.get(idx + 2), Some(ShellTok::RParen))
+                    {
+                        in_header = true;
+                        name_pending = false;
+                    } else {
+                        expect_command = word_keeps_command_position(w);
+                    }
+                }
+            }
+            ShellTok::Redir => {
+                out.push(tok.clone());
+                skip_word = true;
+            }
+            ShellTok::Newline => {
+                out.push(tok.clone());
+                expect_command = true;
+            }
+            ShellTok::LParen | ShellTok::RParen => {
+                out.push(tok.clone());
+                expect_command = true;
+            }
+            ShellTok::Semi | ShellTok::AndOr | ShellTok::Pipe => {
+                out.push(tok.clone());
+                in_header = false;
+                expect_command = true;
+            }
+        }
+    }
+    out
 }
 
 /// The token span (opener..=closer) of the body of the function
@@ -960,7 +1206,12 @@ fn lex_shell(content: &str) -> Vec<ShellTok> {
 /// `name ()` or `function name` (the `()` optional there), then a
 /// `{ ... }` or `( ... )` body, with redirections and newlines
 /// allowed between the header and the body. The body is spanned by
-/// counting brackets of the body's own kind.
+/// counting brackets of the body's own kind. A body that opens
+/// with a word instead — a compound command (`f () if ...`,
+/// `f () while ...`, `f () case ...`) or any other command — is
+/// spanned to the end of the token stream: the scan cannot prove
+/// where such a body ends, and a `return` it cannot prove
+/// top-level must not count as one (fail-closed).
 fn shell_function_body_span(toks: &[ShellTok], i: usize) -> Option<(usize, usize)> {
     let mut j = i;
     match toks.get(j) {
@@ -1016,6 +1267,7 @@ fn shell_function_body_span(toks: &[ShellTok], i: usize) -> Option<(usize, usize
                 }
                 return None;
             }
+            Some(ShellTok::Word(_)) => return Some((j, usize::MAX)),
             _ => return None,
         }
     }
@@ -1039,7 +1291,7 @@ fn shell_function_body_span(toks: &[ShellTok], i: usize) -> Option<(usize, usize
 /// substitutions (opaque word content), a `return` used as an
 /// argument, a loop variable or a `case` pattern, and a `return`
 /// inside a function definition. A `return` directly before a
-/// `)` is a `case` pattern, not a statement, and does not count
+/// `)` or a `|` is a `case` pattern, not a statement, and does not count
 /// either (a bare `return` closing a subshell reads the same and
 /// is left firing). Control flow at top level does not suppress
 /// the proof: a `return` inside a top-level `if`, loop, `case`
@@ -1069,7 +1321,10 @@ fn shell_script_has_top_level_return(content: &str) -> bool {
                     if let Some(span) = shell_function_body_span(&toks, i) {
                         spans.push(span);
                     } else if w == "return"
-                        && !matches!(toks.get(i + 1), Some(ShellTok::RParen))
+                        && !matches!(
+                            toks.get(i + 1),
+                            Some(ShellTok::RParen) | Some(ShellTok::Pipe)
+                        )
                         && !spans.iter().any(|&(s, e)| s <= i && i <= e)
                     {
                         return true;
@@ -12763,6 +13018,10 @@ reason = "warning hook: executable and %config by design"
             "#!/bin/sh\nX=1 return 1\n",
             "#!/bin/sh\ncat <<EOF\nbody\nEOF\nreturn 0\n",
             "#!/bin/sh\n! return 1\n",
+            "#!/bin/bash\ncase $1 in\n  a|b) echo ok ;;\nesac\nreturn 0\n",
+            "#!/bin/bash\nx=$((1+2))\nreturn 0\n",
+            "#!/bin/bash\nx=${#a[@]}\nreturn 0\n",
+            "#!/bin/bash\necho }\nreturn 0\n",
         ];
         for text in positives {
             assert!(
@@ -12773,10 +13032,15 @@ reason = "warning hook: executable and %config by design"
     }
 
     /// The shapes that merely mention `return` are not a proof:
-    /// returns inside function definitions of every header and
-    /// body form, in comments, in quoted strings, in here-document
-    /// bodies and in substitutions, and `return` read as an
-    /// argument, a value, a loop variable or a `case` pattern.
+    /// returns inside function definitions of every header form
+    /// (`name ()`, `function name`, with and without `()`) and
+    /// every body form (brace group, subshell and brace-less
+    /// compound commands), in comments — a backslash-continued
+    /// one included — in quoted strings, in here-document bodies
+    /// and in substitutions (process substitutions included),
+    /// and `return` read as an argument, a value, a loop
+    /// variable or a `case` pattern, a pattern alternative
+    /// before a `|` included.
     #[test]
     fn no_top_level_return_shapes() {
         let negatives = [
@@ -12797,6 +13061,25 @@ reason = "warning hook: executable and %config by design"
             "#!/bin/bash\ncat <<-'EOF'\n\treturn 0\n\tEOF\n",
             "#!/bin/bash\nx=$(return)\n",
             "#!/bin/bash\necho ${x:-return}\n",
+            "#!/bin/bash\ncase $1 in\n  a|return|b) echo ok ;;\nesac\n",
+            "#!/bin/bash\nf() if true; then return 0; fi\n",
+            "#!/bin/bash\nf() while true; do return 0; done\n",
+            "#!/bin/bash\nf() until true; do return 0; done\n",
+            "#!/bin/bash\nf() for i in 1 2; do return 0; done\n",
+            "#!/bin/bash\nf() case $1 in\n  a) return 0 ;;\nesac\n",
+            "#!/bin/bash\nf() select i in a; do return 0; done\n",
+            "#!/bin/bash\nmy-func() { return 1; }\n",
+            "#!/bin/bash\nmy.func() { return 1; }\n",
+            "#!/bin/bash\nfunction my-func { return 1; }\n",
+            "#!/bin/bash\nx=$(case $y in a) return 1 ;; esac)\n",
+            "#!/bin/bash\nx=$(echo \")\"; return 1)\n",
+            "#!/bin/bash\nx=$(echo $(return 1))\n",
+            "#!/bin/bash\ncat <(return 1)\n",
+            "#!/bin/bash\ndiff <(return 1) >(return 2)\n",
+            "#!/bin/bash\nf() { return 1; }>log\n",
+            "#!/bin/bash\n# setup \\\nreturn 0\necho hi\n",
+            "#!/bin/bash\necho a } return 0\n",
+            "#!/bin/bash\necho { return 0\n",
         ];
         for text in negatives {
             assert!(
