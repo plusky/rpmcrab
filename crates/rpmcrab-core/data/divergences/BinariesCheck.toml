@@ -325,3 +325,10 @@ check = "binary-or-shlib-calls-rc4"
 kind = "behaviour"
 reason = "rpmcrab reports undefined references to the RC4 entry points as the Warning binary-or-shlib-calls-rc4 (rpmcrab#972); the reference has no such call finding. Full Factory snapshot measurement: 7 files in 6 binary packages (5 source packages) reference the set, each classified by hand -- all protocol compatibility or binding surface, so the level is Warning."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "go-toolchain-outdated"
+kind = "behaviour"
+reason = "New warning with no reference counterpart (issue #972): the reference has no Go toolchain finder. rpmcrab reads the toolchain version a Go binary's .go.buildinfo section records and warns when it is below the floor in data/go-toolchain-floor.toml (as of 2026-10-26: go1.23.8 on the 1.23 line, go1.24.2 on the 1.24 line, anchored on CVE-2025-22871). A version on an unlisted older line fires; a version on an unlisted newer line stays silent, so a stale floor under-fires and never false-fires. Factory corpus: 874 Go binaries in 613 binary packages record a parseable toolchain version, 44 files in 4 binary packages fire."
+since = "0.4.1"

@@ -272,6 +272,7 @@ mod tests {
                 "missing-cf-protection",
                 "executable-stack",
                 "non-position-independent-executable",
+                "go-toolchain-outdated",
             ]
         );
     }
@@ -285,7 +286,7 @@ mod tests {
     #[test]
     fn class_members_come_in_registry_order() {
         let members = class_members("defect-pattern");
-        assert_eq!(members.len(), 14);
+        assert_eq!(members.len(), 15);
         assert_eq!(members[0].tag, "binary-or-shlib-calls-gethostbyname");
         assert!(class_members("no-such-class").is_empty());
     }
@@ -303,6 +304,9 @@ mod tests {
             Gate::SelfGated
         );
         assert_eq!(member("missing-relro").unwrap().family, Family::Hardening);
+        let go_toolchain = member("go-toolchain-outdated").unwrap();
+        assert_eq!(go_toolchain.family, Family::Pattern);
+        assert_eq!(go_toolchain.gate, Gate::None);
     }
 
     #[test]
