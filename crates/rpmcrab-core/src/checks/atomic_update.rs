@@ -10,6 +10,15 @@
 //! they take effect immediately and vanish or turn inconsistent on a
 //! rollback; the packaging guidelines require them deferred to the
 //! first boot of the new snapshot instead.
+//!
+//! A write target the package itself declares `%ghost` is exempt: the
+//! declared ghost is the package's own runtime file, and the scriptlet
+//! is expected to create it -- the reference even warns
+//! (`ghost-files-without-postin`) when no `%post` creates a declared
+//! ghost, so for a ghost outside the snapshot the two rules would pull
+//! against each other. The exemption is decidable from the package's
+//! own header: the lexically normalised target must equal a declared
+//! ghost path of the same (binary) package.
 //! The reference docstring also states that (re)starting daemons is not
 //! possible during a transactional update, but the reference implements
 //! no such rule; `scriptlet-service-restart` (W) implements it here: a
@@ -125,6 +134,21 @@ impl AtomicUpdateCheck {
         let disallowed = self.disallowed_subdirs.iter().any(|d| under(d));
         !(allowed && !disallowed)
     }
+}
+
+/// True when a scriptlet write target is a path the package itself
+/// declares `%ghost`. Both sides are judged lexically normalised, like
+/// [`AtomicUpdateCheck::scriptlet_target_outside`] judges the target:
+/// `/usr/../var/lib/x` is a write to the ghost `/var/lib/x`. Only an
+/// exact match exempts -- a write to the ghost's parent directory, or
+/// to a path a sibling subpackage declares, still fires, because the
+/// check runs per binary package and consults only that package's
+/// declared ghosts.
+fn target_declared_ghost(target: &str, ghost_files: &[String]) -> bool {
+    let target = crate::pkg::normalize_path(target);
+    ghost_files
+        .iter()
+        .any(|ghost| crate::pkg::normalize_path(ghost) == target)
 }
 
 /// The folder carrying `path`: everything before the final `/`.
@@ -687,7 +711,9 @@ impl Check for AtomicUpdateCheck {
                 continue;
             }
             for target in scan_scriptlet(&slot.body) {
-                if self.scriptlet_target_outside(&target) {
+                if self.scriptlet_target_outside(&target)
+                    && !target_declared_ghost(&target, &pkg.ghost_files)
+                {
                     add_info(
                         out,
                         Level::Warning,
@@ -2454,6 +2480,75 @@ fi
         let pkg = fixture_pkg_named("atomic-scriptlet-clean-1.0-1.noarch.rpm");
         let mut check = shipped_check();
         assert!(run(&mut check, &pkg).is_empty());
+    }
+
+    #[test]
+    fn target_declared_ghost_verdicts() {
+        let ghosts = vec![
+            "/var/lib/foo/state".to_string(),
+            "/var/lib/foo/imported".to_string(),
+        ];
+        // Exact matches, judged on the lexically normalised target.
+        assert!(target_declared_ghost("/var/lib/foo/state", &ghosts));
+        assert!(target_declared_ghost("/var/lib/foo/../foo/state", &ghosts));
+        assert!(target_declared_ghost("/var/lib/foo/state/", &ghosts));
+        // Near misses: the ghost's parent directory, a sibling file in
+        // the same directory, and a path this package does not declare.
+        assert!(!target_declared_ghost("/var/lib/foo", &ghosts));
+        assert!(!target_declared_ghost("/var/lib/foo/other", &ghosts));
+        assert!(!target_declared_ghost("/var/lib/bar/state", &ghosts));
+        assert!(!target_declared_ghost("/var/lib/foo/state", &[]));
+    }
+
+    #[test]
+    fn scriptlet_write_to_own_ghost_is_exempt() {
+        let mut pkg = fixture_pkg_named("atomic-scriptlet-fires-1.0-1.noarch.rpm");
+        pkg.ghost_files = vec!["/var/lib/atomic-fixture/state".to_string()];
+        let mut check = shipped_check();
+        let results = run(&mut check, &pkg);
+        // The %postun removal of the declared ghost no longer fires;
+        // the five writes to undeclared paths still do.
+        assert_eq!(results.len(), 5, "results: {results:?}");
+        assert!(
+            results
+                .iter()
+                .all(|(_, line)| !line.contains("/var/lib/atomic-fixture/state")),
+            "results: {results:?}"
+        );
+    }
+
+    #[test]
+    fn scriptlet_writes_with_every_target_declared_ghost_are_quiet() {
+        let mut pkg = fixture_pkg_named("atomic-scriptlet-fires-1.0-1.noarch.rpm");
+        pkg.ghost_files = [
+            "/var/lib/atomic-fixture",
+            "/srv/atomic-fixture/seed.conf",
+            "/var/cache/atomic-fixture",
+            "/var/lib/atomic-fixture/quoted",
+            "/var/lib/atomic-fixture/state",
+            "/opt/atomic-fixture.conf",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        let mut check = shipped_check();
+        assert!(run(&mut check, &pkg).is_empty());
+    }
+
+    #[test]
+    fn scriptlet_write_to_a_path_declared_by_another_package_still_fires() {
+        // The check runs per binary package and consults only that
+        // package's declared ghosts: a ghost set naming another
+        // package's paths (a sibling subpackage's declaration lives in
+        // the sibling's header, not this one's) exempts nothing here.
+        let mut pkg = fixture_pkg_named("atomic-scriptlet-fires-1.0-1.noarch.rpm");
+        pkg.ghost_files = vec![
+            "/var/lib/other-fixture/state".to_string(),
+            "/srv/other-fixture/seed.conf".to_string(),
+        ];
+        let mut check = shipped_check();
+        let results = run(&mut check, &pkg);
+        assert_eq!(results.len(), 6, "results: {results:?}");
     }
 
     #[test]
