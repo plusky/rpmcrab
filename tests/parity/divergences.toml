@@ -1754,6 +1754,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "rpath-in-buildconfig"
+kind = "behaviour"
+reason = "The reference pattern `(?:-rpath|Wl,-R)\b` also matches two shapes that are not rpath directives: `-rpath-link` (the link editor's link-time search path for secondary dependencies, never recorded in the linked output; mozilla-nss's nss-config and nss-util-config ship only this form) and `-rpath` as the tail of a `--<word>-rpath` configure-option token (php-config's recorded configure command line contains '--disable-rpath'). rpmcrab excludes both by token shape: the `-rpath` arm must start a token (not preceded by a word character or a hyphen) and must not continue as `-link`. Measured on the Factory buildconfig candidate set (3,002 packages shipping a .pc or *-config file): 33 findings -> 30; the removed set is exactly the two nss files and php-config."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "env-script-interpreter"
 kind = "behaviour"
 reason = "Fix-and-diverge (corpus E audit 2026-10-26, section 2): test and harness payload does not emit env-script-interpreter -- the gate is script_is_test_data in files.rs, shared with non-executable-script (see the non-executable-script behaviour entry for the predicate and its guards). A test harness runs its scripts by path, inside a test VM or a scratch tree, so the env form of the interpreter line, chosen for the harness's environments, is not an installed entry point's defect there. The reference fires on these shapes without exception; executable files outside the test shapes keep parity, and wrong-script-interpreter is not gated. Measured on the Factory corpus (the audit population re-run before and after over the 1,544 RPMs of the 574 binaries holding either script finding, the before side reproducing the audit's rows exactly): env-script-interpreter falls 1,701 to 1,175; the 526 silenced findings are systemd-testsuite 361, pcp-testsuite 41, mercurial-tests 31, the test trees of the bazel and kafka source packages 33, and the remaining 60 spread over test helpers bundled inside Python packages, doc-tree test scripts and small test packages, every silenced path verified as harness payload, and no other finding changes. Pinned by script_findings_silent_in_test_packages, script_findings_silent_in_test_trees_of_plain_packages and script_findings_still_fire_at_test_gate_bounds in files.rs."
