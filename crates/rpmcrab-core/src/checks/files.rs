@@ -615,6 +615,565 @@ fn script_is_test_data(pkg_name: &str, fname: &str) -> bool {
     })
 }
 
+/// One token of the small shell lexer behind
+/// `shell_script_has_top_level_return`. The lexer resolves quoting
+/// and escapes and consumes here-document bodies, so a word token's
+/// text is the shell's own view of the word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShellTok {
+    Word(String),
+    Newline,
+    /// `;` or `&`
+    Semi,
+    /// `&&` or `||`
+    AndOr,
+    /// `|` or `|&`
+    Pipe,
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    /// Any redirection operator; the word after it is its target
+    /// (a here-document delimiter included), never a command.
+    Redir,
+}
+
+/// How much of a script the sourced-fragment proof reads. A shell
+/// script past a megabyte is not a fragment anyone sources, and
+/// refusing the proof there keeps the scan bounded; the peek the
+/// interpreter line comes from reads only 2048 bytes, which is why
+/// the proof cannot ride on it.
+const FRAGMENT_PROOF_SCAN_LIMIT: u64 = 1_048_576;
+
+/// Whether `word` is a shell name (a function or variable name).
+fn is_shell_name(word: &str) -> bool {
+    !word.is_empty()
+        && word
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether `word`, read at command position, is a variable
+/// assignment (`name=...`): the command it prefixes is still to
+/// come.
+fn is_assignment_word(word: &str) -> bool {
+    match word.split_once('=') {
+        Some((name, _)) => is_shell_name(name),
+        None => false,
+    }
+}
+
+/// Whether a word read at command position leaves the next word at
+/// command position too: the condition and body keywords, the
+/// negation and the prefix builtins that take a command as their
+/// argument, and assignments.
+fn word_keeps_command_position(word: &str) -> bool {
+    matches!(
+        word,
+        "if" | "then"
+            | "else"
+            | "elif"
+            | "while"
+            | "until"
+            | "do"
+            | "!"
+            | "time"
+            | "command"
+            | "builtin"
+            | "exec"
+    ) || is_assignment_word(word)
+}
+
+/// Scan one shell word starting at `i` (a character that starts a
+/// word): quotes and escapes resolve to their literal text, and
+/// command and parameter substitutions are consumed whole as
+/// opaque content, so no token boundary or keyword hides inside
+/// them. Returns the word's text and the index just past it.
+fn scan_shell_word(chars: &[char], mut i: usize) -> (String, usize) {
+    let n = chars.len();
+    let mut word = String::new();
+    while i < n {
+        match chars[i] {
+            ' ' | '\t' | '\r' | '\n' | ';' | '&' | '|' | '(' | ')' | '<' | '>' => break,
+            '\\' => {
+                if i + 1 < n {
+                    if chars[i + 1] != '\n' {
+                        word.push(chars[i + 1]);
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            '\'' => {
+                i += 1;
+                while i < n && chars[i] != '\'' {
+                    word.push(chars[i]);
+                    i += 1;
+                }
+                if i < n {
+                    i += 1;
+                }
+            }
+            '"' => {
+                i += 1;
+                while i < n && chars[i] != '"' {
+                    if chars[i] == '\\'
+                        && i + 1 < n
+                        && matches!(chars[i + 1], '"' | '\\' | '$' | '`' | '\n')
+                    {
+                        if chars[i + 1] != '\n' {
+                            word.push(chars[i + 1]);
+                        }
+                        i += 2;
+                    } else {
+                        word.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                if i < n {
+                    i += 1;
+                }
+            }
+            '`' => {
+                word.push('`');
+                i += 1;
+                while i < n {
+                    let c = chars[i];
+                    word.push(c);
+                    i += 1;
+                    if c == '\\' && i < n {
+                        word.push(chars[i]);
+                        i += 1;
+                    } else if c == '`' {
+                        break;
+                    }
+                }
+            }
+            '$' if i + 1 < n && (chars[i + 1] == '(' || chars[i + 1] == '{') => {
+                let (open, close) = if chars[i + 1] == '(' {
+                    ('(', ')')
+                } else {
+                    ('{', '}')
+                };
+                let mut depth = 0usize;
+                while i < n {
+                    let c = chars[i];
+                    word.push(c);
+                    i += 1;
+                    if c == open {
+                        depth += 1;
+                    } else if c == close {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                }
+            }
+            c => {
+                word.push(c);
+                i += 1;
+            }
+        }
+    }
+    (word, i)
+}
+
+/// Skip a here-document body: lines from `i` up to and including
+/// the line that consists solely of the delimiter (leading tabs
+/// stripped first for `<<-`). Returns the index just past it.
+fn skip_heredoc_body(chars: &[char], mut i: usize, delim: &str, strip_tabs: bool) -> usize {
+    let n = chars.len();
+    while i < n {
+        let mut j = i;
+        if strip_tabs {
+            while j < n && chars[j] == '\t' {
+                j += 1;
+            }
+        }
+        let mut k = j;
+        while k < n && chars[k] != '\n' {
+            k += 1;
+        }
+        let line: String = chars[j..k].iter().collect();
+        i = if k < n { k + 1 } else { k };
+        if line == delim {
+            break;
+        }
+    }
+    i
+}
+
+/// Tokenize a shell script's text. Comments vanish, an arithmetic
+/// command `(( ... ))` collapses to one opaque word, and
+/// here-document bodies are consumed at the newline that ends the
+/// line opening them, so none of those shapes can produce a token.
+fn lex_shell(content: &str) -> Vec<ShellTok> {
+    let chars: Vec<char> = content.chars().collect();
+    let n = chars.len();
+    let mut toks = Vec::new();
+    let mut heredocs: Vec<(String, bool)> = Vec::new();
+    let mut want_delim: Option<bool> = None;
+    let mut i = 0;
+    while i < n {
+        match chars[i] {
+            ' ' | '\t' | '\r' => i += 1,
+            '\n' => {
+                toks.push(ShellTok::Newline);
+                i += 1;
+                for (delim, strip) in std::mem::take(&mut heredocs) {
+                    i = skip_heredoc_body(&chars, i, &delim, strip);
+                }
+            }
+            '#' => {
+                while i < n && chars[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '\\' if i + 1 < n && chars[i + 1] == '\n' => i += 2,
+            ';' => {
+                toks.push(ShellTok::Semi);
+                i += 1;
+            }
+            '&' => {
+                if i + 1 < n && chars[i + 1] == '&' {
+                    toks.push(ShellTok::AndOr);
+                    i += 2;
+                } else {
+                    toks.push(ShellTok::Semi);
+                    i += 1;
+                }
+            }
+            '|' => {
+                if i + 1 < n && chars[i + 1] == '|' {
+                    toks.push(ShellTok::AndOr);
+                    i += 2;
+                } else if i + 1 < n && chars[i + 1] == '&' {
+                    toks.push(ShellTok::Pipe);
+                    i += 2;
+                } else {
+                    toks.push(ShellTok::Pipe);
+                    i += 1;
+                }
+            }
+            '(' => {
+                if i + 1 < n && chars[i + 1] == '(' {
+                    let mut depth = 0usize;
+                    let mut j = i;
+                    while j < n {
+                        match chars[j] {
+                            '(' => depth += 1,
+                            ')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    j += 1;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        j += 1;
+                    }
+                    toks.push(ShellTok::Word("((arith))".to_string()));
+                    i = j;
+                } else {
+                    toks.push(ShellTok::LParen);
+                    i += 1;
+                }
+            }
+            ')' => {
+                toks.push(ShellTok::RParen);
+                i += 1;
+            }
+            '<' => {
+                if i + 1 < n && chars[i + 1] == '(' {
+                    toks.push(ShellTok::LParen);
+                    i += 2;
+                } else if i + 2 < n && chars[i + 1] == '<' && chars[i + 2] == '<' {
+                    // here-string: a redirection, no body follows
+                    toks.push(ShellTok::Redir);
+                    i += 3;
+                } else if i + 1 < n && chars[i + 1] == '<' {
+                    let strip = i + 2 < n && chars[i + 2] == '-';
+                    toks.push(ShellTok::Redir);
+                    want_delim = Some(strip);
+                    i += if strip { 3 } else { 2 };
+                } else {
+                    toks.push(ShellTok::Redir);
+                    i += 1;
+                    if i < n && (chars[i] == '&' || chars[i] == '|') {
+                        i += 1;
+                    }
+                }
+            }
+            '>' => {
+                if i + 1 < n && chars[i + 1] == '(' {
+                    toks.push(ShellTok::LParen);
+                    i += 2;
+                } else {
+                    toks.push(ShellTok::Redir);
+                    i += 1;
+                    if i < n && chars[i] == '>' {
+                        i += 1;
+                    }
+                    if i < n && (chars[i] == '&' || chars[i] == '|') {
+                        i += 1;
+                    }
+                }
+            }
+            '{' if i + 1 >= n
+                || matches!(
+                    chars[i + 1],
+                    ' ' | '\t' | '\r' | '\n' | ';' | '&' | '|' | '(' | ')'
+                ) =>
+            {
+                toks.push(ShellTok::LBrace);
+                i += 1;
+            }
+            '}' if i + 1 >= n
+                || matches!(
+                    chars[i + 1],
+                    ' ' | '\t' | '\r' | '\n' | ';' | '&' | '|' | '(' | ')'
+                ) =>
+            {
+                toks.push(ShellTok::RBrace);
+                i += 1;
+            }
+            _ => {
+                let (word, next) = scan_shell_word(&chars, i);
+                i = next;
+                if let Some(strip) = want_delim.take() {
+                    heredocs.push((word.clone(), strip));
+                }
+                toks.push(ShellTok::Word(word));
+            }
+        }
+    }
+    toks
+}
+
+/// The token span (opener..=closer) of the body of the function
+/// definition whose header starts at token `i`, if `i` starts one:
+/// `name ()` or `function name` (the `()` optional there), then a
+/// `{ ... }` or `( ... )` body, with redirections and newlines
+/// allowed between the header and the body. The body is spanned by
+/// counting brackets of the body's own kind.
+fn shell_function_body_span(toks: &[ShellTok], i: usize) -> Option<(usize, usize)> {
+    let mut j = i;
+    match toks.get(j) {
+        Some(ShellTok::Word(w)) if is_shell_name(w) => {
+            if matches!(toks.get(j + 1), Some(ShellTok::LParen))
+                && matches!(toks.get(j + 2), Some(ShellTok::RParen))
+            {
+                j += 3;
+            } else if w == "function" {
+                match toks.get(j + 1) {
+                    Some(ShellTok::Word(name)) if is_shell_name(name) => j += 2,
+                    _ => return None,
+                }
+                if matches!(toks.get(j), Some(ShellTok::LParen))
+                    && matches!(toks.get(j + 1), Some(ShellTok::RParen))
+                {
+                    j += 2;
+                }
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    loop {
+        match toks.get(j) {
+            Some(ShellTok::Newline) => j += 1,
+            Some(ShellTok::Redir) => {
+                j += if matches!(toks.get(j + 1), Some(ShellTok::Word(_))) {
+                    2
+                } else {
+                    1
+                };
+            }
+            Some(open @ (ShellTok::LBrace | ShellTok::LParen)) => {
+                let close = if *open == ShellTok::LBrace {
+                    ShellTok::RBrace
+                } else {
+                    ShellTok::RParen
+                };
+                let mut depth = 0usize;
+                let mut k = j;
+                while k < toks.len() {
+                    if toks[k] == *open {
+                        depth += 1;
+                    } else if toks[k] == close {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some((j, k));
+                        }
+                    }
+                    k += 1;
+                }
+                return None;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Whether a shell script's text carries a `return` statement at
+/// top level: at command position, outside every function
+/// definition. bash and the POSIX shells refuse a top-level
+/// `return` in an executed script ("can only 'return' from a
+/// function or sourced script"), so its presence is a decidable
+/// marker that the file was written to be sourced by another
+/// script. The marker is not exclusive: a dual-mode script that
+/// also supports direct execution, guarding its `return` behind
+/// a runtime sourcedness test an executing shell never trips,
+/// carries the same marker, and no decidable reading of the
+/// text separates the two shapes.
+///
+/// The scan is the lexer above plus a command-position pass, not
+/// a text search, so the shapes that merely mention `return` do
+/// not count: comments, quoted strings, here-document bodies,
+/// substitutions (opaque word content), a `return` used as an
+/// argument, a loop variable or a `case` pattern, and a `return`
+/// inside a function definition. A `return` directly before a
+/// `)` is a `case` pattern, not a statement, and does not count
+/// either (a bare `return` closing a subshell reads the same and
+/// is left firing). Control flow at top level does not suppress
+/// the proof: a `return` inside a top-level `if`, loop, `case`
+/// item, brace group or subshell would be refused by an
+/// executing shell that reached it in exactly the same way.
+fn shell_script_has_top_level_return(content: &str) -> bool {
+    let toks = lex_shell(content);
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut expect_command = true;
+    let mut skip_word = false;
+    for (i, tok) in toks.iter().enumerate() {
+        match tok {
+            ShellTok::Word(w) => {
+                if skip_word {
+                    skip_word = false;
+                    continue;
+                }
+                if !w.is_empty()
+                    && w.chars().all(|c| c.is_ascii_digit())
+                    && matches!(toks.get(i + 1), Some(ShellTok::Redir))
+                {
+                    // the fd number of a redirection (`2>file cmd`):
+                    // the command it prefixes is still to come
+                    continue;
+                }
+                if expect_command {
+                    if let Some(span) = shell_function_body_span(&toks, i) {
+                        spans.push(span);
+                    } else if w == "return"
+                        && !matches!(toks.get(i + 1), Some(ShellTok::RParen))
+                        && !spans.iter().any(|&(s, e)| s <= i && i <= e)
+                    {
+                        return true;
+                    }
+                    expect_command = word_keeps_command_position(w);
+                }
+            }
+            ShellTok::Redir => skip_word = true,
+            _ => expect_command = true,
+        }
+    }
+    false
+}
+
+/// Whether the interpreter line names a POSIX-family shell,
+/// resolving `/usr/bin/env` to the program it names: env's first
+/// argument that is neither an option (the argument-taking `-u`
+/// and `-C` skipped with their values) nor an assignment. Only
+/// the sh family qualifies: a top-level `return` is refused by an
+/// executing sh, bash, dash, ash or ksh, while zsh runs a script
+/// in a function-like context where `return` is legal, so the
+/// proof does not hold there.
+fn interpreter_is_posix_shell(interpreter: &str, args: &str) -> bool {
+    let base = interpreter.rsplit('/').next().unwrap_or("");
+    let program: String = if base == "env" {
+        let mut found = None;
+        let mut skip_next = false;
+        for word in args.split_whitespace() {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if matches!(word, "-u" | "--unset" | "-C" | "--chdir") {
+                skip_next = true;
+                continue;
+            }
+            if word.starts_with('-') || is_assignment_word(word) {
+                continue;
+            }
+            found = Some(word.rsplit('/').next().unwrap_or(word).to_string());
+            break;
+        }
+        match found {
+            Some(p) => p,
+            None => return false,
+        }
+    } else {
+        base.to_string()
+    };
+    matches!(
+        program.as_str(),
+        "sh" | "bash" | "dash" | "ash" | "ksh" | "ksh93" | "mksh" | "pdksh"
+    )
+}
+
+/// Whether a non-executable file with an interpreter line is a
+/// sourced fragment rather than a script executed in place: the
+/// interpreter names a POSIX-family shell (see
+/// `interpreter_is_posix_shell`) and the file's text carries a
+/// top-level `return` (see `shell_script_has_top_level_return`).
+/// An executing shell that reaches the `return` refuses it, so
+/// the missing exec bit is the fragment's correct state; a
+/// dual-mode script that also runs standalone carries the same
+/// marker and is exempted with it, an accepted consequence of
+/// there being no decidable separation. The proof reads the
+/// file's own text, bounded by `FRAGMENT_PROOF_SCAN_LIMIT`,
+/// because a fragment's `return` can sit anywhere in it -- the
+/// xim fragment's are at lines 160 to 225, far past the 2048-byte
+/// peek the interpreter line is parsed from. The
+/// script-directory guard of `non_executable_script_is_data`
+/// applies unchanged: a file installed directly in a script
+/// directory is an entry point whatever its text says, so the
+/// proof is not consulted there.
+fn non_executable_script_is_provable_fragment(
+    pkgfile: &PkgFile,
+    fname: &str,
+    interpreter: &str,
+    interpreter_args: &str,
+) -> bool {
+    let parent = fname.rsplit_once('/').map_or("", |(parent, _)| parent);
+    if matches!(
+        parent,
+        "/bin" | "/sbin" | "/usr/bin" | "/usr/sbin" | "/usr/local/bin" | "/usr/local/sbin"
+    ) {
+        return false;
+    }
+    if !interpreter_is_posix_shell(interpreter, interpreter_args) {
+        return false;
+    }
+    let Ok(file) = std::fs::File::open(&pkgfile.path) else {
+        return false;
+    };
+    let Ok(bytes) = read_prefix(file, FRAGMENT_PROOF_SCAN_LIMIT + 1) else {
+        return false;
+    };
+    if bytes.len() as u64 > FRAGMENT_PROOF_SCAN_LIMIT {
+        return false;
+    }
+    let Ok(content) = String::from_utf8(bytes) else {
+        return false;
+    };
+    shell_script_has_top_level_return(&content)
+}
+
 static PYTHON_BYTECODE_PEP3147_REGEX: OnceLock<Regex> = OnceLock::new();
 fn python_bytecode_pep3147_regex() -> &'static Regex {
     PYTHON_BYTECODE_PEP3147_REGEX.get_or_init(|| {
@@ -4362,8 +4921,12 @@ impl FilesCheck {
             // the same way -- a harness runs it by path, so the
             // missing exec bit is not a defect there either:
             // `script_is_test_data` carries those shapes and
-            // their guards. Scripts the shapes do not cover
-            // keep the reference behaviour.
+            // their guards. A script whose own text marks it as
+            // a sourced fragment -- a top-level `return` in a
+            // POSIX-family shell script -- is not a defect
+            // either: `non_executable_script_is_provable_fragment`
+            // carries that proof. Scripts none of the shapes
+            // cover keep the reference behaviour.
             if !mode_is_exec && !is_doc {
                 if let Some(interpreter) = &fd.interpreter {
                     if interpreter.starts_with('/')
@@ -4373,6 +4936,12 @@ impl FilesCheck {
                             &self.python_lib_tree_re,
                         )
                         && !script_is_test_data(&pkg.name, fname)
+                        && !non_executable_script_is_provable_fragment(
+                            pkgfile,
+                            fname,
+                            interpreter,
+                            &fd.interpreter_args,
+                        )
                     {
                         add_info(
                             out,
@@ -12173,6 +12742,185 @@ reason = "warning hook: executable and %config by design"
             Vec::<&str>::new(),
             "no non-executable-script for data shapes: {lines:?}"
         );
+    }
+
+    /// The sourced-fragment proof is read from the script's own
+    /// text: a top-level `return` counts bare and inside top-level
+    /// control flow, a function definition and a redirection or
+    /// assignment prefix alike.
+    #[test]
+    fn top_level_return_shapes() {
+        let positives = [
+            "#!/bin/bash\nreturn 0\n",
+            "#!/bin/sh\nif [ -z \"$X\" ]; then\n  return 1\nfi\n",
+            "#!/bin/sh\nfor f in a b; do\n  return 1\ndone\n",
+            "#!/bin/sh\nwhile read -r l; do\n  return 1\ndone\n",
+            "#!/bin/sh\ncase $1 in\n  a) return 1 ;;\nesac\n",
+            "#!/bin/sh\n{ return 1; }\n",
+            "#!/bin/sh\n( return 1 )\n",
+            "#!/bin/sh\nf() { return 1; }\nreturn 0\n",
+            "#!/bin/sh\n2>/dev/null return 1\n",
+            "#!/bin/sh\nX=1 return 1\n",
+            "#!/bin/sh\ncat <<EOF\nbody\nEOF\nreturn 0\n",
+            "#!/bin/sh\n! return 1\n",
+        ];
+        for text in positives {
+            assert!(
+                shell_script_has_top_level_return(text),
+                "top-level return expected: {text:?}"
+            );
+        }
+    }
+
+    /// The shapes that merely mention `return` are not a proof:
+    /// returns inside function definitions of every header and
+    /// body form, in comments, in quoted strings, in here-document
+    /// bodies and in substitutions, and `return` read as an
+    /// argument, a value, a loop variable or a `case` pattern.
+    #[test]
+    fn no_top_level_return_shapes() {
+        let negatives = [
+            "#!/bin/bash\necho hello\n",
+            "#!/bin/bash\nf() { return 1; }\n",
+            "#!/bin/bash\nf()\n{\n  return 1\n}\n",
+            "#!/bin/bash\nfunction f { return 1; }\n",
+            "#!/bin/bash\nfunction f() { return 1; }\n",
+            "#!/bin/bash\nf() ( return 1 )\n",
+            "#!/bin/bash\nouter() { inner() { return 1; }; return 2; }\n",
+            "#!/bin/bash\n# return 0\necho hi # return\n",
+            "#!/bin/bash\necho \"return\"\necho 'return'\n",
+            "#!/bin/bash\necho return\n",
+            "#!/bin/bash\nx=return\n",
+            "#!/bin/bash\nfor return in a b; do echo $return; done\n",
+            "#!/bin/bash\ncase $1 in\n  return) echo x ;;\nesac\n",
+            "#!/bin/bash\ncat <<EOF\nreturn 0\nEOF\n",
+            "#!/bin/bash\ncat <<-'EOF'\n\treturn 0\n\tEOF\n",
+            "#!/bin/bash\nx=$(return)\n",
+            "#!/bin/bash\necho ${x:-return}\n",
+        ];
+        for text in negatives {
+            assert!(
+                !shell_script_has_top_level_return(text),
+                "no top-level return expected: {text:?}"
+            );
+        }
+    }
+
+    /// The dialect gate: the proof holds for the sh family,
+    /// resolved through `/usr/bin/env`, and not for other
+    /// interpreters -- zsh included, which runs a script in a
+    /// function-like context where `return` is legal.
+    #[test]
+    fn posix_shell_interpreter_resolution() {
+        assert!(interpreter_is_posix_shell("/bin/sh", ""));
+        assert!(interpreter_is_posix_shell("/bin/bash", ""));
+        assert!(interpreter_is_posix_shell("/usr/bin/env", "bash"));
+        assert!(interpreter_is_posix_shell("/usr/bin/env", "-i /bin/sh"));
+        assert!(interpreter_is_posix_shell("/usr/bin/env", "FOO=1 dash"));
+        assert!(!interpreter_is_posix_shell("/usr/bin/env", "python3"));
+        assert!(!interpreter_is_posix_shell("/usr/bin/env", ""));
+        assert!(!interpreter_is_posix_shell("/bin/zsh", ""));
+        assert!(!interpreter_is_posix_shell("/usr/bin/python3", ""));
+    }
+
+    /// A shell script whose text marks it as a sourced fragment
+    /// (a top-level `return`) draws no `non-executable-script`:
+    /// the xim shape, whose returns sit past the 2048-byte peek so
+    /// the proof has to read the whole file, an `/usr/bin/env`
+    /// fragment, and a fragment whose only return sits inside
+    /// top-level control flow.
+    #[test]
+    fn non_executable_script_silent_for_provable_sourced_fragments() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let sh = "Bourne-Again shell script, ASCII text executable";
+        let mut xim = String::from(
+            "#!/bin/bash\n# XIM fragment\nsetup() {\n  XMODIFIERS=@im=local\n}\ncleanup() {\n  unset XMODIFIERS\n}\n",
+        );
+        while xim.len() < 2100 {
+            xim.push_str("# input method selection follows\n");
+        }
+        xim.push_str("if [ -z \"$InputMethod\" ]; then\n  return 0\nfi\nreturn 0\n");
+        let pkg = script_mode_pkg(
+            &dir,
+            &[
+                ("/usr/etc/X11/xim", 0o100644, sh, xim.as_bytes()),
+                (
+                    "/usr/share/myapp/helper",
+                    0o100644,
+                    sh,
+                    b"#!/usr/bin/env bash\nreturn 0\n",
+                ),
+                (
+                    "/usr/share/myapp/frag",
+                    0o100644,
+                    sh,
+                    b"#!/bin/sh\nif [ -n \"$SKIP\" ]; then\n  return 1\nfi\n",
+                ),
+            ],
+        );
+        let lines = script_finding_lines(&pkg, &config);
+        let flagged: Vec<&str> = lines
+            .iter()
+            .filter(|(n, _)| n == "non-executable-script")
+            .map(|(_, line)| line.as_str())
+            .collect();
+        assert_eq!(
+            flagged,
+            Vec::<&str>::new(),
+            "no non-executable-script for provable fragments: {lines:?}"
+        );
+    }
+
+    /// The proof is confined to what it proves: a script whose
+    /// only `return` sits inside a function, a non-shell script
+    /// carrying a top-level `return`, a zsh script (legal there),
+    /// and a provable fragment installed directly in a script
+    /// directory all keep `non-executable-script`.
+    #[test]
+    fn non_executable_script_still_fires_for_unprovable_scripts() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let sh = "Bourne-Again shell script, ASCII text executable";
+        let py = "Python script, ASCII text executable";
+        let pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/etc/X11/ximfunc",
+                    0o100644,
+                    sh,
+                    b"#!/bin/bash\nf() { return 1; }\nf\n",
+                ),
+                (
+                    "/usr/share/myapp/tool.py",
+                    0o100644,
+                    py,
+                    b"#!/usr/bin/python3\nreturn\n",
+                ),
+                (
+                    "/usr/share/myapp/ztool",
+                    0o100644,
+                    sh,
+                    b"#!/bin/zsh\nreturn 1\n",
+                ),
+                ("/usr/bin/xim", 0o100644, sh, b"#!/bin/bash\nreturn 0\n"),
+            ],
+        );
+        let lines = script_finding_lines(&pkg, &config);
+        for path in [
+            "/usr/etc/X11/ximfunc",
+            "/usr/share/myapp/tool.py",
+            "/usr/share/myapp/ztool",
+            "/usr/bin/xim",
+        ] {
+            assert!(
+                lines
+                    .iter()
+                    .any(|(n, line)| n == "non-executable-script" && line.contains(path)),
+                "non-executable-script must fire for {path}: {lines:?}"
+            );
+        }
     }
 
     /// The gate covers the one emission only: an executable file
