@@ -76,3 +76,17 @@ check = "FileDigestCheck"
 kind = "detail"
 reason = "Typo fix in staged `--explain` text for `dbus-file-parse-error`: the article before `D-Bus` fixed. Meaning unchanged."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "detail"
+reason = "Staged `--explain` texts for `cron-file-symlink`, `pam-file-symlink` and `zypperplugin-file-symlink` were the placeholder `this should never happen`; the findings do fire, at Error for a non-excepted symlink in a restricted location (verified in `checks/file_digest.rs`). Reworded to the sibling form the other families in the file use: symlinks are not allowed for cron job files / PAM modules / zypper plugin files."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "detail"
+reason = "Staged `--explain` texts for `cron-file-digest-mismatch`, `sudoers-file-digest-mismatch`, `sysctl-file-digest-mismatch` and `zypperplugin-file-digest-mismatch` opened with ungrammatical first sentences (`A whitelisting related ...`, `drop in` for `drop-in`). Normalized to the form the permissions and polkit entries in the same file use: a <kind> file changed in content."
+since = "0.4.1"
