@@ -71,6 +71,20 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "update-alternatives-postun-call-missing"
+kind = "behaviour"
+reason = "Fix-and-diverge: the %postun phase runs only when the %post phase collected at least one --install. The reference calls its postun check unconditionally for every package passing the presence gate and reports the bare package-level finding whenever %postun carries no update-alternatives line, even when %post installed nothing — there is then no --remove the package could owe. The vacuous arm covers packages whose %post only cleans up legacy registrations (the JDK and Node.js families' existence-guarded cleanup lines, kept after their move to libalternatives) and packages present only through shipped /etc/alternatives files. Measured over a 1,961-package Tumbleweed candidate universe (every /etc/alternatives or libalternatives shipper plus the name families): the tag goes from 57 findings to 5, the five remaining being genuine un-removed installs (fakeroot, makewhat, python3-openqa_review, python313-mutagen, python314-mutagen), and every other AlternativesCheck tag is unchanged on the same scan (update-alternatives-requirement-missing 81, update-alternatives-post-call-missing 50). Pinned by postun_phase_silent_when_post_installed_nothing and postun_phase_reports_when_install_is_never_removed in alternatives.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "update-alternatives-postun-call-missing"
+kind = "behaviour"
+reason = "Fix-and-diverge: a %postun --remove line is credited when the installed name ends the token (followed by whitespace, a command separator, or end of line), not on the reference's trailing word-boundary. A name ending in a non-word character has no word boundary before the whitespace that follows it, so the reference never credits the toluapp packages' --remove tolua++ line and reports all four (5.1, 5.3, 5.4, 5.5) for a removal they perform. The token-end form also refuses the reference's false credit for an installed name that is a proper prefix of the removed one. Pinned by postun_remove_of_plus_suffixed_name_is_credited, postun_remove_of_longer_name_does_not_credit_prefix and postun_remove_of_suffixed_word_name_does_not_credit in alternatives.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "AppDataCheck"
 kind = "behaviour"
 reason = "Also scans /usr/share/metainfo/; the reference (AppDataCheck.py) only matches /usr/share/appdata/, but metainfo/ is the current AppStream location, so files there would otherwise never be validated."
