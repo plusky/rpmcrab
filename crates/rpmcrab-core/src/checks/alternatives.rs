@@ -36,6 +36,11 @@ fn libalternatives_conf_re() -> &'static Regex {
     })
 }
 
+/// One extracted alternative registration: `(link, name)`, where `name`
+/// is the alternative name update-alternatives keys the
+/// `/etc/alternatives` link by.
+type LinkName = (String, String);
+
 impl AlternativesCheck {
     pub fn new(_config: &Config) -> Self {
         Self
@@ -77,8 +82,8 @@ impl AlternativesCheck {
             .collect()
     }
 
-    /// `(install_binaries: link -> name, slave_binaries: [link])`.
-    fn find_binaries(lines: &[String]) -> (Vec<(String, String)>, Vec<String>) {
+    /// `(install_binaries: link -> name, slave_binaries: link -> name)`.
+    fn find_binaries(lines: &[String]) -> (Vec<LinkName>, Vec<LinkName>) {
         let install_re = Self::install_regex();
         let slave_re = Self::slave_regex();
         let mut install = Vec::new();
@@ -103,7 +108,11 @@ impl AlternativesCheck {
             }
             for caps in slave_re.captures_iter(line).flatten() {
                 if let Some(m) = caps.get(1) {
-                    slaves.push(m.as_str().to_string());
+                    let name = caps
+                        .get(2)
+                        .map(|n| n.as_str().to_string())
+                        .unwrap_or_default();
+                    slaves.push((m.as_str().to_string(), name));
                 }
             }
         }
@@ -553,27 +562,41 @@ impl Check for AlternativesCheck {
         // --install line names them.
         let (_, slaves) = Self::find_binaries(&post_lines);
         let file_names: Vec<&str> = pkg.files.iter().map(|f| f.name.as_str()).collect();
-        for binary in slaves
+        for (binary, name) in slaves
             .iter()
-            .map(String::as_str)
-            .chain(install.iter().map(|(l, _)| l.as_str()))
-            .filter(|link| !Self::link_is_template(link))
+            .chain(install.iter())
+            .filter(|entry| !Self::link_is_template(&entry.0))
         {
-            let etc_alt = format!(
-                "/etc/alternatives/{}",
-                Path::new(binary)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            );
+            let binary = binary.as_str();
+            let name = name.as_str();
+            let link_base = Path::new(binary)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let etc_alt = format!("/etc/alternatives/{link_base}");
             if !file_names.contains(&etc_alt.as_str()) {
-                add_info(
-                    out,
-                    Level::Error,
-                    pkg,
-                    "alternative-link-missing",
-                    &[&etc_alt],
-                );
+                // update-alternatives keys the link it creates by the
+                // registration's name, not by the generic link's basename;
+                // when the two differ the package ships the link under
+                // its registered name (arch-suffixed provider names,
+                // renamed session links, slave names). A %ghost at
+                // /etc/alternatives/<name> for the same registration is
+                // the link this finding looks for, so it is credited.
+                // The reference derives the path from the basename and
+                // fires anyway (ledgered divergence).
+                let named_alt = format!("/etc/alternatives/{name}");
+                let shipped_under_name = name != link_base
+                    && file_names.contains(&named_alt.as_str())
+                    && pkg.ghost_files.iter().any(|g| g == &named_alt);
+                if !shipped_under_name {
+                    add_info(
+                        out,
+                        Level::Error,
+                        pkg,
+                        "alternative-link-missing",
+                        &[&etc_alt],
+                    );
+                }
             } else if !pkg.ghost_files.iter().any(|g| g == &etc_alt) {
                 add_info(
                     out,
@@ -627,7 +650,10 @@ mod tests {
         let lines = vec!["update-alternatives --install /usr/bin/foo foo /usr/bin/foo-1.0 10 --slave /usr/bin/bar bar /usr/bin/bar-1.0".to_string()];
         let (install, slaves) = AlternativesCheck::find_binaries(&lines);
         assert_eq!(install.len(), 1);
-        assert_eq!(slaves, vec!["/usr/bin/bar".to_string()]);
+        assert_eq!(
+            slaves,
+            vec![("/usr/bin/bar".to_string(), "bar".to_string())]
+        );
     }
 
     #[test]
