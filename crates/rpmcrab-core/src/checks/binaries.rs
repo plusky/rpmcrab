@@ -389,6 +389,12 @@ struct ReadelfInfo {
     /// bitcode, GIMPLE offload text, plain data), so the archive is
     /// outside the ELF checks' remit. Set by `parse_archive`.
     no_elf_members: bool,
+    /// An ar archive with no members at all: the file is exactly the
+    /// ar magic. glibc's post-2.34 merged-library linker stubs
+    /// (libpthread.a, libdl.a and their kin) are shipped in this
+    /// shape: empty placeholder archives whose symbols live in libc.
+    /// Set by `parse_archive`.
+    no_members: bool,
 }
 
 /// ar archive magic: `!<arch>` followed by a newline.
@@ -427,6 +433,7 @@ impl ReadelfInfo {
             code_machines: Vec::new(),
             failed: None,
             no_elf_members: false,
+            no_members: false,
         }
     }
 
@@ -508,6 +515,7 @@ impl ReadelfInfo {
             }
         }
         info.no_elf_members = members > 0 && elf_members == 0;
+        info.no_members = members == 0;
         info
     }
 
@@ -3156,6 +3164,18 @@ impl BinariesCheck {
         if !self.is_archive {
             return;
         }
+        // An archive with no members has nothing an index could
+        // index and nothing a symtab could describe: glibc's
+        // post-2.34 merged-library stubs (libpthread.a, libdl.a,
+        // ...) are empty placeholder archives shipped so the old
+        // `-l` names keep resolving to libc, and they link
+        // vacuously. The finding's premise -- a linkable library
+        // gutted of its symtab -- cannot hold there. The sibling
+        // debuginfo check stays quiet on the same shape through
+        // its no-code-carrying-member gate (plusky/rpmcrab#847).
+        if info.no_members {
+            return;
+        }
         for elf_file in &info.sections {
             for section in elf_file {
                 if section.name == ".symtab" {
@@ -5266,6 +5286,7 @@ mod tests {
                 code_machines: Vec::new(),
                 failed: None,
                 no_elf_members: false,
+                no_members: false,
             };
             let pkgfile = PkgFile {
                 name: name.to_string(),
@@ -7469,6 +7490,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 code_machines: Vec::new(),
                 failed: None,
                 no_elf_members: false,
+                no_members: false,
                 is_rust: false,
                 is_zig: false,
             };
@@ -7610,6 +7632,7 @@ description = "explicit priority string bypasses the system crypto policy"
             code_machines: Vec::new(),
             failed: None,
             no_elf_members: false,
+            no_members: false,
             is_rust: false,
             is_zig: false,
         }
@@ -9891,6 +9914,51 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn zero_member_archive_parses_as_no_members() {
+        // The file is exactly the ar magic: glibc's post-2.34
+        // merged-library stubs (libpthread.a and kin) ship in this
+        // shape, as empty placeholders whose symbols live in libc.
+        let path = std::env::temp_dir().join(format!("rpmcrab-ar-empty-{}", std::process::id()));
+        std::fs::write(&path, b"!<arch>\n").unwrap();
+
+        let info = ReadelfInfo::parse(path.to_str().unwrap(), "/usr/lib64/libpthread.a");
+        assert!(
+            info.failed.is_none(),
+            "zero-member archive must parse: {:?}",
+            info.failed
+        );
+        assert!(info.no_members, "the member count is recorded at parse");
+        assert!(!info.no_elf_members, "no members is not no-ELF-members");
+        assert!(info.sections.is_empty(), "no member contributes sections");
+
+        // Both archive checks stay quiet on the parsed shape: the
+        // symtab check through the no-members gate above, the
+        // debuginfo check through its no-code-member gate (#847) --
+        // the two agree on what a zero-member archive is.
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkg = synthetic_pkg("glibc-devel", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib64/libpthread.a", "current ar archive");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_missing_symtab_in_archive(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "symtab check quiet on zero members: {:?}",
+            out.results()
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_missing_debug_info_in_archive(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "debuginfo check quiet on zero members: {:?}",
+            out.results()
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn static_library_without_symtab() {
         let config = test_config();
         let mut check = BinariesCheck::with_tool_dir(&config, None);
@@ -9918,6 +9986,20 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(
             out.results().is_empty(),
             ".symtab present must be quiet: {:?}",
+            out.results()
+        );
+
+        // A zero-member archive (glibc's post-2.34 merged-library
+        // stubs: the file is exactly the ar magic, which parses to
+        // no sections and no members) has nothing a symtab could
+        // describe and stays quiet.
+        let mut info = syn_info();
+        info.no_members = true;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_missing_symtab_in_archive(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "zero-member archive must be quiet: {:?}",
             out.results()
         );
     }

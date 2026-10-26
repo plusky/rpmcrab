@@ -123,7 +123,7 @@ sequoia-openpgp = { version = "2.4.2", default-features = false, features = ["cr
 # Base64 decoding of the v6 signature entry (`RPMSIGTAG_OPENPGP`):
 # its strings are base64-encoded signature packets. The crate is
 # already in the tree as sequoia-openpgp's armor dependency.
-base64 = "0.22"
+base64 = "0.23"
 
 [dev-dependencies]
 criterion = "0.8"

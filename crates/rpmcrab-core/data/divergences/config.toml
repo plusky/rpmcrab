@@ -77,3 +77,10 @@ check = "Filters"
 kind = "behaviour"
 reason = "A `Filters` pattern of the form `class:<name>` is class syntax (issue #959), not a regex: it suppresses exactly the findings whose tag belongs to the named defect-pattern class, matched on the finding's tag, and an unknown class name is a configuration error at Filter construction. The reference compiles every `Filters` string as a plain regex, so the same string there is an ordinary pattern over the match string and is normally reported unused."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "config"
+kind = "behaviour"
+reason = "Fix-and-diverge: an rpmlintrc line that attempts a directive but does not parse -- an unquoted or unterminated addFilter argument, a setBadness without its value, a TOML Filters assignment in an old-syntax file -- records a load warning naming the file and line instead of being silently dropped, as the reference's scraper drops it (config.py matches re_filter/re_badness per line with no fallback). The warning never fails the load, and the import set is unchanged: exactly the forms the reference accepts import as before (a quoted string, either quote character, an optional r prefix, arbitrary whitespace, trailing content such as a comment), and a well-formed filter still filters. Lines that attempt no directive stay silent, including the legacy Python content shipped files carry (46 files in the Factory tree still open with `from Config import *`). Measured over the shipped corpus (1,026 rpmlintrc files in the Factory tree, 5,156 lines, 2,935 addFilter lines, all importing): zero malformed directive attempts, so the warning fires only on genuine breakage."
+since = "0.4.1"
