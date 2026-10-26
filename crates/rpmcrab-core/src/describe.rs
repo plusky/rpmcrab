@@ -357,7 +357,7 @@ mod tests {
             ),
             (
                 "FileDigestCheck.toml",
-                "2ed29b916b02a456a60c3dc87d99d17325d22d6e4ab9ff4f5a68cc40a6752f4d",
+                "caac65c7267e86b175cbf6982d5ec39a29d707c340e60992eec0f446dbd74b26",
             ),
             (
                 "FileMetadataCheck.toml",

@@ -1,16 +1,16 @@
 SUFFIX="requires a review and whitelisting by the SUSE security team"
 
 cron-file-unauthorized="Packaging cron jobs #SUFFIX#. #REVIEW_NEEDED_TEXT#"
-cron-file-digest-mismatch="A whitelisted cron job related file changed in content. Packaging cron jobs #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+cron-file-digest-mismatch="A cron job file changed in content. Packaging cron jobs #SUFFIX#. #REVIEW_NEEDED_TEXT#"
 cron-file-ghost="This package installs a cron job as a %ghost file. #GHOST_ENCOUNTERED_TEXT#"
 # we allow symlinks for cron jobs, we just add this to satisfy unit tests
-cron-file-symlink="this should never happen"
+cron-file-symlink="Symlinks are not allowed for cron job files"
 
 # The binary PAM modules are whitelisted without digests so -mismatch should
 # not occur here
 pam-file-unauthorized="Packaging new PAM modules #SUFFIX#. #REVIEW_NEEDED_TEXT#"
 pam-file-ghost="This package installs a PAM module as a %ghost file. #GHOST_ENCOUNTERED_TEXT#"
-pam-file-symlink="this should never happen"
+pam-file-symlink="Symlinks are not allowed for PAM modules"
 
 permissions-file-unauthorized="Packaging permissions.d drop-in snippets #SUFFIX#. #REVIEW_NEEDED_TEXT#"
 permissions-file-digest-mismatch="A permissions.d drop-in snippet changed in content. Packaging permissions.d drop-in snippets #SUFFIX#. #REVIEW_NEEDED_TEXT#"
@@ -29,12 +29,12 @@ dbus-file-symlink="Symlinks are not allowed for D-Bus configuration files"
 dbus-file-parse-error="A digest of a D-Bus XML file could not be computed, because of an XML parsing error"
 
 sudoers-file-unauthorized="Packaging sudoers.d drop-in configuration files #SUFFIX#. #REVIEW_NEEDED_TEXT#"
-sudoers-file-digest-mismatch="A whitelisting related sudoers.d drop-in file changed in content. Packaging sudoers.d drop in configuration files #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+sudoers-file-digest-mismatch="A sudoers.d drop-in file changed in content. Packaging sudoers.d drop-in configuration files #SUFFIX#. #REVIEW_NEEDED_TEXT#"
 sudoers-file-ghost="This package installs a sudoers.d drop-in configuration file as a %ghost file. #GHOST_ENCOUNTERED_TEXT#"
 sudoers-file-symlink="Symlinks are not allowed for sudoers.d drop-in configuration files"
 
 sysctl-file-unauthorized="Packaging sysctl.d drop-in configuration files #SUFFIX#. #REVIEW_NEEDED_TEXT#"
-sysctl-file-digest-mismatch="A whitelisting related sysctl.d drop-in file changed in content. Packaging sysctl.d drop in configuration files #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+sysctl-file-digest-mismatch="A sysctl.d drop-in file changed in content. Packaging sysctl.d drop-in configuration files #SUFFIX#. #REVIEW_NEEDED_TEXT#"
 sysctl-file-ghost="This package installs a sysctl.d drop-in configuration file as a %ghost file. #GHOST_ENCOUNTERED_TEXT#"
 sysctl-file-symlink="Symlinks are not allowed for sysctl.d drop-in configuration files"
 
@@ -43,7 +43,7 @@ varlink-file-ghost="This package installs a systemd socket unit declaring a Varl
 varlink-file-symlink="Symlinks are not allowed for systemd socket units declaring Varlink services"
 varlink-file-unauthorized="Packaging new Varlink services #SUFFIX#. #REVIEW_NEEDED_TEXT#"
 
-zypperplugin-file-digest-mismatch="A whitelisting related zypper plugin file changed in content. Packaging zypper plugins #SUFFIX#. #REVIEW_NEEDED_TEXT#"
+zypperplugin-file-digest-mismatch="A zypper plugin file changed in content. Packaging zypper plugins #SUFFIX#. #REVIEW_NEEDED_TEXT#"
 zypperplugin-file-unauthorized="Packaging new zypper plugins #SUFFIX#. #REVIEW_NEEDED_TEXT#"
 zypperplugin-file-ghost="This package installs a zypper plugin as a %ghost file. #GHOST_ENCOUNTERED_TEXT#"
-zypperplugin-file-symlink="this should never happen"
+zypperplugin-file-symlink="Symlinks are not allowed for zypper plugin files"
