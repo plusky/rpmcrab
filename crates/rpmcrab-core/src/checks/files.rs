@@ -975,8 +975,14 @@ impl FilesCheck {
         }) else {
             return false;
         };
+        // The logged values are the grant's own config values: the
+        // exact-match predicate above means they name the matched
+        // package and path, and package-derived data stays out of
+        // the log line.
         log::debug!(
-            "FileGrants: {finding} on {path} in package {pkg_name} stays quiet: {}",
+            "FileGrants: {finding} on {:?} in {:?} stays quiet: {}",
+            grant.paths,
+            grant.packages,
             grant.reason
         );
         true
