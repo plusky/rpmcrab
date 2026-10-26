@@ -2458,6 +2458,95 @@ impl ArInfo {
     }
 }
 
+/// True when `data` is a structurally valid archive in the gplib
+/// dialect -- the MPLIB-compatible format gputils' `gplib` writes for
+/// SDCC's PIC (pic14/pic16) targets. GNU binutils does not implement
+/// the dialect, so `ar t` fails on these files even though they are
+/// working libraries for their toolchain.
+///
+/// The dialect keeps the `!<arch>` magic but frames members its own
+/// way: a 256-byte name field (the member name, terminated by `/`,
+/// padded with spaces), a fixed 22-byte field of digits, `l` and
+/// spaces whose last digit run is the member size, and a `! ` header
+/// terminator in place of the GNU `` ` `` + newline. Object members
+/// carry PIC COFF objects (magic 0x1240). An optional symbol-index
+/// member named `/` may come first. The test is deliberately strict
+/// -- the member chain must land exactly on EOF -- so a corrupt GNU
+/// archive cannot pass it.
+fn is_gplib_archive(data: &[u8]) -> bool {
+    if !data.starts_with(b"!<arch>\n") {
+        return false;
+    }
+    let mut off = 8;
+    let mut members = 0;
+    while off < data.len() {
+        let Some(header) = data.get(off..off + 280) else {
+            return false;
+        };
+        let (name_field, fields) = header.split_at(256);
+        let Some(pad) = name_field.iter().position(|&b| b == b' ') else {
+            return false;
+        };
+        let name = &name_field[..pad];
+        if name.is_empty()
+            || !name.ends_with(b"/")
+            || !name.iter().all(|&b| (0x21..=0x7e).contains(&b))
+            || !name_field[pad..].iter().all(|&b| b == b' ')
+        {
+            return false;
+        }
+        if !fields[..22]
+            .iter()
+            .all(|&b| b.is_ascii_digit() || b == b'l' || b == b' ')
+        {
+            return false;
+        }
+        // The member size is the last run of digits in the field area.
+        let mut size: Option<usize> = None;
+        let mut run: Option<usize> = None;
+        for &b in &fields[..22] {
+            if b.is_ascii_digit() {
+                let digit = usize::from(b - b'0');
+                let cur = run.unwrap_or(0);
+                let Some(next) = cur.checked_mul(10).and_then(|v| v.checked_add(digit)) else {
+                    return false;
+                };
+                run = Some(next);
+            } else if let Some(v) = run.take() {
+                size = Some(v);
+            }
+        }
+        if let Some(v) = run {
+            size = Some(v);
+        }
+        let Some(size) = size else {
+            return false;
+        };
+        if &fields[22..24] != b"! " {
+            return false;
+        }
+        let data_start = off + 280;
+        let Some(end) = data_start.checked_add(size) else {
+            return false;
+        };
+        let Some(member) = data.get(data_start..end) else {
+            return false;
+        };
+        if name.len() == 1 && name[0] == b'/' {
+            // The symbol index is only ever the first member.
+            if members != 0 {
+                return false;
+            }
+        } else if !member.starts_with(b"\x40\x12") {
+            // Object members are PIC COFF objects.
+            return false;
+        }
+        off = end;
+        members += 1;
+    }
+    members > 0 && off == data.len()
+}
+
 pub struct BinariesCheck {
     checked_files: usize,
     strings: Tool,
@@ -3522,6 +3611,15 @@ impl BinariesCheck {
         }
         let ar = ArInfo::parse(&self.ar, &pkgfile.path);
         if let Some(reason) = ar.failed {
+            // A structurally valid gplib archive (the MPLIB-compatible
+            // dialect gputils writes for SDCC's PIC targets) is a
+            // working library for its toolchain; GNU `ar` cannot read
+            // the dialect, but that is a format difference, not
+            // corruption. Treat it as a non-standard archive, like the
+            // `.bca` case above, instead of charging ar-failed.
+            if std::fs::read(&pkgfile.path).is_ok_and(|data| is_gplib_archive(&data)) {
+                return false;
+            }
             add_info(
                 out,
                 Level::Error,
@@ -8229,6 +8327,142 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(
             out.results().is_empty(),
             "no findings invented: {:?}",
+            out.results()
+        );
+    }
+
+    /// One gplib member: the 256-byte name field, the fixed numeric
+    /// field area (a timestamp-shaped run, then the size), the `! `
+    /// terminator and the payload.
+    fn gplib_member(name: &str, payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut name_field = name.as_bytes().to_vec();
+        name_field.resize(256, b' ');
+        out.extend_from_slice(&name_field);
+        out.extend_from_slice(format!("{}l {:<10}", 1_785_131_819u64, payload.len()).as_bytes());
+        out.extend_from_slice(b"! ");
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn gplib_archive(members: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out = b"!<arch>\n".to_vec();
+        for (name, payload) in members {
+            out.extend_from_slice(&gplib_member(name, payload));
+        }
+        out
+    }
+
+    #[test]
+    fn gplib_archive_shapes_validate() {
+        let coff = b"\x40\x12\x02\x00\x2a\xf3\x66\x6a";
+        // Symbol index first, then an object member.
+        let with_index = gplib_archive(&[("/", b"\x01\x00\x00\x00"), ("foo.o/", coff)]);
+        assert!(is_gplib_archive(&with_index));
+        // Index-less single-member archive (the shape SDCC's libio
+        // libraries take).
+        let single = gplib_archive(&[("libfoo_a-dummy.o/", coff)]);
+        assert!(is_gplib_archive(&single));
+        // The index alone (an empty library).
+        let index_only = gplib_archive(&[("/", b"\x00\x00\x00\x00")]);
+        assert!(is_gplib_archive(&index_only));
+    }
+
+    #[test]
+    fn gplib_archive_near_misses_do_not_validate() {
+        let coff = b"\x40\x12\x02\x00\x2a\xf3\x66\x6a";
+        let good = gplib_archive(&[("/", b"\x01\x00\x00\x00"), ("foo.o/", coff)]);
+        // Truncated payload: the chain no longer lands on EOF.
+        assert!(!is_gplib_archive(&good[..good.len() - 1]));
+        // Trailing garbage after the last member.
+        let mut trailed = good.clone();
+        trailed.push(b'\n');
+        assert!(!is_gplib_archive(&trailed));
+        // Wrong global magic.
+        let mut wrong_magic = good.clone();
+        wrong_magic[0] = b'?';
+        assert!(!is_gplib_archive(&wrong_magic));
+        // GNU ar framing (16-byte name field) is not the dialect.
+        let gnu: &[u8] =
+            b"!<arch>\nfoo.o/          1785131819  1000  1000  100644  8         `\n........";
+        assert!(!is_gplib_archive(gnu));
+        // An object member without the PIC COFF magic.
+        let not_coff = gplib_archive(&[("foo.o/", b"NOPE........")]);
+        assert!(!is_gplib_archive(&not_coff));
+        // A member name without the terminating slash.
+        let no_slash = gplib_archive(&[("foo.o", coff)]);
+        assert!(!is_gplib_archive(&no_slash));
+        // A lying size field breaks the member chain.
+        let mut lying = gplib_archive(&[("foo.o/", coff)]);
+        let pos = 8 + 256 + 12;
+        lying[pos] = if lying[pos] == b'9' { b'1' } else { b'9' };
+        assert!(!is_gplib_archive(&lying));
+    }
+
+    #[test]
+    fn gplib_archive_is_not_charged_ar_failed() {
+        // GNU `ar` cannot read the gplib dialect, but a structurally
+        // valid gplib archive is a working library for its toolchain:
+        // a non-standard archive, not an ar-failed one.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        assert!(check.ar.is_present());
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let archive = dir.path().join("libsdcc.lib");
+        let coff = b"\x40\x12\x02\x00\x2a\xf3\x66\x6a";
+        std::fs::write(
+            &archive,
+            gplib_archive(&[("/", b"\x01\x00\x00\x00"), ("foo.o/", coff)]),
+        )
+        .expect("write archive");
+        let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
+        let extract_dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = Pkg::open(std::path::Path::new(&rpm_path), extract_dir.path(), true)
+            .expect("open fixture");
+        let pkgfile = PkgFile {
+            name: "/usr/share/sdcc/lib/pic16/libsdcc.lib".to_string(),
+            path: archive.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        assert!(
+            !check.is_standard_archive(&pkg, &pkgfile, &mut out),
+            "gplib archives are non-standard archives"
+        );
+        assert!(
+            out.results().is_empty(),
+            "no findings invented: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn broken_archive_is_charged_ar_failed() {
+        // Garbage behind an ar magic is neither GNU ar nor gplib: the
+        // ar-failed charge stands.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        assert!(check.ar.is_present());
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let archive = dir.path().join("libbroken.a");
+        let mut bytes = b"!<arch>\n".to_vec();
+        bytes.resize(8 + 400, b'x');
+        std::fs::write(&archive, bytes).expect("write archive");
+        let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
+        let extract_dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = Pkg::open(std::path::Path::new(&rpm_path), extract_dir.path(), true)
+            .expect("open fixture");
+        let pkgfile = PkgFile {
+            name: "/usr/lib64/libbroken.a".to_string(),
+            path: archive.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        assert!(!check.is_standard_archive(&pkg, &pkgfile, &mut out));
+        assert_eq!(out.results().len(), 1, "one finding: {:?}", out.results());
+        assert!(
+            out.results()[0].1.contains("ar-failed"),
+            "the finding is ar-failed: {:?}",
             out.results()
         );
     }
