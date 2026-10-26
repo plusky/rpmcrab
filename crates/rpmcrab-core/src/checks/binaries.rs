@@ -125,6 +125,9 @@ static SETGROUPS_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static MKTEMP_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static GETS_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static GETHOSTBYNAME_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static MD5_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static DES_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static RC4_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 
 const KERNEL_MODULES_PATHS: &[&str] = &["/lib/modules/", "/usr/lib/modules/"];
 const GLIBC_EMPTY_ARCHIVES: &[&str] = &["libanl", "libdl", "libpthread", "librt", "libutil"];
@@ -2169,6 +2172,9 @@ pub struct BinariesCheck {
     mktemp_call_regex: Regex,
     gets_call_regex: Regex,
     gethostbyname_call_regex: Regex,
+    md5_call_regex: Regex,
+    des_call_regex: Regex,
+    rc4_call_regex: Regex,
     // Per-file state, set by detect_attributes before run_elf_checks.
     is_exec: bool,
     is_shobj: bool,
@@ -2942,6 +2948,25 @@ impl BinariesCheck {
                         r"((gethostbyname|gethostbyname2|gethostbyaddr|gethostbyname_r|gethostbyname2_r|gethostbyaddr_r)(?:@GLIBC\S+)?)(?:\s|$)",
                     )
                     .expect("static regex")
+                })
+                .clone(),
+            md5_call_regex: MD5_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(
+                        r"^((MD5|MD5_Init|MD5_Update|MD5_Final|MD5_Transform)(?:@\S+)?)(?:\s|$)",
+                    )
+                    .expect("static regex")
+                })
+                .clone(),
+            des_call_regex: DES_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(r"^((DES_[A-Za-z0-9_]+)(?:@\S+)?)(?:\s|$)").expect("static regex")
+                })
+                .clone(),
+            rc4_call_regex: RC4_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(r"^((RC4|RC4_set_key|RC4_options)(?:@\S+)?)(?:\s|$)")
+                        .expect("static regex")
                 })
                 .clone(),
             is_exec: false,
@@ -3932,6 +3957,19 @@ impl BinariesCheck {
         // does not match the anchored pattern.
         let gets = info.has_undefined_function_matching(&self.gets_call_regex);
         let gethostbyname = info.has_function_matching(&self.gethostbyname_call_regex);
+        // Legacy crypto primitives (#972 candidate 6): undefined
+        // references to the low-level OpenSSL-style entry points.
+        // The reference is the predicate -- the implementing
+        // libraries define these symbols and stay silent. Warning
+        // only: the artefact cannot tell a security use (credential
+        // storage, confidentiality) from a benign one (a checksum
+        // over public data), and the corpus classification in #972
+        // shows both. The regexes are anchored: EVP_MD5 and friends
+        // are the policy-controlled high-level interface, not this
+        // pattern.
+        let md5 = info.has_undefined_function_matching(&self.md5_call_regex);
+        let des = info.has_undefined_function_matching(&self.des_call_regex);
+        let rc4 = info.has_undefined_function_matching(&self.rc4_call_regex);
 
         if setgid && setuid && !setgroups {
             // Warning unconditionally (fix-and-diverge, #743). The
@@ -3962,6 +4000,33 @@ impl BinariesCheck {
                 Level::Warning,
                 pkg,
                 "binary-or-shlib-calls-gethostbyname",
+                &[&pkgfile.name],
+            );
+        }
+        if md5 {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "binary-or-shlib-calls-md5",
+                &[&pkgfile.name],
+            );
+        }
+        if des {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "binary-or-shlib-calls-des",
+                &[&pkgfile.name],
+            );
+        }
+        if rc4 {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "binary-or-shlib-calls-rc4",
                 &[&pkgfile.name],
             );
         }
@@ -13125,6 +13190,106 @@ description = "explicit priority string bypasses the system crypto policy"
             "initgroups present must be quiet: {:?}",
             out.results()
         );
+    }
+
+    #[test]
+    fn legacy_crypto_findings() {
+        // #972 candidate 6: an undefined reference to a low-level
+        // legacy-primitive entry point reports at Warning, one tag
+        // per primitive set. Definitions (the implementing library's
+        // shape) and the high-level EVP interface stay silent.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        let count = |info: &ReadelfInfo, tag: &str| {
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(&pkg, &pkgfile, info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, tag).len()
+        };
+        let with = |functions: &[&str], refs: &[&str]| {
+            let mut info = syn_info();
+            info.functions = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs = refs.iter().map(|s| s.to_string()).collect();
+            info
+        };
+
+        // MD5 set: each entry point referenced fires, at Warning.
+        for sym in ["MD5", "MD5_Init", "MD5_Update", "MD5_Final"] {
+            let info = with(&[sym], &[sym]);
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            let lines = lines_for(&results, "binary-or-shlib-calls-md5");
+            assert_eq!(lines.len(), 1, "{sym} referenced must fire: {results:?}");
+            assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+            assert_eq!(count(&info, "binary-or-shlib-calls-des"), 0);
+            assert_eq!(count(&info, "binary-or-shlib-calls-rc4"), 0);
+        }
+        // A versioned reference is a call: fires.
+        assert_eq!(
+            count(
+                &with(&["MD5_Init"], &["MD5_Init@OPENSSL_3.0.0"]),
+                "binary-or-shlib-calls-md5"
+            ),
+            1
+        );
+        // The definition alone (libcrypto's shape) is not a call: silent.
+        assert_eq!(
+            count(&with(&["MD5_Init"], &[]), "binary-or-shlib-calls-md5"),
+            0
+        );
+        // EVP_MD5 is the high-level interface, not this pattern: silent.
+        assert_eq!(
+            count(
+                &with(&["EVP_MD5"], &["EVP_MD5"]),
+                "binary-or-shlib-calls-md5"
+            ),
+            0
+        );
+        // SHA1 is not in the candidate's sets: silent.
+        assert_eq!(
+            count(
+                &with(&["SHA1_Init"], &["SHA1_Init"]),
+                "binary-or-shlib-calls-md5"
+            ),
+            0
+        );
+
+        // DES set: the DES_* entry points referenced fire.
+        for sym in ["DES_ecb_encrypt", "DES_set_key", "DES_cbc_encrypt"] {
+            assert_eq!(
+                count(&with(&[sym], &[sym]), "binary-or-shlib-calls-des"),
+                1,
+                "{sym} referenced must fire"
+            );
+        }
+        assert_eq!(
+            count(
+                &with(&["DES_ecb_encrypt"], &[]),
+                "binary-or-shlib-calls-des"
+            ),
+            0
+        );
+        // A name merely containing the prefix off-anchor stays silent.
+        assert_eq!(
+            count(
+                &with(&["XDES_ecb_encrypt"], &["XDES_ecb_encrypt"]),
+                "binary-or-shlib-calls-des"
+            ),
+            0
+        );
+
+        // RC4 set.
+        for sym in ["RC4", "RC4_set_key"] {
+            assert_eq!(
+                count(&with(&[sym], &[sym]), "binary-or-shlib-calls-rc4"),
+                1,
+                "{sym} referenced must fire"
+            );
+        }
+        assert_eq!(count(&with(&["RC4"], &[]), "binary-or-shlib-calls-rc4"), 0);
     }
 
     #[test]

@@ -304,3 +304,24 @@ check = "no-binary"
 kind = "behaviour"
 reason = "rpmcrab stays silent when a payload file is data in a known native-layout format (data/arch-format-magics.toml: XimC compose caches, GDBM databases), whose byte layout is bound to the architecture that wrote it, so the arch marking is deliberate; the reference reports such packages (instance: xorg-x11-libX11-ccache, boo#1110020). Corpus 2026-10-26: 1,757 arch packages report no-binary; exactly one carries such payload."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "binary-or-shlib-calls-md5"
+kind = "behaviour"
+reason = "rpmcrab reports undefined references to the low-level MD5 entry points as the Warning binary-or-shlib-calls-md5 (rpmcrab#972); the reference has no such call finding. Full Factory snapshot measurement: 98 files in 52 binary packages (48 source packages) reference the set, each classified by hand -- protocol-mandated digest compatibility, content/format checksums, cracking workloads and binding surface dominate, and the few security-context uses are not separable by package facts, so the level is Warning."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "binary-or-shlib-calls-des"
+kind = "behaviour"
+reason = "rpmcrab reports undefined references to the low-level DES entry points (the DES_* family, including the triple-DES forms) as the Warning binary-or-shlib-calls-des (rpmcrab#972); the reference has no such call finding. Full Factory snapshot measurement: 42 files in 31 binary packages (23 source packages) reference the set, each classified by hand -- NTLM/DIGEST-MD5 compatibility, card and TPM protocol surfaces and legacy SQL functions dominate; one verified security-context use (grisbi account-file encryption) is not separable by package facts, so the level is Warning."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "binary-or-shlib-calls-rc4"
+kind = "behaviour"
+reason = "rpmcrab reports undefined references to the RC4 entry points as the Warning binary-or-shlib-calls-rc4 (rpmcrab#972); the reference has no such call finding. Full Factory snapshot measurement: 7 files in 6 binary packages (5 source packages) reference the set, each classified by hand -- all protocol compatibility or binding surface, so the level is Warning."
+since = "0.4.1"

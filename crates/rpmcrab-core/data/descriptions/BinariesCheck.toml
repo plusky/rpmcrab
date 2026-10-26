@@ -182,6 +182,34 @@ against. This may indicate a stripped archive.
 binary-or-shlib-calls-gethostbyname="""
 The binary calls gethostbyname. Please port the code to use getaddrinfo.
 """
+binary-or-shlib-calls-md5="""
+The binary calls the low-level MD5 functions (MD5, MD5_Init,
+MD5_Update, MD5_Final). MD5 is broken as a cryptographic hash --
+collisions are cheap -- so it must not protect integrity,
+authenticity or credentials. A checksum over public, non-adversarial
+data is a legitimate use that the binary alone cannot rule out,
+which is why this finding is a warning: symbol presence is not
+proof of misuse. Where MD5 carries a security decision, replace it
+in the upstream source (SHA-256, or a keyed construction where the
+use requires one).
+"""
+binary-or-shlib-calls-des="""
+The binary calls the low-level DES functions (the DES_* entry
+points, including the triple-DES DES_ede forms). Single DES has a
+56-bit key and is brute-forced routinely, and triple-DES is
+disallowed for new protection (NIST SP 800-131A); both survive
+legitimately as compatibility relics, in legacy protocols and file
+formats. Where DES protects anything current, replace it in the
+upstream source; where it is a compatibility surface, the finding
+records that the surface exists.
+"""
+binary-or-shlib-calls-rc4="""
+The binary calls RC4 (RC4, RC4_set_key). RC4's keystream biases
+make it unsuitable for confidentiality or integrity -- it is
+prohibited in TLS by RFC 7465 -- and it survives legitimately only
+as a compatibility relic. Where RC4 protects anything current,
+replace it in the upstream source.
+"""
 static-library-without-debuginfo="""
 The static library doesn't contain any debuginfo. Binaries linking against
 this static library can't be properly debugged.
