@@ -361,11 +361,15 @@ impl TagsCheck {
         // classified once per package: the per-leaf test then only
         // parses the leaf.
         let family_requirer = family_requirer(&pkg.name);
-        // The generated-soname package-name set is consulted only by
-        // the explicit-lib-dependency predicate, and only for a leaf
-        // that passes that predicate's decidable guards; it is built on
-        // the first such leaf rather than for every package (#888).
-        let mut generated_lib_names: Option<std::collections::HashSet<String>> = None;
+        // The generated-soname package-name sets are consulted only
+        // by the explicit-lib-dependency predicate, and only for a
+        // leaf that passes that predicate's decidable guards; they
+        // are built on the first such leaf rather than for every
+        // package (#888). The second set is the self-provided credit.
+        let mut generated_lib_names: Option<(
+            std::collections::HashSet<String>,
+            std::collections::HashSet<String>,
+        )> = None;
         for dep in deps {
             let value = format_require(dep);
             // Rich `(a or b)` expressions (RPM >= 4.13): run the name and
@@ -466,15 +470,28 @@ impl TagsCheck {
                     // conventional name of the library they accompany,
                     // so they stay silent. The reference fires on all
                     // of them.
+                    // A generated soname dependency the package itself
+                    // provides is not a dependency on the library
+                    // package: rpm resolves it against the package's
+                    // own provides, so an explicit requirement naming
+                    // that package is the only expression of it and
+                    // cannot duplicate the generated one (the
+                    // libptscotch MPI flavours ship the serial
+                    // libscotch in their own prefix, provide its
+                    // soname, and still name libscotch7_0 for the
+                    // system copy). Names derived only from such
+                    // self-provided sonames are credited.
                     if !requirer_is_component_devel
                         && leaf.flags == 0
                         && leaf.qualifier.is_none()
                         && !leaf.name.contains("__")
                         && !leaf.name.contains('(')
                     {
-                        let generated_lib_names = generated_lib_names
-                            .get_or_insert_with(|| generated_soname_package_names(deps));
-                        if generated_lib_names.contains(leaf.name.as_str())
+                        let generated_lib_names = generated_lib_names.get_or_insert_with(|| {
+                            generated_soname_package_names(deps, &pkg.provides)
+                        });
+                        if generated_lib_names.0.contains(leaf.name.as_str())
+                            && !generated_lib_names.1.contains(leaf.name.as_str())
                             && let Ok(Some(caps)) = self.lib_package_re.captures(&leaf.name)
                             && caps.get(1).is_none()
                         {
@@ -509,8 +526,22 @@ impl TagsCheck {
 /// candidate: it names a different package in practice (the `libnbd`
 /// tools package vs the `libnbd0` library package), so it proves
 /// nothing about redundancy.
-fn generated_soname_package_names(deps: &[DepInfo]) -> std::collections::HashSet<String> {
+/// The second returned set is the self-provided credit: package
+/// names whose every deriving generated soname is among the package's
+/// own provides, so the generated dependency resolves against the
+/// package itself and never reaches the named library package.
+fn generated_soname_package_names(
+    deps: &[DepInfo],
+    provides: &[DepInfo],
+) -> (
+    std::collections::HashSet<String>,
+    std::collections::HashSet<String>,
+) {
     let mut names = std::collections::HashSet::new();
+    let mut self_names = std::collections::HashSet::new();
+    let mut external_names = std::collections::HashSet::new();
+    let provide_names: std::collections::HashSet<&str> =
+        provides.iter().map(|d| d.name.as_str()).collect();
     for dep in deps {
         if dep.flags & RPMSENSE_FIND_REQUIRES == 0 {
             continue;
@@ -545,27 +576,43 @@ fn generated_soname_package_names(deps: &[DepInfo]) -> std::collections::HashSet
                 .to_string();
             (!version.is_empty()).then(|| version.replace('.', "_"))
         });
+        let mut derived: Vec<String> = Vec::new();
         match (pkgversion, soversion) {
             // `libfoo.so.10.0.0` -> `libfoo10_0_0`, `libfoo-10_0_0`.
             (None, Some(version)) => {
-                names.insert(format!("{stem}{version}"));
-                names.insert(format!("{stem}-{version}"));
+                derived.push(format!("{stem}{version}"));
+                derived.push(format!("{stem}-{version}"));
             }
             // `libgame2-1.9.so.10.0.0` -> `libgame2-1_9-10_0_0`: with a
             // package version in the stem the SLPP form is the dash one.
             (Some(_), Some(version)) => {
-                names.insert(format!("{stem}-{version}"));
+                derived.push(format!("{stem}-{version}"));
             }
             // `libdb-4.8.so` -> `libdb-4_8`: the stem already carries
             // the whole version.
             (Some(_), None) => {
-                names.insert(stem);
+                derived.push(stem);
             }
             // A version-less soname (`libfoo.so`) names no package.
             (None, None) => {}
         }
+        // A generated dependency whose raw name is among the package's
+        // own provides resolves against the package itself, not
+        // against the library package the derived names belong to.
+        if provide_names.contains(dep.name.as_str()) {
+            self_names.extend(derived.iter().cloned());
+        } else {
+            external_names.extend(derived.iter().cloned());
+        }
+        names.extend(derived);
     }
-    names
+    // The credit set: names whose every deriving generated soname is
+    // self-provided. A name also derived from an external soname is
+    // not credited: that soname's dependency does reach the library
+    // package, so an explicit requirement on it still duplicates.
+    let credit: std::collections::HashSet<String> =
+        self_names.difference(&external_names).cloned().collect();
+    (names, credit)
 }
 
 /// The sys-root leaf of a `cross-...` package name: the target and
@@ -4196,5 +4243,95 @@ mod rich_dep_emission_tests {
         let results = run(&pkg, &rich_test_config(&[], false));
         let hits = named(&results, "explicit-lib-dependency");
         assert_eq!(hits.len(), 1, "all: {results:?}");
+    }
+
+    #[test]
+    fn explicit_lib_dependency_self_provided_soname_is_silent() {
+        // The libptscotch shape: the package ships the library itself
+        // (in its MPI prefix) and provides the soname, so the
+        // generated dependency resolves against its own provides and
+        // never reaches libscotch7_0; the explicit requirement on that
+        // name is the only expression of it, not a duplicate.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![
+            plain_dep("libfoo7_0"),
+            generated_dep("libfoo.so.7.0()(64bit)"),
+        ];
+        pkg.provides = vec![plain_dep("libfoo.so.7.0()(64bit)")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "explicit-lib-dependency").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_lib_dependency_self_provided_other_soname_still_fires() {
+        // Providing an unrelated soname does not credit the name: the
+        // generated dependency on libfoo.so.7.0 still reaches the
+        // library package, so the explicit requirement duplicates it.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![
+            plain_dep("libfoo7_0"),
+            generated_dep("libfoo.so.7.0()(64bit)"),
+        ];
+        pkg.provides = vec![plain_dep("libbar.so.9()(64bit)")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "explicit-lib-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(hits[0].1.ends_with(" libfoo7_0"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn explicit_lib_dependency_package_name_provide_still_fires() {
+        // Providing the library package's name (a virtual provide) is
+        // not providing the soname: the generated soname dependency
+        // still reaches the library package.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![
+            plain_dep("libfoo7_0"),
+            generated_dep("libfoo.so.7.0()(64bit)"),
+        ];
+        pkg.provides = vec![plain_dep("libfoo7_0")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "explicit-lib-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(hits[0].1.ends_with(" libfoo7_0"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn explicit_lib_dependency_unqualified_soname_provide_still_fires() {
+        // The generated dependency carries its arch qualifier
+        // (libfoo.so.7.0()(64bit)); a provide of the bare soname does
+        // not satisfy it in rpm's resolution, so it does not credit.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![
+            plain_dep("libfoo7_0"),
+            generated_dep("libfoo.so.7.0()(64bit)"),
+        ];
+        pkg.provides = vec![plain_dep("libfoo.so.7.0")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "explicit-lib-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(hits[0].1.ends_with(" libfoo7_0"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn explicit_lib_dependency_mixed_self_and_external_soname_still_fires() {
+        // libfoo-7_0 is derived from two generated sonames: the
+        // self-provided libfoo.so.7.0 and the external libfoo-7.0.so
+        // (stem-version shape). The external derivation reaches the
+        // library package, so the name keeps firing.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![
+            plain_dep("libfoo-7_0"),
+            generated_dep("libfoo.so.7.0()(64bit)"),
+            generated_dep("libfoo-7.0.so()(64bit)"),
+        ];
+        pkg.provides = vec![plain_dep("libfoo.so.7.0()(64bit)")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "explicit-lib-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(hits[0].1.ends_with(" libfoo-7_0"), "line: {}", hits[0].1);
     }
 }
