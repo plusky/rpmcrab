@@ -872,6 +872,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "beam-compiled-without-debuginfo"
+kind = "behaviour"
+reason = "The reference decides debug info from the compile-info options alone whenever options are recorded (Dbgi presence is only a fallback for option-less, deterministic-shaped compile info): a file whose options omit the debug_info atom is reported even when its Dbgi chunk holds the actual debug-info payload. A compiler that generates debug info without passing an Erlang debug_info option — Elixir's, whose recorded options are its Core Erlang set (from_core, no_core_prepare, no_auto_import, no_spawn_compiler_process) — is therefore reported on files that verifiably contain debug info. Factory corpus (51,589 RPMs, 290 findings): 19 files carry a real {debug_info_v1, Backend, Data} payload and are silenced by this credit (rabbitmq-server's Elixir plugin beams csv and jose, one elixir-hex beam); the other 271 carry the compiler's no-debug-info placeholder (Data is the atom none or the tuple {none, Options}) and still report, as in the reference. rpmcrab credits a Dbgi payload whose Data head is neither placeholder shape; a payload that cannot be parsed earns no credit and the file is judged by its options alone, as in the reference."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "non-standard-dir-in-usr"
 kind = "behaviour"
 reason = "FHSCheck's standard /usr list additionally treats etc, i686-w64-mingw32, x86_64-w64-mingw32 and X11R6 as standard, appended after the reference's twelve FHS 3.0 entries so they name last in the generated description, and the check separately treats the measured cross-toolchain target sysroots as standard: the *-suse-linux triples and the bare-metal targets avr, amdgcn-amdhsa, rx-elf, nvptx-none, bpf-none, pru, arm-none-eabi, epiphany-elf, riscv64-elf and spu, held in their own list so the generated description names only the standard directories. The reference emits the warning for all of them: /usr/etc is the distro's vendor-default config tree, the MinGW sysroots are the guideline-sanctioned cross-toolchain layout, and X11R6 matches FilelistCheck's /usr/X11R6/ GoodPrefix - all modelled as good by FilelistCheck's GoodPrefixes, and the port already whitelists the MinGW sysroots in FilelistCheck itself (see the filelist-forbidden-fhs23 entry above) - while the target sysroots are the layout the distro's cross-compiler packages install by design. The vendored configs also drop upstream's bare Filters entry for the tag, so under the openSUSE flavour the warning fires on genuinely novel /usr top-level directories where upstream's shipped config suppresses it. Measured on the Factory corpus the warning's firing set drops 416 to 0 lines (issue #582)."

@@ -8,7 +8,7 @@
 //! The reference uses `pybeam`; this is a minimal native BEAM reader: it
 //! parses the `FOR1` container, locates the `CInf` chunk, and decodes just
 //! enough of the Erlang external term format to read the `options` and
-//! `source` entries.
+//! `source` entries and to classify the `Dbgi` chunk's payload.
 
 use fancy_regex::Regex;
 
@@ -379,27 +379,120 @@ fn read_compile_info(path: &str) -> Result<Option<CompileInfo>, String> {
     Ok(Some(CompileInfo { options, source }))
 }
 
-/// True when the BEAM file has a `Dbgi` (debug info) chunk.
-fn has_dbgi_chunk(path: &str) -> bool {
-    let Ok(data) = std::fs::read(path) else {
-        return false;
-    };
+/// The payload of the first chunk named `name` in the BEAM file at
+/// `path`, or `None` when the file is unreadable, too short to hold
+/// the `FOR1` header, or has no such chunk.
+fn chunk_payload(path: &str, name: &[u8; 4]) -> Option<Vec<u8>> {
+    let data = std::fs::read(path).ok()?;
     if data.len() < 12 {
-        return false;
+        return None;
     }
     let mut pos = 12;
     while pos + 8 <= data.len() {
-        let name = &data[pos..pos + 4];
-        if name == b"Dbgi" {
-            return true;
-        }
+        let cname = &data[pos..pos + 4];
         let size = u32::from_be_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
             as usize;
         pos += 8;
         let end = pos.saturating_add(size).min(data.len());
+        if cname == name {
+            return Some(data[pos..end].to_vec());
+        }
         pos = end + (4 - end % 4) % 4;
     }
-    false
+    None
+}
+
+/// True when the BEAM file has a `Dbgi` (debug info) chunk.
+fn has_dbgi_chunk(path: &str) -> bool {
+    chunk_payload(path, b"Dbgi").is_some()
+}
+
+/// Parse one term off `parser` and report whether it is the atom
+/// `none`; `None` when the term does not parse.
+fn term_is_none_atom(parser: &mut TermParser) -> Option<bool> {
+    match parser.parse_term()? {
+        Term::Atom(a) => Some(a == "none"),
+        _ => Some(false),
+    }
+}
+
+/// True when the BEAM file's `Dbgi` chunk holds an actual debug-info
+/// payload. The chunk is the external term `{debug_info_v1, Backend,
+/// Data}`; a compile that generated no debug info still writes the
+/// chunk, with `Data` as the placeholder atom `none` (the Elixir
+/// backend's shape) or the tuple `{none, Options}` (the Erlang
+/// backend's shape). Any other `Data` head — a list of abstract
+/// forms, an `{elixir_v1, Map}` tuple, a map — is the payload
+/// itself. Only the head of `Data` is classified, never the whole
+/// payload; an unparsable chunk earns no credit.
+fn has_real_dbgi_payload(path: &str) -> bool {
+    let Some(payload) = chunk_payload(path, b"Dbgi") else {
+        return false;
+    };
+    if payload.first() != Some(&131) {
+        return false;
+    }
+    let body = &payload[1..];
+    // A COMPRESSED_EXT tag wraps the whole term when compression
+    // pays off; inflate it so the term head can be read.
+    let inflated;
+    let term: &[u8] = if body.first() == Some(&80) {
+        use std::io::Read as _;
+        let Some(rest) = body.get(5..) else {
+            return false;
+        };
+        let mut out = Vec::new();
+        if flate2::read::ZlibDecoder::new(rest)
+            .read_to_end(&mut out)
+            .is_err()
+        {
+            return false;
+        }
+        inflated = out;
+        &inflated
+    } else {
+        body
+    };
+    let mut parser = TermParser::new(term);
+    let arity = match parser.byte() {
+        Some(104) => parser.byte().map(usize::from),
+        Some(105) => parser.u32().map(|n| n as usize),
+        _ => None,
+    };
+    if arity != Some(3) {
+        return false;
+    }
+    match parser.parse_term() {
+        Some(Term::Atom(a)) if a == "debug_info_v1" => {}
+        _ => return false,
+    }
+    if !matches!(parser.parse_term(), Some(Term::Atom(_))) {
+        return false;
+    }
+    let head = parser.pos;
+    match parser.byte() {
+        // An atom: the placeholder iff it is `none`.
+        Some(100 | 115 | 118 | 119) => {
+            parser.pos = head;
+            matches!(term_is_none_atom(&mut parser), Some(false))
+        }
+        // A tuple: the placeholder iff its first element is `none`.
+        Some(tag @ (104 | 105)) => {
+            let arity = if tag == 104 {
+                parser.byte().map(usize::from)
+            } else {
+                parser.u32().map(|n| n as usize)
+            };
+            match arity {
+                Some(0) => true,
+                Some(_) => matches!(term_is_none_atom(&mut parser), Some(false)),
+                None => false,
+            }
+        }
+        // Any other head is a payload term, not a placeholder.
+        Some(_) => true,
+        None => false,
+    }
 }
 
 pub struct ErlangCheck {
@@ -465,7 +558,14 @@ impl Check for ErlangCheck {
             // to the Dbgi chunk for the debug-info check.
             let has_debug_info = match &info.options {
                 None => has_dbgi_chunk(&file.path),
-                Some(options) => options.iter().any(|o| o == "debug_info"),
+                // The options alone do not settle it: a compiler that
+                // generates debug info without an Erlang `debug_info`
+                // option — Elixir's records its Core Erlang options
+                // instead — omits the atom while the payload is
+                // present, so a real `Dbgi` payload counts too.
+                Some(options) => {
+                    options.iter().any(|o| o == "debug_info") || has_real_dbgi_payload(&file.path)
+                }
             };
             if !has_debug_info {
                 add_info(
@@ -496,22 +596,29 @@ impl Check for ErlangCheck {
 mod tests {
     use super::*;
 
-    /// Build a minimal BEAM file with a CInf chunk holding the given
-    /// external-term payload.
-    fn beam_with_cinf(payload: &[u8]) -> Vec<u8> {
+    /// Build a minimal BEAM file holding the given chunks.
+    fn beam_with_chunks(chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(b"FOR1");
         out.extend_from_slice(&[0, 0, 0, 0]); // patched below
         out.extend_from_slice(b"BEAM");
-        out.extend_from_slice(b"CInf");
-        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-        out.extend_from_slice(payload);
-        while out.len() % 4 != 0 {
-            out.push(0);
+        for (name, payload) in chunks {
+            out.extend_from_slice(*name);
+            out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            out.extend_from_slice(payload);
+            while out.len() % 4 != 0 {
+                out.push(0);
+            }
         }
         let size = (out.len() - 8) as u32;
         out[4..8].copy_from_slice(&size.to_be_bytes());
         out
+    }
+
+    /// Build a minimal BEAM file with a CInf chunk holding the given
+    /// external-term payload.
+    fn beam_with_cinf(payload: &[u8]) -> Vec<u8> {
+        beam_with_chunks(&[(b"CInf", payload)])
     }
 
     /// Every atom tag the parser accepts: the Latin-1 pair
@@ -1130,6 +1237,206 @@ mod tests {
             "the finding renders at Error: {}",
             results[0].1
         );
+    }
+
+    /// External term for `[{options, [warn_unused_vars]}, {source, <<"/home/abuild/rpmbuild/BUILD/foo">>}]`:
+    /// compile info whose options do NOT record `debug_info`.
+    fn compile_info_term_without_debug_info() -> Vec<u8> {
+        let mut t = vec![131];
+        t.extend_from_slice(&[108, 0, 0, 0, 2]); // LIST_EXT, len 2
+        t.extend_from_slice(&[104, 2]); // {options, [warn_unused_vars]}
+        push_atom(&mut t, 119, b"options");
+        t.extend_from_slice(&[108, 0, 0, 0, 1]);
+        push_atom(&mut t, 119, b"warn_unused_vars");
+        t.push(106); // NIL tail
+        t.extend_from_slice(&[104, 2]); // {source, Binary}
+        push_atom(&mut t, 119, b"source");
+        let source = b"/home/abuild/rpmbuild/BUILD/foo.erl";
+        t.extend_from_slice(&[109]); // BINARY_EXT
+        t.extend_from_slice(&(source.len() as u32).to_be_bytes());
+        t.extend_from_slice(source);
+        t.push(106); // NIL tail
+        t
+    }
+
+    /// `{debug_info_v1, erl_abstract_code, {none, [warn_unused_vars]}}`:
+    /// the Dbgi placeholder an Erlang compile without debug info writes.
+    fn dbgi_erlang_placeholder() -> Vec<u8> {
+        let mut t = vec![131, 104, 3];
+        push_atom(&mut t, 119, b"debug_info_v1");
+        push_atom(&mut t, 119, b"erl_abstract_code");
+        t.extend_from_slice(&[104, 2]);
+        push_atom(&mut t, 119, b"none");
+        t.extend_from_slice(&[108, 0, 0, 0, 1]);
+        push_atom(&mut t, 119, b"warn_unused_vars");
+        t.push(106);
+        t
+    }
+
+    /// `{debug_info_v1, elixir_erl, none}`: the Dbgi placeholder an
+    /// Elixir compile without debug info writes.
+    fn dbgi_elixir_placeholder() -> Vec<u8> {
+        let mut t = vec![131, 104, 3];
+        push_atom(&mut t, 119, b"debug_info_v1");
+        push_atom(&mut t, 119, b"elixir_erl");
+        push_atom(&mut t, 119, b"none");
+        t
+    }
+
+    /// `{debug_info_v1, erl_abstract_code, [{attribute, 1, module, foo}]}`:
+    /// a real Erlang debug-info payload (abstract forms).
+    fn dbgi_erlang_real() -> Vec<u8> {
+        let mut t = vec![131, 104, 3];
+        push_atom(&mut t, 119, b"debug_info_v1");
+        push_atom(&mut t, 119, b"erl_abstract_code");
+        t.extend_from_slice(&[108, 0, 0, 0, 1]); // [{attribute, 1, module, foo}]
+        t.extend_from_slice(&[104, 4]);
+        push_atom(&mut t, 119, b"attribute");
+        t.extend_from_slice(&[97, 1]); // SMALL_INTEGER_EXT
+        push_atom(&mut t, 119, b"module");
+        push_atom(&mut t, 119, b"foo");
+        t.push(106); // NIL tail
+        t
+    }
+
+    /// `{debug_info_v1, elixir_erl, {elixir_v1, #{}}}`: a real Elixir
+    /// debug-info payload.
+    fn dbgi_elixir_real() -> Vec<u8> {
+        let mut t = vec![131, 104, 3];
+        push_atom(&mut t, 119, b"debug_info_v1");
+        push_atom(&mut t, 119, b"elixir_erl");
+        t.extend_from_slice(&[104, 2]);
+        push_atom(&mut t, 119, b"elixir_v1");
+        t.extend_from_slice(&[116, 0, 0, 0, 0]); // MAP_EXT, empty
+        t
+    }
+
+    /// Wrap an external term (including its 131 version byte) in the
+    /// COMPRESSED_EXT form: `[131, 80, uncompressed-size, zlib...]`.
+    fn compressed_term(payload: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&payload[1..]).expect("compress");
+        let zipped = enc.finish().expect("finish compression");
+        let mut t = vec![131, 80];
+        t.extend_from_slice(&((payload.len() - 1) as u32).to_be_bytes());
+        t.extend_from_slice(&zipped);
+        t
+    }
+
+    #[test]
+    fn dbgi_placeholder_shapes_earn_no_credit() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let wrong_head = {
+            let mut t = vec![131, 104, 3];
+            push_atom(&mut t, 119, b"not_debug_info");
+            push_atom(&mut t, 119, b"erl_abstract_code");
+            push_atom(&mut t, 119, b"none");
+            t
+        };
+        for (name, payload) in [
+            ("erlang placeholder", dbgi_erlang_placeholder()),
+            ("elixir placeholder", dbgi_elixir_placeholder()),
+            (
+                "compressed placeholder",
+                compressed_term(&dbgi_erlang_placeholder()),
+            ),
+            ("garbage", vec![131, 1, 2, 3]),
+            ("wrong head atom", wrong_head),
+        ] {
+            let path = tmp.path().join("x.beam");
+            std::fs::write(&path, beam_with_chunks(&[(b"Dbgi", &payload)])).unwrap();
+            assert!(
+                !has_real_dbgi_payload(path.to_str().unwrap()),
+                "{name} must not count as debug info"
+            );
+        }
+        // No Dbgi chunk at all.
+        let path = tmp.path().join("none.beam");
+        std::fs::write(&path, beam_with_cinf(&compile_info_term(119))).unwrap();
+        assert!(!has_real_dbgi_payload(path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn dbgi_real_payload_shapes_earn_credit() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        for (name, payload) in [
+            ("erlang abstract forms", dbgi_erlang_real()),
+            ("elixir v1 data", dbgi_elixir_real()),
+            ("compressed real", compressed_term(&dbgi_erlang_real())),
+        ] {
+            let path = tmp.path().join("x.beam");
+            std::fs::write(&path, beam_with_chunks(&[(b"Dbgi", &payload)])).unwrap();
+            assert!(
+                has_real_dbgi_payload(path.to_str().unwrap()),
+                "{name} must count as debug info"
+            );
+        }
+    }
+
+    /// Run `ErlangCheck` over one synthetic BEAM file and return the
+    /// finding ids it produced.
+    fn finding_ids_for_beam(bytes: &[u8]) -> Vec<String> {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let beam_path = tmp.path().join("mod.beam");
+        std::fs::write(&beam_path, bytes).unwrap();
+        let rpm = format!(
+            "{}/../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut pkg =
+            Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture header");
+        pkg.files = vec![crate::pkg::pkgfile::PkgFile {
+            name: "/usr/lib/erlang/lib/foo/ebin/mod.beam".to_string(),
+            path: beam_path.to_string_lossy().into_owned(),
+            ..Default::default()
+        }];
+        let config = Config::default();
+        let mut check = ErlangCheck::new(&config);
+        let mut out = Filter::new(&config, crate::color::Color::for_tty(false)).unwrap();
+        check.check_binary(&pkg, &config, &mut out);
+        out.results().iter().map(|(id, _)| id.to_string()).collect()
+    }
+
+    /// Compile info without the `debug_info` option plus a Dbgi chunk
+    /// holding a real payload: the file carries debug info even
+    /// though the recorded options do not say so (the shape of
+    /// Elixir-compiled beams in rabbitmq-server's plugin set).
+    #[test]
+    fn real_dbgi_payload_silences_without_debuginfo() {
+        for payload in [dbgi_elixir_real(), dbgi_erlang_real()] {
+            let beam = beam_with_chunks(&[
+                (b"CInf", &compile_info_term_without_debug_info()),
+                (b"Dbgi", &payload),
+            ]);
+            assert_eq!(finding_ids_for_beam(&beam), Vec::<String>::new());
+        }
+    }
+
+    /// Near misses: the same compile info, but the Dbgi chunk holds
+    /// only the compiler's no-debug-info placeholder (or garbage, or
+    /// nothing) — the finding must still fire.
+    #[test]
+    fn placeholder_dbgi_still_reports_without_debuginfo() {
+        for payload in [
+            Some(dbgi_erlang_placeholder()),
+            Some(dbgi_elixir_placeholder()),
+            Some(vec![131, 1, 2, 3]),
+            None,
+        ] {
+            let beam = match &payload {
+                Some(payload) => beam_with_chunks(&[
+                    (b"CInf", &compile_info_term_without_debug_info()),
+                    (b"Dbgi", payload),
+                ]),
+                None => beam_with_cinf(&compile_info_term_without_debug_info()),
+            };
+            assert_eq!(
+                finding_ids_for_beam(&beam),
+                vec!["beam-compiled-without-debuginfo".to_string()],
+                "dbgi {payload:?} must still report"
+            );
+        }
     }
 
     /// A crafted CInf of nothing but nested SMALL_TUPLE wrappers used
