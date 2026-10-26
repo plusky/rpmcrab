@@ -381,7 +381,7 @@ mod tests {
             ),
             (
                 "KMPPolicyCheck.toml",
-                "eab5b6cfe39e79e8e2f19328214970f5a4cccfd9c7a596beb5122d9a922f6493",
+                "fae4eeecdc94f8649dd84ae8b9e30ae8deb84cddb2c31848ee2091709b1649bd",
             ),
             (
                 "LibraryDependencyCheck.toml",

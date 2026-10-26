@@ -15,3 +15,10 @@ check = "KMPPolicyCheck"
 kind = "detail"
 reason = "Typo fix in staged `--explain` text for `kmp-excessive-supplements`: the misspelling of `Supplements` fixed. Meaning unchanged."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "KMPPolicyCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `kmp-missing-supplements` prescribed the `packageand(kernel-%1:%name)` form. The check accepts both spellings (verified in `checks/kmp_policy.rs`), and `packageand()` is the obsolete zypp syntax the `suse-zypp-packageand` finding flags everywhere else, so the text now prescribes the rich boolean form: `Supplements: (kernel-%1 and %name)`."
+since = "0.4.1"
