@@ -32,7 +32,7 @@ use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::pkg::dep::{DepInfo, leaf_account_capability};
-use crate::pkg::pkgfile::{self, PkgFile, is_reg};
+use crate::pkg::pkgfile::{self, PkgFile, is_dir, is_reg};
 use crate::tools::{Tool, ToolSource, test_source};
 use std::sync::OnceLock;
 
@@ -2862,7 +2862,7 @@ impl FilesCheck {
         self.check_file_info_dir_file(pkg, fname, out);
         self.check_file_makefile_junk(pkg, fname, out);
         self.check_file_logrotate(pkg, fname, out);
-        self.check_file_crontab(pkg, fname, out);
+        self.check_file_crontab(pkg, fname, pkgfile, out);
         self.check_file_compressed_symlink(pkg, fname, pkgfile, out);
         self.check_file_normal_file(pkg, fname, pkgfile, st, out);
         self.check_file_dir(pkg, fname, pkgfile, out);
@@ -4008,13 +4008,24 @@ impl FilesCheck {
         }
     }
 
-    fn check_file_crontab(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
-        // #552: replicate reference as-is (matches base dirs too, known bug).
+    fn check_file_crontab(&self, pkg: &Pkg, fname: &str, pkgfile: &PkgFile, out: &mut Filter) {
         // Same #388 root cause as logrotate: the reference also counts
         // requires + recommends + suggests here.
         let deps = Self::dep_names(pkg);
-        if fname.starts_with("/etc/cron.") && !deps.contains(&"crontabs") && pkg.name != "crontabs"
+        if !fname.starts_with("/etc/cron.") || deps.contains(&"crontabs") || pkg.name == "crontabs"
         {
+            return;
+        }
+        // Divergence (FilesCheck ledger): the reference charges every
+        // "/etc/cron." entry, including the cron.* directory entries
+        // themselves (#552's base-dir false positive) and daemon files
+        // sitting directly in /etc -- /etc/cron.deny is the cron daemon's
+        // own access-control file, not a cron script. Neither shape is a
+        // cron script: only a non-directory entry *inside* a cron.*
+        // directory can be one, so charge only those. A real file inside
+        // a charged directory still fires on its own entry.
+        let inside_cron_dir = fname["/etc/cron.".len()..].contains('/');
+        if inside_cron_dir && !is_dir(pkgfile.mode) {
             add_info(
                 out,
                 Level::Error,
@@ -5570,7 +5581,9 @@ impl FilesCheck {
 
 // Bug analysis decisions (2026-09-29):
 // - #1602 (Tom's PR): ldconfig -p interpreter honored — FIXED behavior implemented.
-// - #552: missing-dependency-to-crontabs base dir false positive — REPLICATED as-is.
+// - #552: missing-dependency-to-crontabs base dir false positive — replicated as-is
+//   until the 2026-10-26 FP-trim tightening (directory entries and daemon files
+//   directly in /etc are no longer charged; see the FilesCheck divergence ledger).
 // - #551: logrotate-log-dir-not-packaged — NOT PORTED (LogrotateCheck not yet
 //   ported; the /var/log exclusion from rpmlint#551 defers to that port).
 // - #771: hardlink catch-22 — ABANDONED by Tom, replicate reference exactly.
@@ -6451,6 +6464,89 @@ mod tests {
         let mut check = FilesCheck::new(&config);
         check.check(&pkg, &config, &mut out);
         let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "missing-dependency-to-crontabs");
+    }
+
+    /// Run FilesCheck over a package (named cron-test, no deps of any
+    /// kind) shipping exactly `files`; return the finding names.
+    fn crontabs_findings(files: Vec<PkgFile>) -> Vec<String> {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.name = "cron-test".to_string();
+        pkg.files = files;
+        pkg.requires = vec![];
+        pkg.recommends = vec![];
+        pkg.suggests = vec![];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        out.results().iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    fn cron_entry(name: &str, mode: u32) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            mode,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn missing_dependency_to_crontabs_skips_directory_entries() {
+        // The cron.* directories themselves are not cron scripts: the
+        // `cron` package ships exactly these five entries and drew five
+        // findings. A subdirectory inside a cron dir is likewise a dir.
+        let names = crontabs_findings(vec![
+            cron_entry("/etc/cron.d", 0o40755),
+            cron_entry("/etc/cron.daily", 0o40755),
+            cron_entry("/etc/cron.hourly", 0o40755),
+            cron_entry("/etc/cron.monthly", 0o40755),
+            cron_entry("/etc/cron.weekly", 0o40755),
+            cron_entry("/etc/cron.d/subdir", 0o40755),
+        ]);
+        assert_lacks(&names, "missing-dependency-to-crontabs");
+    }
+
+    #[test]
+    fn missing_dependency_to_crontabs_skips_daemon_files_in_etc() {
+        // /etc/cron.deny (and .allow) are the daemon's own access-control
+        // files directly in /etc, not scripts inside a cron directory.
+        let names = crontabs_findings(vec![cron_entry("/etc/cron.deny", 0o100600)]);
+        assert_lacks(&names, "missing-dependency-to-crontabs");
+    }
+
+    #[test]
+    fn missing_dependency_to_crontabs_fires_on_script_and_symlink() {
+        // A real script file inside a cron dir still fires, and so does a
+        // symlink registration pointing at one.
+        let names = crontabs_findings(vec![
+            cron_entry("/etc/cron.hourly/0fcprobe", 0o100755),
+            PkgFile {
+                name: "/etc/cron.d/fcprobe".to_string(),
+                path: "/etc/cron.d/fcprobe".to_string(),
+                mode: 0o120777,
+                linkto: "../fcprobe".to_string(),
+                ..Default::default()
+            },
+        ]);
+        assert_has(&names, "missing-dependency-to-crontabs");
+    }
+
+    #[test]
+    fn missing_dependency_to_crontabs_cron_dep_does_not_credit() {
+        // Boundary pin: a dep on `cron` (the renamed provider of the
+        // cron.* directories) does NOT satisfy this check -- only the
+        // literal `crontabs` name credits. Crediting the modern name is
+        // a separate ruling, not part of the entry-shape tightening.
+        let names = run_files_check_with_deps(
+            "/etc/cron.d/fcprobe",
+            vec![dep_named("cron")],
+            vec![],
+            vec![],
+        );
         assert_has(&names, "missing-dependency-to-crontabs");
     }
 
