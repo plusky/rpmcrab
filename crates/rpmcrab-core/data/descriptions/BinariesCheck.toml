@@ -228,7 +228,8 @@ package with a Go toolchain at or above the recorded floor.
 """
 binary-or-shlib-calls-weak-prng="""
 The binary calls the predictable libc random functions (rand,
-random, srand, srandom or the *48 family) and runs in a privileged
+random, srand, srandom, initstate, setstate, the *48 family or
+their reentrant *_r forms) and runs in a privileged
 or exposed context: the file is setuid, setgid or carries file
 capabilities, or the package ships a systemd service or socket.
 Values from these generators are predictable to anyone who can

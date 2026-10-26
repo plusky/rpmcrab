@@ -3244,7 +3244,7 @@ impl BinariesCheck {
             weak_prng_call_regex: WEAK_PRNG_CALL_REGEX
                 .get_or_init(|| {
                     Regex::new(
-                        r"^((drand48|erand48|lrand48|nrand48|mrand48|jrand48|seed48|lcong48|srand48|initstate_r|setstate_r|initstate|setstate|srandom|random_r|random|srand|rand_r|rand)(?:@GLIBC\S+)?)(?:\s|$)",
+                        r"^((drand48_r|drand48|erand48_r|erand48|lrand48_r|lrand48|nrand48_r|nrand48|mrand48_r|mrand48|jrand48_r|jrand48|seed48_r|seed48|lcong48_r|lcong48|srand48_r|srand48|initstate_r|setstate_r|initstate|setstate|srandom_r|srandom|random_r|random|srand|rand_r|rand)(?:@GLIBC\S+)?)(?:\s|$)",
                     )
                     .expect("static regex")
                 })
@@ -13808,9 +13808,13 @@ description = "explicit priority string bypasses the system crypto policy"
         // Definition-only (an implementing library's shape) stays silent
         // even in a gated package.
         assert_eq!(count(&svc_pkg, &plain, &["rand"], &[]), 0);
+        // Reentrant forms fire inside the gate.
+        assert_eq!(count(&bare_pkg, &suid, &["srandom_r"], &["srandom_r"]), 1);
+        assert_eq!(count(&svc_pkg, &plain, &["drand48_r"], &["drand48_r"]), 1);
         // The strong generators are not this pattern, even setuid.
         assert_eq!(count(&bare_pkg, &suid, &["arc4random"], &["arc4random"]), 0);
         assert_eq!(count(&bare_pkg, &suid, &["getrandom"], &["getrandom"]), 0);
+        assert_eq!(count(&bare_pkg, &suid, &["getentropy"], &["getentropy"]), 0);
     }
 
     #[test]
