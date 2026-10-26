@@ -27,6 +27,25 @@
 //! library exists through the sibling — installing the devel package
 //! guarantees the library. The reference credits only a direct
 //! requirement on the library package itself.
+//!
+//! The verdict also judges the linked file against every package of
+//! the run that ships it, not only the one owner a single-value file
+//! map names last: several packages in a run can ship the same
+//! library path (a full build beside its mini flavour, `libecpg6`
+//! beside `postgresql18-devel-mini`), and which of them such a map
+//! attributes the file to is lint order, not fact. The dependency is
+//! credited when it lands on any shipper of the file: a direct
+//! requirement naming any shipper (a shipper the devel-name test
+//! classifies as a devel package counts — `dapl-debug-devel`
+//! requires the `dapl-debug` build that ships its link target), a
+//! requirement naming an owner through one of the owner's own
+//! provides (the naming the anchor chain already accepts for the
+//! library), the anchor chain aimed at any owner, or the devel
+//! package shipping the resolved file itself
+//! (`glib2-stage1-devel`'s combined build). The reference attributes
+//! the file to a single package and credits only a direct requirement
+//! on that package. A finding that still fires names the last
+//! non-devel shipper, the owner the single-value map would have held.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -182,7 +201,7 @@ pub struct LibraryDependencyCheck {
     /// same package together silently drops all but the last arch. The port
     /// deliberately checks each arch (plusky/rpmcrab#74).
     devel_order: Vec<(String, String)>,
-    package_so_files: HashMap<String, (String, String)>,
+    package_so_shippers: HashMap<String, Vec<(String, String)>>,
     /// Per-package snapshots for the anchor-chain credit
     /// (plusky/rpmcrab#863), keyed like the devel maps.
     package_snapshots: HashMap<(String, String), PkgSnapshot>,
@@ -196,7 +215,7 @@ pub struct LibraryDependencyCheck {
 struct LibDepState {
     package_requires: HashMap<(String, String), Vec<String>>,
     package_so_symlinks: HashMap<(String, String), Vec<String>>,
-    package_so_files: HashMap<String, (String, String)>,
+    package_so_shippers: HashMap<String, Vec<(String, String)>>,
     package_snapshots: HashMap<(String, String), PkgSnapshot>,
     devel_order: Vec<(String, String)>,
 }
@@ -207,7 +226,7 @@ impl LibraryDependencyCheck {
             package_requires: HashMap::new(),
             package_so_symlinks: HashMap::new(),
             devel_order: Vec::new(),
-            package_so_files: HashMap::new(),
+            package_so_shippers: HashMap::new(),
             package_snapshots: HashMap::new(),
             isa: expand_isa(),
         }
@@ -215,6 +234,73 @@ impl LibraryDependencyCheck {
 
     fn is_devel_pkg(name: &str) -> bool {
         is_match(devel_regex(), name)
+    }
+
+    /// Whether the run credits the devel package `devel` with a
+    /// dependency guaranteeing the linked file: some package of the
+    /// run that ships the file is depended on, in one of the shapes
+    /// the check accepts. The shapes, each measured on the Factory
+    /// corpus (FP-trim campaign, 2026-10-26; 24 of the check's 75 E):
+    ///
+    /// * the devel package ships the resolved file itself
+    ///   (`glib2-stage1-devel`'s combined build) — the dependency
+    ///   the finding asks for would be on itself;
+    /// * a direct requirement names any shipper of the file, or
+    ///   the shipper with the running `%{_isa}` qualifier — the
+    ///   reference's direct arm (`LibraryDependencyCheck.py:49`)
+    ///   aimed at every shipper, not only the attributed owner:
+    ///   12 findings require another owner of the file by name
+    ///   (the ffmpeg mini/full split, `libecpg6` beside
+    ///   `postgresql18-devel-mini`), and one requires a shipper
+    ///   the devel-name test keeps out of the owner side
+    ///   (`dapl-debug-devel` on `dapl-debug`);
+    /// * a requirement names an owner through one of the owner's
+    ///   own provides — the naming `chain_credits` already accepts
+    ///   for the library (10 findings: `wt-devel` on `wt-dbo`, the
+    ///   provide of `libwtdbo4_12_6`; the stem provides of the
+    ///   klatexformula/liblinebreak/liboping libraries). Owners
+    ///   only: a devel-classified shipper is not the library
+    ///   package of the verdict, so its provides name nothing here;
+    /// * the anchor chain (`chain_credits`) aimed at any owner.
+    ///
+    /// A requirement is a name in the devel package's own list, as
+    /// in the reference: version relations play no part, and a rich
+    /// requirement's expression never equals a shipper's name.
+    fn link_credited(
+        &self,
+        devel: &(String, String),
+        requires: &[String],
+        shippers: &[(String, String)],
+        owners: &[&(String, String)],
+        snapshots_by_key: &HashMap<(&str, &str), &PkgSnapshot>,
+    ) -> bool {
+        if shippers.iter().any(|who| who == devel) {
+            return true;
+        }
+        if shippers.iter().any(|(name, _)| {
+            // `definition` is a *package* name, not a soname
+            // (`LibraryDependencyCheck.py:49`), so `name + isa`
+            // matches nothing rpm generates for a library; the arm
+            // is the reference's, kept faithful.
+            let with_isa = format!("{name}{}", self.isa);
+            requires.iter().any(|r| r == name || r == &with_isa)
+        }) {
+            return true;
+        }
+        if owners.iter().any(|(name, arch)| {
+            snapshots_by_key
+                .get(&(name.as_str(), arch.as_str()))
+                .is_some_and(|snap| {
+                    snap.provides
+                        .iter()
+                        .any(|p| requires.iter().any(|r| r == p))
+                })
+        }) {
+            return true;
+        }
+        owners
+            .iter()
+            .any(|(name, arch)| self.chain_credits(devel, name, arch, snapshots_by_key))
     }
 
     /// Whether the anchor chain credits the devel package `devel`
@@ -296,7 +382,7 @@ impl Check for LibraryDependencyCheck {
         self.package_requires.clear();
         self.package_so_symlinks.clear();
         self.devel_order.clear();
-        self.package_so_files.clear();
+        self.package_so_shippers.clear();
         self.package_snapshots.clear();
         self.isa = expand_isa();
     }
@@ -305,7 +391,7 @@ impl Check for LibraryDependencyCheck {
         let state = LibDepState {
             package_requires: std::mem::take(&mut self.package_requires),
             package_so_symlinks: std::mem::take(&mut self.package_so_symlinks),
-            package_so_files: std::mem::take(&mut self.package_so_files),
+            package_so_shippers: std::mem::take(&mut self.package_so_shippers),
             package_snapshots: std::mem::take(&mut self.package_snapshots),
             devel_order: std::mem::take(&mut self.devel_order),
         };
@@ -319,7 +405,14 @@ impl Check for LibraryDependencyCheck {
         if let Ok(state) = state.downcast::<LibDepState>() {
             self.package_requires.extend(state.package_requires);
             self.package_so_symlinks.extend(state.package_so_symlinks);
-            self.package_so_files.extend(state.package_so_files);
+            for (path, shippers) in state.package_so_shippers {
+                let entry = self.package_so_shippers.entry(path).or_default();
+                for who in shippers {
+                    if !entry.contains(&who) {
+                        entry.push(who);
+                    }
+                }
+            }
             self.package_snapshots.extend(state.package_snapshots);
             for name in state.devel_order {
                 if !self.devel_order.contains(&name) {
@@ -397,11 +490,23 @@ impl Check for LibraryDependencyCheck {
                     symlinks.push(link);
                 }
             }
-        } else {
-            for pkgfile in &pkg.files {
-                if pkgfile.name.contains(".so") {
-                    self.package_so_files
-                        .insert(pkgfile.name.clone(), (pkg.name.clone(), pkg.arch.clone()));
+        }
+
+        // Every package of the run shipping a `.so` path is recorded
+        // as a shipper of it, devel packages included: the verdict in
+        // `after_checks` judges the devel package's requirements
+        // against all of them — a requirement can land on a shipper
+        // the devel-name test classifies as a devel package, which
+        // never takes the owner side of the verdict.
+        for pkgfile in &pkg.files {
+            if pkgfile.name.contains(".so") {
+                let who = (pkg.name.clone(), pkg.arch.clone());
+                let shippers = self
+                    .package_so_shippers
+                    .entry(pkgfile.name.clone())
+                    .or_default();
+                if !shippers.contains(&who) {
+                    shippers.push(who);
                 }
             }
         }
@@ -429,21 +534,26 @@ impl Check for LibraryDependencyCheck {
                 .unwrap_or_default();
             let requires = self.package_requires.get(&key).cloned().unwrap_or_default();
             for link in &so_symlinks {
-                if let Some((definition, definition_arch)) = self.package_so_files.get(link) {
-                    // `definition` is the *package* name, not a soname
-                    // (`LibraryDependencyCheck.py:49`), so `definition + isa`
-                    // matches nothing rpm generates; dead in the reference
-                    // as well, kept faithful.
-                    let with_isa = format!("{definition}{}", self.isa);
-                    if !requires.iter().any(|r| r == definition || r == &with_isa)
-                        && !self.chain_credits(&key, definition, definition_arch, &snapshots_by_key)
-                    {
+                // The packages of the run shipping the linked file.
+                // Its owners are the shippers the devel-name test
+                // does not classify as devel packages — the side the
+                // reference's file map records; a file with no owner
+                // takes the `no-library-dependency-for` branch below,
+                // exactly as a file absent from that map does.
+                let empty: Vec<(String, String)> = Vec::new();
+                let shippers = self.package_so_shippers.get(link).unwrap_or(&empty);
+                let owners: Vec<&(String, String)> = shippers
+                    .iter()
+                    .filter(|(name, _)| !Self::is_devel_pkg(name))
+                    .collect();
+                if let Some((definition, _definition_arch)) = owners.last() {
+                    if !self.link_credited(&key, &requires, shippers, &owners, &snapshots_by_key) {
                         out.add_info(make_finding(
                             &pkgname,
                             &arch,
                             Level::Error,
                             "no-library-dependency-on",
-                            vec![definition.clone(), link.clone()],
+                            vec![(*definition).clone(), link.clone()],
                             None,
                         ));
                         break;
@@ -1266,6 +1376,227 @@ mod tests {
         assert!(
             main_out.results().is_empty(),
             "chain lost across export/import: {:?}",
+            main_out.results()
+        );
+    }
+
+    /// A package with the given name carrying the given files,
+    /// requires and provides; the multi-shipper shapes below need
+    /// owners that are neither the `lib_and_devel` library nor an
+    /// anchor.
+    fn bare_pkg(name: &str, files: Vec<PkgFile>, requires: &[String], provides: &[String]) -> Pkg {
+        let mut pkg = fixture_pkg();
+        pkg.name = name.to_string();
+        pkg.arch = "x86_64".to_string();
+        pkg.files = files;
+        pkg.requires = requires.iter().map(|r| require(r)).collect();
+        pkg.prereq = vec![];
+        pkg.provides = provides.iter().map(|p| require(p)).collect();
+        pkg
+    }
+
+    fn foo_devel(requires: &[String]) -> Pkg {
+        bare_pkg(
+            "foo-devel",
+            vec![symlink("/usr/lib64/libfoo.so", "libfoo.so.1")],
+            requires,
+            &[],
+        )
+    }
+
+    #[test]
+    fn requirement_on_second_owner_credits() {
+        // Two packages ship the linked file (the ffmpeg shape: the
+        // full library beside the mini flavour's split libraries).
+        // The devel requires one of them; which owner the run
+        // attributes the file to is lint order and must not matter.
+        let full = bare_pkg("libfoo", vec![regular("/usr/lib64/libfoo.so.1")], &[], &[]);
+        let mini = bare_pkg(
+            "libfoo-mini",
+            vec![regular("/usr/lib64/libfoo.so.1")],
+            &[],
+            &[],
+        );
+        let devel = foo_devel(&["libfoo".to_string()]);
+        assert!(run_pkgs(&[&full, &mini, &devel]).is_empty());
+        assert!(run_pkgs(&[&mini, &full, &devel]).is_empty());
+    }
+
+    #[test]
+    fn unrequired_owners_still_fire_and_name_the_last_owner() {
+        // The near miss of the multi-owner credit, and a pin on the
+        // reported owner: a finding that still fires names the last
+        // non-devel shipper, the owner the reference's single-value
+        // map would have held.
+        let full = bare_pkg("libfoo", vec![regular("/usr/lib64/libfoo.so.1")], &[], &[]);
+        let mini = bare_pkg(
+            "libfoo-mini",
+            vec![regular("/usr/lib64/libfoo.so.1")],
+            &[],
+            &[],
+        );
+        let devel = foo_devel(&["unrelated".to_string()]);
+        let results = run_pkgs(&[&full, &mini, &devel]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "no-library-dependency-on");
+        assert!(
+            results[0]
+                .1
+                .contains("no-library-dependency-on libfoo-mini "),
+            "definition: {}",
+            results[0].1
+        );
+        let results = run_pkgs(&[&mini, &full, &devel]);
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].1.contains("no-library-dependency-on libfoo "),
+            "definition: {}",
+            results[0].1
+        );
+    }
+
+    #[test]
+    fn requirement_naming_owner_through_its_provide_credits() {
+        // wt-devel's shape: the library package was renamed and the
+        // devel requires the name the owner now only provides.
+        let lib = bare_pkg(
+            "libfoo1",
+            vec![regular("/usr/lib64/libfoo.so.1")],
+            &[],
+            &["libfoo".to_string()],
+        );
+        let devel = foo_devel(&["libfoo".to_string()]);
+        assert!(run_pkgs(&[&lib, &devel]).is_empty());
+    }
+
+    #[test]
+    fn unrelated_provide_still_fires() {
+        // The near miss of the provides credit: the owner provides
+        // a name, but not one the devel requires.
+        let lib = bare_pkg(
+            "libfoo1",
+            vec![regular("/usr/lib64/libfoo.so.1")],
+            &[],
+            &["libbar".to_string()],
+        );
+        let devel = foo_devel(&["libfoo".to_string()]);
+        let results = run_pkgs(&[&lib, &devel]);
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].1.contains("no-library-dependency-on libfoo1 "),
+            "definition: {}",
+            results[0].1
+        );
+    }
+
+    #[test]
+    fn requirement_on_devel_classified_shipper_credits() {
+        // dapl-debug's shape: the build shipping the link target is
+        // classified a devel package by its `-debug` name, so it
+        // never takes the owner side of the verdict — but the devel
+        // requires it by name, and that requirement is the
+        // dependency the finding asks for.
+        let debug = bare_pkg(
+            "libfoo-debug",
+            vec![regular("/usr/lib64/libfoo.so.1")],
+            &[],
+            &[],
+        );
+        let other = bare_pkg(
+            "libfoo-other",
+            vec![regular("/usr/lib64/libfoo.so.1")],
+            &[],
+            &[],
+        );
+        let devel = foo_devel(&["libfoo-debug".to_string()]);
+        assert!(run_pkgs(&[&debug, &other, &devel]).is_empty());
+        // Without the requirement the finding fires on the owner.
+        let devel = foo_devel(&["unrelated".to_string()]);
+        let results = run_pkgs(&[&debug, &other, &devel]);
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0]
+                .1
+                .contains("no-library-dependency-on libfoo-other "),
+            "definition: {}",
+            results[0].1
+        );
+    }
+
+    #[test]
+    fn self_shipped_target_credits() {
+        // glib2-stage1-devel's shape: a combined build whose devel
+        // package ships the real file its own `.so` chain resolves
+        // to; an unrequired owner elsewhere in the run must not turn
+        // that into a missing dependency on the owner.
+        let owner = bare_pkg("libfoo", vec![regular("/usr/lib64/libfoo.so.1")], &[], &[]);
+        let devel = bare_pkg(
+            "foo-devel",
+            vec![
+                symlink("/usr/lib64/libfoo.so", "libfoo.so.1"),
+                regular("/usr/lib64/libfoo.so.1"),
+            ],
+            &["unrelated".to_string()],
+            &[],
+        );
+        assert!(run_pkgs(&[&owner, &devel]).is_empty());
+    }
+
+    #[test]
+    fn anchor_chain_credits_via_second_owner() {
+        // The anchor chain aimed at any owner: the sibling's
+        // requirements name the provides of the owner that is not
+        // the attributed (last) one.
+        let alt = bare_pkg(
+            "libfoo-alt",
+            vec![regular("/usr/lib64/libfoo.so.1")],
+            &[],
+            &["libfoo.so.1()(64bit)".to_string()],
+        );
+        let plain = bare_pkg("libfoo", vec![regular("/usr/lib64/libfoo.so.1")], &[], &[]);
+        let anchor = bare_pkg("foo", vec![], &["libfoo.so.1()(64bit)".to_string()], &[]);
+        let mut devel = foo_devel(&[]);
+        devel.requires = vec![require_pinned("foo", "1")];
+        // Lint order puts the plain owner last: it is the
+        // attributed owner, and only the chain to the other owner
+        // credits the devel package.
+        assert!(run_pkgs(&[&alt, &anchor, &plain, &devel]).is_empty());
+    }
+
+    #[test]
+    fn multi_owner_credit_survives_export_import() {
+        // The shipper list travels with the exported state: a
+        // worker that saw both owners and a worker that saw the
+        // devel package merge into a run that credits the owner
+        // the devel requires.
+        let config = Config::default();
+        let full = bare_pkg("libfoo", vec![regular("/usr/lib64/libfoo.so.1")], &[], &[]);
+        let mini = bare_pkg(
+            "libfoo-mini",
+            vec![regular("/usr/lib64/libfoo.so.1")],
+            &[],
+            &[],
+        );
+        let devel = foo_devel(&["libfoo".to_string()]);
+        let mut w0 = LibraryDependencyCheck::new(&config);
+        let mut w0_out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        for pkg in [&full, &mini] {
+            w0.check_binary(pkg, &config, &mut w0_out);
+        }
+        let s0 = w0.export_state().expect("worker 0 exports");
+        let mut w1 = LibraryDependencyCheck::new(&config);
+        let mut w1_out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        w1.check_binary(&devel, &config, &mut w1_out);
+        let s1 = w1.export_state().expect("worker 1 exports");
+
+        let mut main = LibraryDependencyCheck::new(&config);
+        main.import_state(s0);
+        main.import_state(s1);
+        let mut main_out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        main.after_checks(&config, &mut main_out);
+        assert!(
+            main_out.results().is_empty(),
+            "multi-owner credit lost across export/import: {:?}",
             main_out.results()
         );
     }
