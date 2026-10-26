@@ -376,3 +376,11 @@ check = "ar-failed"
 kind = "behaviour"
 reason = "The reference charges ar-failed on any archive GNU `ar` cannot list. Archives in the gplib dialect (the MPLIB-compatible format gputils' gplib writes for SDCC's pic14/pic16 targets) are valid libraries for their toolchain but unreadable by GNU binutils: all 406 corpus findings are sdcc libraries of that shape, and every one passes a strict structural parse (256-byte '/'-terminated member names, fixed-width numeric fields, member sizes chaining exactly to EOF, PIC COFF object members). rpmcrab treats a structurally valid gplib archive as a non-standard archive instead of charging ar-failed; archives that parse neither way are still charged."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "call-to-mktemp"
+kind = "behaviour"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/BinariesCheck.py"
+since = "0.4.1"
+reason = "Fix-and-diverge: the call pattern is anchored at the start, so the charged symbol must BE mktemp (optionally @GLIBC-versioned), not merely end with it. The reference builds the pattern with create_regexp_call('mktemp') and searches it over symbol names (BinariesCheck.py at the pinned reference commit), so every symbol ending in mktemp matches: project-private wrappers are charged as calls to the libc mktemp they are not. Measured A/B over the net-snmp binary family plus apr, gretl, gnunet, radare2, ksh and glibc corpus RPMs (11 RPMs, isolated config): call-to-mktemp 16 -> 2, zero findings added, all other findings identical; every removed row's trigger symbol was readelf-verified as a wrapper name -- netsnmp_mktemp (libsnmp45, 4 files), apr_file_mktemp, gretl_mktemp (4 files), GNUNET_DISK_mktemp, r_syscmd_mktemp (2 files), b_mktemp (ksh libcmd/libshell). The survivors are genuine: glibc's libc.so.6 defining mktemp@@GLIBC_2.2.5 and ksh's libast carrying mktemp. The wrapper population is the one the #852 entry counted inside its remaining 74 (23 undefined-reference files naming a wrapper, plus defined-match wrapper files among the 28 linked objects); those no longer fire."

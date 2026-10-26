@@ -3346,8 +3346,14 @@ impl BinariesCheck {
                         .expect("static regex")
                 })
                 .clone(),
+            // Anchored at the start, unlike the reference's searched
+            // regexp: the charged symbol must BE mktemp (optionally
+            // version-decorated), not merely end with it — project
+            // wrappers such as netsnmp_mktemp are their own functions,
+            // not calls to the libc mktemp (fix-and-diverge; see the
+            // divergences ledger).
             mktemp_call_regex: MKTEMP_CALL_REGEX
-                .get_or_init(|| Regex::new(r"(mktemp(?:@GLIBC\S+)?)(?:\s|$)")
+                .get_or_init(|| Regex::new(r"^(mktemp(?:@GLIBC\S+)?)(?:\s|$)")
                     .expect("static regex"))
                 .clone(),
             gets_call_regex: GETS_CALL_REGEX
@@ -13841,6 +13847,60 @@ description = "explicit priority string bypasses the system crypto policy"
             // Another family's reference does not cross-fire.
             assert_eq!(count(is_archive, &with(&["mktemp"], &["mktemp"])), 0);
         }
+    }
+
+    #[test]
+    fn mktemp_lookalike_names_stay_silent() {
+        // The charged symbol must BE mktemp: the pattern is anchored
+        // at the start, so a project-private wrapper whose name merely
+        // ends in mktemp (net-snmp's netsnmp_mktemp and its kin) is a
+        // call to that project's own function, not to the libc mktemp.
+        // The reference's searched regexp fires on these names too;
+        // this is a deliberate divergence (see the divergences ledger).
+        let config = test_config();
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let run = |check: &BinariesCheck, pkgfile: &PkgFile, info: &ReadelfInfo| {
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(&pkg, pkgfile, info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "call-to-mktemp").len()
+        };
+        let with = |functions: &[&str], refs: &[&str]| {
+            let mut info = syn_info();
+            info.functions = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs = refs.iter().map(|s| s.to_string()).collect();
+            info
+        };
+
+        // Linked object: any FUNC match charges, defined or not.
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let exe = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        for name in [
+            "netsnmp_mktemp",
+            "apr_file_mktemp",
+            "e_mktemp",
+            "netsnmp_mktemp@GLIBC_2.2.5",
+            "mktemp_wrapper",
+        ] {
+            assert_eq!(run(&check, &exe, &with(&[name], &[name])), 0, "{name}");
+        }
+        // The real symbol still fires, plain and versioned.
+        assert_eq!(run(&check, &exe, &with(&["mktemp"], &[])), 1);
+        assert_eq!(run(&check, &exe, &with(&["mktemp@GLIBC_2.2.5"], &[])), 1);
+
+        // Archive: only an undefined reference charges.
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let lib = syn_file("/usr/lib64/libnetsnmp.a", "current ar archive");
+        assert_eq!(
+            run(
+                &check,
+                &lib,
+                &with(&["netsnmp_mktemp"], &["netsnmp_mktemp"])
+            ),
+            0
+        );
+        assert_eq!(run(&check, &lib, &with(&["mktemp"], &["mktemp"])), 1);
     }
 
     /// Minimal ET_REL ELF64 object carrying a `.symtab`, for the #852
