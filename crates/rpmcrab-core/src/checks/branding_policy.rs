@@ -71,6 +71,25 @@ impl BrandingPolicyCheck {
             caps.name("flavor")?.as_str().to_string(),
         ))
     }
+
+    /// Whether `require_name`, required by `pkg_name`, is a patterns
+    /// composition pin: a branding-type pin charged on a package in
+    /// the reserved `patterns-*` namespace. Patterns packages are the
+    /// distribution composition layer, the place where a product
+    /// flavour selection is *made*, so their branding
+    /// pins are the selection itself, not a consumer bypassing the
+    /// generic mechanism, and `branding-requires-specific-flavor` is
+    /// not charged for them. Theme-type pins are not composition
+    /// pins: themes are additive content packs selected by name, and
+    /// they stay charged on every requirer, patterns packages
+    /// included.
+    fn is_composition_pin(re: &Regex, pkg_name: &str, require_name: &str) -> bool {
+        pkg_name.starts_with("patterns-")
+            && matches!(
+                Self::parse_branding(re, require_name),
+                Some((_, kind, _)) if kind == "branding"
+            )
+    }
 }
 
 /// True when `expr` is a plain conjunction carrying `atom` as one of
@@ -109,7 +128,9 @@ impl Check for BrandingPolicyCheck {
         let Some((branding_pkg, branding_type, branding_flavor)) = parsed else {
             // Not a branding package: check its requires.
             for require in &pkg.requires {
-                if is_match(&self.re_branding, &require.name) {
+                if is_match(&self.re_branding, &require.name)
+                    && !Self::is_composition_pin(&self.re_branding, &pkg.name, &require.name)
+                {
                     add_info(
                         out,
                         Level::Error,
@@ -695,5 +716,70 @@ mod tests {
     fn bare_flavour_atom_still_fires() {
         let pkg = branding_pkg("grub2-branding-openSUSE", vec![dep("branding-openSUSE", 0)]);
         assert_eq!(supplements_missing(&pkg).len(), 1, "{:?}", run(&pkg));
+    }
+
+    // Maintainer ruling (2026-10-26): packages in the reserved
+    // patterns-* namespace are the composition layer. Their branding
+    // pins, own-flavour, borrowed-flavour and rich conditional alike,
+    // make the flavour selection, so the specific-flavor error is not
+    // charged for them. Theme pins are not flavour selections and
+    // stay charged on patterns packages too, and the generic-name
+    // (unversioned) arm is untouched.
+    #[test]
+    fn patterns_branding_pins_are_composition_not_consumption() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "patterns-test-base".to_string();
+        pkg.requires = vec![
+            dep("testingpackage-branding-openSUSE", 0),
+            dep("otherpackage-branding-upstream", 0),
+            dep("(grub2-branding-openSUSE if branding-openSUSE)", 0),
+            dep("testingpackage-theme-openSUSE", 0),
+            dep("testingpackage-branding", 0),
+        ];
+        let results = run(&pkg);
+
+        let specific = has(&results, "branding-requires-specific-flavor");
+        assert_eq!(specific.len(), 1, "{results:?}");
+        assert!(specific[0].contains("testingpackage-theme-openSUSE"));
+
+        let unversioned = has(&results, "branding-requires-unversioned");
+        assert_eq!(unversioned.len(), 1, "{results:?}");
+        assert!(unversioned[0].ends_with("testingpackage-branding"));
+    }
+
+    // The exemption keys on the reserved patterns-* prefix exactly:
+    // names that merely contain "pattern", use the singular, drop the
+    // dash or shift the prefix are not in the namespace and keep
+    // firing.
+    #[test]
+    fn near_miss_names_are_not_patterns_packages() {
+        for name in [
+            "mypatterns-test",
+            "pattern-test",
+            "patterns",
+            "x-patterns-test",
+        ] {
+            let mut pkg = fixture_pkg();
+            pkg.name = name.to_string();
+            pkg.requires = vec![dep("testingpackage-branding-openSUSE", 0)];
+            let results = run(&pkg);
+            let specific = has(&results, "branding-requires-specific-flavor");
+            assert_eq!(specific.len(), 1, "{name}: {results:?}");
+        }
+    }
+
+    // A non-patterns requirer keeps the full behaviour: branding pins
+    // and theme pins both fire.
+    #[test]
+    fn non_patterns_requirer_branding_and_theme_pins_fire() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "plain-testpackage".to_string();
+        pkg.requires = vec![
+            dep("testingpackage-branding-openSUSE", 0),
+            dep("testingpackage-theme-openSUSE", 0),
+        ];
+        let results = run(&pkg);
+        let specific = has(&results, "branding-requires-specific-flavor");
+        assert_eq!(specific.len(), 2, "{results:?}");
     }
 }
