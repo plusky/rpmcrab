@@ -386,6 +386,34 @@ fn python_lib_tree_regex() -> &'static Regex {
         .get_or_init(|| Regex::new(r"/(?:site|dist)-packages(?:/|$)").expect("static regex"))
 }
 
+/// A subdirectory of a bin dir named `<tool>.d` is the companion
+/// directory of the executable `<tool>` shipped in the same bin dir:
+/// the tool's own modules and helpers, installed next to their driver
+/// under a name derived from it (liblouis-tools ships
+/// `/usr/bin/lou_maketable.d/*` for `/usr/bin/lou_maketable`). The
+/// shape is decidable from the package's own file list: the first
+/// component below the bin dir must end in `.d`, and stripping the
+/// suffix must name a regular, executable file in the same bin dir.
+/// A `.d` directory without that namesake executable, a namesake
+/// that is not an executable regular file, and any non-`.d`
+/// subdirectory keep firing.
+fn subdir_in_bin_is_companion_dir(pkg: &Pkg, bindir: &str, fname: &str) -> bool {
+    let rest = &fname[bindir.len()..];
+    let Some((first, _)) = rest.split_once('/') else {
+        return false;
+    };
+    let Some(tool) = first.strip_suffix(".d") else {
+        return false;
+    };
+    if tool.is_empty() {
+        return false;
+    }
+    let sibling = format!("{bindir}{tool}");
+    pkg.files
+        .iter()
+        .any(|f| f.name == sibling && f.mode & 0o170000 == 0o100000 && f.mode & 0o111 != 0)
+}
+
 /// Whether a non-executable file carrying an interpreter line is
 /// content the owning program consumes by reading, importing,
 /// sourcing or rendering, so the interpreter line marks data rather
@@ -3786,6 +3814,9 @@ impl FilesCheck {
         // sub_bin_regex: bin dirs with a subdirectory component
         for bindir in ["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/"] {
             if fname.starts_with(bindir) && fname[bindir.len()..].contains('/') {
+                if subdir_in_bin_is_companion_dir(pkg, bindir, fname) {
+                    break;
+                }
                 add_info(out, Level::Error, pkg, "subdir-in-bin", &[fname]);
                 break;
             }
@@ -5821,6 +5852,73 @@ mod tests {
             flags: RPMFILE_GHOST,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn subdir_in_bin_quiet_for_companion_dot_d_dir() {
+        // A `.d` directory named after an executable in the same bin
+        // dir is that tool's companion directory (liblouis-tools
+        // ships /usr/bin/lou_maketable.d/* for /usr/bin/lou_maketable):
+        // its payload, at any depth below it, stays quiet.
+        let names = finding_names(&run_files_check_with_files(vec![
+            mkfile("/usr/bin/lou_tool", 0o100755, 1),
+            mkfile("/usr/bin/lou_tool.d/helper.py", 0o100755, 2),
+            mkfile("/usr/bin/lou_tool.d/sub/deep.sh", 0o100644, 3),
+        ]));
+        assert_lacks(&names, "subdir-in-bin");
+    }
+
+    #[test]
+    fn subdir_in_bin_fires_for_dot_d_dir_without_namesake() {
+        // Near miss: no executable named after the `.d` directory.
+        let names = finding_names(&run_files_check_with_files(vec![mkfile(
+            "/usr/bin/orphan.d/helper",
+            0o100755,
+            1,
+        )]));
+        assert_has(&names, "subdir-in-bin");
+    }
+
+    #[test]
+    fn subdir_in_bin_fires_when_namesake_not_executable() {
+        // Near miss: the namesake exists but is not an executable
+        // regular file, so the `.d` directory is nobody's companion.
+        let names = finding_names(&run_files_check_with_files(vec![
+            mkfile("/usr/bin/tool", 0o100644, 1),
+            mkfile("/usr/bin/tool.d/helper", 0o100755, 2),
+        ]));
+        assert_has(&names, "subdir-in-bin");
+    }
+
+    #[test]
+    fn subdir_in_bin_fires_when_namesake_is_symlink() {
+        // Near miss: a symlink namesake is not the tool itself.
+        let names = finding_names(&run_files_check_with_files(vec![
+            mkfile("/usr/bin/tool", 0o120777, 1),
+            mkfile("/usr/bin/tool.d/helper", 0o100755, 2),
+        ]));
+        assert_has(&names, "subdir-in-bin");
+    }
+
+    #[test]
+    fn subdir_in_bin_still_fires_for_plain_subdir_with_sibling() {
+        // Only the `.d` companion shape is credited; a plain
+        // subdirectory next to a same-named executable keeps firing.
+        let names = finding_names(&run_files_check_with_files(vec![
+            mkfile("/usr/bin/tool", 0o100755, 1),
+            mkfile("/usr/bin/tool/helper", 0o100755, 2),
+        ]));
+        assert_has(&names, "subdir-in-bin");
+    }
+
+    #[test]
+    fn subdir_in_bin_fires_for_plain_subdir() {
+        let names = finding_names(&run_files_check_with_files(vec![mkfile(
+            "/usr/bin/foo/bar",
+            0o100755,
+            1,
+        )]));
+        assert_has(&names, "subdir-in-bin");
     }
 
     #[test]
