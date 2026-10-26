@@ -3994,7 +3994,18 @@ impl BinariesCheck {
                     &[&pkgfile.name],
                 );
             }
-        } else if stack_headers[0].flags.contains('E') {
+        } else if stack_headers[0].flags.contains('E')
+            && !foreign_elf_machine(info.elf_machine, &pkg.arch)
+        {
+            // The marking is charged only where it takes effect: on
+            // an image the package arch's dynamic linker loads, an
+            // explicitly executable stack is a link decision with
+            // live effect on the host. A linked image built for a
+            // different instruction set is payload for another
+            // machine (guest firmware, a cross helper): the emulator
+            // maps it as data into guest memory, and its GNU_STACK
+            // flags state the target ABI's conventions, not this
+            // package's hardening.
             add_info(out, Level::Error, pkg, "executable-stack", &[&pkgfile.name]);
         }
     }
@@ -9392,6 +9403,98 @@ description = "explicit priority string bypasses the system crypto policy"
             1,
             "executable-stack fires: {results:?}"
         );
+    }
+
+    fn rwe_stack_syn_machine(
+        elf_type: u16,
+        machine: u16,
+        headers: Vec<ElfProgramHeader>,
+    ) -> Vec<(String, String)> {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/bin/tool", "ELF 64-bit LSB executable, x86-64");
+        let mut info = syn_info();
+        info.elf_type = elf_type;
+        info.elf_machine = machine;
+        info.program_headers = headers;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_executable_stack(&pkg, &pkgfile, &info, &mut out);
+        out.results().to_vec()
+    }
+
+    #[test]
+    fn executable_stack_silent_for_foreign_machine() {
+        use goblin::elf::header::{EM_ARM, EM_PARISC, EM_SPARC, ET_DYN, ET_EXEC};
+        // Guest firmware in an x86_64 package whose GNU_STACK is
+        // explicitly executable: the HPPA ROM images QEMU ships carry
+        // an RWE stack because that is the target ABI's convention.
+        // The package arch's dynamic linker never loads them (the
+        // emulator maps them as data into guest memory), so the
+        // marking states nothing about this package's hardening.
+        for (elf_type, machine) in [(ET_EXEC, EM_PARISC), (ET_EXEC, EM_SPARC), (ET_DYN, EM_ARM)] {
+            let results = rwe_stack_syn_machine(elf_type, machine, vec![phdr("GNU_STACK", "RWE")]);
+            assert_lacks(&results, "executable-stack");
+        }
+    }
+
+    #[test]
+    fn executable_stack_silent_for_foreign_machine_bytes() {
+        use goblin::elf::header::{EM_PARISC, ET_EXEC};
+        use goblin::elf::program_header::PT_GNU_STACK;
+        // The byte-level counterpart: the parser must surface the
+        // foreign e_machine for the gate to see it (the fixture
+        // builder writes EM_X86_64 and an R+X phdr; patch the
+        // e_machine field at offset 18). The unpatched fixture keeps
+        // firing, so the silence comes from the machine, not the
+        // fixture.
+        let bytes = elf_with_phdrs(ET_EXEC, &[PT_GNU_STACK]);
+        let results = executable_stack_results("/usr/share/qemu/hppa-firmware.img", &bytes);
+        assert_eq!(
+            lines_for(&results, "executable-stack").len(),
+            1,
+            "same-family byte fixture fires: {results:?}"
+        );
+        let mut bytes = bytes;
+        bytes[18..20].copy_from_slice(&EM_PARISC.to_le_bytes());
+        let results = executable_stack_results("/usr/share/qemu/hppa-firmware.img", &bytes);
+        assert_lacks(&results, "executable-stack");
+        assert_lacks(&results, "missing-PT_GNU_STACK-section");
+    }
+
+    #[test]
+    fn executable_stack_fires_for_same_family_machines() {
+        use goblin::elf::header::{EM_386, EM_X86_64, ET_DYN, ET_EXEC};
+        // Near misses: the other word size of the package's own ISA
+        // is served by the same dynamic linker family, and an
+        // executable stack there is a link decision with live effect
+        // on the host -- exactly the population the finding addresses.
+        for (elf_type, machine) in [(ET_EXEC, EM_X86_64), (ET_DYN, EM_X86_64), (ET_EXEC, EM_386)] {
+            let results = rwe_stack_syn_machine(elf_type, machine, vec![phdr("GNU_STACK", "RWE")]);
+            assert_eq!(
+                lines_for(&results, "executable-stack").len(),
+                1,
+                "machine {machine} keeps firing: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn foreign_machine_gate_fails_closed() {
+        use goblin::elf::header::{EM_386, EM_NONE, EM_PARISC, EM_PPC64, EM_SPARCV9, EM_X86_64};
+        // The word-size pairs share a family on both sides of the
+        // comparison (and a hwcaps subarch resolves to its base), and
+        // an unclassified machine or an unmapped package arch never
+        // counts as foreign: the gate cannot classify those, so the
+        // charge stands.
+        assert!(!foreign_elf_machine(EM_SPARCV9, "sparc64"));
+        assert!(!foreign_elf_machine(EM_PPC64, "ppc"));
+        assert!(!foreign_elf_machine(EM_386, "x86_64_v3"));
+        assert!(!foreign_elf_machine(EM_PARISC, "hppa"));
+        assert!(foreign_elf_machine(EM_PARISC, "x86_64"));
+        assert!(foreign_elf_machine(EM_X86_64, "hppa"));
+        assert!(!foreign_elf_machine(EM_NONE, "x86_64"));
+        assert!(!foreign_elf_machine(EM_X86_64, "noarch"));
     }
 
     #[test]
