@@ -340,6 +340,14 @@ struct ReadelfInfo {
     /// True when the binary was produced by the Zig toolchain.
     /// Computed during parse; see `detect_zig_binary`.
     is_zig: bool,
+    /// The Go toolchain release that built this binary, parsed from
+    /// the `.go.buildinfo` section's version string. Computed during
+    /// parse; see `detect_go_toolchain`. `None` when the section is
+    /// absent (a stripped binary, or not a Go binary) and when the
+    /// recorded string is not a clean release version (devel and
+    /// release-candidate strings): the toolchain finder stays silent
+    /// in both cases.
+    go_toolchain: Option<GoVersion>,
     soname: Option<String>,
     needed: Vec<String>,
     runpaths: Vec<String>,
@@ -422,6 +430,7 @@ impl ReadelfInfo {
             is_debug: name.ends_with(".debug"),
             is_rust: false,
             is_zig: false,
+            go_toolchain: None,
             soname: None,
             needed: Vec::new(),
             runpaths: Vec::new(),
@@ -732,6 +741,12 @@ impl ReadelfInfo {
         // OR across archive members: any Rust member marks the whole file.
         self.is_rust = self.is_rust || detect_rust_binary(elf, data, &self.functions);
         self.is_zig = self.is_zig || detect_zig_binary(elf, data);
+        // First member wins: an archive's members are one build's
+        // objects, so any member's recorded toolchain stands for the
+        // file, and a later member never overwrites it.
+        if self.go_toolchain.is_none() {
+            self.go_toolchain = detect_go_toolchain(elf, data);
+        }
     }
     fn has_function_matching(&self, regex: &fancy_regex::Regex) -> bool {
         self.functions
@@ -958,6 +973,242 @@ fn detect_zig_binary(elf: &goblin::elf::Elf, data: &[u8]) -> bool {
         }
     }
     false
+}
+
+/// A Go release version, parsed from the version string a Go
+/// binary's `.go.buildinfo` section records
+/// (`go<major>.<minor>[.<patch>]`). Only clean release strings
+/// parse: devel, release-candidate and bootstrap strings return
+/// `None`, so the toolchain finder built on this type stays silent
+/// for toolchains it cannot order against the floor table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct GoVersion {
+    major: u32,
+    minor: u32,
+    patch: u32,
+}
+
+impl GoVersion {
+    fn parse(raw: &str) -> Option<GoVersion> {
+        fn component(text: &str) -> Option<u32> {
+            if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            text.parse().ok()
+        }
+        let rest = raw.strip_prefix("go")?;
+        let mut parts = rest.split('.');
+        let version = GoVersion {
+            major: component(parts.next()?)?,
+            minor: component(parts.next()?)?,
+            patch: match parts.next() {
+                Some(text) => component(text)?,
+                None => 0,
+            },
+        };
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(version)
+    }
+
+    /// The release line this version belongs to: the version with
+    /// the patch component zeroed, so line identity compares on
+    /// (major, minor) alone.
+    fn line(self) -> GoVersion {
+        GoVersion { patch: 0, ..self }
+    }
+}
+
+impl std::fmt::Display for GoVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.patch == 0 {
+            write!(f, "go{}.{}", self.major, self.minor)
+        } else {
+            write!(f, "go{}.{}.{}", self.major, self.minor, self.patch)
+        }
+    }
+}
+
+/// The build-info magic every Go binary's `.go.buildinfo` section
+/// starts with.
+const GO_BUILDINFO_MAGIC: &[u8; 14] = b"\xff Go buildinf:";
+
+/// Extract the toolchain version string from a `.go.buildinfo`
+/// section, mirroring `debug/buildinfo`: the blob opens with a
+/// fixed 32-byte header — magic, a pointer-size byte, a flags byte,
+/// then pointers to the version and module-info string headers.
+/// With the flags version bit set (Go 1.18 and later) the strings
+/// instead follow the header inline as uvarint-length-prefixed
+/// contents. Without it, the header's first pointer addresses the
+/// version string's (data pointer, length) header, resolved here
+/// through the file's PT_LOAD segments; the flags low bit marks
+/// big-endian pointer words. Anything malformed yields `None`,
+/// never a guess.
+fn parse_go_buildinfo(section: &[u8], data: &[u8], elf: &goblin::elf::Elf) -> Option<String> {
+    const HEADER_LEN: usize = 32;
+    if section.len() < HEADER_LEN || !section.starts_with(GO_BUILDINFO_MAGIC.as_slice()) {
+        return None;
+    }
+    let ptr_size = usize::from(section[14]);
+    if ptr_size != 4 && ptr_size != 8 {
+        return None;
+    }
+    let flags = section[15];
+    if flags & 2 != 0 {
+        let (version, _) = read_go_buildinfo_string(section.get(HEADER_LEN..)?)?;
+        return Some(version);
+    }
+    let big_endian = flags & 1 != 0;
+    let read_word = |bytes: &[u8], offset: usize| -> Option<u64> {
+        let raw = bytes.get(offset..offset + ptr_size)?;
+        let mut value = 0u64;
+        if big_endian {
+            for byte in raw {
+                value = (value << 8) | u64::from(*byte);
+            }
+        } else {
+            for (i, byte) in raw.iter().enumerate() {
+                value |= u64::from(*byte) << (8 * i);
+            }
+        }
+        Some(value)
+    };
+    let resolve = |address: u64| -> Option<usize> {
+        for ph in &elf.program_headers {
+            if ph.p_type != goblin::elf::program_header::PT_LOAD {
+                continue;
+            }
+            if address >= ph.p_vaddr && address - ph.p_vaddr < ph.p_filesz {
+                return usize::try_from(ph.p_offset.checked_add(address - ph.p_vaddr)?).ok();
+            }
+        }
+        None
+    };
+    let header_offset = resolve(read_word(section, 16)?)?;
+    let address = read_word(data, header_offset)?;
+    let length = usize::try_from(read_word(data, header_offset + ptr_size)?).ok()?;
+    if length == 0 || length > 256 {
+        return None;
+    }
+    let offset = resolve(address)?;
+    let bytes = data.get(offset..offset + length)?;
+    Some(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// One uvarint-length-prefixed string from Go build info; returns
+/// the string and the number of bytes consumed.
+fn read_go_buildinfo_string(bytes: &[u8]) -> Option<(String, usize)> {
+    let mut length: u64 = 0;
+    let mut shift = 0u32;
+    let mut consumed = 0usize;
+    loop {
+        let byte = *bytes.get(consumed)?;
+        consumed += 1;
+        length |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+        if shift >= 64 {
+            return None;
+        }
+    }
+    let length = usize::try_from(length).ok()?;
+    let end = consumed.checked_add(length)?;
+    let text = bytes.get(consumed..end)?;
+    Some((String::from_utf8_lossy(text).into_owned(), end))
+}
+
+/// The Go toolchain that built this ELF, from its `.go.buildinfo`
+/// section; `None` when the section is absent or its version string
+/// is not a clean release version.
+fn detect_go_toolchain(elf: &goblin::elf::Elf, data: &[u8]) -> Option<GoVersion> {
+    for sh in &elf.section_headers {
+        if elf.shdr_strtab.get_at(sh.sh_name) != Some(".go.buildinfo") {
+            continue;
+        }
+        let start = usize::try_from(sh.sh_offset).ok()?;
+        let end = start
+            .saturating_add(usize::try_from(sh.sh_size).ok()?)
+            .min(data.len());
+        let section = data.get(start..end)?;
+        return parse_go_buildinfo(section, data, elf).and_then(|raw| GoVersion::parse(&raw));
+    }
+    None
+}
+
+/// The embedded Go toolchain floor: per release line, the minimum
+/// release carrying the fixes for the recorded defect set. Baked in
+/// like the defect-pattern registry so an installed binary needs no
+/// data dir next to it; the table's as-of date and update route are
+/// recorded in the file itself.
+const GO_TOOLCHAIN_FLOOR_TOML: &str = include_str!("../../data/go-toolchain-floor.toml");
+
+/// The parsed floor, parsed once (the `defect_pattern::registry`
+/// pattern).
+fn go_toolchain_floor() -> &'static [(GoVersion, GoVersion)] {
+    static FLOOR: OnceLock<Vec<(GoVersion, GoVersion)>> = OnceLock::new();
+    FLOOR.get_or_init(|| parse_go_toolchain_floor(GO_TOOLCHAIN_FLOOR_TOML))
+}
+
+/// Parse and validate the floor table. Validation takes the
+/// staged-data posture (the registry's): a malformed table panics at
+/// startup instead of silently disabling the finder.
+fn parse_go_toolchain_floor(raw: &str) -> Vec<(GoVersion, GoVersion)> {
+    let table: toml::Table = raw.parse().expect("go toolchain floor is valid TOML");
+    assert!(
+        table.get("as_of").and_then(toml::Value::as_str).is_some(),
+        "go toolchain floor records an as_of date"
+    );
+    let records = table
+        .get("line")
+        .and_then(toml::Value::as_array)
+        .expect("go toolchain floor has a [[line]] array");
+    let mut floor: Vec<(GoVersion, GoVersion)> = records
+        .iter()
+        .map(|record| {
+            let field = |name: &str| -> String {
+                record
+                    .get(name)
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or_else(|| panic!("go toolchain floor line is missing {name:?}"))
+                    .to_string()
+            };
+            let line = GoVersion::parse(&format!("go{}", field("release")))
+                .expect("go toolchain floor release is a version");
+            let minimum = GoVersion::parse(&format!("go{}", field("minimum")))
+                .expect("go toolchain floor minimum is a version");
+            assert!(
+                minimum.line() == line && line.patch == 0,
+                "go toolchain floor minimum belongs to its release line"
+            );
+            (line, minimum)
+        })
+        .collect();
+    floor.sort();
+    floor.dedup();
+    assert!(
+        floor.windows(2).all(|pair| pair[0].0 < pair[1].0),
+        "go toolchain floor lines are strictly ascending"
+    );
+    floor
+}
+
+/// Whether `version` is below the floor: below its own line's
+/// minimum, or on a line older than every listed line (no release
+/// on such a line carries the recorded fixes). A version on a line
+/// newer than every listed line stays silent — the table does not
+/// judge what it does not know, so a stale table under-fires and
+/// never false-fires.
+fn go_toolchain_below_floor(version: GoVersion, floor: &[(GoVersion, GoVersion)]) -> bool {
+    let line = version.line();
+    for (listed, minimum) in floor {
+        if *listed == line {
+            return version < *minimum;
+        }
+    }
+    floor.first().is_some_and(|(lowest, _)| line < *lowest)
 }
 
 struct LddInfo {
@@ -4032,6 +4283,36 @@ impl BinariesCheck {
         }
     }
 
+    /// `go-toolchain-outdated`: the file's `.go.buildinfo` records
+    /// a Go toolchain below the embedded floor (see
+    /// `go_toolchain_below_floor`). A Go binary keeps the standard
+    /// library it was built with, so defects fixed upstream stay in
+    /// the shipped binary until the package is rebuilt; the remedy
+    /// is a rebuild with a fixed toolchain, a distribution
+    /// scheduling action rather than a defect that should fail a
+    /// build, which is why this is a warning and not an error.
+    fn check_go_toolchain(
+        &self,
+        pkg: &Pkg,
+        pkgfile: &PkgFile,
+        info: &ReadelfInfo,
+        out: &mut Filter,
+    ) {
+        let Some(version) = info.go_toolchain else {
+            return;
+        };
+        if go_toolchain_below_floor(version, go_toolchain_floor()) {
+            let version_text = version.to_string();
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "go-toolchain-outdated",
+                &[&pkgfile.name, &version_text],
+            );
+        }
+    }
+
     fn check_rpath(&self, pkg: &Pkg, pkgfile: &PkgFile, info: &ReadelfInfo, out: &mut Filter) {
         for runpaths in &info.runpaths {
             // The reference readelf parser only records non-empty
@@ -4328,6 +4609,7 @@ impl BinariesCheck {
             self.check_library_dependency_location(pkg, pkgfile, l, out);
         }
         self.check_security_functions(pkg, pkgfile, info, out);
+        self.check_go_toolchain(pkg, pkgfile, info, out);
         self.check_rpath(pkg, pkgfile, info, out);
         self.check_library_dependency(pkg, pkgfile, info, out);
         self.check_forbidden_functions(pkg, pkgfile, info, config, out);
@@ -5454,6 +5736,7 @@ mod tests {
                 is_debug: false,
                 is_rust: false,
                 is_zig: false,
+                go_toolchain: None,
                 soname: None,
                 needed: Vec::new(),
                 runpaths,
@@ -5663,6 +5946,17 @@ mod tests {
         ehdr[62..64].copy_from_slice(&(shnum - 1).to_le_bytes()); // shstrndx
         buf[0..64].copy_from_slice(&ehdr);
         buf
+    }
+
+    fn parse_elf_bytes(tag: &str, bytes: &[u8]) -> ReadelfInfo {
+        // Unique per test: parallel cargo test threads share the process.
+        let path =
+            std::env::temp_dir().join(format!("rpmcrab-go-detect-{}-{}", tag, std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        let info = ReadelfInfo::parse(path.to_str().unwrap(), "/usr/bin/probe");
+        assert!(info.failed.is_none(), "crafted ELF must parse");
+        std::fs::remove_file(&path).ok();
+        info
     }
 
     fn parse_crafted_sections(tag: &str, sections: &[(&str, &[u8])]) -> ReadelfInfo {
@@ -7674,6 +7968,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 no_members: false,
                 is_rust: false,
                 is_zig: false,
+                go_toolchain: None,
             };
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
             check.check_hash_sections(&pkg, &pkgfile, &info, &mut out);
@@ -7816,6 +8111,7 @@ description = "explicit priority string bypasses the system crypto policy"
             no_members: false,
             is_rust: false,
             is_zig: false,
+            go_toolchain: None,
         }
     }
 
@@ -13515,5 +13811,308 @@ description = "explicit priority string bypasses the system crypto policy"
         let results = out.results().to_vec();
         assert_lacks(&results, "executable-in-library-package");
         assert_lacks(&results, "non-versioned-file-in-library-package");
+    }
+
+    /// Fabricate `.go.buildinfo` section bytes in the inline-strings
+    /// format (Go 1.18 and later) recording `version` as the
+    /// toolchain, with a minimal module-info string behind it.
+    fn go_buildinfo_inline(version: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"\xff Go buildinf:");
+        bytes.push(8); // pointer size
+        bytes.push(2); // flags: inline strings
+        bytes.extend_from_slice(&[0u8; 16]); // rest of the 32-byte header
+        let push_string = |bytes: &mut Vec<u8>, text: &str| {
+            assert!(text.len() < 128, "fixture strings use a one-byte uvarint");
+            bytes.push(text.len() as u8);
+            bytes.extend_from_slice(text.as_bytes());
+        };
+        push_string(&mut bytes, version);
+        push_string(
+            &mut bytes,
+            "path\texample.invalid/tool\nbuild\t-buildmode=exe\n",
+        );
+        bytes
+    }
+
+    /// A minimal ELF64 (little-endian) with one identity PT_LOAD
+    /// (vaddr == file offset) and a legacy-format `.go.buildinfo`
+    /// section: the 32-byte header's first pointer addresses the
+    /// version string's (data pointer, length) header, which sits
+    /// behind the version bytes outside the section.
+    fn go_buildinfo_legacy_elf(version: &str) -> Vec<u8> {
+        let shstrtab: &[u8] = b"\0.go.buildinfo\0.shstrtab\0";
+        let buildinfo_off = 120u64; // ELF header (64) + program header (56)
+        let version_off = buildinfo_off + 32;
+        let strhdr_off = version_off + version.len() as u64;
+        let shstrtab_off = strhdr_off + 16;
+        let mut shoff = shstrtab_off + shstrtab.len() as u64;
+        while !shoff.is_multiple_of(8) {
+            shoff += 1;
+        }
+        let total = shoff + 3 * 64;
+
+        let mut buf = vec![0u8; 64]; // ELF header placeholder, patched in below
+        let mut ph = vec![0u8; 56];
+        ph[0..4].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+        ph[4..8].copy_from_slice(&5u32.to_le_bytes()); // R+X
+        ph[32..40].copy_from_slice(&total.to_le_bytes()); // filesz
+        ph[40..48].copy_from_slice(&total.to_le_bytes()); // memsz
+        ph[48..56].copy_from_slice(&0x1000u64.to_le_bytes()); // align
+        buf.extend(ph);
+
+        let mut section = Vec::new();
+        section.extend_from_slice(b"\xff Go buildinf:");
+        section.push(8); // pointer size
+        section.push(0); // flags: pointer strings
+        section.extend_from_slice(&strhdr_off.to_le_bytes());
+        section.extend_from_slice(&0u64.to_le_bytes()); // module info: null
+        assert_eq!(section.len(), 32);
+        buf.extend(section);
+        buf.extend_from_slice(version.as_bytes());
+        buf.extend_from_slice(&version_off.to_le_bytes());
+        buf.extend_from_slice(&(version.len() as u64).to_le_bytes());
+        buf.extend_from_slice(shstrtab);
+        while !buf.len().is_multiple_of(8) {
+            buf.push(0);
+        }
+        assert_eq!(buf.len() as u64, shoff);
+
+        let shdr = |name: u32, ty: u32, off: u64, size: u64| -> Vec<u8> {
+            let mut h = vec![0u8; 64];
+            h[0..4].copy_from_slice(&name.to_le_bytes());
+            h[4..8].copy_from_slice(&ty.to_le_bytes());
+            h[24..32].copy_from_slice(&off.to_le_bytes());
+            h[32..40].copy_from_slice(&size.to_le_bytes());
+            h[48..56].copy_from_slice(&1u64.to_le_bytes());
+            h
+        };
+        buf.extend(vec![0u8; 64]); // NULL section
+        buf.extend(shdr(1, 1, buildinfo_off, 32)); // .go.buildinfo, SHT_PROGBITS
+        buf.extend(shdr(15, 3, shstrtab_off, shstrtab.len() as u64)); // .shstrtab
+
+        let mut ehdr = vec![0u8; 64];
+        ehdr[0..4].copy_from_slice(b"\x7fELF");
+        ehdr[4] = 2; // ELFCLASS64
+        ehdr[5] = 1; // ELFDATA2LSB
+        ehdr[6] = 1; // EV_CURRENT
+        ehdr[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+        ehdr[18..20].copy_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+        ehdr[20..24].copy_from_slice(&1u32.to_le_bytes());
+        ehdr[32..40].copy_from_slice(&64u64.to_le_bytes()); // phoff
+        ehdr[40..48].copy_from_slice(&shoff.to_le_bytes());
+        ehdr[52..54].copy_from_slice(&64u16.to_le_bytes()); // ehsize
+        ehdr[54..56].copy_from_slice(&56u16.to_le_bytes()); // phentsize
+        ehdr[56..58].copy_from_slice(&1u16.to_le_bytes()); // phnum
+        ehdr[58..60].copy_from_slice(&64u16.to_le_bytes()); // shentsize
+        ehdr[60..62].copy_from_slice(&3u16.to_le_bytes()); // shnum
+        ehdr[62..64].copy_from_slice(&2u16.to_le_bytes()); // shstrndx
+        buf[0..64].copy_from_slice(&ehdr);
+        buf
+    }
+
+    #[test]
+    fn go_version_parse_accepts_releases_only() {
+        let v = |major, minor, patch| {
+            Some(GoVersion {
+                major,
+                minor,
+                patch,
+            })
+        };
+        assert_eq!(GoVersion::parse("go1.23.8"), v(1, 23, 8));
+        assert_eq!(GoVersion::parse("go1.24"), v(1, 24, 0));
+        assert_eq!(GoVersion::parse("go1.9.2"), v(1, 9, 2));
+        // Devel, release-candidate and bootstrap strings never parse:
+        // the finder stays silent for versions it cannot order
+        // against the floor.
+        for raw in [
+            "devel go1.25-0123456789ab",
+            "go1.24rc1",
+            "go1.4-bootstrap-20171003",
+            "(devel)",
+            "go",
+            "go1",
+            "go1.x",
+            "go1.2.3.4",
+            "",
+        ] {
+            assert_eq!(GoVersion::parse(raw), None, "{raw:?} must not parse");
+        }
+    }
+
+    #[test]
+    fn go_floor_comparison() {
+        let floor = [
+            (
+                GoVersion {
+                    major: 1,
+                    minor: 23,
+                    patch: 0,
+                },
+                GoVersion {
+                    major: 1,
+                    minor: 23,
+                    patch: 8,
+                },
+            ),
+            (
+                GoVersion {
+                    major: 1,
+                    minor: 24,
+                    patch: 0,
+                },
+                GoVersion {
+                    major: 1,
+                    minor: 24,
+                    patch: 2,
+                },
+            ),
+        ];
+        let v = |major, minor, patch| GoVersion {
+            major,
+            minor,
+            patch,
+        };
+        assert!(go_toolchain_below_floor(v(1, 23, 5), &floor));
+        assert!(!go_toolchain_below_floor(v(1, 23, 8), &floor));
+        assert!(!go_toolchain_below_floor(v(1, 23, 12), &floor));
+        assert!(go_toolchain_below_floor(v(1, 24, 1), &floor));
+        assert!(!go_toolchain_below_floor(v(1, 24, 2), &floor));
+        // Older than every listed line: no release there carries the
+        // recorded fixes, so it fires.
+        assert!(go_toolchain_below_floor(v(1, 22, 4), &floor));
+        assert!(go_toolchain_below_floor(v(1, 14, 1), &floor));
+        // Newer than every listed line: the table does not judge what
+        // it does not know, so it stays silent.
+        assert!(!go_toolchain_below_floor(v(1, 25, 0), &floor));
+        assert!(!go_toolchain_below_floor(v(1, 27, 0), &floor));
+        assert!(!go_toolchain_below_floor(v(2, 0, 0), &floor));
+    }
+
+    #[test]
+    fn go_floor_table_records_the_anchor_fixes() {
+        // The shipped floor is anchored on CVE-2025-22871, fixed in
+        // go1.23.8 and go1.24.2: versions just below those releases
+        // must read as below the floor whatever later raises the
+        // recorded defect set adds.
+        let floor = go_toolchain_floor();
+        assert!(!floor.is_empty(), "the shipped floor has lines");
+        for (line, minimum) in floor {
+            assert_eq!(minimum.line(), *line, "minimum belongs to its line");
+        }
+        let v = |major, minor, patch| GoVersion {
+            major,
+            minor,
+            patch,
+        };
+        assert!(go_toolchain_below_floor(v(1, 23, 7), floor));
+        assert!(go_toolchain_below_floor(v(1, 24, 1), floor));
+        assert!(go_toolchain_below_floor(v(1, 22, 0), floor));
+    }
+
+    #[test]
+    fn go_floor_table_validation_rejects_a_misfiled_minimum() {
+        let raw = "as_of = \"2026-10-26\"\n\n[[line]]\nrelease = \"1.24\"\nminimum = \"1.23.8\"\n";
+        let result = std::panic::catch_unwind(|| parse_go_toolchain_floor(raw));
+        assert!(result.is_err(), "a minimum on the wrong line is rejected");
+    }
+
+    #[test]
+    fn go_toolchain_detected_from_inline_buildinfo() {
+        let info = parse_crafted_sections(
+            "go-inline",
+            &[(".go.buildinfo", &go_buildinfo_inline("go1.23.5"))],
+        );
+        assert_eq!(
+            info.go_toolchain,
+            Some(GoVersion {
+                major: 1,
+                minor: 23,
+                patch: 5
+            })
+        );
+    }
+
+    #[test]
+    fn go_toolchain_detected_from_legacy_buildinfo() {
+        let info = parse_elf_bytes("go-legacy", &go_buildinfo_legacy_elf("go1.16.3"));
+        assert_eq!(
+            info.go_toolchain,
+            Some(GoVersion {
+                major: 1,
+                minor: 16,
+                patch: 3
+            })
+        );
+    }
+
+    #[test]
+    fn go_toolchain_absent_without_buildinfo() {
+        let info = parse_crafted_sections("go-none", &[(".text", b"\0"), (".rodata", b"hello\0")]);
+        assert_eq!(info.go_toolchain, None);
+    }
+
+    #[test]
+    fn go_toolchain_devel_string_stays_silent() {
+        let info = parse_crafted_sections(
+            "go-devel",
+            &[(
+                ".go.buildinfo",
+                &go_buildinfo_inline("devel go1.25-0123456789ab"),
+            )],
+        );
+        assert_eq!(info.go_toolchain, None);
+    }
+
+    #[test]
+    fn go_toolchain_garbage_buildinfo_stays_silent() {
+        let info = parse_crafted_sections(
+            "go-garbage",
+            &[(".go.buildinfo", b"\xff Go buildinf:\x08\x02\xff\xff\xff")],
+        );
+        assert_eq!(info.go_toolchain, None);
+    }
+
+    #[test]
+    fn go_toolchain_below_floor_fires_a_warning() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/bin/tool", "ELF 64-bit LSB executable");
+        let lines = |version: Option<GoVersion>| -> Vec<String> {
+            let mut info = syn_info();
+            info.go_toolchain = version;
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_go_toolchain(&pkg, &pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "go-toolchain-outdated")
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        };
+        let v = |major, minor, patch| {
+            Some(GoVersion {
+                major,
+                minor,
+                patch,
+            })
+        };
+        let firing = lines(v(1, 22, 4));
+        assert_eq!(firing.len(), 1, "exactly one finding: {firing:?}");
+        assert!(firing[0].contains(" W: "), "Warning level: {}", firing[0]);
+        assert!(
+            firing[0].contains("go1.22.4"),
+            "the detail names the recorded version: {}",
+            firing[0]
+        );
+        assert_eq!(lines(v(1, 23, 7)).len(), 1);
+        assert_eq!(lines(v(1, 24, 1)).len(), 1);
+        // The fixed releases, and toolchains newer than the table
+        // knows, stay silent.
+        assert_eq!(lines(v(1, 23, 8)).len(), 0);
+        assert_eq!(lines(v(1, 24, 2)).len(), 0);
+        assert_eq!(lines(v(1, 26, 0)).len(), 0);
+        assert_eq!(lines(None).len(), 0);
     }
 }
