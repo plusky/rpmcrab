@@ -3818,9 +3818,25 @@ impl FilesCheck {
         let mode_is_exec = mode & 0o111 != 0;
         if mode_is_exec {
             if pkg.config_files.iter().any(|c| c == fname) {
+                // Severity split on the noreplace flag (maintainer
+                // ruling, 2026-10-26; see the divergence ledger): a
+                // %config(noreplace) executable warns instead of
+                // erroring. The noreplace marking is deliberate -- the
+                // packager opted into keep-local-edits semantics for
+                // this file, and for hook-style files the execution is
+                // the design -- so the finding stays visible for the
+                // maintainer's call and can be suppressed per package,
+                // but it does not fail the build. A plain %config
+                // executable carries no such signal and keeps the
+                // reference's error.
+                let level = if pkg.noreplace_files.iter().any(|c| c == fname) {
+                    Level::Warning
+                } else {
+                    Level::Error
+                };
                 add_info(
                     out,
-                    Level::Error,
+                    level,
                     pkg,
                     "executable-marked-as-config-file",
                     &[fname],
@@ -4277,7 +4293,7 @@ mod tests {
     use super::*;
     use crate::color::Color;
     use crate::pkg::dep::{DepInfo, account_capability};
-    use crate::pkg::pkgfile::RPMFILE_GHOST;
+    use crate::pkg::pkgfile::{RPMFILE_CONFIG, RPMFILE_GHOST, RPMFILE_NOREPLACE};
 
     fn test_config() -> Config {
         // Load the bundled defaults so the check sees the same configuration
@@ -4505,6 +4521,129 @@ mod tests {
         let mut check = FilesCheck::new(&config);
         check.check(&pkg, &config, &mut out);
         out.results().to_vec()
+    }
+
+    /// Build a package from `files` with the header-derived config
+    /// lists set explicitly, run the full FilesCheck over it, and
+    /// return the levels `executable-marked-as-config-file` fired at,
+    /// in emission order.
+    fn exec_config_levels(
+        files: Vec<PkgFile>,
+        config_files: &[&str],
+        noreplace_files: &[&str],
+    ) -> Vec<Level> {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.ghost_files = files
+            .iter()
+            .filter(|f| f.is_ghost())
+            .map(|f| f.name.clone())
+            .collect();
+        pkg.files = files;
+        pkg.config_files = config_files.iter().map(|s| s.to_string()).collect();
+        pkg.noreplace_files = noreplace_files.iter().map(|s| s.to_string()).collect();
+        let (results, levels) = run_files_check_pkgs(&[pkg], &test_config());
+        results
+            .iter()
+            .zip(&levels)
+            .filter(|((name, _), _)| name == "executable-marked-as-config-file")
+            .map(|(_, level)| *level)
+            .collect()
+    }
+
+    /// A regular executable file carrying the given header flags.
+    fn exec_file(name: &str, flags: u32) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            mode: 0o100755,
+            flags,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn executable_config_noreplace_is_warning() {
+        // Maintainer ruling (2026-10-26): %config(noreplace) is a
+        // deliberate marking -- the executable warns, it does not
+        // error, and it is not dropped.
+        let levels = exec_config_levels(
+            vec![exec_file(
+                "/etc/fcprobe/hook.sh",
+                RPMFILE_CONFIG | RPMFILE_NOREPLACE,
+            )],
+            &["/etc/fcprobe/hook.sh"],
+            &["/etc/fcprobe/hook.sh"],
+        );
+        assert_eq!(levels, vec![Level::Warning]);
+    }
+
+    #[test]
+    fn executable_config_plain_stays_error() {
+        // A plain %config executable carries no deliberate-marking
+        // signal and keeps the reference's error.
+        let levels = exec_config_levels(
+            vec![exec_file("/etc/fcprobe/hook.sh", RPMFILE_CONFIG)],
+            &["/etc/fcprobe/hook.sh"],
+            &[],
+        );
+        assert_eq!(levels, vec![Level::Error]);
+    }
+
+    #[test]
+    fn executable_config_split_within_one_package() {
+        // Both arms in one package: the noreplace file warns, the
+        // plain one errors; neither finding is dropped.
+        let levels = exec_config_levels(
+            vec![
+                exec_file("/etc/fcprobe/a.sh", RPMFILE_CONFIG | RPMFILE_NOREPLACE),
+                exec_file("/etc/fcprobe/b.sh", RPMFILE_CONFIG),
+            ],
+            &["/etc/fcprobe/a.sh", "/etc/fcprobe/b.sh"],
+            &["/etc/fcprobe/a.sh"],
+        );
+        assert_eq!(levels.len(), 2, "both arms fire: {levels:?}");
+        assert!(levels.contains(&Level::Warning), "{levels:?}");
+        assert!(levels.contains(&Level::Error), "{levels:?}");
+    }
+
+    #[test]
+    fn executable_config_ghost_noreplace_warns_not_exempt() {
+        // The aaa_base shape: a %ghost %config(noreplace) stub follows
+        // the same split -- it lands on the warning arm; there is no
+        // ghost exemption.
+        let levels = exec_config_levels(
+            vec![exec_file(
+                "/etc/init.d/after.local",
+                RPMFILE_CONFIG | RPMFILE_NOREPLACE | RPMFILE_GHOST,
+            )],
+            &["/etc/init.d/after.local"],
+            &["/etc/init.d/after.local"],
+        );
+        assert_eq!(levels, vec![Level::Warning]);
+    }
+
+    #[test]
+    fn executable_nonconfig_file_is_quiet() {
+        // Near-miss: an executable not marked %config at all must not
+        // fire this tag.
+        let levels = exec_config_levels(vec![exec_file("/usr/lib/fcprobe/tool.sh", 0)], &[], &[]);
+        assert!(levels.is_empty(), "{levels:?}");
+    }
+
+    #[test]
+    fn nonexec_config_noreplace_file_is_quiet() {
+        // Near-miss: %config(noreplace) without the exec bit must not
+        // fire this tag.
+        let mut file = exec_file("/etc/fcprobe/hook.sh", RPMFILE_CONFIG | RPMFILE_NOREPLACE);
+        file.mode = 0o100644;
+        let levels = exec_config_levels(
+            vec![file],
+            &["/etc/fcprobe/hook.sh"],
+            &["/etc/fcprobe/hook.sh"],
+        );
+        assert!(levels.is_empty(), "{levels:?}");
     }
 
     fn plain_file(name: &str) -> PkgFile {
