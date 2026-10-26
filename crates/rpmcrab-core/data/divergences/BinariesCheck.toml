@@ -370,3 +370,9 @@ kind = "behaviour"
 reason = "rpmcrab reports undefined references to the unbounded string copy/format functions (strcpy, strcat, sprintf, vsprintf) as the Warning binary-or-shlib-calls-unbounded-copy (rpmcrab#972); the reference has no such call finding -- the names exist in its data only as fortify applicability markers. Full Factory snapshot measurement: 8,856 files in 2,866 binary packages (2,010 source packages) reference the family, and the privilege-or-exposure population is 508 files in 198 packages; the level is Warning in both populations because a call's reach depends on the call-site destination size, which the artefact does not carry."
 since = "0.4.1"
 
+[[divergence]]
+case = "global"
+check = "ar-failed"
+kind = "behaviour"
+reason = "The reference charges ar-failed on any archive GNU `ar` cannot list. Archives in the gplib dialect (the MPLIB-compatible format gputils' gplib writes for SDCC's pic14/pic16 targets) are valid libraries for their toolchain but unreadable by GNU binutils: all 406 corpus findings are sdcc libraries of that shape, and every one passes a strict structural parse (256-byte '/'-terminated member names, fixed-width numeric fields, member sizes chaining exactly to EOF, PIC COFF object members). rpmcrab treats a structurally valid gplib archive as a non-standard archive instead of charging ar-failed; archives that parse neither way are still charged."
+since = "0.4.1"
