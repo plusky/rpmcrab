@@ -259,6 +259,9 @@ mod tests {
             tags,
             [
                 "binary-or-shlib-calls-gethostbyname",
+                "binary-or-shlib-calls-md5",
+                "binary-or-shlib-calls-des",
+                "binary-or-shlib-calls-rc4",
                 "call-to-mktemp",
                 "call-to-gets",
                 "missing-call-to-setgroups-before-setuid",
@@ -282,7 +285,7 @@ mod tests {
     #[test]
     fn class_members_come_in_registry_order() {
         let members = class_members("defect-pattern");
-        assert_eq!(members.len(), 11);
+        assert_eq!(members.len(), 14);
         assert_eq!(members[0].tag, "binary-or-shlib-calls-gethostbyname");
         assert!(class_members("no-such-class").is_empty());
     }

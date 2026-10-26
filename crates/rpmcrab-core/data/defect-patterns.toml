@@ -29,6 +29,36 @@ provenance = [
 ]
 
 [[member]]
+tag = "binary-or-shlib-calls-md5"
+class = "defect-pattern"
+family = "pattern"
+gate = "none"
+provenance = [
+    "Class-level provenance (rpmcrab#972): MD5 collision resistance is broken (chosen-prefix collisions are practical), so the low-level MD5 entry points (MD5, MD5_Init, MD5_Update, MD5_Final, MD5_Transform) must not carry integrity, authenticity or credential decisions. No per-file CVE is claimed: in the survey window, weak-crypto fixes were library-internal or config/policy changes, and the distribution already carries the config half as the crypto-policy-non-compliance checks.",
+    "Factory corpus on-ramp measurement (rpmcrab#972, full snapshot): 98 files in 52 binary packages hold an undefined reference to the set, every one classified by hand. The population is protocol-mandated compatibility (HTTP Digest, IPMI, CRAM-MD5, STUN), content and format checksums (dpkg md5sums, AFF image hashes, build-system identifiers), password-cracking workloads and library/binding surface; security-context uses exist (znc, tvheadend in daemon packages) but no package-fact shape separates them, so the level is Warning.",
+]
+
+[[member]]
+tag = "binary-or-shlib-calls-des"
+class = "defect-pattern"
+family = "pattern"
+gate = "none"
+provenance = [
+    "Class-level provenance (rpmcrab#972): single DES has a 56-bit key, brute-forced routinely since the EFF's Deep Crack (1998), and triple-DES is disallowed for new protection under NIST SP 800-131A; the low-level DES_* entry points survive legitimately only as protocol and format compatibility. No per-file CVE is claimed, for the same reason as the MD5 member.",
+    "Factory corpus on-ramp measurement (rpmcrab#972, full snapshot): 42 files in 31 binary packages hold an undefined reference to a DES_* entry point, every one classified by hand. The population is NTLM/DIGEST-MD5 SASL and GSS compatibility, MIFARE and TPM-spec surfaces, MariaDB's legacy DES_ENCRYPT functions, the OpenSSL legacy provider, and one verified security-context use -- grisbi encrypts the user's account file with single DES -- which no package fact separates from the compatibility mass, so the level is Warning.",
+]
+
+[[member]]
+tag = "binary-or-shlib-calls-rc4"
+class = "defect-pattern"
+family = "pattern"
+gate = "none"
+provenance = [
+    "Class-level provenance (rpmcrab#972): RC4's keystream biases are exploitable in practice and RC4 is prohibited in TLS by RFC 7465; the entry points (RC4, RC4_set_key, RC4_options) survive legitimately only as protocol compatibility. No per-file CVE is claimed, for the same reason as the MD5 member.",
+    "Factory corpus on-ramp measurement (rpmcrab#972, full snapshot): 7 files in 6 binary packages hold an undefined reference to the set, every one classified by hand -- NTLM session-key compatibility (gssntlmssp), BitTorrent and DC++ protocol encryption, a Python binding surface (M2Crypto) and VirtualBox's runtime. No security-context application use and no isolable shape, so the level is Warning.",
+]
+
+[[member]]
 tag = "call-to-mktemp"
 class = "defect-pattern"
 family = "pattern"
