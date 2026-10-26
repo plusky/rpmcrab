@@ -17,5 +17,5 @@ There is more than one flavor of kernel specified in Supplements field.
 kmp-missing-supplements="""
 Make sure you have extended '%kernel_module_package' by
 '-p %_sourcedir/preamble', a file named 'preamble' as source and there
-specified 'Supplements: packageand(kernel-%1:%name)'.
+specified 'Supplements: (kernel-%1 and %name)'.
 """

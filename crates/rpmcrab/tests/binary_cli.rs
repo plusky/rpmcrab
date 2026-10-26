@@ -2954,7 +2954,7 @@ fn explain_reworded_kmp_missing_supplements() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         stdout,
-        "kmp-missing-supplements:\nMake sure you have extended '%kernel_module_package' by '-p\n%_sourcedir/preamble', a file named 'preamble' as source and there specified\n'Supplements: packageand(kernel-%1:%name)'.\n\n\n",
+        "kmp-missing-supplements:\nMake sure you have extended '%kernel_module_package' by '-p\n%_sourcedir/preamble', a file named 'preamble' as source and there specified\n'Supplements: (kernel-%1 and %name)'.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());
