@@ -569,7 +569,8 @@ impl Check for SUIDPermissionsCheck {
 
         self.parse_dropins(pkg, out);
 
-        // Whether a PreReq for the permissions package is needed in this RPM.
+        // Whether a phase-qualified Requires on the permissions package
+        // is needed in this RPM.
         let mut requires_permctl = false;
 
         for pkgfile in &pkg.files {
@@ -651,7 +652,7 @@ impl Check for SUIDPermissionsCheck {
                 Level::Error,
                 pkg,
                 "permissions-missing-requires",
-                &["missing 'permissions' in PreReq"],
+                &["missing 'permissions' in Requires(post)"],
             );
         }
     }
@@ -1049,6 +1050,40 @@ mod tests {
                 .iter()
                 .any(|(n, _)| *n == "permissions-missing-requires"),
             "prereq absent: {results:?}"
+        );
+        let line = results
+            .iter()
+            .find(|(n, _)| *n == "permissions-missing-requires")
+            .map(|(_, l)| l.as_str())
+            .unwrap();
+        assert!(
+            line.contains("missing 'permissions' in Requires(post)"),
+            "detail names the phase form: {line}"
+        );
+
+        // Near miss: a bare `Requires: permissions` lands in `requires`,
+        // not in the loader's phase split (`gather_requires` moves only
+        // entries carrying a script-phase or legacy-prereq sense bit
+        // into `prereq`), and carries no scriptlet-ordering guarantee,
+        // so the finding still fires.
+        pkg.requires = vec![DepInfo {
+            name: "permissions".to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        }];
+        let mut check = check_with(vec![entry(
+            "/usr/bin/suidbin",
+            0o4755,
+            "/usr/share/permissions/permissions.secure",
+        )]);
+        let results = run_check(&pkg, &mut check);
+        assert!(
+            results
+                .iter()
+                .any(|(n, _)| *n == "permissions-missing-requires"),
+            "bare requires does not satisfy: {results:?}"
         );
     }
 

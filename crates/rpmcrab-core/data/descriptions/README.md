@@ -90,6 +90,7 @@ Provenance, verified against the pinned reference (`84848c0`):
   (minus the dropped `filelist-forbidden-xinetd-configuration` entry),
   `FilesCheck.toml`, `KMPPolicyCheck.toml`,
   `LogrotateCheck.toml`, `MenuCheck.toml`, `MenuXDGCheck.toml`,
+  `SUIDPermissionsCheck.toml`,
   `PythonCheck.toml`, `SpecCheck.toml`
   (besides its one port-only entry above, minus the dropped
   `hardcoded-prefix-tag` and `lib-package-without-%mklibname` entries),
