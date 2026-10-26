@@ -3222,6 +3222,13 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 
 [[divergence]]
 case = "global"
+check = "explicit-lib-dependency"
+kind = "behaviour"
+reason = "Fix-and-diverge: a generated soname dependency whose raw name is among the package's own provides resolves against the package itself, so it never reaches the library package the shared-library naming mapping derives from it; an explicit requirement on that package is then the only expression of the requirement, not a duplicate of the generated one, and stays silent. The credit covers only names whose every deriving generated soname is self-provided; a name also derived from an external soname keeps firing. Measured on the Factory corpus (51,589 RPMs, 2026-10-26): 32 findings before, 28 after — the four libptscotch MPI flavour packages (libptscotch7_0-mpich, libptscotch7_0-mvapich2, libptscotch7_0-openmpi4, libptscotch7_0-openmpi5), which ship the serial libscotch.so.7.0 in their own MPI prefix and provide its soname, yet name libscotch7_0 for the system copy. The reference fires on all 32."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "tmpfile-not-in-filelist"
 kind = "behaviour"
 reason = "The reference (TmpFilesCheck._check_tmpfile_in_filelist) emits one finding per matching tmpfiles.d line, preserving duplicates and file order; the port collects the missing paths, then sorts and dedups them, emitting one finding per path in sorted order. Duplicate lines for the same path produce one finding instead of several, and findings come out sorted rather than in file order."

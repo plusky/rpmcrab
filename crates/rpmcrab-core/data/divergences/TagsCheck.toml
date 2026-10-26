@@ -350,3 +350,10 @@ kind = "behaviour"
 reason = "TagsCheck does not fire devel-dependency when a *-rebuild package requires a -source package: the *-rebuild packages are empty anchors (0-2 files, licences only) whose single requirement exists to trigger rebuilds against that source tree - perf-rebuild, cpupower-rebuild and four siblings on kernel-source. The reference fires on all 6. The credit is per leaf and does not consume the latch."
 since = "0.4.1"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
+
+[[divergence]]
+case = "global"
+check = "explicit-lib-dependency"
+kind = "behaviour"
+reason = "Fix-and-diverge: a generated soname dependency whose raw name is among the package's own provides resolves against the package itself, so it never reaches the library package the shared-library naming mapping derives from it; an explicit requirement on that package is then the only expression of the requirement, not a duplicate of the generated one, and stays silent. The credit covers only names whose every deriving generated soname is self-provided; a name also derived from an external soname keeps firing. Measured on the Factory corpus (51,589 RPMs, 2026-10-26): 32 findings before, 28 after — the four libptscotch MPI flavour packages (libptscotch7_0-mpich, libptscotch7_0-mvapich2, libptscotch7_0-openmpi4, libptscotch7_0-openmpi5), which ship the serial libscotch.so.7.0 in their own MPI prefix and provide its soname, yet name libscotch7_0 for the system copy. The reference fires on all 32."
+since = "0.4.1"
