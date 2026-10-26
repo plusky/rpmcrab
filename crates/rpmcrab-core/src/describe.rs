@@ -301,7 +301,7 @@ mod tests {
         let pinned: &[(&str, &str)] = &[
             (
                 "AlternativesCheck.toml",
-                "0ca651303419582d8eee3e3cc8a5269b3051068ea517a9c7dc1a1081feb0618a",
+                "5f40d63e77daab50d9a4529d9d972554b9d382f37073fe501eda98abb5d83008",
             ),
             (
                 "AppDataCheck.toml",
@@ -325,7 +325,7 @@ mod tests {
             ),
             (
                 "BuildRootAndDateCheck.toml",
-                "210a6d9b95b683072b46e7734a81583beea0f7169ec11479fefdf6e44ffa45f5",
+                "e663906b814d43bc97c8e4a19d5004bfcd830ad75bd66aea84ebd98ac1d666af",
             ),
             (
                 "CheckForXinetd.toml",
@@ -353,7 +353,7 @@ mod tests {
             ),
             (
                 "ErlangCheck.toml",
-                "e239c7a9ffa0beb7e15373cb540d1cf0d6588a16f220cf53d20dabd119f98a52",
+                "2c1f0f39d15566009287bb1184c30f754836e517d6b5621447cb9b8faeab7477",
             ),
             (
                 "FileDigestCheck.toml",
@@ -385,7 +385,7 @@ mod tests {
             ),
             (
                 "LibraryDependencyCheck.toml",
-                "2263735551a41186b48588ccc8176ceaca36399b600407fa2c4c4be4f50856aa",
+                "42e99b7f06cc26f96917f575ca5121fd8fe8744b8fdfbf0adb04d90e79c8fba2",
             ),
             (
                 "LogrotateCheck.toml",
@@ -393,7 +393,7 @@ mod tests {
             ),
             (
                 "MenuCheck.toml",
-                "373e9c6e375dcb1c7e3bcec10e664c8884334608c88e54fddc72e1703ee49a7d",
+                "a074fbb881fdb5fd863d6762d2e74da1d3e35454158089f2e7af3bd59dab5c72",
             ),
             (
                 "MenuXDGCheck.toml",
@@ -409,7 +409,7 @@ mod tests {
             ),
             (
                 "PkgConfigCheck.toml",
-                "fa5aebc5e51fcdb42ae2c45fa185f50cd851d580d4da1fe9c21bcf85e5dd655a",
+                "b657ebe9d799d23fd7ec6683c9470f09ff45d924349a8cd48a75b8789b7eb4ee",
             ),
             (
                 "PolkitCheck.toml",
@@ -441,7 +441,7 @@ mod tests {
             ),
             (
                 "SpecCheck.toml",
-                "6455c0b1e901aecdaa35c6406cfae3d1359cc3a74d1be1eef2d2e83b50b3b1c0",
+                "98ef6b2ca39db5e84741f66e65074aa5b2a56cc3548462ee7e048822ed3ef783",
             ),
             (
                 "SysVInitOnSystemdCheck.toml",

@@ -287,3 +287,10 @@ check = "unversioned-explicit-obsoletes"
 kind = "missing"
 reason = "Mothballed on measurement (issue #940): the reference predicate fires 1,311 times across 394 of the 16,501 Factory specs -- 609 plain predecessor-name obsoletes (the rename idiom, including -64bit variants), 699 macro-formed, and 3 shell-macro artefacts. rpmbuild itself warns on unversioned Obsoletes at build time, so the signal already reaches packagers through the build; the residue is the deliberate rename idiom. rpmcrab does not emit it; the reference still emits it."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SpecCheck"
+kind = "detail"
+reason = "Staged `--explain` texts for `specfile-error` and `specfile-warning` said the error/warning occurred `when rpmlint used rpm to query the specfile` (and the warning entry also called its message `the error`). Reworded: the error/warning occurred when the spec file was queried with rpm; the message is output by rpm."
+since = "0.4.1"

@@ -29,3 +29,10 @@ check = "MenuCheck"
 kind = "detail"
 reason = "Port-only `--explain` descriptions for `executable-menu-file`, `invalid-menu-icon-type`, `menu-in-wrong-dir`, `old-menu-entry`, `strange-needs`, `unable-to-parse-menu-entry`, `unable-to-parse-menu-needs`: the reference emits these findings but ships no descriptions. Staged `menu-in-wrong-directory` removed: the port emits `menu-in-wrong-dir`, the `-directory` variant never fires."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "MenuCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `unable-to-parse-menu-section` read `rpmlint wasn't able to parse the menu section. Please report a bug.` Reworded to the sibling form used by `unable-to-parse-menu-entry` and `unable-to-parse-menu-needs`: the menu section could not be parsed, check its syntax."
+since = "0.4.1"

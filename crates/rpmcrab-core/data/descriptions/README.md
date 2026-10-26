@@ -70,10 +70,12 @@ Provenance, verified against the pinned reference (`84848c0`):
   reference's single-line form: the carved files used `"""` blocks, whose
   trailing newline the reference's entries do not have.
 - `BuildRootAndDateCheck.toml` — the mechanical union of the reference's
-  `descriptions/BuildDateCheck.toml` and `descriptions/BuildRootCheck.toml`
-  (entries byte-identical); the port merged the two reference checks into
-  one, so a single file named after the port check keeps the check-name to
-  TOML mapping total. Ledgered in `tests/parity/divergences.toml`.
+  `descriptions/BuildDateCheck.toml` and `descriptions/BuildRootCheck.toml`;
+  the port merged the two reference checks into one, so a single file
+  named after the port check keeps the check-name to TOML mapping total.
+  The two date entries are reworded (the reference phrasing is garbled;
+  the harm is non-reproducible builds). Ledgered in
+  `tests/parity/divergences.toml`.
 - `SpecCheck.toml` — the reference file, plus three port-only entries:
   `translated-description` (upstream rpmlint#2), `license-file-as-doc`
   and `no-license-file-in-spec` (#821). The reference has no such
@@ -131,6 +133,11 @@ Provenance, verified against the pinned reference (`84848c0`):
   entry reworded (the port reads BEAM files with a native reader; no
   Python pybeam is invoked) and the `beam-compile-info-missed` entry's
   grammar fixed. Ledgered in `tests/parity/divergences.toml`.
+- `LibraryDependencyCheck.toml`, `PkgConfigCheck.toml` — the reference
+  files, with entries reworded for grammar (`no-library-dependency-on`,
+  `no-library-dependency-for`, `pkgconfig-exception`; the last also names
+  reading alongside parsing, which is what the check fires on). Ledgered
+  in `tests/parity/divergences.toml`.
 - Every other `*.toml` file — byte-identical to the reference
   `rpmlint/descriptions/` file of the same name.
 
