@@ -532,6 +532,89 @@ fn non_executable_script_is_data(
         && dirs[2..].contains(&"lib")
 }
 
+/// Whether a file carrying an interpreter line is test or harness
+/// payload: content a testsuite harness runs, sources or reads,
+/// rather than a script the installed system executes in place
+/// (corpus E audit 2026-10-26, section 2). A test package's
+/// scripts are its payload -- the harness invokes them by path,
+/// inside a test VM or a scratch tree -- so their interpreter
+/// lines and exec bits are the harness's business, not an
+/// installed entry point's defect. Every fact is decidable from
+/// the binary package's name and the file's path alone:
+///
+/// - the package's name carries a `test`, `tests` or `testsuite`
+///   hyphen component -- the package exists to carry a test suite
+///   (lvm2-testsuite, systemd-testsuite, pcp-testsuite,
+///   mercurial-tests), wherever in the tree the payload sits
+///   (pcp-testsuite's scripts live under /usr/libexec/);
+/// - a directory component names a test tree outright --
+///   `testsuite` or `testsuites`, or a component ending in
+///   `-testsuite` or `-testsuites` -- wherever the tree is rooted;
+/// - inside the data and library trees (/usr/src/, /usr/share/,
+///   /usr/lib/, /usr/lib64/, /usr/etc/, /etc/), a directory
+///   component is `test`, `tests` or `selftests`, or ends in
+///   `-tests` or `-test` -- the test directories shipped inside
+///   source and data trees (the bazel and kafka source trees,
+///   test helpers bundled inside Python packages, doc trees).
+///
+/// Two bounds keep the gate honest. A file installed directly in
+/// a script directory (/bin, /sbin, /usr/bin, /usr/sbin,
+/// /usr/local/bin or /usr/local/sbin) is an entry point and never
+/// counts as test payload, whatever the package or the tree is
+/// called: a test suite's own runner installed in /usr/bin keeps
+/// the interpreter findings. And fused names carry no fact:
+/// blktests and xfstests glue the word into a single component,
+/// so they and their `common/` fragments stay outside this gate --
+/// a raw suffix match would also claim non-test names
+/// (perftest, minetest) whose scripts are real entry points.
+fn script_is_test_data(pkg_name: &str, fname: &str) -> bool {
+    let parent = fname.rsplit_once('/').map_or("", |(parent, _)| parent);
+    if matches!(
+        parent,
+        "/bin" | "/sbin" | "/usr/bin" | "/usr/sbin" | "/usr/local/bin" | "/usr/local/sbin"
+    ) {
+        return false;
+    }
+    if pkg_name
+        .to_lowercase()
+        .split('-')
+        .any(|c| matches!(c, "test" | "tests" | "testsuite"))
+    {
+        return true;
+    }
+    let comps: Vec<&str> = fname.split('/').filter(|c| !c.is_empty()).collect();
+    if comps.len() < 2 {
+        return false;
+    }
+    let dirs = &comps[..comps.len() - 1];
+    if dirs.iter().any(|c| {
+        let cl = c.to_lowercase();
+        cl == "testsuite"
+            || cl == "testsuites"
+            || cl.ends_with("-testsuite")
+            || cl.ends_with("-testsuites")
+    }) {
+        return true;
+    }
+    let data_tree = fname.starts_with("/usr/src/")
+        || fname.starts_with("/usr/share/")
+        || fname.starts_with("/usr/lib/")
+        || fname.starts_with("/usr/lib64/")
+        || fname.starts_with("/usr/etc/")
+        || fname.starts_with("/etc/");
+    if !data_tree {
+        return false;
+    }
+    dirs.iter().any(|c| {
+        let cl = c.to_lowercase();
+        cl == "test"
+            || cl == "tests"
+            || cl == "selftests"
+            || cl.ends_with("-tests")
+            || cl.ends_with("-test")
+    })
+}
+
 static PYTHON_BYTECODE_PEP3147_REGEX: OnceLock<Regex> = OnceLock::new();
 fn python_bytecode_pep3147_regex() -> &'static Regex {
     PYTHON_BYTECODE_PEP3147_REGEX.get_or_init(|| {
@@ -4236,13 +4319,21 @@ impl FilesCheck {
                 if mode_is_exec || is_match(&self.script_re, fname) {
                     match self.interpreter_re.captures(&interpreter) {
                         Ok(Some(caps)) if caps.get(1).map(|m| m.as_str()) == Some("env") => {
-                            add_info(
-                                out,
-                                Level::Error,
-                                pkg,
-                                "env-script-interpreter",
-                                &[fname, &interpreter, &fd.interpreter_args],
-                            );
+                            // Test and harness payload is run by
+                            // its harness, not executed in place as
+                            // an installed entry point, so the env
+                            // form of its interpreter line is not a
+                            // defect there: `script_is_test_data`
+                            // carries the shapes and their guards.
+                            if !script_is_test_data(&pkg.name, fname) {
+                                add_info(
+                                    out,
+                                    Level::Error,
+                                    pkg,
+                                    "env-script-interpreter",
+                                    &[fname, &interpreter, &fd.interpreter_args],
+                                );
+                            }
                         }
                         Ok(Some(_)) => {}
                         _ => {
@@ -4267,7 +4358,11 @@ impl FilesCheck {
             // script executed in place and the missing exec bit is
             // not a defect (issues #813, #845):
             // `non_executable_script_is_data` carries the shapes
-            // and their guards. Scripts the shapes do not cover
+            // and their guards. Test and harness payload is data
+            // the same way -- a harness runs it by path, so the
+            // missing exec bit is not a defect there either:
+            // `script_is_test_data` carries those shapes and
+            // their guards. Scripts the shapes do not cover
             // keep the reference behaviour.
             if !mode_is_exec && !is_doc {
                 if let Some(interpreter) = &fd.interpreter {
@@ -4277,6 +4372,7 @@ impl FilesCheck {
                             interpreter,
                             &self.python_lib_tree_re,
                         )
+                        && !script_is_test_data(&pkg.name, fname)
                     {
                         add_info(
                             out,
@@ -11646,7 +11742,7 @@ reason = "warning hook: executable and %config by design"
         let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
         let mut pkg =
             Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
-        pkg.name = "nonexec-test".to_string();
+        pkg.name = "nonexec-demo".to_string();
         pkg.files = files
             .iter()
             .map(|(name, mode, magic, content)| {
@@ -12122,6 +12218,199 @@ reason = "warning hook: executable and %config by design"
         let names: Vec<String> = lines.iter().map(|(n, _)| n.clone()).collect();
         assert_has(&names, "env-script-interpreter");
         assert_lacks(&names, "non-executable-script");
+    }
+
+    fn flagged(lines: &[(String, String)], tag: &str, path: &str) -> bool {
+        lines
+            .iter()
+            .any(|(n, line)| n == tag && line.contains(path))
+    }
+
+    /// Test packages carry their suite as payload: a harness runs
+    /// the scripts by path, so a non-executable test script draws
+    /// no `non-executable-script` and an executable one's env
+    /// interpreter line draws no `env-script-interpreter`,
+    /// wherever in the tree the payload sits (the audit's
+    /// lvm2-testsuite, systemd-testsuite and pcp-testsuite
+    /// shapes, the last under /usr/libexec/).
+    #[test]
+    fn script_findings_silent_in_test_packages() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/lvm2-testsuite/shell/check.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/libexec/pcp/stash/testsuite/src/helper.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/lib/systemd/tests/integration-tests/run.sh",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                ),
+            ],
+        );
+        pkg.name = "lvm2-testsuite".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        for (tag, path) in [
+            (
+                "non-executable-script",
+                "/usr/share/lvm2-testsuite/shell/check.sh",
+            ),
+            (
+                "non-executable-script",
+                "/usr/libexec/pcp/stash/testsuite/src/helper.py",
+            ),
+            (
+                "env-script-interpreter",
+                "/usr/lib/systemd/tests/integration-tests/run.sh",
+            ),
+        ] {
+            assert!(
+                !flagged(&lines, tag, path),
+                "no {tag} for test payload {path}: {lines:?}"
+            );
+        }
+    }
+
+    /// Test trees inside a plain package's source or data tree are
+    /// harness material the same way: test directories of the
+    /// shipped bazel and kafka source trees, test helpers bundled
+    /// inside a Python package, and a `testsuite` tree under a
+    /// doc directory draw neither script finding.
+    #[test]
+    fn script_findings_silent_in_test_trees_of_plain_packages() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/src/kafka/tests/bin/run.sh",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                ),
+                (
+                    "/usr/lib/python3.13/site-packages/certbot/tests/helper.py",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/share/doc/myapp/testsuite/check.q",
+                    0o100644,
+                    "ASCII text executable",
+                    b"#!/usr/bin/env qore\n",
+                ),
+                (
+                    "/usr/share/myapp/integration-tests/tool.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+            ],
+        );
+        let lines = script_finding_lines(&pkg, &config);
+        for (tag, path) in [
+            ("env-script-interpreter", "/usr/src/kafka/tests/bin/run.sh"),
+            (
+                "env-script-interpreter",
+                "/usr/lib/python3.13/site-packages/certbot/tests/helper.py",
+            ),
+            (
+                "non-executable-script",
+                "/usr/share/doc/myapp/testsuite/check.q",
+            ),
+            (
+                "non-executable-script",
+                "/usr/share/myapp/integration-tests/tool.py",
+            ),
+        ] {
+            assert!(
+                !flagged(&lines, tag, path),
+                "no {tag} for test tree payload {path}: {lines:?}"
+            );
+        }
+    }
+
+    /// The test gate's bounds: an entry point in a script
+    /// directory keeps both findings whatever the package is
+    /// called; fused package names (blktests, perftest) carry no
+    /// test fact; a weak test component in an entry-point tree
+    /// (/usr/libexec/) does not exempt; and the test word must be
+    /// a directory component or a package-name component, never
+    /// part of a file name or a longer component.
+    #[test]
+    fn script_findings_still_fire_at_test_gate_bounds() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/bin/runfabtests.py",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/lib/blktests/common/fio",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/perftest/run.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/libexec/myapp/tests/run.py",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/share/myapp/test-runner.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/myapp/contest/run.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+            ],
+        );
+        pkg.name = "fabtests".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        for (tag, path) in [
+            ("env-script-interpreter", "/usr/bin/runfabtests.py"),
+            ("non-executable-script", "/usr/lib/blktests/common/fio"),
+            ("non-executable-script", "/usr/share/perftest/run.sh"),
+            ("env-script-interpreter", "/usr/libexec/myapp/tests/run.py"),
+            ("non-executable-script", "/usr/share/myapp/test-runner.sh"),
+            ("non-executable-script", "/usr/share/myapp/contest/run.sh"),
+        ] {
+            assert!(
+                flagged(&lines, tag, path),
+                "{tag} must fire for {path}: {lines:?}"
+            );
+        }
     }
 
     fn eol_flagged(lines: &[(String, String)], path: &str) -> bool {
