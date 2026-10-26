@@ -12,15 +12,25 @@
 //! fallback (ledgered): files under `/usr/share/metainfo/` are scanned too —
 //! the reference only looks at `/usr/share/appdata/`, but metainfo is the
 //! current AppStream location — and the fallback additionally requires the
-//! mandatory AppStream tags, where the reference only checks well-formedness.
+//! tags the validator itself hard-requires, where the reference only
+//! checks well-formedness.
 //!
 //! The mandatory licence tag is `metadata_license` (AppStream §2 "Metainfo
 //! Files"); `licence`/`project_license` are accepted as alternatives so
-//! legacy files are not flagged. The required set is type-aware: `id`,
-//! `name`, `summary` and the licence for every component, plus `description`
-//! only where the spec mandates it (`desktop-application`, and `desktop`,
-//! its legacy alias) — a fixed set false-positives on legitimate types like
-//! `generic`, which needs no `description`.
+//! legacy files are not flagged. The required set is the validator's own
+//! hard floor, measured against `appstream-util validate-relax` (0.8.4):
+//! `id` and the licence for every component, plus `description` only for
+//! the desktop kinds (`desktop-application`, and `desktop`, its legacy
+//! alias) — a wider fixed set false-positives on legitimate types like
+//! `generic`, which needs no `description`. The validator hard-requires
+//! nothing else: in particular it never hard-requires `name` or `summary`,
+//! for any component kind — both are merge-sourced or recommended in the
+//! AppStream model (legacy components take them from the referenced
+//! .desktop file) — so requiring them natively emitted findings the
+//! reference never produces. On the 2026-10-26 Factory snapshot, 23 of
+//! the native path's 33 findings were files the validator accepts, or
+//! whose only native complaint was a missing `name`/`summary` next to a
+//! defect only the tool itself catches.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -43,8 +53,12 @@ use crate::tools::{Tool, ToolSource, test_source};
 /// spelling so legacy files are not flagged.
 const LICENCE_TAGS: [&str; 3] = ["metadata_license", "licence", "project_license"];
 
-/// Required tags for every component type (AppStream §2).
-const BASE_REQUIRED_TAGS: [&str; 3] = ["id", "name", "summary"];
+/// Required tags for every component type: the `appstream-util
+/// validate-relax` hard floor. `name` and `summary` are absent on
+/// purpose — the validator hard-requires them for no component kind
+/// (see the module docs), so requiring them here would emit findings
+/// the reference never produces.
+const BASE_REQUIRED_TAGS: [&str; 1] = ["id"];
 
 /// Component types whose required set includes `description` (AppStream §2.3;
 /// `desktop` is the legacy alias of `desktop-application`).
@@ -255,9 +269,9 @@ fn walk_xml(text: &str) -> Option<ComponentShape> {
     }
 }
 
-/// Required tags absent from the component, in spec order: `id`, `name`,
-/// `summary`, `metadata_license`, then `description` for component types
-/// that mandate it. A missing licence is reported as `metadata_license`,
+/// Required tags absent from the component, in spec order: `id`,
+/// `metadata_license`, then `description` for component types that
+/// mandate it. A missing licence is reported as `metadata_license`,
 /// the mandatory spelling; `licence`/`project_license` satisfy it.
 fn missing_required_tags(shape: &ComponentShape) -> Vec<String> {
     let mut missing = Vec::new();
@@ -689,7 +703,7 @@ mod tests {
         assert_eq!(
             results[0].1,
             "appdata-test.noarch: E: invalid-appdata-file \
-             /usr/share/metainfo/org.example.foo.metainfo.xml: missing required tag(s): summary, metadata_license, description"
+             /usr/share/metainfo/org.example.foo.metainfo.xml: missing required tag(s): metadata_license, description"
         );
     }
 
@@ -822,6 +836,68 @@ mod tests {
         );
     }
 
+    /// `appstream-util validate-relax` hard-requires no `name` or
+    /// `summary` for any component kind — both are merge-sourced or
+    /// recommended in the AppStream model — so the native fallback
+    /// must not require them either: a desktop application carrying
+    /// only `id`, licence and `description` is silent.
+    #[test]
+    fn missing_name_and_summary_are_silent() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.example.foo</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <description><p>Foo bar.</p></description>
+</component>
+"#;
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let (pkg, tool_dir) = appdata_pkg(
+            dir.path(),
+            &[("usr/share/metainfo/org.example.foo.metainfo.xml", xml)],
+        );
+        assert!(findings_for(&pkg, tool_dir.path()).is_empty());
+    }
+
+    /// The legacy `<application>` root (pre-component appdata, the
+    /// shape of e.g. xmoto's file) takes `name` from the .desktop
+    /// file its desktop-typed `id` references; the validator accepts
+    /// it without one, and so does the fallback.
+    #[test]
+    fn legacy_application_root_without_name_is_silent() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<application>
+  <id type="desktop">org.example.foo.desktop</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <summary>Does foo things</summary>
+  <description><p>Foo bar.</p></description>
+</application>
+"#;
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let (pkg, tool_dir) = appdata_pkg(
+            dir.path(),
+            &[("usr/share/appdata/org.example.foo.appdata.xml", xml)],
+        );
+        assert!(findings_for(&pkg, tool_dir.path()).is_empty());
+    }
+
+    /// A `generic` component carrying only the hard-floor tags
+    /// (`id` + licence) is silent, matching the validator.
+    #[test]
+    fn generic_with_only_id_and_licence_is_silent() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<component type="generic">
+  <id>org.example.foo</id>
+  <metadata_license>CC0-1.0</metadata_license>
+</component>
+"#;
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let (pkg, tool_dir) = appdata_pkg(
+            dir.path(),
+            &[("usr/share/metainfo/org.example.foo.metainfo.xml", xml)],
+        );
+        assert!(findings_for(&pkg, tool_dir.path()).is_empty());
+    }
+
     /// Malformed XML keeps the reference's bare-filename detail.
     #[test]
     fn malformed_metainfo_warns_with_filename() {
@@ -869,12 +945,7 @@ mod tests {
         let xml = "<component type=\"generic\"><!-- c > <id>x</id><name>y</name><summary>z</summary><metadata_license>L</metadata_license> --></component>";
         assert_eq!(
             native_validate(xml),
-            NativeOutcome::MissingTags(vec![
-                "id".to_string(),
-                "name".to_string(),
-                "summary".to_string(),
-                "metadata_license".to_string(),
-            ])
+            NativeOutcome::MissingTags(vec!["id".to_string(), "metadata_license".to_string(),])
         );
     }
 
@@ -913,12 +984,7 @@ mod tests {
         let xml = "<component type=\"generic\"><!--> <id>x</id> --></component>";
         assert_eq!(
             native_validate(xml),
-            NativeOutcome::MissingTags(vec![
-                "id".to_string(),
-                "name".to_string(),
-                "summary".to_string(),
-                "metadata_license".to_string(),
-            ])
+            NativeOutcome::MissingTags(vec!["id".to_string(), "metadata_license".to_string(),])
         );
     }
 
