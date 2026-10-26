@@ -522,6 +522,22 @@ plus, where one exists, a linked upstream issue.
   Filter construction. The reference compiles every `Filters` string as a
   plain regex. Recorded in `tests/parity/divergences.toml`.
 
+- **The defect-pattern class** (issue #959). A finding tag whose pattern
+  is a decidable defect pattern with a recorded defect history is
+  registered once in `crates/rpmcrab-core/data/defect-patterns.toml` —
+  tag, class, family, gate shape and provenance — and the registry is the
+  single source every consumer reads: JSON output carries `"class"` on
+  member findings with a per-class summary count, `-v` descriptions name
+  the class and its provenance, and `class:` filter patterns match on the
+  registered membership. A member finder's severity follows its gate
+  combination: the bare pattern reports at Warning, and a gated form
+  reports at the level its Factory corpus measurement earns, with the
+  measurement recorded in the divergence ledger (§6). The first gated
+  member is `binary-or-shlib-calls-gethostbyname` (#967): a call to the
+  legacy resolver family reports at Error when the calling file is
+  privileged (setuid/setgid bits or file capabilities) or its package
+  ships systemd service or socket units, and at Warning otherwise.
+
 ### 5.1 The divergence philosophy
 
 Direction agreed in the RFC (#2), refined 2026-09-28: **divergence is not
