@@ -301,6 +301,24 @@ fn is_agent_idiom(
         || is_agent_interface(iface)
 }
 
+/// True when an `<allow>` without `send_destination` only ever matches
+/// signal messages inside a subject-scoped `<policy>`: a signal is
+/// broadcast and carries no destination name, so no `send_destination`
+/// can be written for it -- a destination criterion can only match a
+/// message that has one. In the daemon's own subject-scoped block the
+/// rule is complete as written: message type, interface and subject are
+/// the full restriction the policy language can express for a broadcast.
+/// In the default policy the same element stays charged, as does an
+/// allow for any other message type (a method call does have a
+/// destination).
+fn is_signal_allow(elem: &PolicyElement, subject_scoped: bool) -> bool {
+    subject_scoped
+        && elem
+            .attrs
+            .iter()
+            .any(|(key, val)| key == "send_type" && val == "signal")
+}
+
 /// Check one `<allow>` element, returning true when it counts as a send
 /// policy (sets `send_policy_seen`).
 fn check_allow(
@@ -318,7 +336,9 @@ fn check_allow(
     if (has("send_interface") || has("send_member") || has("send_path")) && !has("send_destination")
     {
         seen = true;
-        if !is_agent_idiom(elem, subject_scoped, pinned, own_prefixes, block_has_own) {
+        if !is_agent_idiom(elem, subject_scoped, pinned, own_prefixes, block_has_own)
+            && !is_signal_allow(elem, subject_scoped)
+        {
             findings.push((
                 Level::Error,
                 "dbus-policy-allow-without-destination",
@@ -470,6 +490,50 @@ mod tests {
             !findings
                 .iter()
                 .any(|(_, f, _)| *f == "dbus-policy-missing-allow"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn signal_allow_in_service_policy_is_quiet() {
+        // A signal is broadcast: it has no destination a rule could
+        // name. In the daemon's own subject-scoped block the allow is
+        // complete as written (the cups PrinterSpooler shape).
+        let xml = r#"<busconfig><policy user="root">
+<allow send_type="signal" send_interface="com.example.Spooler"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn signal_allow_in_default_policy_still_fires() {
+        // The credit is scoped to subject policies, like the agent
+        // idiom: a broadcast grant to everyone stays charged.
+        let xml = r#"<busconfig><policy context="default">
+<allow send_type="signal" send_interface="com.example.Spooler"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn method_call_allow_in_service_policy_still_fires() {
+        // Only signals are destinationless; a method call has a
+        // destination, so the send_type credit must not reach it.
+        let xml = r#"<busconfig><policy user="root">
+<allow send_type="method_call" send_interface="com.example.Spooler"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
             "{findings:?}"
         );
     }
