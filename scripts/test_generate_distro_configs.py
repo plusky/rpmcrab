@@ -866,6 +866,59 @@ def test_append_extra_checks_without_checks_list_raises():
     raise AssertionError("append_extra_checks accepted a document with no Checks list")
 
 
+def test_append_extra_atomic_allowed_dirs_lands_inside_the_list():
+    """The extra AtomicAllowedDirs entries must land inside
+    `AtomicAllowedDirs = [...]`, nowhere else.
+
+    Appending to the wrong list (or outside any list) would either
+    whitelist nothing or corrupt the vendored config; the drift check
+    compares bytes, so this pins the shape the generator emits.
+    """
+    text = (
+        'AtomicAllowedDirs = [\n'
+        '    "/etc/",\n'
+        '    "/usr/",\n'
+        ']\n'
+        'AtomicDisallowedSubdirs = [\n'
+        '    "/usr/local/",\n'
+        ']\n'
+    )
+    out = gen.append_extra_atomic_allowed_dirs(
+        text, [d for d, _reason in gen.EXTRA_ATOMIC_ALLOWED_DIRS])
+    allowed_part, disallowed_part = out.split("AtomicDisallowedSubdirs = [", 1)
+    for d, _reason in gen.EXTRA_ATOMIC_ALLOWED_DIRS:
+        assert f'"{d}",' in allowed_part, allowed_part
+        assert d not in disallowed_part, disallowed_part
+        # The entry is inside the list: it precedes the closing bracket.
+        assert allowed_part.index(f'"{d}",') < allowed_part.index("]"), allowed_part
+    assert gen.EXTRA_ATOMIC_ALLOWED_DIRS[0][0] == "/srv/www/"
+
+
+def test_append_extra_atomic_allowed_dirs_without_the_list_raises():
+    """A config with no AtomicAllowedDirs list must fail loudly.
+
+    Silently skipping the append would ship a vendored config in which
+    the whitelisted directory is missing again.
+    """
+    try:
+        gen.append_extra_atomic_allowed_dirs("Checks = [\n]\n", ["/srv/www/"])
+    except AssertionError:
+        return
+    raise AssertionError(
+        "append_extra_atomic_allowed_dirs accepted a document with no AtomicAllowedDirs list")
+
+
+def test_extra_atomic_allowed_dirs_carry_their_provenance_reasons():
+    """Each EXTRA_ATOMIC_ALLOWED_DIRS entry pairs its prefix with the
+    reason the generator logs for it in PROVENANCE: the /srv/www/
+    entry keeps its known-regression marking."""
+    reasons = dict(gen.EXTRA_ATOMIC_ALLOWED_DIRS)
+    assert len(reasons) == len(gen.EXTRA_ATOMIC_ALLOWED_DIRS)
+    for prefix, reason in gen.EXTRA_ATOMIC_ALLOWED_DIRS:
+        assert prefix and reason, (prefix, reason)
+    assert "known regression" in reasons["/srv/www/"], reasons["/srv/www/"]
+
+
 def test_remove_excluded_checks_drops_entry_and_explains():
     """The excluded Checks must vanish from `Checks = [...]` only.
 

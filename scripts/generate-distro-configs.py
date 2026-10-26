@@ -366,6 +366,32 @@ EXTRA_CHECKS = [
     "PAMModulesCheck",
 ]
 
+# Extra AtomicAllowedDirs entries appended to the openSUSE config that
+# upstream rpmlint does not carry. Each entry pairs the directory prefix
+# with the reason the generator logs for it in data/distro/PROVENANCE.
+# "/srv/www/" is a whitelist with a known regression, ledgered as such
+# (kind = "config" in crates/rpmcrab-core/data/divergences/
+# AtomicUpdateCheck.toml): the distro mandates /srv/www as the web
+# root (apache_serverroot) while its atomic packaging guideline
+# forbids applications living outside the root subvolume, and no
+# packaged web app complies with the guideline -- so genuine
+# atomic-rule violations under /srv/www go unflagged while the entry
+# stands. The entry is revisited and tightened when openSUSE settles
+# how web apps are packaged under the atomic rules.
+EXTRA_ATOMIC_ALLOWED_DIRS = [
+    (
+        "/srv/www/",
+        "whitelist with a known regression: the distro mandates"
+        " /srv/www as the web root (apache_serverroot) while the"
+        " atomic packaging guideline forbids applications outside"
+        " the root subvolume, and no packaged web app complies --"
+        " genuine violations under /srv/www go unflagged while this"
+        " stands; tightened when openSUSE settles web-app packaging"
+        " under the atomic rules; ledgered in"
+        " tests/parity/divergences.toml",
+    ),
+]
+
 # Checks upstream lists in the openSUSE config that rpmcrab deliberately
 # does NOT run under the flavor. Currently empty: the snapshot
 # layout AtomicUpdateCheck enforces is a transactional-update requirement
@@ -2171,6 +2197,40 @@ def append_extra_checks(text, checks):
     return "".join(out)
 
 
+def append_extra_atomic_allowed_dirs(text, dirs):
+    """Append directory prefixes to the `AtomicAllowedDirs = [...]` list.
+
+    Used for allowed dirs rpmcrab adds to the distro config that
+    upstream does not carry (see EXTRA_ATOMIC_ALLOWED_DIRS). Inserted
+    before the list's closing bracket so the monthly sync re-emits
+    them deterministically.
+    """
+    lines = text.splitlines(keepends=True)
+    out = []
+    in_list = False
+    done = False
+    for line in lines:
+        stripped = line.strip()
+        if not done and re.match(r"^AtomicAllowedDirs\s*=\s*\[", stripped):
+            in_list = True
+            out.append(line)
+            continue
+        if in_list and stripped.startswith("]"):
+            out.append("\n")
+            out.append("    # Extra: added by rpmcrab (whitelist with a known regression);\n")
+            out.append("    # see EXTRA_ATOMIC_ALLOWED_DIRS in\n")
+            out.append("    # scripts/generate-distro-configs.py.\n")
+            for d in dirs:
+                out.append(f'    "{d}",\n')
+            in_list = False
+            done = True
+            out.append(line)
+            continue
+        out.append(line)
+    assert done, "no AtomicAllowedDirs list found to append to"
+    return "".join(out)
+
+
 def append_systemd_preset_packages(text, packages):
     """Insert the `SystemdPresetPackages` key into a TOML document.
 
@@ -2363,6 +2423,9 @@ def generate(ref_dir=None, pins=None):
                 )
                 text = append_extra_checks(text, EXTRA_CHECKS)
                 text = remove_excluded_checks(text, EXCLUDED_CHECKS)
+                text = append_extra_atomic_allowed_dirs(
+                    text, [d for d, _reason in EXTRA_ATOMIC_ALLOWED_DIRS]
+                )
             text, adj_log = apply_digest_adjudications(text, filename)
             adjudicated_log.extend(adj_log)
             data["files"][filename] = text
@@ -2394,6 +2457,13 @@ def generate(ref_dir=None, pins=None):
             f"#   Checks: added {c!r} (deliberate rpmcrab divergence, ledgered in"
             " tests/parity/divergences.toml)"
         )
+    provenance.append("#")
+    provenance.append(
+        "# Extra AtomicAllowedDirs entries appended (not from upstream;"
+        " see EXTRA_ATOMIC_ALLOWED_DIRS):"
+    )
+    for dir_prefix, reason in EXTRA_ATOMIC_ALLOWED_DIRS:
+        provenance.append(f"#   AtomicAllowedDirs: added {dir_prefix!r} ({reason})")
     provenance.append("#")
     provenance.append(
         "# SystemdPresetPackages appended (not from upstream; see SYSTEMD_PRESET_PACKAGES):"
