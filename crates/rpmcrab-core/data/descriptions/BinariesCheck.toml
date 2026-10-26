@@ -155,6 +155,14 @@ POSIX because no call to it can be made safe. The code should read
 input with fgets(3) or getline(3) instead; the fix belongs in the
 upstream project that ships the code.
 """
+call-to-tmpnam="""
+This file references tmpnam, tmpnam_r or tempnam. These functions
+return a file name rather than an open file, so between the name
+being chosen and the caller opening it, an attacker can plant a
+symlink at that name and redirect the caller's write. The code
+should use mkstemp(3), which creates and opens the file atomically;
+the fix belongs in the upstream project that ships the code.
+"""
 unstripped-binary-or-object="""
 This executable should be stripped of debugging symbols, in order to take
 less space and be loaded faster. This is usually done automatically at
