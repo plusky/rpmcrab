@@ -27,5 +27,8 @@ e.g. under /var or /srv. On a transactional-update system that write is
 not part of the snapshot being installed: it takes effect immediately,
 outside the update, and is lost or inconsistent if the update is rolled
 back. Defer the change to the first boot of the new snapshot instead,
-e.g. with a tmpfiles.d entry or a first-boot service.
+e.g. with a tmpfiles.d entry or a first-boot service. A write to a path
+the same package declares %ghost does not fire: the declared ghost is
+the package's own runtime file, and the scriptlet is expected to
+create it.
 """
