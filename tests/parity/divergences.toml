@@ -1879,6 +1879,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "missing-dependency-to-crontabs"
+kind = "behaviour"
+reason = "Only non-directory entries inside a /etc/cron.* directory are charged. The reference charges every '/etc/cron.' path, including the cron.* directory entries themselves (the #552 base-dir false positive, replicated until now) and daemon files sitting directly in /etc -- /etc/cron.deny is cronie's own access-control file, not a cron script. Measured on the Factory corpus, 11 of the check's 14 findings are those two shapes (cron x5 directory entries, systemd-generator-cron2timer x5, cronie /etc/cron.deny); the 3 remaining findings are real cron scripts whose packages depend on the cron stack under its current names and keep firing. The reference fires all 14 (verified against rpmlint 2.10.0, openSUSE config)."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
