@@ -49,6 +49,7 @@ buildarch-instead-of-exclusivearch-tag = E
 buildprereq-use = E
 call-to-gets = E
 call-to-mktemp = E
+call-to-tmpnam = E
 changelog-time-in-future = E
 changelog-time-overflow = W
 comparison-operator-in-deptoken = W

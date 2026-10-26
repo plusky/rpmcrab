@@ -79,6 +79,16 @@ provenance = [
 ]
 
 [[member]]
+tag = "call-to-tmpnam"
+class = "defect-pattern"
+family = "pattern"
+gate = "no-safe-use"
+provenance = [
+    "tmpnam(3), tmpnam_r(3) and tempnam(3) return a predictable file name rather than an open descriptor, so an attacker pre-plants a symlink at the name and the caller's subsequent open follows it (CWE-377); glibc's linker itself warns that the use of `tmpnam' is dangerous when a link unit references the family.",
+    "Verified in-distro instances in the Factory corpus measurement for this finder (rpmcrab#972): 38 files in 33 binary packages from 28 source packages carry an undefined reference to a family member — libXaw3d's libXaw3d.so.8, libguile-3.0 and framel's FrameDataDump among them — and every firing file was independently classified with readelf as a genuine call reference; glibc's own libc, which defines all three names, stays silent because a definition is not a reference.",
+]
+
+[[member]]
 tag = "missing-call-to-setgroups-before-setuid"
 class = "defect-pattern"
 family = "pattern"
