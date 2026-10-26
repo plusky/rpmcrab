@@ -149,3 +149,13 @@ gate = "none"
 provenance = [
     "A non-PIE executable loads at a fixed address, so its code and gadgets sit at known addresses and ASLR gives its main image no layout secrecy.",
 ]
+
+[[member]]
+tag = "go-toolchain-outdated"
+class = "defect-pattern"
+family = "pattern"
+gate = "none"
+provenance = [
+    "CVE-2025-22871: net/http chunked request parsing accepts a bare LF in chunk extensions, enabling request smuggling; a Go binary keeps the standard library of the toolchain that built it, so the defect stays in shipped binaries until they are rebuilt with a fixed toolchain (fixed in go1.23.8 and go1.24.2).",
+    "Factory corpus measurement in rpmcrab#972: 874 Go binaries in 613 binary packages record a parseable toolchain version; 44 files in 4 binary packages sit below the floor (the go1.21 and go1.22 toolchain packages' own tools, aws-nitro-enclaves-binaryblobs-upstream's linuxkit blob at go1.22.3, kubectl-validate at go1.22.12).",
+]
