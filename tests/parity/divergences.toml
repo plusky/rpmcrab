@@ -3126,6 +3126,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "config"
+kind = "behaviour"
+reason = "Fix-and-diverge: an rpmlintrc line that attempts a directive but does not parse -- an unquoted or unterminated addFilter argument, a setBadness without its value, a TOML Filters assignment in an old-syntax file -- records a load warning naming the file and line instead of being silently dropped, as the reference's scraper drops it (config.py matches re_filter/re_badness per line with no fallback). The warning never fails the load, and the import set is unchanged: exactly the forms the reference accepts import as before (a quoted string, either quote character, an optional r prefix, arbitrary whitespace, trailing content such as a comment), and a well-formed filter still filters. Lines that attempt no directive stay silent, including the legacy Python content shipped files carry (46 files in the Factory tree still open with `from Config import *`). Measured over the shipped corpus (1,026 rpmlintrc files in the Factory tree, 5,156 lines, 2,935 addFilter lines, all importing): zero malformed directive attempts, so the warning fires only on genuine breakage."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "finding-line"
 kind = "behaviour"
 reason = "Deliberate output-contract break (issue #699, superseding the #289 D7 / #595 decision): the text renderer shows no (Badness: N) column at all, because rpmcrab no longer computes a badness number. #595 had shown the column whenever badness > 0 (the reference shows it only when N > 1, filter.py); #699 removed the value itself -- it is not stored on findings, not rendered, not totalled, and the JSON finding carries no badness field. The filter-match string (DESIGN §4.2) is unchanged: it never carried the column on either side."
