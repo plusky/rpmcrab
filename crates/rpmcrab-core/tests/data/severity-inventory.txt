@@ -78,7 +78,6 @@ empty-libalternatives-directory = E
 env-script-interpreter = E
 executable-crontab-file = E
 executable-docs = E
-executable-marked-as-config-file = E
 executable-menu-file = E
 executable-sourced-script = E
 executable-stack = E
@@ -379,7 +378,7 @@ zero-perms = W
 zero-perms-ghost = W
 
 [unresolved-sites]
-# count = 37
+# count = 38
 alternatives.rs: add_info( out, level, pkg, "li
 binaries.rs: add_info( out, info_type, pkg, "unused-direct-
 binaries.rs: add_info(out, Level::Warning, pkg, r_name, &[&pkgfile.name, f_name])
@@ -397,6 +396,7 @@ fhs.rs: add_info(out, Level::Warning, pkg, &check, &[&subdir])
 file_digest.rs: add_info( out, Level::Error, pkg,
 file_digest.rs: add_info( out, Level::Error, pkg, &format!("{c
 filelist.rs: add_info(out, Level::Error, pkg, &rule.message, &[f])
+files.rs: add_info( out, level, pkg, "ex
 files.rs: add_info(finding)
 files.rs: add_info(out, Level::Error, pkg, &tag, &[fname])
 files.rs: add_info(out, level, pkg, "python-bytecode-wrong-magic-value", &refs)
