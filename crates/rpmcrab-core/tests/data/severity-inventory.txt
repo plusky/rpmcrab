@@ -91,7 +91,6 @@ file-contains-buildroot = E
 file-contains-current-date = E
 file-contains-date-and-time = E
 file-in-meta-package = W
-file-parent-ownership-mismatch = E
 filelist-forbidden-fhs23 = E
 filelist-forbidden-opt = E
 filename-not-utf8 = E
@@ -384,7 +383,7 @@ zero-perms = W
 zero-perms-ghost = W
 
 [unresolved-sites]
-# count = 38
+# count = 39
 alternatives.rs: add_info( out, level, pkg, "li
 binaries.rs: add_info( out, info_type, pkg, "unused-direct-
 binaries.rs: add_info(out, Level::Warning, pkg, r_name, &[&pkgfile.name, f_name])
@@ -408,6 +407,7 @@ files.rs: add_info(out, Level::Error, pkg, &tag, &[fname])
 files.rs: add_info(out, level, pkg, "python-bytecode-wrong-magic-value", &refs)
 i18n.rs: add_info(out, level, pkg, &check, &detail_refs)
 menu.rs: add_info( out, Level::Error,
+mixed_ownership.rs: add_info( out, level, pkg, "file-parent-owners
 pam_modules.rs: add_info(out, Level::Error, pkg, finding, &[&detail])
 pkg_config.rs: add_info(out, Level::Error, pkg, check, &[&file.name, l])
 pkg_config.rs: add_info(out, Level::Error, pkg, check, &[&file.name])
