@@ -193,6 +193,14 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "call-to-gets"
+kind = "behaviour"
+reason = "New `call-to-gets` error with no reference counterpart (rpmcrab#972): an undefined reference to gets charges the defining call of CWE-242 \u2014 gets reads a line into a caller buffer with no length bound, was removed from C11 and POSIX.1-2024, and survives in glibc only as a binary-compatibility symbol. The predicate charges undefined references only, in archives and linked objects alike, and never definitions: glibc's libc defines gets and stays silent, because the provider is not a caller \u2014 the definition-is-not-a-call line of the #852 mktemp scoping, applied to every object kind. The anchored pattern keeps the bounded neighbours silent (fgets, gets_s, getline), and the fortified __gets_chk, whose bound is checked at the call, is a different symbol and does not match. Measured over the full Factory corpus (51,586 binary RPMs): zero findings, and an independent readelf census (8,776 ELF files across a stratified sample of 3,969 RPMs plus every libc-bearing package) found no undefined gets reference anywhere, and gets definitions only in glibc's own libc.so.6, host and cross sys-roots alike; the population is empty today and the finder ships as a tripwire at the family's no-safe-use error, since no safe use of gets exists. Its staged description lives in crates/rpmcrab-core/data/descriptions/BinariesCheck.toml."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/972"
+
+[[divergence]]
+case = "global"
 check = "executable-stack"
 kind = "behaviour"
 reason = "Fixed behaviour: the executable-stack arch list also matches aarch64. The reference's `arm.*` does not match the string 'aarch64', so the reference skips the check on ARM64; rpmcrab includes it."
