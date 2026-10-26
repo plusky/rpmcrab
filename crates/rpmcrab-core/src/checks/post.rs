@@ -464,7 +464,7 @@ impl PostCheck {
             // (`try-restart`, `condrestart`, `reload-or-try-restart`)
             // genuinely no-op when the unit is inactive and stay quiet.
             Regex::new(
-                r"(?m)((?:^|[;`|]|&&|&|\$\()\s*(?:then\s+|do\s+|else\s+)?|^\s*[^\s()]+\s*\)\s*)(?:\S*/)?systemctl\s+(?:--?\S+\s+)*(reload-or-restart|reenable|enable|start|restart)\b([^\n;|&]*)",
+                r"(?m)((?:^|[;`|]|&&|&|\$\()\s*(?:then\s+|do\s+|else\s+)?|^\s*[^\s()]+\s*\)\s*)(?:\S*/)?systemctl\s+(?:--?\S+\s+)*(reload-or-restart|reenable|enable|start|restart)\b((?:[^\n;|&]|&[\d-])*)",
             )
             .expect("static regex")
         })
@@ -2978,6 +2978,38 @@ mod tests {
         assert!(found.iter().any(|(l, f, d)| *l == Level::Error
             && f == "daemon-activation-in-%post"
             && d == &vec!["systemctl enable".to_string()]));
+    }
+
+    #[test]
+    fn systemctl_enable_service_after_fd_duplication_is_flagged() {
+        // The args tail must not stop at the `&` of `2>&1`: a service
+        // named after the duplication is still enabled by the call.
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "systemctl enable foo.timer 2>&1 bar.service",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "daemon-activation-in-%post"
+            && d == &vec!["systemctl enable".to_string()]));
+    }
+
+    #[test]
+    fn systemctl_enable_timer_after_fd_duplication_is_quiet() {
+        for script in [
+            "systemctl enable foo.timer 2>&1 bar.timer",
+            "systemctl enable 2>&1 foo.timer",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+                "{script} must stay quiet: {found:?}"
+            );
+        }
     }
 
     #[test]
