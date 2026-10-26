@@ -37,6 +37,18 @@ pub fn devel_infix_regex() -> &'static Regex {
     })
 }
 
+/// Devel keyword as an underscore-flavoured component
+/// (`patterns-kde-devel_qt5`): the patterns naming scheme appends the
+/// flavour to the devel component with an underscore instead of a
+/// hyphen. TagsCheck credits this form for `patterns-*` requirers.
+static DEVEL_UNDERSCORE_REGEX: OnceLock<Regex> = OnceLock::new();
+pub fn devel_underscore_regex() -> &'static Regex {
+    DEVEL_UNDERSCORE_REGEX.get_or_init(|| {
+        Regex::new(r"(.*)-(debug(info|source)?|devel|headers|source|static|prof)_")
+            .expect("static regex")
+    })
+}
+
 /// `lib_package_regex`: `(?:^(?:compat-)?lib.*?(\.so.*)?|libs?[\d-]*)$`, case-insensitive.
 static LIB_PACKAGE_REGEX: OnceLock<Regex> = OnceLock::new();
 pub fn lib_package_regex() -> &'static Regex {
