@@ -130,6 +130,7 @@ static MD5_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static DES_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static RC4_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static WEAK_PRNG_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static UNBOUNDED_COPY_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 
 const KERNEL_MODULES_PATHS: &[&str] = &["/lib/modules/", "/usr/lib/modules/"];
 const GLIBC_EMPTY_ARCHIVES: &[&str] = &["libanl", "libdl", "libpthread", "librt", "libutil"];
@@ -2430,6 +2431,7 @@ pub struct BinariesCheck {
     des_call_regex: Regex,
     rc4_call_regex: Regex,
     weak_prng_call_regex: Regex,
+    unbounded_copy_call_regex: Regex,
     // Per-file state, set by detect_attributes before run_elf_checks.
     is_exec: bool,
     is_shobj: bool,
@@ -3245,6 +3247,14 @@ impl BinariesCheck {
                 .get_or_init(|| {
                     Regex::new(
                         r"^((drand48_r|drand48|erand48_r|erand48|lrand48_r|lrand48|nrand48_r|nrand48|mrand48_r|mrand48|jrand48_r|jrand48|seed48_r|seed48|lcong48_r|lcong48|srand48_r|srand48|initstate_r|setstate_r|initstate|setstate|srandom_r|srandom|random_r|random|srand|rand_r|rand)(?:@GLIBC\S+)?)(?:\s|$)",
+                    )
+                    .expect("static regex")
+                })
+                .clone(),
+            unbounded_copy_call_regex: UNBOUNDED_COPY_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(
+                        r"^((strcpy|strcat|sprintf|vsprintf)(?:@GLIBC\S+)?)(?:\s|$)",
                     )
                     .expect("static regex")
                 })
@@ -4286,6 +4296,17 @@ impl BinariesCheck {
         // getrandom are strong sources, not this pattern.
         let weak_prng = info.has_undefined_function_matching(&self.weak_prng_call_regex)
             && (file_is_privileged(pkgfile) || pkg_ships_daemon_units(pkg));
+        // An undefined reference charges the call (#972 candidate 4):
+        // the definition site -- glibc itself, or a library shipping
+        // its own variant -- makes no call and stays silent, unlike
+        // call-to-mktemp's linked-object rule (#852), whose subject
+        // has no implementation library in the distribution. The
+        // fortified __*_chk spellings do not match the regex: they
+        // are the checked form of the same calls. Warning only --
+        // whether a call overflows depends on the destination size
+        // at the call site, which the binary cannot decide, so the
+        // gated population measured in #972 earns no Error form.
+        let unbounded_copy = info.has_undefined_function_matching(&self.unbounded_copy_call_regex);
 
         if setgid && setuid && !setgroups {
             // Warning unconditionally (fix-and-diverge, #743). The
@@ -4382,6 +4403,15 @@ impl BinariesCheck {
                 Level::Warning,
                 pkg,
                 "binary-or-shlib-calls-weak-prng",
+                &[&pkgfile.name],
+            );
+        }
+        if unbounded_copy {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "binary-or-shlib-calls-unbounded-copy",
                 &[&pkgfile.name],
             );
         }
@@ -13979,6 +14009,70 @@ description = "explicit priority string bypasses the system crypto policy"
         suid_svc.mode = 0o104755;
         let lines = run(&svc_pkg, &suid_svc, &["getaddrinfo"]);
         assert!(lines.is_empty(), "no finding: {lines:?}");
+    }
+
+    #[test]
+    fn unbounded_copy_findings() {
+        // #972 candidate 4: an undefined reference to strcpy, strcat,
+        // sprintf or vsprintf reports at Warning. The predicate is the
+        // reference, not the definition, and the fortified __*_chk
+        // spellings are the checked form and stay silent.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        let count = |info: &ReadelfInfo| {
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(&pkg, &pkgfile, info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "binary-or-shlib-calls-unbounded-copy").len()
+        };
+        let with = |functions: &[&str], refs: &[&str]| {
+            let mut info = syn_info();
+            info.functions = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs = refs.iter().map(|s| s.to_string()).collect();
+            info
+        };
+
+        // Every set member referenced is a call: fires, at Warning.
+        for sym in ["strcpy", "strcat", "sprintf", "vsprintf"] {
+            let info = with(&[sym], &[sym]);
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            let lines = lines_for(&results, "binary-or-shlib-calls-unbounded-copy");
+            assert_eq!(lines.len(), 1, "{sym} referenced must fire: {results:?}");
+            assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        }
+        // A versioned reference is a call: fires.
+        assert_eq!(count(&with(&["strcpy"], &["strcpy@GLIBC_2.2.5"])), 1);
+        // The definition alone (glibc's own shape) is not a call: silent.
+        assert_eq!(count(&with(&["strcpy"], &[])), 0);
+        // The fortified spellings are the checked form: silent.
+        assert_eq!(count(&with(&["__strcpy_chk"], &["__strcpy_chk"])), 0);
+        assert_eq!(count(&with(&["__sprintf_chk"], &["__sprintf_chk"])), 0);
+        // Bounded siblings and the out-of-set stpcpy stay silent.
+        assert_eq!(count(&with(&["strncpy"], &["strncpy"])), 0);
+        // xstrcpy is a different function (an allocating wrapper that
+        // sizes the destination to the input): the anchored regex
+        // must not charge it for strcpy.
+        assert_eq!(count(&with(&["xstrcpy"], &["xstrcpy"])), 0);
+        assert_eq!(count(&with(&["snprintf"], &["snprintf"])), 0);
+        assert_eq!(count(&with(&["stpcpy"], &["stpcpy"])), 0);
+
+        // An archive member's reference is a call too: fires.
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkgfile = syn_file("/usr/lib64/libfoo.a", "current ar archive");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let info = with(&["strcat"], &["strcat"]);
+        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(
+            lines_for(&results, "binary-or-shlib-calls-unbounded-copy").len(),
+            1,
+            "archive reference must fire: {results:?}"
+        );
     }
 
     #[test]

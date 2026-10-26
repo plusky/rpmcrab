@@ -35,6 +35,7 @@ binary-or-shlib-calls-des = W
 binary-or-shlib-calls-gethostbyname = E,W
 binary-or-shlib-calls-md5 = W
 binary-or-shlib-calls-rc4 = W
+binary-or-shlib-calls-unbounded-copy = W
 binary-or-shlib-calls-weak-prng = W
 binary-or-shlib-defines-rpath = E
 branding-conflicts-missing = E

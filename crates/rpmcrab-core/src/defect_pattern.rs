@@ -263,6 +263,7 @@ mod tests {
                 "binary-or-shlib-calls-des",
                 "binary-or-shlib-calls-rc4",
                 "binary-or-shlib-calls-weak-prng",
+                "binary-or-shlib-calls-unbounded-copy",
                 "call-to-mktemp",
                 "call-to-gets",
                 "call-to-tmpnam",
@@ -288,7 +289,7 @@ mod tests {
     #[test]
     fn class_members_come_in_registry_order() {
         let members = class_members("defect-pattern");
-        assert_eq!(members.len(), 17);
+        assert_eq!(members.len(), 18);
         assert_eq!(members[0].tag, "binary-or-shlib-calls-gethostbyname");
         assert!(class_members("no-such-class").is_empty());
     }
