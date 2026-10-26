@@ -270,6 +270,18 @@ fortified __*_chk variants the compiler selects under
 _FORTIFY_SOURCE); the fix belongs in the upstream source, not in
 the package.
 """
+binary-or-shlib-calls-shell="""
+The binary calls system() or popen(), handing a command string to a
+shell. The finding fires when the calling file is setuid/setgid or
+carries file capabilities, or when its package ships systemd service
+or socket units. In that context a command string built from data the
+caller does not fully control (network input, message or event data,
+values substituted into a configured command) is a command-injection
+defect (CVE-2025-10230). Audit what reaches the command: data from
+outside the caller's control must never be interpolated unsanitised;
+where no shell features are needed, run the program directly with an
+argv array instead.
+"""
 static-library-without-debuginfo="""
 The static library doesn't contain any debuginfo. Binaries linking against
 this static library can't be properly debugged.

@@ -126,11 +126,14 @@ static MKTEMP_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static GETS_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static TMPNAM_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static GETHOSTBYNAME_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+
 static MD5_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static DES_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static RC4_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static WEAK_PRNG_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static UNBOUNDED_COPY_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+
+static SHELL_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 
 const KERNEL_MODULES_PATHS: &[&str] = &["/lib/modules/", "/usr/lib/modules/"];
 const GLIBC_EMPTY_ARCHIVES: &[&str] = &["libanl", "libdl", "libpthread", "librt", "libutil"];
@@ -2688,11 +2691,15 @@ pub struct BinariesCheck {
     gets_call_regex: Regex,
     tmpnam_call_regex: Regex,
     gethostbyname_call_regex: Regex,
+
     md5_call_regex: Regex,
     des_call_regex: Regex,
     rc4_call_regex: Regex,
     weak_prng_call_regex: Regex,
     unbounded_copy_call_regex: Regex,
+
+    shell_call_regex: Regex,
+
     // Per-file state, set by detect_attributes before run_elf_checks.
     is_exec: bool,
     is_shobj: bool,
@@ -3524,6 +3531,7 @@ impl BinariesCheck {
                     .expect("static regex")
                 })
                 .clone(),
+
             md5_call_regex: MD5_CALL_REGEX
                 .get_or_init(|| {
                     Regex::new(
@@ -3556,6 +3564,14 @@ impl BinariesCheck {
             rc4_call_regex: RC4_CALL_REGEX
                 .get_or_init(|| {
                     Regex::new(r"^((RC4|RC4_set_key|RC4_options)(?:@\S+)?)(?:\s|$)")
+                        .expect("static regex")
+                })
+                .clone(),
+
+            shell_call_regex: SHELL_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(r"^((system|popen)(?:@GLIBC\S+)?)(?:\s|$)")
+
                         .expect("static regex")
                 })
                 .clone(),
@@ -4756,6 +4772,7 @@ impl BinariesCheck {
                 );
             }
         }
+
         if md5 {
             add_info(
                 out,
@@ -4798,6 +4815,27 @@ impl BinariesCheck {
                 Level::Warning,
                 pkg,
                 "binary-or-shlib-calls-unbounded-copy",
+                &[&pkgfile.name],
+            );
+        }
+
+        // #972 (defect-patterns): system()/popen() hand a command
+        // string to a shell. The call form fires only behind the
+        // privilege/exposure gates (the same gates as the
+        // gethostbyname finder above): ungated, the surface is
+        // unremarkable, and binary facts cannot tell a fixed-string
+        // call from one whose command is built from untrusted data,
+        // so the gated form is a Warning — the maintainer audits
+        // what reaches the command (the corpus classification is
+        // recorded in the divergences ledger).
+        if (file_is_privileged(pkgfile) || pkg_ships_daemon_units(pkg))
+            && info.has_undefined_function_matching(&self.shell_call_regex)
+        {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "binary-or-shlib-calls-shell",
                 &[&pkgfile.name],
             );
         }
@@ -15222,6 +15260,7 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+
     fn unbounded_copy_findings() {
         // #972 candidate 4: an undefined reference to strcpy, strcat,
         // sprintf or vsprintf reports at Warning. The predicate is the
@@ -15293,6 +15332,154 @@ description = "explicit priority string bypasses the system crypto policy"
             1,
             "archive reference must fire: {results:?}"
         );
+    }
+
+    #[test]
+
+    fn shell_call_gate_levels() {
+        // #972 (defect-patterns): undefined references to system()/
+        // popen() fire only behind the privilege/exposure gates -
+        // the same gates as the gethostbyname finder - and only at
+        // Warning: binary facts cannot tell a fixed-string call
+        // from one whose command is built from untrusted data, so
+        // the gated population is a shell-reachable surface to
+        // audit, not a proven defect (the corpus classification is
+        // recorded in the divergences ledger).
+        fn run(pkg: &Pkg, pkgfile: &PkgFile, functions: &[&str]) -> Vec<String> {
+            let config = test_config();
+            let check = BinariesCheck::with_tool_dir(&config, None);
+            let mut info = syn_info();
+            info.functions = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs = info.functions.clone();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(pkg, pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "binary-or-shlib-calls-shell")
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        }
+        // A file that only defines the entry points (no undefined
+        // reference) never fires the call form.
+        fn run_definition_only(pkg: &Pkg, pkgfile: &PkgFile) -> Vec<String> {
+            let config = test_config();
+            let check = BinariesCheck::with_tool_dir(&config, None);
+            let mut info = syn_info();
+            info.functions = vec!["system".to_string(), "popen".to_string()];
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(pkg, pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "binary-or-shlib-calls-shell")
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        }
+        let plain = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        let bare_pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+
+        // Setuid firing file -> Warning.
+        let mut suid = plain.clone();
+        suid.mode = 0o104755;
+        let lines = run(&bare_pkg, &suid, &["system"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // Setgid firing file -> Warning.
+        let mut sgid = plain.clone();
+        sgid.mode = 0o102755;
+        let lines = run(&bare_pkg, &sgid, &["popen"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // Capability-carrying firing file -> Warning.
+        let mut caps = plain.clone();
+        caps.filecaps = Some("cap_net_raw+ep".to_string());
+        let lines = run(&bare_pkg, &caps, &["system"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // Package shipping a systemd service unit -> Warning; the
+        // versioned reference form fires through the same gate.
+        let svc_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file(
+                "/usr/lib/systemd/system/foo.service",
+                "ASCII text",
+            )],
+        );
+        let lines = run(&svc_pkg, &plain, &["popen"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        let lines = run(&svc_pkg, &plain, &["system@GLIBC_2.2.5"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // Package shipping a systemd socket unit -> Warning.
+        let sock_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file("/usr/lib/systemd/system/foo.socket", "ASCII text")],
+        );
+        let lines = run(&sock_pkg, &plain, &["system"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // Near miss: the bare pattern in an ungated package (a
+        // desktop application shelling out) does not fire at all.
+        let lines = run(&bare_pkg, &plain, &["system"]);
+        assert!(lines.is_empty(), "no finding: {lines:?}");
+        let lines = run(&bare_pkg, &plain, &["popen"]);
+        assert!(lines.is_empty(), "no finding: {lines:?}");
+
+        // Near miss: a timer unit is not daemon surface.
+        let timer_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file("/usr/lib/systemd/system/foo.timer", "ASCII text")],
+        );
+        let lines = run(&timer_pkg, &plain, &["system"]);
+        assert!(lines.is_empty(), "no finding: {lines:?}");
+
+        // Near miss: a D-Bus activation file is not a systemd unit.
+        let dbus_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file(
+                "/usr/share/dbus-1/services/org.example.Foo.service",
+                "ASCII text",
+            )],
+        );
+        let lines = run(&dbus_pkg, &plain, &["popen"]);
+        assert!(lines.is_empty(), "no finding: {lines:?}");
+
+        // Near miss: privilege on a *different* file of the package
+        // does not gate this file's reference.
+        let mut other = syn_file("/usr/bin/helper", "ELF 64-bit LSB executable");
+        other.mode = 0o104755;
+        let mixed_pkg = synthetic_pkg("testpkg", "x86_64", vec![other]);
+        let lines = run(&mixed_pkg, &plain, &["system"]);
+        assert!(lines.is_empty(), "no finding: {lines:?}");
+
+        // Near miss: a definition-only file does not fire the call
+        // form, in a daemon package or with privilege of its own.
+        let lines = run_definition_only(&svc_pkg, &plain);
+        assert!(lines.is_empty(), "no finding: {lines:?}");
+        let lines = run_definition_only(&bare_pkg, &suid);
+        assert!(lines.is_empty(), "no finding: {lines:?}");
+
+        // Near miss: symbols that merely contain the entry-point
+        // names do not match - the reference must be to system()/
+        // popen() themselves.
+        let lines = run(&svc_pkg, &plain, &["asystem", "systemd_foo", "popen2"]);
+        assert!(lines.is_empty(), "no finding: {lines:?}");
+
+        // Quiet shape: a privileged file in a daemon package that
+        // references none of the entry points emits nothing.
+        let mut suid_svc = plain.clone();
+        suid_svc.mode = 0o104755;
+        let lines = run(&svc_pkg, &suid_svc, &["getaddrinfo"]);
+        assert!(lines.is_empty(), "no finding: {lines:?}");
     }
 
     #[test]

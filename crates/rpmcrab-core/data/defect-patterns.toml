@@ -79,6 +79,16 @@ provenance = [
 ]
 
 [[member]]
+tag = "binary-or-shlib-calls-shell"
+class = "defect-pattern"
+family = "pattern"
+gate = "privilege-or-exposure"
+provenance = [
+    "CVE-2025-10230 (CVSS 10.0; SUSE-SU-2025:03603-1): Samba's WINS hook ran a shell command built with an unsanitised NetBIOS name supplied by an unauthenticated remote system, as the AD DC's nmbd.",
+    "Factory corpus measurement in rpmcrab#972: undefined system()/popen() references in 3,629 files (1,533 binary packages); behind the privilege/exposure gates 222 files in 142 binary packages, classified file by file: 84 with config-selected commands or data-bearing command templates reaching the call, 37 fixed-string only, 101 not decidable from binary facts. The finder fires gated, at Warning.",
+]
+
+[[member]]
 tag = "call-to-mktemp"
 class = "defect-pattern"
 family = "pattern"
