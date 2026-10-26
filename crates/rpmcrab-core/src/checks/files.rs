@@ -192,6 +192,23 @@ fn scm_regex() -> &'static Regex {
     })
 }
 
+static BACKUP_REGEX: OnceLock<Regex> = OnceLock::new();
+
+/// The paths `backup-file-in-package` charges: the reference's
+/// `backup_regex` (FilesCheck.py) verbatim -- a trailing `~`, an
+/// Emacs `#...#` autosave name, or `.orig`/`.rej` optionally followed
+/// by a compression suffix; end-anchored and case-sensitive. There
+/// is no `.bak` arm: the one Factory instance (`/var/lib/nfs/sm.bak`)
+/// is rpc.statd's state file, and uppercase `.ORIG` content such as
+/// aranym's AFROS `mint.cnf.ORIG` is deliberate payload, so the wider
+/// lowercase suffix test this replaces charged only false positives.
+fn backup_regex() -> &'static Regex {
+    BACKUP_REGEX.get_or_init(|| {
+        Regex::new(r"(~|\#[^/]+\#|((\.orig|\.rej)(\.(gz|z|Z|zip|bz2|lzma|xz|zst))?))$")
+            .expect("static regex")
+    })
+}
+
 static KERNEL_PACKAGE_REGEX: OnceLock<Regex> = OnceLock::new();
 fn kernel_package_regex() -> &'static Regex {
     KERNEL_PACKAGE_REGEX.get_or_init(|| {
@@ -2934,12 +2951,7 @@ impl FilesCheck {
     }
 
     fn check_file_backup_file_in_package(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
-        let lower = fname.to_lowercase();
-        if lower.ends_with('~')
-            || lower.ends_with(".bak")
-            || lower.ends_with(".orig")
-            || lower.ends_with(".rej")
-        {
+        if is_match(backup_regex(), fname) {
             add_info(out, Level::Error, pkg, "backup-file-in-package", &[fname]);
         }
     }
@@ -9716,6 +9728,71 @@ mod tests {
                 "scm_regex must not match {path}"
             );
         }
+    }
+
+    #[test]
+    fn backup_regex_matches_the_reference_pattern() {
+        // The reference's backup_regex (FilesCheck.py) verbatim: a
+        // trailing `~`, an Emacs `#...#` autosave name, or `.orig`/
+        // `.rej` optionally followed by a compression suffix;
+        // end-anchored and case-sensitive.
+        for path in [
+            "/usr/share/foo/file.txt~",
+            "/usr/share/foo/file.orig",
+            "/usr/share/foo/file.rej",
+            "/usr/share/foo/file.orig.gz",
+            "/usr/share/foo/file.rej.xz",
+            "/usr/include/foo/#file.hpp#",
+            "/etc/openvswitch/.conf.db.~lock~",
+        ] {
+            assert!(
+                is_match(backup_regex(), path),
+                "backup_regex must match {path}"
+            );
+        }
+        for path in [
+            // No `.bak` arm in the reference; the Factory instance is
+            // rpc.statd's state file, not an editor leftover.
+            "/var/lib/nfs/sm.bak",
+            "/usr/share/foo/file.bak",
+            // Case-sensitive: uppercase suffixes are not charged.
+            "/usr/share/foo/file.BAK",
+            "/usr/share/aranym/afros/drive_c/mint/1-17-cur/mint.cnf.ORIG",
+            "/usr/share/foo/file.Rej",
+            // `.orig` must end the name (modulo a compression suffix).
+            "/usr/share/foo/file.orig.bak",
+            "/usr/share/foo/file.original",
+            // A lone `#` is not an Emacs autosave pair.
+            "/usr/share/foo/#file.hpp",
+            "/usr/share/foo/file.hpp#",
+            "/usr/share/foo/file.txt",
+        ] {
+            assert!(
+                !is_match(backup_regex(), path),
+                "backup_regex must not match {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn backup_file_in_package_charges_reference_shapes_only() {
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/share/foo/file.orig.gz", 0o100644, 71),
+            mkfile("/var/lib/nfs/sm.bak", 0o100644, 72),
+            mkfile("/usr/share/foo/mint.cnf.ORIG", 0o100644, 73),
+        ]);
+        let results = run_check_binary(&pkg);
+        let lines: Vec<&String> = results
+            .iter()
+            .filter(|(n, _)| n == "backup-file-in-package")
+            .map(|(_, l)| l)
+            .collect();
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+        assert!(
+            lines[0].contains("/usr/share/foo/file.orig.gz"),
+            "the compressed .orig charges: {}",
+            lines[0]
+        );
     }
 
     #[test]
