@@ -49,7 +49,7 @@ use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::pkg::dep::DepInfo;
-use crate::pkg::pkgfile::is_dir;
+use crate::pkg::pkgfile::{is_dir, is_symlink};
 
 const RPMSENSE_EQUAL: u32 = 8;
 const RPMSENSE_GREATER: u32 = 4;
@@ -203,6 +203,20 @@ impl SharedLibraryPolicyCheck {
         })
     }
 
+    /// Whether the package ships a versioned shared library: a file
+    /// named with a `.so.<number>` component that is a symlink or a
+    /// regular ELF file. The name test alone is not sufficient — a
+    /// regular non-ELF file can carry such a name without being a
+    /// library (gcc's pretty-printer packages ship the gdb auto-load
+    /// script `libstdc++.so.<version>-gdb.py` and no library at all).
+    fn ships_versioned_library(&self, pkg: &Pkg) -> bool {
+        pkg.files.iter().any(|f| {
+            is_match(&self.re_versioned_so_file, &f.name)
+                && (is_symlink(f.mode)
+                    || (f.mode & S_IFMT == S_IFREG && f.magic.starts_with("ELF ")))
+        })
+    }
+
     /// `(soname, needed)` from an ELF file, or the parse failure reason.
     fn elf_dynamic(path: &str) -> Result<(Option<String>, Vec<String>), String> {
         let data = std::fs::read(path).map_err(|e| e.to_string())?;
@@ -324,7 +338,15 @@ impl Check for SharedLibraryPolicyCheck {
         // cross-bitness obsoletes removes the sibling generation just
         // as a same-bitness one does, and a same-number cross-suffix
         // pair collapses to a self-obsoletes.
-        if let Some((stem, number)) = soname_package_parts(&self.re_soname_pkg, &pkg.name) {
+        // The package must actually ship a versioned shared library:
+        // a scheme-shaped name on a package with no library payload
+        // (gcc's pretty-printer packages, `libstdc++6-pp-gcc<N>`, ship
+        // only Python printer scripts) is not a SONAME generation, and
+        // its obsoletes of other compiler-version packages do not
+        // break any library co-installability.
+        if let Some((stem, number)) = soname_package_parts(&self.re_soname_pkg, &pkg.name)
+            && self.ships_versioned_library(pkg)
+        {
             for obs in &pkg.obsoletes {
                 if let Some((obs_stem, obs_number)) =
                     soname_package_parts(&self.re_soname_pkg, &obs.name)
@@ -1160,11 +1182,30 @@ mod tests {
     }
 
     fn obsoletes_results(name: &str, obsoletes: Vec<DepInfo>) -> Vec<(String, String)> {
+        // The default payload is the versioned library the
+        // scheme-named package ships: a `.so.<number>` symlink, the
+        // shape real library packages carry next to the versioned
+        // regular file.
+        let lib = PkgFile {
+            name: "/usr/lib64/libfoo.so.2".to_string(),
+            path: "/usr/lib64/libfoo.so.2".to_string(),
+            mode: 0o120777,
+            linkto: "libfoo.so.2.0".to_string(),
+            ..Default::default()
+        };
+        obsoletes_results_with_files(name, obsoletes, vec![lib])
+    }
+
+    fn obsoletes_results_with_files(
+        name: &str,
+        obsoletes: Vec<DepInfo>,
+        files: Vec<PkgFile>,
+    ) -> Vec<(String, String)> {
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
         let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture header");
         pkg.name = name.to_string();
-        pkg.files = vec![];
+        pkg.files = files;
         pkg.requires = vec![];
         pkg.obsoletes = obsoletes;
         let config = Config::default();
@@ -1401,6 +1442,64 @@ mod tests {
         assert!(
             sibling_lines(&results).is_empty(),
             "LESS-alone self-obsoletes must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn sibling_obsoletes_without_library_payload_is_quiet() {
+        // A scheme-shaped name is not enough: a package shipping no
+        // versioned library is not a SONAME generation, so its
+        // obsoletes of another generation number do not fire.
+        let results = obsoletes_results_with_files("libfoo2", vec![dep("libfoo1")], vec![]);
+        assert!(
+            sibling_lines(&results).is_empty(),
+            "no library payload must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn sibling_obsoletes_with_only_gdb_autoload_payload_is_quiet() {
+        // The gcc pretty-printer shape: the only `.so.<number>`-named
+        // payload is the gdb auto-load Python script — a regular,
+        // non-ELF file — and the package ships no library at all.
+        let gdb_script = PkgFile {
+            name: "/usr/share/gdb/auto-load/usr/lib64/libstdc++.so.6.0.34-gdb.py".to_string(),
+            path: "/usr/share/gdb/auto-load/usr/lib64/libstdc++.so.6.0.34-gdb.py".to_string(),
+            mode: 0o100644,
+            magic: "Python script, ASCII text executable".to_string(),
+            ..Default::default()
+        };
+        let results = obsoletes_results_with_files(
+            "libstdc++6-pp-gcc15",
+            vec![dep("libstdc++6-pp-gcc14")],
+            vec![gdb_script],
+        );
+        assert!(
+            sibling_lines(&results).is_empty(),
+            "printer-only payload must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn sibling_obsoletes_with_elf_library_payload_fires() {
+        // The regular-ELF arm of the payload test: a versioned library
+        // shipped as a regular ELF file (pointed at a real minimal ELF
+        // so the check's own ELF walk succeeds).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let so_path = dir.path().join("libfoo.so.2");
+        std::fs::write(&so_path, minimal_elf("libfoo.so.2")).expect("write elf");
+        let lib = PkgFile {
+            name: "/usr/lib64/libfoo.so.2".to_string(),
+            path: so_path.to_string_lossy().into_owned(),
+            mode: 0o100755,
+            magic: "ELF 64-bit LSB shared object".to_string(),
+            ..Default::default()
+        };
+        let results = obsoletes_results_with_files("libfoo2", vec![dep("libfoo1")], vec![lib]);
+        assert_eq!(
+            sibling_lines(&results).len(),
+            1,
+            "ELF library payload must fire: {results:?}"
         );
     }
 
