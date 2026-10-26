@@ -154,11 +154,15 @@ pub fn class_members(class: &str) -> Vec<&'static Member> {
 /// unknown name is a configuration error there, never a pattern that
 /// silently matches nothing.
 pub fn known_class(class: &str) -> Option<&'static str> {
-    registry()
-        .members()
-        .iter()
-        .find(|m| m.class == class)
-        .map(|m| m.class.as_str())
+    canonical_class(KNOWN_CLASSES, class)
+}
+
+/// The canonical spelling of `class` in the known-class list, if
+/// present. Resolution reads the same list parse validation checks
+/// against, so a class a member may name resolves as known even
+/// before any member names it.
+fn canonical_class<'a>(classes: &[&'a str], class: &str) -> Option<&'a str> {
+    classes.iter().copied().find(|&known| known == class)
 }
 
 /// Parse and validate the registry text. Validation is the on-ramp
@@ -298,10 +302,23 @@ mod tests {
     }
 
     #[test]
-    fn known_class_resolves_registered_classes_only() {
+    fn known_class_resolves_known_classes_only() {
         assert_eq!(known_class("defect-pattern"), Some("defect-pattern"));
         assert_eq!(known_class("defect-patern"), None);
         assert_eq!(known_class(""), None);
+    }
+
+    #[test]
+    fn known_class_resolves_a_known_class_with_no_members() {
+        // Resolution reads the known-class list itself, so a class
+        // parse validation accepts resolves as known even when no
+        // registry member names it.
+        let classes = ["defect-pattern", "memberless-class"];
+        assert_eq!(
+            canonical_class(&classes, "memberless-class"),
+            Some("memberless-class")
+        );
+        assert_eq!(canonical_class(&classes, "unknown-class"), None);
     }
 
     /// One registry record as TOML text, for the validation tests.
