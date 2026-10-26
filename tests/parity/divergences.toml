@@ -1862,6 +1862,13 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "file-parent-ownership-mismatch"
+kind = "severity"
+reason = "Deliberate severity recalibration (maintainer ruling, 2026-10-26): the port reports W where the reference reports E when the mismatched file is owned by root (or uid 0). Measured over the Factory corpus, 198 of the 199 findings are root-owned files in service-user directories: 183 are deliberate layouts -- web-app writable directories, daemon state/config/certificate directories, spool and tftpboot trees -- and 15 are hylafax+ scripts in the uucp-owned /var/spool/hylafax/bin that the root-running faxq daemon executes, the privilege-escalation shape this check exists to catch; the demotion keeps them visible without failing builds over the deliberate mass. Which uid executes a file is runtime wiring, not decidable from the package, so no exemption separates the classes. The one both-unprivileged finding -- munin-node, a nobody-owned plugin-state directory inside the munin-owned /var/lib/munin -- stays an error. Corpus effect: 199 E become 198 W and 1 E; no finding is dropped."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "PAMModulesCheck"
 kind = "behaviour"
 reason = "Deliberate enablement (plusky/rpmcrab#498): the port enables PAMModulesCheck in the bundled defaults and the vendored openSUSE flavour config, where the reference's shipping openSUSE branch config never enables it (rpmlint main lists it, paired with a flat PAMAuthorizedModules list). The port does not take up the flat list: measured over the 2026-10-13 Factory corpus (99 shipped PAM modules) it would fire on 16 legitimate modules (pam_systemd_home.so, pam_sss_gss.so, among them). Instead the authorized set is derived from the FileDigestGroup data of type pam -- the same security-review data FileDigestCheck consumes -- which covers every shipped module (0 would fire); an explicit PAMAuthorizedModules list is still honoured on top."
