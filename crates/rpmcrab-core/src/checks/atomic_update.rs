@@ -17,7 +17,9 @@
 //! service directly, instead of going through the distribution macros
 //! (which defer via `systemd-update-helper`), silently does nothing on
 //! an atomic system, where scriptlets run inside the new snapshot with
-//! systemd offline.
+//! systemd offline. A `systemctl` invocation whose units are all
+//! `.timer` units stays quiet: a timer carries no daemon to (re)start,
+//! and starting it only schedules the oneshot it drives.
 //!
 //! Directory entries are exempt from the error: a shipped directory
 //! carries no payload that a snapshot switch could lose or leave
@@ -378,7 +380,8 @@ fn segment_restarts(segment: &str) -> bool {
     let command = words[i];
     let args = &words[i + 1..];
     if command == "systemctl" || command.ends_with("/systemctl") {
-        return systemctl_verb(args).is_some_and(|v| RESTART_VERBS.contains(&v));
+        return systemctl_verb(args).is_some_and(|v| RESTART_VERBS.contains(&v))
+            && !systemctl_timer_only(args);
     }
     if command == "service" || command.ends_with("/service") {
         // `service NAME VERB`; the pair is positional.
@@ -429,6 +432,78 @@ fn systemctl_verb<'a>(args: &[&'a str]) -> Option<&'a str> {
             continue;
         }
         return Some(arg);
+    }
+    None
+}
+
+/// Whether a `systemctl` invocation's units are all `.timer` units:
+/// the verb is located the way `systemctl_verb` locates it, and
+/// every unit token after it (options and the values of options
+/// that take one stepped over, as in the verb scan; redirection
+/// tokens name no unit) ends in `.timer`, with at least one unit
+/// named. A timer (re)start reschedules the oneshot the timer
+/// drives; it (re)starts no daemon, so the invocation is outside
+/// this finding.
+fn systemctl_timer_only(args: &[&str]) -> bool {
+    let mut i = 0;
+    // Step over the leading options and the verb itself.
+    while i < args.len() {
+        let arg = args[i];
+        if arg.starts_with('-') {
+            i += if SYSTEMCTL_VALUE_OPTIONS.contains(&arg) {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+        i += 1;
+        break;
+    }
+    let mut units = 0;
+    while i < args.len() {
+        let arg = args[i];
+        if arg.starts_with('-') {
+            i += if SYSTEMCTL_VALUE_OPTIONS.contains(&arg) {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+        match redirection(arg) {
+            // A bare operator takes the next token as its file
+            // target; neither names a unit.
+            Some(true) => i += 2,
+            Some(false) => i += 1,
+            None => {
+                units += 1;
+                if !arg.ends_with(".timer") {
+                    return false;
+                }
+                i += 1;
+            }
+        }
+    }
+    units > 0
+}
+
+/// The redirection shape of a word in a `systemctl` invocation:
+/// `Some(true)` for a bare operator (`>`, `>>`, `2>`), whose file
+/// target is the following word; `Some(false)` for an operator
+/// with its target glued on (`>/dev/null`, `2>/dev/null`); `None`
+/// for any other word. Mirrors the argument-tail reading of
+/// `PostCheck`'s daemon-activation scan.
+fn redirection(token: &str) -> Option<bool> {
+    let digits = token
+        .len()
+        .saturating_sub(token.trim_start_matches(|c: char| c.is_ascii_digit()).len());
+    let rest = &token[digits..];
+    if matches!(rest, ">" | ">>" | "<" | "<<") {
+        return Some(true);
+    }
+    if rest.starts_with('>') || rest.starts_with('<') {
+        return Some(false);
     }
     None
 }
@@ -1387,6 +1462,66 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, "%post");
         assert!(hits[0].1.contains("restart apache2.service"));
+    }
+
+    #[test]
+    fn systemctl_start_timer_is_quiet() {
+        // The openSUSE-build-key shape: starting the key-import timer
+        // schedules its oneshot; no service is (re)started.
+        assert!(
+            service_restarts_in_body("systemctl start openSUSE-build-key-import.timer").is_empty()
+        );
+    }
+
+    #[test]
+    fn systemctl_restart_timer_family_is_quiet() {
+        for body in [
+            "systemctl restart foo.timer",
+            "systemctl try-restart foo.timer",
+            "systemctl reload-or-restart foo.timer",
+            "systemctl start foo@.timer",
+            "systemctl --no-block start foo.timer",
+        ] {
+            assert!(
+                service_restarts_in_body(body).is_empty(),
+                "{body} must stay quiet"
+            );
+        }
+    }
+
+    #[test]
+    fn systemctl_timer_with_redirections_is_quiet() {
+        for body in [
+            "systemctl start foo.timer >/dev/null 2>&1",
+            "systemctl start foo.timer > /dev/null",
+            "systemctl restart foo.service >/dev/null 2>&1",
+        ] {
+            let expect = usize::from(body.contains(".service"));
+            assert_eq!(service_restarts_in_body(body).len(), expect, "{body}");
+        }
+    }
+
+    #[test]
+    fn systemctl_timer_and_service_units_in_one_invocation_fire() {
+        assert_eq!(
+            service_restarts_in_body("systemctl start foo.timer bar.service").len(),
+            1
+        );
+        assert_eq!(
+            service_restarts_in_body("systemctl restart foo.service bar.timer").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn systemctl_timer_segment_does_not_mask_service_segment() {
+        let body = "systemctl start foo.timer; systemctl restart bar.service";
+        assert_eq!(service_restarts_in_body(body).len(), 1);
+    }
+
+    #[test]
+    fn systemctl_restart_without_unit_still_fires() {
+        assert_eq!(service_restarts_in_body("systemctl restart").len(), 1);
     }
 
     #[test]
