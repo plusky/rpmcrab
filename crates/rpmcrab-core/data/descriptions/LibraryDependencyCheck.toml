@@ -1,7 +1,8 @@
 no-library-dependency-for="""
-The package misses dependency on a library package that provides the shared library.
+The package misses a dependency on a library package that provides the shared library.
 """
 
 no-library-dependency-on="""
-The package misses dependency on a package which file it links to.
+The package is missing a dependency on the package whose file it
+links to.
 """

@@ -38,3 +38,10 @@ kind = "severity"
 reason = "Deliberate severity recalibration (issue #759, decision D11 of #714): the port reports E where the reference reports W, on the file-contains-date-and-time reasoning. The build-time emulation over the Factory corpus (51,589 RPMs) fires it 135 times in 71 binary packages (59 srcpkgs); 25 hand-read firings across both date findings carried 23 genuine embedded build dates (ELF __DATE__/__TIME__ stamps, doxygen generation stamps, firmware build stamps, configure-stamped configuration). The 2 remaining firings of the 578 are upstream release-history files whose newest entry's date equals the build date on a release-day build (liberation-fonts ChangeLog, perl-Unicode-LineBreak Changes): the file genuinely contains the build date, the class is bounded and self-limiting, and the matching rule stays unchanged."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/759"
+
+[[divergence]]
+case = "global"
+check = "BuildRootAndDateCheck"
+kind = "detail"
+reason = "Staged `--explain` texts for `file-contains-current-date` and `file-contains-date-and-time` were garbled (`may cause the package to rebuild in excess`, `causes the package to rebuild when not needed`). Reworded to name the actual harm: the file content changes with the build date (and time), so rebuilding the same sources does not produce the same package (the date-only entry hedges this to `may not`, since a rebuild on the same date is unchanged)."
+since = "0.4.1"

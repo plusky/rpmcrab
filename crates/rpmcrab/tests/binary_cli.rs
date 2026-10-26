@@ -2524,7 +2524,7 @@ fn explain_staged_build_root_and_date_check() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         stdout,
-        "file-contains-current-date:\nYour file contains the current date, this may cause the package to rebuild in\nexcess.\n\n\n",
+        "file-contains-current-date:\nYour file contains the current date. Its content therefore changes with the\nbuild date, so rebuilding the same sources may not produce the same package.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());
@@ -2940,7 +2940,7 @@ fn explain_reworded_update_alternatives_postun_call_missing() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         stdout,
-        "update-alternatives-postun-call-missing:\nThe package does not call update-alternatives --remove in postun phase to\nremove all the configuration for each individual --install binary that was\ndone in post.\n\n\n",
+        "update-alternatives-postun-call-missing:\nThe package does not call update-alternatives --remove in the %postun phase\nfor each --install that was done in %post.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());

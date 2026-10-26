@@ -21,7 +21,7 @@ upstream = "https://github.com/plusky/rpmcrab/issues/613"
 case = "global"
 check = "ErlangCheck"
 kind = "detail"
-reason = "Staged `--explain` text for `pybeam-failed` said the Python pybeam library was invoked; the port reads BEAM files with a native reader and the finding fires when a file cannot be parsed (verified in `checks/erlang.rs`). Reworded: the BEAM file could not be parsed, so it could not be checked."
+reason = "Staged `--explain` text for `pybeam-failed` said the Python pybeam library was invoked; the port reads BEAM files with a native reader and the finding fires when a file cannot be read or parsed (verified in `checks/erlang.rs`). Reworded: the beam file could not be read or parsed, so it could not be checked."
 since = "0.4.1"
 
 [[divergence]]

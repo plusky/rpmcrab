@@ -64,6 +64,13 @@ upstream = "https://github.com/plusky/rpmcrab/issues/932"
 
 [[divergence]]
 case = "global"
+check = "AlternativesCheck"
+kind = "detail"
+reason = "Staged `--explain` texts for `update-alternatives-post-call-missing` and `update-alternatives-postun-call-missing` were garbled (`install all the configuration`, `remove all the configuration for each individual --install binary`). Reworded: the package does not call update-alternatives --install in the %post phase to register its alternatives / --remove in the %postun phase for each --install that was done in %post."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "AppDataCheck"
 kind = "behaviour"
 reason = "Also scans /usr/share/metainfo/; the reference (AppDataCheck.py) only matches /usr/share/appdata/, but metainfo/ is the current AppStream location, so files there would otherwise never be validated."
@@ -585,6 +592,13 @@ upstream = "https://github.com/plusky/rpmcrab/issues/759"
 
 [[divergence]]
 case = "global"
+check = "BuildRootAndDateCheck"
+kind = "detail"
+reason = "Staged `--explain` texts for `file-contains-current-date` and `file-contains-date-and-time` were garbled (`may cause the package to rebuild in excess`, `causes the package to rebuild when not needed`). Reworded to name the actual harm: the file content changes with the build date (and time), so rebuilding the same sources does not produce the same package (the date-only entry hedges this to `may not`, since a rebuild on the same date is unchanged)."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "ConfigFilesCheck"
 kind = "detail"
 reason = "`non-etc-or-var-file-marked-as-conffile` carries the upstream rpmlint#1606 reword (drop `%config` named as an option, not just moving files) ahead of the pinned reference, per the fix-in-port rule; the check behaviour is unchanged. Provenance: `crates/rpmcrab-core/data/descriptions/README.md`."
@@ -780,7 +794,7 @@ upstream = "https://github.com/plusky/rpmcrab/issues/613"
 case = "global"
 check = "ErlangCheck"
 kind = "detail"
-reason = "Staged `--explain` text for `pybeam-failed` said the Python pybeam library was invoked; the port reads BEAM files with a native reader and the finding fires when a file cannot be parsed (verified in `checks/erlang.rs`). Reworded: the BEAM file could not be parsed, so it could not be checked."
+reason = "Staged `--explain` text for `pybeam-failed` said the Python pybeam library was invoked; the port reads BEAM files with a native reader and the finding fires when a file cannot be read or parsed (verified in `checks/erlang.rs`). Reworded: the beam file could not be read or parsed, so it could not be checked."
 since = "0.4.1"
 
 [[divergence]]
@@ -1734,6 +1748,13 @@ upstream = "https://github.com/plusky/rpmcrab/issues/863"
 
 [[divergence]]
 case = "global"
+check = "LibraryDependencyCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `no-library-dependency-on` was ungrammatical (`a package which file it links to`). Reworded: the package is missing a dependency on the package whose file it links to. The sibling `no-library-dependency-for` text gained the article it dropped (`misses a dependency on`), for article coherence between the two entries."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "logrotate-log-dir-not-packaged"
 kind = "behaviour"
 reason = "Deliberate improvement over the reference (open rpmlint#551): /var/log itself is never reported by logrotate-log-dir-not-packaged. It is owned by the filesystem package, not by the package shipping the logrotate config, so flagging it is a false positive."
@@ -1781,6 +1802,13 @@ check = "MenuCheck"
 kind = "detail"
 reason = "Port-only `--explain` descriptions for `executable-menu-file`, `invalid-menu-icon-type`, `menu-in-wrong-dir`, `old-menu-entry`, `strange-needs`, `unable-to-parse-menu-entry`, `unable-to-parse-menu-needs`: the reference emits these findings but ships no descriptions. Staged `menu-in-wrong-directory` removed: the port emits `menu-in-wrong-dir`, the `-directory` variant never fires."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "MenuCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `unable-to-parse-menu-section` read `rpmlint wasn't able to parse the menu section. Please report a bug.` Reworded to the sibling form used by `unable-to-parse-menu-entry` and `unable-to-parse-menu-needs`: the menu section could not be parsed, check its syntax."
+since = "0.4.1"
 
 [[divergence]]
 case = "global"
@@ -1840,6 +1868,13 @@ check = "pkgconfig-exception"
 kind = "behaviour"
 reason = "A `.pc` read failing with NotADirectory draws no `pkgconfig-exception`. That failure is the extractor's collision gap: it leaves entries whose path collides with an incompatible existing object out of the tree and reports each skip itself (grpc-source's file `usr/src/grpc/BUILD` against its directory `usr/src/grpc/build` on a case-insensitive filesystem), so the read runs through the object that won the collision. The reference (PkgConfigCheck.py) turns the same failed `open()` into the finding through its `except Exception`. Everything else matches the reference: %ghost entries are dropped from the dispatch before any read, as AbstractFilesCheck (AbstractCheck.py:45) drops `pkg.ghost_files`, and the remaining read failures -- a header-listed file missing from the tree -- plus decode failures on materialised files report as exceptions exactly as the reference charges them."
 since = "0.4.0"
+
+[[divergence]]
+case = "global"
+check = "PkgConfigCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `pkgconfig-exception` was ungrammatical (`An exception during parsing of .pc file has occurred`). Reworded: an error occurred while reading or parsing the .pc file — the check fires on read failures as well as parse failures (verified in `checks/pkg_config.rs`)."
+since = "0.4.1"
 
 [[divergence]]
 case = "global"
@@ -2607,6 +2642,13 @@ check = "unversioned-explicit-obsoletes"
 kind = "missing"
 reason = "Mothballed on measurement (issue #940): the reference predicate fires 1,311 times across 394 of the 16,501 Factory specs -- 609 plain predecessor-name obsoletes (the rename idiom, including -64bit variants), 699 macro-formed, and 3 shell-macro artefacts. rpmbuild itself warns on unversioned Obsoletes at build time, so the signal already reaches packagers through the build; the residue is the deliberate rename idiom. rpmcrab does not emit it; the reference still emits it."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SpecCheck"
+kind = "detail"
+reason = "Staged `--explain` texts for `specfile-error` and `specfile-warning` said the error/warning occurred `when rpmlint used rpm to query the specfile` (and the warning entry also called its message `the error`). Reworded: the error/warning occurred when the spec file was queried with rpm; the message is output by rpm."
+since = "0.4.1"
 
 [[divergence]]
 case = "global"
