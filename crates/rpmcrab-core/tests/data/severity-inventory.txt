@@ -99,6 +99,7 @@ forbidden-controlchar-found = E,W
 forbidden-optflags = E
 ghost-files-without-postin = W
 ghost-outside-snapshot = W
+go-toolchain-outdated = W
 gzipped-svg-icon = W
 hardcoded-packager-tag = W
 hardcoded-path-in-menu-icon = W

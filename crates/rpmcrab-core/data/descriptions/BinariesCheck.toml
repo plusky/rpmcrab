@@ -210,6 +210,14 @@ prohibited in TLS by RFC 7465 -- and it survives legitimately only
 as a compatibility relic. Where RC4 protects anything current,
 replace it in the upstream source.
 """
+go-toolchain-outdated="""
+The binary was built with the Go toolchain named in the detail, which
+predates the oldest release carrying fixes for known standard-library
+defects (CVE-2025-22871, fixed in go1.23.8 and go1.24.2). A Go binary
+keeps the standard library it was built with, so the defects stay in
+the shipped binary until the package is rebuilt. Please rebuild the
+package with a Go toolchain at or above the recorded floor.
+"""
 static-library-without-debuginfo="""
 The static library doesn't contain any debuginfo. Binaries linking against
 this static library can't be properly debugged.

@@ -1,0 +1,32 @@
+# The Go toolchain floor for the `go-toolchain-outdated` finder: per
+# Go release line, the minimum release carrying the fixes for the
+# defect set recorded below. The finder and its parsing live in
+# src/checks/binaries.rs, which embeds this file.
+#
+# A Go binary ships the standard library of the toolchain that built
+# it, so a defect fixed in a later toolchain release stays in the
+# shipped binary until the package is rebuilt with a fixed
+# toolchain.
+#
+# Maintenance: Go security releases are the update trigger. When a
+# Go release fixes a security defect in the standard library, add
+# the defect to the recorded set, raise the affected lines'
+# minimums to the fixed releases, add a [[line]] for the new
+# release line, and move `as_of`. A stale table only ever
+# under-fires: the finder stays silent for versions on lines the
+# table does not list, so no package is ever flagged on the basis
+# of a version the table does not know.
+#
+# Recorded defect set:
+#   CVE-2025-22871 — net/http chunked request parsing accepts a
+#   bare LF in chunk extensions, enabling request smuggling;
+#   fixed in go1.23.8 and go1.24.2 (2025-04-03).
+as_of = "2026-10-26"
+
+[[line]]
+release = "1.23"
+minimum = "1.23.8"
+
+[[line]]
+release = "1.24"
+minimum = "1.24.2"
