@@ -39,6 +39,16 @@ provenance = [
 ]
 
 [[member]]
+tag = "call-to-gets"
+class = "defect-pattern"
+family = "pattern"
+gate = "no-safe-use"
+provenance = [
+    "gets(3) reads a line into a caller buffer with no bound -- the defining call of CWE-242 (use of an inherently dangerous function); it was removed from C11 and from POSIX.1-2024, and glibc keeps the symbol only for binary compatibility with old programs.",
+    "Factory corpus measurement for this finder (rpmcrab#972): zero undefined references in 51,586 binary RPMs \u2014 no in-distro caller exists today, so the finder stands as a tripwire for the class; glibc's own libc, which defines gets as a compatibility symbol, stays silent because a definition is not a reference.",
+]
+
+[[member]]
 tag = "missing-call-to-setgroups-before-setuid"
 class = "defect-pattern"
 family = "pattern"

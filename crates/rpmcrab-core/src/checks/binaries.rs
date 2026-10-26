@@ -123,6 +123,7 @@ static SETGID_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static SETUID_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static SETGROUPS_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static MKTEMP_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static GETS_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static GETHOSTBYNAME_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 
 const KERNEL_MODULES_PATHS: &[&str] = &["/lib/modules/", "/usr/lib/modules/"];
@@ -2158,6 +2159,7 @@ pub struct BinariesCheck {
     setuid_call_regex: Regex,
     setgroups_call_regex: Regex,
     mktemp_call_regex: Regex,
+    gets_call_regex: Regex,
     gethostbyname_call_regex: Regex,
     // Per-file state, set by detect_attributes before run_elf_checks.
     is_exec: bool,
@@ -2831,6 +2833,11 @@ impl BinariesCheck {
             mktemp_call_regex: MKTEMP_CALL_REGEX
                 .get_or_init(|| Regex::new(r"(mktemp(?:@GLIBC\S+)?)(?:\s|$)")
                     .expect("static regex"))
+                .clone(),
+            gets_call_regex: GETS_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(r"^gets(?:@GLIBC\S+)?$").expect("static regex")
+                })
                 .clone(),
             gethostbyname_call_regex: GETHOSTBYNAME_CALL_REGEX
                 .get_or_init(|| {
@@ -3798,6 +3805,18 @@ impl BinariesCheck {
         } else {
             info.has_function_matching(&self.mktemp_call_regex)
         };
+        // gets (#972): the charge is the undefined reference itself,
+        // in archives and linked objects alike. gets reads a line
+        // into a caller buffer with no bound -- CWE-242's defining
+        // call, removed from C11 and POSIX.1-2024, kept by glibc only
+        // as a binary-compatibility symbol. There is no safe use and
+        // no gated form: the pattern is a tripwire, and the corpus
+        // measurement behind this finder found the population at
+        // zero. A definition is never charged (glibc's libc defines
+        // gets; the provider is not a caller), and the fortified
+        // __gets_chk -- a different symbol with a checked bound --
+        // does not match the anchored pattern.
+        let gets = info.has_undefined_function_matching(&self.gets_call_regex);
         let gethostbyname = info.has_function_matching(&self.gethostbyname_call_regex);
 
         if setgid && setuid && !setgroups {
@@ -3819,6 +3838,9 @@ impl BinariesCheck {
         }
         if mktemp {
             add_info(out, Level::Error, pkg, "call-to-mktemp", &[&pkgfile.name]);
+        }
+        if gets {
+            add_info(out, Level::Error, pkg, "call-to-gets", &[&pkgfile.name]);
         }
         if gethostbyname {
             add_info(
@@ -12457,6 +12479,57 @@ description = "explicit priority string bypasses the system crypto policy"
         // Near-miss defined names stay silent.
         assert_eq!(count(&with(&["mkstemp"], &[])), 0);
         assert_eq!(count(&with(&["mktemp64"], &[])), 0);
+    }
+
+    #[test]
+    fn gets_charges_undefined_references_only() {
+        // #972: call-to-gets charges an undefined reference to gets,
+        // in an archive and in a linked object alike. A definition is
+        // never a call (glibc's libc defines gets as a compatibility
+        // symbol), and the anchored pattern keeps the safe and the
+        // fortified neighbours silent.
+        let config = test_config();
+        let count = |is_archive: bool, info: &ReadelfInfo| {
+            let mut check = BinariesCheck::with_tool_dir(&config, None);
+            check.is_archive = is_archive;
+            let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+            let pkgfile = if is_archive {
+                syn_file("/usr/lib64/libfoo.a", "current ar archive")
+            } else {
+                syn_file("/usr/lib64/libfoo.so", "ELF 64-bit LSB shared object")
+            };
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(&pkg, &pkgfile, info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "call-to-gets").len()
+        };
+        let with = |functions: &[&str], refs: &[&str]| {
+            let mut info = syn_info();
+            info.functions = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs = refs.iter().map(|s| s.to_string()).collect();
+            info
+        };
+
+        for is_archive in [true, false] {
+            // A reference is a call: fires, plain and versioned.
+            assert_eq!(count(is_archive, &with(&["gets"], &["gets"])), 1);
+            assert_eq!(
+                count(is_archive, &with(&["gets"], &["gets@GLIBC_2.2.5"])),
+                1
+            );
+            // The definition alone (the glibc shape) is not a call: silent.
+            assert_eq!(count(is_archive, &with(&["gets"], &[])), 0);
+            // Near-miss names stay silent: the safe replacement, the
+            // bounded Annex K form, and the fortified variant whose
+            // bound is checked.
+            assert_eq!(count(is_archive, &with(&["fgets"], &["fgets"])), 0);
+            assert_eq!(count(is_archive, &with(&["gets_s"], &["gets_s"])), 0);
+            assert_eq!(
+                count(is_archive, &with(&["__gets_chk"], &["__gets_chk"])),
+                0
+            );
+            assert_eq!(count(is_archive, &with(&["getline"], &["getline"])), 0);
+        }
     }
 
     /// Minimal ET_REL ELF64 object carrying a `.symtab`, for the #852

@@ -147,6 +147,14 @@ call-to-mktemp="""
 This executable calls mktemp. As advised by the manpage (mktemp(3)), this
 function should be avoided.
 """
+call-to-gets="""
+This file references gets. gets reads a line into a caller-supplied
+buffer with no length bound, so any input longer than the buffer
+overwrites memory; it was removed from the C standard and from
+POSIX because no call to it can be made safe. The code should read
+input with fgets(3) or getline(3) instead; the fix belongs in the
+upstream project that ships the code.
+"""
 unstripped-binary-or-object="""
 This executable should be stripped of debugging symbols, in order to take
 less space and be loaded faster. This is usually done automatically at
