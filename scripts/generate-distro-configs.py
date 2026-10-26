@@ -406,6 +406,62 @@ SYSTEMD_PRESET_PACKAGES = [
     "systemd-presets-branding-SLE-SAP_immutable",
 ]
 
+# Per-file grants for FilesCheck findings (see append_file_grants):
+# each entry names one package, the files the grant covers and the
+# findings that stay quiet for them, with the reason the grant exists.
+# FilesCheck honours a grant only when package, path and finding all
+# match exactly, and rejects an entry whose reason is missing or
+# empty. The set records the 2026-10-26 corpus E audit's core-package
+# clusters: rpm ships no ldconfig scriptlets by design (the platform
+# maintains the cache via glibc file triggers) and systemd's %post
+# runs ldconfig for its NSS modules under an explicit spec comment,
+# while the smartmontools and tuned files are executables that are
+# config by design. The key is rpmcrab-only; upstream configs carry
+# no such table.
+FILE_GRANTS = [
+    {
+        "package": "rpm",
+        "paths": [
+            "/usr/lib64/librpm.so.10.2.1",
+            "/usr/lib64/librpmio.so.10.2.1",
+            "/usr/lib64/librpmsign.so.10.2.1",
+        ],
+        "findings": [
+            "postin-without-ldconfig",
+            "library-without-ldconfig-postun",
+        ],
+        "reason": "the package ships no ldconfig scriptlets by design; "
+        "the platform maintains the ldconfig cache via glibc file "
+        "triggers, so per-package scriptlets are the pre-trigger "
+        "mechanism",
+    },
+    {
+        "package": "systemd",
+        "paths": [
+            "/usr/lib64/libnss_myhostname.so.2",
+            "/usr/lib64/libnss_systemd.so.2",
+        ],
+        "findings": ["postun-without-ldconfig"],
+        "reason": "%post runs ldconfig, under the spec's comment 'Run "
+        "ldconfig for nss-systemd and nss-myhostname NSS modules'; "
+        "the %postun omission is the package's evidenced design",
+    },
+    {
+        "package": "smartmontools",
+        "paths": ["/etc/smartd_warning.sh"],
+        "findings": ["executable-marked-as-config-file"],
+        "reason": "smartd's warning hook: it must be executable to run "
+        "and is marked %config because admins edit it",
+    },
+    {
+        "package": "tuned",
+        "paths": ["/etc/grub.d/00_tuned"],
+        "findings": ["executable-marked-as-config-file"],
+        "reason": "grub.d scripts are executables by construction "
+        "(grub-mkconfig runs them); the %config marking is deliberate",
+    },
+]
+
 # Findings rpmcrab deliberately killed (see tests/parity/divergences.toml).
 # A Filters/BlockedFilters entry that references *only* one of these findings
 # is pruned — but ONLY when the finding is actually gone from the tree, so the
@@ -2199,6 +2255,48 @@ def append_systemd_preset_packages(text, packages):
     return out + block
 
 
+def append_file_grants(text, grants):
+    """Insert the `[[FileGrants]]` stanzas into a TOML document.
+
+    Used for the per-file grants rpmcrab adds on top of upstream (see
+    FILE_GRANTS): named FilesCheck findings stay quiet for one
+    package's named files, each grant carrying its reason. The stanzas
+    go immediately before the `[FileDigestLocation]` table, alongside
+    the `[[GhostFilesExceptions]]` / `[[SymlinkExceptions]]` lists they
+    sit next to in the vendored file; a document without that table
+    fails loudly rather than stranding the grants inside another
+    table's scope. The monthly sync re-emits them deterministically.
+    """
+    block = "\n"
+    block += "# Per-file grants for FilesCheck findings (not from upstream;\n"
+    block += "# see FILE_GRANTS in scripts/generate-distro-configs.py). Each\n"
+    block += "# grant names the package, the findings that stay quiet for its\n"
+    block += "# files, and the reason the grant exists.\n"
+    for grant in grants:
+        block += "[[FileGrants]]\n"
+        block += "package = %s\n" % json.dumps(grant["package"])
+        block += "paths = [\n"
+        for path in grant["paths"]:
+            block += "    %s,\n" % json.dumps(path)
+        block += "]\n"
+        block += "findings = [\n"
+        for finding in grant["findings"]:
+            block += "    %s,\n" % json.dumps(finding)
+        block += "]\n"
+        block += "reason = %s\n" % json.dumps(grant["reason"])
+        block += "\n"
+    lines = text.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.rstrip("\n") == "[FileDigestLocation]":
+            if i and lines[i - 1] == "\n":
+                block = block[1:]
+            lines.insert(i, block)
+            return "".join(lines)
+    raise AssertionError(
+        "no [FileDigestLocation] table found to anchor FileGrants to"
+    )
+
+
 def remove_excluded_checks(text, checks):
     """Remove check names from the `Checks = [...]` list in a TOML document.
 
@@ -2356,6 +2454,7 @@ def generate(ref_dir=None, pins=None):
                 text = append_systemd_preset_packages(
                     text, SYSTEMD_PRESET_PACKAGES
                 )
+                text = append_file_grants(text, FILE_GRANTS)
                 # Exemptions upstream does not ship (see ADD_FILTERS).
                 text = add_filters(text, added_log)
                 text = append_extra_filters(
@@ -2400,6 +2499,13 @@ def generate(ref_dir=None, pins=None):
     )
     for p in SYSTEMD_PRESET_PACKAGES:
         provenance.append(f"#   SystemdPresetPackages: added {p!r}")
+    provenance.append("#")
+    provenance.append("# FileGrants appended (not from upstream; see FILE_GRANTS):")
+    for g in FILE_GRANTS:
+        provenance.append(
+            f"#   FileGrants: added {g['package']!r} for "
+            f"{', '.join(g['findings'])} ({g['reason']})"
+        )
     provenance.append("#")
     provenance.append("# Excluded Checks (removed from the flavor; see EXCLUDED_CHECKS):")
     for c in EXCLUDED_CHECKS:

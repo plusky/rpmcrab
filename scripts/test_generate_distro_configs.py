@@ -1872,6 +1872,80 @@ def test_append_systemd_preset_packages_appends_at_eof_without_table():
     assert gen.append_systemd_preset_packages('Version = 3', ["a"]) == 'Version = 3\n' + block
 
 
+def test_append_file_grants_before_file_digest_location():
+    """The stanzas land immediately before [FileDigestLocation],
+    alongside the other exception lists. A blank line already before
+    the header separates the block, so the block's own leading blank
+    line is dropped: exactly one blank line remains on each side."""
+    text = (
+        'Version = 3\n'
+        '\n'
+        '[[SymlinkExceptions]]\n'
+        'packages = ["systemd"]\n'
+        'paths = [\n'
+        '    "/usr/lib/sysctl.d/99-sysctl.conf"\n'
+        ']\n'
+        '\n'
+        '[FileDigestLocation]\n'
+    )
+    grants = [
+        {
+            "package": "rpm",
+            "paths": ["/usr/lib64/librpm.so.10.2.1"],
+            "findings": ["postin-without-ldconfig"],
+            "reason": "no ldconfig scriptlets by design",
+        }
+    ]
+    out = gen.append_file_grants(text, grants)
+    assert out == (
+        'Version = 3\n'
+        '\n'
+        '[[SymlinkExceptions]]\n'
+        'packages = ["systemd"]\n'
+        'paths = [\n'
+        '    "/usr/lib/sysctl.d/99-sysctl.conf"\n'
+        ']\n'
+        '\n'
+        '# Per-file grants for FilesCheck findings (not from upstream;\n'
+        '# see FILE_GRANTS in scripts/generate-distro-configs.py). Each\n'
+        '# grant names the package, the findings that stay quiet for its\n'
+        '# files, and the reason the grant exists.\n'
+        '[[FileGrants]]\n'
+        'package = "rpm"\n'
+        'paths = [\n'
+        '    "/usr/lib64/librpm.so.10.2.1",\n'
+        ']\n'
+        'findings = [\n'
+        '    "postin-without-ldconfig",\n'
+        ']\n'
+        'reason = "no ldconfig scriptlets by design"\n'
+        '\n'
+        '[FileDigestLocation]\n'
+    ), out
+
+
+def test_append_file_grants_without_anchor_fails():
+    """A document with no [FileDigestLocation] table fails loudly
+    instead of stranding the grants inside another table's scope."""
+    try:
+        gen.append_file_grants('Version = 3\n', gen.FILE_GRANTS)
+    except AssertionError:
+        return
+    raise AssertionError("missing [FileDigestLocation] anchor did not raise")
+
+
+def test_file_grants_carry_reasons():
+    """Every FILE_GRANTS entry names its package, at least one path
+    and one finding, and a non-empty reason: FilesCheck rejects a
+    grant without a recorded reason, so a reasonless entry here would
+    be dead config."""
+    for grant in gen.FILE_GRANTS:
+        assert grant["package"], grant
+        assert grant["paths"], grant
+        assert grant["findings"], grant
+        assert grant["reason"].strip(), grant
+
+
 
 def test_extra_filters_carry_their_provenance_reasons():
     """Each EXTRA_FILTERS entry pairs its pattern with the
