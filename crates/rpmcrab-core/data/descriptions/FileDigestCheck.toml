@@ -3,7 +3,6 @@ SUFFIX="requires a review and whitelisting by the SUSE security team"
 cron-file-unauthorized="Packaging cron jobs #SUFFIX#. #REVIEW_NEEDED_TEXT#"
 cron-file-digest-mismatch="A cron job file changed in content. Packaging cron jobs #SUFFIX#. #REVIEW_NEEDED_TEXT#"
 cron-file-ghost="This package installs a cron job as a %ghost file. #GHOST_ENCOUNTERED_TEXT#"
-# we allow symlinks for cron jobs, we just add this to satisfy unit tests
 cron-file-symlink="Symlinks are not allowed for cron job files"
 
 # The binary PAM modules are whitelisted without digests so -mismatch should
