@@ -243,6 +243,35 @@ fn alternatives_template_link_draws_no_filelist_findings() {
 }
 
 #[test]
+fn alternatives_named_link_shipped_as_ghost_is_credited() {
+    let mut check = AlternativesCheck::new(&Config::default());
+    let results = run_check(&mut check, "w6-alternatives-named-link-1.0-1.noarch.rpm");
+    // The renamed registrations that ship no name-keyed %ghost keep
+    // firing, charged at the basename-derived path as before: one ships
+    // nothing under /etc/alternatives, the other ships the name-keyed
+    // file as a regular file rather than a %ghost.
+    assert_findings(
+        &results,
+        &[
+            ("alternative-link-missing", "/etc/alternatives/w6gone"),
+            ("alternative-link-missing", "/etc/alternatives/w6plain"),
+        ],
+    );
+    // The renamed master link (libw6named.so.3 registered as
+    // libw6named.so.3_x86_64) and the renamed slave link (W6Slave
+    // registered as w6slave) ship their links as %ghost under the
+    // registered name -- the path update-alternatives actually creates
+    // -- so neither may draw a finding. The name == basename control
+    // (w6std, w6tool) stays silent as before.
+    assert!(
+        !results
+            .iter()
+            .any(|(_, line)| line.contains("w6named") || line.contains("W6Slave")),
+        "name-keyed ghost drew a finding: {results:?}"
+    );
+}
+
+#[test]
 fn menu_xdg_flags_desktopfile_without_binary() {
     let mut check = MenuXDGCheck::new(&Config::default());
     let results = run_check(&mut check, "w6-menu-1.0-1.noarch.rpm");
