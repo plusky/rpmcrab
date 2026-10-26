@@ -123,6 +123,14 @@ Provenance, verified against the pinned reference (`84848c0`):
 - `SourceCheck.toml` — the reference file, minus the
   `multiple-specfiles` entry dropped with the deliberately-removed
   finding (issue #883). Ledgered in `tests/parity/divergences.toml`.
+- `DBusPolicyCheck.toml` — the reference file, with the
+  `dbus-parsing-exception` entry reworded (the port parses the policy
+  natively; no Python exception exists). Ledgered in
+  `tests/parity/divergences.toml`.
+- `ErlangCheck.toml` — the reference file, with the `pybeam-failed`
+  entry reworded (the port reads BEAM files with a native reader; no
+  Python pybeam is invoked) and the `beam-compile-info-missed` entry's
+  grammar fixed. Ledgered in `tests/parity/divergences.toml`.
 - Every other `*.toml` file — byte-identical to the reference
   `rpmlint/descriptions/` file of the same name.
 

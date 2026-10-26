@@ -16,3 +16,17 @@ kind = "behaviour"
 reason = "The port decodes a binary-carried compile-info source path as strict UTF-8 and fails the parse (pybeam-failed) when the bytes are not valid UTF-8; a source carried as an atom is outside this divergence, because the atom tags already determine its decode and a Latin-1-tagged source atom decodes as Latin-1. The reference decodes the binary with errors replaced (helpers.byte_to_string). The failure is early, so the port emits only pybeam-failed for the file: the debug-info and build-dir checks that run after a successful read are skipped, and any beam-compiled-without-debuginfo or beam-was-not-recompiled findings the reference would still emit for the file are lost, not merely reported under a different path. Where the reference lints on with the mangled path it usually stays silent -- the mangled path still carries the expected build-dir prefix -- and it emits W beam-was-not-recompiled only when the mangled prefix no longer matches that build dir. Source paths in current BEAM files are UTF-8, so non-UTF-8 bytes are garbage; decoding them with replacement characters would corrupt the build-dir comparison and the reported path (plusky/rpmcrab#613)."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/613"
+
+[[divergence]]
+case = "global"
+check = "ErlangCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `pybeam-failed` said the Python pybeam library was invoked; the port reads BEAM files with a native reader and the finding fires when a file cannot be parsed (verified in `checks/erlang.rs`). Reworded: the BEAM file could not be parsed, so it could not be checked."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "ErlangCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `beam-compile-info-missed` was ungrammatical (`has missed compile info chunk`). Reworded: your beam file is missing the compile_info chunk."
+since = "0.4.1"
