@@ -98,8 +98,8 @@ UPSTREAM_REPO = "rpm-software-management/rpmlint"
 PINS = {
     # flavor: (sha, date, branch, config_subdir)
     "opensuse": (
-        "513f17e8aad7d0bece1be4e46316dc8e97bd1d65",
-        "2026-10-20",
+        "783e34a56e45a4da412ef4c2328656183e01c5b4",
+        "2026-10-26",
         "opensuse",
     ),
 }
