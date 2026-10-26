@@ -1686,6 +1686,14 @@ reason = "FileGrants exemptions (2026-10-26 corpus E audit): the openSUSE flavou
 since = "0.4.1"
 
 [[divergence]]
+check = "subdir-in-bin"
+kind = "behaviour"
+case = "global"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
+since = "0.4.1"
+reason = "Deliberate false-positive fix: a subdirectory of a bin dir named `<tool>.d` whose namesake `<tool>` is an executable regular file in the same bin dir is that tool's companion directory -- its own modules and helpers installed next to their driver -- and does not draw subdir-in-bin. The reference charges every path below a bin dir (FilesCheck.py _check_file_subdir_in_bin, sub_bin_regex). The shape is decidable from the package's own file list; a `.d` directory without the namesake executable, a namesake that is not an executable regular file (a data file, a symlink), and every non-`.d` subdirectory keep firing. Measured on the Factory corpus (51,589 RPMs): the tag held 47 findings in 4 packages, verified set-identical between the pristine port and the reference; the credited class is liblouis-tools' /usr/bin/lou_maketable.d/* (11 findings, the payload of /usr/bin/lou_maketable). The remaining 36 findings are deliberate upstream layouts with no decidable separator (mailutils-mh's /usr/bin/mu-mh command suite, gamescope-session-steam-generic's steamos-polkit-helpers interface scripts, adaptivecpp's hipSYCL toolchain directory) and keep firing. Pinned by subdir_in_bin_quiet_for_companion_dot_d_dir, subdir_in_bin_fires_for_dot_d_dir_without_namesake, subdir_in_bin_fires_when_namesake_not_executable, subdir_in_bin_fires_when_namesake_is_symlink and subdir_in_bin_still_fires_for_plain_subdir_with_sibling."
+
+[[divergence]]
 case = "global"
 check = "I18NCheck"
 kind = "detail"
