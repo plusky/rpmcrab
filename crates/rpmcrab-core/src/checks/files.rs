@@ -458,13 +458,37 @@ fn subdir_in_bin_is_companion_dir(pkg: &Pkg, bindir: &str, fname: &str) -> bool 
 ///   interpreter whose basename is exactly `false`, which declares
 ///   the file is never executed;
 /// - a template: a basename ending in `.in`, `.sample`, `.tmpl`,
-///   `.tpl`, `.template`, `.skel` or `.j2` — the installed name is
-///   the name an instantiation step rewrites, so the shipped file
-///   is the template's content, not an entry point.
+///   `.tpl`, `.template`, `.skel`, `.j2` or `.ex` — the installed
+///   name is the name an instantiation step rewrites, so the
+///   shipped file is the template's content, not an entry point
+///   (`.ex` is the Debian example-file suffix, dh-make's
+///   maintainer-script templates above all);
+/// - a Python package directory (inside the data and library
+///   trees): a `.py` file with a Python interpreter whose own
+///   directory is a package directory — the package ships an
+///   `__init__.py` in the same directory, the caller-verified
+///   `python_pkg_dir` fact — so the file is a module of an
+///   application-private package tree (kitty's, calibre's and
+///   hplip's module trees), imported by the owning program;
+/// - a sourced-fragment, documentation or CI directory (inside
+///   the data and library trees): an `include` or `common`
+///   component — the fragment libraries a program sources
+///   (lynis's `include/`, the blktests and xfstests `common/`
+///   helpers) — a `doc` or `docs` component (documentation-tree
+///   material, the texlive doc packages' scripts) or a `ci`
+///   component (continuous-integration harness scripts, the
+///   ceph dashboard's `ci/` runners);
+/// - an image tree: a `rootfs` component — the file is payload
+///   of a filesystem image another system boots (warewulf's
+///   node overlays), so its mode is set when the image is
+///   assembled or provisioned, not an installed entry point's
+///   defect. The component counts wherever the image tree is
+///   rooted.
 fn non_executable_script_is_data(
     fname: &str,
     interpreter: &str,
     python_lib_tree_re: &Regex,
+    python_pkg_dir: bool,
 ) -> bool {
     // Script directories hold entry points: no shape exempts a
     // file installed directly in one.
@@ -479,6 +503,9 @@ fn non_executable_script_is_data(
         return true;
     }
     if is_match(python_lib_tree_re, fname) {
+        return true;
+    }
+    if python_pkg_dir {
         return true;
     }
     if fname.starts_with("/usr/share/bash-completion/") {
@@ -514,6 +541,7 @@ fn non_executable_script_is_data(
         ".template",
         ".skel",
         ".j2",
+        ".ex",
     ]
     .iter()
     .any(|suffix| base.ends_with(suffix))
@@ -526,6 +554,12 @@ fn non_executable_script_is_data(
     }
     let dirs = &comps[..comps.len() - 1];
     if dirs.iter().any(|c| matches!(*c, "node_modules" | "gems")) {
+        return true;
+    }
+    // An image tree's payload is another system's files, wherever
+    // the tree is rooted: the mode is set when the image is
+    // assembled, so it counts outside the data trees too.
+    if dirs.contains(&"rootfs") {
         return true;
     }
     // The remaining shapes are bare directory components, whose
@@ -546,6 +580,12 @@ fn non_executable_script_is_data(
             "src" | "test" | "tests" | "selftests" | "example" | "examples" | "sample" | "samples"
         )
     }) {
+        return true;
+    }
+    if dirs
+        .iter()
+        .any(|c| matches!(*c, "include" | "common" | "doc" | "docs" | "ci"))
+    {
         return true;
     }
     if dirs.iter().any(|c| {
@@ -5331,11 +5371,41 @@ impl FilesCheck {
             // cover keep the reference behaviour.
             if !mode_is_exec && !is_doc {
                 if let Some(interpreter) = &fd.interpreter {
+                    // Python package evidence for
+                    // `non_executable_script_is_data`: a `.py` file
+                    // carrying a Python interpreter line, inside the
+                    // data and library trees, whose package ships an
+                    // `__init__.py` in the same directory is a module
+                    // of an application-private package tree, not a
+                    // script executed in place.
+                    let parent = fname.rsplit_once('/').map_or("", |(p, _)| p);
+                    let interp_base = interpreter.rsplit('/').next().unwrap_or("");
+                    let pythonish =
+                        interp_base.starts_with("python")
+                            || (interp_base == "env"
+                                && fd.interpreter_args.split_whitespace().next().is_some_and(
+                                    |arg| {
+                                        arg.rsplit('/').next().unwrap_or("").starts_with("python")
+                                    },
+                                ));
+                    let in_python_pkg_dir = pythonish
+                        && fname.ends_with(".py")
+                        && (fname.starts_with("/usr/src/")
+                            || fname.starts_with("/usr/share/")
+                            || fname.starts_with("/usr/lib/")
+                            || fname.starts_with("/usr/lib64/")
+                            || fname.starts_with("/usr/etc/")
+                            || fname.starts_with("/etc/"))
+                        && pkg
+                            .files
+                            .iter()
+                            .any(|f| f.name == format!("{parent}/__init__.py"));
                     if interpreter.starts_with('/')
                         && !non_executable_script_is_data(
                             fname,
                             interpreter,
                             &self.python_lib_tree_re,
+                            in_python_pkg_dir,
                         )
                         && !script_is_test_data(&pkg.name, fname)
                         && !non_executable_script_is_provable_fragment(
@@ -13796,6 +13866,216 @@ reason = "warning hook: executable and %config by design"
         }
     }
 
+    /// A `.py` file whose directory is a Python package directory
+    /// — the package ships an `__init__.py` in the same directory —
+    /// is a module of an application-private package tree, imported
+    /// by the owning program: a non-executable module there draws
+    /// no `non-executable-script`. The bounds: a `.py` file with no
+    /// package marker, a package tree in an entry-point tree
+    /// (`/usr/libexec/`), and a non-Python file inside a package
+    /// directory all keep firing.
+    #[test]
+    fn non_executable_script_silent_in_python_package_dirs() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/lib64/kitty/kitty/__init__.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/python\n",
+                ),
+                (
+                    "/usr/lib64/kitty/kitty/boss.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/python\n",
+                ),
+                (
+                    "/usr/share/hplip/base/__init__.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/share/hplip/base/device.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/share/myapp/tool.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/libexec/myapp/pkg/__init__.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/python3\n",
+                ),
+                (
+                    "/usr/libexec/myapp/pkg/mod.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/python3\n",
+                ),
+                (
+                    "/usr/share/myapp/pkg/__init__.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/python3\n",
+                ),
+                (
+                    "/usr/share/myapp/pkg/run.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+            ],
+        );
+        let lines = script_finding_lines(&pkg, &config);
+        for path in [
+            "/usr/lib64/kitty/kitty/__init__.py",
+            "/usr/lib64/kitty/kitty/boss.py",
+            "/usr/share/hplip/base/__init__.py",
+            "/usr/share/hplip/base/device.py",
+            "/usr/share/myapp/pkg/__init__.py",
+        ] {
+            assert!(
+                !lines
+                    .iter()
+                    .any(|(n, line)| n == "non-executable-script" && line.contains(path)),
+                "no non-executable-script for package module {path}: {lines:?}"
+            );
+        }
+        for path in [
+            "/usr/share/myapp/tool.py",
+            "/usr/libexec/myapp/pkg/__init__.py",
+            "/usr/libexec/myapp/pkg/mod.py",
+            "/usr/share/myapp/pkg/run.sh",
+        ] {
+            assert!(
+                lines
+                    .iter()
+                    .any(|(n, line)| n == "non-executable-script" && line.contains(path)),
+                "non-executable-script must fire for {path}: {lines:?}"
+            );
+        }
+    }
+
+    /// Sourced-fragment directories (`include`, `common`),
+    /// documentation trees (`doc`), CI harness directories (`ci`),
+    /// image payload under a `rootfs` component and `.ex` example
+    /// templates are content the owning program sources, reads or
+    /// assembles elsewhere: non-executable files there draw no
+    /// `non-executable-script`. The bounds: the same components in
+    /// an entry-point tree or outside the data trees, and a
+    /// `rootfs` basename rather than a directory component, all
+    /// keep firing.
+    #[test]
+    fn non_executable_script_silent_for_fragment_doc_and_image_trees() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/lynis/include/functions",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/sh\n",
+                ),
+                (
+                    "/usr/lib/blktests/common/rc",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/texmf/doc/latex/foo/build.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/ceph/mgr/dashboard/ci/run.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/var/lib/warewulf/overlays/ignition/rootfs/warewulf/wwinit.d/10-ignition.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/sh\n",
+                ),
+                (
+                    "/usr/share/debhelper/dh_make/debian/postinst.ex",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/sh\n",
+                ),
+                (
+                    "/usr/libexec/myapp/common/helper.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/myapp/scripts/build.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/myapp/rootfs.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/opt/myapp/doc/build.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+            ],
+        );
+        let lines = script_finding_lines(&pkg, &config);
+        for path in [
+            "/usr/share/lynis/include/functions",
+            "/usr/lib/blktests/common/rc",
+            "/usr/share/texmf/doc/latex/foo/build.sh",
+            "/usr/share/ceph/mgr/dashboard/ci/run.sh",
+            "/var/lib/warewulf/overlays/ignition/rootfs/warewulf/wwinit.d/10-ignition.sh",
+            "/usr/share/debhelper/dh_make/debian/postinst.ex",
+        ] {
+            assert!(
+                !lines
+                    .iter()
+                    .any(|(n, line)| n == "non-executable-script" && line.contains(path)),
+                "no non-executable-script for data shape {path}: {lines:?}"
+            );
+        }
+        for path in [
+            "/usr/libexec/myapp/common/helper.sh",
+            "/usr/share/myapp/scripts/build.sh",
+            "/usr/share/myapp/rootfs.sh",
+            "/opt/myapp/doc/build.sh",
+        ] {
+            assert!(
+                lines
+                    .iter()
+                    .any(|(n, line)| n == "non-executable-script" && line.contains(path)),
+                "non-executable-script must fire for {path}: {lines:?}"
+            );
+        }
+    }
+
     /// The gate covers the one emission only: an executable file
     /// inside a source tree still draws the interpreter findings, so
     /// `env-script-interpreter` keeps parity there (issue #845).
@@ -13986,7 +14266,7 @@ reason = "warning hook: executable and %config by design"
                     b"#!/usr/bin/env python3\n",
                 ),
                 (
-                    "/usr/lib/blktests/common/fio",
+                    "/usr/lib/blktests/fio",
                     0o100644,
                     "Bourne-Again shell script, ASCII text executable",
                     b"#!/bin/bash\n",
@@ -14021,7 +14301,7 @@ reason = "warning hook: executable and %config by design"
         let lines = script_finding_lines(&pkg, &config);
         for (tag, path) in [
             ("env-script-interpreter", "/usr/bin/runfabtests.py"),
-            ("non-executable-script", "/usr/lib/blktests/common/fio"),
+            ("non-executable-script", "/usr/lib/blktests/fio"),
             ("non-executable-script", "/usr/share/perftest/run.sh"),
             ("env-script-interpreter", "/usr/libexec/myapp/tests/run.py"),
             ("non-executable-script", "/usr/share/myapp/test-runner.sh"),
