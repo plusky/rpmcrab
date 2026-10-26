@@ -189,6 +189,9 @@ against. This may indicate a stripped archive.
 """
 binary-or-shlib-calls-gethostbyname="""
 The binary calls gethostbyname. Please port the code to use getaddrinfo.
+The finding is an error when the calling file is setuid/setgid or carries
+file capabilities, or when its package ships systemd service or socket
+units.
 """
 binary-or-shlib-calls-md5="""
 The binary calls the low-level MD5 functions (MD5, MD5_Init,
