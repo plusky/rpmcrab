@@ -223,6 +223,14 @@ upstream = "https://github.com/rpm-software-management/rpmlint/issues/598"
 
 [[divergence]]
 case = "global"
+check = "shared-library-without-dependency-information"
+kind = "behaviour"
+reason = "Extension of the #359 plugin-like scope: a shared object whose DT_SONAME is exactly its own file name with no version component (`certmgr_script.so`, `VMMR0.r0`) is a module built to be loaded by path -- application plugins, interpreter extension modules, hypervisor payloads -- whose build stamps the module's own name as its SONAME; it resolves its undefined symbols against the host process, so an empty DT_NEEDED states nothing. Measured over the Factory corpus (51,589 RPMs): the restored check fired 53 times; 50 are this shape and no package in the corpus records a DT_NEEDED on any of those names, while the only two corpus DT_NEEDED consumers of a firing SONAME are genuine versioned library names (`libfrrfpm_pb.so.0`, `libmlag_pb.so.0`, linked by the frr package) -- those keep firing, as does a versioned SONAME carried by a longer file name and a versioned SONAME equal to the file name. Corpus 53 -> 3."
+since = "0.4.1"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/598"
+
+[[divergence]]
+case = "global"
 check = "BinariesCheck"
 kind = "detail"
 reason = "Port-only `--explain` description for `ar-failed`: the reference emits the finding but ships no description. The port describes it so `--explain` never prints \"Unknown message\"."

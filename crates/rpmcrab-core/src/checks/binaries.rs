@@ -816,10 +816,39 @@ impl ReadelfInfo {
     /// A shared object for which an empty DT_NEEDED is legitimate, not
     /// "missing dependency information": a dlopen-only plugin (no
     /// DT_SONAME, so never DT_NEEDED-linked), a fully self-contained
-    /// object (no non-weak undefined symbols), or an executable-entry
-    /// shim (defines `main`).
-    fn is_plugin_like(&self) -> bool {
-        self.soname.is_none() || !self.has_nonweak_undefined || self.defines_main
+    /// object (no non-weak undefined symbols), an executable-entry
+    /// shim (defines `main`), or a module whose build stamped its own
+    /// file name as its DT_SONAME (see `soname_is_own_module_name`).
+    fn is_plugin_like(&self, file_name: &str) -> bool {
+        self.soname.is_none()
+            || !self.has_nonweak_undefined
+            || self.defines_main
+            || self.soname_is_own_module_name(file_name)
+    }
+
+    /// The object's DT_SONAME is exactly its own file name and carries
+    /// no version component: the shape of a module built to be loaded
+    /// by path -- application plugins (slurm, apache, collectd),
+    /// interpreter extension modules, VirtualBox ring-0 payloads --
+    /// whose build stamps the module's own name as its SONAME. Such
+    /// an object is never DT_NEEDED-linked under that name (verified
+    /// over the Factory corpus: no package records a DT_NEEDED on any
+    /// of these names) and resolves its undefined symbols against the
+    /// host process, so an empty DT_NEEDED states nothing. A versioned
+    /// SONAME (`lib....so.<N>`) is a library ABI name instead: it
+    /// stays checked even when it equals the file name, and so does a
+    /// versioned SONAME carried by a longer file name (the genuine
+    /// `libfrrfpm_pb.so.0` in `libfrrfpm_pb.so.0.0.0` shape, which
+    /// other packages do DT_NEEDED-link).
+    fn soname_is_own_module_name(&self, file_name: &str) -> bool {
+        let Some(soname) = self.soname.as_deref() else {
+            return false;
+        };
+        let base = Path::new(file_name)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(file_name);
+        soname == base && !soname_has_version_component(soname)
     }
 }
 
@@ -840,6 +869,22 @@ fn is_rust_symbol(name: &str) -> bool {
     // may carry one, and the base name is what identifies the runtime.
     let base = name.split('@').next().unwrap_or(name);
     base == "rust_begin_unwind" || base == "rust_eh_personality" || base.starts_with("__rust_")
+}
+
+/// Whether a DT_SONAME carries a library ABI version component: a
+/// `.so.` immediately followed by a digit (`libfoo.so.0`). An
+/// unversioned module name (`mod_foo.so`, `plugin.so`, `VMMR0.r0`)
+/// has none.
+fn soname_has_version_component(soname: &str) -> bool {
+    let mut rest = soname;
+    while let Some(idx) = rest.find(".so.") {
+        let after = &rest[idx + 4..];
+        if after.as_bytes().first().is_some_and(|c| c.is_ascii_digit()) {
+            return true;
+        }
+        rest = after;
+    }
+    false
 }
 
 /// The base name of a symbol: the name with any `@VERSION` suffix
@@ -3908,7 +3953,7 @@ impl BinariesCheck {
                     "statically-linked-binary",
                     &[&pkgfile.name],
                 );
-            } else if !info.is_go_binary() && !info.is_plugin_like() {
+            } else if !info.is_go_binary() && !info.is_plugin_like(&pkgfile.name) {
                 // Go binaries are ET_DYN with no DT_NEEDED, and plugin-like
                 // objects legitimately carry none; only genuine shared
                 // objects are missing dependency information here.
@@ -4843,12 +4888,32 @@ mod tests {
         soname: Option<&str>,
         dynsyms: &[(&str, u8, u8, u16)],
     ) -> Vec<(String, String)> {
+        shlib_libdep_results_named(
+            id,
+            go_note,
+            needed,
+            is_shobj,
+            soname,
+            dynsyms,
+            "/usr/lib64/libnodep.so.1",
+        )
+    }
+
+    fn shlib_libdep_results_named(
+        id: &str,
+        go_note: bool,
+        needed: Option<&str>,
+        is_shobj: bool,
+        soname: Option<&str>,
+        dynsyms: &[(&str, u8, u8, u16)],
+        file_name: &str,
+    ) -> Vec<(String, String)> {
         let config = test_config();
         let mut check = BinariesCheck::with_tool_dir(&config, None);
         check.is_shobj = is_shobj;
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
         let pkgfile = PkgFile {
-            name: "/usr/lib64/libnodep.so.1".to_string(),
+            name: file_name.to_string(),
             ..Default::default()
         };
         let bytes = craft_shlib_elf(go_note, needed, soname, dynsyms);
@@ -5014,6 +5079,135 @@ mod tests {
         );
         assert_lacks(&results, "shared-library-without-dependency-information");
         assert!(results.is_empty(), "main shim must be quiet: {results:?}");
+    }
+
+    #[test]
+    fn shlib_without_dependency_information_skips_own_name_module() {
+        // Module shape: the build stamped the module's own file name
+        // as its DT_SONAME (the slurm/apache plugin shape). The real
+        // non-weak undefined import rules out the self-contained
+        // disjunct and the present SONAME rules out the dlopen-only
+        // one -- only the own-name disjunct can silence this fixture,
+        // so dropping it must fail this test.
+        let results = shlib_libdep_results_named(
+            "ownname",
+            false,
+            None,
+            true,
+            Some("certmgr_script.so"),
+            &[(
+                "external_func",
+                goblin::elf::sym::STB_GLOBAL,
+                goblin::elf::sym::STT_FUNC,
+                0,
+            )],
+            "/usr/lib64/slurm/certmgr_script.so",
+        );
+        assert_lacks(&results, "shared-library-without-dependency-information");
+        assert!(
+            results.is_empty(),
+            "own-name module must be quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn shlib_without_dependency_information_skips_own_name_non_so_module() {
+        // The own-name shape is not tied to a `.so` name: a VirtualBox
+        // ring-0 payload carries its own `.r0` file name as SONAME.
+        let results = shlib_libdep_results_named(
+            "ownnamer0",
+            false,
+            None,
+            true,
+            Some("VMMR0.r0"),
+            &[(
+                "external_func",
+                goblin::elf::sym::STB_GLOBAL,
+                goblin::elf::sym::STT_FUNC,
+                0,
+            )],
+            "/usr/lib/virtualbox/VMMR0.r0",
+        );
+        assert_lacks(&results, "shared-library-without-dependency-information");
+        assert!(
+            results.is_empty(),
+            "own-name .r0 module must be quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn shlib_without_dependency_information_fires_versioned_own_name() {
+        // Near miss: the SONAME equals the file name but carries an
+        // ABI version component -- a genuine linkable library whose
+        // name other packages record DT_NEEDED against, still
+        // checked. Dropping the version condition in the own-name
+        // disjunct must fail this test.
+        let results = shlib_libdep_results_named(
+            "versionedname",
+            false,
+            None,
+            true,
+            Some("libfoo.so.1"),
+            &[(
+                "external_func",
+                goblin::elf::sym::STB_GLOBAL,
+                goblin::elf::sym::STT_FUNC,
+                0,
+            )],
+            "/usr/lib64/libfoo.so.1",
+        );
+        let lines = lines_for(&results, "shared-library-without-dependency-information");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+    }
+
+    #[test]
+    fn shlib_without_dependency_information_fires_versioned_shorter_soname() {
+        // Near miss, the genuine-library shape measured in the corpus
+        // (libfrrfpm_pb): a versioned SONAME carried by a file with a
+        // longer full-version name. The own-name credit must not
+        // reach it.
+        let results = shlib_libdep_results_named(
+            "versionedshort",
+            false,
+            None,
+            true,
+            Some("libfrrfpm_pb.so.0"),
+            &[(
+                "external_func",
+                goblin::elf::sym::STB_GLOBAL,
+                goblin::elf::sym::STT_FUNC,
+                0,
+            )],
+            "/usr/lib64/libfrrfpm_pb.so.0.0.0",
+        );
+        let lines = lines_for(&results, "shared-library-without-dependency-information");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+    }
+
+    #[test]
+    fn shlib_without_dependency_information_fires_foreign_unversioned_soname() {
+        // Near miss: an unversioned SONAME that is NOT the object's
+        // own file name. The credit is the own-name shape, not the
+        // mere absence of a version component.
+        let results = shlib_libdep_results_named(
+            "foreignname",
+            false,
+            None,
+            true,
+            Some("other.so"),
+            &[(
+                "external_func",
+                goblin::elf::sym::STB_GLOBAL,
+                goblin::elf::sym::STT_FUNC,
+                0,
+            )],
+            "/usr/lib64/plugins/thing.so",
+        );
+        let lines = lines_for(&results, "shared-library-without-dependency-information");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
     }
 
     #[test]
