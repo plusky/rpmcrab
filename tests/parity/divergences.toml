@@ -1517,6 +1517,13 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 
 [[divergence]]
 case = "global"
+check = "FilesCheck"
+kind = "detail"
+reason = "Staged `--explain` texts for `executable-crontab-file` and `non-owner-writeable-only-crontab-file` were ungrammatical (`writeable by other users as its owner`, `refused by newer version of cron and insecure`, no final period), and `zero-perms-ghost` read `ensure that are correct`. Reworded: the crontab file has the executable bit set / is writable by users other than its owner, which is refused by newer versions of cron (and is insecure); ensure they are correct."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
