@@ -110,6 +110,17 @@ impl AlternativesCheck {
         (install, slaves)
     }
 
+    /// Whether an extracted alternative link still carries a shell
+    /// variable reference (`$i`, `${lib}`, `$bin`): the `--install` /
+    /// `--slave` line sits inside a shell loop, so the link is a
+    /// template, not a literal path -- no shipped file can carry that
+    /// name. The file-list validation below looks links up in the
+    /// package's file list literally, so it cannot judge a template;
+    /// the phase checks keep using the install set unchanged.
+    fn link_is_template(link: &str) -> bool {
+        link.contains('$')
+    }
+
     /// Validate the `%post` phase. Returns the install binaries found.
     fn check_post_phase(lines: &[String]) -> Result<Vec<(String, String)>, &'static str> {
         if lines.is_empty() {
@@ -536,12 +547,17 @@ impl Check for AlternativesCheck {
         Self::check_postun(pkg, &postun, &install, out);
 
         // File list validation: the reference walks slaves before installs.
+        // Template links (shell loops) name no literal path, so the
+        // literal file-list lookups skip them; their concrete expansions
+        // are the package's own shipped files, judged when a literal
+        // --install line names them.
         let (_, slaves) = Self::find_binaries(&post_lines);
         let file_names: Vec<&str> = pkg.files.iter().map(|f| f.name.as_str()).collect();
         for binary in slaves
             .iter()
             .map(String::as_str)
             .chain(install.iter().map(|(l, _)| l.as_str()))
+            .filter(|link| !Self::link_is_template(link))
         {
             let etc_alt = format!(
                 "/etc/alternatives/{}",
@@ -612,6 +628,34 @@ mod tests {
         let (install, slaves) = AlternativesCheck::find_binaries(&lines);
         assert_eq!(install.len(), 1);
         assert_eq!(slaves, vec!["/usr/bin/bar".to_string()]);
+    }
+
+    #[test]
+    fn template_link_is_detected() {
+        // Loop-carried spellings seen in the corpus: db48-utils ($i),
+        // compatlibopenblas (${lib}), python-ctranslate2 ($bin).
+        assert!(AlternativesCheck::link_is_template("/usr/bin/db_$i"));
+        assert!(AlternativesCheck::link_is_template("/usr/lib64/${lib}"));
+        assert!(AlternativesCheck::link_is_template("/usr/bin/$bin"));
+        assert!(!AlternativesCheck::link_is_template("/usr/bin/foo"));
+        assert!(!AlternativesCheck::link_is_template(
+            "/usr/share/man/man1/foo.1.gz"
+        ));
+    }
+
+    #[test]
+    fn template_install_line_extracts_template_link() {
+        // The extraction itself is unchanged (the phase checks judge the
+        // install set as before); only the file-list lookups skip it.
+        let lines = vec![
+            "update-alternatives --install /usr/bin/$bin $bin /usr/bin/$bin-3.13 1313".to_string(),
+        ];
+        let (install, slaves) = AlternativesCheck::find_binaries(&lines);
+        assert_eq!(
+            install,
+            vec![("/usr/bin/$bin".to_string(), "$bin".to_string())]
+        );
+        assert!(slaves.is_empty());
     }
 
     #[test]

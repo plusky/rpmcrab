@@ -85,6 +85,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "AlternativesCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge: the file-list validation skips an extracted alternative link that still contains a shell variable reference ($i, ${lib}, $bin). Such a link comes from an --install/--slave line inside a shell loop and is a template, not a literal path: no shipped file can carry that name, so the reference's literal lookup always reports alternative-generic-name-missing (and alternative-link-missing for the derived /etc/alternatives/<basename>) for a path that is never registered. Factory corpus (2026-10-26): exactly 6 such links among 1,945 extracted install/slave links -- db48-utils (/usr/bin/db_$i), compatlibopenblas_openmp0/pthreads0/serial0 (/usr/lib64/${lib}) and python313/314-ctranslate2 (/usr/bin/$bin) -- and every concrete expansion of those loops ships its /etc/alternatives ghost and its generic symlink. The install set is unchanged, so the %post/%postun phase findings judge the template entries exactly as the reference does; only the file-list lookups, which need a literal path, skip them. A literal link whose generic name is not shipped keeps firing both findings. Pinned by template_link_is_detected and template_install_line_extracts_template_link in alternatives.rs and alternatives_template_link_draws_no_filelist_findings in wave6_entry.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "AppDataCheck"
 kind = "behaviour"
 reason = "Also scans /usr/share/metainfo/; the reference (AppDataCheck.py) only matches /usr/share/appdata/, but metainfo/ is the current AppStream location, so files there would otherwise never be validated."

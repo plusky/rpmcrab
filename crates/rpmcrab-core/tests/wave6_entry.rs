@@ -220,6 +220,29 @@ fn alternatives_flags_missing_prereqs_and_links() {
 }
 
 #[test]
+fn alternatives_template_link_draws_no_filelist_findings() {
+    let mut check = AlternativesCheck::new(&Config::default());
+    let results = run_check(&mut check, "w6-alternatives-template-1.0-1.noarch.rpm");
+    // The literal registration whose generic name is not shipped keeps
+    // firing both file-list findings.
+    assert_findings(
+        &results,
+        &[
+            ("alternative-link-missing", "/etc/alternatives/w6literal"),
+            ("alternative-generic-name-missing", "/usr/bin/w6literal"),
+        ],
+    );
+    // The loop registration's extracted link is a template
+    // (/usr/bin/w6tpl_$i): it names no literal path, so neither the
+    // generic-name lookup nor the derived /etc/alternatives lookup may
+    // fire for it. Its concrete expansions ship their files.
+    assert!(
+        !results.iter().any(|(_, line)| line.contains("w6tpl_$")),
+        "template link drew a file-list finding: {results:?}"
+    );
+}
+
+#[test]
 fn menu_xdg_flags_desktopfile_without_binary() {
     let mut check = MenuXDGCheck::new(&Config::default());
     let results = run_check(&mut check, "w6-menu-1.0-1.noarch.rpm");
