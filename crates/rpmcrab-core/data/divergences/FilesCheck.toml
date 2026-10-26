@@ -666,6 +666,13 @@ check = "FilesCheck"
 kind = "detail"
 reason = "Staged `--explain` texts for `executable-crontab-file` and `non-owner-writeable-only-crontab-file` were ungrammatical (`writeable by other users as its owner`, `refused by newer version of cron and insecure`, no final period), and `zero-perms-ghost` read `ensure that are correct`. Reworded: the crontab file has the executable bit set / is writable by users other than its owner, which is refused by newer versions of cron (and is insecure); ensure they are correct."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "rpath-in-buildconfig"
+kind = "behaviour"
+reason = "The reference pattern `(?:-rpath|Wl,-R)\b` also matches two shapes that are not rpath directives: `-rpath-link` (the link editor's link-time search path for secondary dependencies, never recorded in the linked output; mozilla-nss's nss-config and nss-util-config ship only this form) and `-rpath` as the tail of a `--<word>-rpath` configure-option token (php-config's recorded configure command line contains '--disable-rpath'). rpmcrab excludes both by token shape: the `-rpath` arm must start a token (not preceded by a word character or a hyphen) and must not continue as `-link`. Measured on the Factory buildconfig candidate set (3,002 packages shipping a .pc or *-config file): 33 findings -> 30; the removed set is exactly the two nss files and php-config."
+since = "0.4.1"
 [[divergence]]
 case = "global"
 check = "env-script-interpreter"

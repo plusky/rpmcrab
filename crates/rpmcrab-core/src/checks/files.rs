@@ -300,7 +300,20 @@ fn buildconfigfile_regex() -> &'static Regex {
 
 static BUILDCONFIG_RPATH_REGEX: OnceLock<Regex> = OnceLock::new();
 fn buildconfig_rpath_regex() -> &'static Regex {
-    BUILDCONFIG_RPATH_REGEX.get_or_init(|| Regex::new(r"(?:-rpath|Wl,-R)\b").expect("static regex"))
+    // The reference pattern is `(?:-rpath|Wl,-R)\b`. Two match shapes are
+    // not an rpath directive at all and are excluded by token shape:
+    //  - `-rpath-link` (e.g. `-Wl,-rpath-link,<dir>`): the link editor's
+    //    search path for secondary dependencies at link time. It is never
+    //    recorded in the linked output, so no rpath is introduced into
+    //    dependent packages (mozilla-nss's nss-config ships only this).
+    //  - `-rpath` as the tail of a `--<word>-rpath` configure-option token
+    //    (e.g. `'--disable-rpath'` in php-config's recorded configure
+    //    command line): part of a longer word, not a standalone flag. The
+    //    `-rpath` arm must start a token: it must not be preceded by a word
+    //    character or a hyphen, and must not continue as `-link`.
+    BUILDCONFIG_RPATH_REGEX.get_or_init(|| {
+        Regex::new(r"(?:(?<![\w-])-rpath(?!-link\b)\b|Wl,-R\b)").expect("static regex")
+    })
 }
 
 static SOFILE_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -10562,6 +10575,162 @@ mod tests {
                 "level: {line}"
             );
         }
+    }
+
+    /// Build a package whose files have real on-disk content, so the
+    /// buildconfig peek and grep run for real: reads resolve against the
+    /// extraction dir (peek via PkgFile.path, grep via dir_name), so the
+    /// payload is materialized there (mirrors spurious_exec_pkg).
+    fn buildconfig_pkg(dir: &tempfile::TempDir, files: &[(&str, u32, &str)]) -> Pkg {
+        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
+        let mut pkg =
+            Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        pkg.name = "buildconfig-test".to_string();
+        let base = pkg.dir_name().to_path_buf();
+        pkg.files = files
+            .iter()
+            .enumerate()
+            .map(|(i, (name, mode, content))| {
+                let path = base.join(name.trim_start_matches('/'));
+                std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+                std::fs::write(&path, content).expect("write temp file");
+                PkgFile {
+                    path: path.to_string_lossy().into_owned(),
+                    ..mkfile(name, *mode, 200 + i as u32)
+                }
+            })
+            .collect();
+        pkg
+    }
+
+    fn rpath_findings(results: &[(String, String)]) -> Vec<&(String, String)> {
+        results
+            .iter()
+            .filter(|(n, _)| n == "rpath-in-buildconfig")
+            .collect()
+    }
+
+    #[test]
+    fn rpath_in_buildconfig_fires_on_emitted_rpath_forms() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = buildconfig_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/lib64/pkgconfig/wl.pc",
+                    0o100644,
+                    "Libs: -L${libdir} -Wl,-rpath,${libdir} -lfoo\n",
+                ),
+                (
+                    "/usr/bin/plain-config",
+                    0o100755,
+                    "APR_LIB_TARGET=\"-rpath $(libdir) $(OBJECTS)\"\n",
+                ),
+                (
+                    "/usr/lib64/pkgconfig/cap-r.pc",
+                    0o100644,
+                    "Libs: -Wl,-R/usr/lib64/foo -lfoo\n",
+                ),
+                (
+                    "/usr/lib64/pkgconfig/joined.pc",
+                    0o100644,
+                    "Libs: -rpath=/usr/lib64 -lfoo\n",
+                ),
+            ],
+        );
+        let results = run_check_binary(&pkg);
+        let hits = rpath_findings(&results);
+        assert_eq!(hits.len(), 4, "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn rpath_in_buildconfig_ignores_rpath_link() {
+        // -rpath-link is the link editor's link-time search path for
+        // secondary dependencies; it is never recorded in the output, so
+        // no rpath is introduced into dependent packages.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = buildconfig_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/bin/linkonly-config",
+                    0o100755,
+                    "libdirs=\"-Wl,-rpath-link,$libdir -L$libdir\"\n",
+                ),
+                (
+                    "/usr/lib64/pkgconfig/linkonly.pc",
+                    0o100644,
+                    "Libs: -rpath-link /usr/lib64 -lfoo\n",
+                ),
+            ],
+        );
+        let results = run_check_binary(&pkg);
+        assert!(
+            rpath_findings(&results).is_empty(),
+            "false positive on -rpath-link: {results:?}"
+        );
+    }
+
+    #[test]
+    fn rpath_in_buildconfig_ignores_configure_option_tokens() {
+        // '--disable-rpath' / '--enable-rpath' in a recorded configure
+        // command line are option names, not linker flags.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = buildconfig_pkg(
+            &dir,
+            &[(
+                "/usr/bin/opts-config",
+                0o100755,
+                "configure_options=\" '--prefix=/usr' '--disable-rpath' '--enable-rpath'\"\n",
+            )],
+        );
+        let results = run_check_binary(&pkg);
+        assert!(
+            rpath_findings(&results).is_empty(),
+            "false positive on configure-option tokens: {results:?}"
+        );
+    }
+
+    #[test]
+    fn rpath_in_buildconfig_reports_first_qualifying_line() {
+        // Non-qualifying matches do not stop the scan: the reported line
+        // is the first line carrying an actual rpath directive.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = buildconfig_pkg(
+            &dir,
+            &[(
+                "/usr/bin/mixed-config",
+                0o100755,
+                "libdirs=\"-Wl,-rpath-link,$libdir\"\n# built with --disable-rpath\nlibs=\"-Wl,-rpath,/usr/lib64\"\n",
+            )],
+        );
+        let results = run_check_binary(&pkg);
+        let hits = rpath_findings(&results);
+        assert_eq!(hits.len(), 1, "unexpected: {results:?}");
+        assert!(
+            hits[0].1.contains("lines 3"),
+            "first qualifying line: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn rpath_in_buildconfig_glued_token_stays_quiet() {
+        // Parity boundary kept: '-rpath' glued to a following word
+        // character is not a flag token under either pattern.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = buildconfig_pkg(
+            &dir,
+            &[(
+                "/usr/lib64/pkgconfig/glued.pc",
+                0o100644,
+                "Libs: -rpathfoo -lfoo\n",
+            )],
+        );
+        let results = run_check_binary(&pkg);
+        assert!(
+            rpath_findings(&results).is_empty(),
+            "unexpected firing on glued token: {results:?}"
+        );
     }
 
     #[test]
