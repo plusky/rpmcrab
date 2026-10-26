@@ -13,6 +13,9 @@
 #   Checks: added 'XinetdDepCheck' (deliberate rpmcrab divergence, ledgered in tests/parity/divergences.toml)
 #   Checks: added 'PAMModulesCheck' (deliberate rpmcrab divergence, ledgered in tests/parity/divergences.toml)
 #
+# Extra AtomicAllowedDirs entries appended (not from upstream; see EXTRA_ATOMIC_ALLOWED_DIRS):
+#   AtomicAllowedDirs: added '/srv/www/' (whitelist with a known regression: the distro mandates /srv/www as the web root (apache_serverroot) while the atomic packaging guideline forbids applications outside the root subvolume, and no packaged web app complies -- genuine violations under /srv/www go unflagged while this stands; tightened when openSUSE settles web-app packaging under the atomic rules; ledgered in tests/parity/divergences.toml)
+#
 # SystemdPresetPackages appended (not from upstream; see SYSTEMD_PRESET_PACKAGES):
 #   SystemdPresetPackages: added 'systemd'
 #   SystemdPresetPackages: added 'systemd-mini'
