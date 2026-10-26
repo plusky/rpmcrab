@@ -2789,6 +2789,95 @@ fn report_forbidden_functions(
     }
 }
 
+/// The embedded table of known native-layout data formats
+/// (`data/arch-format-magics.toml`): on-disk structures whose byte
+/// layout depends on the word size of the machine that wrote them.
+/// Baked in like the defect-pattern registry so an installed binary
+/// needs no data dir next to it; the table's as-of date and the
+/// evidence for each entry are recorded in the file itself.
+const ARCH_FORMAT_MAGICS_TOML: &str = include_str!("../../data/arch-format-magics.toml");
+
+/// The parsed magic prefixes, parsed once (the
+/// `defect_pattern::registry` pattern).
+fn arch_format_magics() -> &'static [Vec<u8>] {
+    static MAGICS: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+    MAGICS.get_or_init(|| parse_arch_format_magics(ARCH_FORMAT_MAGICS_TOML))
+}
+
+/// Parse and validate the magic table. Validation takes the
+/// staged-data posture (the registry's): a malformed table panics at
+/// startup instead of silently disabling the exemption.
+fn parse_arch_format_magics(raw: &str) -> Vec<Vec<u8>> {
+    let table: toml::Table = raw.parse().expect("arch-format magics are valid TOML");
+    assert!(
+        table.get("as_of").and_then(toml::Value::as_str).is_some(),
+        "arch-format magics record an as_of date"
+    );
+    let records = table
+        .get("format")
+        .and_then(toml::Value::as_array)
+        .expect("arch-format magics have a [[format]] array");
+    assert!(!records.is_empty(), "arch-format magics are not empty");
+    records
+        .iter()
+        .map(|record| {
+            let hex = record
+                .get("magic")
+                .and_then(toml::Value::as_str)
+                .expect("arch-format magic entry has a magic string");
+            assert!(
+                !hex.is_empty() && hex.len() % 2 == 0,
+                "arch-format magic is whole bytes: {hex:?}"
+            );
+            (0..hex.len())
+                .step_by(2)
+                .map(|i| {
+                    u8::from_str_radix(&hex[i..i + 2], 16)
+                        .unwrap_or_else(|_| panic!("arch-format magic is hex: {hex:?}"))
+                })
+                .collect::<Vec<u8>>()
+        })
+        .collect()
+}
+
+/// Whether any payload file of `pkg` is data in a known native-layout
+/// format (see `data/arch-format-magics.toml`). Such a file is bound
+/// to the architecture class of the machine that wrote it, so its
+/// presence is positive evidence that the package's arch marking is
+/// deliberate rather than a forgotten `noarch` -- the case
+/// `check_no_binary` exists to catch. Only regular files with an
+/// on-disk payload count: a ghost entry has no bytes to read, and a
+/// symlink's bytes name its target rather than carrying data.
+fn pkg_has_arch_format_data(pkg: &Pkg) -> bool {
+    use std::io::Read;
+    let magics = arch_format_magics();
+    let width = magics.iter().map(Vec::len).max().unwrap_or(0);
+    pkg.files.iter().any(|pkgfile| {
+        if pkgfile.is_ghost()
+            || !crate::pkg::pkgfile::is_reg(pkgfile.mode)
+            || crate::pkg::pkgfile::is_symlink(pkgfile.mode)
+        {
+            return false;
+        }
+        let Ok(mut fh) = std::fs::File::open(&pkgfile.path) else {
+            return false;
+        };
+        let mut head = vec![0u8; width];
+        let mut filled = 0;
+        while filled < width {
+            match fh.read(&mut head[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(_) => return false,
+            }
+        }
+        head.truncate(filled);
+        magics
+            .iter()
+            .any(|magic| head.len() >= magic.len() && &head[..magic.len()] == magic.as_slice())
+    })
+}
+
 impl BinariesCheck {
     pub fn new(config: &Config) -> Self {
         Self::with_tool_source(config, ToolSource::Path)
@@ -3029,10 +3118,15 @@ impl BinariesCheck {
         // shape with no binaries is the expected shape, not a defect.
         // The suffix test matches the debug-companion recognition
         // FilesCheck and FilelistCheck use (plusky/rpmcrab#948).
+        // Payload in a known native-layout data format (an X11
+        // compose cache, a GDBM database) is bound to the build
+        // architecture, so a package shipping it is arch-specific by
+        // design even without binaries (boo#1110020).
         if !has_binary
             && !has_file_in_libdir
             && pkg.arch != "noarch"
             && !pkg.name.ends_with("-debugsource")
+            && !pkg_has_arch_format_data(pkg)
         {
             add_info(out, Level::Warning, pkg, "no-binary", &[]);
         }
@@ -8624,6 +8718,146 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(
             lines.is_empty(),
             "no-binary must stay quiet for libdir content: {results:?}"
+        );
+    }
+
+    #[test]
+    fn arch_format_magics_table_is_well_formed() {
+        // The embedded table parses (staged-data validation) and
+        // carries the two evidenced formats.
+        let magics = arch_format_magics();
+        assert!(magics.contains(&b"XimC".to_vec()), "{magics:?}");
+        assert!(magics.contains(&vec![0xcf, 0x9a, 0x57, 0x13]), "{magics:?}");
+        assert!(magics.contains(&vec![0x13, 0x57, 0x9a, 0xcf]), "{magics:?}");
+        assert!(magics.contains(&vec![0xce, 0x9a, 0x57, 0x13]), "{magics:?}");
+        assert!(magics.contains(&vec![0x13, 0x57, 0x9a, 0xce]), "{magics:?}");
+    }
+
+    #[test]
+    fn no_binary_quiet_for_ximc_payload() {
+        // xorg-x11-libX11-ccache shape (boo#1110020): the payload is
+        // X11 compose caches -- data in libX11's native-word layout,
+        // bound to the architecture that generated it.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let cache = dir.path().join("l4_030_deadbeef");
+        let mut bytes = b"XimC".to_vec();
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 64]);
+        std::fs::write(&cache, &bytes).expect("write cache");
+        let config = test_config();
+        let mut cache_file = syn_file("/var/cache/libx11/compose/l4_030_deadbeef", "data");
+        cache_file.path = cache.to_string_lossy().into_owned();
+        let pkg = synthetic_pkg(
+            "xorg-x11-libX11-ccache",
+            "x86_64",
+            vec![
+                cache_file,
+                syn_file(
+                    "/usr/share/licenses/xorg-x11-libX11-ccache/LICENSE",
+                    "ASCII text",
+                ),
+            ],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "no-binary");
+        assert!(
+            lines.is_empty(),
+            "no-binary must stay quiet for XimC payload: {results:?}"
+        );
+    }
+
+    #[test]
+    fn no_binary_quiet_for_gdbm_payload() {
+        // A GDBM database header is a native C struct (magic in host
+        // byte order, then native int/off_t members): both byte
+        // orders of both magics exempt.
+        let config = test_config();
+        for magic in [
+            vec![0xcf, 0x9a, 0x57, 0x13], // 0x13579acf, little-endian
+            vec![0x13, 0x57, 0x9a, 0xcf], // 0x13579acf, big-endian
+            vec![0xce, 0x9a, 0x57, 0x13], // 0x13579ace, little-endian
+            vec![0x13, 0x57, 0x9a, 0xce], // 0x13579ace, big-endian
+        ] {
+            let dir = tempfile::TempDir::new().expect("tmpdir");
+            let db = dir.path().join("data.db");
+            let mut bytes = magic.clone();
+            bytes.extend_from_slice(&[0u8; 60]);
+            std::fs::write(&db, &bytes).expect("write db");
+            let mut db_file = syn_file("/var/lib/foo/data.db", "data");
+            db_file.path = db.to_string_lossy().into_owned();
+            let pkg = synthetic_pkg("foodb", "x86_64", vec![db_file]);
+            let results = driver_results(&pkg, &config);
+            let lines = lines_for(&results, "no-binary");
+            assert!(
+                lines.is_empty(),
+                "no-binary must stay quiet for GDBM magic {magic:?}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_binary_still_fires_for_portable_or_near_miss_payload() {
+        // Portable payload is not arch evidence: a gettext .mo has
+        // fixed-width fields and a magic that self-describes the byte
+        // order. Near misses are not evidence either: the match is
+        // the full magic prefix, not a resemblance.
+        let config = test_config();
+        for (name, bytes) in [
+            ("mo", vec![0xde, 0x12, 0x04, 0x95, 0, 0, 0, 0]),
+            ("ximc-truncated", b"Xim".to_vec()),
+            ("ximc-wrong-fourth-byte", b"XimD\0\0\0\0".to_vec()),
+            ("gdbm-off-by-one", vec![0xcf, 0x9a, 0x57, 0x14]),
+            ("text", b"just some text\n".to_vec()),
+        ] {
+            let dir = tempfile::TempDir::new().expect("tmpdir");
+            let f = dir.path().join("payload");
+            std::fs::write(&f, &bytes).expect("write payload");
+            let mut pf = syn_file("/usr/share/foo/payload", "data");
+            pf.path = f.to_string_lossy().into_owned();
+            let pkg = synthetic_pkg("foopkg", "x86_64", vec![pf]);
+            let results = driver_results(&pkg, &config);
+            let lines = lines_for(&results, "no-binary");
+            assert_eq!(
+                lines.len(),
+                1,
+                "{name} must still fire no-binary: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_binary_still_fires_when_arch_format_file_is_ghost_or_symlink() {
+        // A ghost entry has no on-disk bytes, so it is no evidence;
+        // a symlink's bytes name its target rather than carrying
+        // data. Neither exempts.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let cache = dir.path().join("cache");
+        let mut bytes = b"XimC".to_vec();
+        bytes.extend_from_slice(&[0u8; 32]);
+        std::fs::write(&cache, &bytes).expect("write cache");
+
+        let mut ghost = syn_file("/var/cache/foo/cache", "data");
+        ghost.flags = crate::pkg::pkgfile::RPMFILE_GHOST;
+        ghost.path = cache.to_string_lossy().into_owned();
+        let pkg = synthetic_pkg("foopkg", "x86_64", vec![ghost]);
+        let results = driver_results(&pkg, &config);
+        assert_eq!(
+            lines_for(&results, "no-binary").len(),
+            1,
+            "ghost XimC must still fire: {results:?}"
+        );
+
+        let mut link = syn_file("/var/cache/foo/cache", "symbolic link");
+        link.mode = 0o120777;
+        link.linkto = "real-cache".to_string();
+        link.path = cache.to_string_lossy().into_owned();
+        let pkg = synthetic_pkg("foopkg", "x86_64", vec![link]);
+        let results = driver_results(&pkg, &config);
+        assert_eq!(
+            lines_for(&results, "no-binary").len(),
+            1,
+            "symlink to XimC must still fire: {results:?}"
         );
     }
 

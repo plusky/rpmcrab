@@ -1,0 +1,48 @@
+# Known native-layout data formats: on-disk structures whose byte
+# layout depends on the word size (and, where the format does not pin
+# it, the byte order) of the machine that wrote them. A file in one of
+# these formats is bound to the architecture class of its writer, so a
+# package shipping one has a genuine reason to be architecture-specific
+# even when it ships no binary: `no-binary` (BinariesCheck) reads this
+# table and stays silent for such packages. The finder and its parsing
+# live in src/checks/binaries.rs, which embeds this file.
+#
+# Every entry is a byte prefix matched at offset 0 of the file. Only
+# formats with a hand-verified specimen belong here: the entry must be
+# provably native-layout (a fixed-width, byte-order-self-describing
+# format is portable and does not qualify -- Berkeley DB, for example,
+# is fixed-width with an explicit byte-order field and is excluded).
+#
+# Evidence base: the 2026-10-26 Factory census of arch-dependent
+# payload (51,589 RPMs). XimC specimen: the x86_64
+# xorg-x11-libX11-ccache compose caches (boo#1110020), whose bodies
+# carry native `unsigned long` fields written by the 64-bit build.
+# GDBM magics: gdbm_file_header begins with magic 0x13579acf (current)
+# or 0x13579ace (pre-1.15), stored in host byte order ahead of native
+# int/off_t members, so both byte orders are listed.
+#
+# Maintenance: adding a format means adding its [[format]] entries
+# here with a verified specimen recorded in the change that adds it.
+# A stale table only ever under-exempts: an unlisted format leaves
+# `no-binary` firing, never the reverse.
+as_of = "2026-10-26"
+
+[[format]]
+name = "XimC"
+magic = "58696d43"
+
+[[format]]
+name = "GDBM"
+magic = "cf9a5713"
+
+[[format]]
+name = "GDBM"
+magic = "13579acf"
+
+[[format]]
+name = "GDBM (old)"
+magic = "ce9a5713"
+
+[[format]]
+name = "GDBM (old)"
+magic = "13579ace"
