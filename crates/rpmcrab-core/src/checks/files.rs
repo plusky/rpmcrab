@@ -629,6 +629,20 @@ fn clean_path(path: &str) -> String {
     out.to_string_lossy().into_owned()
 }
 
+/// One `[[FileGrants]]` config entry: the named findings stay quiet
+/// for one package's named files. The `reason` is the recorded
+/// justification, surfaced in the debug log when the grant applies;
+/// an entry without one is rejected at parse time (see
+/// `FilesCheck::parse_file_grants`), so every live grant carries its
+/// explanation in the settings record itself.
+#[derive(Debug, Clone)]
+struct FileGrant {
+    packages: Vec<String>,
+    paths: Vec<String>,
+    findings: Vec<String>,
+    reason: String,
+}
+
 #[allow(dead_code)]
 pub struct FilesCheck {
     man_re: Regex,
@@ -681,6 +695,7 @@ pub struct FilesCheck {
     standard_groups: Vec<String>,
     disallowed_dirs: Vec<String>,
     preset_packages: Vec<String>,
+    file_grants: Vec<FileGrant>,
     dangling_exceptions: Vec<(String, Regex)>,
     ldconfig_re: Regex,
     python_default_version: String,
@@ -818,6 +833,7 @@ impl FilesCheck {
             standard_groups: get_strings("StandardGroups"),
             disallowed_dirs: get_strings("DisallowedDirs"),
             preset_packages: get_strings("SystemdPresetPackages"),
+            file_grants: Self::parse_file_grants(config),
             dangling_exceptions: dangling,
             ldconfig_re: Regex::new(r"(?m)^[^#]*ldconfig").expect("static regex"),
             python_default_version: get_str("PythonDefaultVersion"),
@@ -839,6 +855,131 @@ impl FilesCheck {
     /// environment.
     pub fn with_tool_dir(config: &Config, bin_dir: Option<&std::path::Path>) -> Self {
         Self::with_tool_source(config, test_source(bin_dir))
+    }
+
+    /// Parse the `FileGrants` tables from the config: the per-file
+    /// grants the distribution settings record (the vendored openSUSE
+    /// config carries the set; see FILE_GRANTS in
+    /// scripts/generate-distro-configs.py). An entry is honoured only
+    /// when it names its package(s), paths and findings and records a
+    /// non-empty `reason`; a malformed entry is logged and skipped
+    /// rather than silently matching nothing or everything.
+    fn parse_file_grants(config: &Config) -> Vec<FileGrant> {
+        let mut out = Vec::new();
+        let Some(list) = config
+            .configuration
+            .get("FileGrants")
+            .and_then(toml::Value::as_array)
+        else {
+            return out;
+        };
+        for item in list {
+            let Some(table) = item.as_table() else {
+                log::error!("FileGrants: entry is not a table, skipping");
+                continue;
+            };
+            let has_package = table.contains_key("package");
+            let has_packages = table.contains_key("packages");
+            if has_package == has_packages {
+                log::error!(
+                    "FileGrants: entry needs exactly one of \"package\"/\"packages\", skipping"
+                );
+                continue;
+            }
+            let mut packages = Vec::new();
+            if let Some(p) = table.get("package") {
+                match p.as_str() {
+                    Some(s) => packages.push(s.to_string()),
+                    None => {
+                        log::error!("FileGrants: \"package\" must be a string, skipping entry");
+                        continue;
+                    }
+                }
+            }
+            if let Some(ps) = table.get("packages") {
+                let Some(arr) = ps.as_array() else {
+                    log::error!("FileGrants: \"packages\" must be an array, skipping entry");
+                    continue;
+                };
+                let mut ok = true;
+                for v in arr {
+                    match v.as_str() {
+                        Some(s) => packages.push(s.to_string()),
+                        None => {
+                            log::error!(
+                                "FileGrants: \"packages\" entries must be strings, skipping entry"
+                            );
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if !ok {
+                    continue;
+                }
+            }
+            let string_list = |key: &str| -> Option<Vec<String>> {
+                table
+                    .get(key)?
+                    .as_array()?
+                    .iter()
+                    .map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            };
+            let Some(paths) = string_list("paths") else {
+                log::error!(
+                    "FileGrants: entry for {packages:?} needs a \"paths\" array of strings, \
+                     skipping"
+                );
+                continue;
+            };
+            let Some(findings) = string_list("findings") else {
+                log::error!(
+                    "FileGrants: entry for {packages:?} needs a \"findings\" array of strings, \
+                     skipping"
+                );
+                continue;
+            };
+            if paths.is_empty() || findings.is_empty() {
+                log::error!(
+                    "FileGrants: entry for {packages:?} names no paths or no findings, skipping"
+                );
+                continue;
+            }
+            let reason = table
+                .get("reason")
+                .and_then(toml::Value::as_str)
+                .unwrap_or("");
+            if reason.trim().is_empty() {
+                log::error!("FileGrants: entry for {packages:?} records no reason, skipping");
+                continue;
+            }
+            out.push(FileGrant {
+                packages,
+                paths,
+                findings,
+                reason: reason.to_string(),
+            });
+        }
+        out
+    }
+
+    /// Whether a `FileGrants` entry covers this package, path and
+    /// finding: package name, file path and finding tag must all
+    /// match exactly.
+    fn file_granted(&self, pkg_name: &str, path: &str, finding: &str) -> bool {
+        let Some(grant) = self.file_grants.iter().find(|g| {
+            g.packages.iter().any(|p| p.as_str() == pkg_name)
+                && g.paths.iter().any(|p| p.as_str() == path)
+                && g.findings.iter().any(|f| f.as_str() == finding)
+        }) else {
+            return false;
+        };
+        log::debug!(
+            "FileGrants: {finding} on {path} in package {pkg_name} stays quiet: {}",
+            grant.reason
+        );
+        true
     }
 }
 
@@ -3850,7 +3991,9 @@ impl FilesCheck {
         let mode = pkgfile.mode;
         let mode_is_exec = mode & 0o111 != 0;
         if mode_is_exec {
-            if pkg.config_files.iter().any(|c| c == fname) {
+            if pkg.config_files.iter().any(|c| c == fname)
+                && !self.file_granted(&pkg.name, fname, "executable-marked-as-config-file")
+            {
                 // Severity split on the noreplace flag (maintainer
                 // ruling, 2026-10-26; see the divergence ledger): a
                 // %config(noreplace) executable warns instead of
@@ -4221,29 +4364,35 @@ impl FilesCheck {
                 // a missing scriptlet emits library-without-ldconfig-*, a
                 // present-but-ldconfig-less one emits postin-without-ldconfig.
                 // Emitting both was a port bug. A -p ldconfig interpreter
-                // satisfies the check outright via is_ldconfig above.
+                // satisfies the check outright via is_ldconfig above. A
+                // FileGrants entry naming this package, file and finding
+                // suppresses the emission (see parse_file_grants).
                 if st.postin.is_empty() {
-                    add_info(
-                        out,
-                        Level::Error,
-                        pkg,
-                        "library-without-ldconfig-postin",
-                        &[fname],
-                    );
-                } else {
+                    if !self.file_granted(&pkg.name, fname, "library-without-ldconfig-postin") {
+                        add_info(
+                            out,
+                            Level::Error,
+                            pkg,
+                            "library-without-ldconfig-postin",
+                            &[fname],
+                        );
+                    }
+                } else if !self.file_granted(&pkg.name, fname, "postin-without-ldconfig") {
                     add_info(out, Level::Error, pkg, "postin-without-ldconfig", &[fname]);
                 }
             }
             if !is_ldconfig(&st.postun, &postun_prog) {
                 if st.postun.is_empty() {
-                    add_info(
-                        out,
-                        Level::Error,
-                        pkg,
-                        "library-without-ldconfig-postun",
-                        &[fname],
-                    );
-                } else {
+                    if !self.file_granted(&pkg.name, fname, "library-without-ldconfig-postun") {
+                        add_info(
+                            out,
+                            Level::Error,
+                            pkg,
+                            "library-without-ldconfig-postun",
+                            &[fname],
+                        );
+                    }
+                } else if !self.file_granted(&pkg.name, fname, "postun-without-ldconfig") {
                     add_info(out, Level::Error, pkg, "postun-without-ldconfig", &[fname]);
                 }
             }
@@ -10529,6 +10678,301 @@ mod tests {
                 .any(|(n, _)| n == "debug-files-in-non-debug-package"),
             "segment equality must not match debugfoo: {results:?}"
         );
+    }
+
+    /// `test_config` plus the `FileGrants` tables parsed from the
+    /// given TOML snippet.
+    fn grant_test_config(snippet: &str) -> Config {
+        let mut cfg = test_config();
+        let parsed: toml::Table = toml::from_str(snippet).expect("grant snippet parses");
+        cfg.configuration
+            .insert("FileGrants".to_string(), parsed["FileGrants"].clone());
+        cfg
+    }
+
+    /// Drive `check_ldconfig` for one library of a synthetic package
+    /// with the given scriptlet bodies, returning the emitted
+    /// (name, line) pairs.
+    fn run_ldconfig(
+        config: &Config,
+        pkg_name: &str,
+        fname: &str,
+        postin: &str,
+        postun: &str,
+    ) -> Vec<(String, String)> {
+        let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture");
+        pkg.name = pkg_name.to_string();
+        let pkgfile = PkgFile {
+            name: fname.to_string(),
+            path: fname.to_string(),
+            mode: 0o100755,
+            size: Some(100),
+            ..Default::default()
+        };
+        let st = PkgState {
+            postin: postin.to_string(),
+            postun: postun.to_string(),
+            ..Default::default()
+        };
+        let check = FilesCheck::new(config);
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        check.check_ldconfig(&pkg, fname, &pkgfile, &st, &mut out);
+        out.results().to_vec()
+    }
+
+    const RPM_GRANT: &str = r#"
+[[FileGrants]]
+package = "rpm"
+paths = ["/usr/lib64/librpm.so.10.2.1"]
+findings = ["postin-without-ldconfig", "library-without-ldconfig-postun"]
+reason = "no ldconfig scriptlets by design"
+"#;
+
+    #[test]
+    fn file_grants_quiet_the_granted_ldconfig_findings() {
+        // rpm's shape: %post present but ldconfig-less, no %postun at
+        // all. Both resulting tags are granted for the named library.
+        let config = grant_test_config(RPM_GRANT);
+        let results = run_ldconfig(&config, "rpm", "/usr/lib64/librpm.so.10.2.1", "echo hi", "");
+        assert!(
+            results.is_empty(),
+            "granted findings must stay quiet: {results:?}"
+        );
+        // The same shape without the grant config fires both tags at E.
+        let results = run_ldconfig(
+            &test_config(),
+            "rpm",
+            "/usr/lib64/librpm.so.10.2.1",
+            "echo hi",
+            "",
+        );
+        assert_eq!(results.len(), 2, "ungranted shape must fire: {results:?}");
+        assert!(results.iter().all(|(_, line)| line.contains(": E: ")));
+    }
+
+    #[test]
+    fn file_grants_stay_exact() {
+        let config = grant_test_config(RPM_GRANT);
+        // Ungranted path in the granted package still fires.
+        let results = run_ldconfig(&config, "rpm", "/usr/lib64/libfoo.so.1", "echo hi", "");
+        assert_eq!(results.len(), 2, "ungranted path must fire: {results:?}");
+        // Granted path in an ungranted package still fires.
+        let results = run_ldconfig(
+            &config,
+            "rpm2",
+            "/usr/lib64/librpm.so.10.2.1",
+            "echo hi",
+            "",
+        );
+        assert_eq!(results.len(), 2, "ungranted package must fire: {results:?}");
+        // A grant naming only one of the two tags leaves the other live.
+        let partial = grant_test_config(
+            r#"
+[[FileGrants]]
+package = "rpm"
+paths = ["/usr/lib64/librpm.so.10.2.1"]
+findings = ["postin-without-ldconfig"]
+reason = "postin side only"
+"#,
+        );
+        let results = run_ldconfig(
+            &partial,
+            "rpm",
+            "/usr/lib64/librpm.so.10.2.1",
+            "echo hi",
+            "",
+        );
+        assert_eq!(
+            results.len(),
+            1,
+            "only the granted tag is quiet: {results:?}"
+        );
+        assert_eq!(results[0].0, "library-without-ldconfig-postun");
+    }
+
+    #[test]
+    fn file_grants_without_a_reason_are_rejected() {
+        // No reason key at all: the grant is invalid and never applies.
+        let no_reason = grant_test_config(
+            r#"
+[[FileGrants]]
+package = "rpm"
+paths = ["/usr/lib64/librpm.so.10.2.1"]
+findings = ["postin-without-ldconfig", "library-without-ldconfig-postun"]
+"#,
+        );
+        assert!(FilesCheck::parse_file_grants(&no_reason).is_empty());
+        let results = run_ldconfig(
+            &no_reason,
+            "rpm",
+            "/usr/lib64/librpm.so.10.2.1",
+            "echo hi",
+            "",
+        );
+        assert_eq!(
+            results.len(),
+            2,
+            "a reasonless grant must not apply: {results:?}"
+        );
+        // A blank reason is no reason.
+        let blank_reason = grant_test_config(
+            r#"
+[[FileGrants]]
+package = "rpm"
+paths = ["/usr/lib64/librpm.so.10.2.1"]
+findings = ["postin-without-ldconfig"]
+reason = "  "
+"#,
+        );
+        assert!(FilesCheck::parse_file_grants(&blank_reason).is_empty());
+        // Both package keys at once is malformed, as is a missing
+        // paths list: neither parses into a live grant.
+        let both_keys = grant_test_config(
+            r#"
+[[FileGrants]]
+package = "rpm"
+packages = ["rpm"]
+paths = ["/usr/lib64/librpm.so.10.2.1"]
+findings = ["postin-without-ldconfig"]
+reason = "recorded"
+"#,
+        );
+        assert!(FilesCheck::parse_file_grants(&both_keys).is_empty());
+        let no_paths = grant_test_config(
+            r#"
+[[FileGrants]]
+package = "rpm"
+findings = ["postin-without-ldconfig"]
+reason = "recorded"
+"#,
+        );
+        assert!(FilesCheck::parse_file_grants(&no_paths).is_empty());
+    }
+
+    #[test]
+    fn file_grants_quiet_the_granted_config_file_finding() {
+        let config = grant_test_config(
+            r#"
+[[FileGrants]]
+package = "smartmontools"
+paths = ["/etc/smartd_warning.sh"]
+findings = ["executable-marked-as-config-file"]
+reason = "warning hook: executable and %config by design"
+"#,
+        );
+        let config_findings = |results: &[(String, String)]| {
+            results
+                .iter()
+                .filter(|(n, _)| n == "executable-marked-as-config-file")
+                .count()
+        };
+        let (mut pkg, _dir) = pkg_with_files(vec![mkfile("/etc/smartd_warning.sh", 0o100755, 61)]);
+        pkg.name = "smartmontools".to_string();
+        pkg.config_files = vec!["/etc/smartd_warning.sh".to_string()];
+        assert_eq!(
+            config_findings(&run_check_binary_with_config(&pkg, &config)),
+            0,
+            "granted config file must stay quiet"
+        );
+        assert_eq!(
+            config_findings(&run_check_binary(&pkg)),
+            1,
+            "the same file fires without the grant"
+        );
+        // An executable %config file of another package at an
+        // ungranted path still fires under the grant config.
+        let (mut pkg, _dir) = pkg_with_files(vec![mkfile("/etc/init.d/after.local", 0o100755, 62)]);
+        pkg.name = "aaa_base".to_string();
+        pkg.config_files = vec!["/etc/init.d/after.local".to_string()];
+        assert_eq!(
+            config_findings(&run_check_binary_with_config(&pkg, &config)),
+            1,
+            "ungranted config file must still fire"
+        );
+    }
+
+    /// The vendored openSUSE config's `FileGrants` set is the grant
+    /// source default runs actually use: the four audited core-package
+    /// clusters (rpm/systemd ldconfig, smartmontools/tuned config
+    /// files) stay quiet under it, so generator or typo drift in the
+    /// set surfaces here instead of false-firing on those packages.
+    #[test]
+    fn opensuse_file_grants_cover_the_audited_clusters() {
+        let opensuse_toml =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("data/distro/opensuse/opensuse.toml");
+        let parsed: toml::Table = toml::from_str(
+            &std::fs::read_to_string(opensuse_toml).expect("vendored opensuse config"),
+        )
+        .expect("vendored opensuse config parses");
+        let grants = parsed["FileGrants"]
+            .as_array()
+            .expect("FileGrants is an array");
+        assert_eq!(
+            grants.len(),
+            4,
+            "the vendored openSUSE grant set changed: {grants:?}"
+        );
+        for g in grants {
+            let reason = g.get("reason").and_then(toml::Value::as_str).unwrap_or("");
+            assert!(
+                !reason.trim().is_empty(),
+                "every vendored grant records its reason: {g:?}"
+            );
+        }
+        let mut cfg = test_config();
+        cfg.configuration
+            .insert("FileGrants".to_string(), parsed["FileGrants"].clone());
+        // rpm: %post ldconfig-less, no %postun — quiet on all three
+        // libraries the audit measured.
+        for path in [
+            "/usr/lib64/librpm.so.10.2.1",
+            "/usr/lib64/librpmio.so.10.2.1",
+            "/usr/lib64/librpmsign.so.10.2.1",
+        ] {
+            let results = run_ldconfig(&cfg, "rpm", path, "echo hi", "");
+            assert!(
+                results.is_empty(),
+                "rpm grant must cover {path}: {results:?}"
+            );
+        }
+        // systemd: %post runs ldconfig, %postun is ldconfig-less —
+        // quiet on both NSS modules; without the grant exactly the
+        // postun tag fires.
+        for path in [
+            "/usr/lib64/libnss_myhostname.so.2",
+            "/usr/lib64/libnss_systemd.so.2",
+        ] {
+            let results = run_ldconfig(&cfg, "systemd", path, "/sbin/ldconfig", "echo hi");
+            assert!(
+                results.is_empty(),
+                "systemd grant must cover {path}: {results:?}"
+            );
+            let ungranted =
+                run_ldconfig(&test_config(), "systemd", path, "/sbin/ldconfig", "echo hi");
+            assert_eq!(
+                ungranted.len(),
+                1,
+                "systemd shape fires without the grant: {ungranted:?}"
+            );
+            assert_eq!(ungranted[0].0, "postun-without-ldconfig");
+        }
+        // smartmontools and tuned: executable %config files stay quiet.
+        for (pkg_name, path) in [
+            ("smartmontools", "/etc/smartd_warning.sh"),
+            ("tuned", "/etc/grub.d/00_tuned"),
+        ] {
+            let (mut pkg, _dir) = pkg_with_files(vec![mkfile(path, 0o100755, 71)]);
+            pkg.name = pkg_name.to_string();
+            pkg.config_files = vec![path.to_string()];
+            let results = run_check_binary_with_config(&pkg, &cfg);
+            assert!(
+                !results
+                    .iter()
+                    .any(|(n, _)| n == "executable-marked-as-config-file"),
+                "{pkg_name} grant must cover {path}: {results:?}"
+            );
+        }
     }
 
     /// `test_config` plus a `SystemdPresetPackages` exemption list, the
