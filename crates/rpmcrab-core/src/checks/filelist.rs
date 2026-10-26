@@ -266,22 +266,32 @@ impl FilelistCheck {
             .is_some_and(|v| v.contains("SUSE"));
 
         // Directory entries carry a trailing slash for the prefix
-        // matching below; other names are borrowed as-is.
-        let paths: Vec<std::borrow::Cow<'_, str>> = pkg
+        // matching below; other names are borrowed as-is. The second
+        // element records whether the entry is in a suppressible
+        // form at a sanctioned path: a directory or a symlink by
+        // mode, or a %ghost by flag. The ghost test is the flag, not
+        // the mode - `RPMFILE_GHOST` is orthogonal to the file type,
+        // and a %ghost may carry a regular mode or mode 0.
+        let paths: Vec<(std::borrow::Cow<'_, str>, bool)> = pkg
             .files
             .iter()
             .map(|pkgfile| {
-                if (pkgfile.mode >> 12) & 0o17 == 4 {
+                let file_type = (pkgfile.mode >> 12) & 0o17;
+                let suppressible = file_type == 4 || file_type == 0o12 || pkgfile.is_ghost();
+                if file_type == 4 {
                     let mut f = pkgfile.name.clone();
                     f.push('/');
-                    std::borrow::Cow::Owned(f)
+                    (std::borrow::Cow::Owned(f), suppressible)
                 } else {
-                    std::borrow::Cow::Borrowed(pkgfile.name.as_str())
+                    (
+                        std::borrow::Cow::Borrowed(pkgfile.name.as_str()),
+                        suppressible,
+                    )
                 }
             })
             .collect();
 
-        for f in &paths {
+        for (f, suppressible) in &paths {
             let f: &str = f;
             if !self.fhs_good_prefix(pkg, f) {
                 // Find the first invalid path component.
@@ -294,13 +304,43 @@ impl FilelistCheck {
                     pfx = Some(base);
                     base = base.rsplit_once('/').map(|(b, _)| b).unwrap_or("");
                 }
+                // When the parent is a restricted dir the walk reports
+                // the path itself (a top-level path's parent is empty,
+                // which lands in the same fallback). If that path is
+                // one of the locations the FHS tables themselves
+                // sanction - a restricted FHS root, or a GoodPrefix
+                // with its trailing slash dropped - and the entry is
+                // in a suppressible form (a directory or symlink by
+                // mode, or a %ghost by flag), the report names a
+                // sanctioned location as forbidden: the mail spool at
+                // /var/mail in symlink or %ghost form is the standard
+                // arrangement, not an FHS violation. A regular file at
+                // such a path still reports.
+                if pfx.is_none() && *suppressible && self.fhs_sanctioned_path(f) {
+                    continue;
+                }
                 invalid_fhs.insert(pfx.unwrap_or(f).to_string());
             }
         }
         (
             invalid_fhs.into_iter().collect(),
-            Self::invalid_opt_providers(paths.iter().map(|p| p.as_ref()), is_suse),
+            Self::invalid_opt_providers(paths.iter().map(|(p, _)| p.as_ref()), is_suse),
         )
+    }
+
+    /// Whether `path` is itself one of the locations the FHS tables
+    /// sanction: a restricted dir (an FHS root such as /var or /usr) or
+    /// a GoodPrefix, compared with trailing slashes dropped - the form
+    /// an entry takes when a package ships that location as a symlink
+    /// or a %ghost placeholder rather than a directory.
+    fn fhs_sanctioned_path(&self, path: &str) -> bool {
+        let key = path.trim_end_matches('/');
+        let key = if key.is_empty() { "/" } else { key };
+        self.restricted_dirs.iter().any(|d| d == key)
+            || self
+                .good_prefixes
+                .iter()
+                .any(|p| p.trim_end_matches('/') == key)
     }
 
     /// The `/opt/<provider>` directories a payload installs into,
@@ -385,7 +425,7 @@ impl Check for FilelistCheck {
 mod tests {
     use super::*;
     use crate::color::Color;
-    use crate::pkg::pkgfile::PkgFile;
+    use crate::pkg::pkgfile::{PkgFile, RPMFILE_GHOST};
 
     /// Hand-built package shell: the fcprobe header with a caller-supplied
     /// file list, so the test drives the real emission path without a
@@ -788,6 +828,127 @@ mod tests {
         );
     }
 
+    // The FHS walk reports a path itself when its parent is a
+    // restricted dir. When that path is a location the FHS tables
+    // themselves sanction - a restricted FHS root, or a GoodPrefix with
+    // its trailing slash dropped - in a suppressible form (a
+    // directory or symlink by mode, or a %ghost by flag), the report
+    // names a sanctioned location as forbidden: exim ships /var/mail as
+    // a symlink to the spool dir, postfix and postfix-bdb ship it as a
+    // %ghost, and xkeyboard-config ships the bare /var directory
+    // entry. The reference reports all of them.
+    #[test]
+    fn sanctioned_locations_in_non_regular_form_are_quiet() {
+        let config = Config::default();
+        for (path, mode, flags) in [
+            ("/var/mail", 0o120777, 0), // symlink: the exim shape
+            // %ghost with a regular mode: the postfix shape. The
+            // ghost test is the flag, which is orthogonal to the
+            // mode's file type - this codebase's ghost fixtures
+            // keep the file's regular mode and set RPMFILE_GHOST.
+            ("/var/mail", 0o100644, RPMFILE_GHOST),
+            // %ghost with mode 0: real postfix headers carry
+            // exactly this shape (FILEFLAGS = RPMFILE_GHOST, mode 0
+            // in the corpus census behind this change).
+            ("/var/mail", 0, RPMFILE_GHOST),
+            ("/var", 0o040755, 0), // bare root dir entry: the xkeyboard shape
+            ("/usr", 0o040755, 0), // bare root dir entry
+            ("/var/log", 0o120777, 0), // symlink at another GoodPrefix
+            // Top-level symlink: the usrmerge /bin shape. Its
+            // parent is empty, and pfx.is_none() covers that too.
+            ("/bin", 0o120777, 0),
+        ] {
+            let pkg = pkg_with_modes_and_flags(&[(path, mode, flags)]);
+            let results = run(&config, &pkg);
+            assert!(
+                lines_for(&results, "filelist-forbidden-fhs23").is_empty(),
+                "{path} mode {mode:o} flags {flags}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn regular_file_at_sanctioned_location_still_fires() {
+        // The exemption is about the form, not the location: a regular
+        // file sitting at a sanctioned path is a real misplacement.
+        // /var/mail reaches the fallback through its restricted
+        // parent /var; the restricted roots /var and /usr themselves
+        // take the empty-parent path, so pin those too.
+        let config = Config::default();
+        for path in ["/var/mail", "/var", "/usr"] {
+            let pkg = pkg_with_modes(&[(path, 0o100644)]);
+            let lines = lines_for(&run(&config, &pkg), "filelist-forbidden-fhs23");
+            assert_eq!(lines.len(), 1, "{path}: {lines:?}");
+            assert!(
+                lines[0].contains(&format!("E: filelist-forbidden-fhs23 {path}")),
+                "{lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mode_zero_without_ghost_flag_still_fires() {
+        // Mode 0 alone is not a %ghost: the ghost test is the
+        // RPMFILE_GHOST flag, so a bare mode-0 entry at a sanctioned
+        // path earns no exemption.
+        let pkg = pkg_with_modes(&[("/var/mail", 0)]);
+        let config = Config::default();
+        let lines = lines_for(&run(&config, &pkg), "filelist-forbidden-fhs23");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("E: filelist-forbidden-fhs23 /var/mail"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn unsanctioned_sibling_paths_still_fire() {
+        let config = Config::default();
+        // The samba-client shape: %ghost dirs at a legacy location next
+        // to the sanctioned tree.
+        let pkg = pkg_with_modes(&[("/var/samba", 0o040000), ("/var/samba/spool", 0o040000)]);
+        let lines = lines_for(&run(&config, &pkg), "filelist-forbidden-fhs23");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("E: filelist-forbidden-fhs23 /var/samba"),
+            "{lines:?}"
+        );
+        // A symlink earns no exemption at a location the tables do not
+        // sanction.
+        let pkg = pkg_with_modes(&[("/var/evil", 0o120777)]);
+        let lines = lines_for(&run(&config, &pkg), "filelist-forbidden-fhs23");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("E: filelist-forbidden-fhs23 /var/evil"),
+            "{lines:?}"
+        );
+        // A %ghost earns no exemption at a location the tables do
+        // not sanction either.
+        let pkg = pkg_with_modes_and_flags(&[("/var/evil", 0o100644, RPMFILE_GHOST)]);
+        let lines = lines_for(&run(&config, &pkg), "filelist-forbidden-fhs23");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("E: filelist-forbidden-fhs23 /var/evil"),
+            "{lines:?}"
+        );
+        // Payload under unsanctioned roots is unchanged.
+        let pkg = pkg_with_files(&["/gnu/store/tool", "/usr/local/bin/date"]);
+        let lines = lines_for(&run(&config, &pkg), "filelist-forbidden-fhs23");
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("E: filelist-forbidden-fhs23 /gnu")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("E: filelist-forbidden-fhs23 /usr/local")),
+            "{lines:?}"
+        );
+    }
+
     // Issue #495: the xinetd rule's only pattern was the reference's typo
     // `/etc/xinet.d/*`, which matches no real path; real xinetd configs are
     // reported by XinetdDepCheck as deprecated-xinetd-config instead.
@@ -819,6 +980,25 @@ mod tests {
                 name: f.to_string(),
                 path: f.to_string(),
                 mode: *mode,
+                ..Default::default()
+            })
+            .collect();
+        pkg
+    }
+
+    fn pkg_with_modes_and_flags(entries: &[(&str, u32, u32)]) -> Pkg {
+        let rpm = format!(
+            "{}/../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut pkg = Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture shell");
+        pkg.files = entries
+            .iter()
+            .map(|(f, mode, flags)| PkgFile {
+                name: f.to_string(),
+                path: f.to_string(),
+                mode: *mode,
+                flags: *flags,
                 ..Default::default()
             })
             .collect();
