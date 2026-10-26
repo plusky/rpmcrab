@@ -195,6 +195,65 @@ fn host_elf_machines(arch: &str) -> &'static [u16] {
     }
 }
 
+/// ISA family of a package arch, for the foreign-payload question in
+/// `check_library_dependency`. Unlike `host_elf_machines` (the exact
+/// machines a package's own debuginfo pipeline handles), a family
+/// groups the machines that execute on one another's hosts: a 32-bit
+/// x86 binary runs on x86-64, AArch32 on AArch64. Only a machine from
+/// a *different* family marks payload built for another architecture
+/// entirely (firmware and cross data the host loader never loads).
+/// An unmapped arch yields None, and callers treat that as "charge",
+/// mirroring `host_elf_machines` (#847).
+fn pkg_arch_family(arch: &str) -> Option<&'static str> {
+    let arch = base_arch(arch);
+    if arch.starts_with("arm") || arch == "aarch64" {
+        return Some("arm");
+    }
+    if arch.starts_with("mips") {
+        return Some("mips");
+    }
+    Some(match arch {
+        "x86_64" | "i386" | "i486" | "i586" | "i686" => "x86",
+        "ppc" | "ppc64" | "ppc64le" => "ppc",
+        "s390" | "s390x" => "s390",
+        "riscv64" => "riscv",
+        "sparc" | "sparc64" => "sparc",
+        "alpha" => "alpha",
+        "m68k" => "m68k",
+        "ia64" => "ia64",
+        "sh4" => "sh",
+        "hppa" | "parisc" => "parisc",
+        "loongarch64" => "loongarch",
+        "avr" => "avr",
+        _ => return None,
+    })
+}
+
+/// ISA family of an ELF `e_machine`; see `pkg_arch_family`.
+fn elf_machine_family(machine: u16) -> Option<&'static str> {
+    use goblin::elf::header::{
+        EM_68K, EM_386, EM_AARCH64, EM_ARM, EM_AVR, EM_IA_64, EM_MIPS, EM_PARISC, EM_PPC, EM_PPC64,
+        EM_RISCV, EM_S390, EM_SH, EM_SPARC, EM_SPARC32PLUS, EM_SPARCV9, EM_X86_64,
+    };
+    Some(match machine {
+        EM_386 | EM_X86_64 => "x86",
+        EM_ARM | EM_AARCH64 => "arm",
+        EM_PPC | EM_PPC64 => "ppc",
+        EM_S390 => "s390",
+        EM_RISCV => "riscv",
+        EM_SPARC | EM_SPARC32PLUS | EM_SPARCV9 => "sparc",
+        36902 => "alpha", // EM_ALPHA; goblin has no constant for it
+        EM_68K => "m68k",
+        EM_MIPS => "mips",
+        EM_IA_64 => "ia64",
+        EM_SH => "sh",
+        EM_PARISC => "parisc",
+        258 => "loongarch", // EM_LOONGARCH; goblin has no constant for it
+        EM_AVR => "avr",
+        _ => return None,
+    })
+}
+
 /// Parse ELF bytes, tolerating a dangling DT_GNU_HASH: stripping hash
 /// sections with objcopy leaves the dynamic entry behind, which fails
 /// goblin's strict parse. The reference never inspects the hash table, so
@@ -351,6 +410,12 @@ struct ReadelfInfo {
     /// release-candidate strings): the toolchain finder stays silent
     /// in both cases.
     go_toolchain: Option<GoVersion>,
+    /// True when the file bytes carry the Go buildinfo magic. The Go
+    /// sections `is_go_binary` reads are the primary marker, but a
+    /// build stripped of its section headers keeps the buildinfo
+    /// block, whose magic is a fixed byte sequence (Go's
+    /// `debug/buildinfo`). Computed during parse.
+    go_buildinfo: bool,
     soname: Option<String>,
     needed: Vec<String>,
     runpaths: Vec<String>,
@@ -434,6 +499,7 @@ impl ReadelfInfo {
             is_rust: false,
             is_zig: false,
             go_toolchain: None,
+            go_buildinfo: false,
             soname: None,
             needed: Vec::new(),
             runpaths: Vec::new(),
@@ -750,6 +816,7 @@ impl ReadelfInfo {
         if self.go_toolchain.is_none() {
             self.go_toolchain = detect_go_toolchain(elf, data);
         }
+        self.go_buildinfo = self.go_buildinfo || has_go_buildinfo_magic(data);
     }
     fn has_function_matching(&self, regex: &fancy_regex::Regex) -> bool {
         self.functions
@@ -947,6 +1014,17 @@ fn is_ocaml_symbol(name: &str) -> bool {
             .is_some_and(|b| b.is_ascii_uppercase()),
         None => false,
     }
+}
+
+/// The Go buildinfo block opens with a fixed magic: 0xff followed by
+/// ` Go buildinf:` (Go's `debug/buildinfo`). It survives stripping of
+/// the section headers, which removes the `.gopclntab` /
+/// `.note.go.buildid` sections `is_go_binary` reads, so sectionless
+/// Go builds are still recognised as Go output.
+fn has_go_buildinfo_magic(data: &[u8]) -> bool {
+    const GO_BUILDINFO_MAGIC: &[u8] = b"\xff Go buildinf:";
+    data.windows(GO_BUILDINFO_MAGIC.len())
+        .any(|w| w == GO_BUILDINFO_MAGIC)
 }
 
 fn detect_rust_binary(elf: &goblin::elf::Elf, data: &[u8], functions: &[String]) -> bool {
@@ -4686,13 +4764,43 @@ impl BinariesCheck {
             .unwrap_or(false);
         if info.needed.is_empty() && !(info.soname.is_some() && ldso) {
             if !self.is_shobj {
-                add_info(
-                    out,
-                    Level::Error,
-                    pkg,
-                    "statically-linked-binary",
-                    &[&pkgfile.name],
+                // Three shapes are not charged. A relocatable object
+                // is not linked at all (Go race `.syso` objects, FPC
+                // `.or` units, kernel modules outside the module tree
+                // the path guard above covers): it has no DT_NEEDED
+                // by construction. Payload whose ELF machine belongs
+                // to a different ISA family than the package
+                // architecture (firmware images, cross data) is never
+                // loaded by the host's dynamic linker; a same-family
+                // machine (32-bit x86 in an x86-64 package) still
+                // charges, as that code runs on the host. And the Go
+                // and Zig toolchains emit fully static binaries as
+                // their normal output shape -- pure-Go builds have no
+                // dynamic mode at all -- a verdict the shared-object
+                // branch below already credits for Go.
+                // `go_buildinfo` covers builds stripped of the
+                // section headers the section test reads.
+                let foreign_payload = matches!(
+                    (
+                        pkg_arch_family(&pkg.arch),
+                        elf_machine_family(info.elf_machine)
+                    ),
+                    (Some(pf), Some(mf)) if pf != mf
                 );
+                if info.elf_type != goblin::elf::header::ET_REL
+                    && !foreign_payload
+                    && !info.is_go_binary()
+                    && !info.go_buildinfo
+                    && !info.is_zig_binary()
+                {
+                    add_info(
+                        out,
+                        Level::Error,
+                        pkg,
+                        "statically-linked-binary",
+                        &[&pkgfile.name],
+                    );
+                }
             } else if !info.is_go_binary() && !info.is_plugin_like(&pkgfile.name) {
                 // Go binaries are ET_DYN with no DT_NEEDED, and plugin-like
                 // objects legitimately carry none; only genuine shared
@@ -5975,6 +6083,145 @@ mod tests {
         assert_lacks(&results, "shared-library-without-dependency-information");
     }
 
+    fn libdep_results_for_bytes(id: &str, bytes: &[u8], arch: &str) -> Vec<(String, String)> {
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_shobj = false;
+        let pkg = synthetic_pkg("testpkg", arch, vec![]);
+        let pkgfile = PkgFile {
+            name: "/usr/bin/foo".to_string(),
+            ..Default::default()
+        };
+        let path =
+            std::env::temp_dir().join(format!("rpmcrab-libdep-bytes-{id}-{}", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        let info = ReadelfInfo::parse(path.to_str().unwrap(), &pkgfile.name);
+        assert!(info.failed.is_none(), "crafted ELF must parse");
+        assert!(info.needed.is_empty(), "no DT_NEEDED");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_library_dependency(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        std::fs::remove_file(&path).ok();
+        results
+    }
+
+    #[test]
+    fn go_binary_without_needed_stays_quiet() {
+        // Go output in the executable (non-shared-object) shape: the
+        // section marker credits it the way the shared-object branch
+        // already credits Go.
+        let results = shlib_libdep_results("goexec", true, None, false, None, &[]);
+        assert!(results.is_empty(), "Go binary must be quiet: {results:?}");
+    }
+
+    #[test]
+    fn go_buildinfo_magic_without_sections_stays_quiet() {
+        // A Go build stripped of its section headers keeps only the
+        // buildinfo block: no `.note.go.buildid` for the section
+        // test, but the magic still marks it as Go output (the
+        // sectionless shape found in the Factory corpus).
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_shobj = false;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = PkgFile {
+            name: "/usr/bin/foo".to_string(),
+            ..Default::default()
+        };
+        let mut bytes = craft_shlib_elf(false, None, None, &[]);
+        bytes.extend_from_slice(b"\xff Go buildinf:");
+        bytes.extend_from_slice(&[0u8; 32]);
+        let path =
+            std::env::temp_dir().join(format!("rpmcrab-libdep-gomagic-{}", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let info = ReadelfInfo::parse(path.to_str().unwrap(), &pkgfile.name);
+        assert!(info.failed.is_none(), "crafted ELF must parse");
+        assert!(!info.is_go_binary(), "fixture carries no Go sections");
+        assert!(info.go_buildinfo, "buildinfo magic must be detected");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_library_dependency(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        std::fs::remove_file(&path).ok();
+        assert!(
+            results.is_empty(),
+            "buildinfo-only Go binary must be quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn zig_binary_without_needed_stays_quiet() {
+        // Zig output in the executable shape; the branch consumes the
+        // detector's verdict, pinned here with literal infos.
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_shobj = false;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = PkgFile {
+            name: "/usr/bin/foo".to_string(),
+            ..Default::default()
+        };
+        let run = |info: &ReadelfInfo| {
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_library_dependency(&pkg, &pkgfile, info, &mut out);
+            out.results().to_vec()
+        };
+        let info = ReadelfInfo {
+            is_zig: true,
+            ..syn_info()
+        };
+        let results = run(&info);
+        assert!(results.is_empty(), "Zig binary must be quiet: {results:?}");
+        // Control: the same shape without the Zig marker charges.
+        let results = run(&syn_info());
+        let lines = lines_for(&results, "statically-linked-binary");
+        assert_eq!(lines.len(), 1, "unmarked shape must fire: {results:?}");
+    }
+
+    #[test]
+    fn relocatable_object_stays_quiet() {
+        // ET_REL payload is not linked at all (Go race `.syso`
+        // objects, FPC `.or` units): the absence of DT_NEEDED states
+        // nothing.
+        let mut bytes = craft_shlib_elf(false, None, None, &[]);
+        bytes[16..18].copy_from_slice(&goblin::elf::header::ET_REL.to_le_bytes());
+        let results = libdep_results_for_bytes("relobj", &bytes, "x86_64");
+        assert!(
+            results.is_empty(),
+            "relocatable object must be quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn foreign_machine_payload_stays_quiet() {
+        // A SPARC payload in an x86-64 package is firmware/data for
+        // another machine (the qemu firmware shape); the host loader
+        // never loads it.
+        let mut bytes = craft_shlib_elf(false, None, None, &[]);
+        bytes[18..20].copy_from_slice(&goblin::elf::header::EM_SPARC.to_le_bytes());
+        let results = libdep_results_for_bytes("foreign", &bytes, "x86_64");
+        assert!(
+            results.is_empty(),
+            "foreign-machine payload must be quiet: {results:?}"
+        );
+
+        // Near miss: 32-bit x86 is the same family as x86-64 and runs
+        // on the host -- it still charges.
+        let mut bytes = craft_shlib_elf(false, None, None, &[]);
+        bytes[18..20].copy_from_slice(&goblin::elf::header::EM_386.to_le_bytes());
+        let results = libdep_results_for_bytes("familymatch", &bytes, "x86_64");
+        let lines = lines_for(&results, "statically-linked-binary");
+        assert_eq!(lines.len(), 1, "same-family payload must fire: {results:?}");
+
+        // The predicate is family-relative, not a per-machine
+        // exemption: the same SPARC payload in a SPARC package
+        // charges.
+        let mut bytes = craft_shlib_elf(false, None, None, &[]);
+        bytes[18..20].copy_from_slice(&goblin::elf::header::EM_SPARCV9.to_le_bytes());
+        let results = libdep_results_for_bytes("foreignhome", &bytes, "sparc64");
+        let lines = lines_for(&results, "statically-linked-binary");
+        assert_eq!(lines.len(), 1, "host-family payload must fire: {results:?}");
+    }
+
     fn libdep_results_for_name(id: &str, name: &str) -> Vec<(String, String)> {
         let config = test_config();
         let mut check = BinariesCheck::with_tool_dir(&config, None);
@@ -6189,6 +6436,7 @@ mod tests {
                 is_rust: false,
                 is_zig: false,
                 go_toolchain: None,
+                go_buildinfo: false,
                 soname: None,
                 needed: Vec::new(),
                 runpaths,
@@ -8557,6 +8805,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 is_rust: false,
                 is_zig: false,
                 go_toolchain: None,
+                go_buildinfo: false,
             };
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
             check.check_hash_sections(&pkg, &pkgfile, &info, &mut out);
@@ -8700,6 +8949,7 @@ description = "explicit priority string bypasses the system crypto policy"
             is_rust: false,
             is_zig: false,
             go_toolchain: None,
+            go_buildinfo: false,
         }
     }
 

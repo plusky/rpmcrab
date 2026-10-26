@@ -532,6 +532,14 @@ reason = "Deliberate removal: the port does not emit this finding -- it is suppr
 since = "0.1.0"
 
 [[divergence]]
+check = "statically-linked-binary"
+kind = "behaviour"
+case = "global"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/BinariesCheck.py"
+since = "0.4.1"
+reason = "The reference charges every ELF that is not a shared object and carries no DT_NEEDED (BinariesCheck.py _check_library_dependency), with no exemption for what the file is. rpmcrab does not charge three shapes. A relocatable object (ET_REL: Go race .syso objects, FPC .or units, out-of-tree kernel modules, archive members that are bare ELF relocatables) is not linked at all, so the absence of DT_NEEDED states nothing. Payload whose ELF machine belongs to a different ISA family than the package architecture (qemu firmware images for HPPA, SPARC, Alpha, PowerPC and S/390; a picotool ARM helper) is never loaded by the host dynamic linker; a same-family machine (32-bit x86 in an x86-64 package) still charges, as that code runs on the host. And the Go and Zig toolchains emit fully static binaries as their normal output shape: Go is recognised by its sections and, for builds stripped of section headers, by the Go buildinfo magic; Zig by the existing toolchain detector. Factory corpus, measured before/after over the firing package set: 399 findings -> 110 (Go 264, ET_REL 14, foreign-family 9, Zig 2 removed, the removed set verified file-for-file), and a fixed control sample of 103 non-firing packages is byte-identical before/after. The 110 that still charge are factually statically linked with no decidable in-binary separator: FPC output and qemu-linux-user (ecosystem-default static linking), SGX enclaves and freestanding firmware (static by construction), deliberately static C tools, and Rust static-PIE (the distro Rust default is dynamic, so Rust output is not exempted)."
+
+[[divergence]]
 case = "global"
 check = "no-binary"
 kind = "behaviour"

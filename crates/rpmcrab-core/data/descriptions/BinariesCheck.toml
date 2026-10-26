@@ -43,6 +43,11 @@ to a non-system library path.
 """
 statically-linked-binary="""
 The package installs a statically linked binary or object file.
+
+Relocatable objects, payload for a different processor family than
+the package's own (firmware and cross data), and the fully static
+binaries the Go and Zig toolchains produce as their normal output
+are not reported.
 """
 shlib-policy-name-error="""
 The package contains shared library but is not named after its SONAME.
