@@ -5,6 +5,15 @@
 //! `shlib-fixed-dependency`, `shlib-policy-excessive-dependency`,
 //! `shlib-policy-obsoletes-sibling`, `shlib-policy-etc-payload`.
 //!
+//! One deliberate divergence in an existing finding:
+//! `shlib-policy-excessive-dependency` is not charged for a SONAME that
+//! no file in the package links against when one of the shipped library
+//! files imports the dynamic loader and embeds that exact SONAME - the
+//! dlopen-shim shape (a library reimplementing another and loading it by
+//! name at runtime, e.g. sdl2-compat, libusb-compat). The reference
+//! charges it: its walk collects only DT_NEEDED entries, so a runtime
+//! load is invisible to it. See the ledger entry.
+//!
 //! One finding has no reference counterpart: `shlib-devel-unversioned-requires`
 //! (Warning). The shared library packaging policy asks a library `-devel`
 //! package to require its shared library package with a version constraint.
@@ -219,6 +228,36 @@ impl SharedLibraryPolicyCheck {
         }
         Ok((soname, needed))
     }
+
+    /// Whether the ELF file at `path` is evidence that the library loads
+    /// `dep` at runtime: it has an undefined `dlopen`/`dlmopen` import
+    /// (a `@VERSION` suffix on the symbol name ignored, as elsewhere in
+    /// this crate) and its raw bytes contain `dep` as a NUL-delimited
+    /// string - the name it hands to the loader. Any read or parse
+    /// failure is a non-witness.
+    fn dlopen_witness(path: &str, dep: &str) -> bool {
+        let Ok(data) = std::fs::read(path) else {
+            return false;
+        };
+        let Ok(elf) = crate::checks::binaries::parse_elf(&data) else {
+            return false;
+        };
+        let imports_loader = elf.dynsyms.iter().any(|sym| {
+            sym.st_shndx == goblin::elf::section_header::SHN_UNDEF as usize
+                && elf.dynstrtab.get_at(sym.st_name).is_some_and(|name| {
+                    let base = name.split('@').next().unwrap_or("");
+                    base == "dlopen" || base == "dlmopen"
+                })
+        });
+        if !imports_loader {
+            return false;
+        }
+        let mut needle = Vec::with_capacity(dep.len() + 2);
+        needle.push(0);
+        needle.extend_from_slice(dep.as_bytes());
+        needle.push(0);
+        data.windows(needle.len()).any(|w| w == needle.as_slice())
+    }
 }
 
 /// `(stem, SONAME number)` for a package name in the versioned shared
@@ -350,16 +389,28 @@ impl Check for SharedLibraryPolicyCheck {
         let mut libs_needed: HashSet<String> = HashSet::new();
         let mut libs_to_dir: HashMap<String, String> = HashMap::new();
         let mut reqlibs: HashSet<String> = HashSet::new();
+        // Paths of the walked library files, for the dlopen credit in
+        // the excessive-dependency loop below.
+        let mut lib_files: Vec<&str> = Vec::new();
+        // DT_NEEDED of every ELF file in the package, library-named or
+        // not: the link-time consumer set for the same credit. The
+        // reference never computes this - it only walks library-named
+        // files - so a parse failure here is ignored, never a
+        // readelf-failed finding.
+        let mut all_needed: HashSet<String> = HashSet::new();
 
         for file in &pkg.files {
             let fname = file.name.as_str();
-            if !fname.contains(".so.") && !fname.ends_with(".so") {
-                continue;
-            }
             if file.mode & S_IFMT != S_IFREG {
                 continue;
             }
             if !file.magic.starts_with("ELF ") {
+                continue;
+            }
+            if !fname.contains(".so.") && !fname.ends_with(".so") {
+                if let Ok((_, needed)) = Self::elf_dynamic(&file.path) {
+                    all_needed.extend(needed);
+                }
                 continue;
             }
             match Self::elf_dynamic(&file.path) {
@@ -368,6 +419,8 @@ impl Check for SharedLibraryPolicyCheck {
                     return;
                 }
                 Ok((soname, needed)) => {
+                    lib_files.push(file.path.as_str());
+                    all_needed.extend(needed.iter().cloned());
                     libs_needed.extend(needed);
                     if let Some(soname) = soname {
                         let dir = match fname.rfind('/') {
@@ -472,6 +525,25 @@ impl Check for SharedLibraryPolicyCheck {
             deps_sorted.sort_unstable();
             for dep in deps_sorted {
                 if dep.contains(".so.") && !libs.contains(dep) && !libs_needed.contains(dep) {
+                    // A dependency nothing in the package links against
+                    // can still be the shipped library's own runtime
+                    // dependency: a dlopen shim (sdl2-compat's libSDL2
+                    // loading libSDL3, libusb-compat's libusb-0.1 loading
+                    // libusb-1.0) reimplements one library on top of
+                    // another and loads it by name at runtime, so the
+                    // packager's explicit SONAME require is the library's
+                    // real dependency, not an excessive one. Credit it
+                    // only when the evidence is complete: no file in the
+                    // package has a DT_NEEDED entry for the name (a link-time consumer
+                    // in a shipped program is the violation this check
+                    // exists to report), and one of the shipped library
+                    // files both imports the dynamic loader and embeds
+                    // the exact name it loads.
+                    if !all_needed.contains(dep)
+                        && lib_files.iter().any(|path| Self::dlopen_witness(path, dep))
+                    {
+                        continue;
+                    }
                     add_info(
                         out,
                         Level::Error,
@@ -792,6 +864,241 @@ mod tests {
             .map(|(_, line)| line.rsplit(' ').next().unwrap_or(""))
             .collect();
         assert_eq!(deps, vec!["libaaa.so.2", "libmmm.so.3", "libzzz.so.1"]);
+    }
+
+    /// An ELF64 object with a dynamic segment rich enough for the
+    /// dlopen-witness path: an optional DT_SONAME, DT_NEEDED entries, and
+    /// a DT_SYMTAB/DT_HASH pair exposing `dynsyms` ((name, bind, type,
+    /// shndx); shndx 0 is an import) to goblin. `embedded` adds a bare
+    /// string to the string table, the way a dlopen target name sits in
+    /// a real library's data. VA == file offset throughout (one PT_LOAD).
+    fn loader_elf(
+        soname: Option<&str>,
+        needed: &[&str],
+        dynsyms: &[(&str, u8, u8, u16)],
+        embedded: Option<&str>,
+    ) -> Vec<u8> {
+        let mut strtab: Vec<u8> = vec![0];
+        let mut push_str = |s: &str| {
+            let off = strtab.len() as u64;
+            strtab.extend_from_slice(s.as_bytes());
+            strtab.push(0);
+            off
+        };
+        let soname_off = soname.map(&mut push_str);
+        let mut needed_offs: Vec<u64> = Vec::new();
+        for n in needed {
+            needed_offs.push(push_str(n));
+        }
+        let mut sym_offs: Vec<u64> = Vec::new();
+        for (n, _, _, _) in dynsyms {
+            sym_offs.push(push_str(n));
+        }
+        if let Some(e) = embedded {
+            let _ = push_str(e);
+        }
+
+        // Symbol table: null entry plus one 24-byte entry per dynsym.
+        let mut symtab: Vec<u8> = vec![0; 24];
+        for (i, (_, bind, typ, shndx)) in dynsyms.iter().enumerate() {
+            let mut e = vec![0u8; 24];
+            e[0..4].copy_from_slice(&(sym_offs[i] as u32).to_le_bytes());
+            e[4] = (bind << 4) | typ;
+            e[6..8].copy_from_slice(&shndx.to_le_bytes());
+            symtab.extend(e);
+        }
+
+        // SysV hash: nbucket 1, nchain = symbol count (goblin derives the
+        // dynsym count from it).
+        let nchain = (1 + dynsyms.len()) as u32;
+        let mut hash: Vec<u8> = Vec::new();
+        hash.extend_from_slice(&1u32.to_le_bytes());
+        hash.extend_from_slice(&nchain.to_le_bytes());
+        hash.extend_from_slice(&(if dynsyms.is_empty() { 0u32 } else { 1 }).to_le_bytes());
+        for i in 0..nchain {
+            let next = if i + 1 < nchain { i + 1 } else { 0 };
+            hash.extend_from_slice(&next.to_le_bytes());
+        }
+
+        let ehsize: u64 = 64;
+        let dyn_off = ehsize + 2 * 56;
+        let dyn_count = needed.len() + soname.is_some() as usize + 6;
+        let symtab_off = dyn_off + 16 * dyn_count as u64;
+        let hash_off = symtab_off + symtab.len() as u64;
+        let strtab_off = hash_off + hash.len() as u64;
+        let total = strtab_off + strtab.len() as u64;
+
+        let mut dynamic: Vec<u8> = Vec::new();
+        let mut entry = |tag: i64, val: u64| {
+            dynamic.extend_from_slice(&tag.to_le_bytes());
+            dynamic.extend_from_slice(&val.to_le_bytes());
+        };
+        if let Some(off) = soname_off {
+            entry(14, off); // DT_SONAME
+        }
+        for off in &needed_offs {
+            entry(1, *off); // DT_NEEDED
+        }
+        entry(4, hash_off); // DT_HASH
+        entry(6, symtab_off); // DT_SYMTAB
+        entry(11, 24); // DT_SYMENT
+        entry(5, strtab_off); // DT_STRTAB
+        entry(10, strtab.len() as u64); // DT_STRSZ
+        entry(0, 0); // DT_NULL
+        assert_eq!(dynamic.len(), 16 * dyn_count);
+
+        let mut elf: Vec<u8> = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        elf.extend_from_slice(&3u16.to_le_bytes()); // ET_DYN
+        elf.extend_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+        elf.extend_from_slice(&1u32.to_le_bytes()); // version
+        elf.extend_from_slice(&0u64.to_le_bytes()); // entry
+        elf.extend_from_slice(&ehsize.to_le_bytes()); // phoff
+        elf.extend_from_slice(&0u64.to_le_bytes()); // shoff
+        elf.extend_from_slice(&0u32.to_le_bytes()); // flags
+        elf.extend_from_slice(&64u16.to_le_bytes()); // ehsize
+        elf.extend_from_slice(&56u16.to_le_bytes()); // phentsize
+        elf.extend_from_slice(&2u16.to_le_bytes()); // phnum
+        elf.extend_from_slice(&0u16.to_le_bytes()); // shentsize
+        elf.extend_from_slice(&0u16.to_le_bytes()); // shnum
+        elf.extend_from_slice(&0u16.to_le_bytes()); // shstrndx
+
+        // PT_LOAD covering the whole file at vaddr 0, then PT_DYNAMIC.
+        let mut ph = |ptype: u32, off: u64, filesz: u64| {
+            elf.extend_from_slice(&ptype.to_le_bytes());
+            elf.extend_from_slice(&5u32.to_le_bytes()); // flags R+X
+            elf.extend_from_slice(&off.to_le_bytes());
+            elf.extend_from_slice(&off.to_le_bytes()); // vaddr == offset
+            elf.extend_from_slice(&0u64.to_le_bytes()); // paddr
+            elf.extend_from_slice(&filesz.to_le_bytes());
+            elf.extend_from_slice(&filesz.to_le_bytes()); // memsz
+            elf.extend_from_slice(&0x1000u64.to_le_bytes()); // align
+        };
+        ph(1, 0, total); // PT_LOAD
+        ph(2, dyn_off, dynamic.len() as u64); // PT_DYNAMIC
+
+        elf.extend(dynamic);
+        elf.extend(symtab);
+        elf.extend(hash);
+        elf.extend(strtab);
+        assert_eq!(elf.len() as u64, total);
+        elf
+    }
+
+    /// Run the check over a synthetic `libfoo1` package whose files are
+    /// the given (path, ELF bytes) pairs, returning all findings.
+    fn run_shlib_pkg(
+        dir_name: &str,
+        files: Vec<(String, Vec<u8>)>,
+        requires: Vec<DepInfo>,
+    ) -> Vec<(String, String)> {
+        let dir = std::env::temp_dir().join(dir_name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let mut pkg_files = Vec::new();
+        for (i, (name, bytes)) in files.into_iter().enumerate() {
+            let path = dir.join(format!("f{i}"));
+            std::fs::write(&path, bytes).expect("write elf");
+            pkg_files.push(PkgFile {
+                name,
+                path: path.to_string_lossy().into_owned(),
+                mode: 0o100644,
+                magic: "ELF 64-bit LSB shared object".to_string(),
+                ..Default::default()
+            });
+        }
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &dir, true).expect("open fixture pkg");
+        pkg.name = "libfoo1".to_string();
+        pkg.files = pkg_files;
+        pkg.requires = requires;
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SharedLibraryPolicyCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        out.results().to_vec()
+    }
+
+    fn excessive_deps(results: &[(String, String)]) -> Vec<&str> {
+        results
+            .iter()
+            .filter(|(n, _)| n == "shlib-policy-excessive-dependency")
+            .map(|(_, line)| line.rsplit(' ').next().unwrap_or(""))
+            .collect()
+    }
+
+    #[test]
+    fn excessive_dependency_credits_dlopen_shim() {
+        // The shipped library loads libbar.so.2 by name at runtime: it
+        // imports the dynamic loader, embeds the exact SONAME, and
+        // nothing in the package has a DT_NEEDED entry for it. The explicit require is
+        // the library's own runtime dependency, not an excessive one.
+        let lib = loader_elf(
+            Some("libfoo.so"),
+            &["libc.so.6"],
+            &[("dlopen", 1, 2, 0), ("dlsym", 1, 2, 0)],
+            Some("libbar.so.2"),
+        );
+        let results = run_shlib_pkg(
+            "rpmcrab-shlib-dlopen-shim",
+            vec![("/usr/lib64/libfoo.so".to_string(), lib)],
+            vec![dep("libbar.so.2"), dep("libc.so.6()(64bit)")],
+        );
+        assert_eq!(excessive_deps(&results), Vec::<&str>::new(), "{results:?}");
+    }
+
+    #[test]
+    fn excessive_dependency_fires_without_loader_import() {
+        // Same package, but the library imports no dynamic loader: an
+        // embedded name alone is not evidence of a runtime load.
+        let lib = loader_elf(Some("libfoo.so"), &["libc.so.6"], &[], Some("libbar.so.2"));
+        let results = run_shlib_pkg(
+            "rpmcrab-shlib-no-loader",
+            vec![("/usr/lib64/libfoo.so".to_string(), lib)],
+            vec![dep("libbar.so.2"), dep("libc.so.6()(64bit)")],
+        );
+        assert_eq!(excessive_deps(&results), vec!["libbar.so.2"], "{results:?}");
+    }
+
+    #[test]
+    fn excessive_dependency_fires_without_embedded_soname() {
+        // The library imports the loader but never names libbar.so.2.
+        let lib = loader_elf(
+            Some("libfoo.so"),
+            &["libc.so.6"],
+            &[("dlopen", 1, 2, 0)],
+            Some("libother.so.9"),
+        );
+        let results = run_shlib_pkg(
+            "rpmcrab-shlib-no-embedded",
+            vec![("/usr/lib64/libfoo.so".to_string(), lib)],
+            vec![dep("libbar.so.2"), dep("libc.so.6()(64bit)")],
+        );
+        assert_eq!(excessive_deps(&results), vec!["libbar.so.2"], "{results:?}");
+    }
+
+    #[test]
+    fn excessive_dependency_fires_when_a_program_links_it() {
+        // The library is a dlopen shim for libbar.so.2, but a shipped
+        // program links libbar.so.2 directly: a link-time consumer in
+        // non-library payload is the violation the check exists to
+        // report, so the credit does not apply.
+        let lib = loader_elf(
+            Some("libfoo.so"),
+            &["libc.so.6"],
+            &[("dlopen", 1, 2, 0)],
+            Some("libbar.so.2"),
+        );
+        let prog = loader_elf(None, &["libbar.so.2"], &[], None);
+        let results = run_shlib_pkg(
+            "rpmcrab-shlib-program-links",
+            vec![
+                ("/usr/lib64/libfoo.so".to_string(), lib),
+                ("/usr/bin/footool".to_string(), prog),
+            ],
+            vec![dep("libbar.so.2"), dep("libc.so.6()(64bit)")],
+        );
+        assert_eq!(excessive_deps(&results), vec!["libbar.so.2"], "{results:?}");
     }
 
     /// A minimal ELF64 shared object with a single DT_SONAME, parseable by
