@@ -27,6 +27,9 @@
 //! selected by name; a theme package that provides the generic name is
 //! still charged `branding-provides-unversioned` for an unversioned
 //! provide, and the excessive-dependency warnings apply on both arms.
+//! On the requirer side, `branding-requires-specific-flavor` is charged
+//! only on package names: an ELF shared-library capability name
+//! (`lib....so...`) is not a package name and pins no flavour.
 
 use fancy_regex::Regex;
 
@@ -59,6 +62,21 @@ impl BrandingPolicyCheck {
             re_branding_generic: Regex::new(r"\A(?P<name>\S+)-(?P<type>branding|theme)\z")
                 .expect("static regex"),
             re_icon_theme: Regex::new(r"\A(?P<name>\S+)-icon-theme\z").expect("static regex"),
+        }
+    }
+
+    /// Whether `name` is an ELF shared-library capability name
+    /// (`lib-theme-resources.so()(64bit)`, `libfoo.so.6(GLIBC_2.4)(64bit)`):
+    /// a `.so` component followed only by version or symbol decoration.
+    /// Such names live in the library-capability namespace, not the
+    /// package-name namespace this check polices.
+    fn is_elf_capability(name: &str) -> bool {
+        match name.find(".so") {
+            Some(i) => {
+                let rest = &name[i + 3..];
+                rest.is_empty() || rest.starts_with(['.', '('])
+            }
+            None => false,
         }
     }
 
@@ -130,6 +148,7 @@ impl Check for BrandingPolicyCheck {
             for require in &pkg.requires {
                 if is_match(&self.re_branding, &require.name)
                     && !Self::is_composition_pin(&self.re_branding, &pkg.name, &require.name)
+                    && !Self::is_elf_capability(&require.name)
                 {
                     add_info(
                         out,
@@ -383,6 +402,35 @@ mod tests {
             unversioned[0]
         );
         assert!(unversioned[0].ends_with("testingpackage-branding"));
+    }
+
+    // An ELF capability name whose soname is branding-shaped is not a
+    // flavour pin: it names a library, not a package. Package-name
+    // near-misses (no `.so` component) keep firing.
+    #[test]
+    fn soname_requires_are_not_flavor_pins() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "brandingdep-testpackage".to_string();
+        pkg.requires = vec![
+            dep("lib-theme-resources.so()(64bit)", 0),
+            dep("lib-theme.so.1()(64bit)", 0),
+            dep("libtheme-branding-openSUSE", 0),
+            dep("testingpackage-branding-openSUSE", 0),
+        ];
+        let results = run(&pkg);
+
+        let specific = has(&results, "branding-requires-specific-flavor");
+        assert_eq!(specific.len(), 2, "{results:?}");
+        assert!(
+            specific
+                .iter()
+                .any(|l| l.contains("libtheme-branding-openSUSE"))
+        );
+        assert!(
+            specific
+                .iter()
+                .any(|l| l.contains("testingpackage-branding-openSUSE"))
+        );
     }
 
     // #857: the unversioned finding is scoped to the generic branding
