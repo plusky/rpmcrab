@@ -78,7 +78,7 @@ fn missing_findings_declare_their_kind() {
         assert!(
             matches!(
                 kind,
-                "missing" | "behaviour" | "severity" | "detail" | "limitation"
+                "missing" | "behaviour" | "severity" | "detail" | "limitation" | "config"
             ),
             "entry {i} (`{}`) has unknown kind `{kind}`",
             field(entry, "check", i)

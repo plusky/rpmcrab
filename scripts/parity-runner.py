@@ -367,7 +367,7 @@ def diff_outputs(case, ref, port, ref_exit, port_exit, ledger):
 
     for f in sorted(rem_r):
         e = by_kind(ledger.candidates(case, f[2]),
-                    {"missing", "behaviour", "limitation"})
+                    {"missing", "behaviour", "limitation", "config"})
         diffs.append(Diff(f"only in reference: {render(f)}", e))
     for f in sorted(rem_p):
         # A `missing` entry records that the port does not emit the
