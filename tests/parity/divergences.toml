@@ -2148,6 +2148,13 @@ upstream = "https://github.com/plusky/rpmcrab/issues/868"
 
 [[divergence]]
 case = "global"
+check = "SUIDPermissionsCheck"
+kind = "detail"
+reason = "Staged `--explain` text for `permissions-missing-requires` prescribed 'PreReq: permissions', contradicting the `prereq-use` text, which deprecates PreReq and steers to phase-qualified Requires. The text now prescribes 'Requires(post): permissions' -- the phase whose scriptlet runs permctl (%post, via %set_permissions) -- and records that 'Requires(pre): permissions' satisfies the requirement the same way; the finding's detail line follows, reading \"missing 'permissions' in Requires(post)\" in place of the reference's \"missing 'permissions' in PreReq\" (the changed line is visible in the w6-filelist parity case). The predicate is unchanged: the header loader (`gather_requires`) splits every script-phase Requires and every legacy PreReq into the `prereq` set the check reads, so both spellings already satisfied it, and a bare Requires names no phase and still fires (pinned by `missing_requires_only_when_absent`). Factory spec corpus at the time of the change, occurrences/files naming the permissions package: Requires(post) 50/43, Requires(pre) 42/38, Requires(verify) 15/12, PreReq 23/20, bare Requires 3/2."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "SharedLibraryPolicyCheck"
 kind = "detail"
 reason = "Staged `--explain` text for `shlib-fixed-dependency` ended with the garbled `move it to the runtime uses of your library`. Reworded: add the dependency to the packages that use the library at runtime instead."

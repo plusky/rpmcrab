@@ -425,7 +425,7 @@ mod tests {
             ),
             (
                 "SUIDPermissionsCheck.toml",
-                "56156810855981231341ebf3c1e6490878f4c3dfc0de42fa2f7ef75bb312df26",
+                "6413f87c22186e346007acc798182caeffa2d02e7ff478d9af3398e6181089b6",
             ),
             (
                 "SharedLibraryPolicyCheck.toml",
