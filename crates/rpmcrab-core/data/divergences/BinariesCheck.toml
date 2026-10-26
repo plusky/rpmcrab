@@ -282,3 +282,10 @@ check = "non-versioned-file-in-library-package"
 kind = "missing"
 reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs (Fedora enables SharedLibraryPolicyCheck but filters this diagnostic, enforcing the policy in the build pipeline instead). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; a negative pin in the BinariesCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "no-binary"
+kind = "behaviour"
+reason = "rpmcrab stays silent when a payload file is data in a known native-layout format (data/arch-format-magics.toml: XimC compose caches, GDBM databases), whose byte layout is bound to the architecture that wrote it, so the arch marking is deliberate; the reference reports such packages (instance: xorg-x11-libX11-ccache, boo#1110020). Corpus 2026-10-26: 1,757 arch packages report no-binary; exactly one carries such payload."
+since = "0.4.1"
