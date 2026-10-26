@@ -83,7 +83,17 @@ impl SharedLibraryPolicyCheck {
         Self {
             re_soname_strongly_versioned: Regex::new(r"-[\d\.]+\.so$").expect("static regex"),
             re_soname_pkg: Regex::new(r"^lib\S+(\d+(-(32|64)bit)?)$").expect("static regex"),
-            re_so_files: Regex::new(r"\S+.so((\.(\d+))*)$").expect("static regex"),
+            // The version tail is dotted alphanumeric components whose
+            // final component contains a digit, plus one optional
+            // trailing `-<digits>` component: real SONAME spellings such
+            // as `libLimeSuite.so.23.11-1`, `libSDL_bgi.so.suse9` and
+            // `libcmark-gfm.so.0.29.0.gfm.13` are library files. A
+            // word-only tail (`libfoo.so.readme`) or a script name
+            // embedding a version (`libstdc++.so.6.0.32-gdb.py`) is not.
+            re_so_files: Regex::new(
+                r"\S+.so((\.[0-9A-Za-z]+)*\.[0-9A-Za-z]*\d[0-9A-Za-z]*(-\d+)?)?$",
+            )
+            .expect("static regex"),
             re_versioned_so_file: Regex::new(r"\.so\.\d").expect("static regex"),
             seen: Vec::new(),
             seen_index: HashMap::new(),
@@ -602,7 +612,111 @@ mod tests {
         assert!(is_match(&check.re_so_files, "/usr/lib64/libfoo.so"));
         assert!(is_match(&check.re_so_files, "/usr/lib64/libfoo.so.1"));
         assert!(is_match(&check.re_so_files, "/usr/lib64/libfoo.so.1.2.3"));
+        // Decorated version tails of real shipped SONAMEs.
+        assert!(is_match(
+            &check.re_so_files,
+            "/usr/lib64/libLimeSuite.so.23.11-1"
+        ));
+        assert!(is_match(
+            &check.re_so_files,
+            "/usr/lib64/libSDL_bgi.so.suse9"
+        ));
+        assert!(is_match(
+            &check.re_so_files,
+            "/usr/lib64/libcmark-gfm.so.0.29.0.gfm.13"
+        ));
         assert!(!is_match(&check.re_so_files, "/usr/bin/foo"));
+        // A word-only tail is not a version decoration.
+        assert!(!is_match(&check.re_so_files, "/usr/lib64/libfoo.so.readme"));
+        // A script name embedding a versioned library name is not a
+        // library file (the gdb auto-load payload shape).
+        assert!(!is_match(
+            &check.re_so_files,
+            "/usr/share/gdb/auto-load/usr/lib64/libstdc++.so.6.0.32-gdb.py"
+        ));
+        assert!(!is_match(&check.re_so_files, "/usr/lib64/libfoo.so.1.py"));
+    }
+
+    #[test]
+    fn missing_lib_silent_when_shipped_lib_has_decorated_tail() {
+        // The package ships its library; only the SONAME spelling
+        // (alphanumeric components, a trailing -<digits>) used to defeat
+        // the file-name test, so the policy-named package was charged
+        // with providing no libraries at all.
+        let dir = std::env::temp_dir().join("rpmcrab-shlib-missinglib-decorated");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let mut files = Vec::new();
+        for soname in [
+            "libLimeSuite.so.23.11-1",
+            "libSDL_bgi.so.suse9",
+            "libcmark-gfm.so.0.29.0.gfm.13",
+        ] {
+            let so = dir.join(soname);
+            std::fs::write(&so, minimal_elf(soname)).expect("write elf");
+            files.push(PkgFile {
+                name: format!("/usr/lib64/{soname}"),
+                path: so.to_string_lossy().into_owned(),
+                mode: 0o100755,
+                magic: "ELF 64-bit LSB shared object".to_string(),
+                ..Default::default()
+            });
+        }
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &dir, true).expect("open fixture pkg");
+        pkg.name = "libmulti1".to_string();
+        pkg.files = files;
+
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SharedLibraryPolicyCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let names: Vec<&str> = out.results().iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            !names.contains(&"shlib-policy-missing-lib"),
+            "decorated-tail libraries must not be charged as missing: {names:?}"
+        );
+    }
+
+    #[test]
+    fn missing_lib_fires_when_only_script_payload() {
+        // A policy-named package shipping no library file at all keeps
+        // firing: a gdb auto-load script embedding the versioned
+        // library name and a word-tailed data file are not libraries.
+        let dir = std::env::temp_dir().join("rpmcrab-shlib-missinglib-script");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &dir, true).expect("open fixture pkg");
+        pkg.name = "libbar9".to_string();
+        pkg.files = vec![
+            PkgFile {
+                name: "/usr/share/gdb/auto-load/usr/lib64/libbar.so.9.0.1-gdb.py".to_string(),
+                path: "/usr/share/gdb/auto-load/usr/lib64/libbar.so.9.0.1-gdb.py".to_string(),
+                mode: 0o100644,
+                magic: "ASCII text".to_string(),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/lib64/libbar.so.readme".to_string(),
+                path: "/usr/lib64/libbar.so.readme".to_string(),
+                mode: 0o100644,
+                magic: "ASCII text".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SharedLibraryPolicyCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let names: Vec<&str> = out.results().iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"shlib-policy-missing-lib"),
+            "script-only payload must still be charged: {names:?}"
+        );
     }
 
     #[test]

@@ -2436,6 +2436,13 @@ upstream = "https://github.com/plusky/rpmcrab/issues/637"
 
 [[divergence]]
 case = "global"
+check = "shlib-policy-missing-lib"
+kind = "behaviour"
+reason = "The library-file test for shlib-policy-missing-lib credits version tails that are not purely dotted digits: dotted alphanumeric components whose final component contains a digit, plus one trailing -<digits> component. The reference accepts only dotted digit components and so fires on packages that ship exactly the library they are named for under a decorated SONAME spelling: libLimeSuite.so.23.11-1 (libLimeSuite23_11-1), libSDL_bgi.so.suse9 (libSDL_bgi-suse9), libcmark-gfm.so.0.29.0.gfm.13 and libcmark-gfm-extensions.so.0.29.0.gfm.13 (the cmark-gfm pair); each file is an ELF shared object whose DT_SONAME equals its file name, verified on the corpus RPMs. Word-only tails (libfoo.so.readme) and script names embedding a version (the gdb auto-load libstdc++.so.6.0.32-gdb.py payload of the libstdc++6-pp packages) still do not count as library files and keep firing. Measured on the Factory corpus: 21 findings -> 17, the removed set is exactly the four shipped-library packages, no other finding movement."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "SignatureCheck"
 kind = "behaviour"
 reason = "Signature verification runs in-process through librpm (a verified `PackageHeader::from_file` read against the rpmdb keyring, with the verification flags masking the digest checks \u2014 a deliberate flag difference from `rpm -Kv`, whose default flag set verifies the digests as well) where the reference shells out to `rpm -Kv` and scrapes its output (SignatureCheck.py; pkg.py). Verdicts come from the structured result; the `unknown-key` key ID is read from the signature packet's issuer subpacket, falling back to the issuer-fingerprint subpacket when the packet carries no issuer subpacket (the key ID is that fingerprint's low 64 bits), and is formatted as the low 32 bits, as `rpm -Kv` prints it; a verification failure is reported as `invalid-signature` only when a signature packet is itself unparsable \u2014 a parseable signature that fails verification, and digest failures, stay silent, matching the reference's text patterns. The library and keyring configuration are the same ones `rpm -Kv` uses, so findings agree; parity is pinned by the fixture pin matrix (the unsigned, signed, corrupt-packet, bad-math, broken-payload and bad-digest fixture RPMs, each generation-checked against empty and key-holding rpmdb states, together with the v6 OPENPGP-container fixtures (container-only, classic-tag control, mixed classic+container and dual-signature forms, generation-checked the same way against an rpm 6 `rpm -Kv`) and a Factory-corpus before/after diff (plusky/rpmcrab#704))."
