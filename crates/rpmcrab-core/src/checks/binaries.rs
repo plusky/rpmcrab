@@ -4255,8 +4255,14 @@ impl BinariesCheck {
         // zero. A definition is never charged (glibc's libc defines
         // gets; the provider is not a caller), and the fortified
         // __gets_chk -- a different symbol with a checked bound --
-        // does not match the anchored pattern.
-        let gets = info.has_undefined_function_matching(&self.gets_call_regex);
+        // does not match the anchored pattern. STT_NOTYPE dynsym
+        // imports land only in `undefined_functions` (fill_from_elf),
+        // so that set is scanned too (#1045).
+        let gets = info.has_undefined_function_matching(&self.gets_call_regex)
+            || info
+                .undefined_functions
+                .iter()
+                .any(|s| self.gets_call_regex.is_match(s).unwrap_or(false));
         // tmpnam family (#972): the charge is the undefined reference
         // itself, in archives and linked objects alike. All three names
         // (tmpnam, tmpnam_r, tempnam) return a caller-chosen file NAME
@@ -4306,7 +4312,14 @@ impl BinariesCheck {
         // whether a call overflows depends on the destination size
         // at the call site, which the binary cannot decide, so the
         // gated population measured in #972 earns no Error form.
-        let unbounded_copy = info.has_undefined_function_matching(&self.unbounded_copy_call_regex);
+        // The second disjunct covers dynsym imports typed STT_NOTYPE:
+        // fill_from_elf files those only under `undefined_functions`,
+        // never under the FUNC-only `undefined_function_refs`.
+        let unbounded_copy = info.has_undefined_function_matching(&self.unbounded_copy_call_regex)
+            || info
+                .undefined_functions
+                .iter()
+                .any(|s| self.unbounded_copy_call_regex.is_match(s).unwrap_or(false));
 
         if setgid && setuid && !setgroups {
             // Warning unconditionally (fix-and-diverge, #743). The
@@ -13340,6 +13353,11 @@ description = "explicit priority string bypasses the system crypto policy"
                 0
             );
             assert_eq!(count(is_archive, &with(&["getline"], &["getline"])), 0);
+            // A NOTYPE dynsym import lands only in
+            // `undefined_functions`, with no FUNC reference: fires.
+            let mut info = syn_info();
+            info.undefined_functions = vec!["gets".to_string()];
+            assert_eq!(count(is_archive, &info), 1);
         }
     }
 
@@ -14059,6 +14077,16 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_eq!(count(&with(&["xstrcpy"], &["xstrcpy"])), 0);
         assert_eq!(count(&with(&["snprintf"], &["snprintf"])), 0);
         assert_eq!(count(&with(&["stpcpy"], &["stpcpy"])), 0);
+
+        // A NOTYPE dynsym import (the stripped-binary shape) lands
+        // only in `undefined_functions`, with no FUNC reference at
+        // all: fires, plain and versioned.
+        let mut info = syn_info();
+        info.undefined_functions = vec!["strcpy".to_string()];
+        assert_eq!(count(&info), 1);
+        let mut info = syn_info();
+        info.undefined_functions = vec!["strcpy@GLIBC_2.2.5".to_string()];
+        assert_eq!(count(&info), 1);
 
         // An archive member's reference is a call too: fires.
         let mut check = BinariesCheck::with_tool_dir(&config, None);
