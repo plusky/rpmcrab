@@ -337,7 +337,7 @@ mod tests {
             ),
             (
                 "DBusPolicyCheck.toml",
-                "df4abb3068b47bc1dbb3c6bbd79911866efa038fed8b9dc31c9873008d3703b5",
+                "65d3fc05b5eb364a17e303fc783fe33c3f8bccd6a43c24a61d3081be3f4a4946",
             ),
             (
                 "DeviceFilesCheck.toml",
@@ -353,7 +353,7 @@ mod tests {
             ),
             (
                 "ErlangCheck.toml",
-                "48df0f4ba8f088c5a50425a6a3b84811b3404a62dbc6505ce1388cf98800f9fd",
+                "e239c7a9ffa0beb7e15373cb540d1cf0d6588a16f220cf53d20dabd119f98a52",
             ),
             (
                 "FileDigestCheck.toml",

@@ -2592,7 +2592,8 @@ fn explain_staged_erlang_check() {
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
-        stdout, "beam-compile-info-missed:\nYour beam file has missed compile info chunk.\n\n\n",
+        stdout,
+        "beam-compile-info-missed:\nYour beam file is missing the compile_info chunk.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());
