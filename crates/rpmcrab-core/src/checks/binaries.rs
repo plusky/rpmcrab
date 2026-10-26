@@ -129,6 +129,7 @@ static GETHOSTBYNAME_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static MD5_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static DES_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static RC4_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static WEAK_PRNG_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 
 const KERNEL_MODULES_PATHS: &[&str] = &["/lib/modules/", "/usr/lib/modules/"];
 const GLIBC_EMPTY_ARCHIVES: &[&str] = &["libanl", "libdl", "libpthread", "librt", "libutil"];
@@ -2428,6 +2429,7 @@ pub struct BinariesCheck {
     md5_call_regex: Regex,
     des_call_regex: Regex,
     rc4_call_regex: Regex,
+    weak_prng_call_regex: Regex,
     // Per-file state, set by detect_attributes before run_elf_checks.
     is_exec: bool,
     is_shobj: bool,
@@ -3137,6 +3139,28 @@ fn pkg_has_arch_format_data(pkg: &Pkg) -> bool {
     })
 }
 
+/// Privilege gate (#959): the file itself runs with raised
+/// privileges -- setuid or setgid bits, or file capabilities.
+fn file_is_privileged(pkgfile: &PkgFile) -> bool {
+    pkgfile.mode & (0o4000 | 0o2000) != 0
+        || pkgfile
+            .filecaps
+            .as_deref()
+            .is_some_and(|caps| !caps.is_empty())
+}
+
+/// Exposure gate (#959): the package ships a systemd service or
+/// socket unit, so its binaries form daemon surface. Only units in
+/// the package's own file list count, and only `.service`/`.socket`
+/// under a `systemd/system` directory -- a D-Bus activation file
+/// under share/dbus-1/services is not a daemon unit.
+fn pkg_ships_daemon_units(pkg: &Pkg) -> bool {
+    pkg.files.iter().any(|f| {
+        f.name.contains("/systemd/system/")
+            && (f.name.ends_with(".service") || f.name.ends_with(".socket"))
+    })
+}
+
 impl BinariesCheck {
     pub fn new(config: &Config) -> Self {
         Self::with_tool_source(config, ToolSource::Path)
@@ -3213,6 +3237,14 @@ impl BinariesCheck {
                 .get_or_init(|| {
                     Regex::new(
                         r"^((MD5|MD5_Init|MD5_Update|MD5_Final|MD5_Transform)(?:@\S+)?)(?:\s|$)",
+                    )
+                    .expect("static regex")
+                })
+                .clone(),
+            weak_prng_call_regex: WEAK_PRNG_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(
+                        r"^((drand48|erand48|lrand48|nrand48|mrand48|jrand48|seed48|lcong48|srand48|initstate_r|setstate_r|initstate|setstate|srandom|random_r|random|srand|rand_r|rand)(?:@GLIBC\S+)?)(?:\s|$)",
                     )
                     .expect("static regex")
                 })
@@ -4242,6 +4274,18 @@ impl BinariesCheck {
         let md5 = info.has_undefined_function_matching(&self.md5_call_regex);
         let des = info.has_undefined_function_matching(&self.des_call_regex);
         let rc4 = info.has_undefined_function_matching(&self.rc4_call_regex);
+        // Weak PRNG family (#972 candidate 7): undefined references
+        // to rand/random and the *48 generators. Charged only inside
+        // the privilege-or-exposure gate -- the bare population stays
+        // silent, because outside a privileged or daemon context the
+        // family's dominant uses are jitter, sampling and test data.
+        // Warning inside the gate too: the artefact cannot tell a
+        // security value (session id, password salt, token) from
+        // jitter, and the gated corpus population is dominated by
+        // the benign uses. The regex is anchored: arc4random and
+        // getrandom are strong sources, not this pattern.
+        let weak_prng = info.has_undefined_function_matching(&self.weak_prng_call_regex)
+            && (file_is_privileged(pkgfile) || pkg_ships_daemon_units(pkg));
 
         if setgid && setuid && !setgroups {
             // Warning unconditionally (fix-and-diverge, #743). The
@@ -4302,6 +4346,15 @@ impl BinariesCheck {
                 Level::Warning,
                 pkg,
                 "binary-or-shlib-calls-rc4",
+                &[&pkgfile.name],
+            );
+        }
+        if weak_prng {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "binary-or-shlib-calls-weak-prng",
                 &[&pkgfile.name],
             );
         }
@@ -13664,6 +13717,100 @@ description = "explicit priority string bypasses the system crypto policy"
             );
         }
         assert_eq!(count(&with(&["RC4"], &[]), "binary-or-shlib-calls-rc4"), 0);
+    }
+
+    #[test]
+    fn weak_prng_gated_findings() {
+        // #972 candidate 7: an undefined reference to the rand family
+        // reports at Warning only inside the privilege-or-exposure
+        // gate; the bare shape, the definition-only shape and the
+        // strong generators stay silent everywhere.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let plain = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        let bare_pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let count = |pkg: &Pkg, pkgfile: &PkgFile, functions: &[&str], refs: &[&str]| {
+            let mut info = syn_info();
+            info.functions = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs = refs.iter().map(|s| s.to_string()).collect();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(pkg, pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "binary-or-shlib-calls-weak-prng").len()
+        };
+        let called = |sym: &str| count(&bare_pkg, &plain, &[sym], &[sym]);
+
+        // Bare shape: silent for the whole family.
+        for sym in ["rand", "random", "srand", "drand48", "srand48", "initstate"] {
+            assert_eq!(called(sym), 0, "bare {sym} must stay silent");
+        }
+
+        // Setuid firing file -> Warning.
+        let mut suid = plain.clone();
+        suid.mode = 0o104755;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut info = syn_info();
+        info.functions = vec!["rand".to_string()];
+        info.undefined_function_refs = vec!["rand".to_string()];
+        check.check_security_functions(&bare_pkg, &suid, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "binary-or-shlib-calls-weak-prng");
+        assert_eq!(lines.len(), 1, "one finding: {results:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // Setgid and capability-carrying firing files -> fire.
+        let mut sgid = plain.clone();
+        sgid.mode = 0o102755;
+        assert_eq!(count(&bare_pkg, &sgid, &["srand48"], &["srand48"]), 1);
+        let mut caps = plain.clone();
+        caps.filecaps = Some("cap_net_raw+ep".to_string());
+        assert_eq!(count(&bare_pkg, &caps, &["random"], &["random"]), 1);
+
+        // Daemon packages (service or socket unit) -> fire.
+        let svc_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file(
+                "/usr/lib/systemd/system/foo.service",
+                "ASCII text",
+            )],
+        );
+        assert_eq!(count(&svc_pkg, &plain, &["drand48"], &["drand48"]), 1);
+        let sock_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file("/usr/lib/systemd/system/foo.socket", "ASCII text")],
+        );
+        assert_eq!(count(&sock_pkg, &plain, &["lrand48"], &["lrand48"]), 1);
+
+        // Near miss: a timer unit is not daemon surface -> silent.
+        let timer_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file("/usr/lib/systemd/system/foo.timer", "ASCII text")],
+        );
+        assert_eq!(count(&timer_pkg, &plain, &["rand"], &["rand"]), 0);
+        // Near miss: a D-Bus activation file is not a systemd unit.
+        let dbus_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file(
+                "/usr/share/dbus-1/services/org.example.Foo.service",
+                "ASCII text",
+            )],
+        );
+        assert_eq!(count(&dbus_pkg, &plain, &["rand"], &["rand"]), 0);
+        // Near miss: privilege on a different file does not gate this one.
+        let mut other = syn_file("/usr/bin/helper", "ELF 64-bit LSB executable");
+        other.mode = 0o104755;
+        let mixed_pkg = synthetic_pkg("testpkg", "x86_64", vec![other]);
+        assert_eq!(count(&mixed_pkg, &plain, &["rand"], &["rand"]), 0);
+        // Definition-only (an implementing library's shape) stays silent
+        // even in a gated package.
+        assert_eq!(count(&svc_pkg, &plain, &["rand"], &[]), 0);
+        // The strong generators are not this pattern, even setuid.
+        assert_eq!(count(&bare_pkg, &suid, &["arc4random"], &["arc4random"]), 0);
+        assert_eq!(count(&bare_pkg, &suid, &["getrandom"], &["getrandom"]), 0);
     }
 
     #[test]

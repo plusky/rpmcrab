@@ -59,6 +59,16 @@ provenance = [
 ]
 
 [[member]]
+tag = "binary-or-shlib-calls-weak-prng"
+class = "defect-pattern"
+family = "pattern"
+gate = "privilege-or-exposure"
+provenance = [
+    "Verified in-distro instance (rpmcrab#972 corpus audit, full Factory snapshot): solanum's solanum-mkpasswd, shipped in the daemon package, generates crypt(3) password salts; when /dev/random cannot be read the generator falls back to srand(time(NULL)) and picks the salt characters with rand() (CWE-338) -- both failure paths of the shipped binary tail-jump to the srand-seeded loop, and the daemon's own m_mkpasswd module carries the same call set.",
+    "Factory corpus on-ramp measurement (rpmcrab#972): 3,251 files in 1,765 binary packages (1,420 source packages) reference the family; the privilege-or-exposure population is 332 files in 185 packages. Warning only, and the bare population stays silent: the gated set's dominant uses are jitter, retry backoff and identifier uniqueness, so the gated population is not the defect population and no Error form is earned.",
+]
+
+[[member]]
 tag = "call-to-mktemp"
 class = "defect-pattern"
 family = "pattern"
