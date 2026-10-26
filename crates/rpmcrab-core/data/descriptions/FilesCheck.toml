@@ -251,12 +251,12 @@ but it actually is not in the filesystem. Because of this, some checks will
 be skipped.
 """
 executable-crontab-file="""
-This crontab file has executable bit set, which is refused by newer version
-of cron
+This crontab file has the executable bit set, which is refused by newer
+versions of cron.
 """
 non-owner-writeable-only-crontab-file="""
-This crontab file is writeable by other users as its owner, which is refused
-by newer version of cron and insecure
+This crontab file is writable by users other than its owner, which is
+refused by newer versions of cron and is insecure.
 """
 rpath-in-buildconfig="""
 This build configuration file contains rpaths which will be introduced into
@@ -339,7 +339,7 @@ permissions, ensure they are correct, or fix them in the %install section.
 zero-perms-ghost="""
 Your package contains a file with no permissions. This is usually an error
 because the file won't be accessible by any user. You should check the file
-permissions and ensure that are correct or fix it using "%attr" macro in %files
+permissions and ensure they are correct or fix it using "%attr" macro in %files
 section.
 http://ftp.rpm.org/max-rpm/s1-rpm-anywhere-specifying-file-attributes.html
 """

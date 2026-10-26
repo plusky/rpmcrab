@@ -624,3 +624,10 @@ kind = "missing"
 reason = "Deliberate removal per triage: openSUSE's own rpmlint config says 'Doesn't seem to make sense' about this finding. The port does not emit it. The reference still emits it."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "detail"
+reason = "Staged `--explain` texts for `executable-crontab-file` and `non-owner-writeable-only-crontab-file` were ungrammatical (`writeable by other users as its owner`, `refused by newer version of cron and insecure`, no final period), and `zero-perms-ghost` read `ensure that are correct`. Reworded: the crontab file has the executable bit set / is writable by users other than its owner, which is refused by newer versions of cron (and is insecure); ensure they are correct."
+since = "0.4.1"
