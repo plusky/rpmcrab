@@ -155,6 +155,22 @@ def test_presence_diff_attributed_by_name_and_module():
     assert unattributed(diff(ref, port, wrong_kind))
 
 
+def test_presence_diff_attributed_by_config_entry():
+    # A `config` entry records that the port's shipped config suppresses
+    # a finding the reference emits: it attributes a finding that is
+    # only in the reference, and (like `missing`) it cannot attribute a
+    # finding only rpmcrab emits.
+    ref = session(HEADER_REF, ["pkg.noarch: E: gone-finding /a"], (1, 0))
+    port = session(HEADER_PORT, [], (0, 0))
+    led = ledger([entry("session-header", "behaviour"),
+                  entry("report", "behaviour"),
+                  entry("gone-finding", "config")])
+    assert not unattributed(diff(ref, port, led))
+    ref2 = session(HEADER_REF, [], (0, 0))
+    port2 = session(HEADER_PORT, ["pkg.noarch: E: gone-finding /a"], (1, 0))
+    assert unattributed(diff(ref2, port2, led))
+
+
 def test_only_in_rpmcrab_not_attributed_by_missing_entry():
     # A `missing` entry records that the port does not emit the finding;
     # it cannot account for the finding appearing in the port's output —
