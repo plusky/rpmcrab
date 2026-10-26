@@ -69,6 +69,16 @@ provenance = [
 ]
 
 [[member]]
+tag = "binary-or-shlib-calls-unbounded-copy"
+class = "defect-pattern"
+family = "pattern"
+gate = "none"
+provenance = [
+    "CVE-2026-60095: Vinchin agentlink_server copies a network-supplied field with strcpy() into a fixed-size stack buffer (CWE-120, CVSS 6.5) -- the class instance for the unbounded string copy/format family (strcpy, strcat, sprintf, vsprintf).",
+    "Factory corpus on-ramp measurement (rpmcrab#972, full snapshot): 8,856 files in 2,866 binary packages (2,010 source packages) hold an undefined reference to the family; the privilege-or-exposure population is 508 files in 198 packages, of which 325 also reference the fortified __*_chk forms. No gated Error form is earned: whether a call overflows depends on the call-site destination size, which the artefact does not carry. The fortified __*_chk spellings are a separate symbol story and are not in the set.",
+]
+
+[[member]]
 tag = "call-to-mktemp"
 class = "defect-pattern"
 family = "pattern"

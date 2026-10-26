@@ -245,6 +245,17 @@ Where a generated value is security-relevant, take it from
 getrandom(2), arc4random(3) or /dev/urandom in the upstream source
 instead.
 """
+binary-or-shlib-calls-unbounded-copy="""
+The binary calls strcpy, strcat, sprintf or vsprintf. None of these
+functions knows the size of the destination, so an input longer than
+the destination buffer overflows it (CWE-120). Whether a given call
+can actually overflow depends on the call site, which the binary
+alone cannot decide. Treat the finding as a prompt to audit the call
+sites and switch to a bounded form (strlcpy, snprintf, or the
+fortified __*_chk variants the compiler selects under
+_FORTIFY_SOURCE); the fix belongs in the upstream source, not in
+the package.
+"""
 static-library-without-debuginfo="""
 The static library doesn't contain any debuginfo. Binaries linking against
 this static library can't be properly debugged.
