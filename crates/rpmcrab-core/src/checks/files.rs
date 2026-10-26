@@ -3433,12 +3433,14 @@ impl FilesCheck {
         // debug trees hold the mirrored .debug companions of the
         // runtime libraries (issue #955, divergences.toml): a
         // -debuginfo package's payload by construction, scoped out
-        // via is_debug_path.
+        // via is_debug_path. A package that is the library's combined
+        // home (lib_combined_home) is scoped out the same way.
         if is_match(&self.lib_re, fname)
             && st.devel_pkg
             && !is_debug_path(fname)
             && !cross_sysroot_matches(fname)
             && !(is_match(&self.sofile_re, fname) && pkgfile::is_symlink(pkgfile.mode))
+            && !Self::lib_combined_home(pkg, fname)
         {
             add_info(
                 out,
@@ -3448,6 +3450,37 @@ impl FilesCheck {
                 &[fname],
             );
         }
+    }
+
+    /// Combined-home shape for the versioned-library arm above: the
+    /// package ships the library's own devel payload — the
+    /// unversioned linker symlink (`libfoo.so`) in the same
+    /// directory, resolving within the package to the versioned file
+    /// itself. Within the package's own build the library then has
+    /// no other home: no separate runtime package was deprived of
+    /// the file, so the finding's premise (a devel package holding a
+    /// runtime file that belongs elsewhere) does not hold. gettext-tools, which
+    /// ships libgettextpo with its headers and linker symlink and
+    /// Provides gettext-devel, is the measured instance
+    /// (divergences.toml). A linker symlink whose chain leaves the
+    /// package or lands on a different file points at a runtime home
+    /// elsewhere and does not credit.
+    fn lib_combined_home(pkg: &Pkg, fname: &str) -> bool {
+        let (dir, base) = match fname.rfind('/') {
+            Some(i) => (&fname[..i + 1], &fname[i + 1..]),
+            None => ("", fname),
+        };
+        let Some(idx) = base.find(".so.") else {
+            return false;
+        };
+        let linker = format!("{dir}{}", &base[..idx + 3]);
+        let Some(link) = pkg.files.iter().find(|f| f.name == linker) else {
+            return false;
+        };
+        if !pkgfile::is_symlink(link.mode) {
+            return false;
+        }
+        matches!(pkg.readlink(link), Some(resolved) if resolved.name == fname)
     }
 
     fn check_normal_rpaths_in_buildconfig(
@@ -5545,6 +5578,156 @@ mod tests {
             .filter(|(name, _)| name == "non-devel-file-in-devel-package")
             .map(|(_, line)| line.clone())
             .collect()
+    }
+
+    /// Like `non_devel_lines`, but each file carries a mode and a
+    /// symlink target (empty for regular files), and the package may
+    /// carry explicit Provides — the devel classification can come
+    /// from a Provide rather than the package name.
+    fn non_devel_lines_typed(
+        pkg_name: &str,
+        provides: &[&str],
+        files: &[(&str, u32, &str)],
+    ) -> Vec<String> {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.name = pkg_name.to_string();
+        pkg.doc_files = vec![];
+        pkg.provides = provides.iter().map(|p| dep_named(p)).collect();
+        pkg.files = files
+            .iter()
+            .map(|(fname, mode, linkto)| {
+                let path = dir.path().join(fname.trim_start_matches('/'));
+                std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+                std::fs::write(&path, b"fake lib\n").expect("write temp file");
+                PkgFile {
+                    name: fname.to_string(),
+                    path: path.to_string_lossy().into_owned(),
+                    mode: *mode,
+                    magic: "ASCII text".to_string(),
+                    linkto: linkto.to_string(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        out.results()
+            .iter()
+            .filter(|(name, _)| name == "non-devel-file-in-devel-package")
+            .map(|(_, line)| line.clone())
+            .collect()
+    }
+
+    #[test]
+    fn combined_home_linker_symlink_is_quiet() {
+        // gettext-tools shape: a tools package that is its library's
+        // combined home — the versioned library plus the linker
+        // symlink resolving to it in the same package. The devel
+        // classification comes from the gettext-devel Provide.
+        let lines = non_devel_lines_typed(
+            "gettext-tools",
+            &["gettext-devel"],
+            &[
+                ("/usr/lib64/libgettextpo.so.0.6.0", 0o100644, ""),
+                (
+                    "/usr/lib64/libgettextpo.so",
+                    0o120777,
+                    "libgettextpo.so.0.6.0",
+                ),
+            ],
+        );
+        assert!(lines.is_empty(), "combined home must be quiet: {lines:?}");
+        // glib2-stage1 shape: a -devel-named bootstrap package whose
+        // linker chain runs through the SONAME symlink.
+        let lines = non_devel_lines_typed(
+            "foo-devel",
+            &[],
+            &[
+                ("/usr/lib64/libfoo.so.1.2.3", 0o100644, ""),
+                ("/usr/lib64/libfoo.so.1", 0o120777, "libfoo.so.1.2.3"),
+                ("/usr/lib64/libfoo.so", 0o120777, "libfoo.so.1"),
+            ],
+        );
+        assert!(
+            lines.is_empty(),
+            "two-hop combined home must be quiet: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn combined_home_near_misses_still_fire() {
+        // Linker symlink present, but its target is not shipped: the
+        // chain points at a runtime home elsewhere.
+        let lines = non_devel_lines_typed(
+            "foo-devel",
+            &[],
+            &[
+                ("/usr/lib64/libfoo.so.1.2.3", 0o100644, ""),
+                ("/usr/lib64/libfoo.so", 0o120777, "libfoo.so.1"),
+            ],
+        );
+        assert_eq!(lines.len(), 1, "dangling linker chain must fire: {lines:?}");
+        // The linker symlink belongs to another library of the same
+        // package; the versioned libfoo has no devel payload here.
+        let lines = non_devel_lines_typed(
+            "foo-devel",
+            &[],
+            &[
+                ("/usr/lib64/libfoo.so.1.2.3", 0o100644, ""),
+                ("/usr/lib64/libbar.so.9.9", 0o100644, ""),
+                ("/usr/lib64/libbar.so", 0o120777, "libbar.so.9.9"),
+            ],
+        );
+        assert_eq!(lines.len(), 1, "only libfoo must fire: {lines:?}");
+        assert!(lines[0].contains("libfoo"), "{lines:?}");
+        // A -devel Provide unrelated to the shipped library does not
+        // credit on its own: no linker symlink, no combined home.
+        let lines = non_devel_lines_typed(
+            "bar-tools",
+            &["foo-devel"],
+            &[("/usr/lib64/libbar.so.1.2.3", 0o100644, "")],
+        );
+        assert_eq!(
+            lines.len(),
+            1,
+            "unrelated Provide must not credit: {lines:?}"
+        );
+        // A regular file at the linker name is not a linker symlink.
+        let lines = non_devel_lines_typed(
+            "foo-devel",
+            &[],
+            &[
+                ("/usr/lib64/libfoo.so.1.2.3", 0o100644, ""),
+                ("/usr/lib64/libfoo.so", 0o100644, ""),
+            ],
+        );
+        assert_eq!(
+            lines.len(),
+            1,
+            "regular libfoo.so must not credit: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn combined_home_does_not_touch_the_typelib_arm() {
+        // nemo-extension-preview shape: the package's own typelib is
+        // charged by the .typelib arm; the combined-home credit is
+        // scoped to the versioned-library arm.
+        let lines = non_devel_lines_typed(
+            "nemo-extension-preview",
+            &["nemo-extension-preview-devel"],
+            &[(
+                "/usr/lib64/nemo-preview/girepository-1.0/NemoPreview-1.0.typelib",
+                0o100644,
+                "",
+            )],
+        );
+        assert_eq!(lines.len(), 1, "typelib arm must still fire: {lines:?}");
     }
 
     #[test]
