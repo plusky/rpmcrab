@@ -63,6 +63,42 @@ fn man_binary_basename(filename: &str) -> Option<&str> {
     split.map(|i| &filename[..i])
 }
 
+/// Whether `s` is a version tail of at least two dot-separated
+/// numeric components (`3.13`, `2.1.1756211046`); a single component
+/// (`2`, `64`) is a name suffix, not a version.
+fn is_version_tail(s: &str) -> bool {
+    let mut n = 0;
+    for part in s.split('.') {
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        n += 1;
+    }
+    n >= 2
+}
+
+/// The base name of a version-suffixed binary name: `exe` minus a
+/// trailing version tail (see `is_version_tail`) and one optional
+/// `-`/`.` separator (`luajit-2.1.1756211046` -> `luajit`,
+/// `perl5.44.0` -> `perl`). `None` when the name carries no such
+/// tail or nothing would remain.
+fn strip_version_tail(exe: &str) -> Option<&str> {
+    let bytes = exe.as_bytes();
+    let mut start = bytes.len();
+    while start > 0 && (bytes[start - 1].is_ascii_digit() || bytes[start - 1] == b'.') {
+        start -= 1;
+    }
+    let tail = exe[start..].strip_prefix('.').unwrap_or(&exe[start..]);
+    if start == 0 || !is_version_tail(tail) {
+        return None;
+    }
+    let mut base = &exe[..start];
+    if base.ends_with('-') || base.ends_with('.') {
+        base = &base[..base.len() - 1];
+    }
+    if base.is_empty() { None } else { Some(base) }
+}
+
 /// Compression suffixes a shipped man page target may carry, mirroring
 /// `compr_regex`: a `.so` reference is satisfied by the target name with
 /// any of these suffixes, or with none.
@@ -2763,7 +2799,10 @@ impl FilesCheck {
                     &[exe, &list_repr],
                 );
             }
-            if !st.man_basenames.contains(exe) && !self.documented_alias(exe, paths, st) {
+            if !st.man_basenames.contains(exe)
+                && !self.documented_alias(exe, paths, st)
+                && !self.version_affix_documented(exe, st)
+            {
                 add_info(out, Level::Info, pkg, "no-manual-page-for-binary", &[exe]);
             }
         }
@@ -2808,6 +2847,33 @@ impl FilesCheck {
                 if st.man_basenames.contains(base) {
                     return true;
                 }
+            }
+        }
+        false
+    }
+
+    /// A bindir name is documented under a version-affixed twin name:
+    /// the package ships the man page for `<exe>-<version>` (the
+    /// flavour-suffixed pages parallel-installable toolchains ship,
+    /// e.g. the Python singlespec `abimap-3.13.1`), or the binary is
+    /// itself the version-suffixed name of a documented tool
+    /// (`luajit-2.1.1756211046` for `luajit`). A version tail is at
+    /// least two dot-separated numeric components, so single-suffix
+    /// names (`ps2ps2`, `gio-querymodules-64`) keep firing. The
+    /// reference credits neither shape (FilesCheck.py:559-564
+    /// consults only its man_basenames set); the divergence is
+    /// ledgered.
+    fn version_affix_documented(&self, exe: &str, st: &PkgState) -> bool {
+        for b in &st.man_basenames {
+            if let Some(rest) = b.strip_prefix(exe).and_then(|r| r.strip_prefix('-')) {
+                if is_version_tail(rest) {
+                    return true;
+                }
+            }
+        }
+        if let Some(base) = strip_version_tail(exe) {
+            if st.man_basenames.contains(base) {
+                return true;
             }
         }
         false
@@ -10338,6 +10404,81 @@ mod tests {
                 .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("alias")),
             "a different inode is a different binary and must fire: {results2:?}"
         );
+    }
+
+    #[test]
+    fn version_affix_name_forms_for_no_manual_page() {
+        // Flavour-suffixed page: the Python singlespec shape -- the
+        // generic name is an alternatives link, the shipped page is
+        // named <tool>-<flavour version>.
+        let (pkg, _dir) = pkg_with_files(vec![
+            PkgFile {
+                linkto: "/usr/bin/alts".to_string(),
+                ..mkfile("/usr/bin/abimap", 0o120777, 11)
+            },
+            mkfile("/usr/share/man/man1/abimap-3.13.1.gz", 0o100644, 12),
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("abimap")),
+            "abimap is documented by its flavour page: {results:?}"
+        );
+        // Version-suffixed binary: the real binary carries the
+        // version, the page the plain name.
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/luajit-2.1.1756211046", 0o100755, 13),
+            mkfile("/usr/share/man/man1/luajit.1.gz", 0o100644, 14),
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, _)| n == "no-manual-page-for-binary"),
+            "luajit-2.1.1756211046 is documented by luajit.1: {results:?}"
+        );
+    }
+
+    #[test]
+    fn version_affix_near_misses_still_fire_for_no_manual_page() {
+        // A single trailing component is a name suffix, not a
+        // version: ps2ps2 is a distinct tool from ps2ps, and a
+        // hypothetical foo-2 page does not document foo.
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/ps2ps2", 0o100755, 21),
+            mkfile("/usr/share/man/man1/ps2ps.1.gz", 0o100644, 22),
+            mkfile("/usr/bin/foo", 0o100755, 23),
+            mkfile("/usr/share/man/man1/foo-2.1.gz", 0o100644, 24),
+            mkfile("/usr/bin/bar-1.2", 0o100755, 25),
+            mkfile("/usr/share/man/man1/baz.1.gz", 0o100644, 26),
+        ]);
+        let results = run_check_binary(&pkg);
+        for exe in ["ps2ps2", "foo", "bar-1.2"] {
+            assert!(
+                results
+                    .iter()
+                    .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with(exe)),
+                "{exe} must still fire: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn version_tail_grammar() {
+        assert!(is_version_tail("3.13"));
+        assert!(is_version_tail("2.1.1756211046"));
+        assert!(!is_version_tail("2"));
+        assert!(!is_version_tail("64"));
+        assert!(!is_version_tail("1.2a"));
+        assert!(!is_version_tail(""));
+        assert!(!is_version_tail("1."));
+        assert_eq!(strip_version_tail("luajit-2.1.1756211046"), Some("luajit"));
+        assert_eq!(strip_version_tail("perl5.44.0"), Some("perl"));
+        assert_eq!(strip_version_tail("cups-genppd.5.3"), Some("cups-genppd"));
+        assert_eq!(strip_version_tail("ps2ps2"), None);
+        assert_eq!(strip_version_tail("gio-querymodules-64"), None);
+        assert_eq!(strip_version_tail("plain"), None);
     }
 
     #[test]

@@ -1914,6 +1914,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "no-manual-page-for-binary"
+kind = "behaviour"
+reason = "Deliberate: the port credits a bindir name documented under a version-affixed twin name: the package ships the man page for <exe>-<version> (the flavour-suffixed pages parallel-installable toolchains ship, e.g. the Python singlespec abimap-3.13.1 for the alternatives-managed abimap), or the binary itself is the version-suffixed name of a documented tool (luajit-2.1.1756211046 for luajit). A version tail is at least two dot-separated numeric components, so single-suffix names (ps2ps2, gio-querymodules-64, stunnel3) keep firing. The reference (FilesCheck.py:559-564) consults only its man_basenames set and fires on every such name (verified against rpmlint 2.10.0 on the Factory corpus representatives)."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
