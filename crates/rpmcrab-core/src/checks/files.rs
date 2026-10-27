@@ -2078,7 +2078,7 @@ impl FilesCheck {
             start_private_key_re: start_private_key_regex().clone(),
             valid_license_keys: {
                 let valid: Vec<String> = get_strings("ValidLicenses");
-                valid.iter().map(|s| canonical_license_id(s).key).collect()
+                valid_license_keys(&valid)
             },
             use_debugsource: get_bool("UseDebugSource"),
             module_rpms_ok: get_bool("KernelModuleRPMsOK"),
@@ -3997,6 +3997,29 @@ fn license_family_version(stem: &str) -> (String, Option<Vec<u32>>) {
     (stem.to_string(), None)
 }
 
+/// The canonical keys of the `ValidLicenses` list. An entry that is
+/// itself an expression (`GPL-2.0-only OR GPL-3.0-only`) contributes
+/// its leaf keys: canonicalising the whole string would produce one
+/// key no declared identifier can ever equal.
+fn valid_license_keys(entries: &[String]) -> HashSet<String> {
+    let mut keys = HashSet::new();
+    for entry in entries {
+        match parse_license_expr(entry) {
+            Some(expr) => {
+                let mut leaves = Vec::new();
+                collect_license_leaves(&expr, &mut leaves);
+                for leaf in leaves {
+                    keys.insert(canonical_license_id(&leaf).key);
+                }
+            }
+            None => {
+                keys.insert(canonical_license_id(entry).key);
+            }
+        }
+    }
+    keys
+}
+
 fn canonical_license_id(raw: &str) -> LicenseId {
     let mut s = raw.trim().to_lowercase();
     // The deprecated combined spelling (`GPL-2.0-with-classpath-exception`)
@@ -4049,8 +4072,10 @@ fn license_version_cmp(a: &[u32], b: &[u32]) -> std::cmp::Ordering {
 
 /// Whether the tag's identifier set covers the declared identifier
 /// (issue #1033): exact canonical equality, or the same family where an
-/// `-or-later` declaration is met by any tag version at or above it and
-/// any other declaration by the same version in any suffix form.
+/// `-or-later` declaration is met by any tag version at or above it, a
+/// declaration is met by a tag `-or-later` range whose floor it
+/// reaches, any other declaration by the same version in any suffix
+/// form, and a version-less declaration by a version-less tag entry.
 fn license_id_covered(declared: &LicenseId, tag_ids: &[LicenseId]) -> bool {
     tag_ids.iter().any(|t| {
         if t.key == declared.key {
@@ -4059,11 +4084,22 @@ fn license_id_covered(declared: &LicenseId, tag_ids: &[LicenseId]) -> bool {
         if t.family != declared.family {
             return false;
         }
+        // A version-less pair in one family covers: `MIT+` declares
+        // MIT in its or-later form, and a bare `MIT` tag names the
+        // same license.
+        if declared.version.is_none() && t.version.is_none() {
+            return true;
+        }
         let (Some(dv), Some(tv)) = (&declared.version, &t.version) else {
             return false;
         };
         match declared.suffix {
             LicenseSuffix::OrLater => license_version_cmp(tv, dv) != std::cmp::Ordering::Less,
+            // The tag's own or-later range covers a declaration at
+            // or above the range's floor version.
+            _ if t.suffix == LicenseSuffix::OrLater => {
+                license_version_cmp(dv, tv) != std::cmp::Ordering::Less
+            }
             _ => license_version_cmp(tv, dv) == std::cmp::Ordering::Equal,
         }
     })
@@ -4318,7 +4354,13 @@ fn unsatisfied_spdx_units(
                         .map(render_license_expr)
                         .collect::<Vec<_>>()
                         .join(" OR ");
-                    let key = format!("or:{}", display.to_lowercase());
+                    // The aggregation key is order-free: the same
+                    // group declared in another arm order is one
+                    // finding, not two. The display keeps the
+                    // declaration order.
+                    let mut key_arms: Vec<String> = arms.iter().map(render_license_expr).collect();
+                    key_arms.sort();
+                    let key = format!("or:{}", key_arms.join(" OR ").to_lowercase());
                     out.push((display, key));
                 }
             }
@@ -4376,13 +4418,17 @@ fn normalize_grant_text(text: &str) -> String {
             }
         }
         if !stripped {
-            for word in ["dnl", "REM"] {
-                if let Some(rest) = l.strip_prefix(word)
-                    && (rest.is_empty() || rest.starts_with([' ', '\t']))
-                {
-                    l = rest;
-                    break;
-                }
+            // `dnl` is m4's comment word and case-sensitive; batch's
+            // `REM` is not -- a lowercase `rem` leader strips too.
+            if let Some(rest) = l.strip_prefix("dnl")
+                && (rest.is_empty() || rest.starts_with([' ', '\t']))
+            {
+                l = rest;
+            } else if let Some(head) = l.get(..3)
+                && head.eq_ignore_ascii_case("REM")
+                && (l.len() == 3 || matches!(l.as_bytes()[3], b' ' | b'\t'))
+            {
+                l = &l[3..];
             }
         }
         joined.push(' ');
@@ -4409,6 +4455,13 @@ fn scan_grant_version(s: &str) -> Option<(String, &str)> {
         if j > i + 1 {
             i = j;
         }
+    }
+    // A further dot-digit component makes the scanned version a
+    // three-component one -- a file or product version, not a
+    // license version: `2.0.1` must not scan as `2.0` with a `.1`
+    // tail left for the grant's tail table to consume.
+    if i < bytes.len() && bytes[i] == b'.' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+        return None;
     }
     Some((s[..i].to_string(), &s[i..]))
 }
@@ -4515,7 +4568,11 @@ fn push_grant(out: &mut Vec<(String, LicenseId)>, grant: (String, LicenseId)) {
 /// plainly.
 fn license_grants_in_window(text: &str) -> Vec<(String, LicenseId)> {
     let t = normalize_grant_text(text);
-    if t.contains("special exception") || t.contains("Alternatively") {
+    // The skip test is the one case-folded read of the window:
+    // headers capitalise freely (`Special Exception`, `ALTERNATIVELY`)
+    // while the grant grammar below matches its forms exactly.
+    let folded = t.to_lowercase();
+    if folded.contains("special exception") || folded.contains("alternatively") {
         return Vec::new();
     }
     let mut out: Vec<(String, LicenseId)> = Vec::new();
@@ -4584,7 +4641,12 @@ fn license_units_in_window(
     valid_keys: &HashSet<String>,
 ) -> Vec<(LicenseUnitKind, String, String)> {
     let exprs = spdx_expressions_in_window(text);
-    if !exprs.is_empty() {
+    // A window carrying the marker declares its license even when
+    // the expression after the marker does not parse: it must not
+    // fall through to grant detection, which is scoped to files
+    // without a declaration.
+    let has_marker = text.contains("SPDX-License-Identifier:");
+    if !exprs.is_empty() || has_marker {
         let mut out: Vec<(LicenseUnitKind, String, String)> = Vec::new();
         for expr in &exprs {
             for (display, key) in unsatisfied_spdx_units(expr, tag_ids, valid_keys) {
@@ -19766,6 +19828,97 @@ x /etc/sysconfig/f - - - -
         let id = canonical_license_id("BSD-2-Clause");
         assert_eq!(id.family, "bsd-2-clause");
         assert_eq!(id.version, None);
+    }
+
+    #[test]
+    fn license_coverage_tag_range_and_versionless() {
+        let covered = |declared: &str, tag: &str| {
+            license_id_covered(&canonical_license_id(declared), &parse_license_tag(tag))
+        };
+        // The tag's own or-later range covers a declaration at or
+        // above its floor version (issue #1159).
+        assert!(covered("GPL-3.0-only", "GPL-2.0-or-later"));
+        assert!(!covered("GPL-1.0-only", "GPL-2.0-or-later"));
+        // A version-less plus form and the bare tag name the same
+        // license, in both directions.
+        assert!(covered("MIT+", "MIT"));
+        assert!(covered("MIT", "MIT+"));
+        // A versioned declaration under a version-less tag entry
+        // stays uncovered: no version relation is decidable.
+        assert!(!covered("GPL-2.0-only", "GPL"));
+    }
+
+    #[test]
+    fn license_coverage_grant_version_three_components() {
+        // `either version 2.0.1` names a three-component version:
+        // no grant is read, where scanning `2.0` and letting the
+        // tail table eat `.1` would fabricate a GPL-2.0-only grant
+        // (issue #1159).
+        let text = "This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation; either version 2.0.1 of the License.\n";
+        assert!(license_displays(text, "MIT").is_empty());
+    }
+
+    #[test]
+    fn license_coverage_malformed_spdx_marker_suppresses_grants() {
+        // The marker is present but its expression does not parse:
+        // the file declares a license, so grant detection -- scoped
+        // to files without a declaration -- stays out (issue #1159).
+        let text = "// SPDX-License-Identifier: Foo Bar Baz\n//\n// This program is free software; you can redistribute it and/or\n// modify it under the terms of the GNU General Public License\n// as published by the Free Software Foundation; either version 2\n// of the License, or (at your option) any later version.\n";
+        assert!(license_displays(text, "MIT").is_empty());
+    }
+
+    #[test]
+    fn license_coverage_window_skip_any_case() {
+        // The whole-window skip reads case-insensitively (issue
+        // #1159): capitalised exception and Alternatively headers
+        // skip the window just like the lowercase forms.
+        let exception = "This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation; either version 2 of the License, or (at your option) any later version. As a Special Exception, the copyright holders give you permission to link this program with the OpenSSL library.\n";
+        assert!(license_displays(exception, "MIT").is_empty());
+        let alternatively = "ALTERNATIVELY, this file may be used under the terms of the GNU General Public License as published by the Free Software Foundation; either version 2 of the License, or (at your option) any later version.\n";
+        assert!(license_displays(alternatively, "MIT").is_empty());
+    }
+
+    #[test]
+    fn license_coverage_rem_leader_any_case() {
+        // Batch comment leaders strip in any case, so a grant whose
+        // sentence wraps across `rem` leaders still reads whole
+        // (issue #1159).
+        let text = "rem This program is free software; you can redistribute it and/or\nrem modify it under the terms of the GNU\nrem General Public License as published by the Free Software Foundation; either version 2\nrem of the License, or (at your option) any later version.\n";
+        assert_eq!(
+            license_displays(text, "MIT"),
+            [(LicenseUnitKind::Grant, "GPL-2.0-or-later".to_string())]
+        );
+    }
+
+    #[test]
+    fn license_or_group_key_ignores_arm_order() {
+        // The same OR group in another arm order aggregates under
+        // one key; the display keeps the declaration order (issue
+        // #1159).
+        let tag = parse_license_tag("BSD-3-Clause");
+        let keys = test_valid_license_keys();
+        let a = parse_license_expr("MIT OR Apache-2.0").expect("expr");
+        let b = parse_license_expr("Apache-2.0 OR MIT").expect("expr");
+        let ua = unsatisfied_spdx_units(&a, &tag, &keys);
+        let ub = unsatisfied_spdx_units(&b, &tag, &keys);
+        assert_eq!(ua.len(), 1, "{ua:?}");
+        assert_eq!(ub.len(), 1, "{ub:?}");
+        assert_eq!(ua[0].1, ub[0].1);
+        assert_ne!(ua[0].0, ub[0].0);
+    }
+
+    #[test]
+    fn valid_license_keys_collect_expression_leaves() {
+        // An expression-form entry contributes its leaf keys, not
+        // one canonicalisation of the whole string (issue #1159).
+        let keys = valid_license_keys(&[
+            "GPL-2.0-only OR GPL-3.0-only".to_string(),
+            "MIT".to_string(),
+        ]);
+        assert!(keys.contains("gpl-2.0-only"), "{keys:?}");
+        assert!(keys.contains("gpl-3.0-only"), "{keys:?}");
+        assert!(keys.contains("mit"), "{keys:?}");
+        assert_eq!(keys.len(), 3, "{keys:?}");
     }
 
     #[test]
