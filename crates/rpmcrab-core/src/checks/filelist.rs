@@ -450,13 +450,7 @@ impl Check for FilelistCheck {
                         if rule.message == "filelist-forbidden-bashcomp-userdirs"
                             && self.bashcomp_compat_symlink(pkg, pkgfile)
                         {
-                            add_info(
-                                out,
-                                Level::Warning,
-                                pkg,
-                                &rule.message,
-                                &[f, "drop the compatibility symlink"],
-                            );
+                            add_info(out, Level::Warning, pkg, &rule.message, &[f]);
                         } else {
                             add_info(out, Level::Error, pkg, &rule.message, &[f]);
                         }
@@ -1513,10 +1507,13 @@ mod tests {
     }
 
     #[test]
-    fn bashcomp_compat_symlinks_warn_to_drop_the_link() {
+    fn bashcomp_compat_symlinks_warn_with_path_only_detail() {
         // The three live shapes: drush and platformsh-cli link into
         // /usr/share app trees (one relatively, one absolutely), and
-        // erlang-rebar links into its /usr/lib64 app tree.
+        // erlang-rebar links into its /usr/lib64 app tree. The
+        // demotion keeps the reference's detail -- the path only, at
+        // both levels -- so the severity entry pairs against the
+        // reference finding.
         let pkg = pkg_with_links(&[
             (
                 "/etc/bash_completion.d/drush.complete.sh",
@@ -1551,8 +1548,8 @@ mod tests {
             "/etc/bash_completion.d/platform.sh.complete.sh",
         ] {
             assert!(
-                lines.iter().any(|l| l.contains(&format!(
-                    "W: filelist-forbidden-bashcomp-userdirs {charged} drop the compatibility symlink"
+                lines.iter().any(|l| l.ends_with(&format!(
+                    "W: filelist-forbidden-bashcomp-userdirs {charged}"
                 ))),
                 "missing W for {charged}: {lines:?}"
             );
