@@ -361,7 +361,7 @@ since = "0.4.1"
 case = "global"
 check = "binary-or-shlib-calls-weak-prng"
 kind = "behaviour"
-reason = "rpmcrab reports undefined references to the libc predictable-random family (rand, random, srand, srandom, initstate, setstate, the *48 generators and their reentrant *_r forms) as the Warning binary-or-shlib-calls-weak-prng when the firing file is privileged (setuid/setgid bits or file capabilities) or its package ships a systemd service/socket unit (rpmcrab#972); the reference has no such finder. Full Factory snapshot measurement: 3,251 files in 1,765 binary packages reference the family and 332 files in 185 packages sit inside the gate; the bare population emits nothing, and the gated level is Warning because the gated population's dominant uses are jitter, backoff and identifier uniqueness rather than security values."
+reason = "rpmcrab reports undefined references to the libc predictable-random family (rand, random, srand, srandom, initstate, setstate and the *48 generators, each with its reentrant *_r form) as the Warning binary-or-shlib-calls-weak-prng when the firing file is privileged (setuid/setgid bits or file capabilities) or its package ships a systemd service/socket unit (rpmcrab#972); the reference has no such finder. Full Factory snapshot measurement: 3,251 files in 1,765 binary packages (1,420 source packages) reference the family, counted with the shipped family regex, the reentrant *_r forms included, and 332 files in 185 packages sit inside the gate; the bare population emits nothing, and the gated level is Warning because the gated population's dominant uses are jitter, retry backoff and identifier uniqueness rather than security values."
 since = "0.4.1"
 
 [[divergence]]

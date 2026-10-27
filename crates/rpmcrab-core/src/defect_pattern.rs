@@ -307,6 +307,9 @@ mod tests {
             Gate::SelfGated
         );
         assert_eq!(member("missing-relro").unwrap().family, Family::Hardening);
+        let weak_prng = member("binary-or-shlib-calls-weak-prng").unwrap();
+        assert_eq!(weak_prng.family, Family::Pattern);
+        assert_eq!(weak_prng.gate, Gate::PrivilegeOrExposure);
         let go_toolchain = member("go-toolchain-outdated").unwrap();
         assert_eq!(go_toolchain.family, Family::Pattern);
         assert_eq!(go_toolchain.gate, Gate::None);
