@@ -3947,9 +3947,23 @@ fn dynsym_section_defines_grub_main(elf: &goblin::elf::Elf, data: &[u8]) -> bool
     let Some(str_sh) = elf.section_headers.get(sh.sh_link as usize) else {
         return false;
     };
-    let Ok(strtab) =
-        goblin::strtab::Strtab::parse(data, str_sh.sh_offset as usize, str_sh.sh_size as usize, 0)
-    else {
+    // The section ranges are header-controlled: convert and
+    // bound-check them before handing them to the goblin parsers,
+    // as elsewhere in this file; an out-of-range section counts as
+    // not defining.
+    let Ok(str_off) = usize::try_from(str_sh.sh_offset) else {
+        return false;
+    };
+    let Ok(str_size) = usize::try_from(str_sh.sh_size) else {
+        return false;
+    };
+    if data
+        .get(str_off..str_off.saturating_add(str_size))
+        .is_none()
+    {
+        return false;
+    }
+    let Ok(strtab) = goblin::strtab::Strtab::parse(data, str_off, str_size, 0) else {
         return false;
     };
     let Ok(container) = elf.header.container() else {
@@ -3966,12 +3980,22 @@ fn dynsym_section_defines_grub_main(elf: &goblin::elf::Elf, data: &[u8]) -> bool
     } else {
         16
     };
-    let Ok(syms) = goblin::elf::sym::Symtab::parse(
-        data,
-        sh.sh_offset as usize,
-        (sh.sh_size / entsize) as usize,
-        ctx,
-    ) else {
+    let Ok(sym_off) = usize::try_from(sh.sh_offset) else {
+        return false;
+    };
+    let Ok(sym_size) = usize::try_from(sh.sh_size) else {
+        return false;
+    };
+    if data
+        .get(sym_off..sym_off.saturating_add(sym_size))
+        .is_none()
+    {
+        return false;
+    }
+    let Ok(count) = usize::try_from(sh.sh_size / entsize) else {
+        return false;
+    };
+    let Ok(syms) = goblin::elf::sym::Symtab::parse(data, sym_off, count, ctx) else {
         return false;
     };
     syms.iter().any(|sym| {
